@@ -23,8 +23,6 @@ func init() {
 		"bypass the public-repo plaintext-secrets guardrail and downgrade all .env.example failure-policy failures to warnings. Strictly one-shot -- no state persistence.")
 	createCmd.Flags().BoolVar(&createJSON, "json", false,
 		"emit a single JSON object {name, number, path} for the created instance and nothing else on stdout")
-	createCmd.Flags().StringVar(&createAgent, "agent", "",
-		"select the coding agent to prepare the instance for (claude or codex) for this session, overriding the workspace default_agent; NIWA_AGENT sets it per shell.")
 	createCmd.Flags().IntVar(&createParallel, "parallel", 0,
 		"maximum repos to clone concurrently (>=1). Lower this on slow or flaky networks; 1 clones serially. Overrides the [global] clone_workers config. 0 (the default) uses clone_workers, else niwa's built-in default.")
 	registerStrictSecretsFlag(createCmd, &strictSecretsCreate)
@@ -39,7 +37,6 @@ var (
 	createNoInstallPlugins      bool
 	createAllowPlaintextSecrets bool
 	createJSON                  bool
-	createAgent                 string
 	createParallel              int
 )
 
@@ -164,6 +161,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// comes from the config that reconcile returns.
 	applier := workspace.NewApplier(gh)
 	applier.Reporter = workspace.NewReporterWithTTY(os.Stderr, !noProgress && term.IsTerminal(int(os.Stderr.Fd())))
+	configureDeveloperHome(applier)
 	// Rendered on every exit from here on, including the failure path where
 	// Create has already removed the instance directory.
 	defer wireKeyReport(applier, cmd.ErrOrStderr())()
@@ -222,11 +220,8 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// (resolved below when it loads) applies; otherwise the Applier default.
 	applier.CloneWorkers = createParallel
 
-	resolvedAgent, agErr := resolveSessionAgent(createAgent, cfg)
-	if agErr != nil {
-		return agErr
-	}
-	applier.Agent = resolvedAgent
+	// No agent is resolved here. A created instance is prepared for every agent
+	// niwa enumerates, so there is nothing to select.
 
 	// Read from the reconciled config, so a workspace that turned strict mode
 	// on upstream is honored on the first create that sees the change.

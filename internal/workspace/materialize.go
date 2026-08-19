@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -146,6 +147,20 @@ type MaterializeContext struct {
 	// collector disables collection, so a call site that was never wired with
 	// one needs no guard.
 	Keys *keyreport.Collector
+
+	// SessionEnv is the workspace's resolved [session.env] values, the
+	// agent-neutral half of what a session runs with. It is resolved once per
+	// apply (SessionEnvVars) and threaded here rather than re-resolved per
+	// materializer, so every agent's delivery is generated from the same map:
+	// two resolutions could disagree, and a workspace where the two agents'
+	// sessions carry different values for one declared variable is the exact
+	// asymmetry the neutral declaration exists to remove.
+	SessionEnv map[string]string
+
+	// SessionEnvSources is the provenance of the inputs SessionEnv was
+	// resolved from, rolled into the settings document's fingerprint so a
+	// rotation upstream of a neutral variable still invalidates it.
+	SessionEnvSources []SourceEntry
 
 	// UnresolvedEnv is the per-repo set of env keys carrying an Unresolved
 	// mark, keyed by variable name. ResolveEnvVars populates it from the marks
@@ -960,8 +975,28 @@ func emitReports(w io.Writer, reports []string) {
 // when any keys are promoted, plus inline vars.
 func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, []SourceEntry, error) {
 	claudeEnv := ctx.Effective.Claude.Env
-	hasEnv := len(claudeEnv.Promote) > 0 || len(claudeEnv.Vars.Values) > 0
-	if !hasEnv {
+	vars, sources, err := resolveDeclaredEnvVars(ctx, "claude.env", claudeEnv.Promote, claudeEnv.Vars)
+	if err != nil {
+		return nil, nil, err
+	}
+	merged := mergeSessionEnv(ctx.SessionEnv, vars)
+	if len(merged) == 0 {
+		return nil, nil, nil
+	}
+	return merged, append(slices.Clip(ctx.SessionEnvSources), sources...), nil
+}
+
+// resolveDeclaredEnvVars resolves one promote list plus one inline table into
+// the literal values a session receives. label is the configuration table the
+// declaration came from, and it appears in every error and report this
+// produces, so a workspace with both [session.env] and [claude.env] is told
+// which one it needs to fix.
+//
+// Returns nil when the declaration is empty. The second return is the ordered
+// list of SourceEntry tuples describing the inputs that contributed bytes:
+// forwarded from ResolveEnvVars when any keys are promoted, plus inline vars.
+func resolveDeclaredEnvVars(ctx *MaterializeContext, label string, promote []string, vars config.EnvVarsTable) (map[string]string, []SourceEntry, error) {
+	if len(promote) == 0 && len(vars.Values) == 0 {
 		return nil, nil, nil
 	}
 
@@ -969,7 +1004,7 @@ func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, []SourceE
 	var sources []SourceEntry
 
 	// Step 1: resolve promoted keys from the env pipeline.
-	if len(claudeEnv.Promote) > 0 {
+	if len(promote) > 0 {
 		var resolvedEnv map[string]string
 		var envSources []SourceEntry
 		if ctx.InheritedEnv != nil {
@@ -999,7 +1034,7 @@ func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, []SourceE
 		// that distinction; the hard error is kept for everything outside it,
 		// which is what still catches a typo in the promote list.
 		unresolved := promoteUnresolvedSet(ctx)
-		for _, key := range claudeEnv.Promote {
+		for _, key := range promote {
 			val, found := resolvedEnv[key]
 			if found {
 				envResult[key] = val
@@ -1013,13 +1048,13 @@ func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, []SourceE
 				// promotion runs later and per-repo, so that gate has
 				// already passed by the time this key is looked up.
 				if ctx.StrictSecrets {
-					return nil, nil, fmt.Errorf("%w: claude.env promotes %q, which has no value",
-						ErrStrictSecrets, key)
+					return nil, nil, fmt.Errorf("%w: %s promotes %q, which has no value",
+						ErrStrictSecrets, label, key)
 				}
 				reportPromoteOmission(ctx.Keys, key, omitted)
 				continue
 			}
-			return nil, nil, fmt.Errorf("claude.env: promoted key %q not found in resolved env vars", key)
+			return nil, nil, fmt.Errorf("%s: promoted key %q not found in resolved env vars", label, key)
 		}
 		// Every env source contributes to the rollup because any
 		// plaintext-file rotation upstream can change promoted
@@ -1036,9 +1071,9 @@ func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, []SourceE
 	// materializer. maybeSecretString reaches through reveal.
 	// UnsafeReveal for secret-bearing entries and returns m.Plain
 	// otherwise.
-	for _, k := range sortedKeys(claudeEnv.Vars.Values) {
-		v := claudeEnv.Vars.Values[k]
-		sources = append(sources, sourceForMaybeSecret("workspace.toml:claude.env.vars."+k, v))
+	for _, k := range sortedKeys(vars.Values) {
+		v := vars.Values[k]
+		sources = append(sources, sourceForMaybeSecret("workspace.toml:"+label+".vars."+k, v))
 		// A marked value is omitted here too. The settings document has no
 		// record form (it is a Claude Code file, not a niwa one), so the key
 		// simply does not appear; the run's report is what accounts for it.
@@ -1103,6 +1138,14 @@ func promoteUnresolvedSet(ctx *MaterializeContext) map[string]unresolvedEnvKey {
 		{"env.secrets", ctx.Effective.Env.Secrets},
 		{"claude.env.vars", ctx.Effective.Claude.Env.Vars},
 		{"claude.env.secrets", ctx.Effective.Claude.Env.Secrets},
+	}
+	// The neutral session table is workspace-scoped, so it is read off the raw
+	// configuration rather than the per-repo effective one.
+	if ctx.Config != nil {
+		tables = append(tables, struct {
+			scope string
+			table config.EnvVarsTable
+		}{"session.env.vars", ctx.Config.Session.Env.Vars})
 	}
 	for _, tbl := range tables {
 		scope := tbl.scope

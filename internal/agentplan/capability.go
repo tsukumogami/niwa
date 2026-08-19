@@ -27,10 +27,11 @@
 // Vault-backed secret resolution is an upstream source feeding the environment
 // and dotenv rows, not something a session receives, so a per-agent declaration
 // of it would describe where a value came from rather than whether an agent got
-// it. The claude.enabled gate is a gate over deliveries rather than a delivery:
-// it zeroes Claude's own plan-borne entries for a scope, which makes it an
-// input to Claude's producer, not a row in the table. Recording both here is
-// what keeps the closure from looking arbitrary.
+// it. The per-agent enabled gates are gates over deliveries rather than
+// deliveries: [claude] enabled zeroes Claude's own plan-borne entries for a
+// scope and [codex] enabled zeroes Codex's, which makes each one an input to
+// its own agent's producer (Producer.Gated), not a row in the table. Recording
+// both here is what keeps the closure from looking arbitrary.
 package agentplan
 
 import "fmt"

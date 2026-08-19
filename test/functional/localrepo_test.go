@@ -48,6 +48,15 @@ func (s *localGitServer) createRepoWithFile(name, filename, content string) (str
 // createRepoWithFiles creates a bare repo named <name>.git, commits every file
 // in files (relative path → content), and returns its file:// URL.
 func (s *localGitServer) createRepoWithFiles(name string, files map[string]string) (string, error) {
+	return s.createRepoWithSpec(name, files, nil)
+}
+
+// createRepoWithSpec is createRepoWithFiles plus committed symlinks (relative
+// path → link target). Git reproduces a committed symlink verbatim in every
+// clone, so this is how a fixture repository ships a context file that is a
+// symlink rather than a regular file — the hostile shape the composer's
+// O_NOFOLLOW read exists to refuse.
+func (s *localGitServer) createRepoWithSpec(name string, files, symlinks map[string]string) (string, error) {
 	repoPath := filepath.Join(s.root, name+".git")
 	out, err := fixtureGit(s.root, "init", "--bare", repoPath)
 	if err != nil {
@@ -79,6 +88,16 @@ func (s *localGitServer) createRepoWithFiles(name string, files map[string]strin
 		}
 	}
 
+	for linkName, target := range symlinks {
+		linkPath := filepath.Join(workDir, linkName)
+		if err = os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
+			return "", fmt.Errorf("creating parent dir for symlink %s: %w", linkName, err)
+		}
+		if err = os.Symlink(target, linkPath); err != nil {
+			return "", fmt.Errorf("creating symlink %s -> %s: %w", linkName, target, err)
+		}
+	}
+
 	// This is the sequence that once escaped: workDir had been deleted out
 	// from under a concurrent run, so git walked up and found the real
 	// checkout. fixtureGitCommit pins GIT_DIR/GIT_WORK_TREE, so a missing
@@ -103,6 +122,15 @@ func (s *localGitServer) createRepoWithFiles(name string, files map[string]strin
 // produces a non-empty HEAD so git worktree add -b works without --orphan.
 func (s *localGitServer) SourceRepo(name string) (string, error) {
 	return s.createRepoWithFile(name, ".gitkeep", "")
+}
+
+// SourceRepoSpec creates a bare repo named <name>.git carrying committed files
+// and committed symlinks, and returns its file:// URL. Use it for fixtures that
+// must ship real content a clone reproduces — a repository's own AGENTS.md, a
+// context file in an intermediate directory, a marketplace tree, or one of the
+// hostile shapes at a name niwa writes.
+func (s *localGitServer) SourceRepoSpec(name string, files, symlinks map[string]string) (string, error) {
+	return s.createRepoWithSpec(name, files, symlinks)
 }
 
 // ConfigRepo creates a bare repo named <name>.git, commits

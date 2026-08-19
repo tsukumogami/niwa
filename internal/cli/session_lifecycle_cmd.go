@@ -326,15 +326,10 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 		opts.WorktreeDelegation = delegation
 	}
 
-	// Resolve the session-global agent from the workspace default (and the
-	// NIWA_AGENT env override) so a worktree is prepared for the same agent the
-	// instance is. DefaultAgent is a workspace-level field unaffected by the
-	// overlay merge below.
-	resolvedAgent, agErr := resolveSessionAgent("", cfg)
-	if agErr != nil {
-		return nil, agErr
-	}
-	opts.Agent = resolvedAgent
+	// No agent is resolved here. A worktree is prepared for every agent niwa
+	// enumerates, the same way an instance is: which documents each one receives
+	// is the capability declaration table's answer, so there is nothing for a
+	// caller to select between.
 
 	// Resolve and merge the workspace overlay the same way `niwa apply` does, so
 	// a worktree of an overlay-augmented repo gets the overlay-merged CLAUDE

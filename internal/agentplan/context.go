@@ -34,19 +34,50 @@ const contextFileMode = 0o644
 // production, which is why For is the only way to make one.
 type Producer struct {
 	ag agent.Agent
+
+	// gateClosed is this agent's own enabled gate, turned off. It is a field
+	// on the producer rather than a check at each call site because that is
+	// what makes the gate structurally per-agent: a producer carries one
+	// agent, so a gate it carries cannot reach any other agent's plan, and the
+	// executor downstream sees only entries that already survived it.
+	gateClosed bool
 }
 
 // For returns the producer that declares plans for ag. The zero Agent resolves
-// to Claude, matching internal/agent's fail-safe contract.
+// to Claude, matching internal/agent's fail-safe contract. The producer it
+// returns is ungated; a caller that has a scope's gate applies it with Gated.
 func For(ag agent.Agent) Producer { return Producer{ag: ag} }
 
-// delivers reports whether the declaration table says this agent receives c.
-// The lookup is fail-closed: a pair the table cannot answer for is an error
-// rather than a silent "no".
+// Gated returns a copy of p whose plans are empty when enabled is false.
+//
+// This is where [claude] enabled and [codex] enabled land. Each one is read
+// for its own agent and handed to that agent's producer, so a gate filters the
+// plan it was set on and no other -- a repository with Claude disabled still
+// receives its full Codex delivery, and the reverse. The previous shape read
+// one agent's key in front of a loop over every agent, which is the same
+// boolean deciding two agents' deliveries; no spelling of the key would have
+// fixed that.
+//
+// The gate deliberately does not reach the reconciliation specs' removals:
+// turning a gate off is a request to stop delivering, not a request to delete
+// what an earlier apply delivered. What niwa tracks in the managed-file record
+// is still cleaned up by the record, exactly as it is for any other path a
+// current apply stops producing.
+func (p Producer) Gated(enabled bool) Producer {
+	p.gateClosed = !enabled
+	return p
+}
+
+// delivers reports whether the declaration table says this agent receives c and
+// this agent's gate is open. The lookup is fail-closed: a pair the table cannot
+// answer for is an error rather than a silent "no".
 func (p Producer) delivers(c Capability) (bool, error) {
 	d, err := Lookup(c, p.ag)
 	if err != nil {
 		return false, err
+	}
+	if p.gateClosed {
+		return false, nil
 	}
 	return d.State == StateImplemented, nil
 }
@@ -59,13 +90,86 @@ func (p Producer) localContextPath(dir string) string {
 	return filepath.Join(dir, p.ag.LocalContextFileName())
 }
 
+// rootContextPath is the context document for a directory niwa owns outright:
+// the instance root and each group directory. Those are not repositories, so
+// the name is the agent's plain one rather than the one that outranks a
+// repository's own committed file.
+func (p Producer) rootContextPath(dir string) string {
+	return filepath.Join(dir, p.ag.RootContextFileName())
+}
+
+// RootContextInputs is one context document for a directory niwa owns: where it
+// goes and what it says. HasBody separates "the configuration declares no
+// source" from "the source rendered to nothing", exactly as RepoContextInputs
+// does.
+type RootContextInputs struct {
+	Dir     string
+	Body    []byte
+	HasBody bool
+}
+
+// RootContextPlan declares the instance-root context document -- the one a
+// session started at the root of a prepared instance reads.
+//
+// An agent that finds context by walking up from its working directory reads it;
+// an agent that finds a project root first and reads downward from there never
+// does, because an instance root is not a project root. The declaration table
+// carries that difference, so this producer asks it rather than testing anything
+// about the directory.
+func (p Producer) RootContextPlan(in RootContextInputs) (*Plan, error) {
+	ok, err := p.delivers(RootSessionOrientation)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || !in.HasBody {
+		return &Plan{}, nil
+	}
+	return &Plan{Entries: []Entry{p.rootContextEntry(RootSessionOrientation, in.Dir, in.Body)}}, nil
+}
+
+// GroupContextPlan declares a group directory's context document.
+//
+// It is empty for an agent that composes the outer layers into each
+// repository's own document, and that is the delivery rather than the absence of
+// one: the group layer still reaches the session, at the only placement the
+// session's discovery visits. Writing a group document for such an agent would
+// put bytes on disk that nothing ever reads.
+func (p Producer) GroupContextPlan(in RootContextInputs) (*Plan, error) {
+	ok, err := p.delivers(WorkspaceOrientation)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || !in.HasBody || p.composition().composesOuterLayers {
+		return &Plan{}, nil
+	}
+	return &Plan{Entries: []Entry{p.rootContextEntry(WorkspaceOrientation, in.Dir, in.Body)}}, nil
+}
+
+// rootContextEntry is one context document written whole into a directory niwa
+// owns. Like contextEntry it is Managed: the document is niwa's to keep current
+// and to remove when it stops being declared.
+func (p Producer) rootContextEntry(c Capability, dir string, body []byte) Entry {
+	return Entry{
+		Capability: c,
+		Op:         OpWriteFile,
+		Path:       p.rootContextPath(dir),
+		Content:    body,
+		Mode:       contextFileMode,
+		Managed:    true,
+	}
+}
+
 // SubdirContext is one context document that belongs in a directory nested
 // inside the repository, declared by [content.repos.<name>.subdirs]. Dir is
 // absolute and has already been containment-checked by the caller against the
 // repository it belongs to; Body is the rendered document.
+//
+// Probe is what the caller found at ContextProbeSpec(Dir), zero for an agent
+// whose documents are not under an ownership rule.
 type SubdirContext struct {
-	Dir  string
-	Body []byte
+	Dir   string
+	Body  []byte
+	Probe ContextProbe
 }
 
 // RepoContextInputs is what a repository-level context install needs from the
@@ -94,6 +198,19 @@ type RepoContextInputs struct {
 
 	// Subdirs are the nested documents, in the order the caller resolved them.
 	Subdirs []SubdirContext
+
+	// Workspace and Group are the outer orientation layers, rendered by the
+	// caller from the same sources the instance-root and group documents are
+	// built from. An agent whose discovery reaches those documents where they
+	// are written ignores them here; an agent whose walk stops at the repository
+	// root gets them folded into the repository's own document, because that is
+	// the only placement its sessions see.
+	Workspace []byte
+	Group     []byte
+
+	// Probe is what the caller found at ContextProbeSpec(Dir), zero for an agent
+	// whose documents are not under an ownership rule.
+	Probe ContextProbe
 }
 
 // RepoContextPlan declares the repository-level context documents: the
@@ -104,6 +221,13 @@ type RepoContextInputs struct {
 // write of the same path. The writer this replaces wrote the base file and then
 // rewrote it with base + "\n" + overlay, so the bytes are identical and the
 // path is still produced once, which is what the caller records.
+//
+// For an agent whose documents are composed and owned, the repository's document
+// also carries the workspace and group layers and the repository's own committed
+// context file, in that order -- and the whole thing is subject to the
+// never-empty rule and the ownership rule. That variation is the composition
+// table's, not this function's shape: the entries it produces are the same kind
+// of entry either way.
 func (p Producer) RepoContextPlan(in RepoContextInputs) (*Plan, error) {
 	ok, err := p.delivers(RepoOrientationDoc)
 	if err != nil {
@@ -115,15 +239,16 @@ func (p Producer) RepoContextPlan(in RepoContextInputs) (*Plan, error) {
 		return &Plan{}, nil
 	}
 
+	comp := p.composition()
+	if comp.owned {
+		return p.composedRepoContextPlan(in, comp), nil
+	}
+
 	plan := &Plan{}
 
 	switch {
 	case in.HasBody:
-		body := in.Body
-		if in.HasOverlay {
-			body = []byte(string(in.Body) + "\n" + string(in.Overlay))
-		}
-		plan.Entries = append(plan.Entries, p.contextEntry(RepoOrientationDoc, in.Dir, body))
+		plan.Entries = append(plan.Entries, p.contextEntry(RepoOrientationDoc, in.Dir, repoBody(in)))
 	case in.HasOverlay:
 		plan.Entries = append(plan.Entries, p.contextEntry(RepoOrientationDoc, in.Dir, in.Overlay))
 	}
@@ -133,6 +258,140 @@ func (p Producer) RepoContextPlan(in RepoContextInputs) (*Plan, error) {
 	}
 
 	return plan, nil
+}
+
+// repoBody folds the overlay addendum into the base document behind a blank
+// line, matching what the writer this producer replaces did.
+func repoBody(in RepoContextInputs) []byte {
+	switch {
+	case in.HasBody && in.HasOverlay:
+		return []byte(string(in.Body) + "\n" + string(in.Overlay))
+	case in.HasBody:
+		return in.Body
+	case in.HasOverlay:
+		return in.Overlay
+	default:
+		return nil
+	}
+}
+
+// composedRepoContextPlan is the owned-document form of RepoContextPlan: one
+// composed document at the repository root carrying the whole chain a session
+// there reads, plus one per declared subdirectory carrying that subdirectory's
+// own body.
+//
+// The subdirectory documents carry no chain of their own, and that is a property
+// of the agent rather than an omission: a session below the repository root
+// reads the root document and every document between it and the working
+// directory, so repeating the outer layers in each one would spend the shared
+// byte budget several times over to say the same thing twice.
+func (p Producer) composedRepoContextPlan(in RepoContextInputs, comp composition) *Plan {
+	plan := &Plan{}
+
+	var layers [][]byte
+	if comp.composesOuterLayers {
+		layers = append(layers, in.Workspace, in.Group)
+	}
+	layers = append(layers, repoBody(in))
+
+	// The committed file joins the chain only when niwa has something of its own
+	// to deliver. A document composed from the committed content alone would
+	// claim the directory's context slot to say exactly what native discovery
+	// already says, so the configured layers are composed first and the inline
+	// is added only if they came to anything.
+	root := composeDocument(layers...)
+	if root != nil && in.Probe.HasInlined {
+		root = composeDocument(append(layers, in.Probe.Inlined)...)
+	}
+
+	if root != nil && in.Probe.InlineRefusal != "" {
+		plan.Warnings = append(plan.Warnings, in.Probe.InlineRefusal)
+	}
+
+	// Chain sizes are accumulated as the entries are declared, so the budget
+	// check measures the documents that will actually be written and not the
+	// ones a refusal or the never-empty rule kept off disk.
+	sizes := map[string]int{in.Dir: p.appendOwnedEntry(plan, RepoOrientationDoc, in.Dir, in.Dir, root, in.Probe)}
+
+	for _, sub := range in.Subdirs {
+		doc := composeDocument(sub.Body)
+		sizes[sub.Dir] = p.appendOwnedEntry(plan, RepoOrientationDoc, in.Dir, sub.Dir, doc, sub.Probe)
+	}
+
+	// The worst chain travels out on the plan, where the generated project-layer
+	// configuration for the same tree turns it into a declared budget that
+	// covers it. Reporting an overflow here instead would move Codex's silent
+	// cut to a line niwa prints and still leave the developer to raise the
+	// budget by hand in a file niwa already writes.
+	if comp.measuresChain {
+		plan.ChainBytes = deepestChain(in.Dir, sizes)
+	}
+
+	return plan
+}
+
+// appendOwnedEntry declares one owned document and returns the bytes it will
+// occupy in a session's chain, or records why it was not declared and returns
+// zero. An absent document (the never-empty rule) is silent; a refused one is
+// reported and exempted from cleanup.
+func (p Producer) appendOwnedEntry(plan *Plan, c Capability, root, dir string, doc []byte, probe ContextProbe) int {
+	if probe.Foreign {
+		plan.Warnings = append(plan.Warnings, conflictWarning(probe.OwnedPath))
+		plan.Exempt = append(plan.Exempt, probe.OwnedPath)
+		return 0
+	}
+	if doc == nil {
+		return 0
+	}
+	e := p.contextEntry(c, dir, doc)
+	e.Pre = IfNotForeign
+	e.Owner = generationMarker
+	e.ExcludeAs = excludePattern(root, e.Path)
+	plan.Entries = append(plan.Entries, e)
+	return len(doc)
+}
+
+// excludePattern renders a written path as the git-exclude pattern the
+// repository at root has to ignore it under: the path relative to the working
+// tree, in slash form.
+//
+// The coverage travels with the write rather than arriving in a later change,
+// and that is not tidiness. A niwa-written file in a working tree that git does
+// not ignore makes the tree read dirty, and a dirty tree is what stops the
+// worktree teardown from reclaiming a session's worktree -- so an uncovered
+// name accumulates orphans rather than merely looking untidy.
+func excludePattern(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return ""
+	}
+	return filepath.ToSlash(rel)
+}
+
+// deepestChain returns the size of the largest chain from root down. A
+// session's budget is spent on the documents between the project root and its
+// working directory, so the worst case is the deepest path through the declared
+// set rather than the sum of all of them.
+func deepestChain(root string, sizes map[string]int) int {
+	worst := sizes[root]
+	for dir := range sizes {
+		total := 0
+		for ancestor, size := range sizes {
+			if ancestor == dir || isAncestorDir(ancestor, dir) {
+				total += size
+			}
+		}
+		if total > worst {
+			worst = total
+		}
+	}
+	return worst
+}
+
+// isAncestorDir reports whether dir contains other. Both are absolute and
+// already cleaned by the caller that built them with filepath.Join.
+func isAncestorDir(dir, other string) bool {
+	return strings.HasPrefix(other, strings.TrimSuffix(dir, string(filepath.Separator))+string(filepath.Separator))
 }
 
 // WorktreeContextInputs is what the worktree layer needs: where the worktree
@@ -150,12 +409,27 @@ type WorktreeContextInputs struct {
 
 	// Body is the rendered section body, written after the heading.
 	Body []byte
+
+	// Probe is what the caller found at ContextProbeSpec(Dir) after the
+	// repository-level plan for the same worktree was applied. It is taken at
+	// that point, not before, because whether this section joins an existing
+	// document or has to stand as one depends on whether that plan wrote.
+	Probe ContextProbe
 }
 
 // WorktreeContextPlan declares the worktree's purpose/branch section as a
 // section replace, so re-applying a worktree rewrites the section in place
 // instead of appending a second copy. Anything the developer wrote above the
 // heading is left alone by the executor.
+//
+// For an agent whose documents are owned, the section joins the composed
+// document the repository-level plan wrote into the same worktree -- which is
+// why the ownership marker has to be on the first line however the file came to
+// exist. When that plan wrote nothing, because no configured layer had content,
+// this section is the whole document and carries the marker itself. Appending a
+// markerless section to a file nobody had written would produce a document niwa
+// could not recognize as its own on the next apply, and would then refuse to
+// refresh forever.
 func (p Producer) WorktreeContextPlan(in WorktreeContextInputs) (*Plan, error) {
 	ok, err := p.delivers(WorktreeOrientationDoc)
 	if err != nil {
@@ -165,9 +439,32 @@ func (p Producer) WorktreeContextPlan(in WorktreeContextInputs) (*Plan, error) {
 		return &Plan{}, nil
 	}
 
-	e := p.contextEntry(WorktreeOrientationDoc, in.Dir, []byte(in.Heading+"\n\n"+string(in.Body)))
-	e.Op = OpReplaceSection
-	e.Marker = in.Heading
+	section := []byte(in.Heading + "\n\n" + string(in.Body))
+
+	if !p.composition().owned {
+		e := p.contextEntry(WorktreeOrientationDoc, in.Dir, section)
+		e.Op = OpReplaceSection
+		e.Marker = in.Heading
+		return &Plan{Entries: []Entry{e}}, nil
+	}
+
+	if in.Probe.Foreign {
+		return &Plan{
+			Warnings: []string{conflictWarning(in.Probe.OwnedPath)},
+			Exempt:   []string{in.Probe.OwnedPath},
+		}, nil
+	}
+
+	e := p.contextEntry(WorktreeOrientationDoc, in.Dir, section)
+	e.Pre = IfNotForeign
+	e.Owner = generationMarker
+	e.ExcludeAs = excludePattern(in.Dir, e.Path)
+	if in.Probe.Owned {
+		e.Op = OpReplaceSection
+		e.Marker = in.Heading
+	} else {
+		e.Content = composeDocument(section)
+	}
 
 	return &Plan{Entries: []Entry{e}}, nil
 }

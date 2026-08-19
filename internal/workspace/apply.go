@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/gitexclude"
 	"github.com/tsukumogami/niwa/internal/github"
@@ -41,12 +42,25 @@ type Applier struct {
 	// clone_workers config (flag > config > default).
 	CloneWorkers int
 
-	// Agent is the resolved session-global coding agent this apply prepares
-	// the workspace for. The zero value (agent.Agent("")) behaves as Claude
-	// (agent.AgentClaude), so an Applier constructed without setting this field
-	// materializes exactly as it did before agent selection existed. The CLI
-	// entry points set it from agent.ResolveAgent before calling Apply/Create.
-	Agent agent.Agent
+	// There is deliberately no agent field here. An apply prepares the
+	// workspace for every agent niwa enumerates, and which capabilities each
+	// one receives is the declaration table's answer rather than a caller's
+	// choice -- so there is nothing for an entry point to select between, and a
+	// field to select it with would be a way for one to try.
+
+	// DeveloperHome is the developer's own home directory, and the only thing
+	// that lets this apply write outside the instance it is preparing. The
+	// procedure-routed deliveries -- today, the directory-trust entry a Codex
+	// session needs before it can write anything at all -- resolve their
+	// targets under it.
+	//
+	// It is empty by default and every such delivery is skipped while it is.
+	// The unit suites build Appliers by the dozen against temp directories,
+	// and a default that resolved the real home would have each of them edit
+	// the developer's own files. Every CLI surface that constructs an Applier
+	// sets it (see cli.configureDeveloperHome), so a real create or apply
+	// delivers what a session needs.
+	DeveloperHome string
 
 	// Keys collects the declared keys this run could not supply, for the
 	// caller to render once the run returns. It is caller-supplied rather
@@ -363,6 +377,22 @@ type pipelineResult struct {
 	overlayURL       string   // set when convention discovery succeeds; empty otherwise
 	overlayCommit    string   // HEAD SHA when overlayURL was set; empty otherwise
 	disclosedNotices []string // one-time notices emitted during this run
+	// trustKeys is the record of directory-trust entries niwa has written
+	// into the developer's own agent configuration, this apply or an earlier
+	// one. Persisted into InstanceState.TrustKeys by Create/Apply; it is the
+	// sole authority for what a later apply may retract.
+	trustKeys []string
+	// procedureErr is a procedure-routed delivery's failure carried out as
+	// data rather than as the pipeline's error return. The record above has to
+	// reach the state file before the failure reaches the user: a run that
+	// wrote entries and then failed must not also forget which entries it
+	// wrote. Create and Apply save state, then surface this.
+	procedureErr error
+	// exemptPaths names the paths this run refused to write because something
+	// niwa did not write occupies them. They are deliberately not in
+	// managedFiles: the state must stop claiming niwa owns them. Only the
+	// deletion is exempted, which is what cleanRemovedFiles reads them for.
+	exemptPaths []string
 }
 
 // logSetupIncomplete prints the counted verdict line naming the repos whose
@@ -409,11 +439,11 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		return "", fmt.Errorf("creating instance directory: %w", err)
 	}
 
-	// Ensure the instance root's .gitignore covers *.local*. The
-	// materializers always emit files with the ".local" infix so
-	// this single pattern is sufficient; running create twice on
-	// the same instance is a no-op after the first run.
-	if err := EnsureInstanceGitignore(instanceRoot); err != nil {
+	// Ensure the instance root's .gitignore covers *.local* and the
+	// generated-configuration names that cannot carry the infix
+	// because they have to sit where their agent reads them; running
+	// create twice on the same instance is a no-op after the first run.
+	if err := EnsureInstanceGitignore(instanceRoot, agentplan.InstanceExcludePatterns()...); err != nil {
 		_ = os.RemoveAll(instanceRoot)
 		return "", fmt.Errorf("preparing instance .gitignore: %w", err)
 	}
@@ -528,6 +558,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		OverlayURL:     result.overlayURL,
 		OverlayCommit:  result.overlayCommit,
 		AuthSources:    result.authSources,
+		TrustKeys:      result.trustKeys,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -545,6 +576,16 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		a.Reporter.DeferWarn("%s", w)
 	}
 	a.Reporter.FlushDeferred()
+
+	// A procedure-routed delivery that failed is surfaced here rather than
+	// from the pipeline's error return: the instance is prepared and stays on
+	// disk, the record of what niwa wrote outside it is already in the state
+	// file, and the failure still reaches the user as a named error (R20).
+	// Returning it from the pipeline instead would run this path's os.RemoveAll
+	// over an instance whose only problem is outside it.
+	if result.procedureErr != nil {
+		return instanceRoot, result.procedureErr
+	}
 
 	return instanceRoot, nil
 }
@@ -573,12 +614,12 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		return err
 	}
 
-	// Ensure the instance root's .gitignore covers *.local*. Applier.
-	// Create already runs this during initial scaffolding, but an
-	// instance created before this guard landed won't have the file;
-	// running it here closes the upgrade-path gap. The helper is
-	// idempotent, so no-op on subsequent applies.
-	if err := EnsureInstanceGitignore(instanceRoot); err != nil {
+	// Ensure the instance root's .gitignore covers *.local* and the
+	// generated-configuration names beside it. Applier.Create already runs
+	// this during initial scaffolding, but an instance created before a given
+	// pattern landed won't carry it; running it here closes the upgrade-path
+	// gap. The helper is idempotent, so no-op on subsequent applies.
+	if err := EnsureInstanceGitignore(instanceRoot, agentplan.InstanceExcludePatterns()...); err != nil {
 		return fmt.Errorf("preparing instance .gitignore: %w", err)
 	}
 
@@ -721,6 +762,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		Repos:                result.repoStates,
 		Shadows:              result.shadows,
 		AuthSources:          result.authSources,
+		TrustKeys:            result.trustKeys,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -739,7 +781,19 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	}
 	a.Reporter.FlushDeferred()
 
-	return nil
+	// Same posture as Create: the record reaches the state file first, then the
+	// failure reaches the user (R20).
+	return result.procedureErr
+}
+
+// contextChainKey identifies one composed context chain inside an apply: one
+// agent's documents in one repository's working tree. It is keyed by both
+// because the chains are per-agent -- two agents compose different layers into
+// different filenames in the same directory -- and the budget one of them
+// declares must be sized from its own.
+type contextChainKey struct {
+	agent agent.Agent
+	dir   string
 }
 
 // runPipeline executes the shared pipeline steps: discover repos, classify,
@@ -771,6 +825,17 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 	var writtenFiles []string
 	var allWarnings []string
+	// exemptPaths collects the paths this run refused to write because
+	// something niwa did not write occupies them. cleanRemovedFiles consults
+	// them: a refused path is by definition one this apply did not produce, so
+	// without the exemption the deletion pass would remove the very file the
+	// refusal promised to leave alone.
+	var exemptPaths []string
+	// contentExcludes collects, per repository working tree, the git-exclude
+	// patterns the context documents written into it imply. The exclude call
+	// runs in the materializer loop below, after every document has landed, so
+	// the patterns are held here rather than applied where they are produced.
+	contentExcludes := map[string][]string{}
 	// plans accumulates every plan applied during this run. It is what the
 	// bookkeeping steps read: Step 7 takes Managed and Sources off the applied
 	// entries, the per-repo git-exclude call takes the patterns entries in that
@@ -1445,12 +1510,21 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
-	// Step 4: Install workspace-level CLAUDE.md.
-	wsFiles, err := InstallWorkspaceContent(effectiveCfg, configDir, instanceRoot, a.Agent)
-	if err != nil {
-		return nil, fmt.Errorf("installing workspace content: %w", err)
+	// Step 4: Install the instance-root context document, for every agent.
+	//
+	// Every enumerated agent's plan is produced on every apply, here and at each
+	// level below. There is no agent choice at create or apply time: an agent
+	// that receives the document gets it, one that does not gets nothing, and
+	// which is which is the declaration table's answer rather than a flag's. A
+	// workspace prepared for one agent is prepared for the other at the same
+	// time, so switching between them needs no re-apply.
+	for _, ag := range agent.All() {
+		wsFiles, err := InstallWorkspaceContent(effectiveCfg, configDir, instanceRoot, ag)
+		if err != nil {
+			return nil, fmt.Errorf("installing workspace content: %w", err)
+		}
+		writtenFiles = append(writtenFiles, wsFiles...)
 	}
-	writtenFiles = append(writtenFiles, wsFiles...)
 
 	// Build repo name -> on-disk path index (used by marketplace resolution
 	// and materializers).
@@ -1500,11 +1574,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		installedGroups[cr.Group] = true
 
-		groupFiles, err := InstallGroupContent(effectiveCfg, configDir, instanceRoot, cr.Group, a.Agent)
-		if err != nil {
-			return nil, fmt.Errorf("installing group content for %q: %w", cr.Group, err)
+		for _, ag := range agent.All() {
+			groupFiles, err := InstallGroupContent(effectiveCfg, configDir, instanceRoot, cr.Group, ag)
+			if err != nil {
+				return nil, fmt.Errorf("installing group content for %q: %w", cr.Group, err)
+			}
+			writtenFiles = append(writtenFiles, groupFiles...)
 		}
-		writtenFiles = append(writtenFiles, groupFiles...)
 	}
 
 	// Step 5c: Install global CLAUDE.md content if global config is active.
@@ -1516,21 +1592,160 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		writtenFiles = append(writtenFiles, globalFiles...)
 	}
 
-	// Step 6: Install repo-level CLAUDE.local.md files (and subdirectories).
-	// Skip repos with claude = false.
+	// Step 6: Install the repo-level orientation documents (and subdirectories).
+	// Each agent's plan is produced behind that agent's own enabled gate, so a
+	// repository that turns one agent off still receives the other's full
+	// delivery.
+	// What each agent's composed chain came to, per repository. Step 6.3 sizes
+	// that agent's declared context budget from it, and the two steps are
+	// separate loops over the same pairs, so the measurement is carried rather
+	// than recomputed -- the payload producer sees the entries a plan declared,
+	// not the layers they were folded from.
+	contextChains := map[contextChainKey]int{}
 	for _, cr := range classified {
-		if !ClaudeEnabled(effectiveCfg, cr.Repo.Name) {
-			continue
+		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
+		for _, ag := range agent.All() {
+			producer := agentplan.For(ag).Gated(AgentEnabled(effectiveCfg, cr.Repo.Name, string(ag)))
+			result, err := InstallRepoContentTo(effectiveCfg, configDir, overlayDir, instanceRoot, repoDir, cr.Group, cr.Repo.Name, producer)
+			if err != nil {
+				return nil, fmt.Errorf("installing repo content for %q: %w", cr.Repo.Name, err)
+			}
+			for _, w := range result.Warnings {
+				allWarnings = append(allWarnings, w.String())
+			}
+			writtenFiles = append(writtenFiles, result.WrittenFiles...)
+			exemptPaths = append(exemptPaths, result.Exempt...)
+			contentExcludes[repoDir] = append(contentExcludes[repoDir], result.Excludes...)
+			contextChains[contextChainKey{agent: ag, dir: repoDir}] = result.ChainBytes
+		}
+	}
+
+	// Step 6.2: Deliver the workspace's declared plugin skills into each
+	// repository. The configured plugins are resolved to their trees once per
+	// apply -- resolution reads marketplace manifests and fetches a remote
+	// marketplace's content into this instance, neither of which belongs on a
+	// per-repository path -- and the resolved set is then delivered for every
+	// agent whose declaration says its skills arrive that way.
+	fetcher, _ := a.GitHubClient.(FetchClient)
+	pluginTrees, missingPlugins := ResolvePluginTrees(ctx, PluginSkillsInputs{
+		InstanceRoot: instanceRoot,
+		Plugins:      MergeInstanceOverrides(effectiveCfg).Plugins,
+		Marketplaces: effectiveCfg.Claude.Marketplaces,
+		RepoIndex:    repoIndex,
+		Fetcher:      fetcher,
+	})
+	for _, m := range missingPlugins {
+		allWarnings = append(allWarnings, m.String())
+	}
+	for _, cr := range classified {
+		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
+		for _, ag := range agent.All() {
+			producer := agentplan.For(ag).Gated(AgentEnabled(effectiveCfg, cr.Repo.Name, string(ag)))
+			skills, err := InstallRepoSkills(repoDir, pluginTrees, producer)
+			if err != nil {
+				return nil, fmt.Errorf("delivering plugin skills for %q: %w", cr.Repo.Name, err)
+			}
+			allWarnings = append(allWarnings, skills.Warnings...)
+			contentExcludes[repoDir] = append(contentExcludes[repoDir], skills.Excludes...)
+		}
+	}
+
+	// Step 6.3: Generate the workspace's declared MCP servers and session
+	// environment into each agent's own format. Both declarations are
+	// agent-neutral and workspace-scoped, so each is resolved once and offered
+	// to every producer, which decides whether it takes a configuration at a
+	// given scope, where it goes, which of the declarations it carries, and
+	// whether they can be expressed in its format at all.
+	//
+	// A declaration a producer cannot express fails the apply here rather than
+	// landing as a file: a generated configuration that an agent refuses to
+	// load takes every other server in it down with it, so the loud failure is
+	// the one that leaves a working session behind.
+	mcpServers, mcpWarnings := MCPServersFromConfig(effectiveCfg)
+	allWarnings = append(allWarnings, mcpWarnings...)
+	instanceOverrides := MergeInstanceOverrides(effectiveCfg)
+	mcpDestinations := mcpVerbatimDestinations(instanceOverrides.Files, instanceOverrides.InstanceFiles, instanceOverrides.RootFiles)
+
+	// One resolution of the session environment for the whole apply. The values
+	// reach the generated payloads below and the settings documents at step
+	// 6.5 through the same map, so no agent's session can end up carrying a
+	// different value for a variable the workspace declared once.
+	sessionEnv, sessionEnvSources, err := SessionEnvVars(effectiveCfg, instanceOverrides, configDir)
+	if err != nil {
+		return nil, err
+	}
+
+	// The declared posture, read once for the apply. Nothing resolves and
+	// nothing defaults: a workspace that declares none produces the zero value,
+	// which every producer writes nothing for.
+	sessionPosture := SessionPostureFromConfig(effectiveCfg)
+
+	for _, ag := range agent.All() {
+		// The instance root belongs to no repository, so the gate that applies
+		// here is the workspace-level one -- the same lookup, asked with no
+		// repository name.
+		producer := agentplan.For(ag).Gated(AgentEnabled(effectiveCfg, "", string(ag)))
+
+		// One posture line per agent per apply rather than one per generated
+		// file: what a workspace changed about a session is a fact about the
+		// workspace, and a developer who reads it once has read it. An agent
+		// whose posture this document does not carry, and a workspace that
+		// declared none, both report nothing.
+		if report := producer.PostureReport(sessionPosture); report != "" {
+			allWarnings = append(allWarnings, report)
 		}
 
-		result, err := InstallRepoContent(effectiveCfg, configDir, overlayDir, instanceRoot, cr.Group, cr.Repo.Name, a.Agent)
+		// One read of the developer's own configuration per agent, before any
+		// generation: a name it already defines merges with a generated one
+		// field by field rather than being overridden by it.
+		existingMCP, collisionWarning := ReadDeclaredMCPNames(a.DeveloperHome, producer.MCPCollisionSpec())
+		if collisionWarning != "" {
+			allWarnings = append(allWarnings, collisionWarning)
+		}
+		if report := producer.MCPVerbatimReport(mcpDestinations, len(mcpServers) > 0); report != "" {
+			allWarnings = append(allWarnings, report)
+		}
+
+		rootPayload, err := InstallPayloadConfig(PayloadRequest{
+			Scope:    agentplan.PayloadAtInstanceRoot,
+			Dir:      instanceRoot,
+			Servers:  mcpServers,
+			Env:      sessionEnv,
+			Posture:  sessionPosture,
+			Existing: existingMCP,
+		}, producer)
 		if err != nil {
-			return nil, fmt.Errorf("installing repo content for %q: %w", cr.Repo.Name, err)
+			return nil, fmt.Errorf("generating the payload configuration for the instance root: %w", err)
 		}
-		for _, w := range result.Warnings {
-			allWarnings = append(allWarnings, w.String())
+		writtenFiles = append(writtenFiles, rootPayload.Written...)
+		exemptPaths = append(exemptPaths, rootPayload.Exempt...)
+		allWarnings = append(allWarnings, rootPayload.Warnings...)
+
+		// The per-repository gate is this agent's own, applied to this agent's
+		// producer. A Claude-named switch in front of a loop that produces
+		// every agent's payload would decide for an agent that has never heard
+		// of it, which is why the gate arrives here as a producer input rather
+		// than as a skip around the loop.
+		for _, cr := range classified {
+			repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
+			repoProducer := agentplan.For(ag).Gated(AgentEnabled(effectiveCfg, cr.Repo.Name, string(ag)))
+			repoPayload, err := InstallPayloadConfig(PayloadRequest{
+				Scope:             agentplan.PayloadInRepo,
+				Dir:               repoDir,
+				Servers:           mcpServers,
+				Env:               sessionEnv,
+				Posture:           sessionPosture,
+				Existing:          existingMCP,
+				ContextChainBytes: contextChains[contextChainKey{agent: ag, dir: repoDir}],
+			}, repoProducer)
+			if err != nil {
+				return nil, fmt.Errorf("generating the payload configuration for %q: %w", cr.Repo.Name, err)
+			}
+			writtenFiles = append(writtenFiles, repoPayload.Written...)
+			exemptPaths = append(exemptPaths, repoPayload.Exempt...)
+			allWarnings = append(allWarnings, repoPayload.Warnings...)
+			contentExcludes[repoDir] = append(contentExcludes[repoDir], repoPayload.Excludes...)
 		}
-		writtenFiles = append(writtenFiles, result.WrittenFiles...)
 	}
 
 	// Step 6.4: Decide the worktree-delegation integration ONCE per apply
@@ -1621,6 +1836,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			WorktreeDelegation:     worktreeDelegation,
 			Keys:                   a.Keys,
 			StrictSecrets:          a.StrictSecrets,
+			SessionEnv:             sessionEnv,
+			SessionEnvSources:      sessionEnvSources,
 		})
 		if err != nil {
 			return nil, err
@@ -1637,10 +1854,22 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		excludeExtras := make([]string, 0, len(envOutputs))
 		excludeExtras = append(excludeExtras, envOutputs...)
 		excludeExtras = append(excludeExtras, plans.excludesUnder(repoDir)...)
+		excludeExtras = append(excludeExtras, contentExcludes[repoDir]...)
 		if err := gitexclude.EnsureRepoExclude(repoDir, excludeExtras...); err != nil {
 			return nil, fmt.Errorf("recording git exclude coverage for repo %s: %w", cr.Repo.Name, err)
 		}
 	}
+
+	// Step 6.5: Deliver the procedure-routed capabilities -- today, directory
+	// trust. It runs here, after the repositories are on disk, because the
+	// entry is keyed by the canonical path of a directory that has to exist to
+	// be canonicalized. Which agent receives it is a lookup in the declaration
+	// table, not a branch here.
+	repoRoots := make([]string, 0, len(classified))
+	for _, cr := range classified {
+		repoRoots = append(repoRoots, filepath.Join(instanceRoot, cr.Group, cr.Repo.Name))
+	}
+	trustKeys, trustErr := a.deliverDirectoryTrust(repoRoots, opts.existingState, &allWarnings)
 
 	// Step 6.6: Refresh the env of the instance's existing worktrees, sourcing
 	// from the clones just materialized above. This is the apply-side fan-out of
@@ -1666,6 +1895,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		now:                    now,
 		allowPlaintextSecrets:  a.AllowPlaintextSecrets,
 		worktreeDelegation:     worktreeDelegation,
+		exempt:                 &exemptPaths,
 	})
 	if err != nil {
 		return nil, err
@@ -1704,6 +1934,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Plan warnings: what the applied plans said the user needs to hear.
 	// Reported alongside the pipeline's other deferred warnings.
 	allWarnings = append(allWarnings, plans.warnings()...)
+	exemptPaths = append(exemptPaths, plans.exempt()...)
 
 	// Step 7: Build managed files with hashes and per-source
 	// provenance. Sources come from two places. Materializers report
@@ -1764,7 +1995,66 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		overlayURL:       pipelineOverlayURL,
 		overlayCommit:    pipelineOverlayCommit,
 		disclosedNotices: newDisclosures,
+		trustKeys:        trustKeys,
+		procedureErr:     trustErr,
+		exemptPaths:      exemptPaths,
 	}, nil
+}
+
+// deliverDirectoryTrust runs the directory-trust delivery for whichever agents
+// the contract declares it implemented for, and returns the record to persist
+// plus the first failure to surface after materialization finishes.
+//
+// There is no agent named here on purpose. The loop asks the declaration table
+// which agents receive the capability and the binding which registered
+// procedure serves it, so delivering trust to a second agent -- or stopping
+// delivering it to this one -- is an edit to the table rather than to the
+// pipeline. That is the whole difference between a delivery under the contract
+// and a hardcoded second pass beside it (R4, R5).
+//
+// The record is returned on every path, failure included. It is the sole
+// authority for what niwa may later remove from the developer's configuration,
+// so a run that could not write must still carry forward what earlier runs did.
+// It is keyed by the capability rather than by the agent because what it holds
+// is the set of repository paths niwa vouched for; a second agent keeping its
+// own per-directory trust would vouch for the same paths in its own file, and
+// each writer only ever retracts what it finds in the file it owns.
+func (a *Applier) deliverDirectoryTrust(repoRoots []string, existing *InstanceState, warnings *[]string) ([]string, error) {
+	var recorded []string
+	if existing != nil {
+		recorded = existing.TrustKeys
+	}
+
+	// An Applier with no developer home has not been wired to write outside
+	// the instance, which is how every unit suite in this package is built: a
+	// default that resolved the real home would have each of them edit the
+	// developer's own files. The CLI sets the field on every surface that
+	// constructs an Applier.
+	if a.DeveloperHome == "" {
+		return recorded, nil
+	}
+
+	var firstErr error
+	for _, ag := range agent.All() {
+		p, ok := procedureFor(agentplan.DirectoryTrust, ag)
+		if !ok {
+			continue
+		}
+		res, err := p.Deliver(procedureInput{
+			DeveloperHome: a.DeveloperHome,
+			RepoRoots:     repoRoots,
+			Recorded:      recorded,
+		})
+		*warnings = append(*warnings, res.Warnings...)
+		// The returned record replaces the prior one outright, empty included:
+		// a retraction that cleared the last key must leave an empty record,
+		// not the stale one it just withdrew.
+		recorded = res.Recorded
+		if err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("delivering %s to %s: %w", agentplan.DirectoryTrust, ag, err)
+		}
+	}
+	return recorded, firstErr
 }
 
 // hashManagedFile builds one managed-file record: the file's content hash, the
@@ -1883,11 +2173,22 @@ func (a *Applier) cleanRemovedFiles(existingState *InstanceState, result *pipeli
 		currentFiles[mf.Path] = true
 	}
 
+	// A path this run refused to write is a path this run did not produce, so
+	// the loop below would delete it. That is exactly backwards: the refusal
+	// happened because the file is the repository's own, and niwa promised to
+	// leave it untouched. The record entry still goes -- the state must stop
+	// claiming niwa owns the path -- and only the deletion is exempted.
+	exempt := make(map[string]bool, len(result.exemptPaths))
+	for _, path := range result.exemptPaths {
+		exempt[filepath.Clean(path)] = true
+	}
+
 	for _, mf := range existingState.ManagedFiles {
-		if !currentFiles[mf.Path] {
-			if err := os.Remove(mf.Path); err != nil && !os.IsNotExist(err) {
-				a.Reporter.DeferWarn("could not remove managed file %s: %v", mf.Path, err)
-			}
+		if currentFiles[mf.Path] || exempt[filepath.Clean(mf.Path)] {
+			continue
+		}
+		if err := os.Remove(mf.Path); err != nil && !os.IsNotExist(err) {
+			a.Reporter.DeferWarn("could not remove managed file %s: %v", mf.Path, err)
 		}
 	}
 }
@@ -1923,6 +2224,11 @@ type worktreeRefreshInputs struct {
 	// registers against cloneDir. nil defaults to gitRegistersWorktree (the real
 	// `git worktree list --porcelain` cross-check); injected in tests.
 	gitRegistered func(cloneDir, worktreePath string) bool
+	// exempt, when non-nil, collects the paths a refreshed worktree refused to
+	// write because the checkout commits its own file at one of niwa's names.
+	// The pipeline passes its own list so cleanRemovedFiles sees them; a test
+	// that only cares about env output may leave it nil.
+	exempt *[]string
 }
 
 // refreshWorktreeEnvs enumerates the instance's session-backed worktrees and, for
@@ -2011,12 +2317,13 @@ func (a *Applier) refreshWorktreeEnvs(in worktreeRefreshInputs) ([]ManagedFile, 
 			in.cfg, in.configDir, in.instanceRoot, wtPath, group, s.Repo,
 			s.Purpose, s.EffectiveBranchName(),
 			WorktreeApplyOptions{
-				Agent:                  a.Agent,
+				Exempt:                 in.exempt,
 				OverlayDir:             in.overlayDir,
 				AllowPlaintextSecrets:  in.allowPlaintextSecrets,
 				Stderr:                 a.Reporter.Writer(),
 				GlobalEnvExamplePolicy: in.globalEnvExamplePolicy,
 				GlobalEnvOutput:        in.globalEnvOutput,
+				DeveloperHome:          a.DeveloperHome,
 				// Decision 9: give the worktree the same delegation configuration
 				// the clone got on this apply, so the two do not drift.
 				WorktreeDelegation: in.worktreeDelegation,

@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
-	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/keyreport"
@@ -442,6 +441,7 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 
 	applier := workspace.NewApplier(gh)
 	applier.Reporter = workspace.NewReporter(os.Stderr)
+	configureDeveloperHome(applier)
 	// Collected rather than rendered: this path has no terminal. The caller
 	// decides where the report goes — into the hook's injected context, or onto
 	// dispatch's stderr.
@@ -487,16 +487,11 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 	}
 
 	// This launch-coupled provisioning path (the Claude SessionStart hook,
-	// `niwa dispatch`, and `niwa watch`) always launches a Claude worker into the
-	// instance, so the instance is prepared for Claude regardless of the
-	// workspace's default_agent. Preparing it for a different agent here would
-	// materialize context the launched Claude worker cannot read. The
-	// interactive-Codex flow prepares its workspace through `niwa apply`/`create`
-	// (which honor default_agent), not through this path. `niwa dispatch` refuses
-	// up front when the resolved agent is not Claude; Codex background dispatch
-	// and a Codex SessionStart hook are later features that will carry their own
-	// agent here.
-	applier.Agent = agent.AgentClaude
+	// `niwa dispatch`, and `niwa watch`) launches a Claude worker into the
+	// instance, and it no longer has to say so: the instance is prepared for
+	// every agent, so the Claude worker finds what it reads whatever else is
+	// also there. Which agents can be launched into it is a separate question,
+	// answered by the launch path's own declaration lookup.
 	// This path has no command line, which is exactly why strict mode is a
 	// workspace setting: `niwa dispatch`, the SessionStart hook, `niwa watch`
 	// and the reaper all provision through here and all read it with no flag.

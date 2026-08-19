@@ -28,9 +28,9 @@ const (
 	OpReplaceSection
 
 	// OpDeliverTree links Source at Path, copying when the link cannot be
-	// made. It has no executor arm yet: the operation's implementation lands
-	// with the payload delivery that first needs it, and until then an entry
-	// carrying it is a named error rather than a silent skip.
+	// made. Owner is required: it is the line the executor writes into the
+	// delivered tree's sentinel file, and reads back to tell its own copy from
+	// a directory somebody else put at the name.
 	OpDeliverTree
 )
 
@@ -48,6 +48,14 @@ const (
 	// IfSourceExists writes the entry only when Source is present. An absent
 	// Source is a no-op, not an error.
 	IfSourceExists
+
+	// IfNotForeign writes the entry only when Path is free for niwa to take:
+	// absent, or a regular file whose first line is Owner. It is the write-time
+	// half of the ownership rule, re-checked here because the producer's verdict
+	// was computed in a pre-pass and a repository's own file can appear in
+	// between. Anything else -- a symlink, a directory, a file niwa did not
+	// write -- is left exactly as it is.
+	IfNotForeign
 )
 
 // Entry is one declared write: what to put where, under which capability, and
@@ -83,6 +91,14 @@ type Entry struct {
 	// Marker delimits the region OpReplaceSection rewrites.
 	Marker string
 
+	// Owner is the line that identifies an existing path as one niwa wrote:
+	// the first line of the file for IfNotForeign, and the content of the
+	// sentinel inside a delivered tree for OpDeliverTree. It is a separate
+	// field from Marker because an entry can need both: a worktree's Codex
+	// document is a section replace delimited by the section heading, in a file
+	// whose ownership is decided by the generation marker on its first line.
+	Owner string
+
 	// Pre gates the entry.
 	Pre Precondition
 
@@ -115,4 +131,24 @@ type Plan struct {
 	// Warnings are the things a user needs to hear about this plan: a
 	// declaration that could not be honored, a refusal, an omission.
 	Warnings []string
+
+	// Exempt lists paths the managed-file cleanup must not delete even though
+	// this plan produced nothing at them. There is exactly one reason a path
+	// lands here: the plan refused to write it because the repository commits
+	// its own file at one of niwa's names. Without the exemption, cleanup would
+	// see a recorded path the current apply did not produce and delete the
+	// repository's own file -- the opposite of what the refusal promised. The
+	// record entry still goes; only the deletion is exempted.
+	Exempt []string
+
+	// ChainBytes is how many bytes the documents this plan writes occupy in the
+	// worst chain a session reads under the tree it wrote them in. It is zero
+	// for a plan whose agent spends no shared budget across its context
+	// documents, and zero for every plan that is not a context plan.
+	//
+	// It travels on the plan because the size is a by-product of composing the
+	// chain and the caller cannot recompute it: the executor sees the entries,
+	// not the layers they were folded from. The generated project-layer
+	// configuration declares a budget covering it -- see codexBudgetFor.
+	ChainBytes int
 }

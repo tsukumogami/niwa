@@ -95,6 +95,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 	gh := github.NewAPIClient(token)
 
 	applier := workspace.NewApplier(gh)
+	configureDeveloperHome(applier)
 	defer wireKeyReport(applier, cmd.ErrOrStderr())()
 	// Reset runs runPipeline; wire the plugin auto-installer so the
 	// rank-2 overlay notice fired during the pipeline triggers
@@ -144,11 +145,6 @@ func runReset(cmd *cobra.Command, args []string) error {
 			applier.ConfigSourceURL = entry.SourceURL
 		}
 	}
-	resolvedAgent, agErr := resolveSessionAgent("", cfg)
-	if agErr != nil {
-		return agErr
-	}
-	applier.Agent = resolvedAgent
 	// Reset surfaces no flags of its own, so the workspace setting is the only
 	// speaker here. It is consulted deliberately: reset rebuilds the same
 	// instance the workspace's own create would have built, and an instance

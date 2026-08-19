@@ -175,6 +175,7 @@ func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot,
 	// Step 4: build the applier and wire seam closures for RunBootstrap.
 	applier := workspace.NewApplier(gh)
 	applier.Reporter = workspace.NewReporter(cmd.ErrOrStderr())
+	configureDeveloperHome(applier)
 	applier.ConfigSourceURL = source
 	defer wireKeyReport(applier, cmd.ErrOrStderr())()
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
@@ -191,11 +192,6 @@ func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot,
 		if loadErr != nil {
 			return "", loadErr
 		}
-		resolvedAgent, agErr := resolveSessionAgent("", result.Config)
-		if agErr != nil {
-			return "", agErr
-		}
-		applier.Agent = resolvedAgent
 		// The scaffold this reads was written moments ago at Step 2, so the
 		// setting is resolved here rather than at Step 4: before the scaffold
 		// exists there is no [workspace] table to read it from.
@@ -775,17 +771,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 	// the workspace is fully usable without the root config, and `niwa apply`
 	// from the root re-converges it.
 	if !initNoEphemeralSessions && rootConfigInstalls(mode) {
-		// Resolve the workspace default agent (honoring NIWA_AGENT) so the
-		// workspace-root context file is written under the right filename at
-		// init time rather than only self-healing on the first apply.
-		rootAgent, agErr := resolveSessionAgent("", result.Config)
-		if agErr != nil {
-			return agErr
-		}
 		if _, mErr := workspace.MaterializeWorkspaceRoot(result.Config, workspaceRoot, workspace.RootMaterializeOptions{
 			EphemeralSessionMode: true,
 			ConfigDir:            filepath.Join(workspaceRoot, workspace.StateDir),
-			Agent:                rootAgent,
 		}); mErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not install workspace-root session config: %v\n", mErr)
 		}

@@ -278,7 +278,7 @@ By default the worktree layer is a short generated section naming the repo,
 purpose, and branch. To control it, set a template in the workspace config:
 
 ```toml
-[claude.content.worktree]
+[content.worktree]
 source = "worktree.md"
 ```
 

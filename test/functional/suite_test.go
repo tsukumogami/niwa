@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cucumber/godog"
 )
@@ -116,6 +117,39 @@ type testState struct {
 	// discovered after a `niwa dispatch` run, so later steps can assert its
 	// presence/absence without hardcoding the random name suffix.
 	lastDispatchInstancePath string
+
+	// Codex acceptance state. See codex_agent_steps_test.go.
+
+	// stagedFiles and stagedSymlinks accumulate fixture content (repo-relative
+	// path → content / link target) that the next fixture-repo step commits and
+	// then drains, so a scenario can build up a repository's committed shape one
+	// readable step at a time.
+	stagedFiles    map[string]string
+	stagedSymlinks map[string]string
+
+	// codexConfigSeed is the developer Codex config exactly as the scenario
+	// seeded it, kept so the additivity check can compare what niwa left behind
+	// against what was there before.
+	codexConfigSeed []byte
+
+	// codexCredentialBytes and codexCredentialModTime snapshot the developer's
+	// Codex credential file at seed time; niwa must leave both untouched.
+	codexCredentialBytes   []byte
+	codexCredentialModTime time.Time
+
+	// workspaceRootAlias is the symlinked path the scenario drove niwa through
+	// when the workspace root is reached through a symlink. Empty otherwise.
+	// The trust keys niwa writes must name the resolved path, never this one.
+	workspaceRootAlias string
+
+	// codexSessionOutput holds the combined output of the last live Codex
+	// invocation, for the gated scenarios that inspect what a session printed.
+	codexSessionOutput string
+
+	// restoreOnCleanup are directories a scenario made read-only on purpose.
+	// The After hook puts them back, because a sandbox holding an unwritable
+	// directory cannot be removed with the rest of them.
+	restoreOnCleanup []string
 }
 
 func getState(ctx context.Context) *testState {
@@ -226,6 +260,9 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 			envOverrides:  make(map[string]string),
 			gitServer:     gs,
 			repoURLs:      make(map[string]string),
+
+			stagedFiles:    make(map[string]string),
+			stagedSymlinks: make(map[string]string),
 		}
 		return setState(ctx, state), nil
 	})
@@ -243,6 +280,13 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 			s.githubFake.Close()
 			s.githubFake = nil
 		}
+		// A scenario that made a directory read-only to force a delivery
+		// failure has to hand it back, or the sandbox it lives in outlives the
+		// run.
+		for _, dir := range s.restoreOnCleanup {
+			_ = os.Chmod(dir, 0o755)
+		}
+		s.restoreOnCleanup = nil
 		return ctx, nil
 	})
 
@@ -413,6 +457,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	registerDispatchSteps(ctx)
 	registerDispatchSpillSteps(ctx)
 	registerKeepAliveSteps(ctx)
+
+	// --- the Codex acceptance bar: what a session in a prepared instance gets
+	// from the capability contract, and what the table says it does not ---
+	registerCodexAgentSteps(ctx)
 
 	// --- plugin pre-warm settings drift (#179): the pre-warm must not dirty
 	// niwa's managed settings.json while still resolving plugins to disk ---

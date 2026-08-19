@@ -2499,7 +2499,7 @@ org = "testorg"
 [groups.public]
 visibility = "public"
 
-[claude.content.groups.public]
+[content.groups.public]
 source = "claude/public.md"
 `
 	mockClient := &mockGitHubClient{

@@ -133,6 +133,17 @@ type InstanceState struct {
 	DisclosedNotices   []string                    `json:"disclosed_notices,omitempty"`
 	ConfigSource       *ConfigSource               `json:"config_source,omitempty"`
 	AuthSources        map[string]AuthSourceRecord `json:"auth_sources,omitempty"`
+	// TrustKeys records the per-directory trust entries niwa has written into
+	// the developer's own agent configuration -- the one place an apply writes
+	// outside its instance. It holds canonical repository paths, never
+	// anything an agent's configuration says about them.
+	//
+	// It is the sole authority for what a later apply may retract: the agent
+	// that keeps such a record writes an identically shaped entry when the
+	// developer answers its own trust prompt, so without this list niwa could
+	// not tell its own entry from the developer's answer. omitempty keeps the
+	// field invisible to old binaries reading new state files.
+	TrustKeys []string `json:"trust_keys,omitempty"`
 }
 
 // AuthSourceRecord is one row of the credential-source audit map

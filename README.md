@@ -15,6 +15,7 @@ has properly scoped context in every repo from the first session. It handles:
 - **Per-repo overrides** -- custom settings, hooks, and env per repo
 - **Overlay layer** -- companion repos that layer additional repos, groups, and Claude context onto the base config; auto-synced on every apply
 - **Multi-instance** -- run multiple workspace instances from the same config
+- **Both agents** -- every apply prepares Claude Code and Codex alike, with no agent flag anywhere; see `docs/guides/codex-agent.md` for what a Codex session gets and what it doesn't
 
 ## Quick start
 
@@ -81,15 +82,39 @@ Create content files in `.niwa/claude/` that become CLAUDE.md files in your work
 Reference them in the config:
 
 ```toml
-[claude.content.workspace]
+[content.workspace]
 source = "workspace.md"
 
-[claude.content.groups.public]
+[content.groups.public]
 source = "public.md"
 ```
 
-The top-level `[content]` key is a deprecated alias for `[claude.content]`
-and still parses cleanly (with a warning) until niwa v1.0.
+`[content]` is agent-neutral: the same declared sources reach every agent
+niwa prepares the workspace for, each under that agent's own filename
+(`CLAUDE.md` and `CLAUDE.local.md` for Claude Code, `AGENTS.md` and
+`AGENTS.override.md` for Codex).
+
+`[claude.content]` is a deprecated alias for it and still parses cleanly,
+with a warning, until niwa v1.0. This reverses the v0.7 move that put
+`[content]` under `[claude]`: that move was made because every consumer
+wrote a `CLAUDE.md`-shaped destination, which stopped being true once a
+second agent read the same content. A workspace already on `[content]`
+needs no change and simply stops being warned at; a workspace on
+`[claude.content]` keeps working and can move the table name at its
+convenience. Setting both is an error.
+
+Each agent's delivery has its own switch, and neither reaches the other:
+
+```toml
+[repos.my-repo.claude]
+enabled = false            # skip Claude Code delivery for this repo
+
+[codex]
+enabled = false            # skip Codex delivery workspace-wide
+```
+
+Both default to enabled, both are accepted at the workspace level and on a
+per-repo override, and the per-repo value wins.
 
 ### 5. Create an instance
 

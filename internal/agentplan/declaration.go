@@ -64,21 +64,24 @@ type Declaration struct {
 // declarations is the capability matrix as data: exactly one row per
 // (capability, agent) pair, in matrix order, Claude before Codex.
 //
-// The Codex column states what main delivers today, which is nothing. Eleven of
-// its unavailable rows are ReasonNotBuilt and flip to implemented -- with the
-// measured Requires edges on DirectoryTrust -- when Codex delivery lands; the
-// other rows carry inherent reasons that no amount of building changes. Writing
-// the future state down early would make the table a plan rather than a record,
-// which is the failure this contract exists to prevent.
+// The Codex column states what niwa delivers today and nothing more. Directory
+// trust is the first row it delivers: the entry that makes every later
+// trust-gated row possible arrives with the writer that produces it, in the
+// same change. Eleven Codex rows are implemented and thirteen are unavailable
+// -- the eleven whose reason is inherent to the agent plus the two whose route
+// exists and is out of this work's scope. Every implemented row flipped in the
+// change that delivered it, never before: writing a future state down early
+// would make the table a plan rather than a record, which is the failure this
+// contract exists to prevent.
 var declarations = []Declaration{
 	// Row 1: workspace and group orientation reaching a repo session.
 	{Capability: WorkspaceOrientation, Agent: agent.AgentClaude, State: StateImplemented},
-	{
-		Capability: WorkspaceOrientation, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "niwa does not yet compose workspace and group orientation into the repository context files Codex reads.",
-	},
+	// Codex reads context from the nearest project-root marker downward, so the
+	// documents above a repository are never visited from a session inside it.
+	// The workspace and group layers are composed into the repository's own
+	// document instead -- the same document row 3 delivers, which is why this
+	// row carries no separate write of its own.
+	{Capability: WorkspaceOrientation, Agent: agent.AgentCodex, State: StateImplemented},
 
 	// Row 2: a session started at the workspace or instance root.
 	{Capability: RootSessionOrientation, Agent: agent.AgentClaude, State: StateImplemented},
@@ -91,30 +94,38 @@ var declarations = []Declaration{
 
 	// Row 3: the repository-level orientation document.
 	{Capability: RepoOrientationDoc, Agent: agent.AgentClaude, State: StateImplemented},
+	// The trust edge is about the byte budget, not the document: the composed
+	// chain is read whatever the trust state, but the project-layer
+	// project_doc_max_bytes niwa writes to cover a chain past the 32768-byte
+	// default is honored only in a trusted directory, and without it an
+	// over-budget chain is cut without a word.
 	{
 		Capability: RepoOrientationDoc, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "niwa does not yet write a repository-level orientation document for Codex.",
+		State:    StateImplemented,
+		Requires: []Capability{DirectoryTrust},
 	},
 
 	// Row 4: the worktree-level orientation document.
 	{Capability: WorktreeOrientationDoc, Agent: agent.AgentClaude, State: StateImplemented},
+	// A linked worktree's `.git` is a regular pointer file, and Codex's
+	// project-root marker check is a bare metadata stat that a file satisfies,
+	// so the walk stops at a worktree root exactly as it stops at a clone's
+	// (measured against codex-cli 0.147.0, with a negative control). The same
+	// budget reasoning as row 3 puts the trust edge here too.
 	{
 		Capability: WorktreeOrientationDoc, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "niwa does not yet write a worktree-level orientation document for Codex.",
+		State:    StateImplemented,
+		Requires: []Capability{DirectoryTrust},
 	},
 
 	// Row 5: workspace-declared plugin skills.
 	{Capability: PluginSkills, Agent: agent.AgentClaude, State: StateImplemented},
-	{
-		Capability: PluginSkills, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "niwa does not yet deliver workspace-declared skills in a layout Codex loads.",
-	},
+	// The plugin tree is delivered whole into the project layer, where Codex
+	// resolves it to the same `<plugin>:<skill>` names Claude Code produces.
+	// There is deliberately no trust edge on this row: skills were measured to
+	// load from an untrusted layer, unlike every configuration key beside them,
+	// so requiring trust here would declare a dependency niwa does not have.
+	{Capability: PluginSkills, Agent: agent.AgentCodex, State: StateImplemented},
 
 	// Row 6: marketplace and plugin registration.
 	{Capability: MarketplaceRegistration, Agent: agent.AgentClaude, State: StateImplemented},
@@ -136,47 +147,60 @@ var declarations = []Declaration{
 
 	// Row 8: MCP servers.
 	{Capability: MCPServers, Agent: agent.AgentClaude, State: StateImplemented},
+	// The workspace declares its servers once, agent-neutrally, and each
+	// agent's own format is generated from that declaration. The trust edge is
+	// the whole of what makes the Codex half work: an untrusted project layer
+	// is not parsed at all, so the generated entries would sit on disk unread.
 	{
 		Capability: MCPServers, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "niwa does not yet generate Codex MCP server entries.",
+		State:    StateImplemented,
+		Requires: []Capability{DirectoryTrust},
 	},
 
 	// Row 9: environment variables in the session.
 	{Capability: SessionEnvironment, Agent: agent.AgentClaude, State: StateImplemented},
+	// The workspace declares its variables once, agent-neutrally, and each
+	// agent's own destination is generated from that declaration: a settings
+	// env block for one, a shell environment policy for the other. The trust
+	// edge is the same one the MCP row carries and for the same measured
+	// reason -- an untrusted project layer is not parsed at all, so the
+	// generated policy would sit on disk unread.
 	{
 		Capability: SessionEnvironment, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "niwa does not yet generate the Codex shell environment policy a session's variables ride.",
+		State:    StateImplemented,
+		Requires: []Capability{DirectoryTrust},
 	},
 
 	// Row 10: dotenv files at declared paths.
 	{Capability: DotenvFiles, Agent: agent.AgentClaude, State: StateImplemented},
-	{
-		Capability: DotenvFiles, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "Dotenv delivery is agent-agnostic, but niwa has not yet bound it to Codex under this contract.",
-	},
+	// The dotenv writer reads no agent and writes the same bytes to the same
+	// declared paths whoever opens the session, so the files are already in
+	// front of a Codex session. Declaring this unavailable said niwa withheld
+	// something it delivers, which is the one direction a gap list must never
+	// be wrong in: a developer reading it would go build what they already had.
+	{Capability: DotenvFiles, Agent: agent.AgentCodex, State: StateImplemented},
 
 	// Row 11: arbitrary file distribution.
 	{Capability: FileDistribution, Agent: agent.AgentClaude, State: StateImplemented},
-	{
-		Capability: FileDistribution, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "File distribution is agent-agnostic, but niwa has not yet bound it to Codex under this contract.",
-	},
+	// Same reasoning as row 10: the distribution copies a source path to a
+	// destination path with no agent anywhere in it, and the destination is on
+	// disk for either session.
+	{Capability: FileDistribution, Agent: agent.AgentCodex, State: StateImplemented},
 
 	// Row 12: approval and sandbox posture.
 	{Capability: ApprovalPosture, Agent: agent.AgentClaude, State: StateImplemented},
+	// Opt-in and absent by default: a workspace that declares no posture has
+	// neither approval_policy nor sandbox_mode written, so the developer's own
+	// defaults stand. What is declared is written from its own key and reported
+	// at apply time, and neither key is ever derived from the other. The trust
+	// edge is the one rows 8 and 9 carry, measured the same way: both keys take
+	// effect from a trusted project layer and revert to their defaults when the
+	// trust entry is removed, so an untrusted layer would leave the posture on
+	// disk unread.
 	{
 		Capability: ApprovalPosture, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "niwa writes neither a Codex approval policy nor a sandbox mode; the route is measured and unbuilt.",
+		State:    StateImplemented,
+		Requires: []Capability{DirectoryTrust},
 	},
 
 	// Row 13: hooks.
@@ -276,21 +300,22 @@ var declarations = []Declaration{
 		Kind:   ReasonNoSuchConcept,
 		Reason: "Claude Code keeps no per-directory trust record; its posture is settings-driven.",
 	},
-	{
-		Capability: DirectoryTrust, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "niwa does not yet write trust entries into the developer's Codex configuration.",
-	},
+	// Codex reads trust from the layers it merges before any project layer
+	// exists, so the one entry that makes a prepared instance usable is
+	// written into the developer's own configuration rather than into the
+	// instance. That is why this row is delivered by a procedure and not by a
+	// plan the executor writes.
+	{Capability: DirectoryTrust, Agent: agent.AgentCodex, State: StateImplemented},
 
 	// Row 24: git-exclude bookkeeping.
 	{Capability: GitExcludeBookkeeping, Agent: agent.AgentClaude, State: StateImplemented},
-	{
-		Capability: GitExcludeBookkeeping, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "Bookkeeping is agent-agnostic, but niwa writes no Codex-side names for it to cover yet.",
-	},
+	// This row flips with the first Codex-side name niwa writes into a working
+	// tree, not after it. The coverage is not cosmetic: an uncovered
+	// niwa-written file makes the tree read dirty, and a dirty tree is what
+	// stops the worktree teardown from reclaiming a session's worktree. Writing
+	// the name in one change and covering it in the next would ship that
+	// breakage as an intermediate state.
+	{Capability: GitExcludeBookkeeping, Agent: agent.AgentCodex, State: StateImplemented},
 }
 
 // Lookup returns the declaration for one (capability, agent) pair.

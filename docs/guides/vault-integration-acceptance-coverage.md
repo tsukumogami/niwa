@@ -16,7 +16,7 @@ at behavior that's deferred to a future release.
 | Accepts `vault://<key>` URI with `[vault.provider]` | `internal/config/vault_test.go` | `TestParseAcceptsAnonymousRefWithAnonymousProvider` |
 | Accepts `vault://<name>/<key>` URI with named provider | `internal/config/vault_test.go` | `TestParseSingleNamedVaultProvider` |
 | Rejects `vault://<name>/<key>` where `<name>` is undeclared | `internal/config/vault_test.go` | `TestParseRejectsUndeclaredProviderRef` |
-| Rejects `vault://` URIs in `[claude.content.*]` source paths | `internal/config/vault_test.go` | `TestParseRejectsVaultURIInContent` |
+| Rejects `vault://` URIs in `[content.*]` source paths | `internal/config/vault_test.go` | `TestParseRejectsVaultURIInContent` |
 | Rejects `vault://` URIs in `[env.files]` source paths | `internal/config/vault_test.go` | `TestParseRejectsVaultURIInEnvFiles` |
 | Rejects `vault://` URIs in `[vault.provider*]` fields | `internal/config/vault_test.go` | `TestParseRejectsVaultURIInProviderConfig` |
 | Rejects `vault://` URIs in workspace name | `internal/config/vault_test.go` | `TestParseRejectsVaultURIInWorkspaceName` |

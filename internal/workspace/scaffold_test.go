@@ -58,7 +58,7 @@ func TestScaffold_WithName(t *testing.T) {
 	}
 
 	// Verify commented sections are present.
-	for _, section := range []string{"[[sources]]", "[groups.public]", "[repos.my-repo]", "[claude.content.workspace]", "[[claude.hooks.pre_tool_use]]", "[claude.settings]", "[env]"} {
+	for _, section := range []string{"[[sources]]", "[groups.public]", "[repos.my-repo.claude]", "[repos.my-repo.codex]", "[content.workspace]", "[[claude.hooks.pre_tool_use]]", "[claude.settings]", "[env]"} {
 		if !strings.Contains(content, "# "+section) {
 			t.Errorf("expected commented section %q in template", section)
 		}
@@ -158,8 +158,9 @@ visibility = "<vis-value>"
 # no live visibility, so name membership is what places the repo in a group.
 repos = ["<bootstrap-repo>"]
 
-# CLAUDE.md content hierarchy: drop a workspace.md in .niwa/claude/ to populate.
-# [claude.content.workspace]
+# Content hierarchy: drop a workspace.md in .niwa/claude/ to populate. It is
+# agent-neutral -- each agent's session reads it under that agent's own filename.
+# [content.workspace]
 # source = "workspace.md"
 
 # See https://github.com/tsukumogami/niwa/blob/main/docs/guides/workspace-config-sources.md

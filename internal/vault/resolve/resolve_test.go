@@ -835,3 +835,59 @@ func TestResolveWorkspaceProviderUnreachable(t *testing.T) {
 		t.Errorf("ProviderKind = %q, want fake", got.Unresolved.ProviderKind)
 	}
 }
+
+// TestResolveWorkspaceResolvesSessionEnv puts the agent-neutral session
+// declaration through the same pipeline every other value slot uses, and checks
+// the resolver's no-mutation contract holds for it.
+//
+// It matters more here than for a Claude-only table: what this resolves is
+// written literally into a generated configuration, so a reference that reached
+// a generator unresolved would land on disk as a vault URI where a credential
+// belongs.
+func TestResolveWorkspaceResolvesSessionEnv(t *testing.T) {
+	cfg := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "test"},
+		Vault: &config.VaultRegistry{
+			Provider: &config.VaultProviderConfig{
+				Kind: "fake",
+				Config: map[string]any{
+					"values": map[string]string{
+						"API_TOKEN": "not-a-real-token-but-long-enough",
+					},
+				},
+			},
+		},
+		Session: config.SessionConfig{
+			Env: config.SessionEnvConfig{
+				Vars: config.EnvVarsTable{
+					Values: map[string]config.MaybeSecret{
+						"API_TOKEN": {Plain: "vault://API_TOKEN"},
+						"REGION":    {Plain: "eu-west-1"},
+					},
+				},
+			},
+		},
+	}
+
+	out, err := resolve.ResolveWorkspace(context.Background(), cfg, resolve.ResolveOptions{
+		Registry: newFakeRegistry(t),
+	})
+	if err != nil {
+		t.Fatalf("ResolveWorkspace: %v", err)
+	}
+
+	got := out.Session.Env.Vars.Values["API_TOKEN"]
+	if !got.IsSecret() {
+		t.Fatal("the session declaration's vault reference was not resolved")
+	}
+	if string(reveal.UnsafeReveal(got.Secret)) != "not-a-real-token-but-long-enough" {
+		t.Errorf("plaintext mismatch: got %q", reveal.UnsafeReveal(got.Secret))
+	}
+	if out.Session.Env.Vars.Values["REGION"].Plain != "eu-west-1" {
+		t.Errorf("a plain value was disturbed: %q", out.Session.Env.Vars.Values["REGION"].Plain)
+	}
+
+	if cfg.Session.Env.Vars.Values["API_TOKEN"].Plain != "vault://API_TOKEN" {
+		t.Error("the resolver mutated the caller's session declaration")
+	}
+}
