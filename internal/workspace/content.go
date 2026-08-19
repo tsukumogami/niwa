@@ -380,14 +380,13 @@ func checkContainment(targetPath, parentDir string) error {
 		return fmt.Errorf("resolving target path: %w", err)
 	}
 
-	// Resolve symlinks for the parent directory (it must exist).
-	realParent, err := filepath.EvalSymlinks(absParent)
-	if err != nil {
-		// If parent doesn't exist, fall back to the cleaned abs path.
-		realParent = absParent
-	}
-
-	// For the target, resolve symlinks on the longest existing prefix.
+	// Resolve both sides the same way: the longest existing prefix, with the
+	// rest appended. Resolving one side and not the other is what makes this
+	// check platform-dependent -- on a system where a temporary directory sits
+	// under a symlink (macOS resolves /var to /private/var), a parent that does
+	// not exist yet stays unresolved while the target resolves, and a path well
+	// inside its parent reads as an escape.
+	realParent := resolveExistingPrefix(absParent)
 	realTarget := resolveExistingPrefix(absTarget)
 
 	// Ensure the resolved target starts with the resolved parent directory.
