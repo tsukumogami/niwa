@@ -112,15 +112,53 @@ Trust interacts with it unevenly, and this was measured rather than inferred:
 So the byte budget and the trust entry are load-bearing for each other. A
 budget declared for a directory that carries no trust entry does not apply.
 
-What the project layer cannot carry at all: trust itself, project-root marker
-configuration, hook trust state, marketplaces and plugin registration, and
-eleven denylisted keys (provider URLs, `notify`, profiles, and similar).
+A later pass measured trust as the only variable and found the line is cleaner
+than "uneven" suggested: MCP servers, `shell_environment_policy`,
+`approval_policy` and `sandbox_mode` all appear only with a trust entry for the
+path and revert to defaults when it is removed. **Skills are the lone exception
+— they load untrusted.**
 
-### 6. `shell_environment_policy.set` is available in the project layer
+What the project layer cannot carry at all: trust itself, hook trust state, and
+marketplace/plugin registration, plus a denylist of general keys (provider URLs,
+`notify`, profiles, and similar).
 
-Environment variables can be delivered to a session through
-`shell_environment_policy.set` in the project config, which parses cleanly at
-this layer. This is the route for anything a session needs in its environment.
+Two amendments from a later measurement pass on the same build. **`project_root_markers`
+is accepted at this layer** rather than rejected — but what was measured is
+acceptance, not effect; a marker list declared inside the root it would have to
+find is plausibly inert, and that was not tested. And **the denylist count did
+not reproduce**: probing roughly fifty keys and reading `codex doctor --json`
+startup warnings found eight, not the eleven originally recorded. That is not
+proof eleven is wrong — the enumeration covered a chosen subset — but treat the
+exact figure as unsettled and the mechanism (feed a key through the startup
+warning and read the count) as the way to settle it.
+
+**A denylisted or malformed key is not inert.** One bad key fails the entire
+config load, not just that key: `forced_login_method = "apikey"` failed with
+`unknown variant`, and `experimental_thread_store_endpoint` is rejected
+outright. "Codex ignores what it does not understand" is unsafe as an assumption
+for anything generating this file.
+
+### 6. `shell_environment_policy` is the environment route, with three traps
+
+Environment variables reach a session through `shell_environment_policy` in the
+project config. Resolution order is `inherit` (default `all`), then `exclude`,
+then `set`, then `include_only`. `set` is additive, overrides on collision, and
+takes strings only.
+
+Three properties that bite anything generating this table:
+
+- **`include_only` is a final allowlist and silently drops values `set` placed.**
+  Declaring both, in that combination, delivers nothing.
+- **No `${VAR}` interpolation happens anywhere** — not here and not in
+  `mcp_servers`. Values must be fully resolved before they are written.
+- **`ignore_default_excludes` defaults to `true`.** The binary carries `*KEY*`
+  and `*TOKEN*` default excludes that are *not* applied unless explicitly opted
+  into. Against one parent environment: 12 matching variables inherited with the
+  table absent, 12 with the flag `true`, 0 with it `false` —
+  `OPENAI_API_KEY` and `GH_TOKEN` among them. Measured through `codex sandbox`,
+  which demonstrably applies the policy; **untested inside a live session's
+  shell tool**, and that is the one measurement here to repeat before any
+  security claim rests on it.
 
 ### 7. Hooks are plugin-delivered and gated behind a blocking prompt
 
@@ -139,15 +177,66 @@ route that avoids both has been demonstrated.
 `.claude-plugin/marketplace.json` verbatim. Plugins authored for Claude Code
 install and their skills load with no changes to the plugin.
 
-Two limits found alongside this. Plugin `agents/` directories are copied into
-the plugin cache but never surface, so Claude-style named subagent types do not
-exist under Codex. And for a marketplace sourced from GitHub rather than a
-local path, the installed tree lives under Claude Code's own user-global plugin
-directory — so anything resolving skills from that location inherits a
-dependency on Claude Code being installed and having fetched the marketplace
-first.
+One limit found alongside this: plugin `agents/` directories are copied into the
+plugin cache but never surface, so Claude-style named subagent types do not
+exist under Codex.
 
-### 9. There is no per-directory config discovery outside the walk
+A note for anything delivering skills programmatically rather than through
+`codex plugin add`. Skills load from a plain `skills/<name>/SKILL.md` tree in
+the project layer, including through a symlink, with no plugin registration at
+all — see finding 5. Resolving that tree out of *another agent's* installation
+directory couples the two products: a first implementation did exactly that for
+github-sourced marketplaces and left a machine without Claude Code installed
+with no skills and no way to self-heal. Fetch the content into a directory you
+own instead.
+
+### 9. Layer precedence is a recursive merge, not an override
+
+Neither the project layer nor the developer's config wins wholesale. They merge
+field by field, with the project layer winning only on the keys it actually
+declares. A name collision on an MCP server produced a hybrid in one measured
+run: niwa's `command` alongside the developer's `args` and `cwd`.
+
+Anything writing into a shared configuration has to detect collisions rather
+than assume it either wins or loses cleanly.
+
+### 10. The `mcp_servers` schema, and what silently goes wrong
+
+`[mcp_servers.<name>]`, keyed by server name. Stdio transport: `command`
+(required, and its presence is what selects the transport), `args`, `env`,
+`env_vars` (names forwarded from Codex's own environment, distinct from `env`),
+`cwd`. Streamable HTTP: `url` (required, selects the transport),
+`http_headers`, `env_http_headers`, `bearer_token_env_var`, `oauth_resource`,
+`oauth.client_id`. Both: `enabled`, `startup_timeout_sec`, `tool_timeout_sec`,
+`enabled_tools`, `disabled_tools`. Established by generating the file with
+`codex mcp add` and round-tripping every field through `codex mcp get --json`
+rather than by guessing the TOML.
+
+Three failure modes matter to any generator:
+
+- **There is no SSE transport, and `type = "sse"` is not rejected.** It is
+  silently served as streamable HTTP, so a server declared SSE is a live
+  protocol mismatch rather than an obviously missing server.
+- **One malformed entry fails the whole config load**, not just that server.
+  There is no per-server failure isolation.
+- **Unknown fields vanish silently**, and `--strict-config` is unavailable on
+  the `mcp` subcommand, so a mistranslated field name yields a server that
+  loads and quietly lacks the behavior.
+
+### 11. A linked worktree's `.git` file satisfies the project-root marker
+
+In a linked git worktree, `.git` is a regular file holding a `gitdir:` pointer
+rather than a directory. It still satisfies the marker. Measured with a context
+file placed only at the worktree root and a session run two directories below
+it, so the file was reachable only if the walk found a root; a negative control
+with no marker anywhere above returned nothing, which is what makes the positive
+result trustworthy rather than the walk picking up its own directory's file.
+
+Untested: whether the main repository's context is also reachable from inside a
+linked worktree. It should not be, but that follows from finding 1 rather than
+from anything measured.
+
+### 12. There is no per-directory config discovery outside the walk
 
 A `.codex/config.toml` in a directory with no project-root marker above it is
 not read. This is a direct consequence of finding 1 and is worth stating
@@ -177,3 +266,11 @@ against upstream source at tag `rust-v0.147.0`.
 These findings are version-specific. Re-verify them against the targeted binary
 before relying on them; the discovery rules in findings 1 through 3 are the ones
 most likely to change and the most expensive to get wrong.
+
+Findings 6 and 9 through 11, and the trust and denylist amendments in finding 5,
+come from a second measurement pass on the same build, using the same isolation
+discipline plus `codex mcp add` / `codex mcp get --json` for schema round-trips,
+`codex doctor --json` startup warnings for denylist probing, and `codex sandbox`
+for environment policy. Where that pass could not reach a question it is labelled
+untested rather than inferred; those labels are load-bearing and should survive
+future edits.
