@@ -102,7 +102,10 @@ reclaims an instance once its session's record is gone, and Codex never removes
 those records, so there's no way to tell a session you finished with from one
 you're coming back to. niwa spares it rather than guess, says so when it runs,
 and leaves it to you: `niwa destroy <instance>` when you're done with the
-session.
+session. That holds even for an instance whose dispatch died before it was
+recorded, which reap otherwise cleans up on age — if a Codex session was
+started there, reap can't tell whether that worker is still writing, so it
+leaves the directory alone.
 
 ## What a Codex session doesn't get
 

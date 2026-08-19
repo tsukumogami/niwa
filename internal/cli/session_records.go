@@ -279,6 +279,75 @@ func matchRecordByCwd(root string, r agentplan.SessionRecords, targetDir string)
 	return found, false, nil
 }
 
+// instanceHasRecordedSession reports whether any agent niwa can launch has a
+// session record whose working directory is at or under instancePath.
+//
+// It is the agent-neutral half of the reaper's mapping-independent guard. The
+// other half reads one agent's harness job state directly, which was the whole
+// story while niwa launched one agent; it is not any more. A worker started
+// detached survives a niwa that dies before writing the mapping, and the
+// instance it is working in is then unmapped -- which is precisely the case the
+// name-and-age backstop acts on. A guard that reads one agent's store would
+// find nothing, and the backstop would destroy the directory a live worker is
+// working in.
+//
+// It answers "is there a session rooted here", not "is that session still
+// running", and the difference is the whole cost of this guard. For an agent
+// that removes a session's record when the session is deleted, the answer
+// tracks the session and the sparing lasts as long as the session does. For an
+// agent that never removes one, the answer is yes forever: the instance is
+// spared on every sweep from the first worker that ran in it until somebody
+// removes it by hand. That is the mapped sweep's declared cost reaching the
+// backstop, and it is the reason found comes back with a reason to print rather
+// than as a bare bool -- a sweep that silently stops reclaiming a whole class of
+// instance is indistinguishable from one that is working.
+//
+// What closes it properly is not more of this. Record presence cannot be made
+// into a liveness signal for an agent that keeps its records; the question the
+// backstop is actually asking is not "did this agent's session end" but "is
+// anything running in this directory right now", and that has an agent-neutral
+// answer one level down: whether any live process has a working directory
+// inside the instance. That needs no cooperation from either agent's
+// bookkeeping and would also catch a worker whose harness state went missing,
+// which nothing here can. It is not built -- internal/worktree's
+// procinfo_linux.go has the beginnings of it in pidStartTime and readPPID, and
+// it is Linux-only as it stands.
+//
+// reason is empty when the sparing ends on its own, because there is nothing
+// worth telling a developer about an instance that will be reclaimed without
+// them; it carries the permanent case's explanation otherwise.
+func instanceHasRecordedSession(instancePath string) (reason string, found bool) {
+	if instancePath == "" {
+		return "", false
+	}
+	instance := normalizePath(instancePath)
+	home := userHomeDir()
+
+	for _, ag := range agentplan.LaunchableAgents() {
+		spec, ok := agentplan.For(ag).LaunchSpec()
+		if !ok {
+			continue
+		}
+		records, err := scanSessionRecords(recordStoreRoot(spec.Records, home, os.Getenv), spec.Records)
+		if err != nil {
+			// An unreadable store is no evidence either way, and this guard
+			// only ever spares, so no evidence means it does not spare here --
+			// the caller's other gates still apply.
+			continue
+		}
+		for _, rec := range records {
+			if !pathWithin(normalizePath(rec.Cwd), instance) {
+				continue
+			}
+			if spec.Records.Liveness == agentplan.LivenessRecordPresence {
+				return "", true
+			}
+			return fmt.Sprintf("a %s session was started in it, and %s never removes a session's record, so niwa cannot tell whether that worker is still running", ag, ag), true
+		}
+	}
+	return "", false
+}
+
 // normalizePath resolves symlinks then cleans path so two spellings of the same
 // directory compare equal. EvalSymlinks fails on a path that does not exist --
 // a stale record's working directory, say -- and in that case Clean alone is

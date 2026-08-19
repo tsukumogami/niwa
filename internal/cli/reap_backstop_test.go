@@ -1,11 +1,15 @@
 package cli
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -303,7 +307,7 @@ func TestSelectBackstopTargets_Matrix(t *testing.T) {
 	touchInstanceMtime(t, dev, now.Add(-2*dispatchBackstopTTL))
 	writeDispatchMarkerAt(t, hook, now.Add(-2*dispatchBackstopTTL))
 
-	targets, err := selectBackstopTargets(root, t.TempDir(), now)
+	targets, _, err := selectBackstopTargets(root, t.TempDir(), now)
 	if err != nil {
 		t.Fatalf("selectBackstopTargets error: %v", err)
 	}
@@ -371,6 +375,172 @@ func TestBackstop_LiveWorkerRooted_Spared(t *testing.T) {
 	if len(*destroyed) != 0 {
 		t.Fatalf("destroyed = %v, want [] (live instance must not be destroyed)", *destroyed)
 	}
+}
+
+// TestBackstop_LiveWorkerOfEveryAgent_Spared is the data-loss case the backstop
+// had no coverage for, and it is the one this feature made reachable.
+//
+// The backstop exists for the orphan the deferred rollback cannot clean up: a
+// worker started detached survives a niwa killed before the mapping is written,
+// leaving a live worker in an unmapped instance. Thirty minutes later the next
+// opportunistic sweep -- which runs at the top of every create and every
+// dispatch -- finds it unmapped and past the TTL. The only thing between that
+// and destroying the directory a worker is working in is the live-session
+// guard, and while niwa launched one agent that guard could read one store.
+//
+// So this runs the same scenario once per launchable agent, planting a session
+// record in *that agent's* declared store rather than in one agent's harness
+// state, and asserts the instance survives. It fails for any agent whose store
+// the guard cannot read.
+//
+// Not every subtest carries the same weight, and it is worth saying which does
+// what. For the agent whose declared store is the jobs directory, the two
+// guards read one tree and ask one question, so its subtest is a control: it
+// passes with the new guard removed, and what it proves is that generalizing
+// the read did not break the case that already worked. The subtest that fails
+// without the new guard is the one for an agent whose sessions live somewhere
+// the jobs-directory read has never looked -- and that is the case detaching a
+// second agent's worker created. The loop is written over LaunchableAgents()
+// rather than around either of them because a third agent should arrive
+// already covered, and land in whichever of those two roles its declaration
+// puts it in.
+func TestBackstop_LiveWorkerOfEveryAgent_Spared(t *testing.T) {
+	for _, ag := range agentplan.LaunchableAgents() {
+		t.Run(string(ag), func(t *testing.T) {
+			spec, ok := agentplan.For(ag).LaunchSpec()
+			if !ok {
+				t.Fatalf("no launch spec for %s", ag)
+			}
+
+			root := setupHookWorkspace(t, true)
+			now := time.Now()
+
+			// Every record store resolves under a fixture home, so this reads
+			// nothing the developer running the suite happens to have on disk.
+			home := t.TempDir()
+			prevHome := userHomeDir
+			userHomeDir = func() string { return home }
+			t.Cleanup(func() { userHomeDir = prevHome })
+
+			inst := makeReapInstance(t, root, dispInstOld)
+			writeDispatchMarkerAt(t, inst, now.Add(-2*dispatchBackstopTTL))
+			writeSessionRecordFor(t, spec.Records, home, inst)
+
+			destroyed := stubDestroyAll(t)
+
+			// jobsDir is the one production derives (defaultJobsDir: the same
+			// path under home), rather than an empty fixture directory. It
+			// matters, and getting it wrong is what would make this test read
+			// as more coverage than it is. For one agent the declared record
+			// store IS the jobs directory, so both guards read the same tree
+			// and ask the same question of it; handing that subtest an empty
+			// jobsDir would separate two roots that are one directory in
+			// practice, and the subtest would then "fail without the new
+			// guard" for a reason that cannot happen. Wired this way, the
+			// subtest asserts the property rather than the mechanism -- a live
+			// worker's instance survives -- and which guard supplies it is the
+			// agent's own business.
+			//
+			// It comes from defaultJobsDir rather than from a path written
+			// here, so the claim that the two roots coincide is demonstrated by
+			// the production accessor instead of asserted by a fixture.
+			t.Setenv("HOME", home)
+			n, err := reapBackstop(root, defaultJobsDir(), now)
+			if err != nil {
+				t.Fatalf("reapBackstop error: %v", err)
+			}
+			if n != 0 {
+				t.Fatalf("reaped count = %d, want 0 (a live %s worker's instance must never be reaped)", n, ag)
+			}
+			if len(*destroyed) != 0 {
+				t.Fatalf("destroyed = %v, want []", *destroyed)
+			}
+
+			// Sparing on a record the agent never removes is permanent: that
+			// instance is skipped by every future sweep until somebody destroys
+			// it by hand, so the developer has to be told, in words, that their
+			// disk is not going to get emptier on its own. An agent whose
+			// records do disappear needs no such notice -- its instance is
+			// reclaimed the moment the session goes.
+			_, spared, err := selectBackstopTargets(root, defaultJobsDir(), now)
+			if err != nil {
+				t.Fatalf("selectBackstopTargets error: %v", err)
+			}
+			wantSpared := spec.Records.Liveness != agentplan.LivenessRecordPresence
+			if got := len(spared) > 0; got != wantSpared {
+				t.Fatalf("reported spared = %v (%v), want %v for a %s record store", got, spared, wantSpared, ag)
+			}
+			if wantSpared {
+				if spared[0].Name != filepath.Base(inst) {
+					t.Errorf("spared name = %q, want the instance name %q; the report has to name what niwa destroy takes", spared[0].Name, filepath.Base(inst))
+				}
+				if !strings.Contains(spared[0].Reason, string(ag)) {
+					t.Errorf("spared reason = %q, want it to name %s", spared[0].Reason, ag)
+				}
+			}
+		})
+	}
+}
+
+// writeSessionRecordFor plants one session record in an agent's own declared
+// store, rooted at cwd. It writes whatever shape the declaration describes --
+// a named file inside a per-session directory, or a glob-matched transcript
+// whose first line is its metadata -- so the fixture follows the declaration
+// rather than restating one agent's layout.
+func writeSessionRecordFor(t *testing.T, r agentplan.SessionRecords, home, cwd string) {
+	t.Helper()
+	root := recordStoreRoot(r, home, func(string) string { return "" })
+	if root == "" {
+		t.Fatal("the session records resolve to no root under the fixture home")
+	}
+
+	dir := root
+	for i := 0; i < r.Depth; i++ {
+		dir = filepath.Join(dir, fmt.Sprintf("d%d", i))
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir record dir: %v", err)
+	}
+
+	const sid = "01a00000-0000-7000-8000-0000000000aa"
+	doc := map[string]any{}
+	setAtPath(doc, r.IDPath, sid)
+	setAtPath(doc, r.CwdPath, cwd)
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("encoding the record: %v", err)
+	}
+
+	name := r.FileName
+	if name == "" {
+		name = strings.ReplaceAll(r.FileGlob, "*", sid)
+	}
+	body := string(encoded)
+	if r.FirstLineOnly {
+		// A second line, because a store whose records are transcripts would
+		// have one, and a reader that swallowed the whole file must fail rather
+		// than quietly succeed.
+		body += "\n{\"ordinal\":1}"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body+"\n"), 0o600); err != nil {
+		t.Fatalf("write record: %v", err)
+	}
+}
+
+// setAtPath writes value at a dotted field path, creating the objects along the
+// way. It is the fixture side of the reader's own path walk, so a declaration
+// that nests its fields is exercised rather than flattened.
+func setAtPath(doc map[string]any, path []string, value string) {
+	cur := doc
+	for _, key := range path[:len(path)-1] {
+		next, ok := cur[key].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			cur[key] = next
+		}
+		cur = next
+	}
+	cur[path[len(path)-1]] = value
 }
 
 // TestBackstop_LiveWorkerInWorktree_Spared: a worker whose cwd is a

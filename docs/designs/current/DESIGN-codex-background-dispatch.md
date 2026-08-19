@@ -682,6 +682,81 @@ acceptance shape holds on this branch: with a Codex mapping present, the
 sweep spares the instance and says so; no TTL or mtime rule for mapped
 instances appears in the delivered code.
 
+**The unmapped backstop's live-worker guard had to widen too, and it
+costs something.** The mapped path above is only half the reaper. The
+other half ages *unmapped* dispatch instances on name and mtime, for the
+orphan the deferred rollback cannot reach: a detached worker outlives a
+niwa killed before the mapping is written, so the instance holding it is
+unmapped and stays unmapped. Thirty minutes later an opportunistic sweep
+-- one runs at the top of every `create` and every `dispatch` -- finds it
+eligible on name and age. The only thing between that and destroying the
+directory a worker is writing in is the live-worker guard, and that guard
+read one agent's harness job state, because for as long as niwa launched
+one agent that was the whole question. Detaching a second agent's worker
+made the case reachable, so this branch reaches it: `instanceHasLiveJob`
+is now joined by `instanceHasRecordedSession`, which asks every launchable
+agent's own declared store whether a session is rooted in the instance.
+
+It is worth being plain about how much that second call adds and to
+which agent. Claude's declared store is `~/.claude/jobs` with the cwd on
+each record -- the same tree `instanceHasLiveJob` reads, asked the same
+question -- so for Claude the two guards are redundant rather than
+complementary and the new one changes nothing. This is a Codex-shaped
+fix written agent-neutrally, which is the right way to write it and a
+weaker claim than it would be to say the guard is stronger than what it
+replaces. It is not stronger; it is wider.
+
+There is one exception, and it is a Claude-path behavior change worth
+naming rather than filing under "no change". The two guards compare
+paths differently: `instanceHasLiveJob` cleans, `instanceHasRecordedSession`
+resolves symlinks first. So a Claude instance whose recorded working
+directory and whose instance path are one directory under two spellings
+-- equal once resolved, unequal once merely cleaned -- is now spared on
+the backstop line where it would previously have been reaped. It takes a
+symlinked instance path to reach, it is in the direction the backstop
+should err, and it is arguably a latent bug the wider guard fixed on its
+way past. It is still a change to what happens to a Claude instance, and
+it is the reason the eventual collapse of the two calls has to go toward
+the resolving one.
+`TestBackstop_LiveWorkerOfEveryAgent_Spared` runs the scenario once per
+launchable agent and is honest about the same asymmetry: the Claude
+subtest is a control that passes with the new guard removed, proving the
+generalization broke nothing, and the Codex subtest is the one that fails
+without it. A third agent arrives covered and lands in whichever role its
+declaration puts it in.
+
+The cost lands on the same declaration. For an agent with
+`LivenessRecordPresence` the guard tracks the session and the sparing
+ends when the session does. For `LivenessNone` it does not: the record
+stays, so the answer stays yes, and an unmapped instance a Codex worker
+once ran in is spared by every future sweep until somebody runs `niwa
+destroy`. That is the mapped path's declared cost reaching the backstop,
+and it is reported the same way -- `selectBackstopTargets` returns the
+spared instances with a reason and `reapBackstop` prints them, so the
+class is observable rather than a slowly filling disk.
+
+The narrow safe answer was taken deliberately over two alternatives that
+look better and are not. Reaping anyway is the data loss the guard
+exists to prevent. Making the guard agent-aware in the shape the mapped
+path uses -- consult the declaration, act only on a faithful signal --
+cannot help, because for `LivenessNone` there is no faithful signal to
+act on; it would resolve to exactly this behavior with more code.
+
+**Explicitly not built here: the process-level check that actually
+closes it.** The backstop is not asking "did this agent's session end".
+It is asking "is anything running in this directory right now", and that
+question has an agent-neutral answer one level down: whether any live
+process has a working directory inside the instance. It needs no
+cooperation from either agent's bookkeeping, it is strictly stronger than
+both readings the guard uses today -- it would also catch a Claude worker
+whose job-state file went missing, which nothing here can -- and it makes
+the sparing temporary again for every agent. It is not built. niwa has
+the beginnings of the machinery in `internal/worktree/procinfo_linux.go`
+(`pidStartTime`, `readPPID`), and the filename says the portability
+question it raises: what a non-Linux host offers instead is unanswered,
+and answering it is more than a launch feature should carry. Named here
+so the next author inherits the boundary.
+
 **Rejected: record-presence over the rollout store.** Stated above: a
 rule whose trigger is an action nobody performs presents a working
 reclamation path that does not exist, and it would purchase a

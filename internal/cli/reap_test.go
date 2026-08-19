@@ -316,8 +316,11 @@ func TestReap_SparedInstancesAreReported(t *testing.T) {
 	if len(spared) != 1 {
 		t.Fatalf("spared %d instance(s), want 1", len(spared))
 	}
-	if spared[0].Path != inst {
-		t.Errorf("spared path = %q, want %q", spared[0].Path, inst)
+	// The name rather than the path, because that is what `niwa destroy` takes
+	// and a report you have to translate before you can act on it is a report
+	// that does not get acted on.
+	if spared[0].Name != filepath.Base(inst) {
+		t.Errorf("spared name = %q, want %q", spared[0].Name, filepath.Base(inst))
 	}
 	if spared[0].Reason == "" {
 		t.Error("an instance was spared with no reason; a reader cannot act on that")

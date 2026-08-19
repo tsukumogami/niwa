@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,9 +54,12 @@ Some instances are spared rather than judged, and reap says so on stderr when
 it happens. The liveness rule needs a record that disappears when a session is
 deleted, and not every agent keeps one: an agent whose session records are
 never removed leaves no way to tell a live session from a deleted one, and an
-instance whose session cannot be proven gone is never reclaimed. Those pile up
-until you remove them yourself with niwa destroy. Sparing an instance nobody is
-using costs a directory; the other mistake costs the work inside it.
+instance whose session cannot be proven gone is never reclaimed. The same holds
+for a dispatch instance with no mapping at all, which reap otherwise reclaims on
+age -- if an agent's records say a worker was started there, reap cannot tell
+whether it is still writing, so it leaves the directory alone. Spared instances
+pile up until you remove them yourself with niwa destroy. Sparing an instance
+nobody is using costs a directory; the other mistake costs the work inside it.
 
 reap runs on demand and is also invoked opportunistically at the start of
 niwa create and niwa dispatch so session fan-out self-bounds.`,
@@ -97,18 +101,25 @@ type reapTarget struct {
 	InstancePath string
 }
 
+// maxSparedNamesListed bounds how many instance names one line carries before
+// it stops naming them individually.
+const maxSparedNamesListed = 3
+
 // reportSparedInstances says what the sweep left alone and why.
 //
-// It goes to stderr rather than to the command's own output because every
-// opportunistic sweep -- at the top of a dispatch, a create, a watch -- runs
-// underneath something the developer actually asked for, and this is a note
-// about the sweep rather than a result of that command. A line they can ignore
-// beats discovering a full disk.
+// It goes to stderr rather than to the command's own output because the sweep
+// runs at the top of a dispatch, a create, and a watch -- underneath something
+// the developer actually asked for -- so this is a note about the sweep rather
+// than a result of that command.
 //
-// The reasons are grouped so a workspace with a dozen spared instances says
-// one thing a dozen times' worth rather than a dozen things, and the paths are
-// listed under it so the note is actionable rather than only informative.
-func reportSparedInstances(spared []sparedInstance) {
+// It is deliberately two lines rather than one per instance. The condition is
+// permanent: an instance whose liveness cannot be read is spared on every sweep
+// forever, and every sweep runs under a command somebody ran for another
+// reason. A report that grew with the number of spared instances would be
+// training to ignore it within a day, which costs more than saying nothing --
+// a warning nobody reads is worse than an absent one, because it also crowds
+// out the ones they would have read.
+func reportSparedInstances(w io.Writer, spared []sparedInstance) {
 	if len(spared) == 0 {
 		return
 	}
@@ -118,23 +129,32 @@ func reportSparedInstances(spared []sparedInstance) {
 		if _, seen := byReason[s.Reason]; !seen {
 			order = append(order, s.Reason)
 		}
-		byReason[s.Reason] = append(byReason[s.Reason], s.Path)
+		byReason[s.Reason] = append(byReason[s.Reason], s.Name)
 	}
 	for _, reason := range order {
-		paths := byReason[reason]
-		fmt.Fprintf(os.Stderr, "niwa: spared %d instance(s): %s\n", len(paths), reason)
-		for _, p := range paths {
-			fmt.Fprintf(os.Stderr, "niwa:   %s\n", p)
+		names := byReason[reason]
+		listed := names
+		suffix := ""
+		if len(listed) > maxSparedNamesListed {
+			listed = listed[:maxSparedNamesListed]
+			suffix = fmt.Sprintf(" and %d more", len(names)-maxSparedNamesListed)
 		}
-		fmt.Fprintf(os.Stderr, "niwa: reclaim one yourself with `niwa destroy <instance>` once you are done with its session\n")
+		fmt.Fprintf(w, "niwa: spared %d instance(s) niwa cannot tell are finished (%s%s): %s\n",
+			len(names), strings.Join(listed, ", "), suffix, reason)
 	}
+	// The name rather than the path, because that is what the command takes.
+	fmt.Fprintf(w, "niwa: reclaim one with `niwa destroy <name>` when you are done with its session\n")
 }
 
 // sparedInstance is an instance the sweep left alone because it could not read
 // whether the session was still there, with the reason in the words a user
 // needs to understand why their disk is not getting emptier.
+//
+// Name rather than path, because `niwa destroy` takes a name and a report that
+// prints one thing while telling you to type another is a report you have to
+// translate before you can act on it.
 type sparedInstance struct {
-	Path   string
+	Name   string
 	Reason string
 }
 
@@ -240,7 +260,11 @@ func selectReapTargets(workspaceRoot, jobsDir string, now time.Time) ([]reapTarg
 		// capability table declares: a declared gap nobody can observe while it
 		// is happening is only half declared.
 		if reason, spared := livenessUnreadable(mapping.Agent); spared {
-			unreadable = append(unreadable, sparedInstance{Path: rec.Path, Reason: reason})
+			name := mapping.InstanceName
+			if name == "" {
+				name = filepath.Base(rec.Path)
+			}
+			unreadable = append(unreadable, sparedInstance{Name: name, Reason: reason})
 			continue
 		}
 
@@ -258,7 +282,15 @@ func selectReapTargets(workspaceRoot, jobsDir string, now time.Time) ([]reapTarg
 		// launches with cmd.Dir == its instance, so its job-state cwd points at
 		// the instance directory; if any present job's cwd resolves inside this
 		// instance, a session is still working there and it must be spared.
-		if instanceHasLiveJob(jobsDir, rec.Path) {
+		//
+		// The record check is the same guard read agent-neutrally, for a worker
+		// whose harness keeps no job state niwa can see. Its reason is dropped
+		// here rather than reported: an instance that reaches this line already
+		// passed the liveness rule above, so anything permanent about it was
+		// reported there, and saying it twice about one instance would train
+		// the developer to skim both.
+		_, recorded := instanceHasRecordedSession(rec.Path)
+		if instanceHasLiveJob(jobsDir, rec.Path) || recorded {
 			continue
 		}
 
@@ -282,7 +314,7 @@ func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	reportSparedInstances(unreadable)
+	reportSparedInstances(os.Stderr, unreadable)
 
 	reaped := 0
 	for _, t := range targets {
@@ -348,15 +380,26 @@ type backstopTarget struct {
 //     SIGKILL-before-marker case, and the malformed-marker case). Either source
 //     must show age > TTL; a present-but-malformed marker does NOT spare the
 //     instance forever -- it falls back to mtime.
-//   - NO live Claude Code session is rooted in it. An unmapped dispatch instance
-//     is NOT necessarily an orphan: a worker that outlives the TTL, or one whose
-//     mapping is missing, is still alive. A dispatched worker launches with
-//     cmd.Dir == its instance, so its job-state cwd points at the instance
-//     directory; instanceHasLiveJob spares any instance a present job's cwd
-//     resolves inside. This is the load-bearing guard that stops the backstop
-//     from reaping a live instance -- including the caller's own -- on name+age
-//     alone (the data-loss class this fix closes). The TTL alone was unsafe: a
+//   - NO worker is rooted in it, by either of the two readings niwa has. An
+//     unmapped dispatch instance is NOT necessarily an orphan: a worker that
+//     outlives the TTL, or one whose mapping is missing, is still alive. A
+//     dispatched worker launches with cmd.Dir == its instance, so its job-state
+//     cwd points at the instance directory; instanceHasLiveJob spares any
+//     instance a present job's cwd resolves inside. That reads one agent's
+//     harness state, so instanceHasRecordedSession asks every launchable agent's
+//     session store the same question and spares on a hit there too -- an
+//     instance may hold a detached worker whose harness niwa cannot see at all.
+//     Together these are the load-bearing guard that stops the backstop from
+//     reaping a live instance -- including the caller's own -- on name+age alone
+//     (the data-loss class this fix closes). The TTL alone was unsafe: a
 //     dispatched session can live for hours, far past the 30-minute TTL.
+//
+// The second reading costs something, and the cost is returned rather than
+// swallowed. For an agent that never removes a session's record, "a worker is
+// rooted here" stays true forever, so such an instance is spared on every sweep
+// until somebody destroys it by hand. Those instances come back in the spared
+// list with the reason to print. See instanceHasRecordedSession for why the
+// answer is not to weaken the guard.
 //
 // A developer instance ("<config>", "<config>-2"), a hook-created instance
 // ("<config>-<sessionhex>", no "+" marker), and a create instance
@@ -364,15 +407,17 @@ type backstopTarget struct {
 // so they are never touched regardless of age or mapping. This function performs
 // no destruction, so it is unit-testable against fixture instances, a fixture
 // jobs tree, and an injectable now.
-func selectBackstopTargets(workspaceRoot, jobsDir string, now time.Time) ([]backstopTarget, error) {
+func selectBackstopTargets(workspaceRoot, jobsDir string, now time.Time) ([]backstopTarget, []sparedInstance, error) {
+	var spared []sparedInstance
+
 	records, err := workspace.EnumerateInstanceRecords(workspaceRoot)
 	if err != nil {
-		return nil, fmt.Errorf("enumerating instances: %w", err)
+		return nil, nil, fmt.Errorf("enumerating instances: %w", err)
 	}
 
 	mappings, err := workspace.ListSessionMappings(workspaceRoot)
 	if err != nil {
-		return nil, fmt.Errorf("listing session mappings: %w", err)
+		return nil, nil, fmt.Errorf("listing session mappings: %w", err)
 	}
 	mappedPaths := make(map[string]bool, len(mappings))
 	for _, m := range mappings {
@@ -407,20 +452,53 @@ func selectBackstopTargets(workspaceRoot, jobsDir string, now time.Time) ([]back
 			continue
 		}
 
-		// A live Claude Code session may still be rooted in this instance even
-		// though it is unmapped and past the TTL (a long-lived worker, or one
-		// whose mapping is absent). The backstop must never delete an instance
-		// out from under a running session -- doing so was the data-loss bug
-		// (it reaped the caller's own live instance mid-dispatch). Spare any
-		// instance a present job's cwd resolves inside.
+		// A worker may still be rooted in this instance even though it is
+		// unmapped and past the TTL (a long-lived one, or one whose mapping is
+		// absent). The backstop must never delete an instance out from under a
+		// running worker -- doing so was the data-loss bug (it reaped the
+		// caller's own live instance mid-dispatch).
+		//
+		// instanceHasLiveJob reads one agent's harness state, which was the
+		// whole story while niwa launched one agent. instanceHasRecordedSession
+		// asks every launchable agent's own declared session store the same
+		// question, and it is what keeps a worker in an agent whose sessions
+		// live somewhere else entirely from having its working directory
+		// destroyed underneath it.
+		//
+		// For the agent whose declared store IS the jobs directory the two are
+		// near-redundant, not complementary -- same tree, same question -- so
+		// the second call adds almost nothing there, and the first is not dead
+		// weight for the other agent either, it simply never fires.
+		//
+		// Near-redundant and not redundant, and the difference matters to
+		// anyone deciding which to delete. They handle paths differently:
+		// instanceHasLiveJob compares cleaned paths, instanceHasRecordedSession
+		// resolves symlinks first. So an instance reachable only through a
+		// symlinked path -- one whose recorded cwd and whose instance path are
+		// the same directory under two spellings -- is matched by the second
+		// and missed by the first, for BOTH agents. If these ever collapse into
+		// one call, it has to be into the resolving one; collapsing into the
+		// cleaning one would quietly reintroduce a reap this line now prevents.
+		//
+		// Left as two calls here because instanceHasLiveJob's jobsDir is
+		// threaded from the caller and several other call sites depend on that.
 		if instanceHasLiveJob(jobsDir, rec.Path) {
+			continue
+		}
+		if reason, recorded := instanceHasRecordedSession(rec.Path); recorded {
+			// A permanent spare is reported; a temporary one is not. See
+			// instanceHasRecordedSession for why this class exists at all and
+			// what would actually close it.
+			if reason != "" {
+				spared = append(spared, sparedInstance{Name: filepath.Base(rec.Path), Reason: reason})
+			}
 			continue
 		}
 
 		targets = append(targets, backstopTarget{InstancePath: rec.Path})
 	}
 
-	return targets, nil
+	return targets, spared, nil
 }
 
 // dispatchInstanceAge returns the creation time the backstop ages a dispatch
@@ -470,10 +548,11 @@ func readDispatchMarkerTime(instancePath string) (time.Time, bool) {
 // target is unmapped by definition). jobsDir feeds the liveness gate in
 // selectBackstopTargets so a live-but-unmapped instance is never reclaimed.
 func reapBackstop(workspaceRoot, jobsDir string, now time.Time) (int, error) {
-	targets, err := selectBackstopTargets(workspaceRoot, jobsDir, now)
+	targets, spared, err := selectBackstopTargets(workspaceRoot, jobsDir, now)
 	if err != nil {
 		return 0, err
 	}
+	reportSparedInstances(os.Stderr, spared)
 
 	reaped := 0
 	for _, t := range targets {
