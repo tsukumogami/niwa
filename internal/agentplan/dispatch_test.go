@@ -185,6 +185,13 @@ func checkRecords(t *testing.T, ag agent.Agent, r SessionRecords) {
 // read, so this cannot prove a field is read *for the right reason*. It can and
 // does prove a field is read nowhere at all, which is the shape that closed the
 // prior attempt.
+//
+// The names that actually collide today are worth knowing before you trust a
+// pass here: Mode, Depth, Handle, Settings, and Model each appear as a selector
+// on some unrelated value in these two packages. Deleting the read of one of
+// those from the launcher leaves this test green, so anything load-bearing about
+// them needs its own assertion -- Mode's is in dispatch_launcher_test.go, which
+// pins Codex's to detached rather than to any member of the closed set.
 func TestEveryLaunchSpecFieldIsRead(t *testing.T) {
 	fields := map[string]string{}
 	for _, decl := range []struct {

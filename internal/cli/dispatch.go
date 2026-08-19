@@ -478,13 +478,21 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 	promptPrefix := ""
 	keepAliveArmed := false
-	if keepAliveDeliverable && resolveDispatchKeepAlive(dispatchKeepAlive, hostGlobal, inst) {
-		if remoteControlEnabled(rcInjected, inst) {
-			promptPrefix = keepAliveArmingInstruction
-			keepAliveArmed = true
-		} else {
-			fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", keepAliveNonRCWarning)
-		}
+	switch {
+	case !resolveDispatchKeepAlive(dispatchKeepAlive, hostGlobal, inst):
+		// Not asked for. Nothing to say and nothing to do.
+	case !keepAliveDeliverable:
+		// Asked for and undeliverable. Saying so is the point: a flag that is
+		// silently ignored for one agent is a developer believing they armed
+		// something they did not, and the declaration already carries the
+		// sentence that explains why.
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: --keep-alive does not apply to the %q agent and was ignored. %s\n",
+			dispatchedAgent, kaDecl.Reason)
+	case !remoteControlEnabled(rcInjected, inst):
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", keepAliveNonRCWarning)
+	default:
+		promptPrefix = keepAliveArmingInstruction
+		keepAliveArmed = true
 	}
 
 	if err := dispatchLaunch(cmd.Context(), spec, instancePath, promptPrefix, prompt, passthrough, nil); err != nil {
@@ -502,9 +510,21 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// we never obtained its session id and cannot stop it. The orphaned process
 	// has no mapping and is harmless, but it is not auto-killed -- the user must
 	// stop it manually. The backstop reclaims the directory, not the process.
+	//
+	// The rollback also destroys the worker's own log, which is the only place
+	// the real cause is written down. A worker that died at startup -- a flag it
+	// would not parse, a configuration it would not load -- says so there, writes
+	// no session record, and is reported here as a capture timeout, which
+	// describes the symptom and not the cause. So the log's tail is read out
+	// BEFORE returning, while the directory still exists. Without this the
+	// failure leaves nothing on disk to diagnose it by, which is the exact
+	// condition the launcher hands the worker a closed stdin to avoid.
 	recordsRoot := recordStoreRoot(spec.Records, userHomeDir(), os.Getenv)
 	sessionID, handle, err := dispatchCapture(spec.Records, recordsRoot, instancePath, dispatchCaptureTimeout, nil, 0)
 	if err != nil {
+		if tail := readWorkerLogTail(instancePath, spec.Binary); tail != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: the %s worker's own output, which the rollback is about to delete:\n%s\n", spec.Binary, tail)
+		}
 		return fmt.Errorf("niwa: error: capturing dispatch session id: %w", err)
 	}
 
@@ -542,6 +562,23 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Dispatched session %s\n", sessionID)
 	fmt.Fprintf(out, "  instance: %s\n", instancePath)
+	// A worker is launched at the instance root, and for an agent that cannot be
+	// oriented there it starts without any of what the workspace delivers --
+	// which it will not say, because it has no way to know something was
+	// withheld. Documented in the guide, invisible at the moment it happens, and
+	// the difference between those two is a developer reading a plausible answer
+	// from an uninformed worker and never learning why.
+	//
+	// The trigger is row 2's declaration rather than a name, so it fires for
+	// exactly the agents it is true of. The sentence is niwa's own rather than
+	// the declaration's reason, because what a root-launched worker loses is
+	// wider than orientation and the reason speaks only to that.
+	if d, err := agentplan.Lookup(agentplan.RootSessionOrientation, dispatchedAgent); err == nil && d.State != agentplan.StateImplemented {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"niwa dispatch: the worker starts at the instance root, where a %s session receives none of the workspace's orientation, skills, MCP servers or posture -- those reach a session from inside a repository. Its prompt is its whole briefing.\n",
+			dispatchedAgent)
+	}
+
 	for _, verb := range spec.HintVerbs {
 		fmt.Fprintf(out, "  %s %s %s\n", spec.Binary, verb, handle)
 	}
@@ -721,7 +758,11 @@ func launchableAgentsHint() string {
 // same fail-safe the jobs-directory resolution has always taken: without a home
 // there is no evidence either way, and a reader with no evidence must not
 // answer.
-func userHomeDir() string {
+// It is a package variable so a test can point every record-store lookup at a
+// fixture home, which is what keeps the reaper's guards from reading -- and
+// being slowed by -- whatever the developer running the suite happens to have
+// on disk.
+var userHomeDir = func() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""

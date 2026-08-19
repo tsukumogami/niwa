@@ -34,6 +34,11 @@ numbered requirements; the design owns the per-agent launch description,
 how a launch-routed capability binds, and the mechanics of each enforcing
 test.
 
+It describes the tree as it stood when the work was framed, and it is not
+maintained as the branches land -- the present tense here is the state
+the framing argues against, not the state after it. The design and the
+code are the current record.
+
 ## Problem Statement
 
 The code states the problem in two places. `internal/cli/dispatch.go`

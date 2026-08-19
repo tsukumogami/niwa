@@ -232,6 +232,81 @@ func TestDispatchSharedHalfRunsForEveryAgent(t *testing.T) {
 	}
 }
 
+// TestDispatchWarnsWhenTheWorkerStartsUnoriented asserts the two runtime
+// notices that make declared gaps observable at the moment they bite, and
+// asserts each fires for exactly the agents the table says it is true of.
+//
+// A gap documented in a guide and invisible at runtime is a developer reading a
+// plausible answer from an uninformed worker and never learning why, or
+// believing they armed a flag that was silently dropped. Both notices are
+// triggered by a declaration rather than by a name, so neither can drift out of
+// step with the table.
+func TestDispatchWarnsWhenTheWorkerStartsUnoriented(t *testing.T) {
+	for _, ag := range agentplan.LaunchableAgents() {
+		t.Run(string(ag), func(t *testing.T) {
+			root := setupDispatchWorkspace(t)
+			chdir(t, root)
+			setHostConfig(t, "")
+			installDispatchFakes(t, root)
+			dispatchDetach = true
+			t.Setenv("NIWA_AGENT", string(ag))
+
+			_, stderr, err := runDispatchCmd(t, "do a thing")
+			if err != nil {
+				t.Fatalf("dispatch: %v", err)
+			}
+
+			decl, err := agentplan.Lookup(agentplan.RootSessionOrientation, ag)
+			if err != nil {
+				t.Fatalf("Lookup(root-session-orientation, %s): %v", ag, err)
+			}
+			warned := strings.Contains(stderr, "starts at the instance root")
+			if unoriented := decl.State != agentplan.StateImplemented; unoriented != warned {
+				t.Errorf("(%s): root-session-orientation implemented=%v, warned=%v; the notice must follow the declaration\n%s",
+					ag, !unoriented, warned, stderr)
+			}
+		})
+	}
+}
+
+// TestDispatchWarnsWhenKeepAliveIsUndeliverable asserts a requested --keep-alive
+// says something for an agent it cannot be delivered to. A flag that is
+// silently ignored for one agent leaves a developer believing they armed
+// something they did not, which is worse than a flag that is refused.
+func TestDispatchWarnsWhenKeepAliveIsUndeliverable(t *testing.T) {
+	for _, ag := range agentplan.LaunchableAgents() {
+		decl, err := agentplan.Lookup(agentplan.DispatchKeepAlive, ag)
+		if err != nil {
+			t.Fatalf("Lookup(dispatch-keep-alive, %s): %v", ag, err)
+		}
+		if decl.State == agentplan.StateImplemented {
+			continue
+		}
+
+		t.Run(string(ag), func(t *testing.T) {
+			root := setupDispatchWorkspace(t)
+			chdir(t, root)
+			setHostConfig(t, "")
+			installDispatchFakes(t, root)
+			dispatchDetach = true
+			asked := true
+			dispatchKeepAlive = &asked
+			t.Setenv("NIWA_AGENT", string(ag))
+
+			_, stderr, err := runDispatchCmd(t, "do a thing")
+			if err != nil {
+				t.Fatalf("dispatch: %v", err)
+			}
+			if !strings.Contains(stderr, "--keep-alive does not apply") {
+				t.Errorf("(%s): --keep-alive was requested and undeliverable, and nothing said so:\n%s", ag, stderr)
+			}
+			if !strings.Contains(stderr, decl.Reason) {
+				t.Errorf("(%s): the notice does not carry the declared reason %q:\n%s", ag, decl.Reason, stderr)
+			}
+		})
+	}
+}
+
 // TestDispatchPreflightsTheDeclaredBinary asserts the preflight looks up the
 // binary the launched agent's declaration names, not a binary this code knows
 // about. The ordering it runs in -- before any instance is created -- is pinned

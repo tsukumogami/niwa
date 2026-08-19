@@ -39,6 +39,14 @@ sequenced pull requests. The downstream design owns the shape of the
 per-agent launch description, the mechanics of the launch-route binding,
 the structural scan's construction, and the resume handle's type.
 
+Every present-tense description of the tree below -- "refuses", "pins
+the refusal", "today's correct behavior", and the file:line citations
+that go with them -- is the tree as it stood when these requirements
+were written, which is what the requirements are stated against. It is
+not maintained as the branches land, and after PR 2 most of it is
+deliberately no longer true. For the current shape of the code, read the
+design and the code; for what was asked for and why, read this.
+
 ## Problem Statement
 
 `internal/cli/dispatch.go` refuses, at its step (2b), any workspace whose

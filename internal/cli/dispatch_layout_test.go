@@ -54,7 +54,12 @@ var dispatchPathFiles = []string{
 //	dispatch_plugins.go  registers plugins with Claude Code's own plugin
 //	                     system. MarketplaceRegistration (row 6) is declared
 //	                     AgentCannotReceive for Codex, so there is no second
-//	                     agent for this file to be neutral about.
+//	                     agent for this file to be neutral about. It also holds
+//	                     claudeLaunchSpec, which the other Claude-only paths
+//	                     (job_state.go's callers, `niwa watch`) read Claude
+//	                     Code's binary and management verbs through -- one
+//	                     place naming that agent, reading the same table the
+//	                     neutral path reads, rather than five.
 //	job_state.go         reads Claude Code's harness job-state file, for the
 //	                     SessionStart guard behind EphemeralSessions (row 17,
 //	                     AgentCannotReceive for Codex) and for `niwa watch`'s
@@ -276,7 +281,7 @@ func offender(ag agent.Agent) string {
 // rather than a gap. Membership is a recorded human decision, which is the
 // whole reason the map holds a reason string rather than just a name.
 var excusedAgentNamingFiles = map[string]string{
-	"dispatch_plugins.go": "drives one agent's own plugin subcommand; MarketplaceRegistration (row 6) is declared AgentCannotReceive for the other",
+	"dispatch_plugins.go": "drives one agent's own plugin subcommand and, for the same reason, hosts the accessor the other agent-specific paths read that agent's launch description through; MarketplaceRegistration (row 6) is declared AgentCannotReceive for the other agent",
 	"job_state.go":        "reads one agent's harness job-state file, for EphemeralSessions (row 17, AgentCannotReceive for the other) and for niwa watch's review continuation",
 
 	// The three below were red on this guard's first run, which is the guard

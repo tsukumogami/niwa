@@ -25,6 +25,13 @@ import (
 // exercised past the two shapes it was written against rather than only
 // between them.
 
+// The handles the fixtures plant are deliberately not prefixes of the session
+// ids beside them. An earlier version used "1234" against a session id starting
+// "12345678", which left a `sessionID[:4]` implementation passing every
+// assertion here except the one written specifically to catch it -- so the
+// suite as a whole stopped discriminating, and one test carried the weight
+// alone.
+
 // captureStore is one record-store shape plus the fixture writer for it.
 type captureStore struct {
 	name    string
@@ -159,7 +166,7 @@ func TestCaptureSessionID(t *testing.T) {
 			t.Run("present immediately returns the id and the handle", func(t *testing.T) {
 				root := t.TempDir()
 				instanceDir := t.TempDir()
-				store.write(t, root, "1234", sid, instanceDir)
+				store.write(t, root, "handle-a", sid, instanceDir)
 
 				got, handle, err := captureSessionID(store.records, root, instanceDir, time.Second, nil, time.Millisecond)
 				if err != nil {
@@ -168,7 +175,7 @@ func TestCaptureSessionID(t *testing.T) {
 				if got != sid {
 					t.Errorf("got %q, want %q", got, sid)
 				}
-				if want := store.wantHandle("1234", sid); handle != want {
+				if want := store.wantHandle("handle-a", sid); handle != want {
 					t.Errorf("handle = %q, want %q", handle, want)
 				}
 			})
@@ -181,7 +188,7 @@ func TestCaptureSessionID(t *testing.T) {
 				// pass so it is picked up before the timeout.
 				go func() {
 					time.Sleep(20 * time.Millisecond)
-					store.write(t, root, "1234", sid, instanceDir)
+					store.write(t, root, "handle-a", sid, instanceDir)
 				}()
 
 				got, _, err := captureSessionID(store.records, root, instanceDir, 2*time.Second, nil, 5*time.Millisecond)
@@ -203,7 +210,7 @@ func TestCaptureSessionID(t *testing.T) {
 			t.Run("two sessions same cwd is ambiguous", func(t *testing.T) {
 				root := t.TempDir()
 				instanceDir := t.TempDir()
-				store.write(t, root, "1234", sid, instanceDir)
+				store.write(t, root, "handle-a", sid, instanceDir)
 				store.write(t, root, "5678", other, instanceDir)
 
 				_, _, err := captureSessionID(store.records, root, instanceDir, time.Second, nil, time.Millisecond)
@@ -227,7 +234,7 @@ func TestCaptureSessionID(t *testing.T) {
 				root := t.TempDir()
 				instanceDir := t.TempDir()
 				// Matching cwd but a non-UUID id: treated as not-yet-ready.
-				store.write(t, root, "1234", "not-a-uuid", instanceDir)
+				store.write(t, root, "handle-a", "not-a-uuid", instanceDir)
 
 				_, _, err := captureSessionID(store.records, root, instanceDir, 30*time.Millisecond, nil, 5*time.Millisecond)
 				if err == nil {
@@ -243,7 +250,7 @@ func TestCaptureSessionID(t *testing.T) {
 					t.Skipf("symlink unsupported: %v", err)
 				}
 				// The record holds the real dir; capture runs against the link.
-				store.write(t, root, "1234", sid, realDir)
+				store.write(t, root, "handle-a", sid, realDir)
 
 				got, _, err := captureSessionID(store.records, root, link, time.Second, nil, time.Millisecond)
 				if err != nil {

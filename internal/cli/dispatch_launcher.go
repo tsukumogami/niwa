@@ -176,6 +176,40 @@ func startDetachedWorker(spec agentplan.LaunchSpec, bin string, args []string, i
 	return cmd.Process.Release()
 }
 
+// maxWorkerLogTailLines bounds how much of a failed worker's own output is
+// echoed. Enough to carry a startup error and the line before it; short enough
+// that a worker which failed after producing real output does not bury the
+// error that follows.
+const maxWorkerLogTailLines = 12
+
+// readWorkerLogTail returns the tail of a detached worker's own output, for the
+// one moment it is about to be unavailable: a capture failure rolls the
+// instance back, and the log lives inside the instance.
+//
+// It prefers the error stream, because a worker that died before writing a
+// session record died at startup and said so there, and falls back to the
+// standard stream for a worker that failed later with something structured to
+// say. An agent whose launch is not detached keeps no such log and gets an
+// empty string, which the caller renders as nothing rather than as an absence.
+func readWorkerLogTail(instanceDir, binary string) string {
+	for _, stream := range []string{"err", "out"} {
+		path := filepath.Join(instanceDir, ".niwa", fmt.Sprintf("dispatch-%s.%s", binary, stream))
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+		if len(lines) == 1 && lines[0] == "" {
+			continue
+		}
+		if len(lines) > maxWorkerLogTailLines {
+			lines = lines[len(lines)-maxWorkerLogTailLines:]
+		}
+		return "  " + strings.Join(lines, "\n  ")
+	}
+	return ""
+}
+
 // openWorkerLog opens one of a detached worker's output files inside the
 // instance, truncating any earlier one. The name carries the binary rather than
 // a fixed string so two agents' logs could never be confused for each other,

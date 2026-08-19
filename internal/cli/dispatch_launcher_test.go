@@ -177,6 +177,15 @@ func TestCodexLaunchArgv(t *testing.T) {
 	if slices.Contains(got, "--ephemeral") {
 		t.Error("the launch argv suppresses the session record capture reads")
 	}
+
+	// And the process model, which the completeness suite only checks for
+	// membership in the closed set. Flipped to backgrounded, every dispatch
+	// would block for the length of the task and then die with a cancelled
+	// context, and nothing else in the suite would notice: the detached-launch
+	// test builds its own spec rather than reading the table.
+	if spec := codexLaunchSpec(t); spec.Mode != agentplan.LaunchDetached {
+		t.Errorf("codex launch mode = %d, want detached; it runs its turn in the foreground", spec.Mode)
+	}
 }
 
 // TestStartDetachedWorker runs the detached path against a real process, which
