@@ -58,12 +58,101 @@ func TestDispatchGateFollowsTheDeclaration(t *testing.T) {
 			if !strings.Contains(runErr.Error(), decl.Reason) {
 				t.Errorf("(%s) refusal does not carry the declared reason.\n got: %v\nwant it to contain: %s", ag, runErr, decl.Reason)
 			}
+			// And it says what to do instead, naming an agent the table says
+			// can be launched rather than one this code decided on. A refusal
+			// is read by the person who does not know the answer.
+			for _, launchable := range agentplan.LaunchableAgents() {
+				if !strings.Contains(runErr.Error(), string(launchable)) {
+					t.Errorf("(%s) refusal does not name %q, which the table says can be launched.\n got: %v", ag, launchable, runErr)
+				}
+			}
 			// And it refuses before anything exists on disk, which is the
 			// ordering the binary preflight depends on too.
 			if f.provisionCalled != 0 {
 				t.Errorf("(%s) is declared unavailable but provision was called %d times", ag, f.provisionCalled)
 			}
 		})
+	}
+}
+
+// TestDispatchUsesTheResolvedAgentsSpec is the test the three below cannot be.
+//
+// Each of them resolves its expected value from the one agent niwa ships a
+// launch description for, so each proves the dispatch reads *a* description. If
+// the code hardcoded that agent instead of resolving one, every one of them
+// would still pass, and the difference between reading a description and
+// reading the resolved agent's description is the whole feature. So this one
+// substitutes a description for an agent that does not exist, shaped unlike
+// anything niwa ships, and asserts the dispatch follows it -- the same move the
+// capture suite makes with its second fixture store.
+func TestDispatchUsesTheResolvedAgentsSpec(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, "")
+	installDispatchFakes(t, root)
+	dispatchDetach = false
+
+	invented := agentplan.LaunchSpec{
+		Binary:      "invented-agent",
+		LeadingArgs: []string{"start"},
+		Flags:       agentplan.LaunchFlags{Model: "--pick"},
+		ResumeArgs:  []string{"reopen", "--by-id"},
+		HintVerbs:   []string{"reopen", "kill"},
+	}
+
+	var askedFor []agent.Agent
+	prevSpec := dispatchLaunchSpec
+	dispatchLaunchSpec = func(ag agent.Agent) (agentplan.LaunchSpec, bool) {
+		askedFor = append(askedFor, ag)
+		return invented, true
+	}
+	t.Cleanup(func() { dispatchLaunchSpec = prevSpec })
+
+	var preflighted []string
+	prevLook := lookAgentBinary
+	lookAgentBinary = func(name string) (string, error) {
+		preflighted = append(preflighted, name)
+		return "/usr/bin/" + name, nil
+	}
+	t.Cleanup(func() { lookAgentBinary = prevLook })
+
+	var resumeSpec agentplan.LaunchSpec
+	prevAttach := dispatchAttach
+	dispatchAttach = func(spec agentplan.LaunchSpec, _ string) error {
+		resumeSpec = spec
+		return nil
+	}
+	t.Cleanup(func() { dispatchAttach = prevAttach })
+
+	stdout, _, err := runDispatchCmd(t, "do a thing")
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	// The description was asked for by the agent the workspace resolved, not by
+	// a name this code chose.
+	wantAgent, err := resolveSessionAgent("", nil)
+	if err != nil {
+		t.Fatalf("resolving the session agent: %v", err)
+	}
+	if len(askedFor) == 0 || askedFor[0] != wantAgent {
+		t.Fatalf("the launch description was resolved for %v, want the session's agent %q", askedFor, wantAgent)
+	}
+
+	// And every surface downstream followed it rather than the real table.
+	if len(preflighted) == 0 || preflighted[0] != invented.Binary {
+		t.Errorf("preflight looked up %v, want the substituted binary %q", preflighted, invented.Binary)
+	}
+	for _, verb := range invented.HintVerbs {
+		if want := invented.Binary + " " + verb + " "; !strings.Contains(stdout, want) {
+			t.Errorf("output does not offer %q.\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "claude ") {
+		t.Errorf("output offers a command from the real table rather than the substituted one.\n%s", stdout)
+	}
+	if resumeSpec.Binary != invented.Binary || strings.Join(resumeSpec.ResumeArgs, " ") != strings.Join(invented.ResumeArgs, " ") {
+		t.Errorf("resume ran %q %v, want the substituted %q %v", resumeSpec.Binary, resumeSpec.ResumeArgs, invented.Binary, invented.ResumeArgs)
 	}
 }
 

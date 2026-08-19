@@ -271,38 +271,99 @@ func offender(ag agent.Agent) string {
 	}
 }
 
-// TestDispatchPathScanCoversTheLaunchSurface guards the scan's own scope. A
-// scan is only worth its failure message if the set it ranges over is the set
-// that matters, and the cheapest way for this one to stop mattering is for a
-// new dispatch file to be added and not listed. Every non-test file whose name
-// begins with "dispatch" is either scanned or explicitly excused above.
-func TestDispatchPathScanCoversTheLaunchSurface(t *testing.T) {
-	// The excused set, kept here rather than in a comment so adding a file
-	// without a decision fails instead of passing quietly.
-	excused := map[string]string{
-		"dispatch_plugins.go": "registers plugins with one agent's own plugin system; row 6 is declared AgentCannotReceive for the other",
-	}
+// excusedAgentNamingFiles are the files in this package that may name an agent,
+// each with the declaration that makes the capability it serves one agent's
+// rather than a gap. Membership is a recorded human decision, which is the
+// whole reason the map holds a reason string rather than just a name.
+var excusedAgentNamingFiles = map[string]string{
+	"dispatch_plugins.go": "drives one agent's own plugin subcommand; MarketplaceRegistration (row 6) is declared AgentCannotReceive for the other",
+	"job_state.go":        "reads one agent's harness job-state file, for EphemeralSessions (row 17, AgentCannotReceive for the other) and for niwa watch's review continuation",
 
+	// The three below were red on this guard's first run, which is the guard
+	// doing its job: each is agent-specific code in this package that no
+	// earlier check looked at. Each is excused on a declaration rather than on
+	// convenience, and each excusal is a claim a reader can check.
+	"instance_from_hook.go": "serves the session-start hook behind EphemeralSessions (row 17), declared AgentCannotReceive for the other agent, and reads the context document only that agent's session would load",
+	"repo_resolve.go":       "skips one agent's own directory when enumerating a workspace's repositories; the name is a directory to ignore rather than a delivery to make, and ignoring one that is not there costs nothing",
+	"watch.go":              "the review continuation is that agent's harness surface throughout -- RemoteControl (row 20) is declared NoSuchConcept for the other, and the sensitive-location guard reasons about that agent's own home directory",
+}
+
+// TestNoUnreviewedAgentNamingInThisPackage is the completeness guard, and it is
+// inverted on purpose.
+//
+// The obvious guard -- enumerate files whose names look like dispatch files and
+// check each is scanned or excused -- has a hole the width of a filename. A new
+// `codex_launcher.go` matches no name pattern, so it lands in neither list, the
+// guard never looks at it, and it is free to hardcode an agent on every line
+// while all the other tests stay green. That is exactly the failure this
+// contract exists to prevent, sitting precisely where the next change lands,
+// and `codex_launcher.go` is the *natural* name for that change: the hole is on
+// the path of least resistance rather than at the end of an adversarial one.
+// The file list above already disproves the premise -- `session_records.go` is
+// on the dispatch path and shares no prefix with it.
+//
+// So the guard ranges over every non-test file in the package instead, and asks
+// a question that needs no name pattern: does this file name an agent, and if
+// so, has somebody decided that it may? A file on the dispatch path may not
+// (the two scans above fail it). Any other file that does must be excused with
+// a reason. A new file naming an agent fails on arrival whatever it is called.
+func TestNoUnreviewedAgentNamingInThisPackage(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("reading package directory: %v", err)
 	}
-	var unlisted []string
+
+	var offenders []dispatchViolation
+	scanned := 0
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, "dispatch") || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
+		scanned++
+		// Files on the dispatch path are covered by the two scans above, which
+		// hold them to a stricter rule: they may not name an agent at all.
 		if slices.Contains(dispatchPathFiles, name) {
 			continue
 		}
-		if _, ok := excused[name]; ok {
+		if _, excused := excusedAgentNamingFiles[name]; excused {
 			continue
 		}
-		unlisted = append(unlisted, name)
+
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		pf := parsedDispatchFile{name: name, fset: fset, file: f}
+		offenders = append(offenders, agentConstantViolations(pf)...)
+		offenders = append(offenders, agentLiteralViolations(pf)...)
 	}
-	if len(unlisted) > 0 {
-		sort.Strings(unlisted)
-		t.Fatalf("these dispatch files are neither scanned nor excused: %s\nAdd each to dispatchPathFiles, or excuse it here naming the declaration that makes it one agent's", strings.Join(unlisted, ", "))
+	if scanned == 0 {
+		t.Fatal("no files scanned; the guard would pass vacuously")
+	}
+	if len(offenders) > 0 {
+		t.Fatalf("%d site(s) in this package name an agent in a file that is neither on the dispatch path nor excused:\n%s\nEither route the behavior through the launch declaration and add the file to dispatchPathFiles, or add it to excusedAgentNamingFiles naming the declaration that makes it one agent's.",
+			len(offenders), renderDispatchViolations(offenders))
+	}
+}
+
+// TestDispatchPathFilesAreAllPresent keeps the scanned list from quietly
+// shrinking. A file removed from dispatchPathFiles but still on disk would stop
+// being held to the strict rule, and nothing else here would notice: the guard
+// above would simply find it clean and move on.
+func TestDispatchPathFilesAreAllPresent(t *testing.T) {
+	for _, name := range dispatchPathFiles {
+		if _, err := os.Stat(name); err != nil {
+			t.Errorf("scanned file %s is listed but not on disk: %v", name, err)
+		}
+	}
+	for name := range excusedAgentNamingFiles {
+		if _, err := os.Stat(name); err != nil {
+			t.Errorf("excused file %s is listed but not on disk: %v", name, err)
+		}
+		if slices.Contains(dispatchPathFiles, name) {
+			t.Errorf("%s is both scanned and excused; it cannot be held to two rules", name)
+		}
 	}
 }

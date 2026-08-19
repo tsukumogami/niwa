@@ -15,8 +15,8 @@ goals: |
   to implemented in the change that delivers it, the gate becomes a
   declaration lookup, and every remaining gap is declared where the
   generated gap list already lives. The seam lands first against Claude
-  only, provably without behavior change; Codex arrives as its second
-  implementation.
+  only, its four user-visible changes named rather than claimed away;
+  Codex arrives as its second implementation.
 upstream: docs/briefs/BRIEF-codex-background-dispatch.md
 motivating_context: |
   The capability contract made workspace preparation serve both agents and
@@ -89,8 +89,9 @@ hardcoded pass the capability contract exists to prevent.
   -- no automatic reclamation for Codex-dispatched instances -- is
   declared in the table and published in the guide, with its closure named
   as future work.
-- The seam lands first against Claude only, with a no-behavior-change
-  proof stated concretely enough that a reviewer can check it
+- The seam lands first against Claude only. Its behavior delta is stated
+  exactly -- four named user-visible changes, everything else proven
+  unchanged -- concretely enough that a reviewer can check the claim
   mechanically.
 
 ## User Stories
@@ -105,11 +106,11 @@ hardcoded pass the capability contract exists to prevent.
 - As a developer returning to a dispatched session, I want one resume verb
   that works for whichever agent the session ran, so that I don't need to
   remember which agent a session was before I can step back into it.
-- As a maintainer reviewing the first pull request, I want its
-  no-behavior-change claim to rest on named seam signatures and untouched
-  behavior assertions rather than on "the suite passes," so that a
-  signature change and its updated fakes can't smuggle a behavior change
-  past me.
+- As a maintainer reviewing the first pull request, I want its behavior
+  claim to name its user-visible changes outright and rest on named seam
+  signatures and untouched behavior assertions rather than on "the suite
+  passes," so that a signature change and its updated fakes can't smuggle
+  an unnamed behavior change past me.
 - As a developer reading the guide, I want the gap list to say exactly
   what a Codex dispatch doesn't do -- no keep-alive, no automatic
   reclamation -- so that I learn the boundary by reading rather than by
@@ -134,7 +135,9 @@ hardcoded pass the capability contract exists to prevent.
   the `DispatchLaunch` declaration for the resolved agent instead of
   comparing against an agent constant. A declared-implemented agent
   proceeds; a declared-unavailable agent is refused with a message that
-  renders the declared reason. Acceptance: the failure this catches is
+  renders the declared reason and names the agents the table declares
+  launchable, enumerated from the declarations so the hint cannot go
+  stale. Acceptance: the failure this catches is
   drift -- a test fails when the gate refuses an agent whose row is
   implemented, or admits one whose row is unavailable; hardcoding the
   refusal so it agrees with the table today would leave that test unable
@@ -369,27 +372,54 @@ hardcoded pass the capability contract exists to prevent.
 ### Sequencing and proof
 
 - **R19. Two pull requests, in order.** PR 1 lands the dispatch path's
-  agent seam against Claude only with no behavior change: the gate as a
-  declaration lookup, the identity representation, the generalized
-  capture, and the structural scan going red to green. PR 2 delivers
+  agent seam against Claude only, with no behavior change beyond the
+  four user-visible changes R20 names: the gate as a declaration lookup,
+  the identity representation, the generalized capture, and the
+  structural scan going red to green. PR 2 delivers
   Codex as the second implementation: launch, capture, resume, liveness,
   row 22 flipped, guide regenerated. If PR 2 grows beyond one reviewable
   change it splits by surface -- launch, then capture and liveness, then
   resume -- never into "the plumbing" and "the behavior"; that second
   split is what made a prior attempt unreviewable.
-- **R20. PR 1's no-behavior-change proof is stated concretely.** The
-  naive proof -- "the suite passes" -- is defeated by changing a seam's
-  signature and its fakes in the same commit. The dispatch path's
-  substitutable seams are package-level function variables, and every
-  substituting test breaks when a signature changes, so the proof is:
-  the seams whose signatures change are named in the PR description with
-  the reason (capture and launch need the agent; others only if argued),
-  every other seam declaration is byte-identical, and the behavior
-  assertions running on top of the substituted seams are not modified or
-  deleted -- new assertions may be added. Acceptance: a reviewer can
-  diff the seam declarations against main and check the named list is
-  exhaustive; an unnamed signature change, or a weakened behavior
-  assertion, fails the review contract this requirement defines.
+- **R20. PR 1's behavior claim is exact: four user-visible changes,
+  named, and nothing else.** A flat "no behavior change" would be false,
+  and an overstated claim in the documents a bisecting reader trusts --
+  a squash-merged PR body becomes the permanent commit message -- is the
+  prior attempt's failure in a smaller frame. PR 1 carries exactly four
+  user-visible changes, three incidental to routing the gate through the
+  declaration and one a fix:
+  - The refusal's wording. It renders the declaration's own reason and
+    names the agents the table declares launchable, enumerated from the
+    declarations rather than written into the string. The old message's
+    hardcoded escape-hatch hint would go stale silently the day a row
+    flips, and dropping it outright would leave the reader without the
+    one fact they are missing.
+  - The gate runs even when the workspace config cannot be loaded.
+    Previously the whole gate sat inside a successful-config-load
+    branch, so `NIWA_AGENT=codex` with an unreadable config skipped the
+    check and launched Claude anyway; the agent now resolves from the
+    environment alone and the refusal fires. A genuine fix riding along,
+    named as one rather than found.
+  - The `--model` help lists the portable categories, not one agent's
+    concrete model names -- text that would start lying the day a second
+    agent shipped. The names still appear in the unrecognized-value
+    warning.
+  - The preflight error names the missing binary rather than a product.
+  Everything else is proven unchanged, and the naive proof -- "the suite
+  passes" -- is defeated by changing a seam's signature and its fakes in
+  the same commit. The dispatch path's substitutable seams are
+  package-level function variables, and every substituting test breaks
+  when a signature changes, so the proof is: the seams whose signatures
+  change are named in the PR description with the reason (capture and
+  launch need the agent; others only if argued), every other seam
+  declaration is byte-identical, and the behavior assertions running on
+  top of the substituted seams are not modified or deleted -- new
+  assertions may be added. Acceptance: the PR description names the four
+  user-visible changes and every changed seam signature; a reviewer can
+  diff the seam declarations against main and check both lists are
+  exhaustive; an unnamed user-visible change, an unnamed signature
+  change, or a weakened behavior assertion fails the review contract
+  this requirement defines.
 - **R21. The functional scenario is extended, not replaced.** The
   scenario at `test/functional/features/codex-agent.feature:83` --
   "dispatch's refusal in a codex-default workspace is the declared gap"
@@ -486,10 +516,11 @@ Documentation and process:
   named next-feature owner appear in the published guide.
 - [ ] `codex-agent.feature`'s dispatch scenario asserts the declared
   delivery; no scenario pinning the refusal survives PR 2.
-- [ ] PR 1's description names every seam whose signature changed and
-  why; every unnamed seam declaration is byte-identical to main; no
-  existing behavior assertion on the dispatch path was modified or
-  deleted.
+- [ ] PR 1's description names its four user-visible changes and every
+  seam whose signature changed and why; every unnamed seam declaration
+  is byte-identical to main; no user-visible change exists outside the
+  named four; no existing behavior assertion on the dispatch path was
+  modified or deleted.
 
 ## Out of Scope
 
@@ -517,6 +548,27 @@ Documentation and process:
 - Converting the four files under the existing `internal/agentplan` scan's
   pending-conversion gate. They belong to a different feature (R6).
 
+## What a Dispatched Codex Worker Does Not Receive
+
+A dispatched worker at the instance root receives none of what rows 5, 8,
+9, and 12 declare implemented -- skills, MCP servers, environment, and
+posture are all delivered inside repositories -- and no orientation
+either. niwa never launched a Codex session at an instance root before,
+so this feature introduces the gap rather than inheriting it, and it is
+worse than "unoriented": discovery is fixed at session construction and
+keyed to the launch directory, following neither the working directory
+nor an instruction naming a repository, and readable-on-request files are
+a categorically weaker delivery than context. The contract cannot
+currently express this gap -- declarations are per capability and agent,
+two states, scoped by who receives and never by where from -- and no new
+capability row is invented for it (R5 stands). Whether closing it is this
+feature's work or a follow-on is being decided above this feature, given
+that closing means correcting row 2's stated reason (factually wrong: a
+session's working directory always contributes its context file, measured
+with and without a marker-bearing ancestor, so a context file at an
+instance root would be read) and writing Codex-shaped content at the
+instance root -- both touching already-shipped declarations.
+
 ## Open Questions the Design Owns
 
 - **The shape of the per-agent launch description.** What it carries --
@@ -543,26 +595,11 @@ Documentation and process:
   that happens to equal the session id for Codex, or a typed value only
   the agent's description interprets, decides what validation the shared
   resume path (R13) can honestly perform.
-- **Where the instance-root delivery gap lands.** A dispatched worker at
-  the instance root receives none of what rows 5, 8, 9, and 12 declare
-  implemented -- skills, MCP servers, environment, and posture are all
-  delivered inside repositories -- and no orientation either. niwa never
-  launched a Codex session at an instance root before, so this feature
-  introduces the gap rather than inheriting it, and it is worse than
-  "unoriented": discovery is fixed at session construction and keyed to
-  the launch directory, following neither the working directory nor an
-  instruction naming a repository, and readable-on-request files are a
-  categorically weaker delivery than context. The contract cannot
-  currently express this gap -- declarations are per capability and
-  agent, two states, scoped by who receives and never by where from --
-  and no new capability row is invented for it (R5 stands). Whether
-  closing it is this feature's work or a follow-on is being decided
-  above this feature, given that closing means correcting row 2's stated
-  reason (factually wrong: a session's working directory always
-  contributes its context file, measured with and without a
-  marker-bearing ancestor, so a context file at an instance root would
-  be read) and writing Codex-shaped content at the instance root -- both
-  touching already-shipped declarations.
+- **Where the instance-root delivery gap lands.** The gap itself is
+  stated under "What a dispatched Codex worker does not receive" above.
+  Whether closing it is this feature's work or a follow-on is being
+  decided above this feature; the design inherits whichever answer
+  lands.
 - **Whether a per-invocation project-root-marker override reaches an
   instance root.** A per-invocation configuration override of Codex's
   project-root markers is being measured right now and is not settled.

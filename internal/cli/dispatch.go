@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/keyreport"
@@ -115,6 +116,16 @@ const (
 // (DESIGN Decision 9).
 var lookAgentBinary = func(name string) (string, error) {
 	return exec.LookPath(name)
+}
+
+// dispatchLaunchSpec resolves an agent's launch description. It is a package
+// variable so a test can substitute a description for an agent niwa does not
+// ship, which is the only way to tell "the dispatch reads the resolved agent's
+// spec" apart from "the dispatch reads a spec". Asserting against the one real
+// agent's spec proves the second and not the first, and the difference between
+// them is the whole feature.
+var dispatchLaunchSpec = func(ag agent.Agent) (agentplan.LaunchSpec, bool) {
+	return agentplan.For(ag).LaunchSpec()
 }
 
 // dispatchCapture is the capture seam. Production wires it to captureSessionID;
@@ -244,7 +255,6 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if agErr != nil {
 		return fmt.Errorf("niwa: error: %w", agErr)
 	}
-	producer := agentplan.For(dispatchedAgent)
 
 	// (2c) The gate is the declaration, not a comparison against an agent this
 	// code names. Launching a background worker is a declared capability, so
@@ -256,9 +266,10 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("niwa: error: %w", err)
 	}
-	spec, hasSpec := producer.LaunchSpec()
+	spec, hasSpec := dispatchLaunchSpec(dispatchedAgent)
 	if launchDecl.State != agentplan.StateImplemented || !hasSpec {
-		return fmt.Errorf("niwa: error: niwa dispatch cannot launch a background worker for the %q agent. %s Set NIWA_AGENT to an agent it can launch, or open a session yourself and run the task there", dispatchedAgent, launchDecl.Reason)
+		return fmt.Errorf("niwa: error: niwa dispatch cannot launch a background worker for the %q agent. %s %s, or open a session yourself and run the task there",
+			dispatchedAgent, launchDecl.Reason, launchableAgentsHint())
 	}
 
 	// (3) Preflight the worker binary on PATH BEFORE creating any instance, so
@@ -673,6 +684,30 @@ func buildDispatchPassthrough(flags agentplan.LaunchFlags, slug, model string) [
 		}
 	}
 	return pass
+}
+
+// launchableAgentsHint names the agents a refusal can point a developer at, in
+// the form they would set. The names come from the declarations rather than
+// from a sentence written here, because the person reading a refusal is by
+// definition the person who does not already know which agent to name -- and a
+// hardcoded one goes stale the moment a row flips, silently, at exactly the
+// moment it is being read.
+//
+// With no launchable agent at all there is nothing useful to suggest, so the
+// hint says what is true rather than pointing at an empty set.
+func launchableAgentsHint() string {
+	launchable := agentplan.LaunchableAgents()
+	if len(launchable) == 0 {
+		return "No agent niwa knows about can be dispatched to"
+	}
+	if len(launchable) == 1 {
+		return "Set NIWA_AGENT=" + string(launchable[0])
+	}
+	names := make([]string, len(launchable))
+	for i, ag := range launchable {
+		names[i] = string(ag)
+	}
+	return "Set NIWA_AGENT to one of " + strings.Join(names, ", ")
 }
 
 // userHomeDir returns the developer's home directory, or "" when it cannot be

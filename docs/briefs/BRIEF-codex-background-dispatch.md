@@ -180,13 +180,26 @@ work rather than pretending the gap isn't there.
 
 Two pull requests, in order, and the split is not optional.
 
-**PR 1** puts the agent seam through the dispatch path against Claude only,
-with no behavior change: the gate becomes a declaration lookup, the
-session-identity representation lands, capture is generalized to a
-pluggable candidate source, and the structural scan over the dispatch path
-goes from red to green. Its correctness argument is "nothing a user can
-observe changed," and that argument is only provable when the PR contains
-nothing else.
+**PR 1** puts the agent seam through the dispatch path against Claude
+only: the gate becomes a declaration lookup, the session-identity
+representation lands, capture is generalized to a pluggable candidate
+source, and the structural scan over the dispatch path goes from red to
+green. Its behavior claim is exact rather than flat: four user-visible
+changes, three incidental to routing the gate through the declaration and
+one a fix, and nothing else. The refusal now renders the declaration's
+own reason and enumerates the launchable agents from the table, since a
+hardcoded hint would go stale silently the day a row flips. The gate now
+runs even when the workspace config cannot be loaded -- previously an
+unreadable config skipped the check and launched Claude anyway, so this
+one is a fix riding along, named rather than found. The `--model` help
+names the portable categories instead of one agent's concrete model
+names, which would start lying the day a second agent shipped. And the
+preflight error names the missing binary rather than a product.
+Everything else is provably unchanged -- and a claim with a named
+exception list is provable where a flat claim is simply false. That
+matters beyond this PR: the documents behind a squash-merged PR become
+what someone bisecting a behavior change reads, and an overstated claim
+there is the prior attempt's failure in a smaller frame.
 
 **PR 2** delivers Codex as the second implementation of the seam: launch,
 capture, resume, and liveness, with row 22 flipped and the guide

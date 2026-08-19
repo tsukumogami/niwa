@@ -1,7 +1,10 @@
 package agentplan
 
 import (
+	"go/ast"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/agent"
@@ -148,6 +151,95 @@ func checkRecords(t *testing.T, ag agent.Agent, r SessionRecords) {
 	case LivenessRecordPresence, LivenessNone:
 	default:
 		t.Errorf("(%s): liveness kind %d is outside the closed set", ag, r.Liveness)
+	}
+}
+
+// TestEveryLaunchSpecFieldIsRead is the anti-dead-plumbing check, and it is the
+// one this whole contract exists because of.
+//
+// The attempt that closed as a prototype shipped a type meant to unify two
+// agents whose value was read by nothing, while every call site hardcoded an
+// agent constant. Its structure compiled, its tests passed, and its design said
+// the right things. What it never had was a check that a field somebody added
+// is a field somebody reads.
+//
+// So: every field of the launch description, and of the two structures it
+// carries, must be selected somewhere in this package or in the package that
+// does the launching. A field nobody reads is either a decision that has not
+// been wired up, or a decision nobody needed -- and neither should be able to
+// merge quietly. Completeness suites that check a field is *populated* do not
+// catch this: a populated field nothing reads is exactly the failure.
+//
+// The check is deliberately coarse in one direction and exact in the other. A
+// field name that coincides with an unrelated selector elsewhere would count as
+// read, so this cannot prove a field is read *for the right reason*. It can and
+// does prove a field is read nowhere at all, which is the shape that closed the
+// prior attempt.
+func TestEveryLaunchSpecFieldIsRead(t *testing.T) {
+	fields := map[string]string{}
+	for _, decl := range []struct {
+		owner string
+		typ   reflect.Type
+	}{
+		{"LaunchSpec", reflect.TypeOf(LaunchSpec{})},
+		{"SessionRecords", reflect.TypeOf(SessionRecords{})},
+		{"LaunchFlags", reflect.TypeOf(LaunchFlags{})},
+	} {
+		for i := 0; i < decl.typ.NumField(); i++ {
+			fields[decl.typ.Field(i).Name] = decl.owner
+		}
+	}
+
+	// Composite-literal keys are plain identifiers rather than selectors, so
+	// the table that declares these fields does not count as reading them.
+	read := map[string]bool{}
+	for _, dir := range []string{leafDir, "../cli"} {
+		for _, pf := range parsePackageFiles(t, dir) {
+			ast.Inspect(pf.file, func(n ast.Node) bool {
+				if sel, ok := n.(*ast.SelectorExpr); ok {
+					read[sel.Sel.Name] = true
+				}
+				return true
+			})
+		}
+	}
+
+	var unread []string
+	for name, owner := range fields {
+		if !read[name] {
+			unread = append(unread, owner+"."+name)
+		}
+	}
+	if len(unread) > 0 {
+		slices.Sort(unread)
+		t.Fatalf("%d launch-description field(s) are declared and read by nothing:\n  %s\nEither wire the field up, or delete it until the change that needs it. A field nothing reads is the shape that closed the prior attempt at this feature.",
+			len(unread), strings.Join(unread, "\n  "))
+	}
+}
+
+// TestLaunchableAgentsMatchesTheDeclarations pins the answer a refusal points a
+// developer at to the table rather than to a sentence somebody wrote. The two
+// have to stay the same set: a name in the message the table does not implement
+// sends a developer to an agent that will refuse them again, and an implemented
+// agent missing from the message is one they never learn they could have used.
+func TestLaunchableAgentsMatchesTheDeclarations(t *testing.T) {
+	got := LaunchableAgents()
+	for _, ag := range agent.All() {
+		d, err := Lookup(DispatchLaunch, ag)
+		if err != nil {
+			t.Fatalf("Lookup(%s, %s): %v", DispatchLaunch, ag, err)
+		}
+		listed := slices.Contains(got, ag)
+		if implemented := d.State == StateImplemented; implemented != listed {
+			t.Errorf("(%s): declared implemented=%v but listed as launchable=%v", ag, implemented, listed)
+		}
+	}
+	// Every listed agent must also have a spec, or the refusal would name one
+	// the launch cannot actually use.
+	for _, ag := range got {
+		if _, ok := For(ag).LaunchSpec(); !ok {
+			t.Errorf("(%s) is listed as launchable with no launch spec behind it", ag)
+		}
 	}
 }
 

@@ -158,7 +158,7 @@ agent has no flag for is spelled as the empty string and dropped rather
 than guessed at: forwarding a flag a binary does not accept fails the
 launch, and inventing a near-equivalent hands a developer something they
 did not ask for (`buildDispatchPassthrough`,
-`internal/cli/dispatch.go:657`).
+`internal/cli/dispatch.go:669`).
 
 It lives in `internal/agentplan` rather than beside the code that execs
 because the package's boundary already permits exactly this and no more.
@@ -414,8 +414,10 @@ tree, so a comment is not a violation and code cannot hide behind
 formatting; literal matching is whole-value, so
 `"claude-code-is-not-the-binary-name"` is legal.
 
-Two files sit beside the dispatch path and are deliberately not scanned,
-each excused by a declaration rather than by omission:
+Files that may name an agent are excused by a recorded decision, not by
+omission: `excusedAgentNamingFiles` maps each one to the declaration
+that makes the capability it serves one agent's rather than a gap. The
+first two were known from the start:
 
 - `dispatch_plugins.go` registers plugins with Claude Code's own plugin
   system. `MarketplaceRegistration` (row 6) is declared
@@ -426,8 +428,15 @@ each excused by a declaration rather than by omission:
   AgentCannotReceive for Codex) and for `niwa watch`'s review
   continuation, which is Claude Code harness surface throughout.
 
-Naming the exclusions against declarations is the point: an exclusion a
-reader can check against a row is a different thing from an exclusion
+Three more were found by the completeness guard's own first run (below):
+`instance_from_hook.go` (serves the row 17 hook path and reads the
+context document only that agent's session would load),
+`repo_resolve.go` (skips one agent's own directory when enumerating a
+workspace's repositories -- a directory to ignore, not a delivery to
+make), and `watch.go` (the review continuation is that agent's harness
+surface throughout; row 20 is declared NoSuchConcept for the other).
+Naming every exclusion against a declaration is the point: an exclusion
+a reader can check against a row is a different thing from an exclusion
 that exists because a file happened to fail.
 
 **It was seen red.** Against the tree it arrived on, the scan failed at
@@ -441,7 +450,8 @@ is reproducible on demand: reintroducing the launcher's literal by hand
 fails the scan today with `dispatch_launcher.go:85: names claude` --
 re-verified against this tree while this document was written.
 
-Two guards keep a passing scan meaningful over time.
+Three guards keep a passing scan meaningful over time.
+
 `TestDispatchScanDetectsWhatItForbids` is the control: it runs the
 detectors against fixture source written to contain exactly what they
 look for -- two constants, two literals, plus a comment naming both and
@@ -449,13 +459,56 @@ a substring-bearing literal that must not fire -- and fails if the scan
 comes back clean. A detector that matched nothing would pass the two
 main tests forever, and the first person to reintroduce a hardcoded
 agent would get a green run; the control is what makes that impossible.
-`TestDispatchPathScanCoversTheLaunchSurface` guards the scope: every
-non-test file whose name begins with `dispatch` must be either scanned
-or excused in the test's own excusal map with the declaration that makes
-it one agent's, so a new dispatch file added without a decision fails
-instead of passing quietly. The scan also refuses to pass vacuously: a
-listed file that has gone missing is a hard failure, because a scan that
-passes by not looking is worse than no scan.
+
+`TestNoUnreviewedAgentNamingInThisPackage` is the completeness guard,
+and it is worth recording that its first version had a hole a reviewer
+found. That version enumerated files whose names begin with `dispatch`
+and checked each was scanned or excused -- which leaves a hole the
+width of a filename: a new `internal/cli/codex_launcher.go` matches no
+name pattern, lands in neither list, and is free to hardcode an agent
+on every line while every other test stays green. And that is the
+*natural* name for the file the next change adds, so the hole sat on
+the path of least resistance rather than at the end of an adversarial
+one. The scan's own file list already disproved the name-pattern
+premise: `session_records.go` is on the dispatch path and shares no
+prefix with it. The guard is now inverted. It ranges over every
+non-test file in the package and asks one question that needs no name
+pattern: does this file name an agent, and if so, has somebody decided
+it may? A dispatch-path file may not -- the two scans fail it -- and
+any other file that does must appear in `excusedAgentNamingFiles` with
+its declaration. The inverted guard went red on its own arrival at
+four sites in three files -- `instance_from_hook.go`,
+`repo_resolve.go`, `watch.go` -- each now excused on a checkable
+declaration, and the reviewer's exact cheat was verified closed by
+planting the file they described: it failed with
+`codex_launcher.go:8: names agent.AgentCodex`. A guard whose failure
+mode was found and fixed is worth more here than one presented as
+having been right from the start.
+
+`TestDispatchPathFilesAreAllPresent` keeps the scanned list from
+quietly shrinking: a file removed from `dispatchPathFiles` but still on
+disk would silently drop to the weaker excusable rule, so every listed
+file must exist, every excused file must exist, and no file may appear
+on both lists -- it cannot be held to two rules. The scan itself also
+refuses to pass vacuously: a listed file that has gone missing is a
+hard failure, because a scan that passes by not looking is worse than
+no scan.
+
+One more scan belongs beside these, aimed at the other direction of the
+same failure. The scans above catch a delivery decision made outside
+the declaration; `TestEveryLaunchSpecFieldIsRead` catches a declaration
+nothing consumes. It reflects over every field of `LaunchSpec`,
+`SessionRecords`, and `LaunchFlags` and asserts each is selected
+somewhere in `internal/agentplan` or `internal/cli` -- because a field
+nobody reads is precisely the shape that closed the prior attempt, and
+a completeness suite that checks a field is *populated* does not catch
+it: a populated field nothing reads is the failure. It was demonstrated
+red by adding a decorative field, failing with
+`LaunchSpec.UnreadDecoration`. Its limit is stated as plainly as its
+power: a field name coinciding with an unrelated selector counts as
+read, so it proves a field is read *nowhere*, not that it is read for
+the right reason -- the coarse net under the finer tests, not a
+replacement for them.
 
 **Rejected: an allowlist of files permitted to name agents, seeded with
 today's offenders.** A scan that cannot fail on arrival, which is the
@@ -508,7 +561,7 @@ reading, so a pre-field mapping with no job entry stays reclaimable
 exactly as it was.
 
 Resume stays one verb on the strength of the same declaration.
-`dispatchAttach` (`internal/cli/dispatch.go:135`) looks the binary up,
+`dispatchAttach` (`internal/cli/dispatch.go:147`) looks the binary up,
 runs the agent's own resume arguments against the handle with inherited
 stdio, and propagates the outcome -- all of it written once, with only
 `spec.ResumeArgs` and `spec.Binary` varying.
@@ -772,6 +825,24 @@ entirely, and it makes a worker's inability to work a diagnosable
 condition niwa should surface rather than let the worker spend tokens
 on -- surfaced, not acted on.
 
+One constraint on any future posture choice, recorded here because
+nothing in this design depends on it and the next person choosing a
+posture would otherwise rediscover it. Measured in a live session at
+`danger-full-access`: the model's shell tool sees the launching process
+environment regardless of what `shell_environment_policy` declares,
+including a CLI-layer `inherit = "none"`, which is the
+highest-precedence layer and needs no trust. The policy itself works --
+the same override applied through the sandbox surface strips the
+environment to nothing -- so what this measures is that one posture's
+shell tool does not take the policy-aware route, not that the policy is
+broken. Whether a sandboxed posture behaves the same way is untested,
+for a host reason unrelated to Codex, and the untested half is the half
+that matters: `danger-full-access` is the posture almost nobody runs.
+The consequence for a chooser is narrow and real -- dispatching at
+`danger-full-access` would mean the environment policy does not
+constrain what that worker's shell sees. The route this design chose
+does not go there.
+
 ### Decision 10 -- what an exit status is allowed to mean (R17, R18)
 
 A Codex worker's exit code is not a task-success signal, and dispatch's
@@ -861,10 +932,55 @@ Every other seam declaration -- `dispatchPromptCapture`,
 `dispatchInteractive`, `provisionInstanceFunc`, `destroyInstanceFunc` --
 is byte-identical to its pre-branch form, checkable by diffing the
 declarations. The behavior assertions running on top of the substituted
-seams were not modified or deleted; new assertions were added. The one
-user-observable change is the refusal's wording, which now quotes the
-declaration's reason instead of a sentence written beside it -- named as
-such rather than smuggled.
+seams were not modified or deleted; new assertions were added.
+
+"No behavior change" is, stated precisely, four user-visible changes --
+three incidental to routing the gate through the declaration and one a
+fix -- and naming all four is a stronger and truer claim than a flat
+none:
+
+- **The refusal's wording.** It now carries the declaration's own
+  reason, and it names the agents the table says *can* be launched,
+  enumerated from the declarations (`launchableAgentsHint`, backed by
+  `agentplan.LaunchableAgents()` and pinned against the table by
+  `TestLaunchableAgentsMatchesTheDeclarations`) rather than spelled
+  into the string. The old message ended "Set NIWA_AGENT=claude";
+  dropping the suggestion would leave the developer who hits the
+  refusal without the one fact they are missing, and hardcoding it
+  back would go stale, silently, the day a row flips -- at exactly the
+  moment it is being read.
+- **The gate now runs even when the workspace config cannot be
+  loaded.** Previously the whole gate sat inside the config-load
+  success branch, so `NIWA_AGENT=codex` plus an unreadable config
+  skipped the check and launched Claude anyway -- a worker the
+  developer explicitly asked not to get. The gate now resolves the
+  agent from the environment alone and refuses. This is the one
+  genuine fix riding along, stated as one.
+- **`--model` help lists only the portable categories,** no longer the
+  concrete model names. The old text was one agent's vocabulary in a
+  flag that reaches whichever agent the workspace resolves to, so it
+  would have started lying the day a second agent shipped. The
+  concrete names still surface where they are agent-specific by
+  construction: the unrecognized-value warning, which knows which
+  agent it resolved against.
+- **The preflight error names the binary rather than the product** --
+  "install it before dispatching" against the declared binary name,
+  not "install Claude Code" -- for the same reason: the sentence is
+  printed for whichever binary the declaration named.
+
+One further test closes a hole that naming the seams still leaves
+open. Three of the contract tests -- the preflight, the printed hints,
+the resume verb -- resolved their expected values from the one real
+agent's spec, which proves the dispatch reads *a* description, not
+that it reads the *resolved agent's*: hardcoding the agent would have
+passed all three, and the difference between those two claims is the
+whole feature. `TestDispatchUsesTheResolvedAgentsSpec` substitutes,
+through the `dispatchLaunchSpec` seam that exists for exactly this, a
+description for an agent that does not exist -- different binary,
+different resume verb, different management verbs -- and asserts the
+preflight, the hints, and the resume all follow it, with nothing from
+the real table appearing. It is the same move the capture suite makes
+with its second fixture store, applied to the launch surface.
 
 **PR 2 -- Codex as the second implementation** -- adds the Codex
 `LaunchSpec` row (with the launch-mode field and its Claude value, both
@@ -1122,14 +1238,18 @@ Negative, accepted:
 - The launch table is more hand-maintained data, and its honesty is
   only as good as its tests -- which is the accepted trade throughout
   this contract: maintenance errors are loud rather than impossible.
-- One user-visible wording change shipped in a "no behavior change"
-  PR: the refusal now quotes the declaration. Named in the PR rather
-  than hidden, and the alternative -- keeping the old sentence beside
-  the table it duplicates -- is the drift this work removes.
-- The reaper consults `agentplan` and `agent` by name, which is
-  correct -- it is not on the scan's denylist and must resolve
-  declarations -- but it means the scan's boundary needs its scope
-  guard to stay meaningful as files move.
+- Four user-visible changes shipped in a "no behavior change" PR:
+  the refusal's wording, the gate running under an unreadable config,
+  the `--model` help text, and the preflight error's noun (Decision
+  11). Each named in the PR rather than hidden, and the alternative --
+  keeping one agent's sentences beside the table they duplicate -- is
+  the drift this work removes.
+- The completeness guard scans every file in the package, so its
+  discipline now rests on `excusedAgentNamingFiles` staying an honest
+  record of decisions rather than on file naming -- a file like
+  `reap.go`, which consults the declarations without naming an agent,
+  passes on its content, not by being unlisted. Five excusals is five
+  entries a reviewer must be willing to challenge.
 
 ## References
 

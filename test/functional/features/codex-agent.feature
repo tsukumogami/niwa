@@ -105,7 +105,7 @@ Feature: prepare every instance for both agents
     When I run "niwa dispatch some-task --detach" from the workspace root
     Then the exit code is not 0
     And the error output contains "cannot launch a background worker"
-    And the error output contains "Set NIWA_AGENT to an agent it can launch"
+    And the error output contains "Set NIWA_AGENT="
     And the capability "dispatch-launch" is declared unavailable for Codex
     And the refusal carries the declared reason for "dispatch-launch"
     And the committed Codex gap list carries the declared reason for "dispatch-launch"

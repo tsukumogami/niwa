@@ -240,6 +240,26 @@ var launchSpecs = map[agent.Agent]LaunchSpec{
 	},
 }
 
+// LaunchableAgents returns the agents niwa can launch a background worker for,
+// in the accepted set's order.
+//
+// It exists so a refusal can tell a developer what to do instead without naming
+// an agent this code has decided on. The answer is read from the declarations,
+// so the day a row flips the message changes with it -- the alternative,
+// spelling one agent's name into an error string, is a sentence that goes stale
+// silently and at the worst possible moment, since the person reading it is by
+// definition the person who does not already know the answer.
+func LaunchableAgents() []agent.Agent {
+	var out []agent.Agent
+	for _, ag := range agent.All() {
+		d, err := Lookup(DispatchLaunch, ag)
+		if err == nil && d.State == StateImplemented {
+			out = append(out, ag)
+		}
+	}
+	return out
+}
+
 // LaunchSpec returns this producer's agent's launch description, and false for
 // an agent niwa does not launch a background worker for. The caller's next move
 // on false is to consult the declaration for the reason, not to invent one.
