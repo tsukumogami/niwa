@@ -356,11 +356,12 @@ var launchSpecs = map[agent.Agent]LaunchSpec{
 			Liveness: LivenessNone,
 		},
 		ResumeArgs: []string{"resume"},
-		// Measured against 0.147.0: resuming a session whose turn is still
-		// running is refused by the session store itself, not by the terminal
-		// front end -- "thread-store conflict: thread <id> already has an
-		// active writer", exit 1, from codex_core::session. It clears when the
-		// turn ends.
+		// Measured against 0.147.0, both verbs: resuming a session whose turn
+		// is still running exits 1 with "thread-store conflict: thread <id>
+		// already has an active writer", the interactive form failing the same
+		// way during TUI bootstrap under a real pty. A per-thread writer lock
+		// is what produces it, so the refusal is deterministic rather than a
+		// race, and it clears when the turn ends.
 		ResumeDuringTurn: false,
 		HintVerbs:        []string{"resume"},
 	},

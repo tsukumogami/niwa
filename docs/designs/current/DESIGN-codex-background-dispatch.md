@@ -837,13 +837,26 @@ files unmerged.
   why capture exists at all.
 - **A session cannot be resumed while its turn is still running, so
   dispatch does not try.** Measured: with a worker mid-turn, `codex exec
-  resume <id>` exits 1 with "thread-store conflict: thread `<id>`
-  already has an active writer", raised by `codex_core::session` --
-  the session store, not the terminal front end, so the interactive verb
-  refuses on the same grounds. It clears when the turn ends; the
-  end-to-end resume in this branch's evidence was against a finished
-  session, which is why this went unnoticed until it was asked about
-  directly. It matters because dispatch's last step without `--detach`
+  resume <id>` exits 1 in under a second with "thread-store conflict:
+  thread `<id>` already has an active writer", raised by
+  `codex_core::session`. The interactive verb, which is the one niwa
+  runs, was measured separately under a real pty and refuses with the
+  same error during TUI bootstrap. The mechanism is a per-thread writer
+  lock at `$CODEX_HOME/thread-writer-locks/<id>.lock`, created when a
+  process opens a thread and removed when it exits, which is what makes
+  the behavior deterministic rather than racy. It clears when the turn
+  ends; the end-to-end resume in this branch's evidence was against a
+  finished session, which is why this went unnoticed until it was asked
+  about directly.
+
+  The refusal is clean rather than merely survivable, which is worth
+  recording because it removes a whole class of worry: across a rejected
+  resume the worker's rollout was byte-identical, the worker completed
+  normally and knew nothing about the attempt, no second rollout was
+  forked, and no model spend was incurred -- the refusal happens during
+  session bootstrap, before a turn starts. A lock left behind by a
+  SIGKILLed worker does not brick the thread either; a later resume
+  re-acquires it. It matters because dispatch's last step without `--detach`
   is to resume the session it just started, when the worker is mid-turn
   by construction: every non-detached Codex dispatch would have ended in
   a store-conflict error from a dispatch that in fact succeeded.
@@ -853,10 +866,12 @@ files unmerged.
   session and expects to be attached to, false for one that holds an
   exclusive writer for the length of the turn. False is the default, so
   an agent whose behavior here is unmeasured gets niwa's honest sentence
-  instead of an error from its own store. Neither alternative was
-  tenable: waiting for the turn would make dispatch block for as long as
-  the task, and forcing the resume would corrupt the record both sides
-  are writing. `TestDispatchDoesNotResumeAnAgentThatRefusesMidTurn`
+  instead of an error from its own store. The alternatives are worse for
+  ordinary reasons rather than dangerous ones: waiting for the turn would
+  make dispatch block for as long as the task, and there is nothing to
+  force -- the lock is what the agent uses to keep a second writer out,
+  so retrying just produces the same error more slowly.
+  `TestDispatchDoesNotResumeAnAgentThatRefusesMidTurn`
   binds it in both directions against a substituted spec, so it tests
   the declaration and not one agent's row.
 
