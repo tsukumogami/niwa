@@ -87,6 +87,14 @@ func TestLaunchSpecsAreComplete(t *testing.T) {
 		if len(spec.KnownModels) == 0 {
 			t.Errorf("(%s): the launch spec recognizes no model names, so every value warns", ag)
 		}
+		// The other direction: a spec may not bind a name that is not part of
+		// the portable vocabulary. A category only one agent answers for is
+		// not portable, which is the one thing the vocabulary is for.
+		for name := range spec.ModelCategories {
+			if !slices.Contains(ModelCategories(), name) {
+				t.Errorf("(%s): the launch spec binds %q, which is not a portable category", ag, name)
+			}
+		}
 
 		checkRecords(t, ag, spec.Records)
 	}
@@ -126,9 +134,15 @@ func checkRecords(t *testing.T, ag agent.Agent, r SessionRecords) {
 	}
 	// A record-directory handle only exists when the record sits inside a
 	// directory of its own, which is what a depth of at least one and a named
-	// file mean together.
-	if r.Handle == HandleRecordDir && r.FileName == "" {
-		t.Errorf("(%s): the handle is the record's directory name, but the records are named by a glob rather than sitting in one", ag)
+	// file mean together. Without both, the handle would be the name of the
+	// store's own root, which is the same string for every session in it.
+	if r.Handle == HandleRecordDir {
+		if r.FileName == "" {
+			t.Errorf("(%s): the handle is the record's directory name, but the records are named by a glob rather than sitting in one", ag)
+		}
+		if r.Depth < 1 {
+			t.Errorf("(%s): the handle is the record's directory name, but the records sit at the store root", ag)
+		}
 	}
 	switch r.Liveness {
 	case LivenessRecordPresence, LivenessNone:

@@ -25,8 +25,8 @@ func init() {
 	dispatchCmd.Flags().StringVar(&dispatchLabel, "label", "", "optional human-friendly alias recorded on the session mapping")
 	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session (sanitized into a slug; also names the niwa instance: <config>+-<id> with no name, <config>+<slug>-<id> with one -- '+' always marks the end of the config name)")
 	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", dispatchModelFlagHelp())
-	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker (--permission-mode)")
-	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "agent to forward to the background worker (--agent)")
+	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker; dropped for an agent that has no such flag")
+	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "subagent type to forward to the background worker; this selects a role within the launched agent, not which agent is launched (that is NIWA_AGENT and the workspace default_agent). Dropped for an agent that has no such flag")
 	dispatchCmd.Flags().BoolVarP(&dispatchDetach, "detach", "d", false, "do not attach the terminal to the new session; print hints and return")
 	dispatchCmd.Flags().IntVar(&dispatchParallel, "parallel", 0,
 		"maximum repos to clone concurrently when provisioning the dispatch instance (>=1). Lower this on slow or flaky networks; 1 clones serially. Overrides the [global] clone_workers config. 0 (the default) uses clone_workers, else niwa's built-in default.")
@@ -118,7 +118,8 @@ var lookAgentBinary = func(name string) (string, error) {
 }
 
 // dispatchCapture is the capture seam. Production wires it to captureSessionID;
-// tests substitute a fake to return a fabricated UUID without a real jobs dir.
+// tests substitute a fake to return a fabricated session id without a real
+// record store.
 var dispatchCapture = captureSessionID
 
 // dispatchAttach steps the terminal into a dispatched session by running the
