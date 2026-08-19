@@ -128,6 +128,7 @@ func registerCodexAgentSteps(ctx *godog.ScenarioContext) {
 	// The declaration table, asserted directly.
 	ctx.Step(`^the capability "([^"]*)" is declared unavailable for Codex$`, theCapabilityIsDeclaredUnavailableForCodex)
 	ctx.Step(`^the committed Codex gap list carries the declared reason for "([^"]*)"$`, theGapListCarriesTheDeclaredReason)
+	ctx.Step(`^the refusal carries the declared reason for "([^"]*)"$`, theRefusalCarriesTheDeclaredReason)
 
 	// Live, codex-gated.
 	ctx.Step(`^codex is available$`, codexIsAvailable)
@@ -1462,6 +1463,32 @@ func theGapListCarriesTheDeclaredReason(ctx context.Context, name string) error 
 	want := strings.Join(strings.Fields(d.Reason), " ")
 	if !strings.Contains(flat, want) {
 		return fmt.Errorf("the gap list in %s does not carry the declared reason for %s:\nwant: %s", codexGuidePath, name, want)
+	}
+	return nil
+}
+
+// theRefusalCarriesTheDeclaredReason closes the last side of the same loop. The
+// two steps above tie the table to the guide; this one ties the table to the
+// binary, by asserting the message a developer actually hits carries the
+// declaration's own words rather than a sentence written beside it. With all
+// three, a gap cannot be described three different ways by three different
+// surfaces -- which is the failure mode the whole contract exists to prevent,
+// and the one a hand-written refusal string reintroduces the moment somebody
+// edits the table without editing it.
+func theRefusalCarriesTheDeclaredReason(ctx context.Context, name string) error {
+	c, err := capabilityByName(name)
+	if err != nil {
+		return err
+	}
+	d, err := agentplan.Lookup(c, agent.AgentCodex)
+	if err != nil {
+		return fmt.Errorf("looking up %s for codex: %w", name, err)
+	}
+	s := getState(ctx)
+	flat := strings.Join(strings.Fields(s.stderr), " ")
+	want := strings.Join(strings.Fields(d.Reason), " ")
+	if !strings.Contains(flat, want) {
+		return fmt.Errorf("the refusal does not carry the declared reason for %s:\nwant: %s\ngot:\n%s", name, want, s.stderr)
 	}
 	return nil
 }

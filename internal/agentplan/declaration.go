@@ -286,11 +286,17 @@ var declarations = []Declaration{
 
 	// Row 22: launching a background worker.
 	{Capability: DispatchLaunch, Agent: agent.AgentClaude, State: StateImplemented},
+	// The reason no longer cites the per-agent model table as evidence that
+	// something was half-built. That table did carry Codex entries, and the
+	// launch route's binding check is what established they were a delivery no
+	// declaration stood behind: nothing read them, because the launch path
+	// refused a non-Claude agent before it could. They are gone, and what
+	// remains is an honest statement of what is missing.
 	{
 		Capability: DispatchLaunch, Agent: agent.AgentCodex,
 		State:  StateUnavailable,
 		Kind:   ReasonNotBuilt,
-		Reason: "The launch path refuses a non-Claude agent, although the per-agent model table already carries Codex entries.",
+		Reason: "Nothing in niwa knows how to start a Codex worker, recover which session it became, or step back into one.",
 	},
 
 	// Row 23: per-directory trust bootstrap.

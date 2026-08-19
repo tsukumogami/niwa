@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -210,6 +211,84 @@ func TestReap_LiveIdleEphemeral_Spared(t *testing.T) {
 	}
 	if _, err := workspace.ReadSessionMapping(root, reapLiveSessionID); err != nil {
 		t.Errorf("mapping for live session was deleted; want retained: %v", err)
+	}
+}
+
+// TestReap_MappingWithNoLaunchableAgent_Spared is the safety property the
+// mapping's agent field exists for.
+//
+// The entry-present liveness rule reads one agent's record store. A mapping for
+// an agent niwa launches no background worker for -- or one whose sessions
+// leave no record that distinguishes a live session from a deleted one -- gives
+// that rule no evidence, and the store it does read will always come back
+// empty, which is indistinguishable from "the developer deleted this session".
+// Reclaiming on that would destroy the instance a working session lives in, and
+// it would do it silently.
+//
+// The reaper therefore spares anything it cannot prove is gone. Sparing an
+// instance nobody is using costs a directory; the other mistake costs the work
+// in it.
+func TestReap_MappingWithNoLaunchableAgent_Spared(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, "test-ws-otheragent")
+	m := workspace.SessionMapping{
+		SessionID:    reapDeadSessionID,
+		InstanceName: filepath.Base(inst),
+		InstancePath: inst,
+		Ephemeral:    true,
+		// An accepted agent with no launch spec behind it. There is no record
+		// store for the liveness rule to read, and none of the Claude-shaped
+		// evidence below is about this session.
+		Agent: string(agent.AgentCodex),
+	}
+	if err := workspace.WriteSessionMapping(root, m); err != nil {
+		t.Fatal(err)
+	}
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapWorkspace(root, jobsDir, now)
+	if err != nil {
+		t.Fatalf("reapWorkspace error: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("reaped count = %d, want 0 (a session whose liveness cannot be read must never be reclaimed)", n)
+	}
+	if len(*destroyed) != 0 {
+		t.Fatalf("destroyed = %v, want []", *destroyed)
+	}
+	if _, err := workspace.ReadSessionMapping(root, reapDeadSessionID); err != nil {
+		t.Fatalf("the mapping must survive a spared sweep: %v", err)
+	}
+}
+
+// TestReap_MappingWithNoAgentRecordedIsClaude pins the compatibility reading of
+// an absent agent field. Every mapping written before the field existed
+// describes a Claude session, because that is the only kind niwa wrote one for,
+// and the zero Agent is Claude by internal/agent's own contract. A mapping with
+// no agent and no job entry is therefore still reclaimable, exactly as it was.
+func TestReap_MappingWithNoAgentRecordedIsClaude(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, "test-ws-legacy")
+	mapEphemeral(t, root, reapDeadSessionID, inst, true)
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapWorkspace(root, jobsDir, now)
+	if err != nil {
+		t.Fatalf("reapWorkspace error: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reaped count = %d, want 1 (an agent-less mapping reads as Claude and its session is gone)", n)
+	}
+	if len(*destroyed) != 1 {
+		t.Fatalf("destroyed = %v, want one instance", *destroyed)
 	}
 }
 

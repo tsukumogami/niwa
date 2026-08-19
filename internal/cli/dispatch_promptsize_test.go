@@ -74,7 +74,7 @@ func TestDispatchLaunch_OverCeilingPrompt_RefusedBeforeExec(t *testing.T) {
 	t.Cleanup(func() { spillPrompt = restore })
 
 	over := strings.Repeat("a", maxArgStringBytes+1)
-	err := realDispatchLaunch(context.Background(), t.TempDir(), "", over, nil, []string{})
+	err := realDispatchLaunch(context.Background(), claudeLaunchSpec(), t.TempDir(), "", over, nil, []string{})
 	if err == nil {
 		t.Fatal("expected the launcher to refuse a prompt it could not spill")
 	}
@@ -91,7 +91,7 @@ func TestDispatchLaunch_NulPromptRefusedWhenSpillIsStubbed(t *testing.T) {
 	spillPrompt = func(_, _, body string) (string, error) { return "", errSpillStubbed }
 	t.Cleanup(func() { spillPrompt = restore })
 
-	err := realDispatchLaunch(context.Background(), t.TempDir(), "", "a\x00b", nil, []string{})
+	err := realDispatchLaunch(context.Background(), claudeLaunchSpec(), t.TempDir(), "", "a\x00b", nil, []string{})
 	if err == nil {
 		t.Fatal("expected the launcher to refuse a prompt it could not spill")
 	}
@@ -162,6 +162,6 @@ func spillProbe(t *testing.T, prefix, body string) (bool, string) {
 	// would actually spawn a worker with a 131 KB argument.
 	t.Setenv("PATH", "")
 
-	_ = realDispatchLaunch(context.Background(), instDir, prefix, body, nil, []string{})
+	_ = realDispatchLaunch(context.Background(), claudeLaunchSpec(), instDir, prefix, body, nil, []string{})
 	return fired, gotBody
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -75,14 +76,14 @@ type dispatchFakes struct {
 
 // installDispatchFakes wires every dispatch seam to a fake and resets the
 // command flags to their zero values, restoring all originals on cleanup. The
-// returned struct records calls. By default: lookClaude succeeds, provision
+// returned struct records calls. By default: lookAgentBinary succeeds, provision
 // creates a real temp instance dir under workspaceRoot, launch succeeds,
 // capture returns dispatchTestSessionID, attach succeeds.
 func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 	t.Helper()
 	f := &dispatchFakes{}
 
-	prevLook := lookClaude
+	prevLook := lookAgentBinary
 	prevProvision := provisionInstanceFunc
 	prevLaunch := dispatchLaunch
 	prevCapture := dispatchCapture
@@ -104,7 +105,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 	dispatchDetach = false
 	dispatchKeepAlive = nil
 
-	lookClaude = func() (string, error) { return "/usr/bin/claude", nil }
+	lookAgentBinary = func(string) (string, error) { return "/usr/bin/claude", nil }
 
 	provisionInstanceFunc = func(_ context.Context, root, _, namePrefix, sep string, _ int) (provisionResult, error) {
 		f.provisionCalled++
@@ -117,17 +118,17 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 		return provisionResult{Name: name, Path: dir}, nil
 	}
 
-	dispatchLaunch = func(_ context.Context, _, _, _ string, _ []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, _, _ string, _ []string, _ []string) error {
 		f.launchCalled++
 		return nil
 	}
 
-	dispatchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
+	dispatchCapture = func(_ agentplan.SessionRecords, _, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
 		f.captureCalled++
 		return dispatchTestSessionID, dispatchTestShortID, nil
 	}
 
-	dispatchAttach = func(id string) error {
+	dispatchAttach = func(_ agentplan.LaunchSpec, id string) error {
 		f.attachCalled++
 		f.attachedID = id
 		return nil
@@ -140,7 +141,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 	}
 
 	t.Cleanup(func() {
-		lookClaude = prevLook
+		lookAgentBinary = prevLook
 		provisionInstanceFunc = prevProvision
 		dispatchLaunch = prevLaunch
 		dispatchCapture = prevCapture
@@ -190,7 +191,7 @@ func TestDispatch_ClaudeNotOnPath_Errors(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
 	f := installDispatchFakes(t, root)
-	lookClaude = func() (string, error) { return "", errors.New("not found") }
+	lookAgentBinary = func(string) (string, error) { return "", errors.New("not found") }
 
 	_, _, err := runDispatchCmd(t, "do a thing")
 	if err == nil {
@@ -298,7 +299,7 @@ func TestDispatch_AttachFailure_NonFatal(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
 	f := installDispatchFakes(t, root)
-	dispatchAttach = func(id string) error {
+	dispatchAttach = func(_ agentplan.LaunchSpec, id string) error {
 		f.attachCalled++
 		f.attachedID = id
 		return errors.New("session already exited")
@@ -326,7 +327,7 @@ func TestDispatch_Rollback_LaunchFailure(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
 	f := installDispatchFakes(t, root)
-	dispatchLaunch = func(_ context.Context, _, _, _ string, _ []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, _, _ string, _ []string, _ []string) error {
 		f.launchCalled++
 		return errors.New("launch boom")
 	}
@@ -350,7 +351,7 @@ func TestDispatch_Rollback_CaptureFailure(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
 	f := installDispatchFakes(t, root)
-	dispatchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
+	dispatchCapture = func(_ agentplan.SessionRecords, _, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
 		f.captureCalled++
 		return "", "", errors.New("capture timeout")
 	}
@@ -373,7 +374,7 @@ func TestDispatch_Rollback_MappingWriteFailure(t *testing.T) {
 	f := installDispatchFakes(t, root)
 	// Force a mapping-write failure by having capture return an invalid id;
 	// WriteSessionMapping rejects a non-UUID session id without writing.
-	dispatchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
+	dispatchCapture = func(_ agentplan.SessionRecords, _, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
 		f.captureCalled++
 		return "not-a-uuid", "shortid1", nil
 	}
@@ -469,7 +470,9 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 	// installDispatchFakes mutates shared dispatchFakes counters without
 	// synchronization, which would be a data race under concurrent dispatch; this
 	// test asserts on the durable mappings instead of those counters.
-	dispatchLaunch = func(_ context.Context, _, _, _ string, _ []string, _ []string) error { return nil }
+	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, _, _ string, _ []string, _ []string) error {
+		return nil
+	}
 	destroyInstanceFunc = func(_ string) error { return nil }
 
 	// A goroutine-safe provision: each call mints a distinct instance dir under
@@ -487,7 +490,7 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 
 	// A goroutine-safe capture handing back a distinct valid UUID per call.
 	var captureSeq int64
-	dispatchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
+	dispatchCapture = func(_ agentplan.SessionRecords, _, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
 		i := atomic.AddInt64(&captureSeq, 1)
 		// 12 distinct, well-formed lowercase UUIDs differing only in the final
 		// hex digit (i is 1..n, single hex digit covers n <= 15). A distinct
@@ -566,7 +569,7 @@ func TestDispatch_PassthroughFlags_DiscreteArgv(t *testing.T) {
 	dispatchDetach = true
 
 	var gotPass []string
-	dispatchLaunch = func(_ context.Context, _, _, _ string, passthrough []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, _, _ string, passthrough []string, _ []string) error {
 		gotPass = passthrough
 		return nil
 	}
@@ -680,7 +683,7 @@ func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 	}
 
 	var gotPass []string
-	dispatchLaunch = func(_ context.Context, _, _, _ string, passthrough []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, _, _ string, passthrough []string, _ []string) error {
 		f.launchCalled++
 		gotPass = passthrough
 		return nil
@@ -750,7 +753,7 @@ func TestDispatch_NoName_NoSlugNoNameFlag(t *testing.T) {
 	}
 
 	var gotPass []string
-	dispatchLaunch = func(_ context.Context, _, _, _ string, passthrough []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, _, _ string, passthrough []string, _ []string) error {
 		f.launchCalled++
 		gotPass = passthrough
 		return nil
@@ -792,7 +795,7 @@ func TestDispatch_NameSanitizesEmpty_FallsBack(t *testing.T) {
 	}
 
 	var gotPass []string
-	dispatchLaunch = func(_ context.Context, _, _, _ string, passthrough []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, _, _ string, passthrough []string, _ []string) error {
 		f.launchCalled++
 		gotPass = passthrough
 		return nil

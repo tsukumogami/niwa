@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -143,6 +145,19 @@ func selectReapTargets(workspaceRoot, jobsDir string, now time.Time) ([]reapTarg
 		// straight off the mapping keeps the never-reap-non-ephemeral guarantee
 		// local to this decision.
 		if !mapping.Ephemeral {
+			continue
+		}
+
+		// Which liveness rule applies is the launching agent's own
+		// declaration, and the mapping records which agent that was. An agent
+		// niwa launches no worker for, or one whose sessions leave no signal
+		// that distinguishes a live session from a deleted one, gives this
+		// reaper no evidence at all -- and with no evidence it must not act.
+		// Sparing an instance nobody is using costs a directory; reclaiming one
+		// a resumable session still lives in costs the work in it, which is the
+		// failure this whole rule exists to prevent.
+		spec, hasSpec := agentplan.For(agent.Agent(mapping.Agent)).LaunchSpec()
+		if !hasSpec || spec.Records.Liveness != agentplan.LivenessRecordPresence {
 			continue
 		}
 

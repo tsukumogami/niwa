@@ -6,21 +6,24 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/tsukumogami/niwa/internal/agentplan"
 )
 
 // dispatchLaunch is the package-level launcher seam. Production wires it to
 // realDispatchLaunch; tests substitute a fake to assert the constructed argv
-// and cmd.Dir without spawning a real claude. It launches a background worker
+// and cmd.Dir without spawning a real worker. It launches a background worker
 // rooted in instanceDir.
 var dispatchLaunch = realDispatchLaunch
 
-// realDispatchLaunch runs `claude --bg <prompt>` with cmd.Dir set to
-// instanceDir, forwarding passthrough as already-split discrete argv elements.
+// realDispatchLaunch runs the launched agent's worker binary with cmd.Dir set
+// to instanceDir, forwarding passthrough as already-split discrete argv elements.
 // It generalizes the exec pattern in internal/cli/sessionattach/supervise.go:
-// the worker is daemon-backed, so this does not capture stdout (identity is
-// recovered by jobs-dir cwd correlation in dispatch_capture.go). The prompt is
-// passed as a single argv element -- never shell-interpolated -- so quotes,
-// newlines, and metacharacters in it cannot inject a command (D8).
+// the worker backgrounds itself, so this does not capture stdout (identity is
+// recovered by correlating the agent's session records against instanceDir in
+// dispatch_capture.go). The prompt is passed as a single argv element -- never
+// shell-interpolated -- so quotes, newlines, and metacharacters in it cannot
+// inject a command (D8).
 //
 // env selects the worker's environment: a nil env inherits the full parent
 // environment (os.Environ()), the behavior every ordinary dispatch relies on;
@@ -39,7 +42,7 @@ var dispatchLaunch = realDispatchLaunch
 // An empty prompt is rejected before any exec. The check binds to body, NOT to
 // the composed string: prefix is a long constant whenever keep-alive is armed,
 // so testing the pair would silently stop rejecting an empty task.
-func realDispatchLaunch(ctx context.Context, instanceDir, prefix, body string, passthrough, env []string) error {
+func realDispatchLaunch(ctx context.Context, spec agentplan.LaunchSpec, instanceDir, prefix, body string, passthrough, env []string) error {
 	if body == "" {
 		return fmt.Errorf("dispatch: empty prompt")
 	}
@@ -79,12 +82,12 @@ func realDispatchLaunch(ctx context.Context, instanceDir, prefix, body string, p
 		return fmt.Errorf("dispatch: prompt contains a NUL byte at offset %d; an argv element cannot carry one", i)
 	}
 
-	bin, err := exec.LookPath("claude")
+	bin, err := exec.LookPath(spec.Binary)
 	if err != nil {
-		return fmt.Errorf("dispatch: claude binary not found in PATH")
+		return fmt.Errorf("dispatch: %s binary not found in PATH", spec.Binary)
 	}
 
-	args := buildClaudeBgArgs(prompt, passthrough)
+	args := buildLaunchArgs(spec, prompt, passthrough)
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = instanceDir
 	if env == nil {
@@ -96,23 +99,29 @@ func realDispatchLaunch(ctx context.Context, instanceDir, prefix, body string, p
 	}
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("dispatch: launching claude --bg: %w", err)
+		return fmt.Errorf("dispatch: launching %s: %w", spec.Binary, err)
 	}
 	return nil
 }
 
-// buildClaudeBgArgs builds the discrete argv (excluding the binary) for a
-// background launch. Order: --bg first, then the pass-through flags (already
-// split into discrete elements by the caller), then the prompt as the final
-// single element. Returning each value as its own slice element -- and never
-// concatenating into a command line -- is what prevents a crafted prompt or
-// pass-through value from smuggling in an extra claude flag (D8, security
-// note 1). It is a pure helper so the argv contract is unit-testable without
-// exec.
-func buildClaudeBgArgs(prompt string, passthrough []string) []string {
-	args := make([]string, 0, 2+len(passthrough))
-	args = append(args, "--bg")
+// buildLaunchArgs builds the discrete argv (excluding the binary) for a
+// background launch. Order: the agent's own leading arguments first, then the
+// pass-through flags (already split into discrete elements by the caller), then
+// an optional bare "--" for an agent whose parser would otherwise read a prompt
+// beginning with a dash as a flag, then the prompt as the final single element.
+//
+// Returning each value as its own slice element -- and never concatenating into
+// a command line -- is what prevents a crafted prompt or pass-through value from
+// smuggling in an extra flag (D8, security note 1). It is a pure helper so the
+// argv contract is unit-testable without exec, and it reads the agent's spec
+// rather than naming one, so the same test drives it for any agent.
+func buildLaunchArgs(spec agentplan.LaunchSpec, prompt string, passthrough []string) []string {
+	args := make([]string, 0, len(spec.LeadingArgs)+len(passthrough)+2)
+	args = append(args, spec.LeadingArgs...)
 	args = append(args, passthrough...)
+	if spec.PromptSeparator {
+		args = append(args, "--")
+	}
 	args = append(args, prompt)
 	return args
 }
