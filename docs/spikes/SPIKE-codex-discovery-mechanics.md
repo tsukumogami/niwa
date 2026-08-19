@@ -393,7 +393,40 @@ treats it as a thread name, and for an unknown name it silently starts a fresh
 session and exits 0. Anything passing user input through to `resume` can
 quietly fork a conversation instead of failing.
 
-### 18. `codex exec` reads stdin, and a detached child needs its own session and file-backed stdio
+### 18. A session cannot be resumed while its own turn is still running
+
+Resume is stable and cheap once a turn ends (finding 17). It is refused while
+one is in flight. Measured with a worker mid-turn — a `codex exec` running a
+`sleep 40` — a second process running `codex exec resume <id>` against the same
+session exits 1 with:
+
+```
+ERROR codex_core::session::session: failed to initialize thread persistence:
+  thread-store conflict: thread <id> already has an active writer
+Error: thread/resume: thread/resume failed: thread <id> already has an active
+  writer (code -32600)
+```
+
+Two things to take from where that error is raised. It comes from
+`codex_core::session`, the session store rather than the terminal front end, so
+the interactive `codex resume` refuses on the same grounds — the observation is
+not specific to the exec surface. And it is a conflict on the writer, not a
+permission or a validation error, so it clears by itself the moment the turn
+ends; the resume that failed here succeeded against the same session a minute
+later.
+
+That combination is easy to miss, because the natural way to test resume is
+against a session that has finished, which is exactly the case that works. It
+matters to anything that resumes a session it just started: the turn is in
+flight by construction, and the caller gets a store-conflict error out of an
+operation that otherwise worked.
+
+`codex exec resume` also takes far fewer flags than `codex exec` — its usage
+line is `resume --skip-git-repo-check --config <key=value> <SESSION_ID>
+[PROMPT]`, and passing `--sandbox` there is a parse error and exit 2. Posture
+on a resume goes through `-c` config keys.
+
+### 19. `codex exec` reads stdin, and a detached child needs its own session and file-backed stdio
 
 `codex exec` reads stdin *in addition to* its positional prompt, and on an
 inherited or held-open stdin it blocks before doing anything: measured at 20
@@ -446,7 +479,7 @@ for environment policy. Where that pass could not reach a question it is labelle
 untested rather than inferred; those labels are load-bearing and should survive
 future edits.
 
-Findings 13 through 18, the finding 1 statement that the working directory
+Findings 13 through 19, the finding 1 statement that the working directory
 always contributes, the closure of the `project_root_markers` question in
 finding 5, and the narrowing of finding 6's untested label come from a third
 pass against the same build on Linux with ChatGPT auth, taken while building
