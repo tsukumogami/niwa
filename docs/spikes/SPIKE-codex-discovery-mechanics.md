@@ -407,13 +407,36 @@ Error: thread/resume: thread/resume failed: thread <id> already has an active
   writer (code -32600)
 ```
 
-Two things to take from where that error is raised. It comes from
-`codex_core::session`, the session store rather than the terminal front end, so
-the interactive `codex resume` refuses on the same grounds — the observation is
-not specific to the exec surface. And it is a conflict on the writer, not a
-permission or a validation error, so it clears by itself the moment the turn
-ends; the resume that failed here succeeded against the same session a minute
-later.
+It is not specific to the exec surface. The interactive `codex resume` was
+measured separately against a different live worker, under a real pty, and
+fails the same way — exit 1 after 1.27s, `thread/resume failed during TUI
+bootstrap: … already has an active writer`, dropping the user back to the
+shell. And it is a conflict on the writer, not a permission or a validation
+error, so it clears by itself the moment the turn ends; the resume that failed
+here succeeded against the same session afterwards.
+
+The mechanism is a per-thread writer lock: `$CODEX_HOME/thread-writer-locks/`
+holds one zero-byte `<thread-id>.lock` per thread with a live writer, created
+when a process opens the thread and removed when it exits. That is what makes
+the refusal deterministic rather than racy. The lock is advisory and the kernel
+releases it when the holder dies, so a file left behind by a killed worker does
+not brick the thread — a later resume acquires it anyway and the file's mtime
+moves. Stale `.lock` files sitting in that directory are routine.
+
+The refusal is clean, not merely survivable, and that rules out most of what
+you would otherwise have to worry about. Across a rejected resume the worker's
+rollout was byte-identical (85056 bytes, 19 lines, same md5 before and after);
+the worker completed normally, emitted its final message, and printed nothing
+at all about the attempt; no second rollout was forked; and no model spend was
+incurred, because the refusal lands during session bootstrap before a turn
+starts — the failed resume's stdout was zero bytes. Rollout corruption from
+concurrent writers is ruled out at the source: a second writer is never
+admitted.
+
+One usability note for anything wrapping this. The message is phrased in
+Codex-internal terms — "thread-store conflict", "code -32600" — rather than
+"that session is still running", so a caller that surfaces it raw hands its
+user an error about a data structure instead of about their session.
 
 That combination is easy to miss, because the natural way to test resume is
 against a session that has finished, which is exactly the case that works. It
