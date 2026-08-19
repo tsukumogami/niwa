@@ -6,23 +6,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
 )
 
-// The capture suite runs every assertion against two differently-shaped record
-// stores. That is the whole point of it. Correlating a launched worker to its
-// instance is one behavior -- normalize both sides of the path, refuse to guess
-// when two records claim the same directory, keep polling while an id has not
-// appeared, give up at the deadline -- and it is one behavior whichever agent
-// was launched. Running it against a single store would prove the Claude path
-// works and prove nothing about whether it is a capture or one agent's capture
-// with a parameter bolted on.
+// The capture suite runs every assertion against three differently-shaped
+// record stores. That is the whole point of it. Correlating a launched worker
+// to its instance is one behavior -- normalize both sides of the path, refuse
+// to guess when two records claim the same directory, keep polling while an id
+// has not appeared, give up at the deadline -- and it is one behavior whichever
+// agent was launched. Running it against a single store would prove one path
+// works and prove nothing about whether this is a capture or one agent's
+// capture with a parameter bolted on.
 //
-// The second store is a fixture rather than a second agent's real one, which is
-// deliberate: it is shaped unlike anything niwa ships (nested directories, a
-// glob, one JSON object on a transcript's first line, fields under a nested
-// key, the id as its own handle) so the reader is exercised past the shape it
-// was first written for.
+// Two of the three are the shapes niwa actually declares. The third is a
+// fixture and is deliberately shaped like neither -- a different environment
+// override, different nesting, different field names -- so the reader is
+// exercised past the two shapes it was written against rather than only
+// between them.
 
 // captureStore is one record-store shape plus the fixture writer for it.
 type captureStore struct {
@@ -100,13 +101,60 @@ func nestedStore() captureStore {
 	}
 }
 
-func captureStores() []captureStore { return []captureStore{claudeStore(), nestedStore()} }
+// codexStore is the second real shape, driven by the declared record
+// description rather than by a restatement of it, against a fixture written in
+// the envelope a real session record uses: one JSON object per line, the
+// session metadata on the first, the two fields under a payload key, and the
+// file nested under the date the session started.
+//
+// It is here rather than only in the synthetic store because a description can
+// be internally consistent and still not describe the thing it is about. This
+// is the test that fails if the declared field paths, the nesting depth, or the
+// glob stop matching what the agent actually writes.
+func codexStore(t *testing.T) captureStore {
+	t.Helper()
+	spec, ok := agentplan.For(agent.AgentCodex).LaunchSpec()
+	if !ok {
+		t.Fatal("no launch spec for codex")
+	}
+	return captureStore{
+		name:    "codex",
+		records: spec.Records,
+		write: func(t *testing.T, root, handle, sessionID, cwd string) {
+			t.Helper()
+			// The date directories are the host's local time, which is why the
+			// fixture picks its own rather than deriving one: capture walks the
+			// tree, so any date works and none is special.
+			dir := filepath.Join(root, "2026", "08", "19")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatalf("mkdir record dir: %v", err)
+			}
+			meta := `{"timestamp":"2026-08-19T04:00:00.000Z","ordinal":0,"type":"session_meta","payload":` +
+				`{"id":"` + sessionID + `","session_id":"` + sessionID + `","timestamp":"2026-08-19T04:00:00.000Z",` +
+				`"cwd":"` + cwd + `","originator":"codex_exec","cli_version":"0.147.0","source":"exec"}}`
+			// A second line, because the real file is a transcript and a reader
+			// that swallowed the whole thing would fail to parse rather than
+			// quietly succeed.
+			body := meta + "\n" + `{"timestamp":"2026-08-19T04:00:01.000Z","ordinal":1,"type":"turn_context","payload":{}}` + "\n"
+			name := "rollout-2026-08-19T04-00-00-" + handle + ".jsonl"
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+				t.Fatalf("write record: %v", err)
+			}
+		},
+		wantHandle: func(_, sessionID string) string { return sessionID },
+	}
+}
+
+func captureStores(t *testing.T) []captureStore {
+	t.Helper()
+	return []captureStore{claudeStore(), nestedStore(), codexStore(t)}
+}
 
 func TestCaptureSessionID(t *testing.T) {
 	const sid = "12345678-90ab-cdef-1234-567890abcdef"
 	const other = "ffffffff-ffff-ffff-ffff-ffffffffffff"
 
-	for _, store := range captureStores() {
+	for _, store := range captureStores(t) {
 		t.Run(store.name, func(t *testing.T) {
 			t.Run("present immediately returns the id and the handle", func(t *testing.T) {
 				root := t.TempDir()

@@ -286,18 +286,21 @@ var declarations = []Declaration{
 
 	// Row 22: launching a background worker.
 	{Capability: DispatchLaunch, Agent: agent.AgentClaude, State: StateImplemented},
-	// The reason no longer cites the per-agent model table as evidence that
-	// something was half-built. That table did carry Codex entries, and the
-	// launch route's binding check is what established they were a delivery no
-	// declaration stood behind: nothing read them, because the launch path
-	// refused a non-Claude agent before it could. They are gone, and what
-	// remains is an honest statement of what is missing.
-	{
-		Capability: DispatchLaunch, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "Nothing in niwa knows how to start a Codex worker, recover which session it became, or step back into one.",
-	},
+	// The worker is started detached, its session recovered by correlating the
+	// agent's own session records against the unique instance directory it was
+	// launched in, and stepped back into by that agent's own resume verb --
+	// all of it through the launch description beside this table rather than
+	// through a second pass beside the Claude one. There is deliberately no
+	// Requires edge here: the launch grants its own working directory the
+	// posture it needs, for one process, so it depends on no other capability
+	// having been delivered first.
+	//
+	// What this row does not promise is anything about where the worker is
+	// launched. A session started at an instance root receives none of the
+	// repository-delivered capabilities, which is a gap the contract has no
+	// axis to state -- declarations say who receives, never from where. The
+	// design records it; no row is invented for it.
+	{Capability: DispatchLaunch, Agent: agent.AgentCodex, State: StateImplemented},
 
 	// Row 23: per-directory trust bootstrap.
 	{

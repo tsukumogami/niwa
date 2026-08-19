@@ -43,7 +43,7 @@ func TestNonEmptyBodyWithEmptyPrefixIsAccepted(t *testing.T) {
 // dangling forward reference, and would put untrusted text ahead of niwa's own
 // framing on every path.
 func TestComposedArgvIsPrefixThenBody(t *testing.T) {
-	args := buildLaunchArgs(claudeLaunchSpec(), keepAliveArmingInstruction+"the task", nil)
+	args := buildLaunchArgs(claudeLaunchSpec(), "/inst", keepAliveArmingInstruction+"the task", nil)
 	final := args[len(args)-1]
 
 	if !strings.HasPrefix(final, keepAliveArmingInstruction) {

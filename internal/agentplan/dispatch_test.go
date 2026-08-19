@@ -69,6 +69,16 @@ func TestLaunchSpecsAreComplete(t *testing.T) {
 		if spec.Binary == "" {
 			t.Errorf("(%s): the launch spec names no binary", ag)
 		}
+		// The launcher treats an unset mode as backgrounded, which is the right
+		// fail-safe for a spec somebody builds by hand in a test -- but a
+		// declared row that meant detached and forgot to say so would run in
+		// the wrong mode silently, and "silently" is the word that makes it
+		// worth a check here rather than a comment there.
+		switch spec.Mode {
+		case LaunchBackgrounded, LaunchDetached:
+		default:
+			t.Errorf("(%s): launch mode %d is outside the closed set", ag, spec.Mode)
+		}
 		if len(spec.ResumeArgs) == 0 {
 			t.Errorf("(%s): the launch spec declares no way to resume a session", ag)
 		}

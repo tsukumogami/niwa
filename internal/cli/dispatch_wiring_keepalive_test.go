@@ -58,7 +58,7 @@ func TestDispatch_KeepAlive_FlagOn_RCInjected_Arms(t *testing.T) {
 		t.Fatalf("no non-RC warning expected when RC is on, got %q", stderr)
 	}
 	// Argv safety: the armed prompt stays the single final argv element.
-	args := buildLaunchArgs(claudeLaunchSpec(), prompt, pass)
+	args := buildLaunchArgs(claudeLaunchSpec(), "/inst", prompt, pass)
 	if args[len(args)-1] != keepAliveArmingInstruction+"do a thing" {
 		t.Fatalf("armed prompt must ride one argv element; final element = %q", args[len(args)-1])
 	}

@@ -2,9 +2,17 @@ package cli
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
 )
 
@@ -31,7 +39,7 @@ func syntheticLaunchSpec() agentplan.LaunchSpec {
 // pass-through values sit in the middle as separate elements, and the prompt is
 // the last single element.
 func TestBuildLaunchArgs_Order(t *testing.T) {
-	got := buildLaunchArgs(claudeLaunchSpec(), "do the thing", []string{"--model", "opus", "--permission-mode", "acceptEdits"})
+	got := buildLaunchArgs(claudeLaunchSpec(), "/inst", "do the thing", []string{"--model", "opus", "--permission-mode", "acceptEdits"})
 	want := []string{"--bg", "--model", "opus", "--permission-mode", "acceptEdits", "do the thing"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("buildLaunchArgs = %#v, want %#v", got, want)
@@ -40,7 +48,7 @@ func TestBuildLaunchArgs_Order(t *testing.T) {
 
 // TestBuildLaunchArgs_NoPassthrough verifies the minimal argv.
 func TestBuildLaunchArgs_NoPassthrough(t *testing.T) {
-	got := buildLaunchArgs(claudeLaunchSpec(), "hi", nil)
+	got := buildLaunchArgs(claudeLaunchSpec(), "/inst", "hi", nil)
 	want := []string{"--bg", "hi"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("buildLaunchArgs = %#v, want %#v", got, want)
@@ -52,7 +60,7 @@ func TestBuildLaunchArgs_NoPassthrough(t *testing.T) {
 // Without it, an agent whose parser reads a leading dash as a flag would take a
 // prompt beginning with one as an unknown argument.
 func TestBuildLaunchArgs_SeparatorShape(t *testing.T) {
-	got := buildLaunchArgs(syntheticLaunchSpec(), "--looks-like-a-flag", []string{"-m", "fast"})
+	got := buildLaunchArgs(syntheticLaunchSpec(), "/inst", "--looks-like-a-flag", []string{"-m", "fast"})
 	want := []string{"exec", "--headless", "-m", "fast", "--", "--looks-like-a-flag"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("buildLaunchArgs = %#v, want %#v", got, want)
@@ -90,7 +98,7 @@ func TestBuildLaunchArgs_PromptRemainsSingleElement(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildLaunchArgs(tc.spec, prompt, tc.passthrough)
+			got := buildLaunchArgs(tc.spec, "/inst", prompt, tc.passthrough)
 			if len(got) != tc.wantLen {
 				t.Fatalf("got %d args, want %d: %#v", len(got), tc.wantLen, got)
 			}
@@ -101,6 +109,140 @@ func TestBuildLaunchArgs_PromptRemainsSingleElement(t *testing.T) {
 				t.Errorf("prompt mangled: last element = %q, want %q", got[len(got)-1], prompt)
 			}
 		})
+	}
+}
+
+// codexLaunchSpec returns the Codex launch description, for the tests below
+// that pin the shape of the argv niwa builds from it. Reading it from the table
+// rather than restating it is the point: these assert what the launcher does
+// with a declaration, not what the declaration says.
+func codexLaunchSpec(t *testing.T) agentplan.LaunchSpec {
+	t.Helper()
+	spec, ok := agentplan.For(agent.AgentCodex).LaunchSpec()
+	if !ok {
+		t.Fatal("no launch spec for codex")
+	}
+	return spec
+}
+
+// TestBuildLaunchArgs_WorkdirGrant checks the grant is rendered with the
+// working directory substituted, sits ahead of the pass-through so an explicit
+// posture wins, and is absent entirely for an agent that declares none.
+func TestBuildLaunchArgs_WorkdirGrant(t *testing.T) {
+	got := buildLaunchArgs(codexLaunchSpec(t), "/tmp/ws/inst", "do the thing", []string{"--sandbox", "read-only"})
+
+	grantAt := slices.Index(got, "-c")
+	if grantAt < 0 {
+		t.Fatalf("no grant in argv: %#v", got)
+	}
+	if want := `projects={"/tmp/ws/inst"={trust_level="trusted"}}`; got[grantAt+1] != want {
+		t.Errorf("grant = %q, want %q", got[grantAt+1], want)
+	}
+	if sandboxAt := slices.Index(got, "--sandbox"); sandboxAt < grantAt {
+		t.Errorf("an explicit posture at %d precedes the grant at %d; the developer's own flag must come last", sandboxAt, grantAt)
+	}
+
+	// An agent that declares no grant gets none, rather than an empty pair.
+	if plain := buildLaunchArgs(claudeLaunchSpec(), "/tmp/ws/inst", "hi", nil); slices.Contains(plain, "-c") {
+		t.Errorf("a spec with no grant produced one: %#v", plain)
+	}
+	// And a grant naming no directory is not emitted at all.
+	if noDir := buildLaunchArgs(codexLaunchSpec(t), "", "hi", nil); slices.Contains(noDir, "-c") {
+		t.Errorf("a grant was emitted with no working directory: %#v", noDir)
+	}
+}
+
+// TestCodexLaunchArgv pins the whole argv a Codex dispatch builds, because
+// several of its elements are measured requirements rather than preferences and
+// each fails in its own quiet way.
+//
+// `--skip-git-repo-check` is mandatory: an instance root is not a git
+// repository and the run refuses to start in one without it, and trusting the
+// directory does not substitute. `--json` is what makes the launch log
+// parseable. The `--` separator is what stops a prompt beginning with a dash
+// being read as a flag. And `--ephemeral` must never appear: it runs without
+// persisting the session record, which is the substrate capture reads, so a
+// dispatch carrying it would launch a worker niwa could never find again.
+func TestCodexLaunchArgv(t *testing.T) {
+	got := buildLaunchArgs(codexLaunchSpec(t), "/tmp/ws/inst", "--do the thing", nil)
+
+	want := []string{
+		"exec", "--json", "--skip-git-repo-check",
+		"-c", `projects={"/tmp/ws/inst"={trust_level="trusted"}}`,
+		"--", "--do the thing",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("codex launch argv =\n  %#v\nwant\n  %#v", got, want)
+	}
+	if slices.Contains(got, "--ephemeral") {
+		t.Error("the launch argv suppresses the session record capture reads")
+	}
+}
+
+// TestStartDetachedWorker runs the detached path against a real process, which
+// is the only way to check the things that make it detached: that it returns
+// without waiting for the work, that the worker gets its own session, that its
+// output lands in files inside the instance with the two streams kept apart,
+// and that it keeps running after the launch call returns.
+func TestStartDetachedWorker(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skipf("no shell to launch: %v", err)
+	}
+	instance := t.TempDir()
+	done := filepath.Join(instance, "done")
+
+	// Prints to both streams, reports its own session, then finishes after the
+	// launch call has certainly returned.
+	script := `echo out; echo err 1>&2; ps -o sid= -p $$ > "` + done + `.sid"; sleep 0.3; echo finished > "` + done + `"`
+	spec := agentplan.LaunchSpec{Binary: "sh", Mode: agentplan.LaunchDetached}
+
+	start := time.Now()
+	if err := startDetachedWorker(spec, sh, []string{"-c", script}, instance, os.Environ()); err != nil {
+		t.Fatalf("startDetachedWorker: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Errorf("the launch waited %s for a worker that sleeps 300ms; it must return without waiting", elapsed)
+	}
+	if _, err := os.Stat(done); err == nil {
+		t.Error("the worker had already finished when the launch returned; the test proves nothing about detaching")
+	}
+
+	// The worker outlives the call, so wait for its own completion marker.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(done); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the detached worker never finished")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	out, err := os.ReadFile(filepath.Join(instance, ".niwa", "dispatch-sh.out"))
+	if err != nil {
+		t.Fatalf("reading the worker's stdout log: %v", err)
+	}
+	errOut, err := os.ReadFile(filepath.Join(instance, ".niwa", "dispatch-sh.err"))
+	if err != nil {
+		t.Fatalf("reading the worker's stderr log: %v", err)
+	}
+	if strings.TrimSpace(string(out)) != "out" {
+		t.Errorf("stdout log = %q, want just the stdout line", string(out))
+	}
+	if strings.TrimSpace(string(errOut)) != "err" {
+		t.Errorf("stderr log = %q, want just the stderr line; the streams must not be merged", string(errOut))
+	}
+
+	// Its own session id is its own pid, which is what Setsid buys: a signal
+	// sent to the launcher's process group does not reach it.
+	sid, err := os.ReadFile(done + ".sid")
+	if err != nil {
+		t.Fatalf("reading the worker's session id: %v", err)
+	}
+	if strings.TrimSpace(string(sid)) == strconv.Itoa(os.Getpid()) {
+		t.Error("the worker shares this process's session; it would die with the terminal that launched it")
 	}
 }
 

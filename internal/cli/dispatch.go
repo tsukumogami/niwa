@@ -144,12 +144,18 @@ var dispatchCapture = captureSessionID
 // a (non-fatal) failure without a real binary. It runs ONLY as the final step,
 // after the mapping is durable, so its failure never rolls back (DESIGN
 // Decision 1).
-var dispatchAttach = func(spec agentplan.LaunchSpec, handle string) error {
+var dispatchAttach = func(spec agentplan.LaunchSpec, handle, workdir string) error {
 	bin, err := lookAgentBinary(spec.Binary)
 	if err != nil {
 		return fmt.Errorf("%s binary not found in PATH: %w", spec.Binary, err)
 	}
 	cmd := exec.Command(bin, append(slices.Clone(spec.ResumeArgs), handle)...)
+	// The resumed session runs where it ran. An agent that narrows its own
+	// session list by working directory would otherwise refuse to find a
+	// session started somewhere else, and a session that reopened in the
+	// terminal's directory rather than its own would be a different session in
+	// every way that matters to the work in it.
+	cmd.Dir = workdir
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -546,7 +552,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// a warning and never roll back or delete the mapping (success is already
 	// true; DESIGN Decision 1).
 	if !dispatchDetach {
-		if err := dispatchAttach(spec, handle); err != nil {
+		if err := dispatchAttach(spec, handle, instancePath); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: warning: could not attach to session %s: %v\n", sessionID, err)
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: the session is running; attach later with: %s %s %s\n",
 				spec.Binary, strings.Join(spec.ResumeArgs, " "), handle)

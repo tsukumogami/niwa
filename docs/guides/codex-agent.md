@@ -15,8 +15,9 @@ niwa simply hasn't wired up yet.
 
 ## What a Codex session gets
 
-Everything below lands inside the instance, in the repository you open the
-session in.
+Everything up to background dispatch lands inside the instance, in the
+repository you open the session in. Background dispatch is the one that starts
+somewhere else, which turns out to matter.
 
 **Orientation.** niwa composes the workspace-level and group-level context into
 each repository's own `AGENTS.md`, because Codex reads context from the nearest
@@ -68,6 +69,41 @@ front of a Claude Code one. See `docs/guides/file-distribution.md`.
 **Git-exclude coverage.** Every name niwa writes into a working tree is covered
 by the repository's exclude block, so a prepared tree doesn't read dirty.
 
+**Background dispatch.** `niwa dispatch` launches a Codex worker the same way
+it launches a Claude one, with the same command and no agent flag — the agent
+is whichever one `NIWA_AGENT` and your workspace's `default_agent` already
+resolve to. It provisions a fresh instance, starts `codex exec` detached inside
+it, recovers the session id from the session record Codex writes, and prints
+`codex resume <id>`. Without `--detach` it drops you into that session as its
+last step. The worker's own output is kept in the instance, at
+`.niwa/dispatch-codex.out` and `.niwa/dispatch-codex.err`, which is where to
+look when a run does something you didn't expect.
+
+Three things are worth knowing before you rely on it.
+
+The worker starts in the instance root, and everything the sections above
+deliver lands inside the repositories below it — so a dispatched worker gets
+none of it. No composed orientation, none of the workspace's skills, no MCP
+servers, no posture from the project layer. Codex fixes what it reads when the
+session is constructed, keyed to the directory it started in, and it doesn't
+pick things up later from a directory you tell it to work in. Your own
+user-level Codex skills still load, since those aren't part of what niwa
+delivers; so does your environment, and so does the task you gave it, and the
+repository files are all there to read. But a dispatched worker is briefed by
+its prompt rather than by the workspace, so write the prompt accordingly.
+
+A Codex run's exit status doesn't tell you whether the work happened. A worker
+that couldn't write still exits 0, and an API failure of any kind — including
+running out of quota — exits 1 alongside every other error. Read the last
+message or the run's output rather than the exit code.
+
+And a dispatched Codex instance isn't reclaimed automatically. `niwa reap`
+reclaims an instance once its session's record is gone, and Codex never removes
+those records, so there's no way to tell a session you finished with from one
+you're coming back to. niwa spares it rather than guess, says so when it runs,
+and leaves it to you: `niwa destroy <instance>` when you're done with the
+session.
+
 ## What a Codex session doesn't get
 
 <!-- BEGIN GENERATED: codex gap list (internal/agentplan/gaplist.go) -->
@@ -95,7 +131,7 @@ the session would never read it, so these move only if the agent changes.
   delivered as hooks, which Codex cannot receive.
 - **Filling in a pull request's body from the session.** The pull-request body
   capture is delivered as a hook, which Codex cannot receive.
-- **A dedicated niwa instance provisioned for each dispatched session.**
+- **An instance provisioned automatically for a session niwa did not launch.**
   Provisioning rides a session-start hook and the harness job-state file;
   Codex has neither.
 - **Instance-root skills such as `/dispatch`.** Root-installed skills serve
@@ -108,9 +144,6 @@ debt, and it's the one group that can shrink without the agent changing.
 
 - **niwa's own plugin, which carries the migrate-config skill.** Codex accepts
   the identical plugin manifest; the wiring is unbuilt.
-- **Launching a background worker with `niwa dispatch`.** Nothing in niwa
-  knows how to start a Codex worker, recover which session it became, or step
-  back into one.
 
 ### What doesn't apply to Codex
 

@@ -34,24 +34,31 @@ func init() {
 var reapCmd = &cobra.Command{
 	Use:   "reap",
 	Short: "Reclaim ephemeral instances whose backing session was deleted",
-	Long: `Reclaim ephemeral instances whose Claude Code session was deleted.
+	Long: `Reclaim ephemeral instances whose session was deleted.
 
 reap enumerates the workspace's instances, joins each against its
 session->instance mapping, and force-destroys an instance only when BOTH hold:
 
   - the instance is marked ephemeral (provisioned for a session), and
-  - its session is dead by the liveness rule: the session's Claude Code job
-    entry at ~/.claude/jobs/<session-id>/ is GONE (the proxy for the developer
-    deleting the session from the Agent View).
+  - its session is dead by the liveness rule: the session record its agent
+    writes is GONE (the proxy for the developer deleting the session).
 
 Teardown is delete-only. A session that finished its task, went idle, or was
-suspended keeps its job entry -- and so keeps its instance, which stays
-resumable -- and is reclaimed only once that entry disappears. A non-ephemeral
+suspended keeps its record -- and so keeps its instance, which stays resumable
+-- and is reclaimed only once that record disappears. A non-ephemeral
 (developer) instance is NEVER targeted, and an instance is NEVER reaped without
 the ephemeral marker.
 
+Some instances are spared rather than judged, and reap says so on stderr when
+it happens. The liveness rule needs a record that disappears when a session is
+deleted, and not every agent keeps one: an agent whose session records are
+never removed leaves no way to tell a live session from a deleted one, and an
+instance whose session cannot be proven gone is never reclaimed. Those pile up
+until you remove them yourself with niwa destroy. Sparing an instance nobody is
+using costs a directory; the other mistake costs the work inside it.
+
 reap runs on demand and is also invoked opportunistically at the start of
-niwa create so session fan-out self-bounds.`,
+niwa create and niwa dispatch so session fan-out self-bounds.`,
 	Args:          cobra.NoArgs,
 	SilenceErrors: true,
 	SilenceUsage:  true,
@@ -90,6 +97,72 @@ type reapTarget struct {
 	InstancePath string
 }
 
+// reportSparedInstances says what the sweep left alone and why.
+//
+// It goes to stderr rather than to the command's own output because every
+// opportunistic sweep -- at the top of a dispatch, a create, a watch -- runs
+// underneath something the developer actually asked for, and this is a note
+// about the sweep rather than a result of that command. A line they can ignore
+// beats discovering a full disk.
+//
+// The reasons are grouped so a workspace with a dozen spared instances says
+// one thing a dozen times' worth rather than a dozen things, and the paths are
+// listed under it so the note is actionable rather than only informative.
+func reportSparedInstances(spared []sparedInstance) {
+	if len(spared) == 0 {
+		return
+	}
+	byReason := map[string][]string{}
+	var order []string
+	for _, s := range spared {
+		if _, seen := byReason[s.Reason]; !seen {
+			order = append(order, s.Reason)
+		}
+		byReason[s.Reason] = append(byReason[s.Reason], s.Path)
+	}
+	for _, reason := range order {
+		paths := byReason[reason]
+		fmt.Fprintf(os.Stderr, "niwa: spared %d instance(s): %s\n", len(paths), reason)
+		for _, p := range paths {
+			fmt.Fprintf(os.Stderr, "niwa:   %s\n", p)
+		}
+		fmt.Fprintf(os.Stderr, "niwa: reclaim one yourself with `niwa destroy <instance>` once you are done with its session\n")
+	}
+}
+
+// sparedInstance is an instance the sweep left alone because it could not read
+// whether the session was still there, with the reason in the words a user
+// needs to understand why their disk is not getting emptier.
+type sparedInstance struct {
+	Path   string
+	Reason string
+}
+
+// livenessUnreadable reports whether a mapping's recorded agent leaves the
+// sweep with no way to tell a live session from a deleted one, and why.
+//
+// Three shapes reach here and all three mean the same thing to the sweep. An
+// agent outside the accepted set is a mapping written by something this build
+// does not understand. An agent niwa launches no background worker for has no
+// record store to read at all. And an agent whose records are never removed has
+// a store that says a session once existed and nothing about whether it still
+// does -- reading it would answer a different question than the one being
+// asked.
+func livenessUnreadable(recorded string) (string, bool) {
+	ag, err := agent.ParseAgent(recorded)
+	if err != nil {
+		return fmt.Sprintf("its mapping records agent %q, which this build does not recognize", recorded), true
+	}
+	spec, ok := agentplan.For(ag).LaunchSpec()
+	if !ok {
+		return fmt.Sprintf("niwa launches no background worker for %s, so there are no session records to read", ag), true
+	}
+	if spec.Records.Liveness != agentplan.LivenessRecordPresence {
+		return fmt.Sprintf("%s never removes a session's record, so its presence cannot tell a live session from a deleted one", ag), true
+	}
+	return "", false
+}
+
 // selectReapTargets joins the workspace's instances against their session
 // mappings and returns the targets eligible for reclamation. An instance is
 // eligible only when it is marked ephemeral AND its session is dead by
@@ -105,15 +178,17 @@ type reapTarget struct {
 // This function performs NO destruction and touches no instance directory, so
 // the selection logic is unit-testable against fixture mappings and a fixture
 // jobs tree, independent of the real destroy path.
-func selectReapTargets(workspaceRoot, jobsDir string, now time.Time) ([]reapTarget, error) {
+func selectReapTargets(workspaceRoot, jobsDir string, now time.Time) ([]reapTarget, []sparedInstance, error) {
+	var unreadable []sparedInstance
+
 	records, err := workspace.EnumerateInstanceRecords(workspaceRoot)
 	if err != nil {
-		return nil, fmt.Errorf("enumerating instances: %w", err)
+		return nil, nil, fmt.Errorf("enumerating instances: %w", err)
 	}
 
 	mappings, err := workspace.ListSessionMappings(workspaceRoot)
 	if err != nil {
-		return nil, fmt.Errorf("listing session mappings: %w", err)
+		return nil, nil, fmt.Errorf("listing session mappings: %w", err)
 	}
 	byPath := make(map[string]workspace.SessionMapping, len(mappings))
 	for _, m := range mappings {
@@ -150,14 +225,22 @@ func selectReapTargets(workspaceRoot, jobsDir string, now time.Time) ([]reapTarg
 
 		// Which liveness rule applies is the launching agent's own
 		// declaration, and the mapping records which agent that was. An agent
-		// niwa launches no worker for, or one whose sessions leave no signal
-		// that distinguishes a live session from a deleted one, gives this
-		// reaper no evidence at all -- and with no evidence it must not act.
-		// Sparing an instance nobody is using costs a directory; reclaiming one
-		// a resumable session still lives in costs the work in it, which is the
-		// failure this whole rule exists to prevent.
-		spec, hasSpec := agentplan.For(agent.Agent(mapping.Agent)).LaunchSpec()
-		if !hasSpec || spec.Records.Liveness != agentplan.LivenessRecordPresence {
+		// niwa launches no worker for, one whose sessions leave no signal that
+		// distinguishes a live session from a deleted one, or a mapping whose
+		// recorded agent will not parse at all, each give this reaper no
+		// evidence -- and with no evidence it must not act. Sparing an instance
+		// nobody is using costs a directory; reclaiming one a resumable session
+		// still lives in costs the work in it, which is the failure this whole
+		// rule exists to prevent.
+		//
+		// It is reported rather than skipped in silence. A sweep that spares
+		// something and says nothing is indistinguishable from a sweep that
+		// found nothing, and the instances pile up with no way to notice short
+		// of counting directories. This is the runtime half of a gap the
+		// capability table declares: a declared gap nobody can observe while it
+		// is happening is only half declared.
+		if reason, spared := livenessUnreadable(mapping.Agent); spared {
+			unreadable = append(unreadable, sparedInstance{Path: rec.Path, Reason: reason})
 			continue
 		}
 
@@ -185,7 +268,7 @@ func selectReapTargets(workspaceRoot, jobsDir string, now time.Time) ([]reapTarg
 		})
 	}
 
-	return targets, nil
+	return targets, unreadable, nil
 }
 
 // reapWorkspace selects and reclaims orphaned ephemeral instances under
@@ -195,10 +278,11 @@ func selectReapTargets(workspaceRoot, jobsDir string, now time.Time) ([]reapTarg
 // failure on one target is surfaced on stderr and does not abort the rest, so a
 // single stuck instance never blocks reclaiming the others.
 func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
-	targets, err := selectReapTargets(workspaceRoot, jobsDir, now)
+	targets, unreadable, err := selectReapTargets(workspaceRoot, jobsDir, now)
 	if err != nil {
 		return 0, err
 	}
+	reportSparedInstances(unreadable)
 
 	reaped := 0
 	for _, t := range targets {

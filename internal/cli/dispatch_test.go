@@ -128,7 +128,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 		return dispatchTestSessionID, dispatchTestShortID, nil
 	}
 
-	dispatchAttach = func(_ agentplan.LaunchSpec, id string) error {
+	dispatchAttach = func(_ agentplan.LaunchSpec, id string, _ string) error {
 		f.attachCalled++
 		f.attachedID = id
 		return nil
@@ -299,7 +299,7 @@ func TestDispatch_AttachFailure_NonFatal(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
 	f := installDispatchFakes(t, root)
-	dispatchAttach = func(_ agentplan.LaunchSpec, id string) error {
+	dispatchAttach = func(_ agentplan.LaunchSpec, id string, _ string) error {
 		f.attachCalled++
 		f.attachedID = id
 		return errors.New("session already exited")

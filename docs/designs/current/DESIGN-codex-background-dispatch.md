@@ -23,14 +23,14 @@ decision: |
   declaration -- and a new AST scan over the dispatch-path files holds that
   no file there names an agent. Capture reads the agent's own on-disk
   session record through one reader over a declared record shape,
-  exercised against two differently-shaped stores; the durable mapping
+  exercised against three differently-shaped stores; the durable mapping
   records its agent; the reaper spares any mapping whose liveness it
   cannot read. Codex launches via start-and-release with setsid, stdin at
   /dev/null, stdout and stderr to separate niwa-owned files,
   --skip-git-repo-check always, and its sandbox posture from a
-  per-invocation trust override that leaves the developer's own Codex
-  configuration byte-identical -- never a --sandbox flag, never a
-  persisted trust stanza.
+  per-invocation trust override whose grant is scoped to the one worker
+  process and writes nothing to the developer's own Codex configuration
+  -- never a --sandbox flag, never a persisted trust stanza.
 rationale: |
   Every structural decision here names the test that fails when its claim
   stops being true, because the predecessor failed precisely by lacking
@@ -63,13 +63,14 @@ DESIGN-agent-capability-contract.md: that design built the declaration
 table and bound the plan and procedure routes; this one binds the third
 route, `RouteLaunch`, whose row 22 was declared and read by nothing.
 
-One thing distinguishes this document from an ordinary design: its first
-PR is already merged on this branch (commit 5a7b4c4). Decisions 1 through
-7 and 11 describe code that exists and tests that run; where a decision
-was demonstrated by a failing test, the failure was reproduced against
-this tree while this document was written, not remembered from a plan.
-Decisions 8 through 10 describe PR 2, constrained throughout by
-measurement against codex-cli 0.147.0.
+One thing distinguishes this document from an ordinary design: both
+halves of the work it describes exist. PR 1 (commit 5a7b4c4, hardened in
+ac6d3ab) landed the seam against Claude alone; the branch this document
+rides carries the Codex delivery on top of it. Every decision below
+describes code that exists and tests that run -- where a decision was
+demonstrated by a failing test, the failure was reproduced against a
+real tree rather than remembered from a plan -- and the launch mechanics
+are constrained throughout by measurement against codex-cli 0.147.0.
 
 ## Context and Problem Statement
 
@@ -149,16 +150,18 @@ mechanical no-behavior-change argument.
 (`dispatch.go`), consulted via `Producer.LaunchSpec()`.**
 
 The spec is everything the dispatch path has to ask about one agent: the
-binary name, the leading arguments, the spelling of each pass-through flag
-(`LaunchFlags` -- model, permission mode, subagent type, display name,
-settings), the portable model-category bindings and recognized versionless
-names, the session-record description (`SessionRecords`, Decision 4), the
-resume arguments, and the management verbs printed as hints. An intent an
+binary name, the launch mode (`LaunchMode`, below), the leading
+arguments, the working-directory grant (`WorkdirGrantArgs`, Decision 9),
+the spelling of each pass-through flag (`LaunchFlags` -- model,
+permission mode, subagent type, display name, settings), the portable
+model-category bindings and recognized versionless names, the
+session-record description (`SessionRecords`, Decision 4), the resume
+arguments, and the management verbs printed as hints. An intent an
 agent has no flag for is spelled as the empty string and dropped rather
 than guessed at: forwarding a flag a binary does not accept fails the
 launch, and inventing a near-equivalent hands a developer something they
 did not ask for (`buildDispatchPassthrough`,
-`internal/cli/dispatch.go:669`).
+`internal/cli/dispatch.go:675`).
 
 It lives in `internal/agentplan` rather than beside the code that execs
 because the package's boundary already permits exactly this and no more.
@@ -180,17 +183,23 @@ Claude per `internal/agent`'s own documented contract
 wired to set the agent degrades to today's behavior rather than to no
 launch at all.
 
-**What it deliberately does not carry yet: the process model.** Claude's
-`claude --bg` is daemon-backed -- the worker backgrounds itself and the
-launcher runs the command to completion. Codex's `codex exec` runs the
-whole turn in the foreground, so its launch must start and release
-(Decision 8). That difference is real and measured, and the field for it
-is still absent from `LaunchSpec` on this branch, on purpose: every agent
-niwa launches today has one process model, so a launch-mode field would be
-a constant nothing branches on -- the exact dead-seam shape this contract
-exists to catch, in miniature. The field arrives in PR 2 with Codex, its
-first second answer, and `TestLaunchSpecsAreComplete` grows the assertion
-that every spec declares one in the same change.
+**The process model is a field, and it arrived with its second answer.**
+`LaunchMode` has two members: `LaunchBackgrounded` -- the binary puts its
+own worker in the background and exits, so the launcher runs the command
+and waits, because the process it started is the hand-off rather than
+the work -- and `LaunchDetached` -- the binary runs the whole turn in
+the foreground, so the launcher starts it in a session of its own and
+releases it (Decision 8). The launcher branches on it, which is the
+point of its timing: the field was deliberately absent from PR 1, where
+every launched agent had one process model and a launch-mode field would
+have been a constant nothing branches on -- the exact dead-seam shape
+this contract exists to catch, in miniature. It landed in the change
+that gave it a second value and a live branch, and
+`TestEveryLaunchSpecFieldIsRead` holds that it stays read. One deliberate
+asymmetry: the launcher's switch treats any mode other than
+`LaunchDetached` as backgrounded, so the zero value degrades to the
+run-and-wait path -- the same fail-safe posture as the zero agent
+resolving to Claude.
 
 **Rejected: the spec beside the exec code in `internal/cli`.** Putting the
 table where it is consumed reads naturally until the binding is needed.
@@ -254,10 +263,10 @@ agent and asserts the command does what the table says: an implemented
 agent dispatches (provision called once), an unavailable one is refused
 before anything is provisioned, with the declaration's reason verbatim in
 the message. It is written against the table rather than against a named
-agent, so when row 22 flips in PR 2 the test changes which branch it takes
-for Codex and asserts the other half -- it never needs editing to keep
-passing, and it fails immediately if the binary and the table disagree
-about who can be launched. That is what stops the refusal a developer
+agent, and when row 22 flipped on this branch the test changed which
+branch it takes for Codex and asserted the other half with no edit -- it
+never needs editing to keep passing, and it fails immediately if the
+binary and the table disagree about who can be launched. That is what stops the refusal a developer
 hits and the gap list they read from drifting into two explanations.
 
 **Rejected: the functional scenario as the binding.** The sibling
@@ -353,18 +362,22 @@ parameter bolted on is the test that proves it. The capture suite
 after symlink resolution on both sides, the ambiguity error when two
 records claim one directory, the timeout error at zero matches,
 keep-polling on a record whose id has not been written yet, and the
-symlinked-instance-path case -- against two differently-shaped stores.
-One is the shape niwa ships: a directory per job holding a
+symlinked-instance-path case -- against three differently-shaped
+stores. The first is Claude's: a directory per job holding a
 pretty-printed JSON object, the directory's name as the handle. The
-other is a fixture deliberately shaped unlike anything niwa ships:
-records three directories deep, matched by a glob, each a JSONL
-transcript whose first line is its metadata, both fields under a nested
-key, the id as its own handle. The fixture writes a second transcript
-line specifically so a reader that swallowed the whole file would fail
-to parse rather than quietly succeed. Running the suite against a single
-store would prove the Claude path works and prove nothing about whether
-the mechanism generalizes; the second shape is what makes "one capture"
-a property the suite can fail on.
+second is a fixture deliberately shaped unlike anything niwa ships --
+records nested under a glob, metadata on a transcript's first line,
+fields under a nested key, the id as its own handle -- which writes a
+second transcript line specifically so a reader that swallowed the
+whole file would fail to parse rather than quietly succeed. The third
+is the real Codex description, driven against a fixture written in the
+envelope a real rollout uses: it is the test that fails if the declared
+field paths, the nesting depth, or the glob stop matching what the
+agent actually writes. Running the suite against a single store would
+prove the Claude path works and prove nothing about whether the
+mechanism generalizes; the alien shape is what makes "one capture" a
+property the suite can fail on, and the Codex shape is what binds the
+declaration to the record format on disk.
 
 The shared rules are deliberately not pluggable. Refusing to guess when
 two records claim the same directory, treating an id-less record as
@@ -561,14 +574,33 @@ reading, so a pre-field mapping with no job entry stays reclaimable
 exactly as it was.
 
 Resume stays one verb on the strength of the same declaration.
-`dispatchAttach` (`internal/cli/dispatch.go:147`) looks the binary up,
-runs the agent's own resume arguments against the handle with inherited
-stdio, and propagates the outcome -- all of it written once, with only
-`spec.ResumeArgs` and `spec.Binary` varying.
+`dispatchAttach` (`internal/cli/dispatch.go:147`) takes the spec, the
+handle, and the working directory the session ran in, looks the binary
+up, runs the agent's own resume arguments against the handle with
+inherited stdio, and propagates the outcome -- all of it written once,
+with only `spec.ResumeArgs` and `spec.Binary` varying. The working
+directory is threaded because a resumed session runs where it ran: an
+agent that narrows its own session list by working directory would
+otherwise refuse to find a session started elsewhere, and a session
+reopened in the terminal's directory rather than its own is a different
+session in every way that matters to the work in it.
 `TestDispatchResumeUsesTheDeclaredVerb` substitutes the seam and asserts
 the declared verb and a non-empty handle arrive, with everything around
 the exec -- the lookup, the non-fatal failure handling -- the same code
 whoever was launched.
+
+The "one verb" property has a test only a cross-agent run can be:
+`TestDispatchSharedHalfRunsForEveryAgent` runs one dispatch per
+launchable agent through the same code and asserts the parts that must
+not vary do not -- the mapping is written and records that agent, the
+handle capture returned reaches resume unchanged, and resume is told
+which directory the session ran in -- while the binary and the verb
+come from the declaration. Two resume implementations selected by a
+conditional at the call site is the named failure mode, and it is not
+one a per-agent test catches, because each half would pass its own; the
+shared half is only shown shared by running it for more than one agent,
+and the test skips itself with a complaint if the table ever shrinks to
+one.
 
 **Rejected: a per-agent identity type or a second store.** Nothing
 requires one: the ids share a format, the store is format-agnostic, and
@@ -587,20 +619,41 @@ entry-present rule with spare-while-resumable semantics is unchanged for
 it. `LivenessNone` means the agent records no signal niwa can read that
 tells a live session from a deleted one.
 
-The reaper's gate reads the mapping's recorded agent, resolves its spec,
-and spares the instance unless the declaration says presence is a
-faithful proxy (`internal/cli/reap.go:159`): no spec, or any liveness
-kind other than record-presence, means no evidence, and with no evidence
-it must not act. Sparing an instance nobody is using costs a directory;
-reclaiming one a resumable session still lives in costs the work in it,
-which is the failure this whole rule exists to prevent.
+The reaper's gate reads the mapping's recorded agent and spares the
+instance unless the declaration says presence is a faithful proxy
+(`livenessUnreadable`, `internal/cli/reap.go:151`). Three shapes reach
+that gate and all three mean the same thing to the sweep: an agent
+outside the accepted set -- a mapping written by something this build
+does not understand, which would otherwise be spared silently forever, a
+case nobody had considered until the gate was written to enumerate its
+inputs; an agent niwa launches no worker for, which has no record store
+to read at all; and an agent whose records are never removed, whose
+store answers a different question than the one being asked. No
+evidence, and with no evidence it must not act. Sparing an instance
+nobody is using costs a directory; reclaiming one a resumable session
+still lives in costs the work in it, which is the failure this whole
+rule exists to prevent.
 `TestReap_MappingWithNoLaunchableAgent_Spared` is the safety property as
 a test: a mapping for an agent with no launch spec is spared even though
 the Claude-shaped store has nothing for it -- the state that, before this
 branch, read as "the developer deleted this session" and destroyed the
 instance.
 
-**PR 2 declares Codex `LivenessNone`.** This is the honest declaration,
+**Sparing is visible, not silent.** A sweep that spares something and
+says nothing is indistinguishable from a sweep that found nothing, so
+the instances would accumulate with no symptom until somebody counted
+directories -- a declared gap nobody can observe at runtime is only
+half declared. So the sweep reports what it spared and why
+(`reportSparedInstances`): grouped by reason so a dozen spared
+instances say one thing rather than a dozen, with the paths listed so
+the note is actionable, and with `niwa destroy <instance>` named as the
+way out. It goes to stderr because every opportunistic sweep runs
+underneath a command the developer actually asked for, and this is a
+note about the sweep, not a result of that command. `niwa reap`'s own
+help now describes the sparing rule alongside the entry-present one,
+so the behavior is discoverable before it is encountered.
+
+**Codex declares `LivenessNone`.** This is the honest declaration,
 and it is worth being precise about why, because the tempting alternative
 is formally available. Codex rollouts are never aged out: the agent has
 no delete verb for them and removes nothing on session end, so the honest
@@ -621,13 +674,13 @@ directory that never goes away.
 **Explicitly not built here: the real liveness proxy.** Closing the gap
 means a name-plus-TTL-plus-mtime backstop for mapped Codex instances --
 the analogue of the existing backstop, which today ages only unmapped
-orphans (`selectBackstopTargets`, `reap.go:283`) and deliberately never
+orphans (`selectBackstopTargets`, `reap.go:367`) and deliberately never
 touches a mapped instance. That is the next feature's work, named as such
 so the next author inherits the boundary rather than rediscovering it;
 this feature's job is the narrower one of not introducing data loss. The
-acceptance shape follows: with a Codex mapping present, the sweep spares
-the instance; no TTL or mtime rule for mapped instances appears in PR 2's
-diff.
+acceptance shape holds on this branch: with a Codex mapping present, the
+sweep spares the instance and says so; no TTL or mtime rule for mapped
+instances appears in the delivered code.
 
 **Rejected: record-presence over the rollout store.** Stated above: a
 rule whose trigger is an action nobody performs presents a working
@@ -642,24 +695,35 @@ finished `codex exec` leaves a resumable session with no process at all
 ### Decision 8 -- the Codex launch shape (R7, R8)
 
 Every element here is settled by measurement against codex-cli 0.147.0,
-and each one is a field or rule of PR 2's spec and launcher rather than
-advice.
+and each one is now a field of the Codex spec or a rule of the launcher
+rather than advice. The launcher's detached half is
+`startDetachedWorker` (`internal/cli/dispatch_launcher.go`), selected by
+`spec.Mode`; the argv is pinned whole by `TestCodexLaunchArgv`, and the
+detached mechanics run against a real process in
+`TestStartDetachedWorker`, which checks the launch returns without
+waiting (and that the worker had not already finished when it did, so
+the test proves something about detaching), that the worker gets a
+session of its own, and that the two output streams land in separate
+files unmerged.
 
 - **Start-and-release, not run-to-completion.** `codex exec` runs the
-  whole turn in the foreground, so Claude's `cmd.Run()` shape would park
+  whole turn in the foreground, so the run-and-wait shape would park
   the dispatch for the entire task. Measured: `cmd.Start()` with
   `SysProcAttr{Setsid: true}` and stdio redirected to files returns in
   about 670 microseconds; the child survives the parent's exit, is
   reparented, completes its turn, writes its rollout, and ignores
   signals sent to the launcher's process group -- so a Ctrl-C on the
-  niwa CLI does not take the worker with it. This is the launch-mode
-  field's first second answer, and it lands in `LaunchSpec` in the same
-  PR (Decision 1).
-- **`exec.Command`, never `exec.CommandContext`.** The current launcher
-  uses `CommandContext` and may keep it for a run-to-completion agent,
-  but a released child must not be tied to the dispatch's context: a
-  context cancelled when dispatch returns would kill the worker the
-  instant launch finished.
+  niwa CLI does not take the worker with it. This is `LaunchDetached`,
+  the launch-mode field's second answer, landed in the same change as
+  the field (Decision 1); the launcher releases the process after
+  `Start`, waiting to learn nothing from an exit status that -- for
+  this agent -- does not report task success anyway (Decision 10).
+- **`exec.Command`, never `exec.CommandContext`, on the detached
+  path.** A released child must not be tied to the dispatch's context:
+  a context cancelled when dispatch returns -- which is every dispatch
+  -- would kill the worker the instant launch finished. The
+  backgrounded path keeps `CommandContext` precisely because the
+  process it starts is the hand-off, not the worker.
 - **Stdin at `/dev/null`, always.** `codex exec` reads stdin in addition
   to its positional prompt. With stdin inherited or left an open pipe,
   the process blocks before doing anything -- measured at 20 seconds
@@ -672,8 +736,11 @@ advice.
 - **Stdout and stderr to files niwa owns, never merged.** stderr is not
   empty on a healthy run -- 1.4KB of MCP tracing on the measuring host
   -- and `--json` stdout to a file is clean JSONL with no ANSI; merging
-  would corrupt the one and bury the other. Non-empty stderr is not
-  failure; exit codes are (Decision 10).
+  would corrupt the one and bury the other. The files live inside the
+  instance at `.niwa/dispatch-<binary>.out` and `.err`, mode 0o600,
+  named by the binary so two agents' logs could never be confused and
+  so the function that opens them names no agent. Non-empty stderr is
+  not failure; exit codes are (Decision 10).
 - **`--skip-git-repo-check` is mandatory, and trust does not substitute
   for it.** An instance root is not a git repository, and the launch
   refuses to start there without the flag; measured, the identical
@@ -757,9 +824,17 @@ stanzas. (The earlier plain-run md5 comparisons above were taken
 against an isolated, minimal configuration where the checksum was
 meaningful.)
 
-The override is per-agent launch data like every other argv element,
-so it lives in the Codex spec's leading arguments with the instance
-directory interpolated as its own value, never shell-composed.
+The override is per-agent launch data like every other argv element: it
+lives in the spec's `WorkdirGrantArgs`, with the absolute working
+directory substituted into a single verb in the last element by
+`formatWorkdirGrant` -- never shell-composed, and yielding nothing at
+all for an agent that declares no grant or a call with no directory,
+since a grant naming no directory would either fail to parse or grant
+something nobody asked for. The grant precedes the pass-through flags
+in the argv, so a developer who asks for a posture explicitly gets the
+last word on it -- which is also why the Codex spec still spells
+`--sandbox` as its permission-mode flag: niwa passes nothing there of
+its own, but a deliberate developer intent has somewhere to go.
 
 **Consequently, row 22 carries no `Requires: DirectoryTrust` edge.**
 The edge looked right while persistent trust was the only route to the
@@ -781,8 +856,9 @@ implementation still gets this wrong:
   its own sentence: a clean exit from a `-c` override is not evidence
   the override took effect. Anything that generates those flags
   inherits that footgun, this feature and every later one -- which is
-  why the launch test asserts the inline-table spelling, not merely
-  that some `-c` argument is present.
+  why `TestCodexLaunchArgv` pins the whole argv including the
+  inline-table spelling, not merely that some `-c` argument is
+  present.
 - `-c 'sandbox_mode="workspace-write"'` does change the posture and
   still writes the trust stanza, exactly like the flag. The write-back
   is triggered by an effective elevated posture at an untrusted
@@ -855,25 +931,36 @@ including a resume against a nonexistent session ("no rollout found for
 thread id"); exit 2 is an argument parse error; non-empty stderr
 accompanies healthy runs.
 
-So dispatch and resume report only what the status can support: the
-session ran and ended, with which code. They never render exit 0 as "the
-task succeeded" -- the truth about the task is in the session, reachable
-through the printed hints, and claiming more than that from a status
-byte is exactly the silent-failure mode the read-only measurement
-demonstrates.
+The delivered posture follows, and the detached launch sharpens it:
+dispatch never observes a Codex worker's exit at all. The launcher
+releases the process after `Start`, its own comment naming the reason
+-- nothing there is waiting to learn anything from an exit status that
+does not report whether the work succeeded anyway -- so dispatch's
+success message claims exactly what it knows: a session was launched
+and captured, never that the task succeeded. The worker's stdout and
+stderr land in the instance's log files, which is where the truth about
+a run lives, and the published guide says so in as many words: read the
+last message or the run's output rather than the exit code, because a
+worker that could not write still exits 0 and every API failure --
+quota exhaustion included -- exits 1 alongside every other error.
+Resume is the one place an exit status is observed, and `dispatchAttach`
+propagates it without interpretation.
 
-Quota exhaustion gets one narrow carve-out, and only for classification.
-It is exit 1 among every other API error and is detectable only by
-parsing the error payload for its markers (`usage_limit_reached`,
-`UsageLimitReached`, `CreditsDepleted`). PR 2 classifies it so the
-message a developer sees says what happened rather than a generic launch
-failure -- and does nothing else. No automatic agent switching, no
-retry, no fallback: acting on the condition is a policy decision nobody
-has made, and the classification exists precisely so a future policy has
-a clean condition to act on rather than a misfiled error. A test feeds a
-quota-shaped payload and asserts the classified message; a generic
-failure stays generic; no code path selects a different agent in
-response.
+Quota exhaustion stays a documentation obligation rather than a code
+path on this branch, and that is a narrower delivery than this design
+first specified. The condition is detectable only by parsing the error
+payload for its markers (`usage_limit_reached`, `UsageLimitReached`,
+`CreditsDepleted`), and the detached launch dissolved the surface that
+was going to do the parsing: dispatch has returned before any error
+payload exists, so the payload lands in the worker's stderr log, where
+no launch-time classifier can see it. What survives is the boundary the
+classification existed to protect: no code path switches agents,
+retries, or falls back on any error, quota-shaped or otherwise --
+acting on the condition is a policy decision nobody has made -- and the
+guide names quota exhaustion explicitly so a developer reading an exit
+1 does not misread it as a niwa failure. A log-reading classifier
+remains open to a follow-on if reading the logs proves too slow a
+diagnosis in practice.
 
 ### Decision 11 -- two pull requests, and what PR 1's proof rests on (R19, R20, R21)
 
@@ -916,7 +1003,11 @@ is used for:
 - `dispatchAttach(id string)` became
   `dispatchAttach(spec agentplan.LaunchSpec, handle string)` -- resume
   runs the declared verb against the captured handle.
-  `TestDispatchResumeUsesTheDeclaredVerb` pins both.
+  `TestDispatchResumeUsesTheDeclaredVerb` pins both. (The Codex
+  delivery later widened it again to
+  `(spec agentplan.LaunchSpec, handle, workdir string)`, threading the
+  working directory for the reason Decision 6 gives; that change
+  belongs to the delivery, not to the no-behavior-change proof.)
 - `captureSessionID(jobsDir, instanceDir, ...) (sessionID, shortID,
   error)` became `captureSessionID(records agentplan.SessionRecords,
   root, instanceDir, ...) (sessionID, handle, error)`, and the
@@ -982,18 +1073,31 @@ preflight, the hints, and the resume all follow it, with nothing from
 the real table appearing. It is the same move the capture suite makes
 with its second fixture store, applied to the launch surface.
 
-**PR 2 -- Codex as the second implementation** -- adds the Codex
-`LaunchSpec` row (with the launch-mode field and its Claude value, both
-arriving with their first consumer), the start-and-release launcher
-path, the rollout record description, the `LivenessNone` declaration,
-the per-invocation trust override on the launch argv, the row 22 flip,
-the quota classification and exit-status reporting, the regenerated guide section with its
-surrounding prose edited in the same change (R16), and the
-transformation -- not duplication -- of the functional scenario that
-today pins the refusal, so that no scenario asserting the refusal
-survives the delivery (R21). The gate, capture, resume, and reaper
-change in PR 2 only by what the new declaration says: their code landed
-in PR 1 and reads the table.
+**PR 2 -- Codex as the second implementation -- is the branch this
+document rides.** It adds the Codex `LaunchSpec` row (with the
+launch-mode field and its Claude value, both arriving with their first
+consumer), the detached launcher path, the rollout record description,
+the `LivenessNone` declaration and the sparing report beside it, the
+per-invocation trust override on the launch argv, the row 22 flip with
+no `Requires` edge, the regenerated guide section with its surrounding
+prose edited in the same change (R16), and the transformation -- not
+duplication -- of the functional scenario that pinned the refusal
+(R21). It is the same scenario asserting the other side of the same
+declaration: it launches a Codex worker through a fake binary and
+asserts the row is declared implemented, the guide has stopped
+publishing it as a gap, the mapping records the agent, the printed hint
+is the agent's own verb, and the launch argv carries what the real
+binary requires while omitting what would break capture. The same
+scenario matters, because the alternative -- a parallel scenario beside
+the old one -- is how a table and a test start disagreeing. The guide
+gained a hand-written background-dispatch section covering the three
+caveats a user needs -- the unbriefed worker, the exit status, the
+unreclaimed instance -- and one generated row title changed: row 17 now
+reads "An instance provisioned automatically for a session niwa did not
+launch", because "for each dispatched session" became actively
+misleading the moment dispatch provisions one for Codex too. The gate,
+capture, resume, and reaper themselves changed only by what the new
+declaration says: their code landed in PR 1 and reads the table.
 
 ## What a Dispatched Codex Worker Does Not Receive
 
@@ -1014,6 +1118,15 @@ categorically weaker delivery than the content being in the session's
 context. The worker also gets no composed orientation -- niwa
 deliberately writes nothing Codex-shaped at an instance root today --
 and takes its task from the prompt alone.
+
+What it does keep is worth stating, because the loose version of this
+paragraph overstates the gap. The developer's own user-level Codex
+configuration still loads, skills included: the first event of the
+end-to-end run was Codex's own skills-budget notice, from a worker
+launched at an instance root. niwa neither delivers nor withholds that.
+What a root-launched worker loses is the *workspace's* delivery, which
+is a materially smaller claim than "no skills" and the only one the
+measurement supports.
 
 Two findings follow, and both belong on the record.
 
@@ -1064,15 +1177,16 @@ where the session records sit and how to read one, what the handle is,
 whether presence proves liveness, and how to step back in;
 `internal/cli` does the launching, polling, and exec, and an AST scan
 holds that no dispatch-path file names an agent. Capture is one reader
-and one loop over a declared record shape, proven against two store
-shapes. The mapping records its agent; the reaper reads the declaration
-and spares what it cannot prove dead. PR 1 shipped all of that against
-Claude with a named-seam no-behavior-change proof. PR 2 adds Codex as
-one table row plus the measured launch mechanics: start-and-release
-under setsid, `/dev/null` stdin, split output files,
+and one loop over a declared record shape, proven against three store
+shapes, one of them the real Codex rollout envelope. The mapping
+records its agent; the reaper reads the declaration, spares what it
+cannot prove dead, and says what it spared and why. PR 1 shipped the
+seam against Claude with a named-seam no-behavior-change proof; this
+branch ships Codex as one table row plus the measured launch mechanics:
+start-and-release under setsid, `/dev/null` stdin, split output files,
 `--skip-git-repo-check`, posture via the per-invocation trust override,
-`LivenessNone` with the reclamation gap declared, and exit-status
-reporting that claims session completion, never task success.
+`LivenessNone` with the reclamation gap declared, and reporting that
+claims a session was launched, never that the task succeeded.
 
 ## Solution Architecture
 
@@ -1117,8 +1231,8 @@ data:
    disk (R2).
 3. Preflight `spec.Binary` on PATH before provisioning, so an absent
    binary fails with no instance and no mapping (R3).
-4. Provision, arm rollback, launch with the spec's argv shape and (in
-   PR 2) its launch mode.
+4. Provision, arm rollback, launch with the spec's argv shape under
+   the spec's launch mode.
 5. Capture: poll the spec's record store, correlate by normalized cwd
    equality against the unique instance directory, return id and
    declared handle (R10, R11, R12).
@@ -1130,51 +1244,58 @@ data:
 
 ## Implementation Approach
 
-PR 1 is merged; its content and proof are Decision 11's. PR 2, in
-increments that each keep the suite green:
+PR 1 is merged; its content and proof are Decision 11's. The Codex
+delivery on this branch landed as one change, and its pieces are the
+ones the decisions above describe:
 
-1. The launch-mode field on `LaunchSpec`, with Claude's value, plus the
-   completeness assertion for it -- landing with the Codex row in the
-   same increment so the field's second answer arrives with the field.
-2. The Codex `launchSpecs` row: binary, `exec` leading arguments with
-   `--json` and `--skip-git-repo-check`, flag spellings, model
-   vocabulary, the rollout `SessionRecords` (depth 3 under the sessions
-   root, glob, first-line-only, nested field paths, `HandleSessionID`,
+1. `LaunchMode` on `LaunchSpec`, with Claude's value and Codex's second
+   one arriving together, so the field lands with a live branch
+   (Decision 1) -- `TestEveryLaunchSpecFieldIsRead` holds that it and
+   every other field stay read.
+2. The Codex `launchSpecs` row: binary, mode, `exec` leading arguments
+   with `--json` and `--skip-git-repo-check`, the `WorkdirGrantArgs`
+   grant, flag spellings, model vocabulary, the rollout
+   `SessionRecords` (depth 3 under the sessions root, glob,
+   first-line-only, `payload`-keyed field paths, `HandleSessionID`,
    `LivenessNone`), resume arguments, hint verbs. The binding and
-   completeness tests confront it with the whole contract on arrival.
-3. The start-and-release launcher path selected by the spec's launch
-   mode: `cmd.Start()` with `Setsid`, `/dev/null` stdin, stdout and
-   stderr to files under the instance's `.niwa/` directory, release. A
-   launcher test asserts the stdio wiring rather than hanging on its
-   absence.
-4. Row 22 flips to implemented -- with no `Requires` edge, per
-   Decision 9 -- in the same change as the delivery, never before
-   (R4). The gate, capture, resume, and reaper tests change branches by
-   themselves.
-5. Exit-status reporting and quota classification (Decision 10), with
-   the payload-shaped test.
-6. The guide: regenerate the gap section via the existing `-update`
-   flow, edit the surrounding hand-written prose in the same change so
-   it stops describing the refusal, and state the reclamation gap with
-   its named next-feature owner (R15, R16).
-7. Transform the functional scenario that pins the refusal into the one
-   that asserts the delivery; no refusal-asserting scenario survives
-   (R21).
+   completeness tests confronted it with the whole contract on
+   arrival.
+3. The detached launcher path (`startDetachedWorker`) selected by the
+   spec's mode: `cmd.Start()` with `Setsid`, `/dev/null` stdin, stdout
+   and stderr to `.niwa/dispatch-<binary>.{out,err}`, release.
+   `TestStartDetachedWorker` runs it against a real process;
+   `TestCodexLaunchArgv` pins the argv whole.
+4. Row 22 implemented -- with no `Requires` edge, per Decision 9 -- in
+   the same change as the delivery (R4). The gate, capture, resume,
+   and reaper tests changed branches by themselves, and
+   `TestDispatchSharedHalfRunsForEveryAgent` became runnable the
+   moment the table held two rows.
+5. The sparing report and the widened `niwa reap` help (Decision 7),
+   landing with the declaration that makes sparing a daily reality
+   rather than an edge case.
+6. The guide: gap section regenerated via the existing `-update` flow,
+   the surrounding prose rewritten off the refusal, the hand-written
+   background-dispatch section with its three caveats, the reclamation
+   gap with its named next-feature owner, and row 17's regenerated
+   title corrected (R15, R16).
+7. The functional scenario transformed -- the same scenario, asserting
+   the delivery; no refusal-asserting scenario survives (R21).
 
-Exit criteria: the declaration suite, the binding tests, the scan, the
-capture suite, and the reap tests all green with the Codex row present;
-`gofmt -l .`, `go vet ./...`, `go test -race ./...`; one manual
-dispatch-and-resume against a real `codex` binary as a sanity check,
-never as the only coverage (N2).
+Exit criteria, all holding on this branch: the declaration suite, the
+binding tests, the scans, the three-store capture suite, and the reap
+tests green with the Codex row present; `gofmt -l .`, `go vet ./...`,
+`go test -race ./...`; one manual dispatch-and-resume against a real
+`codex` binary as a sanity check, never as the only coverage (N2).
 
 ## Security Considerations
 
 - **No write at all to the developer's Codex configuration.** niwa
   passes no `--sandbox` flag and persists no trust stanza; the posture
-  rides a per-invocation override that leaves the file byte-identical
-  (Decision 9). The named failures a test catches are a launch argv
-  carrying a sandbox flag and the `sandbox_mode` config spelling, both
-  of which make Codex itself write trust.
+  rides a per-invocation override whose grant is scoped to the one
+  worker process and adds no stanza to the file (Decision 9).
+  `TestCodexLaunchArgv` pins the argv whole; the named failures are a
+  launch argv carrying a sandbox flag and the `sandbox_mode` config
+  spelling, both of which make Codex itself write trust.
 - **The prompt is one argv element, never shell-interpolated.** The
   existing D8 guard carries over unchanged: flags and values are
   discrete elements, the spill path handles oversized and NUL-bearing
@@ -1219,20 +1340,26 @@ Positive:
 - A third agent's dispatch support has a defined job: one `launchSpecs`
   row, confronted by the completeness and binding tests on arrival,
   with the gate, capture, resume, and reaper needing no changes.
-- The capture reader is proven against a store shape it was not written
-  for, so the second real store is an entry in a table rather than an
-  engineering project.
+- The capture reader was proven against a store shape it was not
+  written for before the second real store arrived -- and when it did,
+  the Codex delivery was one table entry and one fixture, which is the
+  claim demonstrated rather than promised.
 
 Negative, accepted:
 
 - A Codex-dispatched instance is not reclaimed by the mapping path.
   This is Decision 7's declared cost: rollouts never age out, niwa
-  refuses to guess, and the directory leaks until the developer
+  refuses to guess, and the directory stays until the developer
   destroys it or the next feature's backstop ages it. Declared in the
-  table and the guide rather than discovered.
-- A dispatched Codex worker starts with its task prompt and nothing
-  else -- no skills, no MCP servers, no session environment, no
-  composed orientation. The gap, its cause, and the contract's
+  table, published in the guide, and reported at runtime by the sweep
+  itself, so it is never discovered by counting directories.
+- A dispatched Codex worker starts with its task prompt and none of
+  what the workspace delivers -- not the workspace's skills, its MCP
+  servers, its session environment, or its composed orientation. What
+  it does keep is the developer's own user-level configuration, which
+  niwa neither delivers nor withholds; the loss is niwa's delivery
+  rather than the agent's whole surface, and stating it the looser way
+  would overstate a real gap. The gap, its cause, and the contract's
   inability to express it are recorded above; its closure is decided
   above this feature.
 - The launch table is more hand-maintained data, and its honesty is
@@ -1261,9 +1388,10 @@ Negative, accepted:
   sibling design: the declaration table, the routes, the binding
   posture this design extends to `RouteLaunch`, and the prior attempt's
   post-mortem.
-- docs/guides/codex-agent.md -- the published guide whose generated gap
-  list carries row 22 today and changes when it flips; the reclamation
-  gap lands in its prose per R15.
+- docs/guides/codex-agent.md -- the published guide: its generated gap
+  list no longer carries row 22, and its hand-written
+  background-dispatch section states the three caveats and the
+  reclamation gap per R15.
 - docs/spikes/SPIKE-codex-discovery-mechanics.md -- the standing spike
   for measured Codex discovery behavior, which the instance-root
   findings above extend.

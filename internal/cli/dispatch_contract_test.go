@@ -118,7 +118,7 @@ func TestDispatchUsesTheResolvedAgentsSpec(t *testing.T) {
 
 	var resumeSpec agentplan.LaunchSpec
 	prevAttach := dispatchAttach
-	dispatchAttach = func(spec agentplan.LaunchSpec, _ string) error {
+	dispatchAttach = func(spec agentplan.LaunchSpec, _, _ string) error {
 		resumeSpec = spec
 		return nil
 	}
@@ -153,6 +153,82 @@ func TestDispatchUsesTheResolvedAgentsSpec(t *testing.T) {
 	}
 	if resumeSpec.Binary != invented.Binary || strings.Join(resumeSpec.ResumeArgs, " ") != strings.Join(invented.ResumeArgs, " ") {
 		t.Errorf("resume ran %q %v, want the substituted %q %v", resumeSpec.Binary, resumeSpec.ResumeArgs, invented.Binary, invented.ResumeArgs)
+	}
+}
+
+// TestDispatchSharedHalfRunsForEveryAgent is the property behind "resume is one
+// verb". Two resume implementations chosen by an if-statement at the call site
+// is the failure mode, however tidy each half looks, and it is not something a
+// per-agent test catches: each half would pass its own.
+//
+// So this runs one dispatch per launchable agent through the same code and
+// asserts the parts that must not vary do not: the mapping is written and
+// records that agent, the handle capture returned reaches resume unchanged, and
+// resume runs against that agent's own binary and verb. What varies -- the
+// binary, the verb, the shape of the handle -- comes from the declaration, and
+// what does not vary is everything else.
+func TestDispatchSharedHalfRunsForEveryAgent(t *testing.T) {
+	launchable := agentplan.LaunchableAgents()
+	if len(launchable) < 2 {
+		t.Skipf("only %d launchable agent(s); the shared half cannot be shown to be shared", len(launchable))
+	}
+
+	for _, ag := range launchable {
+		t.Run(string(ag), func(t *testing.T) {
+			spec, ok := agentplan.For(ag).LaunchSpec()
+			if !ok {
+				t.Fatalf("no launch spec for %s", ag)
+			}
+
+			root := setupDispatchWorkspace(t)
+			chdir(t, root)
+			setHostConfig(t, "")
+			installDispatchFakes(t, root)
+			dispatchDetach = false
+			t.Setenv("NIWA_AGENT", string(ag))
+
+			var resumeSpec agentplan.LaunchSpec
+			var resumeHandle, resumeDir string
+			prev := dispatchAttach
+			dispatchAttach = func(s agentplan.LaunchSpec, handle, workdir string) error {
+				resumeSpec, resumeHandle, resumeDir = s, handle, workdir
+				return nil
+			}
+			t.Cleanup(func() { dispatchAttach = prev })
+
+			if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
+				t.Fatalf("dispatch: %v", err)
+			}
+
+			// The shared half: one mapping, in one store, recording the agent.
+			m, err := workspace.ReadSessionMapping(root, dispatchTestSessionID)
+			if err != nil {
+				t.Fatalf("reading the mapping: %v", err)
+			}
+			if m.Agent != string(ag) {
+				t.Errorf("mapping records agent %q, want %q", m.Agent, ag)
+			}
+			if !m.Ephemeral || m.Origin != "dispatch" {
+				t.Errorf("mapping provenance differs by agent: ephemeral=%v origin=%q", m.Ephemeral, m.Origin)
+			}
+
+			// The handle capture returned reaches resume unchanged, and resume
+			// runs in the instance the worker was launched in.
+			if resumeHandle != dispatchTestShortID {
+				t.Errorf("resume handle = %q, want the captured %q", resumeHandle, dispatchTestShortID)
+			}
+			if resumeDir == "" {
+				t.Error("resume was not told which directory the session ran in")
+			}
+
+			// And the agent-specific half is the agent's own.
+			if resumeSpec.Binary != spec.Binary {
+				t.Errorf("resume ran %q, want %q", resumeSpec.Binary, spec.Binary)
+			}
+			if strings.Join(resumeSpec.ResumeArgs, " ") != strings.Join(spec.ResumeArgs, " ") {
+				t.Errorf("resume args = %v, want %v", resumeSpec.ResumeArgs, spec.ResumeArgs)
+			}
+		})
 	}
 }
 
@@ -258,7 +334,7 @@ func TestDispatchResumeUsesTheDeclaredVerb(t *testing.T) {
 	var gotSpec agentplan.LaunchSpec
 	var gotHandle string
 	prev := dispatchAttach
-	dispatchAttach = func(spec agentplan.LaunchSpec, handle string) error {
+	dispatchAttach = func(spec agentplan.LaunchSpec, handle, _ string) error {
 		gotSpec, gotHandle = spec, handle
 		return nil
 	}

@@ -29,6 +29,26 @@ import (
 // it fails, and a spec for an agent the table does not declare implemented
 // fails.
 
+// LaunchMode says how the dispatch path runs an agent's worker binary. It is
+// the one place the two agents differ in kind rather than in spelling, and it
+// is why the launcher cannot be one call with different arguments.
+type LaunchMode uint8
+
+const (
+	// LaunchBackgrounded means the binary puts the worker in the background
+	// itself and exits. The launcher runs it and waits, because the process it
+	// started is not the worker -- waiting costs the time it takes to hand off,
+	// and its exit status says whether the hand-off happened.
+	LaunchBackgrounded LaunchMode = iota + 1
+
+	// LaunchDetached means the binary runs the whole turn in the foreground.
+	// The launcher starts it in a session of its own, hands it a closed stdin
+	// and files for its output, and releases it without waiting -- waiting
+	// would block the dispatch for the length of the task, and a context
+	// cancelled when the dispatch returns would kill the worker outright.
+	LaunchDetached
+)
+
 // HandleKind says what the user-facing handle for a session is: the thing a
 // developer types after the binary's own management verbs, and the thing
 // niwa's resume passes.
@@ -154,15 +174,12 @@ type LaunchFlags struct {
 // LaunchSpec is everything the dispatch path needs to know about one agent.
 // A spec exists exactly for the agents the table declares DispatchLaunch
 // implemented for; see dispatch_test.go for the check in both directions.
-//
-// One thing it deliberately does not carry yet is the process model. Every
-// agent niwa launches today puts its own worker in the background and exits, so
-// there is one process model and no field is choosing between them. Declaring
-// the choice before a second answer exists would put a constant here that
-// nothing branches on, which is the shape this contract exists to catch.
 type LaunchSpec struct {
 	// Binary is the executable name looked up on PATH.
 	Binary string
+
+	// Mode says how to run it.
+	Mode LaunchMode
 
 	// LeadingArgs are the arguments that always precede the pass-through
 	// flags: a subcommand, and whatever policy niwa fixes for every dispatch.
@@ -174,6 +191,22 @@ type LaunchSpec struct {
 
 	// Flags is the spelling of each pass-through intent.
 	Flags LaunchFlags
+
+	// WorkdirGrantArgs are the arguments that grant this one invocation the
+	// write posture niwa intends for a directory it owns, with the absolute
+	// working directory substituted for the single %q verb in the last
+	// element. Empty for an agent that needs no such grant.
+	//
+	// The grant is per invocation and deliberately so. An agent that decides a
+	// session's posture from a persistent registry offers niwa two ways to
+	// elevate one: write the registry, or override it for the process being
+	// started. Writing it vouches for anything anybody ever runs in that
+	// directory afterwards, including sessions niwa did not launch and has no
+	// opinion about; overriding it vouches for exactly the worker niwa is
+	// starting, and the grant is gone when that worker exits. The narrower one
+	// is the right one, and it also happens to leave the developer's own
+	// configuration untouched.
+	WorkdirGrantArgs []string
 
 	// ModelCategories maps niwa's portable capability categories to the
 	// concrete versionless model name this agent is given. The values are
@@ -206,6 +239,7 @@ type LaunchSpec struct {
 var launchSpecs = map[agent.Agent]LaunchSpec{
 	agent.AgentClaude: {
 		Binary:      "claude",
+		Mode:        LaunchBackgrounded,
 		LeadingArgs: []string{"--bg"},
 		Flags: LaunchFlags{
 			Model:          "--model",
@@ -237,6 +271,71 @@ var launchSpecs = map[agent.Agent]LaunchSpec{
 		},
 		ResumeArgs: []string{"attach"},
 		HintVerbs:  []string{"attach", "logs", "stop"},
+	},
+
+	agent.AgentCodex: {
+		Binary: "codex",
+		// The exec subcommand runs the whole turn in the foreground, so the
+		// launcher detaches it rather than waiting.
+		Mode: LaunchDetached,
+		// --json makes the run's own event stream parseable, which is what the
+		// launch log is for; --skip-git-repo-check is not optional, because a
+		// dispatch instance root is not a git repository and the run refuses
+		// to start in one without it. Trusting the directory does not satisfy
+		// that check -- measured, and the identical startup failure reproduces
+		// with the path trusted.
+		//
+		// --ephemeral is deliberately absent and must stay absent: it runs
+		// without persisting the session record, which is the substrate
+		// capture reads.
+		LeadingArgs:     []string{"exec", "--json", "--skip-git-repo-check"},
+		PromptSeparator: true,
+		// The grant is a whole-table override rather than a dotted path. The
+		// dotted form parses without error and silently does nothing, which is
+		// worth knowing generally: a clean exit from one of these overrides is
+		// not evidence it took effect.
+		WorkdirGrantArgs: []string{"-c", `projects={%q={trust_level="trusted"}}`},
+		Flags: LaunchFlags{
+			Model: "--model",
+			// The sandbox is this agent's permission posture. niwa passes
+			// nothing here of its own -- the grant above decides the default
+			// -- so this spelling exists for a developer who asks for a
+			// posture deliberately.
+			PermissionMode: "--sandbox",
+			// No subagent types, no session display name, and no inline
+			// settings document. Each is a niwa-side intent this agent has no
+			// flag for, and an intent with no flag is dropped rather than
+			// guessed at.
+		},
+		ModelCategories: map[string]string{
+			"fast":     "gpt-5-codex-mini",
+			"balanced": "gpt-5-codex",
+			"powerful": "gpt-5",
+		},
+		KnownModels: []string{"gpt-5", "gpt-5-codex", "gpt-5-codex-mini"},
+		Records: SessionRecords{
+			HomeEnv:  "CODEX_HOME",
+			HomePath: []string{".codex", "sessions"},
+			// The records are nested under the year, month, and day the
+			// session started -- in the host's local time rather than UTC.
+			Depth: 3,
+			// One file per session, and the record is that file's first line:
+			// the rest of it is the conversation.
+			FileGlob:      "rollout-*.jsonl",
+			FirstLineOnly: true,
+			CwdPath:       []string{"payload", "cwd"},
+			IDPath:        []string{"payload", "session_id"},
+			// The session id is the handle: this agent's resume verb takes it
+			// directly and there is no shorter form.
+			Handle: HandleSessionID,
+			// A record is never removed, so its presence says a session once
+			// existed and nothing about whether it still does. Anything asking
+			// whether a session is gone gets no evidence here, and must not
+			// act as though it did.
+			Liveness: LivenessNone,
+		},
+		ResumeArgs: []string{"resume"},
+		HintVerbs:  []string{"resume"},
 	},
 }
 

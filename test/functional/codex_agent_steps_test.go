@@ -3,6 +3,7 @@ package functional
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -129,6 +130,12 @@ func registerCodexAgentSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the capability "([^"]*)" is declared unavailable for Codex$`, theCapabilityIsDeclaredUnavailableForCodex)
 	ctx.Step(`^the committed Codex gap list carries the declared reason for "([^"]*)"$`, theGapListCarriesTheDeclaredReason)
 	ctx.Step(`^the refusal carries the declared reason for "([^"]*)"$`, theRefusalCarriesTheDeclaredReason)
+	ctx.Step(`^the capability "([^"]*)" is declared implemented for Codex$`, theCapabilityIsDeclaredImplementedForCodex)
+	ctx.Step(`^the committed Codex gap list does not mention "([^"]*)"$`, theGapListDoesNotMention)
+	ctx.Step(`^a fake codex for dispatch with session "([^"]*)"$`, aFakeCodexForDispatchWithSession)
+	ctx.Step(`^the dispatch mapping for session "([^"]*)" records agent "([^"]*)"$`, theDispatchMappingRecordsAgent)
+	ctx.Step(`^the codex launch argv contains "([^"]*)"$`, theCodexLaunchArgvContains)
+	ctx.Step(`^the codex launch argv does not contain "([^"]*)"$`, theCodexLaunchArgvDoesNotContain)
 
 	// Live, codex-gated.
 	ctx.Step(`^codex is available$`, codexIsAvailable)
@@ -1489,6 +1496,172 @@ func theRefusalCarriesTheDeclaredReason(ctx context.Context, name string) error 
 	want := strings.Join(strings.Fields(d.Reason), " ")
 	if !strings.Contains(flat, want) {
 		return fmt.Errorf("the refusal does not carry the declared reason for %s:\nwant: %s\ngot:\n%s", name, want, s.stderr)
+	}
+	return nil
+}
+
+// theCapabilityIsDeclaredImplementedForCodex is the mirror of the unavailable
+// step. A scenario pinning behavior as present has to have the table agree, or
+// the guide a developer reads and the binary they run tell them different
+// things -- which is the same failure in the other direction.
+func theCapabilityIsDeclaredImplementedForCodex(ctx context.Context, name string) error {
+	c, err := capabilityByName(name)
+	if err != nil {
+		return err
+	}
+	d, err := agentplan.Lookup(c, agent.AgentCodex)
+	if err != nil {
+		return fmt.Errorf("looking up %s for codex: %w", name, err)
+	}
+	if d.State != agentplan.StateImplemented {
+		return fmt.Errorf("%s is not declared implemented for codex (state %d); the scenario below pins behavior the table does not agree with", name, d.State)
+	}
+	return nil
+}
+
+// theGapListDoesNotMention closes the loop for a row that flipped: the
+// committed guide must have stopped publishing it as a gap. A flip whose guide
+// was never regenerated leaves a developer reading that niwa cannot do
+// something it now does, which is the direction a gap list must never be wrong
+// in.
+func theGapListDoesNotMention(ctx context.Context, phrase string) error {
+	data, err := os.ReadFile(codexGuidePath)
+	if err != nil {
+		return fmt.Errorf("reading the committed guide: %w", err)
+	}
+	flat := strings.Join(strings.Fields(string(data)), " ")
+	start := strings.Index(flat, "What niwa hasn't built yet")
+	if start < 0 {
+		return fmt.Errorf("the guide has no not-built section to check")
+	}
+	end := strings.Index(flat[start:], "What doesn't apply to")
+	if end < 0 {
+		end = len(flat) - start
+	}
+	if section := flat[start : start+end]; strings.Contains(section, phrase) {
+		return fmt.Errorf("the guide still lists %q as something niwa has not built:\n%s", phrase, section)
+	}
+	return nil
+}
+
+// --- a fake codex on PATH ----------------------------------------------
+
+// dispatchFakeCodexScript is a stand-in for the codex binary on the dispatch
+// path. It answers the two invocations niwa makes -- `exec` to launch a worker
+// and `resume` to step back into one -- and it writes the session record niwa's
+// capture reads, in the envelope a real one uses: one JSON object per line,
+// metadata first, the two fields under a payload key, nested under the date.
+//
+// It also records its own argv, so a scenario can assert what niwa asked for
+// rather than only what came back. That is the half a fake is uniquely good
+// for: the launch flags are a contract with the real binary, and a scenario
+// that only checked the outcome would pass just as well if niwa stopped sending
+// them.
+const dispatchFakeCodexScript = `#!/bin/sh
+case "$1" in
+  exec)
+    printf '%s\n' "$*" > "$HOME/dispatch-codex-argv"
+    sid="${FAKE_CODEX_SESSION_ID:-01a00000-0000-7000-8000-000000000000}"
+    root="${CODEX_HOME:-$HOME/.codex}/sessions/2026/08/19"
+    mkdir -p "$root"
+    cwd=$(pwd)
+    printf '{"timestamp":"2026-08-19T04:00:00.000Z","ordinal":0,"type":"session_meta","payload":{"id":"%s","session_id":"%s","cwd":"%s","originator":"codex_exec","cli_version":"0.147.0","source":"exec"}}\n' "$sid" "$sid" "$cwd" > "$root/rollout-2026-08-19T04-00-00-$sid.jsonl"
+    printf '{"timestamp":"2026-08-19T04:00:01.000Z","ordinal":1,"type":"turn_context","payload":{}}\n' >> "$root/rollout-2026-08-19T04-00-00-$sid.jsonl"
+    exit 0
+    ;;
+  resume)
+    printf '%s\n' "$*" > "$HOME/dispatch-codex-resume-argv"
+    exit 0
+    ;;
+  *)
+    echo "fake codex: unsupported invocation: $*" >&2
+    exit 1
+    ;;
+esac
+`
+
+// aFakeCodexForDispatchWithSession installs the fake codex and pins the session
+// id it will record, so a scenario can assert the mapping is keyed on exactly
+// that id rather than on whatever turned up.
+func aFakeCodexForDispatchWithSession(ctx context.Context, sessionID string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	binDir := filepath.Join(s.homeDir, "fake-codex-bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return ctx, fmt.Errorf("mkdir fake-codex-bin: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte(dispatchFakeCodexScript), 0o755); err != nil {
+		return ctx, fmt.Errorf("writing fake codex script: %w", err)
+	}
+	s.pathPrefix = binDir
+	s.envOverrides["FAKE_CODEX_SESSION_ID"] = sessionID
+	// Keep the session records inside the scenario's own home rather than
+	// wherever the developer running the suite keeps theirs.
+	s.envOverrides["CODEX_HOME"] = filepath.Join(s.homeDir, ".codex")
+	return ctx, nil
+}
+
+// theDispatchMappingRecordsAgent asserts the durable mapping exists for the
+// captured session and says which agent's session it is. The id is the one the
+// worker recorded, correlated to the instance it was launched in, so this is
+// also the assertion that capture read the right record rather than any record.
+func theDispatchMappingRecordsAgent(ctx context.Context, sessionID, wantAgent string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, ".niwa", "sessions", sessionID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("expected a dispatch mapping at %s: %w\nstdout:\n%s\nstderr:\n%s", path, err, s.stdout, s.stderr)
+	}
+	var m struct {
+		Agent string `json:"agent"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return fmt.Errorf("parsing mapping %s: %w", path, err)
+	}
+	if m.Agent != wantAgent {
+		return fmt.Errorf("mapping %s records agent %q, want %q:\n%s", path, m.Agent, wantAgent, string(data))
+	}
+	return nil
+}
+
+// theCodexLaunchArgvContains asserts the launch niwa issued carried a given
+// fragment. The flags are a contract with the real binary -- one of them is the
+// difference between starting at all and refusing, another is what decides
+// whether the worker can write -- so a scenario that only checked the outcome
+// would pass just as well if niwa stopped sending them.
+func theCodexLaunchArgvContains(ctx context.Context, fragment string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	data, err := os.ReadFile(filepath.Join(s.homeDir, "dispatch-codex-argv"))
+	if err != nil {
+		return fmt.Errorf("reading the recorded launch argv: %w", err)
+	}
+	if !strings.Contains(string(data), fragment) {
+		return fmt.Errorf("the launch argv does not contain %q:\n%s", fragment, string(data))
+	}
+	return nil
+}
+
+// theCodexLaunchArgvDoesNotContain is the other half, for the flags whose
+// presence would be a defect rather than an omission.
+func theCodexLaunchArgvDoesNotContain(ctx context.Context, fragment string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	data, err := os.ReadFile(filepath.Join(s.homeDir, "dispatch-codex-argv"))
+	if err != nil {
+		return fmt.Errorf("reading the recorded launch argv: %w", err)
+	}
+	if strings.Contains(string(data), fragment) {
+		return fmt.Errorf("the launch argv contains %q, which it must not:\n%s", fragment, string(data))
 	}
 	return nil
 }

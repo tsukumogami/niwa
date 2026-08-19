@@ -558,7 +558,11 @@ so this feature introduces the gap rather than inheriting it, and it is
 worse than "unoriented": discovery is fixed at session construction and
 keyed to the launch directory, following neither the working directory
 nor an instruction naming a repository, and readable-on-request files are
-a categorically weaker delivery than context. The contract cannot
+a categorically weaker delivery than context. What is lost is niwa's
+delivery rather than the agent's whole surface: the developer's own
+user-level skills and configuration still load, since niwa neither
+delivers nor withholds those, and stating it the looser way would
+overstate a gap that is real enough as it stands. The contract cannot
 currently express this gap -- declarations are per capability and agent,
 two states, scoped by who receives and never by where from -- and no new
 capability row is invented for it (R5 stands). Whether closing it is this
