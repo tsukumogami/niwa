@@ -115,7 +115,10 @@ budget declared for a directory that carries no trust entry does not apply.
 A later pass measured trust as the only variable and found the line is cleaner
 than "uneven" suggested: MCP servers, `shell_environment_policy`,
 `approval_policy` and `sandbox_mode` all appear only with a trust entry for the
-path and revert to defaults when it is removed. **Skills are the lone exception
+path, and revert to their defaults (`on-request`, restricted) when it is
+removed. Untrusted, a project-declared server and a project-declared environment
+variable are both simply absent, and `codex doctor` counts only the developer's
+own servers. **Skills are the lone exception
 — they load untrusted.**
 
 What the project layer cannot carry at all: trust itself, hook trust state, and
@@ -195,7 +198,7 @@ own instead.
 Neither the project layer nor the developer's config wins wholesale. They merge
 field by field, with the project layer winning only on the keys it actually
 declares. A name collision on an MCP server produced a hybrid in one measured
-run: niwa's `command` alongside the developer's `args` and `cwd`.
+run: the project layer's `command` alongside the developer's `args` and `cwd`.
 
 Anything writing into a shared configuration has to detect collisions rather
 than assume it either wins or loses cleanly.
