@@ -15,7 +15,7 @@ has properly scoped context in every repo from the first session. It handles:
 - **Per-repo overrides** -- custom settings, hooks, and env per repo
 - **Overlay layer** -- companion repos that layer additional repos, groups, and Claude context onto the base config; auto-synced on every apply
 - **Multi-instance** -- run multiple workspace instances from the same config
-- **Both agents** -- every apply prepares Claude Code and Codex alike, with no agent flag anywhere; `default_agent` picks which one a launched session runs as, without changing what apply prepares. See `docs/guides/codex-agent.md` for that setting, and for what a Codex session gets and what it doesn't
+- **Both agents** -- every apply prepares Claude Code and Codex alike, with no agent flag on create or apply; you pick which one a launched session runs as per command (`niwa dispatch --launch-agent`), per shell (`NIWA_AGENT`), per workspace (`[workspace].default_agent`), or per machine (`niwa config set default-agent`), and none of it changes what apply prepares. See `docs/guides/codex-agent.md` for those settings, and for what a Codex session gets and what it doesn't
 
 ## Quick start
 

@@ -71,6 +71,27 @@ type GlobalSettings struct {
 	// counts records whose instance still has a live job, so a dismissed or dead
 	// session frees capacity on the next pass.
 	WatchMaxStaged int `toml:"watch_max_staged,omitempty"`
+	// DefaultAgent is the developer's machine-wide default for which coding
+	// agent a niwa-launched session runs as. It accepts the same closed set as
+	// [workspace].default_agent ("claude" or "codex") and goes through the same
+	// single validation boundary (agent.ParseAgent), so it is stored raw here
+	// rather than as a typed Agent -- a value decoded from a file never looks
+	// validated by its type. It is the BROADEST rung of the resolution: a
+	// workspace stating its own default_agent outranks it, as do NIWA_AGENT and
+	// the per-dispatch flag. "" (the default) means no machine-wide preference.
+	DefaultAgent string `toml:"default_agent,omitempty"`
+}
+
+// DefaultAgent returns the machine-wide default agent from
+// ~/.config/niwa/config.toml, or "" when the file, the section, or the key is
+// absent. The value comes back raw and unvalidated on purpose: the closed-set
+// check belongs to agent.ParseAgent, the one boundary every source is forced
+// through.
+func (g *GlobalConfig) DefaultAgent() string {
+	if g == nil {
+		return ""
+	}
+	return g.Global.DefaultAgent
 }
 
 // SkipPluginInstall reports whether the user has explicitly opted

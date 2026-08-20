@@ -1,9 +1,11 @@
 Feature: prepare every instance for both agents
-  Every instance niwa prepares serves Claude Code and Codex alike. There is no
-  agent flag on create or apply and no per-machine setting that picks one:
-  default_agent selects which agent a niwa-launched session runs, not what
-  preparation produces. niwa still writes no AGENTS.md inside a cloned
-  repository, so a repo's own committed AGENTS.md is never clobbered.
+  Every instance niwa prepares serves Claude Code and Codex alike. Nothing
+  narrows that: create and apply take no agent flag, and default_agent --
+  whether a workspace states it or a developer sets it machine-wide -- selects
+  which agent a niwa-launched session runs, not what preparation produces.
+  Which agent gets launched is agent-selection.feature's subject. niwa still
+  writes no AGENTS.md inside a cloned repository, so a repo's own committed
+  AGENTS.md is never clobbered.
 
   Design: docs/designs/current/DESIGN-agent-capability-contract.md
   Requirements: docs/prds/PRD-agent-capability-contract.md

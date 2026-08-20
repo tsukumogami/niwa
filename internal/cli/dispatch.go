@@ -27,7 +27,8 @@ func init() {
 	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session (sanitized into a slug; also names the niwa instance: <config>+-<id> with no name, <config>+<slug>-<id> with one -- '+' always marks the end of the config name)")
 	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", dispatchModelFlagHelp())
 	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker; dropped for an agent that has no such flag")
-	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "subagent type to forward to the background worker; this selects a role within the launched agent, not which agent is launched (that is NIWA_AGENT and the workspace default_agent). Dropped for an agent that has no such flag")
+	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "subagent type to forward to the background worker; this selects a role within the launched agent, not which agent is launched (that is --launch-agent). Dropped for an agent that has no such flag")
+	dispatchCmd.Flags().StringVar(&dispatchLaunchAgent, launchAgentFlagName, "", launchAgentFlagUsage())
 	dispatchCmd.Flags().BoolVarP(&dispatchDetach, "detach", "d", false, "do not attach the terminal to the new session; print hints and return")
 	dispatchCmd.Flags().IntVar(&dispatchParallel, "parallel", 0,
 		"maximum repos to clone concurrently when provisioning the dispatch instance (>=1). Lower this on slow or flaky networks; 1 clones serially. Overrides the [global] clone_workers config. 0 (the default) uses clone_workers, else niwa's built-in default.")
@@ -46,6 +47,7 @@ var (
 	dispatchModel          string
 	dispatchPermissionMode string
 	dispatchAgent          string
+	dispatchLaunchAgent    string
 	dispatchDetach         bool
 	dispatchParallel       int
 	// dispatchKeepAlive holds the tri-state --keep-alive value: nil when the
@@ -247,17 +249,30 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	}
 	workspaceRoot := class.WorkspaceRoot
 
-	// (2b) Resolve which agent this dispatch launches, from NIWA_AGENT and the
-	// workspace default_agent. dispatch's own --agent flag is the launched
-	// agent's subagent-type passthrough, a different thing, so it is
-	// deliberately not consulted here. A config that cannot be loaded resolves
-	// against the environment alone and leaves the failure to the provisioning
-	// path to report.
+	// (2a) Load the host global config ONCE, best-effort, and reuse it below.
+	// It carries two things this command reads: the machine-wide default_agent
+	// (broadest rung of the agent resolution just below) and the dispatch_model
+	// and remote-control defaults consumed after provisioning. A missing or
+	// unreadable config degrades to "none of those set", which is today's
+	// behavior for every one of them -- they are all opt-in defaults.
+	gc, gcErr := config.LoadGlobalConfig()
+
+	// (2b) Resolve which agent this dispatch launches, from --launch-agent,
+	// NIWA_AGENT, the workspace default_agent, and the host default_agent, in
+	// that order. dispatch's own --agent flag is the launched agent's
+	// subagent-type passthrough, a different thing, so it is deliberately not
+	// consulted here. A config that cannot be loaded resolves against the
+	// sources that did load and leaves the failure to the provisioning path to
+	// report.
 	var wsConfig *config.WorkspaceConfig
 	if wsCfg, cfgErr := config.Load(filepath.Join(workspaceRoot, workspace.StateDir, workspace.WorkspaceConfigFile)); cfgErr == nil {
 		wsConfig = wsCfg.Config
 	}
-	dispatchedAgent, agErr := resolveSessionAgent("", wsConfig)
+	var hostCfg *config.GlobalConfig
+	if gcErr == nil {
+		hostCfg = gc
+	}
+	dispatchedAgent, agErr := resolveSessionAgent(dispatchLaunchAgent, wsConfig, hostCfg)
 	if agErr != nil {
 		return fmt.Errorf("niwa: error: %w", agErr)
 	}
@@ -372,11 +387,8 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("niwa: error: writing dispatch pending-marker: %w", err)
 	}
 
-	// (9) Load the host global config ONCE, best-effort. A missing or unreadable
-	// config degrades to "no dispatch_model default" and "no remote-control
-	// injection" -- neither can fail the dispatch (both features are opt-in
-	// defaults, so absence just means today's behavior).
-	gc, gcErr := config.LoadGlobalConfig()
+	// (9) The host global config was loaded once at (2a), before the agent
+	// resolution that also reads it. gc/gcErr below are that same result.
 
 	// (9a) Resolve the effective main-loop model. The --model flag wins; when it
 	// is unset the host [global] dispatch_model default fills in; when neither is

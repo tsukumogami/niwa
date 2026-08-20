@@ -94,6 +94,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 	prevModel := dispatchModel
 	prevPerm := dispatchPermissionMode
 	prevAgent := dispatchAgent
+	prevLaunchAgent := dispatchLaunchAgent
 	prevDetach := dispatchDetach
 	prevKeepAlive := dispatchKeepAlive
 
@@ -102,6 +103,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 	dispatchModel = ""
 	dispatchPermissionMode = ""
 	dispatchAgent = ""
+	dispatchLaunchAgent = ""
 	dispatchDetach = false
 	dispatchKeepAlive = nil
 
@@ -152,6 +154,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 		dispatchModel = prevModel
 		dispatchPermissionMode = prevPerm
 		dispatchAgent = prevAgent
+		dispatchLaunchAgent = prevLaunchAgent
 		dispatchDetach = prevDetach
 		dispatchKeepAlive = prevKeepAlive
 	})

@@ -135,7 +135,7 @@ func TestDispatchUsesTheResolvedAgentsSpec(t *testing.T) {
 
 	// The description was asked for by the agent the workspace resolved, not by
 	// a name this code chose.
-	wantAgent, err := resolveSessionAgent("", nil)
+	wantAgent, err := resolveSessionAgent("", nil, nil)
 	if err != nil {
 		t.Fatalf("resolving the session agent: %v", err)
 	}

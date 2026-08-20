@@ -1,10 +1,11 @@
 # Running Codex in a niwa workspace
 
 niwa prepares a workspace for whichever coding agent you open it with. There's
-no agent flag on `niwa create` or `niwa apply` and no per-machine setting to
-pick one: every apply prepares both Claude Code and Codex, and you decide which
-one to launch by launching it. Nothing you do for one agent takes anything away
-from the other.
+no agent flag on `niwa create` or `niwa apply`: every apply prepares both Claude
+Code and Codex, and you decide which one to launch by launching it. Nothing you
+do for one agent takes anything away from the other. There are settings that
+pick a launch target — the next section is about them — but none of them narrow
+what gets prepared.
 
 What that preparation amounts to isn't identical for the two, though, and this
 guide says where the difference is. The short version: a Codex session inside a
@@ -16,8 +17,24 @@ niwa simply hasn't wired up yet.
 ## Choosing which agent niwa launches
 
 The paragraphs above are about preparation. Launching is a separate question,
-and it has its own answer: `default_agent`, on the `[workspace]` table of the
-`workspace.toml` that drives your workspace.
+and four things answer it. Each has a different lifetime, and the shorter-lived
+one wins:
+
+| Source | Lasts | Set it with |
+|--------|-------|-------------|
+| `--launch-agent` | one command | `niwa dispatch "..." --launch-agent codex` |
+| `NIWA_AGENT` | one shell | `NIWA_AGENT=codex niwa dispatch "..."` |
+| `[workspace].default_agent` | one workspace, for everyone in it | editing the workspace config |
+| `[global].default_agent` | your machine, every workspace | `niwa config set default-agent codex` |
+
+Nothing set anywhere means `claude`. The rest of this section takes them from
+the bottom of that table upward, since the workspace setting is the one with
+something to watch out for.
+
+### The workspace setting
+
+`default_agent` lives on the `[workspace]` table of the `workspace.toml` that
+drives your workspace.
 
 ```toml
 [workspace]
@@ -46,29 +63,61 @@ after pushing, or use `NIWA_AGENT` for the run in front of you. An overlay is
 no help either: `[workspace]` in an overlay is inert, so a `default_agent`
 there is dropped without a warning.
 
-Accepted values are `claude` and `codex`, and leaving it out means `claude`. To
-override it for a single shell without editing the file, set `NIWA_AGENT`:
+Accepted values are `claude` and `codex` wherever you set them, and an unknown
+value is rejected with the accepted set named rather than quietly ignored.
+
+It's a workspace-level setting, with no per-instance form — every instance of a
+workspace launches the same agent unless something shorter-lived says
+otherwise.
+
+### Your own machine-wide default
+
+If you'd rather not touch a workspace's config at all — or you can't, because
+it's a snapshot and the source repo isn't yours — set it for your machine:
 
 ```bash
-NIWA_AGENT=codex niwa dispatch "..."
+niwa config set default-agent codex
+niwa config unset default-agent   # back to the built-in claude default
 ```
 
-The environment beats the config, and the config beats the `claude` default.
-It's a workspace-level setting, with no per-instance form — every instance of a
-workspace launches the same agent unless a shell says otherwise.
+That writes `[global].default_agent` to `~/.config/niwa/config.toml`, next to
+the other host-level dispatch defaults (`dispatch_model`,
+`keep_alive_on_dispatch`). It's your own file. niwa never materializes it from
+anywhere, so nothing replaces it and the trap above doesn't apply.
 
-What it doesn't do is change what `niwa apply` prepares. Every apply prepares
-the tree for every agent niwa supports no matter what `default_agent` says, so
-changing it needs no re-apply and takes nothing away from the other agent. It
-picks a launch target, and that's all it does. The one command that reads it
-today is `niwa dispatch`, which uses it to decide which agent the background
+It's the weakest of the four, deliberately. A workspace that states an agent
+keeps launching that agent, because that statement is for everyone who works in
+the workspace and your personal file shouldn't quietly override it. Your
+machine-wide setting fills in for every workspace that states nothing. When you
+do want the other agent in a workspace that has an opinion, use `NIWA_AGENT` or
+the flag — both outrank the workspace.
+
+### Per command
+
+```bash
+niwa dispatch "fix the flaky retry test" --launch-agent codex
+```
+
+`--launch-agent` outranks everything else and lasts exactly one command. It's
+the quickest way to try the other agent on one task without changing anything.
+
+The name is not `--agent` because that one is already taken on `niwa dispatch`,
+by something else: it forwards a **subagent type** to the worker — a role inside
+the agent that gets launched — and is dropped for an agent that has no such
+flag, which today means Codex. It never picks the agent. The two coexist, so
+`niwa dispatch --launch-agent claude --agent reviewer` launches Claude Code and
+hands it the `reviewer` role, while `--launch-agent codex --agent reviewer`
+launches Codex and drops the role, since Codex has nothing to forward it to.
+`niwa create` and `niwa apply` have neither flag and reject both as unknown.
+
+### What none of them do
+
+None of them change what `niwa apply` prepares. Every apply prepares the tree
+for every agent niwa supports no matter what any of these four say, so changing
+one needs no re-apply and takes nothing away from the other agent. They pick a
+launch target, and that's all they do. The one command that reads them today is
+`niwa dispatch`, which uses the result to decide which agent the background
 worker runs as.
-
-One name worth disambiguating: `niwa dispatch --agent` is a different setting.
-It forwards a subagent type to the worker — a role inside the agent that gets
-launched — and is dropped for an agent with no such flag. It never picks the
-agent. `niwa create` and `niwa apply` have no `--agent` flag at all and reject
-one as an unknown flag.
 
 ## What a Codex session gets
 

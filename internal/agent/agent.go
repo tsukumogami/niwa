@@ -92,12 +92,21 @@ func (a Agent) LocalContextFileName() string {
 	return "CLAUDE.local.md"
 }
 
-// ResolveAgent computes the session agent from its three sources, once, in
-// precedence order: flag > env > workspaceDefault > claude. Each argument is a
-// raw string (empty means "not set" for that source); the chosen value is
-// validated via ParseAgent, so an invalid value from any source returns an
-// error naming the accepted set.
-func ResolveAgent(flag, env, workspaceDefault string) (Agent, error) {
+// ResolveAgent computes the session agent from its four sources, once, in
+// precedence order: flag > env > workspaceDefault > hostDefault > claude. Each
+// argument is a raw string (empty means "not set" for that source); the chosen
+// value is validated via ParseAgent, so an invalid value from any source
+// returns an error naming the accepted set.
+//
+// hostDefault is the broadest rung: the developer's own machine-wide default,
+// read from their personal niwa config rather than from anything a workspace
+// ships. It sits BELOW workspaceDefault deliberately. A workspace that states
+// an agent is stating it for everyone who works in it, and the same ordering
+// already governs niwa's other host-level dispatch defaults, where a downstream
+// setting outranks the personal one. A developer who wants the other agent for
+// one shell or one command reaches for env or flag, which both outrank the
+// workspace.
+func ResolveAgent(flag, env, workspaceDefault, hostDefault string) (Agent, error) {
 	switch {
 	case flag != "":
 		return ParseAgent(flag)
@@ -105,6 +114,8 @@ func ResolveAgent(flag, env, workspaceDefault string) (Agent, error) {
 		return ParseAgent(env)
 	case workspaceDefault != "":
 		return ParseAgent(workspaceDefault)
+	case hostDefault != "":
+		return ParseAgent(hostDefault)
 	default:
 		return AgentClaude, nil
 	}

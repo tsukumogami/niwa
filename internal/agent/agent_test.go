@@ -96,36 +96,46 @@ func TestLocalContextFileName(t *testing.T) {
 
 func TestResolveAgent(t *testing.T) {
 	tests := []struct {
-		name             string
-		flag, env, wsDef string
-		want             Agent
-		wantErr          bool
+		name                      string
+		flag, env, wsDef, hostDef string
+		want                      Agent
+		wantErr                   bool
 	}{
-		{"all empty defaults to claude", "", "", "", AgentClaude, false},
-		{"workspace default codex", "", "", "codex", AgentCodex, false},
-		{"env overrides workspace default", "", "codex", "claude", AgentCodex, false},
-		{"flag overrides env and default", "claude", "codex", "codex", AgentClaude, false},
-		{"flag codex over claude default", "codex", "", "claude", AgentCodex, false},
-		{"env claude over codex default", "", "claude", "codex", AgentClaude, false},
-		{"unknown flag errors", "gemini", "", "", "", true},
-		{"unknown env errors", "", "gemini", "", "", true},
-		{"unknown workspace default errors", "", "", "gemini", "", true},
-		{"flag wins even when env is invalid-shaped but flag valid", "codex", "codex", "", AgentCodex, false},
+		{"all empty defaults to claude", "", "", "", "", AgentClaude, false},
+		{"workspace default codex", "", "", "codex", "", AgentCodex, false},
+		{"env overrides workspace default", "", "codex", "claude", "", AgentCodex, false},
+		{"flag overrides env and default", "claude", "codex", "codex", "", AgentClaude, false},
+		{"flag codex over claude default", "codex", "", "claude", "", AgentCodex, false},
+		{"env claude over codex default", "", "claude", "codex", "", AgentClaude, false},
+		{"unknown flag errors", "gemini", "", "", "", "", true},
+		{"unknown env errors", "", "gemini", "", "", "", true},
+		{"unknown workspace default errors", "", "", "gemini", "", "", true},
+		{"flag wins even when env is invalid-shaped but flag valid", "codex", "codex", "", "", AgentCodex, false},
+
+		// The host default is the broadest rung: it answers when nothing more
+		// specific does, and loses to every source above it.
+		{"host default alone", "", "", "", "codex", AgentCodex, false},
+		{"workspace default outranks host default", "", "", "claude", "codex", AgentClaude, false},
+		{"env outranks host default", "", "claude", "", "codex", AgentClaude, false},
+		{"flag outranks host default", "claude", "", "", "codex", AgentClaude, false},
+		{"host default fills in for a workspace that states none", "", "", "", "claude", AgentClaude, false},
+		{"unknown host default errors", "", "", "", "gemini", "", true},
+		{"a valid workspace default hides an invalid host default", "", "", "codex", "gemini", AgentCodex, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ResolveAgent(tt.flag, tt.env, tt.wsDef)
+			got, err := ResolveAgent(tt.flag, tt.env, tt.wsDef, tt.hostDef)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatalf("ResolveAgent(%q,%q,%q) = %q, want error", tt.flag, tt.env, tt.wsDef, got)
+					t.Fatalf("ResolveAgent(%q,%q,%q,%q) = %q, want error", tt.flag, tt.env, tt.wsDef, tt.hostDef, got)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("ResolveAgent(%q,%q,%q) unexpected error: %v", tt.flag, tt.env, tt.wsDef, err)
+				t.Fatalf("ResolveAgent(%q,%q,%q,%q) unexpected error: %v", tt.flag, tt.env, tt.wsDef, tt.hostDef, err)
 			}
 			if got != tt.want {
-				t.Fatalf("ResolveAgent(%q,%q,%q) = %q, want %q", tt.flag, tt.env, tt.wsDef, got, tt.want)
+				t.Fatalf("ResolveAgent(%q,%q,%q,%q) = %q, want %q", tt.flag, tt.env, tt.wsDef, tt.hostDef, got, tt.want)
 			}
 		})
 	}
