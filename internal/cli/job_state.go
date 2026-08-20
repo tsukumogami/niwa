@@ -11,14 +11,25 @@ import (
 // jobState is the subset of ~/.claude/jobs/<id>/state.json niwa reads. The dir
 // name is the session-id prefix; the full SessionID inside confirms the match.
 //
-// Two distinct consumers read this file:
+// Everything here is Claude Code's own harness surface rather than a
+// general-purpose reader, and its consumers are the paths that are Claude
+// Code's by declaration:
 //   - the SessionStart guard (instance_from_hook.go) keys on Template == "bg"
-//     to confirm a dispatched background worker.
-//   - the dispatch capture path (dispatch_capture.go) keys on Cwd to correlate a
-//     launched worker to its instance directory and recover its session id.
+//     to confirm a dispatched background worker. Ephemeral-session provisioning
+//     rides that hook, and the capability is declared unavailable for every
+//     agent that has no such hook.
+//   - the reaper's entry-present liveness rule and `niwa watch`'s review
+//     continuation, both of which read a Claude Code job entry.
+//
+// The dispatch capture path no longer reads this file. Correlating a launched
+// worker to its instance is one behavior for whichever agent was launched, so
+// it moved to session_records.go, which is driven by the agent's own
+// declaration of where its records sit and what shape they are.
 //
 // The reaper's liveness rule (sessionLive) keys on the job ENTRY existing, not
 // on any field inside it, so no field here feeds liveness (DESIGN Decision 6).
+// Which agents that rule applies to is decided before it is called, from the
+// agent recorded on the session mapping.
 //
 // state.json is an undocumented internal Claude Code file, so absent fields
 // decode to their zero value and every reader fails safe on a miss.

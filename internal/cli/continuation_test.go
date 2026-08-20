@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/watch"
 )
 
@@ -189,7 +190,7 @@ func TestCaptureReviewSession(t *testing.T) {
 	t.Cleanup(func() { watchCapture = orig })
 
 	t.Run("valid capture is returned", func(t *testing.T) {
-		watchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
+		watchCapture = func(_ agentplan.SessionRecords, _, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
 			return testConvID, "aaaaaaaa", nil
 		}
 		sid, short := captureReviewSession(t.TempDir())
@@ -199,7 +200,7 @@ func TestCaptureReviewSession(t *testing.T) {
 	})
 
 	t.Run("capture miss degrades to empty", func(t *testing.T) {
-		watchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
+		watchCapture = func(_ agentplan.SessionRecords, _, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
 			return "", "", errors.New("timed out")
 		}
 		if sid, short := captureReviewSession(t.TempDir()); sid != "" || short != "" {
@@ -208,7 +209,7 @@ func TestCaptureReviewSession(t *testing.T) {
 	})
 
 	t.Run("invalid captured id is rejected", func(t *testing.T) {
-		watchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
+		watchCapture = func(_ agentplan.SessionRecords, _, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
 			return "not-a-uuid", "aaaaaaaa", nil
 		}
 		if sid, short := captureReviewSession(t.TempDir()); sid != "" || short != "" {

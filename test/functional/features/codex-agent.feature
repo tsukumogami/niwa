@@ -81,15 +81,17 @@ Feature: prepare every instance for both agents
 
   @critical
   Scenario: dispatch's refusal in a codex-default workspace is the declared gap
-    # niwa dispatch launches a Claude worker, so it refuses when the workspace
-    # agent is codex rather than silently preparing a Codex instance a Claude
-    # worker cannot read. The refusal fires before any instance is provisioned.
+    # niwa dispatch refuses when it has no way to launch a background worker for
+    # the workspace's agent, rather than provisioning an instance and then
+    # failing. The refusal fires before anything is created.
     #
-    # The refusal is not a rule this scenario knows on its own: launching a
-    # background worker is a declared-unavailable capability for Codex, and the
-    # assertions below pin the declaration and the reason the generated gap
-    # list publishes, so the binary, the table, and the guide cannot drift into
-    # telling a developer three different things.
+    # The refusal is not a rule this scenario knows on its own, and it is not a
+    # rule the command knows either: launching a background worker is a declared
+    # capability, the gate is a lookup against that declaration, and the message
+    # carries the declaration's own reason. The three assertions below pin the
+    # table, the guide, and the binary against each other, so a gap cannot end
+    # up described three different ways -- which is what happens the moment a
+    # hand-written refusal string and a table are edited separately.
     Given a clean niwa environment
     And a local git server is set up
     And a config repo "ws" exists with body:
@@ -102,9 +104,10 @@ Feature: prepare every instance for both agents
     Then the exit code is 0
     When I run "niwa dispatch some-task --detach" from the workspace root
     Then the exit code is not 0
-    And the error output contains "does not support"
-    And the error output contains "NIWA_AGENT=claude"
+    And the error output contains "cannot launch a background worker"
+    And the error output contains "Set NIWA_AGENT="
     And the capability "dispatch-launch" is declared unavailable for Codex
+    And the refusal carries the declared reason for "dispatch-launch"
     And the committed Codex gap list carries the declared reason for "dispatch-launch"
 
   @critical

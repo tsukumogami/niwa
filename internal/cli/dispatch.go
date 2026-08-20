@@ -9,11 +9,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/promptcapture"
@@ -23,9 +25,9 @@ import (
 func init() {
 	dispatchCmd.Flags().StringVar(&dispatchLabel, "label", "", "optional human-friendly alias recorded on the session mapping")
 	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session (sanitized into a slug; also names the niwa instance: <config>+-<id> with no name, <config>+<slug>-<id> with one -- '+' always marks the end of the config name)")
-	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", "model for the worker's main chat loop: a capability category or a versionless vendor name ("+knownModelHint(agent.AgentClaude)+"); overrides the [global] dispatch_model default")
-	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker (--permission-mode)")
-	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "agent to forward to the background worker (--agent)")
+	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", dispatchModelFlagHelp())
+	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker; dropped for an agent that has no such flag")
+	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "subagent type to forward to the background worker; this selects a role within the launched agent, not which agent is launched (that is NIWA_AGENT and the workspace default_agent). Dropped for an agent that has no such flag")
 	dispatchCmd.Flags().BoolVarP(&dispatchDetach, "detach", "d", false, "do not attach the terminal to the new session; print hints and return")
 	dispatchCmd.Flags().IntVar(&dispatchParallel, "parallel", 0,
 		"maximum repos to clone concurrently when provisioning the dispatch instance (>=1). Lower this on slow or flaky networks; 1 clones serially. Overrides the [global] clone_workers config. 0 (the default) uses clone_workers, else niwa's built-in default.")
@@ -107,28 +109,47 @@ const (
 	// in the launcher, where no estimate is needed.
 )
 
-// lookClaude reports the path to the claude binary or an error if it is not on
-// PATH. It is a package variable so the preflight check is unit-testable
-// without a real claude install (DESIGN Decision 9).
-var lookClaude = func() (string, error) {
-	return exec.LookPath("claude")
+// lookAgentBinary reports the path to a worker binary or an error if it is not
+// on PATH. The name comes from the launched agent's own declaration, so this
+// function knows nothing about which agent it is preflighting. It is a package
+// variable so the preflight check is unit-testable without a real install
+// (DESIGN Decision 9).
+var lookAgentBinary = func(name string) (string, error) {
+	return exec.LookPath(name)
+}
+
+// dispatchLaunchSpec resolves an agent's launch description. It is a package
+// variable so a test can substitute a description for an agent niwa does not
+// ship, which is the only way to tell "the dispatch reads the resolved agent's
+// spec" apart from "the dispatch reads a spec". Asserting against the one real
+// agent's spec proves the second and not the first, and the difference between
+// them is the whole feature.
+var dispatchLaunchSpec = func(ag agent.Agent) (agentplan.LaunchSpec, bool) {
+	return agentplan.For(ag).LaunchSpec()
 }
 
 // dispatchCapture is the capture seam. Production wires it to captureSessionID;
-// tests substitute a fake to return a fabricated UUID without a real jobs dir.
+// tests substitute a fake to return a fabricated session id without a real
+// record store.
 var dispatchCapture = captureSessionID
 
-// dispatchAttach attaches the terminal to the given session by running
-// `claude attach <id>` with inherited stdio. It is a package variable so tests
-// can assert it is/isn't called and force a (non-fatal) failure without a real
-// claude. It runs ONLY as the final step, after the mapping is durable, so its
-// failure never rolls back (DESIGN Decision 1).
-var dispatchAttach = func(id string) error {
-	bin, err := lookClaude()
+// dispatchAttach steps the terminal into a dispatched session by running the
+// launched agent's own resume verb against the handle capture recovered, with
+// inherited stdio. Which verb that is and what the handle means are both the
+// agent's declaration; everything else here -- looking the binary up, wiring
+// stdio, propagating the outcome -- is the same for whoever is launched, and is
+// written once.
+//
+// It is a package variable so tests can assert it is or isn't called and force
+// a (non-fatal) failure without a real binary. It runs ONLY as the final step,
+// after the mapping is durable, so its failure never rolls back (DESIGN
+// Decision 1).
+var dispatchAttach = func(spec agentplan.LaunchSpec, handle string) error {
+	bin, err := lookAgentBinary(spec.Binary)
 	if err != nil {
-		return fmt.Errorf("claude binary not found in PATH: %w", err)
+		return fmt.Errorf("%s binary not found in PATH: %w", spec.Binary, err)
 	}
-	cmd := exec.Command(bin, "attach", id)
+	cmd := exec.Command(bin, append(slices.Clone(spec.ResumeArgs), handle)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -220,30 +241,45 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	}
 	workspaceRoot := class.WorkspaceRoot
 
-	// (2b) niwa dispatch launches a Claude worker (it forwards Claude flags and
-	// spawns the claude binary), so it refuses when the workspace's resolved
-	// agent is not Claude -- otherwise the instance would be prepared for another
-	// agent whose context the launched Claude worker cannot read. The resolved
-	// agent comes from NIWA_AGENT and the workspace default_agent; dispatch's own
-	// --agent flag is Claude's subagent passthrough (a different thing), so the
-	// escape hatch from a Codex-default workspace is NIWA_AGENT=claude. A config
-	// that cannot be loaded is left to the provisioning path to report.
+	// (2b) Resolve which agent this dispatch launches, from NIWA_AGENT and the
+	// workspace default_agent. dispatch's own --agent flag is the launched
+	// agent's subagent-type passthrough, a different thing, so it is
+	// deliberately not consulted here. A config that cannot be loaded resolves
+	// against the environment alone and leaves the failure to the provisioning
+	// path to report.
+	var wsConfig *config.WorkspaceConfig
 	if wsCfg, cfgErr := config.Load(filepath.Join(workspaceRoot, workspace.StateDir, workspace.WorkspaceConfigFile)); cfgErr == nil {
-		resolvedAgent, agErr := resolveSessionAgent("", wsCfg.Config)
-		if agErr != nil {
-			return fmt.Errorf("niwa: error: %w", agErr)
-		}
-		if resolvedAgent != agent.AgentClaude {
-			return fmt.Errorf("niwa: error: niwa dispatch launches a Claude worker; this workspace's agent is %q, which background dispatch does not support yet. Set NIWA_AGENT=claude to dispatch a Claude worker, or wait for Codex background dispatch", resolvedAgent)
-		}
+		wsConfig = wsCfg.Config
+	}
+	dispatchedAgent, agErr := resolveSessionAgent("", wsConfig)
+	if agErr != nil {
+		return fmt.Errorf("niwa: error: %w", agErr)
 	}
 
-	// (3) Preflight claude on PATH BEFORE creating any instance, so an absent
-	// claude fails with no instance dir and no mapping on disk
+	// (2c) The gate is the declaration, not a comparison against an agent this
+	// code names. Launching a background worker is a declared capability, so
+	// whether niwa can launch one for this agent is a lookup, and the refusal
+	// quotes the same reason the generated gap list publishes -- which is what
+	// keeps the binary, the table, and the guide from telling a developer three
+	// different things.
+	launchDecl, err := agentplan.Lookup(agentplan.DispatchLaunch, dispatchedAgent)
+	if err != nil {
+		return fmt.Errorf("niwa: error: %w", err)
+	}
+	spec, hasSpec := dispatchLaunchSpec(dispatchedAgent)
+	if launchDecl.State != agentplan.StateImplemented || !hasSpec {
+		return fmt.Errorf("niwa: error: niwa dispatch cannot launch a background worker for the %q agent. %s %s, or open a session yourself and run the task there",
+			dispatchedAgent, launchDecl.Reason, launchableAgentsHint())
+	}
+
+	// (3) Preflight the worker binary on PATH BEFORE creating any instance, so
+	// an absent binary fails with no instance dir and no mapping on disk
 	// (PRD-instance-dispatch R16, R13 -- both numbers mean something unrelated
-	// in PRD-dispatch-paste-prompt, so the document is named).
-	if _, err := lookClaude(); err != nil {
-		return fmt.Errorf("niwa: error: claude binary not found in PATH; install Claude Code before dispatching")
+	// in PRD-dispatch-paste-prompt, so the document is named). This ordering is
+	// load-bearing rather than incidental, and it holds for whichever binary the
+	// declaration named above.
+	if _, err := lookAgentBinary(spec.Binary); err != nil {
+		return fmt.Errorf("niwa: error: %s binary not found in PATH; install it before dispatching", spec.Binary)
 	}
 
 	// (3b) With no positional prompt, capture one from the terminal. This sits
@@ -339,24 +375,25 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// (9a) Resolve the effective main-loop model. The --model flag wins; when it
 	// is unset the host [global] dispatch_model default fills in; when neither is
 	// set nothing is forwarded. The chosen value (a category or a versionless
-	// vendor name) is resolved to the concrete name `claude --model` receives, and
-	// an unrecognized value is forwarded as-is with a warning rather than blocking
-	// the launch (see resolveDispatchModel).
+	// vendor name) is resolved against the launched agent's own vocabulary to the
+	// concrete name its --model receives, and an unrecognized value is forwarded
+	// as-is with a warning rather than blocking the launch (see
+	// resolveDispatchModel).
 	effectiveModel := dispatchModel
 	if effectiveModel == "" && gcErr == nil && gc != nil {
 		effectiveModel = strings.TrimSpace(gc.Global.DispatchModel)
 	}
-	// F2 lands the resolver as agent-aware groundwork; the dispatch launcher
-	// stays Claude, so resolving under Claude preserves today's behavior exactly.
-	resolvedModel, modelWarning := resolveDispatchModel(agent.AgentClaude, effectiveModel)
+	resolvedModel, modelWarning := resolveDispatchModel(spec, effectiveModel)
 	if modelWarning != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", modelWarning)
 	}
 
 	// (9b) Build the pass-through argv. Flags become discrete argv elements --
-	// never string-concatenated -- so a crafted value cannot inject a claude flag
-	// (DESIGN Decision 8).
-	passthrough := buildDispatchPassthrough(slug, resolvedModel)
+	// never string-concatenated -- so a crafted value cannot inject a flag
+	// (DESIGN Decision 8). The spelling of each flag is the launched agent's,
+	// and an intent that agent has no flag for is dropped rather than guessed
+	// at.
+	passthrough := buildDispatchPassthrough(spec.Flags, slug, resolvedModel)
 
 	// (9c) Remote-control-on-dispatch default-fill. When the host preference
 	// (~/.config/niwa/config.toml [global].remote_control_on_dispatch) is on and
@@ -371,9 +408,16 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// dispatch always launches. The global config is loaded once in step (9) and
 	// reused here. The instance settings are read once too -- the keep-alive
 	// resolution in (9d) consults the same projection.
+	//
+	// Remote control is its own capability row, and it reaches a session as a
+	// settings document the agent reads. An agent that has no such flag has
+	// nowhere for the document to go, so the injection is gated on the
+	// declaration rather than attempted and dropped.
 	inst, _ := readInstanceSettings(instancePath)
 	rcInjected := false
-	if gcErr == nil {
+	rcDecl, rcErr := agentplan.Lookup(agentplan.RemoteControl, dispatchedAgent)
+	rcDeliverable := rcErr == nil && rcDecl.State == agentplan.StateImplemented && spec.Flags.Settings != ""
+	if gcErr == nil && rcDeliverable {
 		// The eligibility check must inspect the SAME environment the worker
 		// inherits -- realDispatchLaunch launches with cmd.Env = os.Environ() -- so
 		// the warning describes the worker's actual auth context. Keep these two
@@ -383,7 +427,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", warning)
 		}
 		if inject {
-			passthrough = append(passthrough, "--settings", remoteControlSettingsJSON)
+			passthrough = append(passthrough, spec.Flags.Settings, remoteControlSettingsJSON)
 			rcInjected = true
 		}
 	}
@@ -418,9 +462,17 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// gone, and a spill would write niwa's arming instruction into the file
 	// where the developer's text belongs -- producing a session recorded and
 	// reported as kept alive that was never actually armed.
+	//
+	// Keep-alive is its own capability row too, and it is the row that says
+	// whether keeping a dispatched session warm is a thing that exists for this
+	// agent at all. Consulting the declaration is what stops the arming from
+	// being attempted for an agent with no bridge to keep warm.
+	kaDecl, kaErr := agentplan.Lookup(agentplan.DispatchKeepAlive, dispatchedAgent)
+	keepAliveDeliverable := kaErr == nil && kaDecl.State == agentplan.StateImplemented
+
 	promptPrefix := ""
 	keepAliveArmed := false
-	if resolveDispatchKeepAlive(dispatchKeepAlive, hostGlobal, inst) {
+	if keepAliveDeliverable && resolveDispatchKeepAlive(dispatchKeepAlive, hostGlobal, inst) {
 		if remoteControlEnabled(rcInjected, inst) {
 			promptPrefix = keepAliveArmingInstruction
 			keepAliveArmed = true
@@ -429,32 +481,37 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if err := dispatchLaunch(cmd.Context(), instancePath, promptPrefix, prompt, passthrough, nil); err != nil {
+	if err := dispatchLaunch(cmd.Context(), spec, instancePath, promptPrefix, prompt, passthrough, nil); err != nil {
 		return fmt.Errorf("niwa: error: launching dispatch worker: %w", err)
 	}
 
-	// (10) Capture the worker's full session UUID AND its short id by jobs-dir
-	// cwd correlation. The full UUID keys the durable mapping; the short id is
-	// the handle `claude attach/logs/stop` accept (those commands reject the
-	// full UUID with "No job matching ...", so every user-facing claude
-	// invocation below uses shortID, not sessionID).
+	// (10) Capture the worker's session id AND the handle a developer reaches it
+	// by, correlating the launched agent's own session records against this
+	// instance directory. The id keys the durable mapping; the handle is what
+	// the agent's management verbs accept, and for one agent those two are
+	// different strings, which is why capture returns both rather than deriving
+	// one from the other.
 	// On failure the deferred rollback destroys the instance DIRECTORY, but the
-	// background worker launched in step (9) may still be running: capture failed,
-	// so we never obtained its session id and cannot 'claude stop' it. The
-	// orphaned process has no mapping and is harmless, but it is not auto-killed
-	// -- the user must stop it manually. The backstop reclaims the directory, not
-	// the process.
-	sessionID, shortID, err := dispatchCapture(defaultJobsDir(), instancePath, dispatchCaptureTimeout, nil, 0)
+	// background worker launched above may still be running: capture failed, so
+	// we never obtained its session id and cannot stop it. The orphaned process
+	// has no mapping and is harmless, but it is not auto-killed -- the user must
+	// stop it manually. The backstop reclaims the directory, not the process.
+	recordsRoot := recordStoreRoot(spec.Records, userHomeDir(), os.Getenv)
+	sessionID, handle, err := dispatchCapture(spec.Records, recordsRoot, instancePath, dispatchCaptureTimeout, nil, 0)
 	if err != nil {
 		return fmt.Errorf("niwa: error: capturing dispatch session id: %w", err)
 	}
 
 	// (11) Write the durable ephemeral, dispatch-origin mapping keyed on the
-	// full UUID.
+	// session id. The mapping records which agent launched the session, because
+	// every later question about it -- is it still there, how do I get back into
+	// it -- is answered against that agent's own declaration, and a reader that
+	// had to infer the agent from the shape of an id would be guessing.
 	mapping := workspace.SessionMapping{
 		SessionID:    sessionID,
 		InstanceName: res.Name,
 		InstancePath: instancePath,
+		Agent:        string(dispatchedAgent),
 		Ephemeral:    true,
 		Origin:       "dispatch",
 		Label:        dispatchLabel,
@@ -470,26 +527,29 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	removeDispatchMarker(instancePath)
 	success = true
 
-	// (13) Print the session id and management hints. The headline prints the
-	// full UUID (it is the durable mapping key the user can correlate), but the
-	// claude management hints use the SHORT id because `claude attach/logs/stop`
-	// are keyed on it -- the full UUID yields "No job matching ...".
+	// (13) Print the session id and the launched agent's own management hints.
+	// The headline prints the session id, which is the durable mapping key a
+	// developer can correlate; the hints print the handle, because that is what
+	// the agent's verbs accept. The verbs come from the agent's declaration
+	// rather than from a list here, so niwa never offers a command the binary
+	// does not have.
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Dispatched session %s\n", sessionID)
 	fmt.Fprintf(out, "  instance: %s\n", instancePath)
-	fmt.Fprintf(out, "  claude attach %s\n", shortID)
-	fmt.Fprintf(out, "  claude logs %s\n", shortID)
-	fmt.Fprintf(out, "  claude stop %s\n", shortID)
+	for _, verb := range spec.HintVerbs {
+		fmt.Fprintf(out, "  %s %s %s\n", spec.Binary, verb, handle)
+	}
 
-	// (14) Unless --detach, attach the terminal to the new session as the FINAL
-	// step. attach is keyed on the SHORT id, not the full UUID. An attach failure
-	// is NON-fatal: the session and instance survive, so degrade to a warning and
-	// never roll back or delete the mapping (success is already true; DESIGN
-	// Decision 1).
+	// (14) Unless --detach, step the terminal into the new session as the FINAL
+	// step, through the agent's own resume verb and keyed on the handle. A
+	// failure here is NON-fatal: the session and instance survive, so degrade to
+	// a warning and never roll back or delete the mapping (success is already
+	// true; DESIGN Decision 1).
 	if !dispatchDetach {
-		if err := dispatchAttach(shortID); err != nil {
+		if err := dispatchAttach(spec, handle); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: warning: could not attach to session %s: %v\n", sessionID, err)
-			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: the session is running; attach later with: claude attach %s\n", shortID)
+			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: the session is running; attach later with: %s %s %s\n",
+				spec.Binary, strings.Join(spec.ResumeArgs, " "), handle)
 		}
 	}
 
@@ -606,21 +666,61 @@ func isDispatchInstanceName(name string) bool {
 // model is the already-resolved main-loop model (see resolveDispatchModel): a
 // concrete versionless name, forwarded as "--model <model>", or "" to forward
 // nothing. Resolution happens in the caller so this stays a pure argv builder.
-func buildDispatchPassthrough(slug, model string) []string {
+func buildDispatchPassthrough(flags agentplan.LaunchFlags, slug, model string) []string {
 	var pass []string
-	if model != "" {
-		pass = append(pass, "--model", model)
-	}
-	if dispatchPermissionMode != "" {
-		pass = append(pass, "--permission-mode", dispatchPermissionMode)
-	}
-	if dispatchAgent != "" {
-		pass = append(pass, "--agent", dispatchAgent)
-	}
-	if slug != "" {
-		pass = append(pass, "--name", slug)
+	// Each pair is appended only when niwa has something to say AND the agent
+	// has a flag to say it with. An intent an agent has no flag for is dropped
+	// rather than forwarded under a near-equivalent spelling: forwarding a flag
+	// the binary does not accept fails the launch, and inventing one hands the
+	// developer something they did not ask for.
+	for _, pair := range []struct{ flag, value string }{
+		{flags.Model, model},
+		{flags.PermissionMode, dispatchPermissionMode},
+		{flags.SubagentType, dispatchAgent},
+		{flags.DisplayName, slug},
+	} {
+		if pair.flag != "" && pair.value != "" {
+			pass = append(pass, pair.flag, pair.value)
+		}
 	}
 	return pass
+}
+
+// launchableAgentsHint names the agents a refusal can point a developer at, in
+// the form they would set. The names come from the declarations rather than
+// from a sentence written here, because the person reading a refusal is by
+// definition the person who does not already know which agent to name -- and a
+// hardcoded one goes stale the moment a row flips, silently, at exactly the
+// moment it is being read.
+//
+// With no launchable agent at all there is nothing useful to suggest, so the
+// hint says what is true rather than pointing at an empty set.
+func launchableAgentsHint() string {
+	launchable := agentplan.LaunchableAgents()
+	if len(launchable) == 0 {
+		return "No agent niwa knows about can be dispatched to"
+	}
+	if len(launchable) == 1 {
+		return "Set NIWA_AGENT=" + string(launchable[0])
+	}
+	names := make([]string, len(launchable))
+	for i, ag := range launchable {
+		names[i] = string(ag)
+	}
+	return "Set NIWA_AGENT to one of " + strings.Join(names, ", ")
+}
+
+// userHomeDir returns the developer's home directory, or "" when it cannot be
+// resolved. Every caller here treats "" as "no session records", which is the
+// same fail-safe the jobs-directory resolution has always taken: without a home
+// there is no evidence either way, and a reader with no evidence must not
+// answer.
+func userHomeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return home
 }
 
 // writeDispatchMarker writes the pending-marker file containing an RFC3339

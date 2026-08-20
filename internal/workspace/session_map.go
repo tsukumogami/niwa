@@ -53,6 +53,15 @@ type SessionMapping struct {
 	TranscriptPath string    `json:"transcript_path"`
 	Created        time.Time `json:"created"`
 	Ephemeral      bool      `json:"ephemeral"`
+	// Agent names the coding agent whose session this is. Every later question
+	// about a session -- whether it still exists, how to step back into it --
+	// is answered against that agent's own declaration, and a reader that had
+	// to infer the agent from the shape of an id would be guessing. It is
+	// omitempty, and an absent value reads as the zero Agent, which
+	// internal/agent documents as Claude: a mapping written before this field
+	// existed describes a Claude session, because that is the only kind niwa
+	// wrote one for.
+	Agent string `json:"agent,omitempty"`
 	// Label is an optional human-friendly alias derived later from the
 	// session topic. It is metadata only and is never used to rename the
 	// on-disk instance directory. omitempty keeps it absent when unset.

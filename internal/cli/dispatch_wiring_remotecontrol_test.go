@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/tsukumogami/niwa/internal/agentplan"
 )
 
 // setHostConfig points XDG_CONFIG_HOME at a temp dir and, when body != "",
@@ -55,7 +57,7 @@ func provisionWithInstanceSettings(t *testing.T, f *dispatchFakes, settingsBody 
 
 // captureLaunchPassthrough overrides the launch seam to record the passthrough argv.
 func captureLaunchPassthrough(f *dispatchFakes, got *[]string) {
-	dispatchLaunch = func(_ context.Context, _, _, _ string, passthrough []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, _, _ string, passthrough []string, _ []string) error {
 		f.launchCalled++
 		*got = passthrough
 		return nil
@@ -124,7 +126,7 @@ func TestDispatch_RemoteControl_HostUnset_NoChange(t *testing.T) {
 	// AC4: with the preference unset, the passthrough must be byte-for-byte the
 	// baseline buildDispatchPassthrough produces -- not merely "--settings absent".
 	// dispatchName is "" here, so the baseline carries no flags at all.
-	if want := buildDispatchPassthrough("", ""); !slices.Equal(pass, want) {
+	if want := buildDispatchPassthrough(claudeLaunchSpec().Flags, "", ""); !slices.Equal(pass, want) {
 		t.Fatalf("preference unset must not alter argv; got %v, want %v", pass, want)
 	}
 }

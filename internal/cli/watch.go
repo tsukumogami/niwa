@@ -446,7 +446,8 @@ func recordJobActivity(jobsDir string, rec watch.StagedRecord) watch.JobActivity
 // on any miss/timeout/validation failure. It never errors: a capture miss is a
 // non-fatal degrade (the record saves without ids and that PR stays Defer).
 func captureReviewSession(instancePath string) (sessionID, shortID string) {
-	sid, short, err := watchCapture(defaultJobsDir(), instancePath, watchCaptureTimeout, nil, 0)
+	records := claudeLaunchSpec().Records
+	sid, short, err := watchCapture(records, recordStoreRoot(records, userHomeDir(), os.Getenv), instancePath, watchCaptureTimeout, nil, 0)
 	if err != nil {
 		return "", ""
 	}
@@ -572,12 +573,12 @@ func continueReview(cmd *cobra.Command, root, cwd, token string, client *github.
 	// (buildDispatchPassthrough + --strict-mcp-config when sandboxed) and additionally
 	// carries --resume <SessionID>. The re-review prompt is a fixed template.
 	prompt := watch.BuildResumePrompt(watch.DefaultCloneRelDir, watch.DefaultDraftRelPath)
-	passthrough := buildDispatchPassthrough(rec.Handle, "")
+	passthrough := buildDispatchPassthrough(claudeLaunchSpec().Flags, rec.Handle, "")
 	passthrough = append(passthrough, "--resume", rec.SessionID)
 	if plan.sandbox {
 		passthrough = append(passthrough, "--strict-mcp-config")
 	}
-	if err := dispatchLaunch(ctx, instancePath, "", prompt, passthrough, nil); err != nil {
+	if err := dispatchLaunch(ctx, claudeLaunchSpec(), instancePath, "", prompt, passthrough, nil); err != nil {
 		return fmt.Errorf("resuming review agent: %w", err)
 	}
 
@@ -823,7 +824,7 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	}
 
 	prompt := watch.BuildReviewPrompt(pr, watch.DefaultCloneRelDir, watch.DefaultDraftRelPath)
-	passthrough := buildDispatchPassthrough(slug, "")
+	passthrough := buildDispatchPassthrough(claudeLaunchSpec().Flags, slug, "")
 	if plan.sandbox {
 		// Belt-and-suspenders: reduce MCP server loading so the egress-deny hook
 		// is not the only thing standing between an MCP tool and the network.
@@ -831,7 +832,7 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	}
 
 	// Launch detached (no terminal attach) with the real environment.
-	if err := dispatchLaunch(ctx, instancePath, "", prompt, passthrough, nil); err != nil {
+	if err := dispatchLaunch(ctx, claudeLaunchSpec(), instancePath, "", prompt, passthrough, nil); err != nil {
 		return fmt.Errorf("launching review agent: %w", err)
 	}
 

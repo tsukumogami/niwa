@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -109,6 +111,26 @@ func warnPrewarm(reporter *workspace.Reporter, format string, a ...any) {
 // tests can record the issued commands without a real claude install, mirroring the
 // lookClaude/dispatchAttach seam pattern in dispatch.go. Output is folded into the
 // returned error so a failure surfaces a useful message in the caller's warning.
+// lookClaude reports the path to the Claude Code binary. Two callers want it by
+// name rather than by declaration: the plugin prewarm below, which drives
+// Claude Code's own `plugin` subcommand and answers for a capability the table
+// declares no other agent can receive, and `niwa watch`, whose review
+// continuation is Claude Code harness surface. In both the agent is not a choice
+// being made at a call site -- it is the only agent the capability exists for --
+// which is why this sits here rather than on the launch path, where the agent is
+// resolved rather than assumed.
+var lookClaude = func() (string, error) { return lookAgentBinary(claudeLaunchSpec().Binary) }
+
+// claudeLaunchSpec is Claude Code's own launch description, for the two paths
+// above that drive Claude Code specifically rather than whichever agent a
+// workspace resolves to. It reads the same table the dispatch path reads, so
+// there is still exactly one place that says how Claude Code is launched and
+// what its management verbs are.
+func claudeLaunchSpec() agentplan.LaunchSpec {
+	spec, _ := agentplan.For(agent.AgentClaude).LaunchSpec()
+	return spec
+}
+
 var runClaudePluginCmd = func(ctx context.Context, dir string, args ...string) error {
 	bin, err := lookClaude()
 	if err != nil {

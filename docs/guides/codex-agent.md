@@ -108,9 +108,9 @@ debt, and it's the one group that can shrink without the agent changing.
 
 - **niwa's own plugin, which carries the migrate-config skill.** Codex accepts
   the identical plugin manifest; the wiring is unbuilt.
-- **Launching a background worker with `niwa dispatch`.** The launch path
-  refuses a non-Claude agent, although the per-agent model table already
-  carries Codex entries.
+- **Launching a background worker with `niwa dispatch`.** Nothing in niwa
+  knows how to start a Codex worker, recover which session it became, or step
+  back into one.
 
 ### What doesn't apply to Codex
 
