@@ -1213,6 +1213,80 @@ misleading the moment dispatch provisions one for Codex too. The gate,
 capture, resume, and reaper themselves changed only by what the new
 declaration says: their code landed in PR 1 and reads the table.
 
+### Decision 12 -- selection gets its own flag name, and the durable home is the file niwa owns (R1, R1a)
+
+Added in the second round of this chain, after the delivery was judged
+unreachable. The PRD's original R1 forbade a selection flag; what
+follows is the design half of its replacement.
+
+**The flag is `--launch-agent` on `niwa dispatch`, and `--agent` is left
+alone.** The collision is real: `--agent` already exists on that command
+as the subagent-type passthrough. What settles it is that the launch
+description's own field is named `SubagentType`
+(`agentplan.LaunchFlags`), bound to the string `"--agent"` in the Claude
+row -- so the codebase already calls the concept by its right name and
+only the user-facing flag disagrees. Three options were live:
+
+- **A new name, `--agent` untouched.** Chosen. Additive, breaks no
+  script, and matches the vocabulary already in the tree: the capability
+  is `DispatchLaunch`, the accessor is `dispatchLaunchSpec`, the refusal
+  says "cannot launch a background worker for the %q agent". The one
+  reservation is that `LaunchAgent` is an unrelated macOS launchd noun,
+  which nobody meets inside a `niwa dispatch` invocation.
+- **Rename the passthrough to `--subagent-type` with `--agent` as a
+  deprecated alias, then repoint `--agent` later.** This is the right
+  eventual fix and is recorded as follow-on rather than dropped. It
+  cannot be the answer now: during its own deprecation window `--agent`
+  still means subagent type, so selection needs a distinct name today
+  regardless. It is strictly more work now for a payoff a release later.
+- **Repoint `--agent` immediately, no alias.** Rejected. It is a loud
+  break for `--agent general-purpose` and a *silent* one for `--agent
+  claude`, and "the outcome is near-identical" is not a standard to ship
+  a breaking flag on -- near-identical is the claim that turns out to
+  have an exception nobody enumerated.
+
+The flag belongs on `niwa dispatch` and nowhere else. `resolveSessionAgent`
+has one call site, nothing else in niwa is agent-specific at invocation
+time because every apply prepares every agent, and the functional
+scenario pinning `apply --agent codex` as an unknown flag stands
+unchanged.
+
+**The durable home is `~/.config/niwa/config.toml`, never the
+workspace's `.niwa/`.** This corrects a premise this design was written
+under. Two different files share the word "global", and only one is
+writable: `<workspace>/.niwa/` is materialized from a source repo and
+rotated wholesale on refresh, so a write there produces a setting that
+works and then silently stops. `~/.config/niwa/config.toml` is a plain
+local file niwa owns, never materialized, already written by `config set
+global` through `SaveGlobalConfigTo`, and already home to a row of
+dispatch-scoped host defaults of exactly this shape -- `dispatch_model`,
+`remote_control_on_dispatch`, `keep_alive_on_dispatch`. `default_agent`
+is the same kind of setting; putting it anywhere else would make it the
+odd one out. So `niwa config set default-agent <agent>` writes
+`[global].default_agent` there, with a matching `unset`.
+
+**Precedence: flag > `NIWA_AGENT` > `[workspace].default_agent` >
+`[global].default_agent` > claude.** The host default is the weakest
+rung above the built-in. The argument is consistency rather than
+ergonomics: `RemoteControlOnDispatch` and `KeepAliveOnDispatch` both
+document a downstream workspace value outranking the host default, and
+`DispatchModel` documents the flag always winning. A third key in the
+same file with the opposite polarity would make that file's precedence
+something a reader looks up per key instead of learning once, and
+unpredictable-per-key is a worse outcome than any single key's
+ergonomics. The personal-machine case that argues for the other order --
+"on this machine I use Codex" -- is already served twice, by `NIWA_AGENT`
+in a shell profile and now by the flag per dispatch.
+
+**Rejected: refusing to write anything.** An earlier framing of this
+work assumed no durable local target existed and proposed that `config
+set` fail with directions to the config source repo instead. That would
+have been the right call had the premise held, on the principle that a
+command which appears to work and silently does not is worse than one
+that refuses with directions. The premise did not hold, and the
+principle is what identified the real target rather than what blocked
+it.
+
 ## What a Dispatched Codex Worker Does Not Receive
 
 This section is deliberately its own rather than a caveat inside a

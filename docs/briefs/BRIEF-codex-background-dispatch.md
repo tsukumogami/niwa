@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Done
+status: Accepted
 problem: |
   niwa dispatch refuses any workspace whose resolved agent is not Claude,
   and row 22 of the capability table declares that refusal as niwa's own
@@ -26,7 +26,7 @@ motivating_context: |
 
 ## Status
 
-Done
+Accepted
 
 This brief frames the delivery of `niwa dispatch` for Codex: the framing,
 the scope boundary, and the sequencing. The downstream PRD owns the
@@ -106,7 +106,24 @@ was built to prevent.
 
 ## User Journeys
 
-### Dispatching from a codex-default workspace
+### Deciding that this workspace's workers are Codex
+
+A developer has a workspace prepared, as every workspace is, for both
+agents. They want its background workers to be Codex. They find out that
+this is a choice they get to make, and where to make it, without reading
+source: the command that launches workers says so, the guide says so, and
+the setting has a documented home that survives the next `niwa apply`.
+Having made it, they can tell which agent a dispatch will launch before
+they run one. Nothing they do here changes what a workspace is prepared
+with -- both agents stay ready, and the choice is only about who gets
+launched.
+
+This journey is the one the first pass through this brief left out, and
+leaving it out is what made the rest of the feature unreachable. A
+capability whose entry point is an undocumented environment variable is
+not delivered; it is present.
+
+### Dispatching from a workspace whose workers are Codex
 
 A developer's workspace sets `default_agent = "codex"`. They run
 `niwa dispatch "fix the flaky retry test" --detach` from the workspace
@@ -157,6 +174,21 @@ work rather than pretending the gap isn't there.
 - Declaring the reclamation gap: a Codex-dispatched instance is safe from
   the reaper and consequently not auto-reclaimed. Declared, published, and
   its closure named as the next feature's work.
+- **Selecting which agent a workspace's background workers are, as a
+  surface a developer can find, set, and verify.** Added in the second
+  round of this chain. The first round put this out of scope on the
+  argument that `NIWA_AGENT` and `default_agent` already resolved the
+  agent, so no new user-facing surface was needed. That was wrong in a way
+  that only shows up from outside: resolution existing is not the same as
+  selection being reachable. What lands here is the entry point rather
+  than a new resolution rule -- the precedence order is unchanged, and
+  nothing here alters what `niwa apply` prepares.
+- **The documentation of that surface, and of the costs this feature
+  declares.** Also second-round. A cost declared only in a design document
+  is not declared to the person who pays it, and a setting whose only
+  written home is a commented-out line in a generated file is not
+  documented. What the reviewers judge necessary is what this covers; the
+  PRD carries the list.
 
 **Out (each item named as deferred, not absorbed):**
 

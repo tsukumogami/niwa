@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Done
+status: In Progress
 problem: |
   niwa dispatch refuses any workspace whose resolved agent is not Claude,
   and row 22 of the capability table declares that refusal as niwa's own
@@ -31,7 +31,7 @@ motivating_context: |
 
 ## Status
 
-Done
+In Progress
 
 This PRD owns the requirements for delivering `niwa dispatch` to Codex
 across four surfaces -- launch, capture, resume, liveness -- as two
@@ -128,17 +128,72 @@ hardcoded pass the capability contract exists to prevent.
 
 ### Selection and the gate
 
-- **R1. No new selection flag.** The agent a dispatch launches is resolved
-  exactly as every other niwa surface resolves it: `NIWA_AGENT`, then the
-  workspace `default_agent`, through the existing resolution call with an
-  empty flag argument. `niwa dispatch --agent` keeps its current meaning
-  -- Claude's subagent-type passthrough, forwarded to the worker -- and
-  never participates in niwa-agent resolution. No `--agent-type` or any
-  other selector is added; a planning document elsewhere used that
-  spelling, and it corresponds to nothing in the code. Acceptance: a test
-  fails if dispatch's flag set gains an agent selector, or if a dispatch
-  in a codex-default workspace with `--agent <subagent>` set resolves to
-  anything but Codex.
+- **R1. Selecting the launched agent is a reachable surface.** *Rewritten in
+  the second round; the original requirement is preserved below because
+  what it got wrong is the useful part.*
+
+  A developer can choose which agent a dispatch launches, and can do it
+  three ways matching three lifetimes: per dispatch with a flag on `niwa
+  dispatch`, per shell with `NIWA_AGENT`, and durably for the host with
+  `niwa config set`. The full precedence is flag > `NIWA_AGENT` >
+  `[workspace].default_agent` > `[global].default_agent` > claude, and
+  every rung of it is stated in the command's own help, not only in a
+  guide. Nothing here changes what `niwa apply` prepares: every apply
+  prepares every supported agent, and selection names a launch target.
+
+  The flag is a new name rather than a repointing of `niwa dispatch
+  --agent`. That flag is the subagent-type passthrough -- a role within
+  the launched agent -- and the launch spec's own field is named
+  `SubagentType`, so the codebase already calls the concept by its right
+  name and only the user-facing flag disagrees. Repointing `--agent` would
+  be a silent behavior change for `--agent claude`. Renaming the
+  passthrough to `--subagent-type` with a deprecated alias is the correct
+  eventual fix and is recorded as follow-on, but it cannot deliver
+  `--agent` for selection during its own deprecation window, so selection
+  needs its own name either way.
+
+  Acceptance: a dispatch in a workspace with no stated agent launches the
+  one `niwa config set` recorded; a workspace that states an agent
+  outranks that; `NIWA_AGENT` outranks both; the flag outranks all three.
+  A test fails if any rung is unreachable or if the order differs from the
+  one above. `niwa dispatch --agent <subagent>` still resolves the launch
+  target from the other rungs and forwards the subagent type untouched.
+  `niwa create` and `niwa apply` gain no agent flag, and the functional
+  scenario asserting `apply --agent codex` is an unknown flag stands.
+
+  **What the original R1 said, and why it was wrong.** It required that no
+  selection flag be added at all, on the argument that `NIWA_AGENT` and
+  `default_agent` already resolved the agent and a flag would be new
+  user-facing surface for no gain. Every fact in that argument was true and
+  the conclusion did not follow. Resolution existing is not the same as
+  selection being reachable: the resolution call's flag parameter had
+  exactly one caller passing an empty string, `niwa config set` is not a
+  key/value setter and could not write the value, and the environment
+  variable appeared in no committed documentation. The requirement
+  described the code's internals accurately and the developer's position
+  not at all, which is the failure mode a requirement written from inside
+  the implementation is prone to.
+
+- **R1a. The durable home is a file niwa owns, not the materialized
+  snapshot.** `niwa config set` writes `[global].default_agent` to
+  `~/.config/niwa/config.toml`, alongside the dispatch-scoped host
+  defaults already there (`dispatch_model`,
+  `remote_control_on_dispatch`, `keep_alive_on_dispatch`). It must not
+  write `<workspace>/.niwa/workspace.toml`: that tree is materialized from
+  a source repo and replaced wholesale on the next reconcile, so a write
+  there produces a setting that works and then silently stops.
+  A matching `niwa config unset` removes it. Acceptance: a test fails if
+  the write target is inside `.niwa/`, and the failure this catches is a
+  setting that survives the command and not the next `niwa apply`.
+
+  Where the value beats a workspace's own `default_agent` is settled the
+  way its neighbours settle it -- the host default is the weaker rung, and
+  a workspace that states an agent keeps saying it. The two sibling
+  settings both document a downstream workspace value outranking the host
+  default, and a third key in the same file with the opposite polarity
+  would make that file's precedence something a reader looks up per key
+  rather than learns once. The personal-machine case is served by
+  `NIWA_AGENT` and by the flag.
 - **R2. The gate is a declaration lookup.** Dispatch's agent gate consults
   the `DispatchLaunch` declaration for the resolved agent instead of
   comparing against an agent constant. A declared-implemented agent
