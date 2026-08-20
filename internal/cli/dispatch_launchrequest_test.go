@@ -51,19 +51,54 @@ func TestEveryLaunchRequestFieldIsRead(t *testing.T) {
 		t.Fatalf("parsing %s: %v", launcherFile, err)
 	}
 
-	// A selector on any identifier counts, because the request travels under
-	// more than one name (the parameter, and locals it is copied into). What
-	// this rules out is a field nothing in the launcher ever selects.
+	// Only selectors ON THE REQUEST count, and only inside the function that
+	// takes one. An earlier version of this test inspected the whole file and
+	// counted a selector on any identifier, which reintroduced exactly the
+	// collision it was written to defeat -- from inside the file it scans.
+	// `cmd.Env`, `os.Stdout` and `cmd.Stderr` all live in this launcher, so
+	// `Env`, `Stdout` and `Stderr` counted as read no matter what the launcher
+	// did with the request. Dropping the `req.Env` read left the guard green
+	// AND the whole `internal/...` suite green, with the worker silently
+	// inheriting the supervisor's full environment -- credentials included --
+	// through the one seam the type documents as the only way to avoid that.
+	//
+	// Finding the parameter by type rather than by name is what keeps this
+	// honest if the parameter is ever renamed.
+	var (
+		scanned  bool
+		reqIdent string
+	)
 	ast.Inspect(file, func(n ast.Node) bool {
-		sel, ok := n.(*ast.SelectorExpr)
-		if !ok {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Type.Params == nil {
 			return true
 		}
-		if _, tracked := fields[sel.Sel.Name]; tracked {
-			fields[sel.Sel.Name] = true
+		for _, param := range fn.Type.Params.List {
+			ident, isIdent := param.Type.(*ast.Ident)
+			if !isIdent || ident.Name != "launchRequest" || len(param.Names) == 0 {
+				continue
+			}
+			scanned, reqIdent = true, param.Names[0].Name
+			ast.Inspect(fn.Body, func(inner ast.Node) bool {
+				sel, isSel := inner.(*ast.SelectorExpr)
+				if !isSel {
+					return true
+				}
+				base, isBase := sel.X.(*ast.Ident)
+				if !isBase || base.Name != reqIdent {
+					return true
+				}
+				if _, tracked := fields[sel.Sel.Name]; tracked {
+					fields[sel.Sel.Name] = true
+				}
+				return true
+			})
 		}
 		return true
 	})
+	if !scanned {
+		t.Fatalf("no function in %s takes a launchRequest parameter; the guard would pass by not looking", launcherFile)
+	}
 
 	var unread []string
 	for name, seen := range fields {
