@@ -13,6 +13,42 @@ environment, and its approval posture. What it doesn't get is mostly Claude
 Code harness surface — hooks and the features built on them — plus a few routes
 niwa simply hasn't wired up yet.
 
+## Choosing which agent niwa launches
+
+The paragraphs above are about preparation. Launching is a separate question,
+and it has its own answer: `default_agent`, on the `[workspace]` table of your
+workspace root's `.niwa/workspace.toml`.
+
+```toml
+[workspace]
+name = "my-workspace"
+default_agent = "codex"
+```
+
+Accepted values are `claude` and `codex`, and leaving it out means `claude`. To
+override it for a single shell without editing the file, set `NIWA_AGENT`:
+
+```bash
+NIWA_AGENT=codex niwa dispatch "..."
+```
+
+The environment beats the config, and the config beats the `claude` default.
+It's a workspace-level setting, with no per-instance form — every instance of a
+workspace launches the same agent unless a shell says otherwise.
+
+What it doesn't do is change what `niwa apply` prepares. Every apply prepares
+the tree for every agent niwa supports no matter what `default_agent` says, so
+changing it needs no re-apply and takes nothing away from the other agent. It
+picks a launch target, and that's all it does. The one command that reads it
+today is `niwa dispatch`, which uses it to decide which agent the background
+worker runs as.
+
+One name worth disambiguating: `niwa dispatch --agent` is a different setting.
+It forwards a subagent type to the worker — a role inside the agent that gets
+launched — and is dropped for an agent with no such flag. It never picks the
+agent. `niwa create` and `niwa apply` have no `--agent` flag at all and reject
+one as an unknown flag.
+
 ## What a Codex session gets
 
 Everything up to background dispatch lands inside the instance, in the
