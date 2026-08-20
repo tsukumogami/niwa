@@ -166,11 +166,18 @@ var dispatchAttach = func(spec agentplan.LaunchSpec, handle, workdir string) err
 
 var dispatchCmd = &cobra.Command{
 	Use:   "dispatch [prompt]",
-	Short: "Launch a background Claude Code worker in a fresh ephemeral instance",
-	Long: `dispatch creates a fresh ephemeral niwa instance, launches a Claude Code
-background worker rooted inside it, captures the worker's session id, and
-records an ephemeral dispatch-origin mapping so the instance is reclaimed when
-the session ends.
+	Short: "Launch a background worker in a fresh ephemeral instance",
+	Long: `dispatch creates a fresh ephemeral niwa instance, launches a background
+worker rooted inside it, captures the worker's session id, and records an
+ephemeral dispatch-origin mapping so the instance is reclaimed when the session
+ends.
+
+Which agent the worker runs as is resolved once, in this order: --launch-agent,
+then NIWA_AGENT, then the workspace's [workspace].default_agent, then your own
+[global].default_agent (niwa config set default-agent). Every instance is
+prepared for every agent niwa supports whatever those say, so this picks a
+launch target and takes nothing away from the other agent. Not to be confused
+with --agent, which forwards a subagent type INTO whichever agent is launched.
 
 The prompt is optional. With no prompt argument, dispatch opens an interactive
 capture on the terminal: paste or type the task, press Enter to dispatch,
@@ -186,16 +193,20 @@ line and the rest reaches the shell; pass the prompt as an argument there.
 With no prompt AND no terminal -- a script, a hook, a cron job -- dispatch fails
 immediately rather than waiting on input that will never arrive.
 
-By default the terminal then attaches to the new session (like docker run);
-pass --detach/-d to skip the attach and return after printing the
-attach/logs/stop hints (the mode for fan-out and scripting).
+By default the terminal then attaches to the new session (like docker run), for
+an agent that can hand a session over while its turn is still running. For one
+that cannot, dispatch says so and returns; the session is yours to resume once
+the turn ends. Either way --detach/-d skips the attach and returns after
+printing the launched agent's own management hints, which is the mode for
+fan-out and scripting.
 
 Any failure before the mapping is durable destroys the just-created instance,
 so dispatch never leaves an unreclaimable instance DIRECTORY. One caveat: if the
 worker launch succeeds but session-id capture then fails, the rollback deletes
 the instance directory, but the detached background process keeps running -- we
 never captured its session id, so we cannot stop it. That process has no mapping
-and it is yours to 'claude stop' once you find it in 'claude list'. It is mostly
+and stopping it is yours to do, with the launched agent's own stop verb, once
+you find it in that agent's own session list. It is mostly
 harmless, with one caveat: a prompt too large to pass as a command argument is
 written into the instance, so a worker in that window may find its task file
 already deleted and proceed on the excerpt it was given.`,

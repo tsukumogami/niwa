@@ -72,13 +72,32 @@ type GlobalSettings struct {
 	// session frees capacity on the next pass.
 	WatchMaxStaged int `toml:"watch_max_staged,omitempty"`
 	// DefaultAgent is the developer's machine-wide default for which coding
-	// agent a niwa-launched session runs as. It accepts the same closed set as
-	// [workspace].default_agent ("claude" or "codex") and goes through the same
-	// single validation boundary (agent.ParseAgent), so it is stored raw here
-	// rather than as a typed Agent -- a value decoded from a file never looks
-	// validated by its type. It is the BROADEST rung of the resolution: a
-	// workspace stating its own default_agent outranks it, as do NIWA_AGENT and
-	// the per-dispatch flag. "" (the default) means no machine-wide preference.
+	// agent a niwa-launched session runs as, written by
+	// `niwa config set default-agent` and removed by `niwa config unset
+	// default-agent`.
+	//
+	// It is the BROADEST rung of a four-source resolution, in full:
+	//
+	//	--launch-agent  >  NIWA_AGENT  >  [workspace].default_agent  >
+	//	[global].default_agent  >  claude
+	//
+	// So a workspace that states its own default_agent keeps launching that
+	// agent and this value fills in for every workspace that states none. That
+	// polarity matches RemoteControlOnDispatch and KeepAliveOnDispatch above,
+	// both of which a downstream value outranks; a key in this file with the
+	// opposite polarity would make the file's precedence something a reader
+	// looks up per key rather than learns once.
+	//
+	// It never changes what `niwa apply` prepares. Every apply prepares the tree
+	// for every agent niwa supports whatever this says; the value names a launch
+	// target and nothing else, so changing it needs no re-apply and takes
+	// nothing away from the other agent.
+	//
+	// It accepts the same closed set as [workspace].default_agent and goes
+	// through the same single validation boundary (agent.ParseAgent), so it is
+	// stored raw here rather than as a typed Agent -- a value decoded from a
+	// file never looks validated by its type. "" (the default) means no
+	// machine-wide preference.
 	DefaultAgent string `toml:"default_agent,omitempty"`
 }
 

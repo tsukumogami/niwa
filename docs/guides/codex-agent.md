@@ -42,33 +42,27 @@ name = "my-workspace"
 default_agent = "codex"
 ```
 
-Which copy of that file you edit depends on your workspace's config model, so
-check before you touch it: `cat .niwa/.niwa-snapshot.toml` at the workspace
-root. A marker naming a source repo means `.niwa/` is a snapshot — a plain file
-tree materialized from that repo, no `.git` — and the durable edit belongs
-upstream, in the source repo at the subpath the marker names. No such file, and
-`.niwa/` is yours to edit in place. See
-[workspace-config-sources.md](workspace-config-sources.md) for the whole model,
-including a legacy shape that converts to a snapshot on its next command.
+Check which copy of that file you edit before you touch it: `cat
+.niwa/.niwa-snapshot.toml` at the workspace root. A marker naming a source repo
+means `.niwa/` is a snapshot materialized from that repo, and the durable edit
+belongs upstream in that repo, not here — an in-place edit takes effect and then
+silently stops the next time niwa re-materializes the directory. No such file,
+and `.niwa/` is yours to edit in place. See
+[workspace-config-sources.md](workspace-config-sources.md) for the model.
 
-Editing a snapshot in place is the trap. The edit takes effect and then quietly
-stops: niwa replaces `.niwa/` wholesale whenever it re-materializes from the
-source, which can be the very next command and certainly is the one after the
-source repo moves. Nothing warns you, and from the outside it reads like niwa
-dropping a setting rather than like a file you changed being replaced. Going
-upstream runs one command behind for this particular setting, too — `niwa
-dispatch` resolves the agent before it refreshes the snapshot, so a value you
-push lands on the dispatch after the one that pulls it. Run `niwa apply` once
-after pushing, or use `NIWA_AGENT` for the run in front of you. An overlay is
-no help either: `[workspace]` in an overlay is inert, so a `default_agent`
-there is dropped without a warning.
-
-Accepted values are `claude` and `codex` wherever you set them, and an unknown
-value is rejected with the accepted set named rather than quietly ignored.
+Two things to know if you do go upstream. The value lands one command late —
+`niwa dispatch` resolves the agent before it refreshes the snapshot, so run
+`niwa apply` once after pushing. And an overlay is no help: `[workspace]` in an
+overlay is inert, so a `default_agent` there is dropped without a warning. If
+neither the wait nor the push access suits you, the next section is the way
+around both: your own machine-wide setting is durable, immediate, and touches no
+snapshot.
 
 It's a workspace-level setting, with no per-instance form — every instance of a
 workspace launches the same agent unless something shorter-lived says
-otherwise.
+otherwise. Accepted values are `claude` and `codex` wherever you set them, and
+an unknown value is rejected with the accepted set named rather than quietly
+ignored.
 
 ### Your own machine-wide default
 
@@ -175,10 +169,10 @@ front of a Claude Code one. See `docs/guides/file-distribution.md`.
 **Git-exclude coverage.** Every name niwa writes into a working tree is covered
 by the repository's exclude block, so a prepared tree doesn't read dirty.
 
-**Background dispatch.** `niwa dispatch` launches a Codex worker the same way
-it launches a Claude one, with the same command and no agent flag — the agent
-is whichever one `NIWA_AGENT` and your workspace's `default_agent` already
-resolve to. It provisions a fresh instance, starts `codex exec` detached inside
+**Background dispatch.** `niwa dispatch` launches a Codex worker the same way it
+launches a Claude one, with the same command — the agent is whichever one the
+four sources above resolve to, so `--launch-agent codex` picks it for a single
+dispatch and the settings pick it standing. It provisions a fresh instance, starts `codex exec` detached inside
 it, recovers the session id from the session record Codex writes, and prints
 `codex resume <id>`. It doesn't run that command for you, even without
 `--detach`, and `--detach` makes no difference to a Codex dispatch: Codex won't

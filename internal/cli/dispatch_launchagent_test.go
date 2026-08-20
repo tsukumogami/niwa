@@ -198,6 +198,51 @@ func TestDispatch_UnknownHostDefaultAgentRefuses(t *testing.T) {
 	}
 }
 
+// TestDispatchHelpNamesNoSingleAgent is the guard for the failure the docs audit
+// found: dispatch's own help said it launches one specific agent, named that
+// agent's binary, and described that agent's attach behavior as universal. A
+// reader who has just read the guide runs --help to confirm and takes the
+// binary's word over the guide's, concluding the feature is not in their build.
+//
+// The package's AST scan does not catch this. It rejects a string literal that
+// IS an agent name; these were agent names sitting inside a much longer literal,
+// which is a different shape and reads exactly as authoritative.
+//
+// Both the agent names and the binary names come from the closed set and the
+// launch declarations, so a third agent extends this guard rather than slipping
+// past it.
+func TestDispatchHelpNamesNoSingleAgent(t *testing.T) {
+	var banned []string
+	for _, ag := range agent.All() {
+		banned = append(banned, string(ag))
+		if spec, ok := dispatchLaunchSpec(ag); ok && spec.Binary != "" {
+			banned = append(banned, spec.Binary)
+		}
+	}
+
+	for _, field := range []struct{ name, text string }{
+		{"Short", dispatchCmd.Short},
+		{"Long", dispatchCmd.Long},
+	} {
+		lowered := strings.ToLower(field.text)
+		for _, name := range banned {
+			if strings.Contains(lowered, strings.ToLower(name)) {
+				t.Errorf("dispatch's %s names %q; it describes whichever agent the resolution picks, so it must name none of them:\n%s",
+					field.name, name, field.text)
+			}
+		}
+	}
+
+	// And it does say how the agent is picked, since --help is where the reader
+	// who is about to run an unfamiliar command goes looking.
+	if !strings.Contains(dispatchCmd.Long, launchAgentFlagName) {
+		t.Errorf("dispatch's Long never mentions --%s, so nothing in the command's own help says the agent is selectable", launchAgentFlagName)
+	}
+	if !strings.Contains(dispatchCmd.Long, "NIWA_AGENT") {
+		t.Error("dispatch's Long never mentions NIWA_AGENT, a rung of the resolution it describes")
+	}
+}
+
 // TestLaunchAgentFlagIsRegisteredAndDistinctFromAgent guards the collision this
 // flag was named around. --agent forwards a subagent type INTO the launched
 // agent; --launch-agent picks which agent is launched. They are different
