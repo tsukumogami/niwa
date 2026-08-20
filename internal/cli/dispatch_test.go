@@ -120,7 +120,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 		return provisionResult{Name: name, Path: dir}, nil
 	}
 
-	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, _, _ string, _ []string, _ []string) error {
+	dispatchLaunch = func(context.Context, launchRequest) error {
 		f.launchCalled++
 		return nil
 	}
@@ -330,7 +330,7 @@ func TestDispatch_Rollback_LaunchFailure(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
 	f := installDispatchFakes(t, root)
-	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, _, _ string, _ []string, _ []string) error {
+	dispatchLaunch = func(context.Context, launchRequest) error {
 		f.launchCalled++
 		return errors.New("launch boom")
 	}
@@ -473,7 +473,7 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 	// installDispatchFakes mutates shared dispatchFakes counters without
 	// synchronization, which would be a data race under concurrent dispatch; this
 	// test asserts on the durable mappings instead of those counters.
-	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, _, _ string, _ []string, _ []string) error {
+	dispatchLaunch = func(context.Context, launchRequest) error {
 		return nil
 	}
 	destroyInstanceFunc = func(_ string) error { return nil }
@@ -572,8 +572,8 @@ func TestDispatch_PassthroughFlags_DiscreteArgv(t *testing.T) {
 	dispatchDetach = true
 
 	var gotPass []string
-	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, _, _ string, passthrough []string, _ []string) error {
-		gotPass = passthrough
+	dispatchLaunch = func(_ context.Context, req launchRequest) error {
+		gotPass = req.Passthrough
 		return nil
 	}
 
@@ -686,9 +686,9 @@ func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 	}
 
 	var gotPass []string
-	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, _, _ string, passthrough []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, req launchRequest) error {
 		f.launchCalled++
-		gotPass = passthrough
+		gotPass = req.Passthrough
 		return nil
 	}
 	dispatchDetach = true
@@ -756,9 +756,9 @@ func TestDispatch_NoName_NoSlugNoNameFlag(t *testing.T) {
 	}
 
 	var gotPass []string
-	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, _, _ string, passthrough []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, req launchRequest) error {
 		f.launchCalled++
-		gotPass = passthrough
+		gotPass = req.Passthrough
 		return nil
 	}
 	dispatchDetach = true
@@ -798,9 +798,9 @@ func TestDispatch_NameSanitizesEmpty_FallsBack(t *testing.T) {
 	}
 
 	var gotPass []string
-	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, _, _ string, passthrough []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, req launchRequest) error {
 		f.launchCalled++
-		gotPass = passthrough
+		gotPass = req.Passthrough
 		return nil
 	}
 	dispatchDetach = true

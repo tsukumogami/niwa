@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/tsukumogami/niwa/internal/agentplan"
 )
 
 // TestEmptyPromptGuardBindsToBodyNotTheComposedString is the regression this
@@ -15,8 +17,10 @@ import (
 // would then launch a worker whose entire instruction is "arm your keep-alive"
 // -- a dispatch that does nothing, reported as a success.
 func TestEmptyPromptGuardBindsToBodyNotTheComposedString(t *testing.T) {
-	err := realDispatchLaunch(context.Background(), claudeLaunchSpec(), t.TempDir(),
-		keepAliveArmingInstruction, "", nil, nil)
+	err := realDispatchLaunch(context.Background(), launchRequest{
+		Spec: claudeLaunchSpec(), Mode: agentplan.LaunchBackgrounded,
+		InstanceDir: t.TempDir(), Prefix: keepAliveArmingInstruction,
+	})
 	if err == nil {
 		t.Fatal("an empty task with keep-alive armed was accepted; " +
 			"the emptiness check is testing the composed string, not the body")
@@ -31,7 +35,10 @@ func TestEmptyPromptGuardBindsToBodyNotTheComposedString(t *testing.T) {
 func TestNonEmptyBodyWithEmptyPrefixIsAccepted(t *testing.T) {
 	// A missing claude binary is the next failure after the guard, so reaching
 	// it proves the guard let the prompt through.
-	err := realDispatchLaunch(context.Background(), claudeLaunchSpec(), t.TempDir(), "", "do the thing", nil, nil)
+	err := realDispatchLaunch(context.Background(), launchRequest{
+		Spec: claudeLaunchSpec(), Mode: agentplan.LaunchBackgrounded,
+		InstanceDir: t.TempDir(), Body: "do the thing",
+	})
 	if err != nil && strings.Contains(err.Error(), "empty prompt") {
 		t.Fatal("a non-empty body with no prefix was rejected as empty")
 	}
@@ -43,7 +50,7 @@ func TestNonEmptyBodyWithEmptyPrefixIsAccepted(t *testing.T) {
 // dangling forward reference, and would put untrusted text ahead of niwa's own
 // framing on every path.
 func TestComposedArgvIsPrefixThenBody(t *testing.T) {
-	args := buildLaunchArgs(claudeLaunchSpec(), "/inst", keepAliveArmingInstruction+"the task", nil)
+	args := buildLaunchArgs(claudeLaunchSpec(), agentplan.LaunchBackgrounded, "/inst", keepAliveArmingInstruction+"the task", nil)
 	final := args[len(args)-1]
 
 	if !strings.HasPrefix(final, keepAliveArmingInstruction) {

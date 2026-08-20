@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,39 +15,80 @@ import (
 	"github.com/tsukumogami/niwa/internal/agentplan"
 )
 
+// launchRequest is everything one launch needs: which agent, which process
+// model, where, with what prompt, and where its output goes when the developer
+// is the one reading it.
+//
+// Mode is a field rather than something read off the spec because the process
+// model is not a property of the agent alone. The spec says what the agent's
+// runner is; the caller resolves that against the invocation's --detach
+// (agentplan.RunnerKind.ModeFor) and passes the answer here. A launcher that
+// went back to the declaration for it could not see the flag, which is the
+// defect this shape exists to prevent.
+type launchRequest struct {
+	// Spec is the launched agent's declaration.
+	Spec agentplan.LaunchSpec
+
+	// Mode is the process model for THIS invocation, resolved from the spec's
+	// runner and the invocation's --detach.
+	Mode agentplan.LaunchMode
+
+	// InstanceDir is the instance the worker is rooted in, and cmd.Dir.
+	InstanceDir string
+
+	// Prefix is niwa-authored prompt text; Body is the developer's task. They
+	// are kept apart all the way into the exec layer -- see below.
+	Prefix string
+	Body   string
+
+	// Passthrough are the developer's own flags, already split into discrete
+	// argv elements by the caller.
+	Passthrough []string
+
+	// Env is the worker's environment. A nil Env inherits the full parent
+	// environment (os.Environ()), the behavior every ordinary dispatch relies
+	// on; a non-nil Env is used verbatim, which is how a contained caller
+	// passes an allowlisted, credential-scrubbed one. Passing an explicit Env
+	// is the ONLY way the worker's environment differs from the supervisor's.
+	Env []string
+
+	// Stdout and Stderr are where a foreground worker's output goes: the
+	// caller's own streams, so the developer watches the turn as it happens.
+	// They are unused by the other two modes, which either background the
+	// worker themselves or write its output into the instance. A nil pair on a
+	// foreground launch falls back to this process's own streams.
+	Stdout io.Writer
+	Stderr io.Writer
+}
+
 // dispatchLaunch is the package-level launcher seam. Production wires it to
 // realDispatchLaunch; tests substitute a fake to assert the constructed argv
-// and cmd.Dir without spawning a real worker. It launches a background worker
-// rooted in instanceDir.
+// and cmd.Dir without spawning a real worker. It launches a worker rooted in
+// the request's instance directory.
 var dispatchLaunch = realDispatchLaunch
 
 // realDispatchLaunch runs the launched agent's worker binary with cmd.Dir set
-// to instanceDir, forwarding passthrough as already-split discrete argv elements.
-// It generalizes the exec pattern in internal/cli/sessionattach/supervise.go:
-// the worker backgrounds itself, so this does not capture stdout (identity is
-// recovered by correlating the agent's session records against instanceDir in
-// dispatch_capture.go). The prompt is passed as a single argv element -- never
-// shell-interpolated -- so quotes, newlines, and metacharacters in it cannot
-// inject a command (D8).
+// to the instance directory, forwarding the pass-through as already-split
+// discrete argv elements. The prompt is passed as a single argv element --
+// never shell-interpolated -- so quotes, newlines, and metacharacters in it
+// cannot inject a command (D8). That holds for every process model: it is a
+// property of how the argv is built, not of how the process is started.
 //
-// env selects the worker's environment: a nil env inherits the full parent
-// environment (os.Environ()), the behavior every ordinary dispatch relies on;
-// a non-nil env is used verbatim, which is how the contained watch path passes
-// an allowlisted, credential-scrubbed environment. Passing an explicit env is
-// the ONLY way the worker's environment differs from the supervisor's.
+// Which of the three models runs is req.Mode, and nothing here re-derives it.
 //
-// The prompt arrives in two pieces. body is the developer's text and is the
-// only part a spill may move to a file; prefix is niwa-authored text (today,
+// The prompt arrives in two pieces. Body is the developer's text and is the
+// only part a spill may move to a file; Prefix is niwa-authored text (today,
 // the keep-alive arming instruction) that always rides the argv element. They
 // are kept apart all the way down to here because the caller cannot know
 // whether a spill will happen -- that depends on the composed length -- and
 // once concatenated the distinction cannot be recovered without the exec layer
 // knowing about the keep-alive feature.
 //
-// An empty prompt is rejected before any exec. The check binds to body, NOT to
-// the composed string: prefix is a long constant whenever keep-alive is armed,
+// An empty prompt is rejected before any exec. The check binds to Body, NOT to
+// the composed string: Prefix is a long constant whenever keep-alive is armed,
 // so testing the pair would silently stop rejecting an empty task.
-func realDispatchLaunch(ctx context.Context, spec agentplan.LaunchSpec, instanceDir, prefix, body string, passthrough, env []string) error {
+func realDispatchLaunch(ctx context.Context, req launchRequest) error {
+	spec, instanceDir, prefix, body := req.Spec, req.InstanceDir, req.Prefix, req.Body
 	if body == "" {
 		return fmt.Errorf("dispatch: empty prompt")
 	}
@@ -90,19 +133,21 @@ func realDispatchLaunch(ctx context.Context, spec agentplan.LaunchSpec, instance
 		return fmt.Errorf("dispatch: %s binary not found in PATH", spec.Binary)
 	}
 
-	args := buildLaunchArgs(spec, instanceDir, prompt, passthrough)
+	args := buildLaunchArgs(spec, req.Mode, instanceDir, prompt, req.Passthrough)
 	worker := os.Environ()
-	if env != nil {
+	if req.Env != nil {
 		// Inherit the parent environment so the worker sees the same context
 		// the supervisor does (mirrors the sessionattach supervisor); a
-		// non-nil env replaces it wholesale, which is how the contained watch
-		// path passes an allowlisted, credential-scrubbed one.
-		worker = env
+		// non-nil env replaces it wholesale, which is how a contained caller
+		// passes an allowlisted, credential-scrubbed one.
+		worker = req.Env
 	}
 
-	switch spec.Mode {
+	switch req.Mode {
 	case agentplan.LaunchDetached:
 		return startDetachedWorker(spec, bin, args, instanceDir, worker)
+	case agentplan.LaunchForeground:
+		return runForegroundWorker(spec, bin, args, instanceDir, worker, req.Stdout, req.Stderr)
 	default:
 		// The binary backgrounds its own worker and exits, so the process
 		// started here is the hand-off rather than the work. Waiting for it
@@ -115,6 +160,75 @@ func realDispatchLaunch(ctx context.Context, spec agentplan.LaunchSpec, instance
 		}
 		return nil
 	}
+}
+
+// runForegroundWorker runs the worker's whole turn in the caller's terminal and
+// does not return until it ends. For a runner that executes the turn in the
+// foreground natively, this is what attaching to the session would have been:
+// the developer watches the work rather than being told where to find it.
+//
+// Three things carry over from the detached path, each measured rather than
+// chosen for tidiness. They are also the three an implementation that reaches
+// for "inherit stdio and be done" drops.
+//
+// Stdin is /dev/null, even here. The measured hang is on stdin specifically: an
+// agent that reads it in addition to its prompt blocks on an inherited one --
+// twenty seconds with no output, no session record, and no request made.
+// Attaching the terminal's stdout and stderr does not require attaching its
+// stdin, and a foreground worker that hangs is a worse outcome than the
+// detached one it replaces.
+//
+// The prompt is one argv element, built by the same builder as every other
+// mode.
+//
+// And the exit status is not read as task success. A read-only sandbox failure
+// exits 0, so a run that ended is all this can honestly report: an exit code is
+// returned to the caller as "the turn ended", never as "it worked". A process
+// that could not be started at all is a different thing and is reported as an
+// error, because then no turn ran.
+//
+// What differs from the detached path is deliberate on both counts. The context
+// is not passed to the command, for the reason startDetachedWorker gives: it is
+// cancelled when the dispatch returns, and here the dispatch does not return
+// until the worker is done anyway. And there is no Setsid: the worker shares
+// the caller's process group, so Ctrl-C reaches it. That is what a developer
+// expects of a command running in front of them, and it is the exact property
+// Setsid takes away from the detached one.
+func runForegroundWorker(spec agentplan.LaunchSpec, bin string, args []string, instanceDir string, env []string, stdout, stderr io.Writer) error {
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDONLY, 0)
+	if err != nil {
+		return fmt.Errorf("dispatch: opening %s for the worker's stdin: %w", os.DevNull, err)
+	}
+	defer devNull.Close()
+
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+
+	cmd := exec.Command(bin, args...)
+	cmd.Dir = instanceDir
+	cmd.Env = env
+	cmd.Stdin = devNull
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			// The turn ran and ended non-zero. That is not a failed launch and
+			// it is not a failed task either -- this agent's exit code says
+			// neither -- and treating it as a launch failure would roll the
+			// instance back out from under work that may well have happened.
+			// The developer watched the run; whatever it said is on their
+			// terminal already.
+			return nil
+		}
+		return fmt.Errorf("dispatch: launching %s: %w", spec.Binary, err)
+	}
+	return nil
 }
 
 // startDetachedWorker starts a worker that runs its whole turn in the
@@ -227,12 +341,19 @@ func openWorkerLog(instanceDir, binary, stream string) (*os.File, error) {
 	return f, nil
 }
 
-// buildLaunchArgs builds the discrete argv (excluding the binary) for a
-// background launch. Order: the agent's own leading arguments, then the grant
-// for the working directory if it declares one, then the pass-through flags
-// (already split into discrete elements by the caller), then an optional bare
-// "--" for an agent whose parser would otherwise read a prompt beginning with a
-// dash as a flag, then the prompt as the final single element.
+// buildLaunchArgs builds the discrete argv (excluding the binary) for a launch.
+// Order: the agent's own leading arguments, then the arguments that ride the
+// detached path only, then the grant for the working directory if it declares
+// one, then the pass-through flags (already split into discrete elements by the
+// caller), then an optional bare "--" for an agent whose parser would otherwise
+// read a prompt beginning with a dash as a flag, then the prompt as the final
+// single element.
+//
+// The mode reaches in for one reason: an argument that exists so niwa can parse
+// a log nobody is watching has no business on a run the developer is watching.
+// Everything else is identical across the modes -- the policy flags, the grant,
+// the separator, the prompt -- because everything else is about what the agent
+// needs to do the work rather than about who reads the output.
 //
 // The grant comes before the pass-through so that a developer who asks for a
 // posture explicitly gets the last word on it.
@@ -242,9 +363,12 @@ func openWorkerLog(instanceDir, binary, stream string) (*os.File, error) {
 // smuggling in an extra flag (D8, security note 1). It is a pure helper so the
 // argv contract is unit-testable without exec, and it reads the agent's spec
 // rather than naming one, so the same test drives it for any agent.
-func buildLaunchArgs(spec agentplan.LaunchSpec, workdir, prompt string, passthrough []string) []string {
-	args := make([]string, 0, len(spec.LeadingArgs)+len(spec.WorkdirGrantArgs)+len(passthrough)+2)
+func buildLaunchArgs(spec agentplan.LaunchSpec, mode agentplan.LaunchMode, workdir, prompt string, passthrough []string) []string {
+	args := make([]string, 0, len(spec.LeadingArgs)+len(spec.DetachedArgs)+len(spec.WorkdirGrantArgs)+len(passthrough)+2)
 	args = append(args, spec.LeadingArgs...)
+	if mode == agentplan.LaunchDetached {
+		args = append(args, spec.DetachedArgs...)
+	}
 	args = append(args, formatWorkdirGrant(spec, workdir)...)
 	args = append(args, passthrough...)
 	if spec.PromptSeparator {

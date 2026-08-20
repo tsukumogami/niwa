@@ -1561,6 +1561,10 @@ const dispatchFakeCodexScript = `#!/bin/sh
 case "$1" in
   exec)
     printf '%s\n' "$*" > "$HOME/dispatch-codex-argv"
+    # The turn's own output. On the foreground path this is what the developer
+    # watches, so a scenario can tell a worker that ran in front of them from
+    # one whose output went to a file inside the instance.
+    echo "fake codex: running the turn"
     sid="${FAKE_CODEX_SESSION_ID:-01a00000-0000-7000-8000-000000000000}"
     root="${CODEX_HOME:-$HOME/.codex}/sessions/2026/08/19"
     mkdir -p "$root"

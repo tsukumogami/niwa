@@ -200,16 +200,21 @@ func TestDispatchSharedHalfRunsForEveryAgent(t *testing.T) {
 			}
 			t.Cleanup(func() { dispatchAttach = prev })
 
-			// Force the mid-turn resume flag on, for every agent, so the resume
-			// half runs and can be compared across them. Whether a given agent
-			// hands over a running session is a real difference between them
-			// and it has its own test; it is not this one's subject, and
-			// letting it decide which agents reach the resume assertions here
-			// would leave the shared half unchecked for exactly the agent whose
-			// declaration differs. Everything else about the spec is the
-			// agent's own, so the assertions below still read the real row.
+			// Force the two properties that decide whether the resume step runs
+			// at all, for every agent, so the resume half runs and can be
+			// compared across them. Both are real differences between agents
+			// and both have their own tests -- whether an agent hands over a
+			// running session, and whether its runner executes the turn in the
+			// caller's terminal, which makes the run itself the way in and
+			// leaves nothing to step into afterwards. Neither is this test's
+			// subject, and letting either decide which agents reach the
+			// assertions below would leave the shared half unchecked for
+			// exactly the agent whose declaration differs. Everything else
+			// about the spec is the agent's own, so the assertions still read
+			// the real row.
 			resumable := spec
 			resumable.ResumeDuringTurn = true
+			resumable.Runner = agentplan.RunnerSelfBackgrounding
 			prevSpec := dispatchLaunchSpec
 			dispatchLaunchSpec = func(agent.Agent) (agentplan.LaunchSpec, bool) { return resumable, true }
 			t.Cleanup(func() { dispatchLaunchSpec = prevSpec })

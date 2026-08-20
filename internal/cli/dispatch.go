@@ -29,7 +29,7 @@ func init() {
 	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker; dropped for an agent that has no such flag")
 	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "subagent type to forward to the background worker; this selects a role within the launched agent, not which agent is launched (that is --launch-agent). Dropped for an agent that has no such flag")
 	dispatchCmd.Flags().StringVar(&dispatchLaunchAgent, launchAgentFlagName, "", launchAgentFlagUsage())
-	dispatchCmd.Flags().BoolVarP(&dispatchDetach, "detach", "d", false, "do not attach the terminal to the new session; print hints and return")
+	dispatchCmd.Flags().BoolVarP(&dispatchDetach, "detach", "d", false, "put the worker out of this terminal's reach: for an agent whose runner executes the turn in the foreground, run it detached instead of here; for one that backgrounds its own session, skip the attach. Either way, print hints and return")
 	dispatchCmd.Flags().IntVar(&dispatchParallel, "parallel", 0,
 		"maximum repos to clone concurrently when provisioning the dispatch instance (>=1). Lower this on slow or flaky networks; 1 clones serially. Overrides the [global] clone_workers config. 0 (the default) uses clone_workers, else niwa's built-in default.")
 	// --keep-alive is tri-state (unset / explicit true / explicit false) so it
@@ -193,23 +193,29 @@ line and the rest reaches the shell; pass the prompt as an argument there.
 With no prompt AND no terminal -- a script, a hook, a cron job -- dispatch fails
 immediately rather than waiting on input that will never arrive.
 
-By default the terminal then attaches to the new session (like docker run), for
-an agent that can hand a session over while its turn is still running. For one
-that cannot, dispatch says so and returns; the session is yours to resume once
-the turn ends. Either way --detach/-d skips the attach and returns after
-printing the launched agent's own management hints, which is the mode for
-fan-out and scripting.
+--detach/-d chooses how the worker runs, not only whether a step follows it.
+Without it, an agent whose runner executes the turn in the foreground runs it
+here: the output is this terminal's and dispatch does not return until the turn
+ends. An agent that backgrounds its own session instead has the terminal attach
+to it (like docker run) if it can hand a session over mid-turn, and says so and
+returns if it cannot -- the session is yours to resume once the turn ends.
+
+With --detach the worker is put out of this terminal's reach: a foreground
+runner is detached, with its output kept in the instance, and an agent that
+backgrounds its own session simply skips the attach. Either way dispatch
+returns after printing the launched agent's own management hints, which is the
+mode for fan-out and scripting.
 
 Any failure before the mapping is durable destroys the just-created instance,
-so dispatch never leaves an unreclaimable instance DIRECTORY. One caveat: if the
-worker launch succeeds but session-id capture then fails, the rollback deletes
-the instance directory, but the detached background process keeps running -- we
-never captured its session id, so we cannot stop it. That process has no mapping
-and stopping it is yours to do, with the launched agent's own stop verb, once
-you find it in that agent's own session list. It is mostly
-harmless, with one caveat: a prompt too large to pass as a command argument is
-written into the instance, so a worker in that window may find its task file
-already deleted and proceed on the excerpt it was given.`,
+so dispatch never leaves an unreclaimable instance DIRECTORY. One caveat, for a
+worker that is still running when that happens: if the launch succeeds but
+session-id capture then fails, the rollback deletes the instance directory, but
+the background process keeps running -- we never captured its session id, so we
+cannot stop it. That process has no mapping and stopping it is yours to do, with
+the launched agent's own stop verb, once you find it in that agent's own session
+list. It is mostly harmless, with one caveat: a prompt too large to pass as a
+command argument is written into the instance, so a worker in that window may
+find its task file already deleted and proceed on the excerpt it was given.`,
 	Args:          cobra.MaximumNArgs(1),
 	SilenceErrors: true,
 	SilenceUsage:  true,
@@ -558,7 +564,27 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		keepAliveArmed = true
 	}
 
-	if err := dispatchLaunch(cmd.Context(), spec, instancePath, promptPrefix, prompt, passthrough, nil); err != nil {
+	// (9b) The process model, resolved from both of its inputs: what this
+	// agent's runner is, and whether this invocation asked to detach. Read from
+	// the declaration alone it could not see the flag, which is how a runner
+	// that executes its turn in the foreground came to be detached whether or
+	// not anybody asked for that.
+	//
+	// Without --detach, a foreground runner's turn runs here, in this terminal,
+	// and this call does not return until it ends. The developer watches the
+	// work; for that runner, that is what attaching would have been.
+	launchMode := spec.Runner.ModeFor(dispatchDetach)
+
+	if err := dispatchLaunch(cmd.Context(), launchRequest{
+		Spec:        spec,
+		Mode:        launchMode,
+		InstanceDir: instancePath,
+		Prefix:      promptPrefix,
+		Body:        prompt,
+		Passthrough: passthrough,
+		Stdout:      cmd.OutOrStdout(),
+		Stderr:      cmd.ErrOrStderr(),
+	}); err != nil {
 		return fmt.Errorf("niwa: error: launching dispatch worker: %w", err)
 	}
 
@@ -631,24 +657,40 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(out, "  %s %s %s\n", spec.Binary, verb, handle)
 	}
 
-	// (14) Unless --detach, step the terminal into the new session as the FINAL
-	// step, through the agent's own resume verb and keyed on the handle. A
-	// failure here is NON-fatal: the session and instance survive, so degrade to
-	// a warning and never roll back or delete the mapping (success is already
-	// true; DESIGN Decision 1).
+	// (14) The last step is about the session the developer ends up in, and
+	// which of three things happens is decided by the process model the launch
+	// actually used rather than by the flag alone.
+	//
+	// A foreground turn has already ended by the time this runs -- the launch
+	// waited for it -- so there is nothing to attach to and nothing to
+	// apologize for. What is left to say is that the turn ended, which is the
+	// only thing a finished run of that kind honestly reports.
+	if launchMode == agentplan.LaunchForeground {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"niwa: the turn ended. That is what the run reports -- not whether the task succeeded -- so read the work, and resume the session with the command above to carry on.\n")
+		return nil
+	}
+
+	// Otherwise the worker is still going. An agent that will not hand over a
+	// session in that state would answer an attach with an error from its own
+	// session store, which reads like a broken dispatch rather than like a
+	// thing that resolves itself a minute later. Say what is true instead: the
+	// hint above is already the command to run, so this does not repeat it.
+	// This holds whether or not --detach was passed, because in both cases the
+	// worker is running and the session is not yet openable.
+	if !spec.ResumeDuringTurn {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"niwa: %s will not open a session while its turn is still running. The worker is going; resume it with the command above once it finishes.\n",
+			spec.Binary)
+		return nil
+	}
+
+	// And for an agent that does hand one over, step the terminal into the new
+	// session through its own resume verb, keyed on the handle, unless the
+	// developer asked to be left where they are. A failure here is NON-fatal:
+	// the session and instance survive, so degrade to a warning and never roll
+	// back or delete the mapping (success is already true; DESIGN Decision 1).
 	if !dispatchDetach {
-		if !spec.ResumeDuringTurn {
-			// The worker is, by construction, mid-turn: it was started a moment
-			// ago. An agent that will not hand over a session in that state
-			// would answer with an error from its own session store, which
-			// reads like a broken dispatch rather than like a thing that
-			// resolves itself. Say what is true instead. The hint above is
-			// already the command to run, so this does not repeat it.
-			fmt.Fprintf(cmd.ErrOrStderr(),
-				"niwa: %s will not open a session while its turn is still running, so the terminal stays here. The worker is going; resume it with the command above once it finishes.\n",
-				spec.Binary)
-			return nil
-		}
 		if err := dispatchAttach(spec, handle, instancePath); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: warning: could not attach to session %s: %v\n", sessionID, err)
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: the session is running; attach later with: %s %s %s\n",

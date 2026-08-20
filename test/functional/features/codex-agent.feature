@@ -131,6 +131,54 @@ Feature: prepare every instance for both agents
     And the codex launch argv contains "trust_level"
     And the codex launch argv does not contain "--ephemeral"
     And the codex launch argv does not contain "--sandbox"
+    # The machine-readable stream flag rides this path, because the output goes
+    # to a file inside the instance and niwa is the one that reads it back.
+    And the codex launch argv contains "--json"
+    # And the worker's own output went there rather than here: a detached
+    # dispatch returns without the turn, so there is nothing to watch.
+    And the output does not contain "fake codex: running the turn"
+
+  @critical
+  Scenario: a plain dispatch runs the turn in the terminal that asked for it
+    # The other half of the flag. This agent's runner executes the whole turn
+    # in the foreground of the process it is started as, so without --detach
+    # niwa runs it here and the developer watches the work -- which for this
+    # runner is what attaching to the session would have been. The same
+    # dispatch with --detach is the scenario above.
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+      default_agent = "codex"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    Given a fake codex for dispatch with session "01a00000-0000-7000-8000-00000000cafe"
+    When I run "niwa dispatch some-task" from the workspace root
+    Then the exit code is 0
+    # The turn ran in front of the caller: its output is on this terminal.
+    And the output contains "fake codex: running the turn"
+    # Capture is indifferent to which way the worker was started -- the session
+    # id comes from the record on disk, not from the stream -- so the durable
+    # mapping is written here exactly as it is for a detached launch. Asserted
+    # rather than assumed, because "it follows" is how a path stops being
+    # covered.
+    And the dispatch mapping for session "01a00000-0000-7000-8000-00000000cafe" records agent "codex"
+    And the output contains "codex resume 01a00000-0000-7000-8000-00000000cafe"
+    # The developer is the reader here, so the flag that exists to make the
+    # output machine-readable is not sent. Everything else is what the detached
+    # launch sends.
+    And the codex launch argv does not contain "--json"
+    And the codex launch argv contains "exec"
+    And the codex launch argv contains "--skip-git-repo-check"
+    And the codex launch argv contains "trust_level"
+    And the codex launch argv does not contain "--ephemeral"
+    # And nothing apologizes for a session it could not open, because there was
+    # nothing to open: the turn the developer just watched has ended.
+    And the error output does not contain "still running"
+    And the error output contains "turn ended"
 
   @critical
   Scenario: a claude-default workspace materializes both agents' context too

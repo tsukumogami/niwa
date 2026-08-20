@@ -578,7 +578,16 @@ func continueReview(cmd *cobra.Command, root, cwd, token string, client *github.
 	if plan.sandbox {
 		passthrough = append(passthrough, "--strict-mcp-config")
 	}
-	if err := dispatchLaunch(ctx, claudeLaunchSpec(), instancePath, "", prompt, passthrough, nil); err != nil {
+	if err := dispatchLaunch(ctx, launchRequest{
+		Spec: claudeLaunchSpec(),
+		// This agent's runner backgrounds its own session, so the process
+		// model is the same whether or not anything asks to detach; a sweep
+		// has no terminal to run a turn in either way.
+		Mode:        claudeLaunchSpec().Runner.ModeFor(true),
+		InstanceDir: instancePath,
+		Body:        prompt,
+		Passthrough: passthrough,
+	}); err != nil {
 		return fmt.Errorf("resuming review agent: %w", err)
 	}
 
@@ -832,7 +841,16 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	}
 
 	// Launch detached (no terminal attach) with the real environment.
-	if err := dispatchLaunch(ctx, claudeLaunchSpec(), instancePath, "", prompt, passthrough, nil); err != nil {
+	if err := dispatchLaunch(ctx, launchRequest{
+		Spec: claudeLaunchSpec(),
+		// This agent's runner backgrounds its own session, so the process
+		// model is the same whether or not anything asks to detach; a sweep
+		// has no terminal to run a turn in either way.
+		Mode:        claudeLaunchSpec().Runner.ModeFor(true),
+		InstanceDir: instancePath,
+		Body:        prompt,
+		Passthrough: passthrough,
+	}); err != nil {
 		return fmt.Errorf("launching review agent: %w", err)
 	}
 

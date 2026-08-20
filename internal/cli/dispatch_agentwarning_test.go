@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
-
-	"github.com/tsukumogami/niwa/internal/agentplan"
 )
 
 // This file covers the two things niwa dispatch has to say before it spends
@@ -35,7 +33,7 @@ func dispatchCmdWithBuffers() (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
 func recordStderrAtLaunch(t *testing.T, errBuf *bytes.Buffer, into *string) {
 	t.Helper()
 	prev := dispatchLaunch
-	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, _, _ string, _ []string, _ []string) error {
+	dispatchLaunch = func(context.Context, launchRequest) error {
 		*into = errBuf.String()
 		return nil
 	}

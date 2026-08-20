@@ -69,15 +69,22 @@ func TestLaunchSpecsAreComplete(t *testing.T) {
 		if spec.Binary == "" {
 			t.Errorf("(%s): the launch spec names no binary", ag)
 		}
-		// The launcher treats an unset mode as backgrounded, which is the right
-		// fail-safe for a spec somebody builds by hand in a test -- but a
-		// declared row that meant detached and forgot to say so would run in
-		// the wrong mode silently, and "silently" is the word that makes it
-		// worth a check here rather than a comment there.
-		switch spec.Mode {
-		case LaunchBackgrounded, LaunchDetached:
+		// ModeFor treats an unset runner as self-backgrounding, which is the
+		// right fail-safe for a spec somebody builds by hand in a test -- but a
+		// declared row whose runner executes the turn in the foreground and
+		// forgot to say so would be started the wrong way silently, and
+		// "silently" is the word that makes it worth a check here rather than a
+		// comment there.
+		switch spec.Runner {
+		case RunnerSelfBackgrounding, RunnerForeground:
 		default:
-			t.Errorf("(%s): launch mode %d is outside the closed set", ag, spec.Mode)
+			t.Errorf("(%s): runner kind %d is outside the closed set", ag, spec.Runner)
+		}
+		// An argument that rides the detached launch only is meaningless for a
+		// runner that has no detached launch to ride: it would be declared,
+		// never sent, and nothing would say so.
+		if len(spec.DetachedArgs) > 0 && spec.Runner != RunnerForeground {
+			t.Errorf("(%s): the launch spec declares detached-only arguments %v for a runner that always backgrounds its own session, so they would never be sent", ag, spec.DetachedArgs)
 		}
 		if len(spec.ResumeArgs) == 0 {
 			t.Errorf("(%s): the launch spec declares no way to resume a session", ag)
@@ -190,8 +197,9 @@ func checkRecords(t *testing.T, ag agent.Agent, r SessionRecords) {
 // pass here: Mode, Depth, Handle, Settings, and Model each appear as a selector
 // on some unrelated value in these two packages. Deleting the read of one of
 // those from the launcher leaves this test green, so anything load-bearing about
-// them needs its own assertion -- Mode's is in dispatch_launcher_test.go, which
-// pins Codex's to detached rather than to any member of the closed set.
+// them needs its own assertion -- Runner's is in dispatch_launcher_test.go,
+// which pins the argv and the process model each declared runner produces
+// rather than settling for membership in the closed set.
 func TestEveryLaunchSpecFieldIsRead(t *testing.T) {
 	fields := map[string]string{}
 	for _, decl := range []struct {
@@ -318,5 +326,53 @@ func TestKnownModelNamesDoesNotAliasTheTable(t *testing.T) {
 	again, _ := For(agent.AgentClaude).LaunchSpec()
 	if slices.Contains(again.KnownModelNames(), "") {
 		t.Error("KnownModelNames() handed out the package's own slice")
+	}
+}
+
+// TestModeForNeedsBothItsInputs is the test the defect this resolution replaced
+// would fail.
+//
+// The process model used to be a field of the launch description, so it was
+// decided before any flag was read: an agent whose runner executes the turn in
+// the foreground was detached whether or not the developer asked, and --detach
+// was wired to a separate question -- whether an attach step ran afterwards.
+// The two never met.
+//
+// So the assertion is not that ModeFor returns particular constants; it is that
+// the answer moves with both inputs where it should and with neither where it
+// should not. A resolution that read the runner alone gives the same answer for
+// both values of detach and fails the first case here. One that read the flag
+// alone gives different answers for a runner with only one process model, and
+// fails the second.
+func TestModeForNeedsBothItsInputs(t *testing.T) {
+	// A runner that executes the turn in the foreground offers two models, and
+	// the flag chooses. Same declaration, different answers.
+	attached := RunnerForeground.ModeFor(false)
+	detached := RunnerForeground.ModeFor(true)
+	if attached == detached {
+		t.Errorf("a foreground runner resolves to %d with and without --detach; the flag is not reaching the decision, which is the defect this replaced", attached)
+	}
+	if attached != LaunchForeground {
+		t.Errorf("without --detach a foreground runner resolves to %d, want the turn run in the caller's terminal (%d)", attached, LaunchForeground)
+	}
+	if detached != LaunchDetached {
+		t.Errorf("with --detach a foreground runner resolves to %d, want %d", detached, LaunchDetached)
+	}
+
+	// A runner that backgrounds its own session offers one model, and no flag
+	// overrides it into the other: there is nothing to run in the foreground.
+	// What --detach still decides for it is whether the attach step follows,
+	// which is not this function's business.
+	for _, detach := range []bool{false, true} {
+		if got := RunnerSelfBackgrounding.ModeFor(detach); got != LaunchBackgrounded {
+			t.Errorf("a self-backgrounding runner with detach=%v resolves to %d, want %d; an agent offering one model cannot be overridden into the other", detach, got, LaunchBackgrounded)
+		}
+	}
+
+	// An unset runner is the shape a spec built by hand in a test takes. It
+	// resolves to the mode that waits for a hand-off rather than to one that
+	// hands the caller's terminal to a process, which is the safe way round.
+	if got := RunnerKind(0).ModeFor(false); got != LaunchBackgrounded {
+		t.Errorf("an unset runner resolves to %d, want the %d fail-safe", got, LaunchBackgrounded)
 	}
 }

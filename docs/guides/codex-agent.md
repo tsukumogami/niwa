@@ -172,17 +172,30 @@ by the repository's exclude block, so a prepared tree doesn't read dirty.
 **Background dispatch.** `niwa dispatch` launches a Codex worker the same way it
 launches a Claude one, with the same command — the agent is whichever one the
 four sources above resolve to, so `--launch-agent codex` picks it for a single
-dispatch and the settings pick it standing. It provisions a fresh instance, starts `codex exec` detached inside
-it, recovers the session id from the session record Codex writes, and prints
-`codex resume <id>`. It doesn't run that command for you, even without
-`--detach`, and `--detach` makes no difference to a Codex dispatch: Codex won't
-open a session while its turn is still running, and the worker has just started
-one. So dispatch says the worker is going and leaves you the command, which
-works from the moment the turn ends. `niwa list` prints that command again
+dispatch and the settings pick it standing. It provisions a fresh instance, runs
+`codex exec` inside it, recovers the session id from the session record Codex
+writes, and prints `codex resume <id>`. `niwa list` prints that command again
 beside the instance for as long as the instance exists, so the handle isn't
-stranded in the terminal that dispatched it. The worker's own output is kept in the instance, at
-`.niwa/dispatch-codex.out` and `.niwa/dispatch-codex.err`, which is where to
-look when a run does something you didn't expect.
+stranded in the terminal that dispatched it.
+
+`--detach` decides how the worker runs. Without it the turn runs in your
+terminal: `codex exec` executes the whole turn in the foreground, so niwa runs
+it there and you watch the work as it happens, and the command doesn't return
+until the turn ends. For this runner that's what attaching to the session would
+have been — Codex won't hand over a session whose turn is still running, so
+there's no attach to be had, and watching the run is the better half of that
+trade rather than a consolation for it. When it ends, `codex resume <id>` picks
+the conversation up. Ctrl-C reaches a worker running in front of you, the same
+as any other command.
+
+With `--detach` the worker goes out of the terminal's reach and dispatch returns
+straight away, which is the mode for fan-out and scripting. The session is
+yours to resume once the turn ends — until then Codex refuses, since it holds a
+writer on the session for the length of the turn, and dispatch says so rather
+than leaving you to discover it. The worker's own output is kept in the
+instance, at `.niwa/dispatch-codex.out` and `.niwa/dispatch-codex.err`, which is
+where to look when a detached run does something you didn't expect. A
+foreground run keeps nothing there: the output was on your terminal.
 
 Three things are worth knowing before you rely on it.
 

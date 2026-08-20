@@ -19,11 +19,11 @@ import (
 // drop the keep-alive arming instruction and make every assertion below pass
 // against a worker that was never armed.
 func captureLaunchPrompt(f *dispatchFakes, gotPrompt *string, gotPass *[]string) {
-	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, prefix, body string, passthrough, _ []string) error {
+	dispatchLaunch = func(_ context.Context, req launchRequest) error {
 		f.launchCalled++
-		*gotPrompt = prefix + body
+		*gotPrompt = req.Prefix + req.Body
 		if gotPass != nil {
-			*gotPass = passthrough
+			*gotPass = req.Passthrough
 		}
 		return nil
 	}
@@ -58,7 +58,7 @@ func TestDispatch_KeepAlive_FlagOn_RCInjected_Arms(t *testing.T) {
 		t.Fatalf("no non-RC warning expected when RC is on, got %q", stderr)
 	}
 	// Argv safety: the armed prompt stays the single final argv element.
-	args := buildLaunchArgs(claudeLaunchSpec(), "/inst", prompt, pass)
+	args := buildLaunchArgs(claudeLaunchSpec(), agentplan.LaunchBackgrounded, "/inst", prompt, pass)
 	if args[len(args)-1] != keepAliveArmingInstruction+"do a thing" {
 		t.Fatalf("armed prompt must ride one argv element; final element = %q", args[len(args)-1])
 	}

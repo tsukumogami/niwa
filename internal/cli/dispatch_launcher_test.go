@@ -40,7 +40,7 @@ func syntheticLaunchSpec() agentplan.LaunchSpec {
 // pass-through values sit in the middle as separate elements, and the prompt is
 // the last single element.
 func TestBuildLaunchArgs_Order(t *testing.T) {
-	got := buildLaunchArgs(claudeLaunchSpec(), "/inst", "do the thing", []string{"--model", "opus", "--permission-mode", "acceptEdits"})
+	got := buildLaunchArgs(claudeLaunchSpec(), agentplan.LaunchBackgrounded, "/inst", "do the thing", []string{"--model", "opus", "--permission-mode", "acceptEdits"})
 	want := []string{"--bg", "--model", "opus", "--permission-mode", "acceptEdits", "do the thing"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("buildLaunchArgs = %#v, want %#v", got, want)
@@ -49,7 +49,7 @@ func TestBuildLaunchArgs_Order(t *testing.T) {
 
 // TestBuildLaunchArgs_NoPassthrough verifies the minimal argv.
 func TestBuildLaunchArgs_NoPassthrough(t *testing.T) {
-	got := buildLaunchArgs(claudeLaunchSpec(), "/inst", "hi", nil)
+	got := buildLaunchArgs(claudeLaunchSpec(), agentplan.LaunchBackgrounded, "/inst", "hi", nil)
 	want := []string{"--bg", "hi"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("buildLaunchArgs = %#v, want %#v", got, want)
@@ -61,7 +61,7 @@ func TestBuildLaunchArgs_NoPassthrough(t *testing.T) {
 // Without it, an agent whose parser reads a leading dash as a flag would take a
 // prompt beginning with one as an unknown argument.
 func TestBuildLaunchArgs_SeparatorShape(t *testing.T) {
-	got := buildLaunchArgs(syntheticLaunchSpec(), "/inst", "--looks-like-a-flag", []string{"-m", "fast"})
+	got := buildLaunchArgs(syntheticLaunchSpec(), agentplan.LaunchBackgrounded, "/inst", "--looks-like-a-flag", []string{"-m", "fast"})
 	want := []string{"exec", "--headless", "-m", "fast", "--", "--looks-like-a-flag"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("buildLaunchArgs = %#v, want %#v", got, want)
@@ -99,7 +99,7 @@ func TestBuildLaunchArgs_PromptRemainsSingleElement(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildLaunchArgs(tc.spec, "/inst", prompt, tc.passthrough)
+			got := buildLaunchArgs(tc.spec, agentplan.LaunchBackgrounded, "/inst", prompt, tc.passthrough)
 			if len(got) != tc.wantLen {
 				t.Fatalf("got %d args, want %d: %#v", len(got), tc.wantLen, got)
 			}
@@ -130,7 +130,7 @@ func codexLaunchSpec(t *testing.T) agentplan.LaunchSpec {
 // working directory substituted, sits ahead of the pass-through so an explicit
 // posture wins, and is absent entirely for an agent that declares none.
 func TestBuildLaunchArgs_WorkdirGrant(t *testing.T) {
-	got := buildLaunchArgs(codexLaunchSpec(t), "/tmp/ws/inst", "do the thing", []string{"--sandbox", "read-only"})
+	got := buildLaunchArgs(codexLaunchSpec(t), agentplan.LaunchDetached, "/tmp/ws/inst", "do the thing", []string{"--sandbox", "read-only"})
 
 	grantAt := slices.Index(got, "-c")
 	if grantAt < 0 {
@@ -144,11 +144,11 @@ func TestBuildLaunchArgs_WorkdirGrant(t *testing.T) {
 	}
 
 	// An agent that declares no grant gets none, rather than an empty pair.
-	if plain := buildLaunchArgs(claudeLaunchSpec(), "/tmp/ws/inst", "hi", nil); slices.Contains(plain, "-c") {
+	if plain := buildLaunchArgs(claudeLaunchSpec(), agentplan.LaunchBackgrounded, "/tmp/ws/inst", "hi", nil); slices.Contains(plain, "-c") {
 		t.Errorf("a spec with no grant produced one: %#v", plain)
 	}
 	// And a grant naming no directory is not emitted at all.
-	if noDir := buildLaunchArgs(codexLaunchSpec(t), "", "hi", nil); slices.Contains(noDir, "-c") {
+	if noDir := buildLaunchArgs(codexLaunchSpec(t), agentplan.LaunchDetached, "", "hi", nil); slices.Contains(noDir, "-c") {
 		t.Errorf("a grant was emitted with no working directory: %#v", noDir)
 	}
 }
@@ -165,10 +165,10 @@ func TestBuildLaunchArgs_WorkdirGrant(t *testing.T) {
 // persisting the session record, which is the substrate capture reads, so a
 // dispatch carrying it would launch a worker niwa could never find again.
 func TestCodexLaunchArgv(t *testing.T) {
-	got := buildLaunchArgs(codexLaunchSpec(t), "/tmp/ws/inst", "--do the thing", nil)
+	got := buildLaunchArgs(codexLaunchSpec(t), agentplan.LaunchDetached, "/tmp/ws/inst", "--do the thing", nil)
 
 	want := []string{
-		"exec", "--json", "--skip-git-repo-check",
+		"exec", "--skip-git-repo-check", "--json",
 		"-c", `projects={"/tmp/ws/inst"={trust_level="trusted"}}`,
 		"--", "--do the thing",
 	}
@@ -179,13 +179,59 @@ func TestCodexLaunchArgv(t *testing.T) {
 		t.Error("the launch argv suppresses the session record capture reads")
 	}
 
-	// And the process model, which the completeness suite only checks for
-	// membership in the closed set. Flipped to backgrounded, every dispatch
-	// would block for the length of the task and then die with a cancelled
-	// context, and nothing else in the suite would notice: the detached-launch
-	// test builds its own spec rather than reading the table.
-	if spec := codexLaunchSpec(t); spec.Mode != agentplan.LaunchDetached {
-		t.Errorf("codex launch mode = %d, want detached; it runs its turn in the foreground", spec.Mode)
+	// And the runner, which the completeness suite only checks for membership
+	// in the closed set. Flipped to self-backgrounding, every dispatch would
+	// block for the length of the task and then die with a cancelled context,
+	// and nothing else in the suite would notice: the detached-launch test
+	// builds its own spec rather than reading the table.
+	if spec := codexLaunchSpec(t); spec.Runner != agentplan.RunnerForeground {
+		t.Errorf("codex runner = %d, want the one that executes the turn in the foreground (%d)", spec.Runner, agentplan.RunnerForeground)
+	}
+}
+
+// TestCodexLaunchArgvForegroundOmitsTheMachineStream is the argv half of the
+// process-model split: the flag that exists so niwa can parse a log nobody is
+// watching does not ride a run the developer is watching.
+//
+// Everything else has to be identical, and that is the part worth asserting
+// rather than assuming. `--skip-git-repo-check` decides whether the run starts
+// at all, the trust grant decides whether the worker can write, the `--`
+// separator decides how a prompt beginning with a dash is read, and
+// `--ephemeral` must be absent in both -- none of those are about who reads the
+// output, so none of them may vary with it.
+func TestCodexLaunchArgvForegroundOmitsTheMachineStream(t *testing.T) {
+	spec := codexLaunchSpec(t)
+	detached := buildLaunchArgs(spec, agentplan.LaunchDetached, "/tmp/ws/inst", "--do the thing", nil)
+	foreground := buildLaunchArgs(spec, agentplan.LaunchForeground, "/tmp/ws/inst", "--do the thing", nil)
+
+	if len(spec.DetachedArgs) == 0 {
+		t.Fatal("the spec declares no detached-only arguments, so this test compares two identical argvs and proves nothing")
+	}
+	for _, arg := range spec.DetachedArgs {
+		if !slices.Contains(detached, arg) {
+			t.Errorf("the detached argv dropped %q, which is what makes the instance log readable back: %#v", arg, detached)
+		}
+		if slices.Contains(foreground, arg) {
+			t.Errorf("the foreground argv carries %q; the developer is the reader here, and an event stream in place of the human output is a regression: %#v", arg, foreground)
+		}
+	}
+
+	// The rest of the argv, element for element. Built by removing exactly the
+	// detached-only arguments from the detached form, so an element that moved,
+	// changed, or appeared shows up here rather than passing as "close enough".
+	var want []string
+	for _, arg := range detached {
+		if !slices.Contains(spec.DetachedArgs, arg) {
+			want = append(want, arg)
+		}
+	}
+	if !reflect.DeepEqual(foreground, want) {
+		t.Errorf("foreground argv =\n  %#v\nwant the detached argv minus its machine-stream flags\n  %#v", foreground, want)
+	}
+	for _, args := range [][]string{detached, foreground} {
+		if slices.Contains(args, "--ephemeral") {
+			t.Errorf("an argv suppresses the session record capture reads: %#v", args)
+		}
 	}
 }
 
@@ -213,7 +259,7 @@ func TestStartDetachedWorker(t *testing.T) {
 	// sets both, and it is the group that decides whether a signal aimed at
 	// the launcher reaches the worker.
 	script := `echo out; echo err 1>&2; ps -o pgid= -p $$ > "` + done + `.pgid"; sleep 0.3; echo finished > "` + done + `"`
-	spec := agentplan.LaunchSpec{Binary: "sh", Mode: agentplan.LaunchDetached}
+	spec := agentplan.LaunchSpec{Binary: "sh", Runner: agentplan.RunnerForeground}
 
 	start := time.Now()
 	if err := startDetachedWorker(spec, sh, []string{"-c", script}, instance, os.Environ()); err != nil {
@@ -271,7 +317,11 @@ func TestStartDetachedWorker(t *testing.T) {
 // rejected before any exec (R43). It does not depend on the binary being
 // present.
 func TestRealDispatchLaunch_EmptyPromptRejected(t *testing.T) {
-	err := realDispatchLaunch(context.Background(), claudeLaunchSpec(), t.TempDir(), "", "", nil, nil)
+	err := realDispatchLaunch(context.Background(), launchRequest{
+		Spec:        claudeLaunchSpec(),
+		Mode:        agentplan.LaunchBackgrounded,
+		InstanceDir: t.TempDir(),
+	})
 	if err == nil {
 		t.Fatal("expected an error for an empty prompt, got nil")
 	}

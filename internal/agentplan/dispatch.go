@@ -29,25 +29,75 @@ import (
 // it fails, and a spec for an agent the table does not declare implemented
 // fails.
 
-// LaunchMode says how the dispatch path runs an agent's worker binary. It is
-// the one place the two agents differ in kind rather than in spelling, and it
-// is why the launcher cannot be one call with different arguments.
+// RunnerKind says what an agent's worker binary is: whether it puts the worker
+// in the background itself, or runs the whole turn in the foreground of the
+// process niwa starts. That is a property of the agent, so it is declared here.
+//
+// It is deliberately not the process model. A runner that executes the turn in
+// the foreground offers two -- run it where the developer can watch, or detach
+// it -- and which one an invocation gets is decided with --detach in hand. A
+// runner that backgrounds its own session offers one, and no flag overrides it
+// into the other, because there is nothing to run in the foreground.
+type RunnerKind uint8
+
+const (
+	// RunnerSelfBackgrounding means the binary puts the worker in the
+	// background itself and exits, so the process niwa starts is the hand-off
+	// rather than the work.
+	RunnerSelfBackgrounding RunnerKind = iota + 1
+
+	// RunnerForeground means the binary runs the whole turn in the foreground
+	// of the process niwa starts.
+	RunnerForeground
+)
+
+// LaunchMode says how the dispatch path runs an agent's worker binary for one
+// invocation. It is resolved from both of its inputs -- what the agent's runner
+// is, and whether this invocation asked to detach -- and never from the
+// declaration alone. See ModeFor.
 type LaunchMode uint8
 
 const (
-	// LaunchBackgrounded means the binary puts the worker in the background
-	// itself and exits. The launcher runs it and waits, because the process it
-	// started is not the worker -- waiting costs the time it takes to hand off,
-	// and its exit status says whether the hand-off happened.
+	// LaunchBackgrounded means the binary backgrounds the worker itself. The
+	// launcher runs it and waits, because the process it started is not the
+	// worker -- waiting costs the time it takes to hand off, and its exit
+	// status says whether the hand-off happened.
 	LaunchBackgrounded LaunchMode = iota + 1
 
-	// LaunchDetached means the binary runs the whole turn in the foreground.
-	// The launcher starts it in a session of its own, hands it a closed stdin
-	// and files for its output, and releases it without waiting -- waiting
-	// would block the dispatch for the length of the task, and a context
-	// cancelled when the dispatch returns would kill the worker outright.
+	// LaunchForeground means the worker's whole turn runs in the caller's
+	// terminal. The launcher waits for it and the developer watches it, which
+	// for a foreground runner is what attaching to the session would have been.
+	LaunchForeground
+
+	// LaunchDetached means the worker's turn is put out of the terminal's
+	// reach. The launcher starts it in a session of its own, hands it a closed
+	// stdin and files for its output, and releases it without waiting --
+	// waiting would block the dispatch for the length of the task, and a
+	// context cancelled when the dispatch returns would kill the worker
+	// outright.
 	LaunchDetached
 )
+
+// ModeFor resolves the process model for one invocation from both of its
+// inputs: what this runner is, and whether the developer asked to detach.
+//
+// The flag is an input here rather than a step that runs afterwards. Deciding
+// the model from the runner alone is exactly what left --detach unable to
+// change how a worker was started: a foreground runner was detached whether or
+// not anybody asked, and the flag only chose whether a step followed.
+func (r RunnerKind) ModeFor(detach bool) LaunchMode {
+	if r == RunnerForeground {
+		if detach {
+			return LaunchDetached
+		}
+		return LaunchForeground
+	}
+	// A runner that backgrounds its own session has one process model, and
+	// --detach cannot override it into another. What the flag still decides for
+	// it is whether the attach step runs afterwards, which is what it always
+	// meant for this kind of runner.
+	return LaunchBackgrounded
+}
 
 // HandleKind says what the user-facing handle for a session is: the thing a
 // developer types after the binary's own management verbs, and the thing
@@ -178,12 +228,22 @@ type LaunchSpec struct {
 	// Binary is the executable name looked up on PATH.
 	Binary string
 
-	// Mode says how to run it.
-	Mode LaunchMode
+	// Runner says what the binary is: whether it backgrounds its own worker,
+	// or runs the turn in the foreground. Which process model an invocation
+	// gets is ModeFor's answer, not this field's.
+	Runner RunnerKind
 
 	// LeadingArgs are the arguments that always precede the pass-through
 	// flags: a subcommand, and whatever policy niwa fixes for every dispatch.
 	LeadingArgs []string
+
+	// DetachedArgs are the arguments added only when the worker is detached:
+	// the ones that exist because niwa, rather than a developer, is the reader
+	// of the output. In the foreground the developer is the reader, and handing
+	// them a machine-readable event stream instead of the human output would be
+	// a regression justified as consistency. Empty for an agent with no such
+	// argument.
+	DetachedArgs []string
 
 	// PromptSeparator says a bare "--" must precede the prompt, so a prompt
 	// that begins with a dash is read as the prompt rather than as a flag.
@@ -257,7 +317,7 @@ type LaunchSpec struct {
 var launchSpecs = map[agent.Agent]LaunchSpec{
 	agent.AgentClaude: {
 		Binary:      "claude",
-		Mode:        LaunchBackgrounded,
+		Runner:      RunnerSelfBackgrounding,
 		LeadingArgs: []string{"--bg"},
 		Flags: LaunchFlags{
 			Model:          "--model",
@@ -296,20 +356,25 @@ var launchSpecs = map[agent.Agent]LaunchSpec{
 
 	agent.AgentCodex: {
 		Binary: "codex",
-		// The exec subcommand runs the whole turn in the foreground, so the
-		// launcher detaches it rather than waiting.
-		Mode: LaunchDetached,
-		// --json makes the run's own event stream parseable, which is what the
-		// launch log is for; --skip-git-repo-check is not optional, because a
-		// dispatch instance root is not a git repository and the run refuses
-		// to start in one without it. Trusting the directory does not satisfy
-		// that check -- measured, and the identical startup failure reproduces
-		// with the path trusted.
+		// The exec subcommand runs the whole turn in the foreground of the
+		// process it is started as, so this agent offers both process models
+		// and --detach picks one.
+		Runner: RunnerForeground,
+		// --skip-git-repo-check is not optional, because a dispatch instance
+		// root is not a git repository and the run refuses to start in one
+		// without it. Trusting the directory does not satisfy that check --
+		// measured, and the identical startup failure reproduces with the path
+		// trusted.
 		//
 		// --ephemeral is deliberately absent and must stay absent: it runs
 		// without persisting the session record, which is the substrate
 		// capture reads.
-		LeadingArgs:     []string{"exec", "--json", "--skip-git-repo-check"},
+		LeadingArgs: []string{"exec", "--skip-git-repo-check"},
+		// --json makes the run's own event stream parseable, which is what the
+		// instance log is for. It rides the detached launch only: there, the
+		// output goes to a file nobody is watching, and niwa is the one that
+		// has to be able to read it back.
+		DetachedArgs:    []string{"--json"},
 		PromptSeparator: true,
 		// The grant is a whole-table override rather than a dotted path. The
 		// dotted form parses without error and silently does nothing, which is
