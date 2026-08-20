@@ -1345,6 +1345,37 @@ worker shares the terminal's group and dies with it. That is the
 behavior a developer expects from a command running in front of them,
 and it is a difference worth stating rather than discovering.
 
+**What this does to the mid-turn resume refusal: it relocates, and gets
+more load-bearing rather than less.** The refusal measured in Decision 8
+-- a session whose turn is running cannot be opened, refused by the
+store's per-thread writer lock -- stops being something niwa collides
+with and becomes something the developer can collide with.
+
+On the foreground path there is nothing left to refuse. niwa never
+resumes, because the developer is already watching the turn; the attach
+step that used to run into the lock does not exist on that path. On the
+detached path the collision is still live, but the party who can cause it
+is now the developer: they were handed `codex resume <id>` and nothing
+stops them running it while the worker is still going, at which point
+they get `thread-store conflict` phrased in Codex's internal vocabulary
+rather than in terms of their session.
+
+So the load moves from a gate to a sentence. What has to be right is the
+guidance printed alongside the handle on a detached dispatch -- it has to
+say the session is resumable *once the turn ends*, because that is now
+the only place the constraint is communicated. Getting it wrong costs a
+developer one confusing error rather than costing niwa a broken attach,
+which is a smaller failure and an easier one to leave un-noticed.
+
+`ResumeDuringTurn` itself survives with a narrower consumer. It no longer
+decides whether dispatch attaches on the foreground path, because that
+path has no attach; it decides it for an agent that backgrounds its own
+session, which is the only shape where niwa still performs a resume the
+developer did not ask for. No agent ships today that both backgrounds its
+own session and refuses a mid-turn handover, so the field currently
+guards a combination nobody has -- which is a reason to keep it declared
+and a reason not to claim it is doing more than it is.
+
 **Rejected: keep detaching, and tail the log.** niwa could have followed
 `.niwa/dispatch-codex.out` and presented that as the attach. It reads as
 close to the same thing and is strictly worse: a second copy of the
