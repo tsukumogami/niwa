@@ -226,6 +226,13 @@ func TestDispatchSharedHalfRunsForEveryAgent(t *testing.T) {
 			if m.Agent != string(ag) {
 				t.Errorf("mapping records agent %q, want %q", m.Agent, ag)
 			}
+			// The handle rides the mapping too. It is not derivable from the
+			// session id -- for one agent the two are different strings -- so a
+			// later reader that has only the id cannot name a command that
+			// reaches the session.
+			if m.Handle != dispatchTestShortID {
+				t.Errorf("mapping records handle %q, want the captured %q", m.Handle, dispatchTestShortID)
+			}
 			if !m.Ephemeral || m.Origin != "dispatch" {
 				t.Errorf("mapping provenance differs by agent: ephemeral=%v origin=%q", m.Ephemeral, m.Origin)
 			}

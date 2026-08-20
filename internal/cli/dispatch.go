@@ -288,7 +288,23 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("niwa: error: %w", agErr)
 	}
 
-	// (2c) The gate is the declaration, not a comparison against an agent this
+	// (2c) --agent names a subagent type, not an agent to launch, and the two
+	// readings are one keystroke apart. A developer who means "launch codex"
+	// and types --agent codex gets a Claude worker started with a subagent type
+	// no installation defines, which fails inside the worker rather than here.
+	// So say it, once, before anything is provisioned or launched.
+	//
+	// A warning rather than a refusal: an agent name is a legitimate
+	// subagent-type name -- a role called "claude" is a real thing to have --
+	// and refusing would break setups that already work. The trigger is
+	// deliberately narrow: the value has to parse as an agent niwa knows AND
+	// disagree with the one actually being launched, so --agent reviewer says
+	// nothing and --agent claude on a Claude dispatch says nothing either.
+	if warning := launchAgentMismatchWarning(dispatchAgent, dispatchedAgent); warning != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", warning)
+	}
+
+	// (2d) The gate is the declaration, not a comparison against an agent this
 	// code names. Launching a background worker is a declared capability, so
 	// whether niwa can launch one for this agent is a lookup, and the refusal
 	// quotes the same reason the generated gap list publishes -- which is what
@@ -314,7 +330,31 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("niwa: error: %s binary not found in PATH; install it before dispatching", spec.Binary)
 	}
 
-	// (3b) With no positional prompt, capture one from the terminal. This sits
+	// (3b) A worker is launched at the instance root, and for an agent that
+	// cannot be oriented there it starts without any of what the workspace
+	// delivers -- which it will not say, because it has no way to know
+	// something was withheld. Documented in the guide, invisible at the moment
+	// it happens, and the difference between those two is a developer reading a
+	// plausible answer from an uninformed worker and never learning why.
+	//
+	// It prints here, after every preflight and BEFORE the prompt is captured,
+	// because what it changes is the prompt. A worker with no orientation needs
+	// a briefing the prompt has to carry, and a developer who reads this after
+	// the launch has already written one that assumes otherwise -- and stopping
+	// the result means finding the process by hand. Read first, then type, or
+	// press Ctrl-C having spent nothing.
+	//
+	// The trigger is row 2's declaration rather than a name, so it fires for
+	// exactly the agents it is true of. The sentence is niwa's own rather than
+	// the declaration's reason, because what a root-launched worker loses is
+	// wider than orientation and the reason speaks only to that.
+	if d, err := agentplan.Lookup(agentplan.RootSessionOrientation, dispatchedAgent); err == nil && d.State != agentplan.StateImplemented {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"niwa dispatch: the worker starts at the instance root, where a %s session receives none of the workspace's orientation, skills, MCP servers or posture -- those reach a session from inside a repository. Its prompt is its whole briefing.\n",
+			dispatchedAgent)
+	}
+
+	// (3c) With no positional prompt, capture one from the terminal. This sits
 	// after every preflight check and before anything is created, so abandoning
 	// the capture costs nothing -- there is no instance to roll back -- and a
 	// wrong workspace or a missing claude fails before the developer types.
@@ -561,6 +601,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		InstanceName: res.Name,
 		InstancePath: instancePath,
 		Agent:        string(dispatchedAgent),
+		Handle:       handle,
 		Ephemeral:    true,
 		Origin:       "dispatch",
 		Label:        dispatchLabel,
@@ -585,22 +626,6 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Dispatched session %s\n", sessionID)
 	fmt.Fprintf(out, "  instance: %s\n", instancePath)
-	// A worker is launched at the instance root, and for an agent that cannot be
-	// oriented there it starts without any of what the workspace delivers --
-	// which it will not say, because it has no way to know something was
-	// withheld. Documented in the guide, invisible at the moment it happens, and
-	// the difference between those two is a developer reading a plausible answer
-	// from an uninformed worker and never learning why.
-	//
-	// The trigger is row 2's declaration rather than a name, so it fires for
-	// exactly the agents it is true of. The sentence is niwa's own rather than
-	// the declaration's reason, because what a root-launched worker loses is
-	// wider than orientation and the reason speaks only to that.
-	if d, err := agentplan.Lookup(agentplan.RootSessionOrientation, dispatchedAgent); err == nil && d.State != agentplan.StateImplemented {
-		fmt.Fprintf(cmd.ErrOrStderr(),
-			"niwa dispatch: the worker starts at the instance root, where a %s session receives none of the workspace's orientation, skills, MCP servers or posture -- those reach a session from inside a repository. Its prompt is its whole briefing.\n",
-			dispatchedAgent)
-	}
 
 	for _, verb := range spec.HintVerbs {
 		fmt.Fprintf(out, "  %s %s %s\n", spec.Binary, verb, handle)

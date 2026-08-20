@@ -114,3 +114,26 @@ Feature: choosing which agent niwa launches
     When I run "niwa config unset default-agent"
     Then the exit code is 0
     And the output contains "No machine-wide default agent set."
+
+  @critical
+  Scenario: naming an agent in --agent is warned about, not silently obeyed
+    # --agent forwards a subagent type INTO the launched agent. A developer who
+    # means "launch codex" and types it here gets a Claude worker carrying a
+    # subagent type nothing defines, which fails inside the worker where niwa
+    # wires no output. It stays a warning rather than a refusal: an agent's name
+    # is a legitimate subagent type, and refusing would break a setup that works.
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "01a20000-0000-7000-8000-00000000ba5e"
+    When I run "niwa dispatch some-task --detach --agent codex" from the workspace root
+    Then the exit code is 0
+    And the error output contains "subagent type"
+    And the error output contains "--launch-agent codex"
+    And the dispatch mapping for session "01a20000-0000-7000-8000-00000000ba5e" records agent "claude"

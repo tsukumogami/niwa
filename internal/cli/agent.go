@@ -40,6 +40,31 @@ func launchAgentFlagUsage() string {
 		"This is not --agent, which forwards a subagent type into whichever agent is launched"
 }
 
+// launchAgentMismatchWarning returns the line to print when --agent's value
+// reads like a request to launch a different agent, or "" when there is
+// nothing to say.
+//
+// It fires on exactly one shape: the value parses as an agent niwa knows, and
+// that agent is not the one this dispatch resolved to launch. Anything else is
+// silence. A value that is not an agent name is an ordinary subagent type and
+// carries no confusion; a value that agrees with the launched agent is
+// consistent whatever the developer meant by it.
+//
+// The line names three things because a developer who typed the wrong flag
+// needs all three: what --agent actually does, which agent is being launched
+// instead, and the flag that would have selected the one they named.
+func launchAgentMismatchWarning(agentFlagValue string, launched agent.Agent) string {
+	if agentFlagValue == "" {
+		return ""
+	}
+	named, err := agent.ParseAgent(agentFlagValue)
+	if err != nil || named == launched {
+		return ""
+	}
+	return "--agent " + agentFlagValue + " names a subagent type to forward into the launched agent, not which agent to launch. This dispatch launches " +
+		string(launched) + ". Use --" + launchAgentFlagName + " " + string(named) + " to launch " + string(named) + " instead"
+}
+
 // resolveSessionAgent resolves the session-global coding agent once from its
 // four sources, in precedence order flag > NIWA_AGENT env > workspace
 // default_agent > host default_agent > claude.

@@ -178,7 +178,9 @@ it, recovers the session id from the session record Codex writes, and prints
 `--detach`, and `--detach` makes no difference to a Codex dispatch: Codex won't
 open a session while its turn is still running, and the worker has just started
 one. So dispatch says the worker is going and leaves you the command, which
-works from the moment the turn ends. The worker's own output is kept in the instance, at
+works from the moment the turn ends. `niwa list` prints that command again
+beside the instance for as long as the instance exists, so the handle isn't
+stranded in the terminal that dispatched it. The worker's own output is kept in the instance, at
 `.niwa/dispatch-codex.out` and `.niwa/dispatch-codex.err`, which is where to
 look when a run does something you didn't expect.
 

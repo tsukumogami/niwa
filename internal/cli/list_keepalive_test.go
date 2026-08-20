@@ -68,7 +68,7 @@ func TestAnnotateKeepAlive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enumerate: %v", err)
 	}
-	annotateKeepAlive(records, root, jobsDir, time.Now())
+	annotateFromSessionMappings(records, root, jobsDir, time.Now())
 
 	got := map[string]bool{}
 	for _, r := range records {
@@ -96,7 +96,7 @@ func TestAnnotateKeepAlive_JSONShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enumerate: %v", err)
 	}
-	annotateKeepAlive(records, root, jobsDir, time.Now())
+	annotateFromSessionMappings(records, root, jobsDir, time.Now())
 
 	data, err := json.Marshal(records)
 	if err != nil {
@@ -129,7 +129,7 @@ func TestAnnotateKeepAlive_NoStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enumerate: %v", err)
 	}
-	annotateKeepAlive(records, root, t.TempDir(), time.Now())
+	annotateFromSessionMappings(records, root, t.TempDir(), time.Now())
 	for _, r := range records {
 		if r.KeepAlive {
 			t.Errorf("record %s KeepAlive = true with no mapping store", r.Name)

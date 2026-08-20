@@ -223,3 +223,57 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     When I dispatch a generated paste of 140000 bytes
     Then the exit code is 0
     And the worker received a pointer to a spilled prompt
+
+  # --- What a dispatched session leaves behind ---
+  #
+  # The handle a dispatch prints is printed once. For an agent that will not
+  # hand over a session while its turn is running, the terminal never attaches,
+  # so resuming later is the only way that session is ever used -- and the
+  # developer needs the handle after the terminal that printed it is gone.
+  # niwa list already reads the mapping store for its keep-alive marker, and the
+  # mapping records the agent and the handle, so the command it prints is built
+  # from that agent's own declaration rather than from a name typed here.
+
+  @critical
+  Scenario: a dispatched session is reachable from niwa list after the terminal closes
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake codex for dispatch with session "01a10000-0000-7000-8000-00000000ab1e"
+    When I run "niwa dispatch some-task --detach --launch-agent codex" from the workspace root
+    Then the exit code is 0
+    When I run "niwa list" from the workspace root
+    Then the exit code is 0
+    And the output contains "codex resume 01a10000-0000-7000-8000-00000000ab1e"
+
+  # --- The unoriented-worker warning, before the prompt rather than after ---
+  #
+  # A worker launched at the instance root receives none of the workspace's
+  # orientation, and the warning that says so is advice about a prompt that has
+  # not been written yet. This scenario asks for a prompt niwa cannot get -- no
+  # terminal to capture one from -- so the run ends before anything is
+  # provisioned or launched. The warning still has to be there: if it printed
+  # with the completion hints, as it once did, this run would say nothing.
+
+  @critical
+  Scenario: the unoriented-worker warning arrives before the prompt is asked for
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake codex for dispatch with session "01a30000-0000-7000-8000-00000000c0de"
+    When I run "niwa dispatch --launch-agent codex" with stdin held open
+    Then the exit code is 1
+    And the error output contains "not an interactive terminal"
+    And the error output contains "receives none of the workspace's orientation"
