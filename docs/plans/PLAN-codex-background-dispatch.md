@@ -239,15 +239,27 @@ keeps running.
 
 ## Open Questions
 
-**Two defects the documentation work surfaced, neither resolved.**
-`niwa dispatch` resolves the agent before it refreshes the config
-snapshot, so a `default_agent` pushed upstream takes effect one dispatch
-late; and `[workspace]` in a config overlay is inert, so a
-`default_agent` set there is dropped with no warning at all. Item 2 makes
-the first mostly moot by giving the setting a home that needs no push,
-and the second looks like it belongs to whoever owns overlay merging
-rather than to this feature. Both are currently documented as caveats.
-Neither has an owner.
+**Two defects the documentation work surfaced. Ownership is now settled;
+neither is fixed.**
+
+The first is the resolution lag: `niwa dispatch` resolves the agent
+before it refreshes the config snapshot, so a `default_agent` pushed
+upstream takes effect one dispatch late. Issue 2 routes around it rather
+than fixing it -- the host config is not a snapshot, so there is nothing
+to refresh and no lag -- and the guide's trap paragraph now ends by
+pointing at that way out. The underlying ordering is untouched, because
+changing when the refresh happens relative to resolution is a real
+behavior change that deserves its own increment and its own reasoning.
+It affects every workspace-level setting a command reads at startup, not
+only this one.
+
+The second is not this feature's at all. `[workspace]` in a config
+overlay is inert, so a `default_agent` set there is dropped with no
+warning -- but that is overlay-merge behavior, and `default_agent` is
+just one field that happens to land in it. Fixing it for this field
+alone would leave the next `[workspace]` field with the identical silent
+drop. It belongs to whoever owns overlay merging, and the silence is the
+defect rather than the inertness.
 
 **Whether this plan should exist.** The process reviewer recommended
 against writing it: `docs/plans/` held eight PLANs and every one was
