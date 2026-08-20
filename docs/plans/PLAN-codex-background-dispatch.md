@@ -25,9 +25,9 @@ no durable home.
 
 This plan covers what three reviewers -- on UX, on documentation, and on
 this repository's delivery conventions -- judged necessary before the
-feature counts as delivered. Their verdicts are at
-`wip/research/review_agent-selection_{ux,docs,process}.md` and are the
-source of every item below. Items nobody named are not here; the
+feature counts as delivered. Their verdicts are the source of every item
+below, and each finding is restated here with the evidence it rested on
+so this document stands without them. Items nobody named are not here; the
 reviewers were each asked to be adversarial about scope inflation and
 each returned a shorter list than the one I would have written.
 
@@ -284,8 +284,9 @@ BRIEF, PRD, and DESIGN are already on that branch.
 
 ## Before Ready
 
-`wip/research/` is deleted and the tree grepped for `wip/` references
-before the pull request leaves draft, per the workspace wip-hygiene rule.
+The review scratch under the non-durable working directory is deleted,
+and the tree grepped for references to it, before the pull request leaves
+draft, per the workspace hygiene rule.
 No CI check enforces this here, so it is a manual step and it is written
 down for that reason. This plan is deleted in the same pass, and the
 BRIEF and PRD move to Done as they land -- the statuses they carry now
