@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Done
+status: Accepted
 problem: |
   niwa dispatch refuses any workspace whose resolved agent is not Claude,
   and row 22 of the capability table declares that refusal as niwa's own
@@ -26,7 +26,7 @@ motivating_context: |
 
 ## Status
 
-Done
+Accepted
 
 This brief frames the delivery of `niwa dispatch` for Codex: the framing,
 the scope boundary, and the sequencing. The downstream PRD owns the
@@ -134,6 +134,22 @@ prints the id with resume hints. The developer comes back an hour later and
 steps into the session to see what happened. At no point did they name an
 agent on the command line.
 
+### Watching the work, when that is what you asked for
+
+A developer runs `niwa dispatch "<task>"` without `--detach`, which is the
+way you say "I want to be in this". The worker's turn runs in their
+terminal and they watch it happen -- the same thing `--detach` exists to
+opt out of. When it finishes they are back at the shell with the session
+id and the command to continue the conversation.
+
+The first round did not deliver this for Codex and delivered something
+that reads like a bug instead: the worker was detached whatever the
+developer asked for, and dispatch then explained that it could not put
+them into the session. Both halves were true. Together they describe a
+command that ignores its own flag and then apologizes. `--detach` should
+decide how the worker is run, not merely whether a step happens after it
+is already too late.
+
 ### The second dispatch doesn't eat the first
 
 The same developer dispatches a second task while the first Codex worker is
@@ -183,6 +199,14 @@ work rather than pretending the gap isn't there.
   selection being reachable. What lands here is the entry point rather
   than a new resolution rule -- the precedence order is unchanged, and
   nothing here alters what `niwa apply` prepares.
+- **`--detach` deciding the process model rather than a later step.**
+  Third round. Without it, an agent whose runner is a foreground process
+  runs in the developer's terminal and they watch the turn; with it, the
+  worker is detached as today. What made this necessary is that the
+  process model was a property of the *agent* and the flag was a property
+  of the *invocation*, so the two could not meet: Codex was detached
+  unconditionally and then found to be un-attachable, which is a problem
+  this feature created rather than one it inherited from Codex.
 - **The documentation of that surface, and of the costs this feature
   declares.** Also second-round. A cost declared only in a design document
   is not declared to the person who pays it, and a setting whose only

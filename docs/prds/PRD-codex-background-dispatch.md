@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Done
+status: In Progress
 problem: |
   niwa dispatch refuses any workspace whose resolved agent is not Claude,
   and row 22 of the capability table declares that refusal as niwa's own
@@ -31,7 +31,7 @@ motivating_context: |
 
 ## Status
 
-Done
+In Progress
 
 This PRD owns the requirements for delivering `niwa dispatch` to Codex
 across four surfaces -- launch, capture, resume, liveness -- as two
@@ -269,6 +269,40 @@ hardcoded pass the capability contract exists to prevent.
   Acceptance: a launcher that leaves stdin open fails a test rather than
   hanging one; merged streams fail; a healthy run with non-empty stderr
   is not reported as an error.
+- **R7a. `--detach` decides the process model, not a step after it.**
+  *Third round.* Whether a worker is detached is a question about the
+  invocation, so the flag that asks it has to reach the decision. Without
+  `--detach`, an agent whose runner executes the turn in the foreground
+  runs it in the developer's terminal, with the worker's own output as
+  the session they asked to be in; with `--detach`, that agent's worker is
+  detached exactly as it is today. An agent whose runner backgrounds its
+  own session is unaffected in either case -- there is nothing to run in
+  the foreground, and the attach step remains what `--detach` skips.
+
+  Three properties from R7 survive the foreground path unchanged and are
+  the ones most likely to be lost by an implementation that reaches for
+  "just inherit stdio": stdin stays `/dev/null` even when stdout and
+  stderr are the terminal, because the blocking read is on stdin
+  specifically and a foreground worker that hangs is worse than a
+  detached one; the prompt stays a single argv element; and exit status
+  still does not mean the task succeeded, so what the foreground run
+  reports at the end is that the turn ended.
+
+  The machine-readable stream flag belongs to the detached path only. It
+  exists so niwa can parse a log nobody is watching; in the foreground the
+  developer is the reader, and giving them a JSON event stream instead of
+  the human output is a regression dressed as consistency. Capture is
+  unaffected either way, because the session id comes from the record on
+  disk rather than from the stream.
+
+  Acceptance: a dispatch without `--detach` in a workspace whose agent
+  runs turns in the foreground does not return until the turn ends, and
+  the developer sees the worker's output as it happens; the same dispatch
+  with `--detach` returns promptly and writes the worker's output to the
+  instance. The failure this catches is the one that shipped: a flag that
+  is read only after the process model has already been chosen without
+  it. A test fails if the launch mode is decided from the agent's
+  declaration alone.
 - **R8. The launch works from an instance root: `--skip-git-repo-check`,
   and nothing written there.** An instance root is not a git repository,
   and the Codex launch will not start in one without

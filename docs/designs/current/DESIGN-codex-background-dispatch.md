@@ -1287,6 +1287,78 @@ that refuses with directions. The premise did not hold, and the
 principle is what identified the real target rather than what blocked
 it.
 
+### Decision 13 -- the launch mode is a function of the agent and the invocation, not the agent alone (R7a)
+
+Added in the third round, correcting Decision 1 rather than extending it.
+
+`LaunchMode` was declared as a field of the launch description, so the
+process model became a property of the agent: Claude backgrounded,
+Codex detached, decided before any flag was read. `realDispatchLaunch`
+switches on `spec.Mode` and nothing else. `--detach` was wired to a
+different question entirely -- whether an attach step runs after the
+launch -- and the two never met.
+
+For one agent that was invisible, because `claude --bg` backgrounds its
+own session and there is no foreground alternative to choose. For Codex
+it produced a command that ignores its own flag: the worker was detached
+whether or not the developer asked for it, and dispatch then explained
+that Codex would not hand over a session whose turn was still running.
+Both statements are true and the combination is a defect. The
+un-attachability is real and is Codex's; being unable to *watch* the work
+is ours, and we introduced it by detaching a process that runs its turn
+in the foreground natively.
+
+So the decision that was "which mode does this agent use" becomes "which
+mode does this invocation want, of the ones this agent can offer". A
+runner that backgrounds its own session offers one mode and the flag
+changes nothing about how it is started. A runner that executes the turn
+in the foreground offers both: run it in the terminal, or detach it.
+
+**What the foreground path must not quietly drop.** Three properties
+were measured into Decision 8 and are easy to lose to an implementation
+that reaches for "inherit stdio and be done":
+
+- **Stdin stays `/dev/null`.** The measured hang is on stdin
+  specifically -- `codex exec` reads it in addition to the positional
+  prompt and blocks on an inherited or open one, 20 seconds of nothing
+  with no rollout and no API call. Attaching the terminal's stdout and
+  stderr does not require attaching its stdin, and a foreground worker
+  that hangs is a worse outcome than the detached one it replaces.
+- **The prompt stays one argv element.** Unchanged, and unchanged for the
+  same reason.
+- **Exit status still is not task success.** A read-only sandbox failure
+  exits 0. What a foreground run can honestly report at the end is that
+  the turn ended.
+
+**`--json` belongs to the detached path.** It is there so niwa can parse
+a log nobody is watching. In the foreground the developer is the reader,
+and handing them an event stream instead of the human output would be a
+regression justified as consistency. Capture is indifferent: the session
+id comes from the rollout record on disk, written about 0.7 seconds in,
+not from stdout. That is also what lets the mapping be written while a
+foreground turn is still running rather than after it.
+
+**Ctrl-C changes meaning, and that is correct.** A detached worker
+survives a signal to the launcher's process group, which is what
+`Setsid` buys and what `TestStartDetachedWorker` holds. A foreground
+worker shares the terminal's group and dies with it. That is the
+behavior a developer expects from a command running in front of them,
+and it is a difference worth stating rather than discovering.
+
+**Rejected: keep detaching, and tail the log.** niwa could have followed
+`.niwa/dispatch-codex.out` and presented that as the attach. It reads as
+close to the same thing and is strictly worse: a second copy of the
+output, a stream to keep in sync with a process niwa no longer controls,
+and no answer for Ctrl-C. Running the process in the foreground is not a
+workaround for the absence of attach -- for this runner it is what attach
+would have been.
+
+**Rejected: block until the turn ends, then resume.** Waiting for the
+writer lock to clear and then opening the session would put the developer
+in the conversation, after making them wait the length of the task with
+nothing on screen. The foreground path gives them the same endpoint and
+the work to watch on the way.
+
 ## What a Dispatched Codex Worker Does Not Receive
 
 This section is deliberately its own rather than a caveat inside a
