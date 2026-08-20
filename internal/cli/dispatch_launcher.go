@@ -148,7 +148,7 @@ func realDispatchLaunch(ctx context.Context, req launchRequest) error {
 		return startDetachedWorker(spec, bin, args, instanceDir, worker)
 	case agentplan.LaunchForeground:
 		return runForegroundWorker(spec, bin, args, instanceDir, worker, req.Stdout, req.Stderr)
-	default:
+	case agentplan.LaunchBackgrounded:
 		// The binary backgrounds its own worker and exits, so the process
 		// started here is the hand-off rather than the work. Waiting for it
 		// costs the hand-off and its exit status says whether that happened.
@@ -159,6 +159,15 @@ func realDispatchLaunch(ctx context.Context, req launchRequest) error {
 			return fmt.Errorf("dispatch: launching %s: %w", spec.Binary, err)
 		}
 		return nil
+	default:
+		// Named rather than folded into the backgrounded branch, because the
+		// zero LaunchMode used to land there silently. A caller that forgets to
+		// set Mode would then run a foreground agent's whole turn under
+		// cmd.Run() with no stdout or stderr wired -- every byte discarded, the
+		// command blocking for the length of the task with nothing on screen.
+		// The dead-field guard proves each field is read, not that each call
+		// site sets it, so this is the check that covers the difference.
+		return fmt.Errorf("dispatch: launch mode %d is not a process model this launcher implements", req.Mode)
 	}
 }
 

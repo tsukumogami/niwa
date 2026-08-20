@@ -440,6 +440,22 @@ func selectBackstopTargets(workspaceRoot, jobsDir string, now time.Time) ([]back
 			continue
 		}
 
+		// An instance explicitly marked to be kept is spared regardless of age.
+		// This is the case where a worker's turn finished and produced work but
+		// niwa could not identify the session, so no mapping was ever written:
+		// name-and-age alone reads that as an abandoned dispatch, which is the
+		// one reading that deletes exactly the directory somebody was told was
+		// being kept for them. The marker is the dispatch saying so, and it is
+		// reported rather than silently honored, because an instance nothing
+		// will ever reclaim on its own is one the developer has to know about.
+		if reason, marked := dispatchRetainReason(rec.Path); marked {
+			if reason == "" {
+				reason = "it is marked to be kept, though the note saying why could not be read"
+			}
+			spared = append(spared, sparedInstance{Name: filepath.Base(rec.Path), Reason: reason})
+			continue
+		}
+
 		created, ok := dispatchInstanceAge(rec.Path)
 		if !ok {
 			// Neither the marker timestamp nor the directory mtime is readable:

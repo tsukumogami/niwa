@@ -74,10 +74,36 @@ const (
 	// case), so the orphan window is closed (DESIGN Decision 4).
 	dispatchPendingMarker = ".niwa/dispatch-pending"
 
+	// dispatchRetainMarker is dropped in an instance whose worker finished and
+	// produced work, but whose session could not be identified -- so there is
+	// no mapping, and the reaper's backstop would otherwise judge the directory
+	// an abandoned dispatch and delete it once it aged past the TTL.
+	//
+	// It exists because the in-process rollback is not the only thing that
+	// deletes an instance. Disarming that rollback keeps the work for the
+	// length of the command; the backstop runs out-of-process at the top of the
+	// next create, dispatch or watch, and its eligibility signal is the
+	// directory NAME. Removing the pending marker does not help -- the age
+	// check falls back to the directory mtime -- so keeping the work needs a
+	// signal the sweep honors rather than the absence of one.
+	//
+	// The contents are the reason, in the words a developer needs to decide
+	// what to do with the directory. The sweep spares any instance carrying
+	// this file and says so, which is the same treatment an instance whose
+	// liveness cannot be read already gets.
+	dispatchRetainMarker = ".niwa/dispatch-retain"
+
 	// dispatchCaptureTimeout bounds the jobs-dir cwd-correlation poll that
 	// recovers the worker's session UUID. Exhaustion is a capture failure that
 	// triggers self-rollback, never a hang (DESIGN Decision 3, R20/R22).
 	dispatchCaptureTimeout = 30 * time.Second
+
+	// dispatchForegroundCaptureTimeout bounds the same poll when the launch ran
+	// the turn in this terminal and has already returned. The record was
+	// written while the turn ran or it was never written at all, so this is a
+	// grace period for a slow filesystem rather than a wait for work in
+	// progress.
+	dispatchForegroundCaptureTimeout = 2 * time.Second
 
 	// maxArgStringBytes is the largest byte length niwa lets a SINGLE argv
 	// element reach. The prompt is handed to claude as one discrete argv element
@@ -631,16 +657,38 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	}
 
 	recordsRoot := recordStoreRoot(spec.Records, userHomeDir(), os.Getenv)
-	sessionID, handle, err := dispatchCapture(spec.Records, recordsRoot, instancePath, dispatchCaptureTimeout, nil, 0)
+	// The poll's deadline depends on what it is waiting for. Detached, the
+	// worker started moments ago and the record is about to appear, so the full
+	// timeout is the point. Foreground, the launch already waited for the turn
+	// to end -- the record either exists on the first pass or never will, and
+	// waiting the full thirty seconds after the developer watched the turn
+	// finish buys nothing while rescanning the whole record store roughly
+	// twelve hundred times.
+	captureTimeout := dispatchCaptureTimeout
+	if launchMode == agentplan.LaunchForeground {
+		captureTimeout = dispatchForegroundCaptureTimeout
+	}
+	sessionID, handle, err := dispatchCapture(spec.Records, recordsRoot, instancePath, captureTimeout, nil, 0)
 	if err != nil {
 		if launchMode == agentplan.LaunchForeground {
 			// The turn ran here, so the developer has already seen whatever the
 			// worker said; what they need is the directory and why there is no
 			// session to resume.
+			//
+			// Keeping it means more than not deleting it now. Without a
+			// mapping this directory is exactly what the reaper's backstop
+			// exists to reclaim, so the retain marker is what makes "kept" true
+			// past the next sweep rather than for thirty minutes.
+			reason := fmt.Sprintf("a %s turn finished here but no session record was found, so niwa could not identify the session", spec.Binary)
+			if mErr := writeDispatchRetainMarker(instancePath, reason); mErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(),
+					"niwa: warning: could not mark %s to be kept, so a later sweep may reclaim it: %v\n", instancePath, mErr)
+			}
+			removeDispatchMarker(instancePath)
 			fmt.Fprintf(cmd.ErrOrStderr(),
 				"niwa: warning: the turn ended but no session record was found, so there is nothing to resume: %v\n", err)
 			fmt.Fprintf(cmd.ErrOrStderr(),
-				"niwa: the work is kept at %s\n", instancePath)
+				"niwa: the work is kept at %s -- remove it with `niwa destroy` when you are done with it\n", instancePath)
 			return nil
 		}
 		if tail := readWorkerLogTail(instancePath, spec.Binary); tail != "" {
@@ -942,6 +990,35 @@ func writeDispatchMarker(instancePath string) error {
 // beside a written mapping is never acted on.
 func removeDispatchMarker(instancePath string) {
 	_ = os.Remove(filepath.Join(instancePath, dispatchPendingMarker))
+}
+
+// writeDispatchRetainMarker records that this instance holds work niwa could
+// not attach a session to, so the reaper's backstop spares it instead of
+// judging it an abandoned dispatch. The reason is written into the file because
+// the developer meeting this directory later needs to know why it is here, and
+// the sweep reads it back to say so rather than reporting a bare path.
+func writeDispatchRetainMarker(instancePath, reason string) error {
+	path := filepath.Join(instancePath, dispatchRetainMarker)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(reason+"\n"), 0o600)
+}
+
+// dispatchRetainReason returns the recorded reason an instance is being kept,
+// and whether the marker is present at all. An unreadable marker still counts
+// as present: the file existing is the retain signal, and a sweep that deleted
+// a directory because it could not read the note explaining why to keep it
+// would be the worst possible reading of it.
+func dispatchRetainReason(instancePath string) (string, bool) {
+	data, err := os.ReadFile(filepath.Join(instancePath, dispatchRetainMarker))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false
+		}
+		return "", true
+	}
+	return strings.TrimSpace(string(data)), true
 }
 
 // validateDispatchPrompt applies the same rules to a captured prompt as to a

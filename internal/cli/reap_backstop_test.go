@@ -377,6 +377,60 @@ func TestBackstop_LiveWorkerRooted_Spared(t *testing.T) {
 	}
 }
 
+// TestBackstop_RetainedInstance_Spared closes the gap between "kept" meaning
+// kept for the length of one command and kept at all.
+//
+// A foreground turn that finishes and produces work but yields no discoverable
+// session record leaves an instance with no mapping. Dispatch disarms its own
+// rollback so the work survives the command -- but the backstop runs
+// out-of-process at the top of the next create, dispatch or watch, and its
+// eligibility signal is the directory NAME. Unmapped, dispatch-named and past
+// the TTL is exactly the abandoned-dispatch shape it exists to reclaim, so the
+// directory the developer was told was being kept is deleted half an hour later
+// by an unrelated command.
+//
+// Removing the pending marker does not help: the age check falls back to the
+// directory mtime, which TestBackstop_DispNamedUnmappedOldNoMarker_ReclaimedViaMtime
+// pins. Keeping the work needs a signal the sweep honors rather than the
+// absence of one, and this is that signal.
+func TestBackstop_RetainedInstance_Spared(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, dispInstOld)
+	// Old enough to be reaped on every other count, and unmapped, which is the
+	// state the keep path leaves behind.
+	touchInstanceMtime(t, inst, now.Add(-2*dispatchBackstopTTL))
+	const reason = "a codex turn finished here but no session record was found, so niwa could not identify the session"
+	if err := writeDispatchRetainMarker(inst, reason); err != nil {
+		t.Fatalf("writing the retain marker: %v", err)
+	}
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, t.TempDir(), now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 0 || len(*destroyed) != 0 {
+		t.Fatalf("reaped %d (%v); an instance marked to be kept must survive the sweep that was told to keep it", n, *destroyed)
+	}
+
+	// And the developer is told, because nothing will ever reclaim it on its
+	// own and an instance that accumulates silently is the other half of this
+	// failure.
+	_, spared, err := selectBackstopTargets(root, t.TempDir(), now)
+	if err != nil {
+		t.Fatalf("selectBackstopTargets error: %v", err)
+	}
+	if len(spared) != 1 {
+		t.Fatalf("spared %d instance(s), want 1", len(spared))
+	}
+	if spared[0].Reason != reason {
+		t.Errorf("spared reason = %q, want the marker's own words %q", spared[0].Reason, reason)
+	}
+}
+
 // TestBackstop_LiveWorkerOfEveryAgent_Spared is the data-loss case the backstop
 // had no coverage for, and it is the one this feature made reachable.
 //
