@@ -4,7 +4,7 @@ status: Active
 execution_mode: single-pr
 upstream: docs/designs/current/DESIGN-codex-background-dispatch.md
 milestone: "Codex background dispatch: the reachable surface"
-issue_count: 9
+issue_count: 10
 ---
 
 # PLAN: Codex background dispatch -- the reachable surface
@@ -37,8 +37,8 @@ each returned a shorter list than the one I would have written.
 for a developer today, ordered by what it costs them. Items 1 through 3
 are the selection surface and are already in flight on
 `feat/agent-selection-surface`; items 4 through 6 are defects the review
-surfaced that nothing was tracking; items 7 through 9 are the
-documentation the reviewers judged necessary.
+surfaced that nothing was tracking; items 7 through 10 are the
+documentation and messaging the reviewers judged necessary.
 
 Two items are deliberately *not* here and are named in Open Questions
 rather than dropped silently.
@@ -213,6 +213,30 @@ twenty lines on the snapshot trap. Item 2 makes that a footnote.
 **Dependencies**: Issue 1
 **Complexity**: simple
 
+### Issue 10: The unoriented-worker warning fires before the prompt, not after
+
+**Goal**: The warning that a root-launched worker receives none of the
+workspace's orientation, skills, MCP servers, or posture is correct and
+arrives too late -- it prints at step 13, after the launch and after the
+capture, when the worker has been running for half a minute.
+
+**Acceptance Criteria**:
+- The existing `Fprintf` moves to just after the agent resolves, ahead of
+  the interactive prompt capture, so a developer reads it before writing
+  the prompt rather than after spending it
+- A test fails if the warning is emitted after the launch
+- No new surface: this is a move of code that already exists
+
+**Dependencies**: None
+**Complexity**: simple
+
+**Note**: the cost of getting this wrong is a wasted first dispatch that
+is not cheaply undone. The developer writes a prompt assuming workspace
+orientation the worker does not have, and stopping the result means
+finding the process by hand -- Codex declares only a resume verb, no
+stop, and `niwa destroy` removes the directory while a detached worker
+keeps running.
+
 ## Open Questions
 
 **Two defects the documentation work surfaced, neither resolved.**
@@ -251,4 +275,13 @@ BRIEF, PRD, and DESIGN are already on that branch.
 `wip/research/` is deleted and the tree grepped for `wip/` references
 before the pull request leaves draft, per the workspace wip-hygiene rule.
 No CI check enforces this here, so it is a manual step and it is written
-down for that reason. This plan is deleted in the same pass.
+down for that reason. This plan is deleted in the same pass, and the
+BRIEF and PRD move to Done as they land -- the statuses they carry now
+are the mid-PR ones the lifecycle gate requires while a PLAN roots the
+chain.
+
+The pull request's title and body have to satisfy the `pr-body` gate: a
+Conventional Commits title from the fixed type list, exactly one bare
+`---` separator, a non-empty Part 1 above it, and no ATX heading in that
+part. `shirabe validate --pr-body <file> --pr-title <string>` checks it
+offline before the body is posted.
