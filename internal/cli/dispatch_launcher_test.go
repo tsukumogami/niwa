@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -201,9 +202,17 @@ func TestStartDetachedWorker(t *testing.T) {
 	instance := t.TempDir()
 	done := filepath.Join(instance, "done")
 
-	// Prints to both streams, reports its own session, then finishes after the
-	// launch call has certainly returned.
-	script := `echo out; echo err 1>&2; ps -o sid= -p $$ > "` + done + `.sid"; sleep 0.3; echo finished > "` + done + `"`
+	// Prints to both streams, reports its own process group, then finishes
+	// after the launch call has certainly returned.
+	//
+	// The probe asks for pgid rather than sid because pgid is POSIX and sid is
+	// not: macOS ps rejects `-o sid` with "keyword not found", which failed
+	// this test twice over -- once on the identity assertion and once on the
+	// stderr assertion, because ps wrote its complaint into the worker's
+	// stderr log. Process group is also the property that matters here. Setsid
+	// sets both, and it is the group that decides whether a signal aimed at
+	// the launcher reaches the worker.
+	script := `echo out; echo err 1>&2; ps -o pgid= -p $$ > "` + done + `.pgid"; sleep 0.3; echo finished > "` + done + `"`
 	spec := agentplan.LaunchSpec{Binary: "sh", Mode: agentplan.LaunchDetached}
 
 	start := time.Now()
@@ -244,14 +253,17 @@ func TestStartDetachedWorker(t *testing.T) {
 		t.Errorf("stderr log = %q, want just the stderr line; the streams must not be merged", string(errOut))
 	}
 
-	// Its own session id is its own pid, which is what Setsid buys: a signal
-	// sent to the launcher's process group does not reach it.
-	sid, err := os.ReadFile(done + ".sid")
+	// Its own process group, which is what Setsid buys: a signal sent to the
+	// launcher's group does not reach it. Compared against this process's
+	// actual group rather than its pid, because a test binary is not
+	// necessarily its own group leader and comparing to the pid would pass for
+	// the wrong reason whenever it is not.
+	pgid, err := os.ReadFile(done + ".pgid")
 	if err != nil {
-		t.Fatalf("reading the worker's session id: %v", err)
+		t.Fatalf("reading the worker's process group: %v", err)
 	}
-	if strings.TrimSpace(string(sid)) == strconv.Itoa(os.Getpid()) {
-		t.Error("the worker shares this process's session; it would die with the terminal that launched it")
+	if strings.TrimSpace(string(pgid)) == strconv.Itoa(syscall.Getpgrp()) {
+		t.Error("the worker shares this process's group; a signal aimed at the launcher would take it down too")
 	}
 }
 
