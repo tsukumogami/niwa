@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: In Progress
+status: Done
 problem: |
   niwa dispatch refuses any workspace whose resolved agent is not Claude,
   and row 22 of the capability table declares that refusal as niwa's own
@@ -31,7 +31,7 @@ motivating_context: |
 
 ## Status
 
-In Progress
+Done
 
 This PRD owns the requirements for delivering `niwa dispatch` to Codex
 across four surfaces -- launch, capture, resume, liveness -- as two

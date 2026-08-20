@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   niwa dispatch refuses any workspace whose resolved agent is not Claude,
   and row 22 of the capability table declares that refusal as niwa's own
@@ -26,7 +26,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 This brief frames the delivery of `niwa dispatch` for Codex: the framing,
 the scope boundary, and the sequencing. The downstream PRD owns the
