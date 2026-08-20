@@ -1390,6 +1390,44 @@ in the conversation, after making them wait the length of the task with
 nothing on screen. The foreground path gives them the same endpoint and
 the work to watch on the way.
 
+### Decision 14 -- the session mapping outlives a config-snapshot refresh (R11)
+
+Recorded here because it would otherwise survive only in a pull-request
+body and a deleted plan, and it is the kind of fact that gets
+rediscovered expensively.
+
+Dispatch writes its mapping to `<workspace>/.niwa/sessions/<id>.json`.
+That path is inside the directory the snapshot writer rotates wholesale
+on refresh, and exactly two things were carried across the swap:
+`instance.json` via `preserveInstanceState`, and `dispatch-briefs/` via
+`preserveDispatchBriefs`. `sessions/` was not. So a refresh destroyed
+every dispatch mapping in the workspace -- the resume handle
+unrecoverable, and the reaper's mapped sweep losing the join it decides
+on, dropping every dispatched instance through to the name-and-age
+backstop where only the record-store guard stands between a live worker
+and its directory being deleted.
+
+The trigger is narrower than every dispatch and wider than it looks. For
+a GitHub-sourced snapshot the swap fires only on upstream drift, so the
+event is a teammate pushing any commit to the shared config repo; for a
+non-GitHub source it fires on every reconcile. Either way it is somebody
+else's unrelated change destroying your session handles.
+
+The fix is a third preserver beside the two that were already there,
+which is the shape the existing code had been asking for -- the comment
+above `preserveInstanceState` already names issue #74 as the structural
+version, where niwa pulls only files it knows about from upstream and the
+state-versus-source distinction at this seam stops being something each
+new state file has to remember to opt into.
+
+**What it costs, stated rather than discovered.** Preserving the
+directory wholesale means a stale or corrupt mapping now survives
+forever, where a refresh used to clear it. Nothing prunes that store. The
+reaper deletes a mapping when it reclaims the instance, so the normal
+path stays clean; what accumulates is mappings whose instances were
+removed by hand. That is a smaller cost than losing live handles and it
+is not zero.
+
 ## What a Dispatched Codex Worker Does Not Receive
 
 This section is deliberately its own rather than a caveat inside a
@@ -1513,23 +1551,33 @@ internal/workspace
 The flow, per dispatch, with the agent resolved once and threaded as
 data:
 
-1. Resolve the agent from `NIWA_AGENT` and the workspace
-   `default_agent`, flag argument empty -- `niwa dispatch --agent`
-   remains the subagent-type passthrough and never participates (R1).
+1. Resolve the agent from `--launch-agent`, then `NIWA_AGENT`, then the
+   workspace `default_agent`, then the host `default_agent`, then claude
+   (R1, R1a). `niwa dispatch --agent` remains the subagent-type
+   passthrough and never participates in that resolution; it names a role
+   within whichever agent is launched (Decision 12).
 2. Gate: `agentplan.Lookup(DispatchLaunch, agent)` plus
    `Producer.LaunchSpec()`. Unavailable, or implausibly implemented with
    no spec, refuses with the declared reason before anything exists on
    disk (R2).
 3. Preflight `spec.Binary` on PATH before provisioning, so an absent
    binary fails with no instance and no mapping (R3).
-4. Provision, arm rollback, launch with the spec's argv shape under
-   the spec's launch mode.
+4. Provision, arm rollback, launch with the spec's argv shape under the
+   mode resolved from the agent's runner *and* the invocation's
+   `--detach` (Decision 13). A runner that backgrounds its own session
+   offers one mode and the flag does not change it; a runner that
+   executes the turn in the foreground is run in the developer's terminal
+   without `--detach` and detached with it, and the argv differs between
+   the two only by the machine-readable stream flag (R7a).
 5. Capture: poll the spec's record store, correlate by normalized cwd
    equality against the unique instance directory, return id and
    declared handle (R10, R11, R12).
 6. Write the mapping with the agent recorded; print the spec's hint
-   verbs against the handle; attach through the spec's resume arguments
-   unless detached (R13).
+   verbs against the handle. Then attach through the spec's resume
+   arguments only where an attach is still meaningful: a backgrounded
+   runner that was not detached and hands over a running session (R13).
+   A foreground run has nothing to attach to -- the developer watched the
+   turn -- and a detached run is the developer declining to attach.
 7. Any later sweep reads the mapping's agent, resolves its spec, and
    applies the declared liveness rule -- or declines (R14).
 

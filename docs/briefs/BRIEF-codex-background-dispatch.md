@@ -81,9 +81,20 @@ worker the way a Claude-default workspace always could: `niwa dispatch
 "<task>"`, a fresh instance, a worker that starts and does the work, a
 printed session id, and a way back into the session afterward. `niwa list`
 shows the session; finishing or resuming it behaves the same regardless of
-which agent is behind it. No new flag appears -- the agent is the one the
-workspace already resolved from `NIWA_AGENT` and `default_agent`, the same
-convention every other niwa surface uses.
+which agent is behind it. The agent is whichever one the workspace already
+resolves, so a developer who has set one names nothing on the command
+line.
+
+*Amended in the second round.* This paragraph originally ended "No new
+flag appears", and that was the position the work started from: the agent
+resolves from `NIWA_AGENT` and `default_agent`, so no new surface was
+needed. It shipped the opposite -- `--launch-agent`, and `niwa config set
+default-agent` behind it -- because resolution existing turned out not to
+be the same as selection being reachable. The sentence is corrected here
+rather than left standing under the not-maintained note, which covers
+descriptions of the tree at authoring time and not an outcome that is now
+the reverse of what was delivered. PRD R1 carries the full reversal and
+preserves the original requirement underneath it.
 
 Where a Codex dispatch genuinely differs -- keep-alive doesn't exist for
 it, and a Codex-dispatched instance isn't reclaimed automatically the way a
@@ -271,6 +282,24 @@ Folding them together produces a diff where neither argument can be made,
 which is how the prior attempt became unreviewable. If PR 2 grows beyond
 one reviewable change, it splits by surface -- launch, then capture and
 liveness, then resume -- never into "the plumbing" and "the behavior."
+
+**This commitment was not kept, and saying so here is the point of having
+made it.** PR 2 grew to 27 commits across five increments -- the Codex
+delivery, the selection surface, three defects review found, the
+process-model amendment, and a folded-in spike -- and did not split. It
+was reviewed at ten commits and roughly 1,400 added lines; it is several
+times that now. The direct cause was an instruction to collapse the stack
+so one merge would finish the work, which is a legitimate call and not
+one this brief anticipated. The cost is the one this paragraph predicted:
+a reviewer who read the first version has to re-enter a much larger diff,
+and the argument for each increment is harder to make in isolation than
+it would have been in its own pull request.
+
+What limited the damage was not the split but the review that replaced
+it: the delta is grouped by concern rather than chronologically, and each
+group names what it is weakest at. That is a worse instrument than a
+split and better than nothing, and it is worth writing down which one
+actually happened.
 
 ## Open Questions
 
