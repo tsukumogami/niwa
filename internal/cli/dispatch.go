@@ -608,9 +608,41 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// BEFORE returning, while the directory still exists. Without this the
 	// failure leaves nothing on disk to diagnose it by, which is the exact
 	// condition the launcher hands the worker a closed stdin to avoid.
+	// On the foreground path the rollback is disarmed BEFORE capture, and this
+	// is the difference between the two shapes rather than a nicety.
+	//
+	// Detached, a capture failure means the worker started moments ago and the
+	// instance holds nothing but its own logs; destroying it is the right
+	// cleanup and costs a diagnostic, which is why the tail is read out first.
+	// Foreground, the launch already waited for the turn to end. Everything the
+	// worker produced is inside this directory. A run that did real work and
+	// then failed to yield a discoverable session record -- a refused prompt, a
+	// crash after writing files, a record the scanner cannot match -- would have
+	// its output deleted by a rollback armed for the case where there was none.
+	//
+	// The instance is the deliverable there and the session id is a
+	// convenience; detached it is the other way round. The exit-status arm of
+	// this same function already reasons exactly this way and declines to roll
+	// back work that may have happened, so leaving the capture arm to destroy it
+	// would have one half of one function protecting the work and the other half
+	// deleting it.
+	if launchMode == agentplan.LaunchForeground {
+		success = true
+	}
+
 	recordsRoot := recordStoreRoot(spec.Records, userHomeDir(), os.Getenv)
 	sessionID, handle, err := dispatchCapture(spec.Records, recordsRoot, instancePath, dispatchCaptureTimeout, nil, 0)
 	if err != nil {
+		if launchMode == agentplan.LaunchForeground {
+			// The turn ran here, so the developer has already seen whatever the
+			// worker said; what they need is the directory and why there is no
+			// session to resume.
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"niwa: warning: the turn ended but no session record was found, so there is nothing to resume: %v\n", err)
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"niwa: the work is kept at %s\n", instancePath)
+			return nil
+		}
 		if tail := readWorkerLogTail(instancePath, spec.Binary); tail != "" {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: the %s worker's own output, which the rollback is about to delete:\n%s\n", spec.Binary, tail)
 		}
@@ -678,10 +710,16 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// hint above is already the command to run, so this does not repeat it.
 	// This holds whether or not --detach was passed, because in both cases the
 	// worker is running and the session is not yet openable.
+	//
+	// The text is built by unopenableSessionNotice rather than written inline
+	// so a test can name this exact message. Its words are not distinctive:
+	// "still running" also appears in the reaper's sparing report, which
+	// reaches the same stderr on the same command because the opportunistic
+	// sweep runs at the top of every dispatch. A test grepping for a substring
+	// could pass with this message reworded away and fail with it absent but a
+	// spared instance present, so it greps for nothing and calls this instead.
 	if !spec.ResumeDuringTurn {
-		fmt.Fprintf(cmd.ErrOrStderr(),
-			"niwa: %s will not open a session while its turn is still running. The worker is going; resume it with the command above once it finishes.\n",
-			spec.Binary)
+		fmt.Fprint(cmd.ErrOrStderr(), unopenableSessionNotice(spec.Binary))
 		return nil
 	}
 
@@ -840,6 +878,19 @@ func buildDispatchPassthrough(flags agentplan.LaunchFlags, slug, model string) [
 //
 // With no launchable agent at all there is nothing useful to suggest, so the
 // hint says what is true rather than pointing at an empty set.
+// unopenableSessionNotice is what dispatch says when the worker it just
+// started belongs to an agent that will not hand over a session whose turn is
+// running. It exists as a function so the message has a name: the test that
+// holds it absent from the foreground path calls this rather than grepping for
+// words, because the words it would grep for are not unique to it -- the
+// reaper's sparing report says "still running" too, and lands on the same
+// stderr on the same command.
+func unopenableSessionNotice(binary string) string {
+	return fmt.Sprintf(
+		"niwa: %s will not open a session while its turn is still running. The worker is going; resume it with the command above once it finishes.\n",
+		binary)
+}
+
 func launchableAgentsHint() string {
 	launchable := agentplan.LaunchableAgents()
 	if len(launchable) == 0 {

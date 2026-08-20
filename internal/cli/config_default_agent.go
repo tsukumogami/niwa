@@ -31,7 +31,7 @@ is yours and local -- unlike a workspace's .niwa/ directory, which is often a
 snapshot materialized from a source repo and replaced wholesale on the next
 refresh, so an edit there does not survive.
 
-Accepted values are "claude" and "codex".
+Accepted values are ` + acceptedAgentNames() + `.
 
 This is the broadest rung of the resolution. Anything more specific wins:
 
@@ -83,7 +83,7 @@ var configUnsetDefaultAgentCmd = &cobra.Command{
 	Long: `Remove [global].default_agent from your personal niwa config.
 
 Afterwards a launch with no workspace default_agent, no NIWA_AGENT, and no
---launch-agent runs Claude, which is niwa's built-in default.`,
+--launch-agent runs ` + builtinDefaultAgentName() + `, which is niwa's built-in default.`,
 	Args: cobra.NoArgs,
 	RunE: runConfigUnsetDefaultAgent,
 }

@@ -24,6 +24,31 @@ const launchAgentFlagName = "launch-agent"
 // The line carries the whole precedence ladder on purpose. Every rung has to be
 // reachable from the command a developer is already running, not just from a
 // guide they would have to know to go looking for.
+// acceptedAgentNames renders the accepted set for help text, quoted and
+// comma-joined. It derives from agent.All() for the same reason
+// launchAgentFlagUsage does: a third agent should update the help rather than
+// leave a hardcoded list quietly wrong. The dispatch-path scan cannot catch a
+// stale one, because the names would sit inside a long literal rather than
+// being a literal the scan recognizes.
+func acceptedAgentNames() string {
+	quoted := make([]string, 0, len(agent.All()))
+	for _, a := range agent.All() {
+		quoted = append(quoted, `"`+string(a)+`"`)
+	}
+	if len(quoted) < 2 {
+		return strings.Join(quoted, "")
+	}
+	return strings.Join(quoted[:len(quoted)-1], ", ") + " and " + quoted[len(quoted)-1]
+}
+
+// builtinDefaultAgentName is what resolving with no source set produces, so
+// help text says what the resolution does rather than repeating a name that
+// would have to be kept in step with it.
+func builtinDefaultAgentName() string {
+	fallback, _ := agent.ResolveAgent("", "", "", "")
+	return string(fallback)
+}
+
 func launchAgentFlagUsage() string {
 	names := make([]string, 0, len(agent.All()))
 	for _, a := range agent.All() {
@@ -69,9 +94,17 @@ func launchAgentMismatchWarning(agentFlagValue string, launched agent.Agent) str
 // four sources, in precedence order flag > NIWA_AGENT env > workspace
 // default_agent > host default_agent > claude.
 //
-// flagValue is the agent-selection flag's value ("" when the entry point does
-// not expose the flag, e.g. init/reset/from-hook/worktree -- those still honor
-// the NIWA_AGENT env override and both config defaults).
+// flagValue is the agent-selection flag's value: `--launch-agent` on `niwa
+// dispatch`, which is the only command that selects a launch target and the
+// only caller of this function. "" means the flag was not given, and the
+// remaining rungs decide.
+//
+// An earlier version of this comment said the empty case also covered entry
+// points that expose no such flag, naming init, reset, from-hook and worktree.
+// Those commands do not consult agent selection at all -- none of them launches
+// anything, and every apply prepares the tree for every supported agent
+// regardless. The sentence was arguably true when dispatch passed "" as well,
+// and adding the flag made it false.
 //
 // cfg is the workspace config; gc is the developer's personal niwa config
 // (~/.config/niwa/config.toml), the broadest rung. Either may be nil, which

@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
@@ -92,6 +94,56 @@ func TestDispatchResolvesTheLaunchModeFromTheRunnerAndTheFlag(t *testing.T) {
 	}
 }
 
+// TestDispatchForegroundCaptureFailureKeepsTheWork is the data-safety half of
+// the process-model change, and the case every existing rollback test misses
+// because they all exercise the detached shape.
+//
+// The rollback is armed before the launch and disarmed after the mapping is
+// durable, so a capture failure destroys the instance. Detached that is right:
+// the worker started moments ago, the directory holds its logs and nothing
+// else, and cleaning up costs a diagnostic. Foreground the launch WAITED for
+// the turn to end, so everything the worker produced is in that directory. A
+// run that did real work and then yielded no discoverable session record --
+// a refused prompt, a crash after writing files, a record the scanner cannot
+// match -- would have its output deleted by a rollback armed for the case
+// where there was none.
+//
+// The same function already reasons this way about a non-zero exit and
+// declines to roll back work that may have happened. Without this test one arm
+// protected the work and the other deleted it.
+func TestDispatchForegroundCaptureFailureKeepsTheWork(t *testing.T) {
+	base, ok := agentplan.For(agent.AgentClaude).LaunchSpec()
+	if !ok {
+		t.Fatal("no launch spec for the default agent")
+	}
+	spec := base
+	spec.Runner = agentplan.RunnerForeground
+
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, "")
+	f := installDispatchFakes(t, root)
+	substituteLaunchSpec(t, spec)
+	dispatchDetach = false
+
+	prevCapture := dispatchCapture
+	dispatchCapture = func(_ agentplan.SessionRecords, _, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
+		return "", "", errors.New("capture timeout")
+	}
+	t.Cleanup(func() { dispatchCapture = prevCapture })
+
+	_, stderr, err := runDispatchCmd(t, "do a thing")
+	if err != nil {
+		t.Fatalf("a foreground turn that ran is not a failed dispatch: %v", err)
+	}
+	if f.destroyCalled != 0 {
+		t.Errorf("destroy called %d times; a foreground capture failure must not delete a directory holding a completed turn's work", f.destroyCalled)
+	}
+	if !strings.Contains(stderr, "nothing to resume") {
+		t.Errorf("the developer was not told why there is no session to resume:\n%s", stderr)
+	}
+}
+
 // TestDispatchDoesNotApologizeForATurnTheDeveloperWatched covers the surface
 // that stops being true the moment a foreground run is possible.
 //
@@ -128,12 +180,20 @@ func TestDispatchDoesNotApologizeForATurnTheDeveloperWatched(t *testing.T) {
 	}
 	t.Cleanup(func() { dispatchAttach = prevAttach })
 
-	_, stderr, err := runDispatchCmd(t, "do a thing")
+	stdout, stderr, err := runDispatchCmd(t, "do a thing")
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	if strings.Contains(stderr, "still running") {
-		t.Errorf("a dispatch whose turn ran in this terminal apologized for not opening the session:\n%s", stderr)
+	// The exact message, against BOTH streams. Two holes closed here, each
+	// demonstrated rather than imagined. Grepping "still running" would pass
+	// with the notice reworded away and fail with it absent but a spared
+	// instance present, because the reaper's sparing report says the same
+	// words on this same stderr. And reading stderr alone let a copy of the
+	// notice routed to stdout go undetected -- a reviewer planted one and this
+	// test stayed green.
+	both := stdout + stderr
+	if notice := unopenableSessionNotice(spec.Binary); strings.Contains(both, notice) {
+		t.Errorf("a dispatch whose turn ran in this terminal apologized for not opening the session:\n%s", both)
 	}
 	if !strings.Contains(stderr, "turn ended") {
 		t.Errorf("a foreground dispatch said nothing about the turn ending, which is the one thing it can honestly report:\n%s", stderr)
@@ -159,7 +219,7 @@ func TestDispatchDoesNotApologizeForATurnTheDeveloperWatched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatch --detach: %v", err)
 	}
-	if !strings.Contains(stderr, "still running") {
+	if notice := unopenableSessionNotice(spec.Binary); !strings.Contains(stderr, notice) {
 		t.Errorf("a detached worker its agent will not hand over left the developer nothing to explain a resume that refuses:\n%s", stderr)
 	}
 }
