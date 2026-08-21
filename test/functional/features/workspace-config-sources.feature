@@ -117,7 +117,7 @@ Feature: workspace config sources (snapshot model)
     Then the exit code is 0
     And the provenance marker exists
     Given a fake codex for dispatch with session "01a40000-0000-7000-8000-00000000d1ce"
-    When I run "niwa dispatch some-task --detach --launch-agent codex" from the workspace root
+    When I run "niwa dispatch some-task --detach --harness codex" from the workspace root
     Then the exit code is 0
     And a dispatch-origin mapping exists for session "01a40000-0000-7000-8000-00000000d1ce"
     When I run "niwa apply mapws"

@@ -54,7 +54,7 @@ func TestDispatch_AgentFlagNamingAnotherAgentWarnsBeforeTheLaunch(t *testing.T) 
 	chdir(t, root)
 	setHostConfig(t, "")
 	installDispatchFakes(t, root)
-	t.Setenv("NIWA_AGENT", "")
+	t.Setenv("NIWA_DISPATCH_HARNESS", "")
 	dispatchDetach = true
 	dispatchAgent = "codex"
 
@@ -68,7 +68,7 @@ func TestDispatch_AgentFlagNamingAnotherAgentWarnsBeforeTheLaunch(t *testing.T) 
 
 	// Named three times over: what --agent is, what is actually launching, and
 	// the flag that selects.
-	for _, want := range []string{"subagent type", "claude", "--" + launchAgentFlagName + " codex"} {
+	for _, want := range []string{"subagent type", "claude", "--" + harnessFlagName + " codex"} {
 		if !strings.Contains(atLaunch, want) {
 			t.Fatalf("stderr at launch does not mention %q; --agent codex launched a claude worker with no warning.\nstderr at launch: %q", want, atLaunch)
 		}
@@ -83,7 +83,7 @@ func TestDispatch_AgentFlagAgreeingWithTheLaunchedAgentIsSilent(t *testing.T) {
 	chdir(t, root)
 	setHostConfig(t, "")
 	installDispatchFakes(t, root)
-	t.Setenv("NIWA_AGENT", "")
+	t.Setenv("NIWA_DISPATCH_HARNESS", "")
 	dispatchDetach = true
 	dispatchAgent = "claude"
 
@@ -104,7 +104,7 @@ func TestDispatch_AgentFlagThatNamesNoAgentIsSilent(t *testing.T) {
 	chdir(t, root)
 	setHostConfig(t, "")
 	installDispatchFakes(t, root)
-	t.Setenv("NIWA_AGENT", "")
+	t.Setenv("NIWA_DISPATCH_HARNESS", "")
 	dispatchDetach = true
 	dispatchAgent = "code-reviewer"
 
@@ -126,7 +126,7 @@ func TestDispatch_AgentFlagIsNeverARefusal(t *testing.T) {
 	chdir(t, root)
 	setHostConfig(t, "")
 	f := installDispatchFakes(t, root)
-	t.Setenv("NIWA_AGENT", "")
+	t.Setenv("NIWA_DISPATCH_HARNESS", "")
 	dispatchDetach = true
 	dispatchAgent = "codex"
 
@@ -150,8 +150,8 @@ func TestDispatch_UnorientedWorkerWarningPrintsBeforeThePromptCapture(t *testing
 	chdir(t, root)
 	setHostConfig(t, "")
 	installDispatchFakes(t, root)
-	t.Setenv("NIWA_AGENT", "")
-	dispatchLaunchAgent = "codex"
+	t.Setenv("NIWA_DISPATCH_HARNESS", "")
+	dispatchHarness = "codex"
 	dispatchDetach = true
 	stubCaptureTTY(t, true, true)
 

@@ -40,7 +40,7 @@ func TestDispatchGateFollowsTheDeclaration(t *testing.T) {
 			setHostConfig(t, "")
 			f := installDispatchFakes(t, root)
 			dispatchDetach = true
-			t.Setenv("NIWA_AGENT", string(ag))
+			t.Setenv("NIWA_DISPATCH_HARNESS", string(ag))
 
 			_, _, runErr := runDispatchCmd(t, "do a thing")
 
@@ -197,7 +197,7 @@ func TestDispatchSharedHalfRunsForEveryAgent(t *testing.T) {
 			setHostConfig(t, "")
 			installDispatchFakes(t, root)
 			dispatchDetach = false
-			t.Setenv("NIWA_AGENT", string(ag))
+			t.Setenv("NIWA_DISPATCH_HARNESS", string(ag))
 
 			var resumeSpec agentplan.LaunchSpec
 			var resumeHandle, resumeDir string
@@ -287,7 +287,7 @@ func TestDispatchWarnsWhenTheWorkerStartsUnoriented(t *testing.T) {
 			setHostConfig(t, "")
 			installDispatchFakes(t, root)
 			dispatchDetach = true
-			t.Setenv("NIWA_AGENT", string(ag))
+			t.Setenv("NIWA_DISPATCH_HARNESS", string(ag))
 
 			_, stderr, err := runDispatchCmd(t, "do a thing")
 			if err != nil {
@@ -329,7 +329,7 @@ func TestDispatchWarnsWhenKeepAliveIsUndeliverable(t *testing.T) {
 			dispatchDetach = true
 			asked := true
 			dispatchKeepAlive = &asked
-			t.Setenv("NIWA_AGENT", string(ag))
+			t.Setenv("NIWA_DISPATCH_HARNESS", string(ag))
 
 			_, stderr, err := runDispatchCmd(t, "do a thing")
 			if err != nil {

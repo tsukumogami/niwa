@@ -96,7 +96,7 @@ func TestScaffold_EmptyName(t *testing.T) {
 
 // TestScaffold_DefaultAgentCommentNamesEveryRung keeps the template honest
 // about a ladder that has grown. The comment described two rungs -- the key
-// itself and NIWA_AGENT -- while the resolution has four, so the reader most
+// itself and NIWA_DISPATCH_HARNESS -- while the resolution has four, so the reader most
 // likely to be sitting in this file was told nothing about the flag that
 // overrides it for one command or the personal setting that fills in when the
 // key is absent.
@@ -124,7 +124,7 @@ func TestScaffold_DefaultAgentCommentNamesEveryRung(t *testing.T) {
 		t.Fatalf("no default_agent comment block in the scaffolded config:\n%s", content)
 	}
 
-	for _, rung := range []string{"--launch-agent", "NIWA_AGENT", "[workspace].default_agent", "[global].default_agent"} {
+	for _, rung := range []string{"--harness", "NIWA_DISPATCH_HARNESS", "[workspace].default_agent", "[global].default_dispatch_harness"} {
 		if !strings.Contains(comment, rung) {
 			t.Errorf("the default_agent comment does not name the %s rung of the resolution:\n%s", rung, comment)
 		}

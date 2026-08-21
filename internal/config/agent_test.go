@@ -4,7 +4,7 @@ import "testing"
 
 // TestWorkspaceDefaultAgentDecodes asserts that [workspace].default_agent
 // decodes into WorkspaceMeta.DefaultAgent as a raw string, and that its absence
-// leaves the field empty (the default-agent case). The value is validated later
+// leaves the field empty (the unset case). The value is validated later
 // by internal/agent.ParseAgent, not at decode time, so config carries it raw.
 func TestWorkspaceDefaultAgentDecodes(t *testing.T) {
 	t.Run("present", func(t *testing.T) {

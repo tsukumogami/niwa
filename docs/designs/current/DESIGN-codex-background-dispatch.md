@@ -1149,14 +1149,14 @@ none:
   enumerated from the declarations (`launchableAgentsHint`, backed by
   `agentplan.LaunchableAgents()` and pinned against the table by
   `TestLaunchableAgentsMatchesTheDeclarations`) rather than spelled
-  into the string. The old message ended "Set NIWA_AGENT=claude";
+  into the string. The old message ended "Set NIWA_DISPATCH_HARNESS=claude";
   dropping the suggestion would leave the developer who hits the
   refusal without the one fact they are missing, and hardcoding it
   back would go stale, silently, the day a row flips -- at exactly the
   moment it is being read.
 - **The gate now runs even when the workspace config cannot be
   loaded.** Previously the whole gate sat inside the config-load
-  success branch, so `NIWA_AGENT=codex` plus an unreadable config
+  success branch, so `NIWA_DISPATCH_HARNESS=codex` plus an unreadable config
   skipped the check and launched Claude anyway -- a worker the
   developer explicitly asked not to get. The gate now resolves the
   agent from the environment alone and refuses. This is the one
@@ -1219,7 +1219,7 @@ Added in the second round of this chain, after the delivery was judged
 unreachable. The PRD's original R1 forbade a selection flag; what
 follows is the design half of its replacement.
 
-**The flag is `--launch-agent` on `niwa dispatch`, and `--agent` is left
+**The flag is `--harness` on `niwa dispatch`, and `--agent` is left
 alone.** The collision is real: `--agent` already exists on that command
 as the subagent-type passthrough. What settles it is that the launch
 description's own field is named `SubagentType`
@@ -1228,11 +1228,12 @@ row -- so the codebase already calls the concept by its right name and
 only the user-facing flag disagrees. Three options were live:
 
 - **A new name, `--agent` untouched.** Chosen. Additive, breaks no
-  script, and matches the vocabulary already in the tree: the capability
-  is `DispatchLaunch`, the accessor is `dispatchLaunchSpec`, the refusal
-  says "cannot launch a background worker for the %q agent". The one
-  reservation is that `LaunchAgent` is an unrelated macOS launchd noun,
-  which nobody meets inside a `niwa dispatch` invocation.
+  script, and leaves the passthrough meaning what it has always meant.
+  The name itself went through one revision: the flag first shipped in
+  this chain as `--launch-agent` and was renamed to `--harness` before
+  merge, together with the environment variable and the host key, so all
+  three surfaces of one setting say one word. The reasoning is in **the
+  vocabulary is "dispatch harness"** below.
 - **Rename the passthrough to `--subagent-type` with `--agent` as a
   deprecated alias, then repoint `--agent` later.** This is the right
   eventual fix and is recorded as follow-on rather than dropped. It
@@ -1260,13 +1261,39 @@ works and then silently stops. `~/.config/niwa/config.toml` is a plain
 local file niwa owns, never materialized, already written by `config set
 global` through `SaveGlobalConfigTo`, and already home to a row of
 dispatch-scoped host defaults of exactly this shape -- `dispatch_model`,
-`remote_control_on_dispatch`, `keep_alive_on_dispatch`. `default_agent`
-is the same kind of setting; putting it anywhere else would make it the
-odd one out. So `niwa config set default-agent <agent>` writes
-`[global].default_agent` there, with a matching `unset`.
+`remote_control_on_dispatch`, `keep_alive_on_dispatch`. The harness
+default is the same kind of setting; putting it anywhere else would make
+it the odd one out. So `niwa config set default-dispatch-harness <agent>`
+writes `[global].default_dispatch_harness` there, with a matching
+`unset`.
 
-**Precedence: flag > `NIWA_AGENT` > `[workspace].default_agent` >
-`[global].default_agent` > claude.** The host default is the weakest
+**The vocabulary is "dispatch harness", on the three surfaces niwa owns
+end to end.** The setting first landed with a different name on each
+surface -- `--launch-agent`, `NIWA_AGENT`, `[global].default_agent` --
+which reads as three settings rather than three lifetimes of one, and
+the guide had to spend a table teaching that they are the same knob.
+They are now `--harness`, `NIWA_DISPATCH_HARNESS`, and
+`[global].default_dispatch_harness`. "Harness" says what the value picks
+without colliding with `--agent`'s established meaning on this command,
+and it names the thing precisely: the coding agent that harnesses a
+dispatched turn.
+
+`NIWA_AGENT` is renamed rather than aliased. It shipped in v0.9 and is
+therefore a user-visible break, taken deliberately: it is set per shell,
+so the fix is one line in a profile, and carrying a permanent alias for
+a variable one release old would preserve the split this rename exists
+to close.
+
+`[workspace].default_agent` keeps its name and is the one rung that does
+not say "harness". It is also shipped, but it lives in committed
+`workspace.toml` files across every workspace that sets it, and those are
+not one line in one developer's profile. The asymmetry is deliberate and
+is stated in the guide's table rather than left for a reader to notice.
+Renaming it, with the old spelling accepted as a fallback, is follow-on
+work.
+
+**Precedence: flag > `NIWA_DISPATCH_HARNESS` > `[workspace].default_agent` >
+`[global].default_dispatch_harness` > claude.** The host default is the weakest
 rung above the built-in. The argument is consistency rather than
 ergonomics: `RemoteControlOnDispatch` and `KeepAliveOnDispatch` both
 document a downstream workspace value outranking the host default, and
@@ -1275,7 +1302,7 @@ same file with the opposite polarity would make that file's precedence
 something a reader looks up per key instead of learning once, and
 unpredictable-per-key is a worse outcome than any single key's
 ergonomics. The personal-machine case that argues for the other order --
-"on this machine I use Codex" -- is already served twice, by `NIWA_AGENT`
+"on this machine I use Codex" -- is already served twice, by `NIWA_DISPATCH_HARNESS`
 in a shell profile and now by the flag per dispatch.
 
 **Rejected: refusing to write anything.** An earlier framing of this
@@ -1551,7 +1578,7 @@ internal/workspace
 The flow, per dispatch, with the agent resolved once and threaded as
 data:
 
-1. Resolve the agent from `--launch-agent`, then `NIWA_AGENT`, then the
+1. Resolve the agent from `--harness`, then `NIWA_DISPATCH_HARNESS`, then the
    workspace `default_agent`, then the host `default_agent`, then claude
    (R1, R1a). `niwa dispatch --agent` remains the subagent-type
    passthrough and never participates in that resolution; it names a role

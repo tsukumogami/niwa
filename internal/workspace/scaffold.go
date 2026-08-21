@@ -20,10 +20,11 @@ content_dir = "claude"
 # supports, so a session can be opened as any of them without re-applying.
 #
 # The whole ladder, most specific first:
-#   --launch-agent          one niwa dispatch
-#   NIWA_AGENT              one shell, and every worker dispatched from it
-#   [workspace].default_agent   this workspace, for everyone in it
-#   [global].default_agent  this machine (niwa config set default-agent)
+#   --harness                          one niwa dispatch
+#   NIWA_DISPATCH_HARNESS              one shell, and every worker dispatched from it
+#   [workspace].default_agent          this workspace, for everyone in it
+#   [global].default_dispatch_harness  this machine
+#                                      (niwa config set default-dispatch-harness)
 # and niwa's built-in default when none of them is set.
 # default_agent = "codex"
 

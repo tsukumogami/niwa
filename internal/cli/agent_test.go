@@ -13,12 +13,12 @@ func cfgWithDefaultAgent(def string) *config.WorkspaceConfig {
 	return &config.WorkspaceConfig{Workspace: config.WorkspaceMeta{Name: "ws", DefaultAgent: def}}
 }
 
-func hostCfgWithDefaultAgent(def string) *config.GlobalConfig {
-	return &config.GlobalConfig{Global: config.GlobalSettings{DefaultAgent: def}}
+func hostCfgWithDefaultHarness(def string) *config.GlobalConfig {
+	return &config.GlobalConfig{Global: config.GlobalSettings{DefaultDispatchHarness: def}}
 }
 
 // TestResolveSessionAgent covers the CLI-level resolution: the flag and the
-// NIWA_AGENT env override the workspace default_agent, which in turn overrides
+// NIWA_DISPATCH_HARNESS env override the workspace default_agent, which in turn overrides
 // the host default_agent, in precedence order flag > env > workspace > host >
 // claude, and an unknown value from any source errors.
 func TestResolveSessionAgent(t *testing.T) {
@@ -49,11 +49,11 @@ func TestResolveSessionAgent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.env == "" {
-				t.Setenv("NIWA_AGENT", "")
+				t.Setenv("NIWA_DISPATCH_HARNESS", "")
 			} else {
-				t.Setenv("NIWA_AGENT", tt.env)
+				t.Setenv("NIWA_DISPATCH_HARNESS", tt.env)
 			}
-			got, err := resolveSessionAgent(tt.flag, cfgWithDefaultAgent(tt.def), "", hostCfgWithDefaultAgent(tt.hostDef))
+			got, err := resolveSessionAgent(tt.flag, cfgWithDefaultAgent(tt.def), "", hostCfgWithDefaultHarness(tt.hostDef))
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("resolveSessionAgent(%q, def=%q, host=%q, env=%q) = %q, want error", tt.flag, tt.def, tt.hostDef, tt.env, got)
@@ -82,7 +82,7 @@ func TestResolveSessionAgent(t *testing.T) {
 func TestResolveSessionAgentErrorNamesTheOffendingRung(t *testing.T) {
 	wsPath := filepath.Join(t.TempDir(), ".niwa", "workspace.toml")
 	// Every rung's label, so each case can assert the other three are absent.
-	labels := []string{"--" + launchAgentFlagName, "NIWA_AGENT", "[workspace].default_agent", "[global].default_agent"}
+	labels := []string{"--" + harnessFlagName, "NIWA_DISPATCH_HARNESS", "[workspace].default_agent", "[global].default_dispatch_harness"}
 
 	tests := []struct {
 		name string
@@ -96,15 +96,15 @@ func TestResolveSessionAgentErrorNamesTheOffendingRung(t *testing.T) {
 		wantPath     string
 		wantHostPath bool
 	}{
-		{name: "flag", flag: "gemini", want: "--" + launchAgentFlagName},
-		{name: "env", env: "gemini", want: "NIWA_AGENT"},
+		{name: "flag", flag: "gemini", want: "--" + harnessFlagName},
+		{name: "env", env: "gemini", want: "NIWA_DISPATCH_HARNESS"},
 		{name: "workspace default", def: "gemini", want: "[workspace].default_agent", wantPath: wsPath},
-		{name: "host default", host: "gemini", want: "[global].default_agent", wantHostPath: true},
+		{name: "host default", host: "gemini", want: "[global].default_dispatch_harness", wantHostPath: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-			t.Setenv("NIWA_AGENT", tt.env)
+			t.Setenv("NIWA_DISPATCH_HARNESS", tt.env)
 
 			wantPath := tt.wantPath
 			if tt.wantHostPath {
@@ -118,7 +118,7 @@ func TestResolveSessionAgentErrorNamesTheOffendingRung(t *testing.T) {
 				wantPath = p
 			}
 
-			_, err := resolveSessionAgent(tt.flag, cfgWithDefaultAgent(tt.def), wsPath, hostCfgWithDefaultAgent(tt.host))
+			_, err := resolveSessionAgent(tt.flag, cfgWithDefaultAgent(tt.def), wsPath, hostCfgWithDefaultHarness(tt.host))
 			if err == nil {
 				t.Fatalf("resolveSessionAgent accepted %q from the %s rung, want a rejection", "gemini", tt.name)
 			}
@@ -155,7 +155,7 @@ func TestResolveSessionAgentErrorNamesTheOffendingRung(t *testing.T) {
 // a panic and not a failed command: dispatch resolves against the sources it
 // does have and leaves a broken config for the provisioning path to report.
 func TestResolveSessionAgentNilConfigs(t *testing.T) {
-	t.Setenv("NIWA_AGENT", "")
+	t.Setenv("NIWA_DISPATCH_HARNESS", "")
 	got, err := resolveSessionAgent("", nil, "", nil)
 	if err != nil {
 		t.Fatalf("resolveSessionAgent with nil configs: %v", err)
@@ -164,12 +164,12 @@ func TestResolveSessionAgentNilConfigs(t *testing.T) {
 		t.Fatalf("resolveSessionAgent with nil configs = %q, want %q", got, agent.AgentClaude)
 	}
 
-	t.Setenv("NIWA_AGENT", "codex")
+	t.Setenv("NIWA_DISPATCH_HARNESS", "codex")
 	got, err = resolveSessionAgent("", nil, "", nil)
 	if err != nil {
-		t.Fatalf("resolveSessionAgent with nil configs and NIWA_AGENT: %v", err)
+		t.Fatalf("resolveSessionAgent with nil configs and NIWA_DISPATCH_HARNESS: %v", err)
 	}
 	if got != agent.AgentCodex {
-		t.Fatalf("resolveSessionAgent with nil configs and NIWA_AGENT=codex = %q, want %q", got, agent.AgentCodex)
+		t.Fatalf("resolveSessionAgent with nil configs and NIWA_DISPATCH_HARNESS=codex = %q, want %q", got, agent.AgentCodex)
 	}
 }

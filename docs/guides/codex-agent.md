@@ -22,22 +22,28 @@ one wins:
 
 | Source | Lasts | Set it with |
 |--------|-------|-------------|
-| `--launch-agent` | one command | `niwa dispatch "..." --launch-agent codex` |
-| `NIWA_AGENT` | one shell, and every worker dispatched from it | `NIWA_AGENT=codex niwa dispatch "..."` |
+| `--harness` | one command | `niwa dispatch "..." --harness codex` |
+| `NIWA_DISPATCH_HARNESS` | one shell, and every worker dispatched from it | `NIWA_DISPATCH_HARNESS=codex niwa dispatch "..."` |
 | `[workspace].default_agent` | one workspace, for everyone in it | editing the workspace config |
-| `[global].default_agent` | your machine, every workspace | `niwa config set default-agent codex` |
+| `[global].default_dispatch_harness` | your machine, every workspace | `niwa config set default-dispatch-harness codex` |
 
 Nothing set anywhere means `claude`. The rest of this section takes them from
 the bottom of that table upward, since the workspace setting is the one with
 something to watch out for.
 
+Three of the four say "dispatch harness", which is what the setting picks: the
+coding agent that harnesses a dispatched turn. The workspace rung is the odd
+one out and still spells itself `default_agent`, because it is a shipped key
+sitting in committed `workspace.toml` files; renaming it would break every
+workspace that already sets it.
+
 The two one-off rungs differ in reach, and the difference is easy to miss.
-`--launch-agent` really does last one command: the worker it starts knows
-nothing about it, so a worker that dispatches a sibling gets whatever the other
-rungs resolve to. `NIWA_AGENT` is inherited, because a dispatched worker runs
-with your environment — so it reaches that worker, and anything that worker
-dispatches, with no bound. If you want one command in codex, the flag is the
-narrower instrument.
+`--harness` really does last one command: the worker it starts knows nothing
+about it, so a worker that dispatches a sibling gets whatever the other rungs
+resolve to. `NIWA_DISPATCH_HARNESS` is inherited, because a dispatched worker
+runs with your environment — so it reaches that worker, and anything that
+worker dispatches, with no bound. If you want one command in codex, the flag is
+the narrower instrument.
 
 ### The workspace setting
 
@@ -78,38 +84,39 @@ If you'd rather not touch a workspace's config at all — or you can't, because
 it's a snapshot and the source repo isn't yours — set it for your machine:
 
 ```bash
-niwa config set default-agent codex
-niwa config unset default-agent   # back to the built-in claude default
+niwa config set default-dispatch-harness codex
+niwa config unset default-dispatch-harness   # back to the built-in claude default
 ```
 
-That writes `[global].default_agent` to `~/.config/niwa/config.toml`, next to
-the other host-level dispatch defaults (`dispatch_model`,
-`keep_alive_on_dispatch`). It's your own file. niwa never materializes it from
-anywhere, so nothing replaces it and the trap above doesn't apply.
+That writes `[global].default_dispatch_harness` to
+`~/.config/niwa/config.toml`, next to the other host-level dispatch defaults
+(`dispatch_model`, `keep_alive_on_dispatch`). It's your own file. niwa never
+materializes it from anywhere, so nothing replaces it and the trap above
+doesn't apply.
 
 It's the weakest of the four, deliberately. A workspace that states an agent
 keeps launching that agent, because that statement is for everyone who works in
 the workspace and your personal file shouldn't quietly override it. Your
 machine-wide setting fills in for every workspace that states nothing. When you
-do want the other agent in a workspace that has an opinion, use `NIWA_AGENT` or
-the flag — both outrank the workspace.
+do want the other agent in a workspace that has an opinion, use
+`NIWA_DISPATCH_HARNESS` or the flag — both outrank the workspace.
 
 ### Per command
 
 ```bash
-niwa dispatch "fix the flaky retry test" --launch-agent codex
+niwa dispatch "fix the flaky retry test" --harness codex
 ```
 
-`--launch-agent` outranks everything else and lasts exactly one command. It's
-the quickest way to try the other agent on one task without changing anything.
+`--harness` outranks everything else and lasts exactly one command. It's the
+quickest way to try the other agent on one task without changing anything.
 
 The name is not `--agent` because that one is already taken on `niwa dispatch`,
 by something else: it forwards a **subagent type** to the worker — a role inside
 the agent that gets launched — and is dropped for an agent that has no such
 flag, which today means Codex. It never picks the agent. The two coexist, so
-`niwa dispatch --launch-agent claude --agent reviewer` launches Claude Code and
-hands it the `reviewer` role, while `--launch-agent codex --agent reviewer`
-launches Codex and drops the role, since Codex has nothing to forward it to.
+`niwa dispatch --harness claude --agent reviewer` launches Claude Code and hands
+it the `reviewer` role, while `--harness codex --agent reviewer` launches Codex
+and drops the role, since Codex has nothing to forward it to.
 `niwa create` and `niwa apply` have neither flag and reject both as unknown.
 
 ### What none of them do
@@ -179,7 +186,7 @@ by the repository's exclude block, so a prepared tree doesn't read dirty.
 
 **Background dispatch.** `niwa dispatch` launches a Codex worker the same way it
 launches a Claude one, with the same command — the agent is whichever one the
-four sources above resolve to, so `--launch-agent codex` picks it for a single
+four sources above resolve to, so `--harness codex` picks it for a single
 dispatch and the settings pick it standing. It provisions a fresh instance, runs
 `codex exec` inside it, recovers the session id from the session record Codex
 writes, and prints `codex resume <id>`. `niwa list` prints that command again

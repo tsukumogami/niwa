@@ -72,15 +72,15 @@ type GlobalSettings struct {
 	// counts records whose instance still has a live job, so a dismissed or dead
 	// session frees capacity on the next pass.
 	WatchMaxStaged int `toml:"watch_max_staged,omitempty"`
-	// DefaultAgent is the developer's machine-wide default for which coding
-	// agent a niwa-launched session runs as, written by
-	// `niwa config set default-agent` and removed by `niwa config unset
-	// default-agent`.
+	// DefaultDispatchHarness is the developer's machine-wide default for which
+	// coding agent harnesses a niwa-dispatched session, written by
+	// `niwa config set default-dispatch-harness` and removed by
+	// `niwa config unset default-dispatch-harness`.
 	//
 	// It is the BROADEST rung of a four-source resolution, in full:
 	//
-	//	--launch-agent  >  NIWA_AGENT  >  [workspace].default_agent  >
-	//	[global].default_agent  >  claude
+	//	--harness  >  NIWA_DISPATCH_HARNESS  >  [workspace].default_agent  >
+	//	[global].default_dispatch_harness  >  claude
 	//
 	// So a workspace that states its own default_agent keeps launching that
 	// agent and this value fills in for every workspace that states none. That
@@ -88,6 +88,10 @@ type GlobalSettings struct {
 	// both of which a downstream value outranks; a key in this file with the
 	// opposite polarity would make the file's precedence something a reader
 	// looks up per key rather than learns once.
+	//
+	// The workspace rung keeps the older `default_agent` spelling because it is
+	// a shipped key living in committed workspace.toml files; the three rungs
+	// niwa owns end-to-end say "dispatch harness".
 	//
 	// It never changes what `niwa apply` prepares. Every apply prepares the tree
 	// for every agent niwa supports whatever this says; the value names a launch
@@ -99,19 +103,19 @@ type GlobalSettings struct {
 	// stored raw here rather than as a typed Agent -- a value decoded from a
 	// file never looks validated by its type. "" (the default) means no
 	// machine-wide preference.
-	DefaultAgent string `toml:"default_agent,omitempty"`
+	DefaultDispatchHarness string `toml:"default_dispatch_harness,omitempty"`
 }
 
-// DefaultAgent returns the machine-wide default agent from
-// ~/.config/niwa/config.toml, or "" when the file, the section, or the key is
-// absent. The value comes back raw and unvalidated on purpose: the closed-set
-// check belongs to agent.ParseAgent, the one boundary every source is forced
-// through.
-func (g *GlobalConfig) DefaultAgent() string {
+// DefaultDispatchHarness returns the machine-wide default dispatch harness
+// from ~/.config/niwa/config.toml, or "" when the file, the section, or the key
+// is absent. The value comes back raw and unvalidated on purpose: the
+// closed-set check belongs to agent.ParseAgent, the one boundary every source
+// is forced through.
+func (g *GlobalConfig) DefaultDispatchHarness() string {
 	if g == nil {
 		return ""
 	}
-	return g.Global.DefaultAgent
+	return g.Global.DefaultDispatchHarness
 }
 
 // SkipPluginInstall reports whether the user has explicitly opted

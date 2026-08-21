@@ -15,9 +15,9 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
-// runConfigDefaultAgent invokes one of the two default-agent subcommands with a
+// runConfigDefaultHarness invokes one of the two default-dispatch-harness subcommands with a
 // fresh cobra.Command so its output streams are isolated.
-func runConfigDefaultAgent(t *testing.T, run func(*cobra.Command, []string) error, args []string) (stdout string, err error) {
+func runConfigDefaultHarness(t *testing.T, run func(*cobra.Command, []string) error, args []string) (stdout string, err error) {
 	t.Helper()
 	var out bytes.Buffer
 	cmd := &cobra.Command{}
@@ -27,23 +27,23 @@ func runConfigDefaultAgent(t *testing.T, run func(*cobra.Command, []string) erro
 	return out.String(), runErr
 }
 
-// TestConfigSetDefaultAgent_WritesTheHostConfig is the point of the command:
+// TestConfigSetDefaultHarness_WritesTheHostConfig is the point of the command:
 // the value lands in the developer's own config file, which niwa never
 // re-materializes from anywhere. A workspace's .niwa/ is frequently a snapshot
 // replaced wholesale on refresh, so a setting written there would go away
 // without saying so.
-func TestConfigSetDefaultAgent_WritesTheHostConfig(t *testing.T) {
+func TestConfigSetDefaultHarness_WritesTheHostConfig(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	if _, err := runConfigDefaultAgent(t, runConfigSetDefaultAgent, []string{"codex"}); err != nil {
-		t.Fatalf("config set default-agent codex: %v", err)
+	if _, err := runConfigDefaultHarness(t, runConfigSetDefaultHarness, []string{"codex"}); err != nil {
+		t.Fatalf("config set default-dispatch-harness codex: %v", err)
 	}
 
 	loaded, err := config.LoadGlobalConfig()
 	if err != nil {
 		t.Fatalf("loading the host config back: %v", err)
 	}
-	if got := loaded.DefaultAgent(); got != "codex" {
+	if got := loaded.DefaultDispatchHarness(); got != "codex" {
 		t.Fatalf("host default_agent = %q, want %q", got, "codex")
 	}
 
@@ -56,17 +56,17 @@ func TestConfigSetDefaultAgent_WritesTheHostConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading %s: %v", path, err)
 	}
-	if !strings.Contains(string(body), "default_agent") {
-		t.Fatalf("%s does not carry default_agent:\n%s", path, body)
+	if !strings.Contains(string(body), "default_dispatch_harness") {
+		t.Fatalf("%s does not carry default_dispatch_harness:\n%s", path, body)
 	}
 }
 
-// TestConfigSetDefaultAgent_WritesNothingInsideAWorkspaceSnapshot is the
+// TestConfigSetDefaultHarness_WritesNothingInsideAWorkspaceSnapshot is the
 // failure this command exists to avoid: a setting that survives the command and
 // not the next apply. A workspace's .niwa/ is materialized from a source repo
 // and replaced wholesale on refresh, so the command must leave it alone --
 // including when it is run from inside a workspace.
-func TestConfigSetDefaultAgent_WritesNothingInsideAWorkspaceSnapshot(t *testing.T) {
+func TestConfigSetDefaultHarness_WritesNothingInsideAWorkspaceSnapshot(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
@@ -77,8 +77,8 @@ func TestConfigSetDefaultAgent_WritesNothingInsideAWorkspaceSnapshot(t *testing.
 		t.Fatal(err)
 	}
 
-	if _, err := runConfigDefaultAgent(t, runConfigSetDefaultAgent, []string{"codex"}); err != nil {
-		t.Fatalf("config set default-agent codex: %v", err)
+	if _, err := runConfigDefaultHarness(t, runConfigSetDefaultHarness, []string{"codex"}); err != nil {
+		t.Fatalf("config set default-dispatch-harness codex: %v", err)
 	}
 
 	after, err := snapshotDir(stateDir)
@@ -120,19 +120,19 @@ func snapshotDir(dir string) (map[string]string, error) {
 	return out, err
 }
 
-// TestConfigSetDefaultAgent_ReportsWhereItWrote holds the one thing a developer
+// TestConfigSetDefaultHarness_ReportsWhereItWrote holds the one thing a developer
 // needs from the output. The whole reason this command exists is that guessing
 // which file holds the setting is the trap, so the file it wrote is named.
-func TestConfigSetDefaultAgent_ReportsWhereItWrote(t *testing.T) {
+func TestConfigSetDefaultHarness_ReportsWhereItWrote(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	path, err := config.GlobalConfigPath()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	out, err := runConfigDefaultAgent(t, runConfigSetDefaultAgent, []string{"codex"})
+	out, err := runConfigDefaultHarness(t, runConfigSetDefaultHarness, []string{"codex"})
 	if err != nil {
-		t.Fatalf("config set default-agent codex: %v", err)
+		t.Fatalf("config set default-dispatch-harness codex: %v", err)
 	}
 	if !strings.Contains(out, path) {
 		t.Errorf("output does not name the file it wrote (%s):\n%s", path, out)
@@ -144,15 +144,15 @@ func TestConfigSetDefaultAgent_ReportsWhereItWrote(t *testing.T) {
 	}
 }
 
-// TestConfigSetDefaultAgent_RejectsUnknownAgentWithoutWriting keeps the command
+// TestConfigSetDefaultHarness_RejectsUnknownAgentWithoutWriting keeps the command
 // on the same closed set as every other source, and keeps a typo from leaving a
 // value behind that only fails later, at the next dispatch.
-func TestConfigSetDefaultAgent_RejectsUnknownAgentWithoutWriting(t *testing.T) {
+func TestConfigSetDefaultHarness_RejectsUnknownAgentWithoutWriting(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	_, err := runConfigDefaultAgent(t, runConfigSetDefaultAgent, []string{"gemini"})
+	_, err := runConfigDefaultHarness(t, runConfigSetDefaultHarness, []string{"gemini"})
 	if err == nil {
-		t.Fatal("config set default-agent gemini succeeded, want a rejection")
+		t.Fatal("config set default-dispatch-harness gemini succeeded, want a rejection")
 	}
 	for _, want := range agent.All() {
 		if !strings.Contains(err.Error(), string(want)) {
@@ -164,19 +164,19 @@ func TestConfigSetDefaultAgent_RejectsUnknownAgentWithoutWriting(t *testing.T) {
 	if lErr != nil {
 		t.Fatalf("loading the host config back: %v", lErr)
 	}
-	if got := loaded.DefaultAgent(); got != "" {
+	if got := loaded.DefaultDispatchHarness(); got != "" {
 		t.Fatalf("a rejected value was written anyway: default_agent = %q", got)
 	}
 }
 
-// TestConfigSetDefaultAgent_RejectsEmptyValueWithoutWriting covers the argument
+// TestConfigSetDefaultHarness_RejectsEmptyValueWithoutWriting covers the argument
 // that is not a typo and not a request. ParseAgent reads "" as "this source is
 // unset" -- right for the resolver -- and cobra counts "" as an argument, so
-// `niwa config set default-agent "$AGENT"` from a script with AGENT unset would
+// `niwa config set default-dispatch-harness "$AGENT"` from a script with AGENT unset would
 // write a machine-wide claude and report success. A scripted setup is where
 // this command earns its keep, so the empty case has to fail loudly and leave
 // whatever was there alone.
-func TestConfigSetDefaultAgent_RejectsEmptyValueWithoutWriting(t *testing.T) {
+func TestConfigSetDefaultHarness_RejectsEmptyValueWithoutWriting(t *testing.T) {
 	for _, arg := range []string{"", "   ", "\t\n"} {
 		t.Run("arg="+strconv.Quote(arg), func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -187,7 +187,7 @@ func TestConfigSetDefaultAgent_RejectsEmptyValueWithoutWriting(t *testing.T) {
 
 			// Seed a real setting, so a write of the wrong value is visible as
 			// a change rather than only as a file that appeared.
-			if _, err := runConfigDefaultAgent(t, runConfigSetDefaultAgent, []string{"codex"}); err != nil {
+			if _, err := runConfigDefaultHarness(t, runConfigSetDefaultHarness, []string{"codex"}); err != nil {
 				t.Fatalf("seeding the host config: %v", err)
 			}
 			before, err := os.ReadFile(path)
@@ -195,13 +195,13 @@ func TestConfigSetDefaultAgent_RejectsEmptyValueWithoutWriting(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			_, err = runConfigDefaultAgent(t, runConfigSetDefaultAgent, []string{arg})
+			_, err = runConfigDefaultHarness(t, runConfigSetDefaultHarness, []string{arg})
 			if err == nil {
-				t.Fatalf("config set default-agent %q succeeded, want a rejection", arg)
+				t.Fatalf("config set default-dispatch-harness %q succeeded, want a rejection", arg)
 			}
 			// The way out of the setting is a different command, and a reader
 			// who meant to clear it has to be told which one.
-			if !strings.Contains(err.Error(), "niwa config unset default-agent") {
+			if !strings.Contains(err.Error(), "niwa config unset default-dispatch-harness") {
 				t.Errorf("rejection does not name the command that clears the setting: %v", err)
 			}
 
@@ -216,17 +216,17 @@ func TestConfigSetDefaultAgent_RejectsEmptyValueWithoutWriting(t *testing.T) {
 			if lErr != nil {
 				t.Fatalf("loading the host config back: %v", lErr)
 			}
-			if got := loaded.DefaultAgent(); got != "codex" {
+			if got := loaded.DefaultDispatchHarness(); got != "codex" {
 				t.Fatalf("default_agent = %q after a rejected argument, want the seeded %q", got, "codex")
 			}
 		})
 	}
 }
 
-// TestConfigSetDefaultAgent_PreservesOtherSettings guards the read-modify-write.
+// TestConfigSetDefaultHarness_PreservesOtherSettings guards the read-modify-write.
 // The host config holds several unrelated dispatch defaults, and setting one
 // must not drop the rest.
-func TestConfigSetDefaultAgent_PreservesOtherSettings(t *testing.T) {
+func TestConfigSetDefaultHarness_PreservesOtherSettings(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	globalCfg, err := config.LoadGlobalConfig()
@@ -243,8 +243,8 @@ func TestConfigSetDefaultAgent_PreservesOtherSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := runConfigDefaultAgent(t, runConfigSetDefaultAgent, []string{"codex"}); err != nil {
-		t.Fatalf("config set default-agent codex: %v", err)
+	if _, err := runConfigDefaultHarness(t, runConfigSetDefaultHarness, []string{"codex"}); err != nil {
+		t.Fatalf("config set default-dispatch-harness codex: %v", err)
 	}
 
 	loaded, err := config.LoadGlobalConfig()
@@ -257,48 +257,48 @@ func TestConfigSetDefaultAgent_PreservesOtherSettings(t *testing.T) {
 	if loaded.GlobalConfig.Repo != "myorg/my-config" {
 		t.Errorf("global_config.repo = %q, want it preserved", loaded.GlobalConfig.Repo)
 	}
-	if loaded.DefaultAgent() != "codex" {
-		t.Errorf("default_agent = %q, want codex", loaded.DefaultAgent())
+	if loaded.DefaultDispatchHarness() != "codex" {
+		t.Errorf("default_agent = %q, want codex", loaded.DefaultDispatchHarness())
 	}
 }
 
-// TestConfigUnsetDefaultAgent_ClearsTheSetting covers the way back out.
-func TestConfigUnsetDefaultAgent_ClearsTheSetting(t *testing.T) {
+// TestConfigUnsetDefaultHarness_ClearsTheSetting covers the way back out.
+func TestConfigUnsetDefaultHarness_ClearsTheSetting(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	if _, err := runConfigDefaultAgent(t, runConfigSetDefaultAgent, []string{"codex"}); err != nil {
-		t.Fatalf("config set default-agent codex: %v", err)
+	if _, err := runConfigDefaultHarness(t, runConfigSetDefaultHarness, []string{"codex"}); err != nil {
+		t.Fatalf("config set default-dispatch-harness codex: %v", err)
 	}
-	if _, err := runConfigDefaultAgent(t, runConfigUnsetDefaultAgent, nil); err != nil {
-		t.Fatalf("config unset default-agent: %v", err)
+	if _, err := runConfigDefaultHarness(t, runConfigUnsetDefaultHarness, nil); err != nil {
+		t.Fatalf("config unset default-dispatch-harness: %v", err)
 	}
 
 	loaded, err := config.LoadGlobalConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := loaded.DefaultAgent(); got != "" {
+	if got := loaded.DefaultDispatchHarness(); got != "" {
 		t.Fatalf("default_agent = %q after unset, want it cleared", got)
 	}
 }
 
-// TestConfigUnsetDefaultAgent_SaysNothingWasSet keeps the no-op path quiet and
+// TestConfigUnsetDefaultHarness_SaysNothingWasSet keeps the no-op path quiet and
 // successful rather than an error, matching `config unset global`.
-func TestConfigUnsetDefaultAgent_SaysNothingWasSet(t *testing.T) {
+func TestConfigUnsetDefaultHarness_SaysNothingWasSet(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	out, err := runConfigDefaultAgent(t, runConfigUnsetDefaultAgent, nil)
+	out, err := runConfigDefaultHarness(t, runConfigUnsetDefaultHarness, nil)
 	if err != nil {
-		t.Fatalf("config unset default-agent with nothing set: %v", err)
+		t.Fatalf("config unset default-dispatch-harness with nothing set: %v", err)
 	}
-	if !strings.Contains(strings.ToLower(out), "no machine-wide default agent") {
+	if !strings.Contains(strings.ToLower(out), "no machine-wide default dispatch harness") {
 		t.Errorf("output does not say nothing was set:\n%s", out)
 	}
 }
 
-// TestConfigDefaultAgentSubcommandsAreRegistered pins the surface a developer
+// TestConfigDefaultHarnessSubcommandsAreRegistered pins the surface a developer
 // actually types, including the TOML spelling as an alias.
-func TestConfigDefaultAgentSubcommandsAreRegistered(t *testing.T) {
+func TestConfigDefaultHarnessSubcommandsAreRegistered(t *testing.T) {
 	for _, tc := range []struct {
 		parent *cobra.Command
 		name   string
@@ -308,15 +308,15 @@ func TestConfigDefaultAgentSubcommandsAreRegistered(t *testing.T) {
 	} {
 		var found *cobra.Command
 		for _, sub := range tc.parent.Commands() {
-			if sub.Name() == "default-agent" {
+			if sub.Name() == "default-dispatch-harness" {
 				found = sub
 			}
 		}
 		if found == nil {
-			t.Fatalf("niwa config %s has no default-agent subcommand", tc.name)
+			t.Fatalf("niwa config %s has no default-dispatch-harness subcommand", tc.name)
 		}
-		if !found.HasAlias("default_agent") {
-			t.Errorf("niwa config %s default-agent does not accept the TOML spelling default_agent", tc.name)
+		if !found.HasAlias("default_dispatch_harness") {
+			t.Errorf("niwa config %s default-dispatch-harness does not accept the TOML spelling default_dispatch_harness", tc.name)
 		}
 	}
 }

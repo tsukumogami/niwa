@@ -246,7 +246,7 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     When I run niwa init from config repo "myws"
     Then the exit code is 0
     Given a fake codex for dispatch with session "01a10000-0000-7000-8000-00000000ab1e"
-    When I run "niwa dispatch some-task --detach --launch-agent codex" from the workspace root
+    When I run "niwa dispatch some-task --detach --harness codex" from the workspace root
     Then the exit code is 0
     When I run "niwa list" from the workspace root
     Then the exit code is 0
@@ -273,7 +273,7 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     When I run niwa init from config repo "myws"
     Then the exit code is 0
     Given a fake codex for dispatch with session "01a30000-0000-7000-8000-00000000c0de"
-    When I run "niwa dispatch --launch-agent codex" with stdin held open
+    When I run "niwa dispatch --harness codex" with stdin held open
     Then the exit code is 1
     And the error output contains "not an interactive terminal"
     And the error output contains "receives none of the workspace's orientation"

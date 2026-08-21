@@ -133,12 +133,14 @@ hardcoded pass the capability contract exists to prevent.
   what it got wrong is the useful part.*
 
   A developer can choose which agent a dispatch launches, and can do it
-  three ways matching three lifetimes: per dispatch with a flag on `niwa
-  dispatch`, per shell with `NIWA_AGENT`, and durably for the host with
-  `niwa config set`. The full precedence is flag > `NIWA_AGENT` >
-  `[workspace].default_agent` > `[global].default_agent` > claude, and
-  every rung of it is stated in the command's own help, not only in a
-  guide. Nothing here changes what `niwa apply` prepares: every apply
+  three ways matching three lifetimes: per dispatch with `--harness`, per
+  shell with `NIWA_DISPATCH_HARNESS`, and durably for the host with `niwa
+  config set default-dispatch-harness`. The three surfaces are one setting
+  and say one word, so a developer who learns any of them can guess the
+  other two. The full precedence is flag > `NIWA_DISPATCH_HARNESS` >
+  `[workspace].default_agent` > `[global].default_dispatch_harness` >
+  claude, and every rung of it is stated in the command's own help, not
+  only in a guide. Nothing here changes what `niwa apply` prepares: every apply
   prepares every supported agent, and selection names a launch target.
 
   The flag is a new name rather than a repointing of `niwa dispatch
@@ -154,16 +156,18 @@ hardcoded pass the capability contract exists to prevent.
 
   Acceptance: a dispatch in a workspace with no stated agent launches the
   one `niwa config set` recorded; a workspace that states an agent
-  outranks that; `NIWA_AGENT` outranks both; the flag outranks all three.
-  A test fails if any rung is unreachable or if the order differs from the
-  one above. `niwa dispatch --agent <subagent>` still resolves the launch
-  target from the other rungs and forwards the subagent type untouched.
+  outranks that; `NIWA_DISPATCH_HARNESS` outranks both; the flag outranks
+  all three. A test fails if any rung is unreachable or if the order
+  differs from the one above. `niwa dispatch --agent <subagent>` still
+  resolves the launch target from the other rungs and forwards the subagent
+  type untouched.
   `niwa create` and `niwa apply` gain no agent flag, and the functional
   scenario asserting `apply --agent codex` is an unknown flag stands.
 
   **What the original R1 said, and why it was wrong.** It required that no
-  selection flag be added at all, on the argument that `NIWA_AGENT` and
-  `default_agent` already resolved the agent and a flag would be new
+  selection flag be added at all, on the argument that the environment
+  variable and `default_agent` already resolved the agent and a flag would
+  be new
   user-facing surface for no gain. Every fact in that argument was true and
   the conclusion did not follow. Resolution existing is not the same as
   selection being reachable: the resolution call's flag parameter had
@@ -175,9 +179,9 @@ hardcoded pass the capability contract exists to prevent.
   the implementation is prone to.
 
 - **R1a. The durable home is a file niwa owns, not the materialized
-  snapshot.** `niwa config set` writes `[global].default_agent` to
-  `~/.config/niwa/config.toml`, alongside the dispatch-scoped host
-  defaults already there (`dispatch_model`,
+  snapshot.** `niwa config set default-dispatch-harness` writes
+  `[global].default_dispatch_harness` to `~/.config/niwa/config.toml`,
+  alongside the dispatch-scoped host defaults already there (`dispatch_model`,
   `remote_control_on_dispatch`, `keep_alive_on_dispatch`). It must not
   write `<workspace>/.niwa/workspace.toml`: that tree is materialized from
   a source repo and replaced wholesale on the next reconcile, so a write
@@ -193,7 +197,7 @@ hardcoded pass the capability contract exists to prevent.
   default, and a third key in the same file with the opposite polarity
   would make that file's precedence something a reader looks up per key
   rather than learns once. The personal-machine case is served by
-  `NIWA_AGENT` and by the flag.
+  `NIWA_DISPATCH_HARNESS` and by the flag.
 - **R2. The gate is a declaration lookup.** Dispatch's agent gate consults
   the `DispatchLaunch` declaration for the resolved agent instead of
   comparing against an agent constant. A declared-implemented agent
@@ -493,7 +497,7 @@ hardcoded pass the capability contract exists to prevent.
     one fact they are missing.
   - The gate runs even when the workspace config cannot be loaded.
     Previously the whole gate sat inside a successful-config-load
-    branch, so `NIWA_AGENT=codex` with an unreadable config skipped the
+    branch, so `NIWA_DISPATCH_HARNESS=codex` with an unreadable config skipped the
     check and launched Claude anyway; the agent now resolves from the
     environment alone and the refusal fires. A genuine fix riding along,
     named as one rather than found.

@@ -11,18 +11,25 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
-// launchAgentFlagName is the flag that selects WHICH coding agent a command
+// harnessFlagName is the flag that selects WHICH coding agent a command
 // launches. It is deliberately not spelled --agent: on niwa dispatch that name
 // already means the subagent type forwarded INTO the launched agent (a role
 // within it), and the two are different enough that sharing a name would be a
-// trap rather than a convenience. "launch" is the word the rest of this code
-// already uses for the distinction -- agentplan.DispatchLaunch, the launch
-// spec, and the refusal that says an agent cannot be launched.
-const launchAgentFlagName = "launch-agent"
+// trap rather than a convenience.
+//
+// "harness" is the word the three surfaces of this one setting share --
+// --harness, NIWA_DISPATCH_HARNESS, [global].default_dispatch_harness -- so a
+// developer who meets any of them can guess the other two. It names what the
+// value picks: the coding agent that harnesses a dispatched turn.
+//
+// The fourth rung, [workspace].default_agent, keeps its older spelling because
+// it is a shipped key living in committed workspace.toml files. That asymmetry
+// is stated in docs/guides/codex-agent.md rather than hidden.
+const harnessFlagName = "harness"
 
 // acceptedAgentNames renders the accepted set for help text, quoted and
 // comma-joined. It derives from agent.All() for the same reason
-// launchAgentFlagUsage does: a third agent should update the help rather than
+// harnessFlagUsage does: a third agent should update the help rather than
 // leave a hardcoded list quietly wrong. The dispatch-path scan cannot catch a
 // stale one, because the names would sit inside a long literal rather than
 // being a literal the scan recognizes.
@@ -45,7 +52,7 @@ func builtinDefaultAgentName() string {
 	return string(fallback)
 }
 
-// launchAgentFlagUsage builds the flag's help line. The accepted values are
+// harnessFlagUsage builds the flag's help line. The accepted values are
 // read from the closed set rather than typed out here, so adding a third agent
 // updates the help instead of leaving it quietly wrong. The fallback comes from
 // builtinDefaultAgentName for the same reason.
@@ -53,19 +60,19 @@ func builtinDefaultAgentName() string {
 // The line carries the whole precedence ladder on purpose. Every rung has to be
 // reachable from the command a developer is already running, not just from a
 // guide they would have to know to go looking for.
-func launchAgentFlagUsage() string {
+func harnessFlagUsage() string {
 	names := make([]string, 0, len(agent.All()))
 	for _, a := range agent.All() {
 		names = append(names, string(a))
 	}
-	return "which coding agent to launch (" + strings.Join(names, ", ") + "). " +
-		"Full precedence: this flag, then NIWA_AGENT, then the workspace's " +
-		"[workspace].default_agent, then your own [global].default_agent " +
-		"(niwa config set default-agent), then " + builtinDefaultAgentName() + ". " +
+	return "which coding agent harnesses the dispatched work (" + strings.Join(names, ", ") + "). " +
+		"Full precedence: this flag, then NIWA_DISPATCH_HARNESS, then the workspace's " +
+		"[workspace].default_agent, then your own [global].default_dispatch_harness " +
+		"(niwa config set default-dispatch-harness), then " + builtinDefaultAgentName() + ". " +
 		"This is not --agent, which forwards a subagent type into whichever agent is launched"
 }
 
-// launchAgentMismatchWarning returns the line to print when --agent's value
+// harnessMismatchWarning returns the line to print when --agent's value
 // reads like a request to launch a different agent, or "" when there is
 // nothing to say.
 //
@@ -78,7 +85,7 @@ func launchAgentFlagUsage() string {
 // The line names three things because a developer who typed the wrong flag
 // needs all three: what --agent actually does, which agent is being launched
 // instead, and the flag that would have selected the one they named.
-func launchAgentMismatchWarning(agentFlagValue string, launched agent.Agent) string {
+func harnessMismatchWarning(agentFlagValue string, launched agent.Agent) string {
 	if agentFlagValue == "" {
 		return ""
 	}
@@ -87,14 +94,14 @@ func launchAgentMismatchWarning(agentFlagValue string, launched agent.Agent) str
 		return ""
 	}
 	return "--agent " + agentFlagValue + " names a subagent type to forward into the launched agent, not which agent to launch. This dispatch launches " +
-		string(launched) + ". Use --" + launchAgentFlagName + " " + string(named) + " to launch " + string(named) + " instead"
+		string(launched) + ". Use --" + harnessFlagName + " " + string(named) + " to launch " + string(named) + " instead"
 }
 
 // resolveSessionAgent resolves the session-global coding agent once from its
-// four sources, in precedence order flag > NIWA_AGENT env > workspace
-// default_agent > host default_agent > claude.
+// four sources, in precedence order flag > NIWA_DISPATCH_HARNESS env >
+// [workspace].default_agent > [global].default_dispatch_harness > claude.
 //
-// flagValue is the agent-selection flag's value: `--launch-agent` on `niwa
+// flagValue is the agent-selection flag's value: `--harness` on `niwa
 // dispatch`, which is the only command that selects a launch target and the
 // only caller of this function. "" means the flag was not given, and the
 // remaining rungs decide.
@@ -115,8 +122,8 @@ func resolveSessionAgent(flagValue string, cfg *config.WorkspaceConfig, cfgPath 
 	if cfg != nil {
 		def = cfg.Workspace.DefaultAgent
 	}
-	env := os.Getenv("NIWA_AGENT")
-	hostDef := gc.DefaultAgent()
+	env := os.Getenv("NIWA_DISPATCH_HARNESS")
+	hostDef := gc.DefaultDispatchHarness()
 	chosen, err := agent.ResolveAgent(flagValue, env, def, hostDef)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", agentSourceLabel(flagValue, env, def, cfgPath), err)
@@ -135,13 +142,13 @@ func resolveSessionAgent(flagValue string, cfg *config.WorkspaceConfig, cfgPath 
 func agentSourceLabel(flagValue, env, workspaceDefault, cfgPath string) string {
 	switch {
 	case flagValue != "":
-		return "--" + launchAgentFlagName
+		return "--" + harnessFlagName
 	case env != "":
-		return "NIWA_AGENT"
+		return "NIWA_DISPATCH_HARNESS"
 	case workspaceDefault != "":
 		return "[workspace].default_agent in " + workspaceConfigDisplayPath(cfgPath)
 	default:
-		return "[global].default_agent in " + globalConfigDisplayPath()
+		return "[global].default_dispatch_harness in " + globalConfigDisplayPath()
 	}
 }
 

@@ -27,8 +27,8 @@ func init() {
 	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session (sanitized into a slug; also names the niwa instance: <config>+-<id> with no name, <config>+<slug>-<id> with one -- '+' always marks the end of the config name)")
 	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", dispatchModelFlagHelp())
 	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker; dropped for an agent that has no such flag")
-	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "subagent type to forward to the background worker; this selects a role within the launched agent, not which agent is launched (that is --launch-agent). Dropped for an agent that has no such flag")
-	dispatchCmd.Flags().StringVar(&dispatchLaunchAgent, launchAgentFlagName, "", launchAgentFlagUsage())
+	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "subagent type to forward to the background worker; this selects a role within the launched agent, not which agent is launched (that is --harness). Dropped for an agent that has no such flag")
+	dispatchCmd.Flags().StringVar(&dispatchHarness, harnessFlagName, "", harnessFlagUsage())
 	dispatchCmd.Flags().BoolVarP(&dispatchDetach, "detach", "d", false, "put the worker out of this terminal's reach: for an agent whose runner executes the turn in the foreground, run it detached instead of here; for one that backgrounds its own session, skip the attach. Either way, print hints and return")
 	dispatchCmd.Flags().IntVar(&dispatchParallel, "parallel", 0,
 		"maximum repos to clone concurrently when provisioning the dispatch instance (>=1). Lower this on slow or flaky networks; 1 clones serially. Overrides the [global] clone_workers config. 0 (the default) uses clone_workers, else niwa's built-in default.")
@@ -47,7 +47,7 @@ var (
 	dispatchModel          string
 	dispatchPermissionMode string
 	dispatchAgent          string
-	dispatchLaunchAgent    string
+	dispatchHarness        string
 	dispatchDetach         bool
 	dispatchParallel       int
 	// dispatchKeepAlive holds the tri-state --keep-alive value: nil when the
@@ -198,9 +198,9 @@ worker rooted inside it, captures the worker's session id, and records an
 ephemeral dispatch-origin mapping so the instance is reclaimed when the session
 ends.
 
-Which agent the worker runs as is resolved once, in this order: --launch-agent,
-then NIWA_AGENT, then the workspace's [workspace].default_agent, then your own
-[global].default_agent (niwa config set default-agent). Every instance is
+Which agent the worker runs as is resolved once, in this order: --harness,
+then NIWA_DISPATCH_HARNESS, then the workspace's [workspace].default_agent, then your own
+[global].default_dispatch_harness (niwa config set default-dispatch-harness). Every instance is
 prepared for every agent niwa supports whatever those say, so this picks a
 launch target and takes nothing away from the other agent. Not to be confused
 with --agent, which forwards a subagent type INTO whichever agent is launched.
@@ -293,16 +293,17 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	workspaceRoot := class.WorkspaceRoot
 
 	// (2a) Load the host global config ONCE, best-effort, and reuse it below.
-	// It carries two things this command reads: the machine-wide default_agent
+	// It carries two things this command reads: the machine-wide dispatch
+	// harness
 	// (broadest rung of the agent resolution just below) and the dispatch_model
 	// and remote-control defaults consumed after provisioning. A missing or
 	// unreadable config degrades to "none of those set", which is today's
 	// behavior for every one of them -- they are all opt-in defaults.
 	gc, gcErr := config.LoadGlobalConfig()
 
-	// (2b) Resolve which agent this dispatch launches, from --launch-agent,
-	// NIWA_AGENT, the workspace default_agent, and the host default_agent, in
-	// that order. dispatch's own --agent flag is the launched agent's
+	// (2b) Resolve which agent this dispatch launches, from --harness,
+	// NIWA_DISPATCH_HARNESS, the workspace default_agent, and the host
+	// default_dispatch_harness, in that order. dispatch's own --agent flag is the launched agent's
 	// subagent-type passthrough, a different thing, so it is deliberately not
 	// consulted here. A config that cannot be loaded resolves against the
 	// sources that did load and leaves the failure to the provisioning path to
@@ -321,7 +322,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if gcErr == nil {
 		hostCfg = gc
 	}
-	dispatchedAgent, agErr := resolveSessionAgent(dispatchLaunchAgent, wsConfig, wsConfigPath, hostCfg)
+	dispatchedAgent, agErr := resolveSessionAgent(dispatchHarness, wsConfig, wsConfigPath, hostCfg)
 	if agErr != nil {
 		return fmt.Errorf("niwa: error: %w", agErr)
 	}
@@ -338,7 +339,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// deliberately narrow: the value has to parse as an agent niwa knows AND
 	// disagree with the one actually being launched, so --agent reviewer says
 	// nothing and --agent claude on a Claude dispatch says nothing either.
-	if warning := launchAgentMismatchWarning(dispatchAgent, dispatchedAgent); warning != "" {
+	if warning := harnessMismatchWarning(dispatchAgent, dispatchedAgent); warning != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", warning)
 	}
 
@@ -950,7 +951,7 @@ func unopenableSessionNotice(binary string) string {
 // moment it is being read.
 //
 // It offers the flag first and the variable second. The developer reading this
-// is retrying one command, and --launch-agent changes that command; NIWA_AGENT
+// is retrying one command, and --harness changes that command; NIWA_DISPATCH_HARNESS
 // changes every niwa command in the shell, and everything dispatched from it,
 // which is a bigger thing to hand someone who asked for one dispatch.
 //
@@ -963,14 +964,14 @@ func launchableAgentsHint() string {
 	}
 	if len(launchable) == 1 {
 		only := string(launchable[0])
-		return "Retry with --" + launchAgentFlagName + " " + only + ", or set NIWA_AGENT=" + only + " for the whole shell"
+		return "Retry with --" + harnessFlagName + " " + only + ", or set NIWA_DISPATCH_HARNESS=" + only + " for the whole shell"
 	}
 	names := make([]string, len(launchable))
 	for i, ag := range launchable {
 		names[i] = string(ag)
 	}
-	return "Retry with --" + launchAgentFlagName + " set to one of " + strings.Join(names, ", ") +
-		", or set NIWA_AGENT to one of them for the whole shell"
+	return "Retry with --" + harnessFlagName + " set to one of " + strings.Join(names, ", ") +
+		", or set NIWA_DISPATCH_HARNESS to one of them for the whole shell"
 }
 
 // userHomeDir returns the developer's home directory, or "" when it cannot be

@@ -77,9 +77,9 @@ func TestDispatch_CaptureTimeoutFollowsTheProcessModel(t *testing.T) {
 			}
 			t.Cleanup(func() { dispatchCapture = prev })
 
-			dispatchLaunchAgent = string(ag)
+			dispatchHarness = string(ag)
 			dispatchDetach = tc.detach
-			t.Setenv("NIWA_AGENT", "")
+			t.Setenv("NIWA_DISPATCH_HARNESS", "")
 
 			if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
 				t.Fatalf("dispatch: %v", err)
