@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -291,20 +292,70 @@ func SaveGlobalConfig(cfg *GlobalConfig) error {
 // parent directories as needed. The file is created with 0o600 permissions
 // because config.toml may contain sensitive values like repo URLs.
 func SaveGlobalConfigTo(path string, cfg *GlobalConfig) error {
+	return writeGlobalConfigFile(path, func(w io.Writer) error {
+		return toml.NewEncoder(w).Encode(cfg)
+	})
+}
+
+// writeGlobalConfigFile replaces path with whatever encode writes, atomically:
+// the bytes go to a temporary file in the same directory and only become the
+// config once a rename swaps them in. Same directory matters -- rename is
+// atomic within a filesystem and not across one, so a temp file in the system
+// temp directory would degrade to a copy and reopen the window this closes.
+//
+// The window is worth closing because this one file is the whole workspace
+// registry rather than a handful of settings. Truncating it in place means any
+// interruption between the truncate and the last byte -- a crash, a full disk,
+// a SIGINT during a long `niwa apply` -- leaves a config that has lost every
+// instance the workspace knew about, and a concurrent reader can observe the
+// half-written state even when the writer goes on to finish. With the rename,
+// a reader sees either the whole previous config or the whole new one.
+//
+// This is deliberately not a lock. Atomic replacement fixes torn writes and
+// torn reads; it does not fix a lost update, where two processes each load the
+// config, change different parts, and the second save overwrites the first.
+// Fixing that means holding a lock across load-mutate-save at every call site,
+// which is a different change to a different set of functions.
+//
+// encode is a parameter so a test can fail the encode partway and assert what
+// the target path holds afterwards, which is the case this exists for.
+func writeGlobalConfigFile(path string, encode func(io.Writer) error) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
 
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	tmp, err := os.CreateTemp(dir, ".config-*.toml")
 	if err != nil {
 		return fmt.Errorf("creating global config file: %w", err)
 	}
-	defer f.Close()
+	tmpPath := tmp.Name()
+	// Runs on every path. After a successful rename the temp name no longer
+	// exists, so both calls are harmless no-ops; on every failure below they
+	// are what keeps a partial write from being left on disk.
+	defer func() {
+		tmp.Close()
+		os.Remove(tmpPath)
+	}()
 
-	encoder := toml.NewEncoder(f)
-	if err := encoder.Encode(cfg); err != nil {
+	// CreateTemp already opens at 0o600, but the mode is part of this file's
+	// contract rather than an accident of the helper, so it is set explicitly.
+	if err := tmp.Chmod(0o600); err != nil {
+		return fmt.Errorf("setting global config file permissions: %w", err)
+	}
+
+	if err := encode(tmp); err != nil {
 		return fmt.Errorf("encoding global config: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("flushing global config file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing global config file: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("replacing global config file: %w", err)
 	}
 	return nil
 }
