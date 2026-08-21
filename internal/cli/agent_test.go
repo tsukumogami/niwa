@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/agent"
@@ -51,7 +53,7 @@ func TestResolveSessionAgent(t *testing.T) {
 			} else {
 				t.Setenv("NIWA_AGENT", tt.env)
 			}
-			got, err := resolveSessionAgent(tt.flag, cfgWithDefaultAgent(tt.def), hostCfgWithDefaultAgent(tt.hostDef))
+			got, err := resolveSessionAgent(tt.flag, cfgWithDefaultAgent(tt.def), "", hostCfgWithDefaultAgent(tt.hostDef))
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("resolveSessionAgent(%q, def=%q, host=%q, env=%q) = %q, want error", tt.flag, tt.def, tt.hostDef, tt.env, got)
@@ -68,13 +70,93 @@ func TestResolveSessionAgent(t *testing.T) {
 	}
 }
 
+// TestResolveSessionAgentErrorNamesTheOffendingRung is what turns a rejected
+// value into something a developer can act on. Four sources can hold the bad
+// value and the parse error reads the same for all four, so a stale
+// default_agent set weeks ago sends the reader looking through the two files
+// they are least likely to have open.
+//
+// Each rung is named the way it would be edited, and the error names that rung
+// only -- a message that listed all four would be the same guessing game with
+// more words.
+func TestResolveSessionAgentErrorNamesTheOffendingRung(t *testing.T) {
+	wsPath := filepath.Join(t.TempDir(), ".niwa", "workspace.toml")
+	// Every rung's label, so each case can assert the other three are absent.
+	labels := []string{"--" + launchAgentFlagName, "NIWA_AGENT", "[workspace].default_agent", "[global].default_agent"}
+
+	tests := []struct {
+		name string
+		flag string
+		env  string
+		def  string
+		host string
+		// want is the label this rung must carry; wantPath is an extra
+		// substring, the file that holds the value.
+		want         string
+		wantPath     string
+		wantHostPath bool
+	}{
+		{name: "flag", flag: "gemini", want: "--" + launchAgentFlagName},
+		{name: "env", env: "gemini", want: "NIWA_AGENT"},
+		{name: "workspace default", def: "gemini", want: "[workspace].default_agent", wantPath: wsPath},
+		{name: "host default", host: "gemini", want: "[global].default_agent", wantHostPath: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("NIWA_AGENT", tt.env)
+
+			wantPath := tt.wantPath
+			if tt.wantHostPath {
+				// The personal config's real path, honoring XDG_CONFIG_HOME:
+				// naming the file it usually lives in would be naming the wrong
+				// file for anyone who moved it.
+				p, err := config.GlobalConfigPath()
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantPath = p
+			}
+
+			_, err := resolveSessionAgent(tt.flag, cfgWithDefaultAgent(tt.def), wsPath, hostCfgWithDefaultAgent(tt.host))
+			if err == nil {
+				t.Fatalf("resolveSessionAgent accepted %q from the %s rung, want a rejection", "gemini", tt.name)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, tt.want) {
+				t.Errorf("rejection does not name the %s rung (%s):\n%s", tt.name, tt.want, msg)
+			}
+			if wantPath != "" && !strings.Contains(msg, wantPath) {
+				t.Errorf("rejection does not name the file holding the value (%s):\n%s", wantPath, msg)
+			}
+			for _, other := range labels {
+				if other == tt.want {
+					continue
+				}
+				if strings.Contains(msg, other) {
+					t.Errorf("rejection blames the %s rung too, so it does not say which one to edit:\n%s", other, msg)
+				}
+			}
+			// The wrapping must not swallow what the old message carried.
+			if !strings.Contains(msg, "gemini") {
+				t.Errorf("rejection does not quote the rejected value:\n%s", msg)
+			}
+			for _, ag := range agent.All() {
+				if !strings.Contains(msg, string(ag)) {
+					t.Errorf("rejection does not name the accepted value %q:\n%s", ag, msg)
+				}
+			}
+		})
+	}
+}
+
 // TestResolveSessionAgentNilConfigs pins the nil-tolerance both config
 // arguments carry. A config niwa could not load is "that source is unset", not
 // a panic and not a failed command: dispatch resolves against the sources it
 // does have and leaves a broken config for the provisioning path to report.
 func TestResolveSessionAgentNilConfigs(t *testing.T) {
 	t.Setenv("NIWA_AGENT", "")
-	got, err := resolveSessionAgent("", nil, nil)
+	got, err := resolveSessionAgent("", nil, "", nil)
 	if err != nil {
 		t.Fatalf("resolveSessionAgent with nil configs: %v", err)
 	}
@@ -83,7 +165,7 @@ func TestResolveSessionAgentNilConfigs(t *testing.T) {
 	}
 
 	t.Setenv("NIWA_AGENT", "codex")
-	got, err = resolveSessionAgent("", nil, nil)
+	got, err = resolveSessionAgent("", nil, "", nil)
 	if err != nil {
 		t.Fatalf("resolveSessionAgent with nil configs and NIWA_AGENT: %v", err)
 	}

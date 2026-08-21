@@ -307,15 +307,16 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// consulted here. A config that cannot be loaded resolves against the
 	// sources that did load and leaves the failure to the provisioning path to
 	// report.
+	wsConfigPath := filepath.Join(workspaceRoot, workspace.StateDir, workspace.WorkspaceConfigFile)
 	var wsConfig *config.WorkspaceConfig
-	if wsCfg, cfgErr := config.Load(filepath.Join(workspaceRoot, workspace.StateDir, workspace.WorkspaceConfigFile)); cfgErr == nil {
+	if wsCfg, cfgErr := config.Load(wsConfigPath); cfgErr == nil {
 		wsConfig = wsCfg.Config
 	}
 	var hostCfg *config.GlobalConfig
 	if gcErr == nil {
 		hostCfg = gc
 	}
-	dispatchedAgent, agErr := resolveSessionAgent(dispatchLaunchAgent, wsConfig, hostCfg)
+	dispatchedAgent, agErr := resolveSessionAgent(dispatchLaunchAgent, wsConfig, wsConfigPath, hostCfg)
 	if agErr != nil {
 		return fmt.Errorf("niwa: error: %w", agErr)
 	}
@@ -917,15 +918,6 @@ func buildDispatchPassthrough(flags agentplan.LaunchFlags, slug, model string) [
 	return pass
 }
 
-// launchableAgentsHint names the agents a refusal can point a developer at, in
-// the form they would set. The names come from the declarations rather than
-// from a sentence written here, because the person reading a refusal is by
-// definition the person who does not already know which agent to name -- and a
-// hardcoded one goes stale the moment a row flips, silently, at exactly the
-// moment it is being read.
-//
-// With no launchable agent at all there is nothing useful to suggest, so the
-// hint says what is true rather than pointing at an empty set.
 // unopenableSessionNotice is what dispatch says when the worker it just
 // started belongs to an agent that will not hand over a session whose turn is
 // running. It exists as a function so the message has a name: the test that
@@ -939,19 +931,35 @@ func unopenableSessionNotice(binary string) string {
 		binary)
 }
 
+// launchableAgentsHint names the agents a refusal can point a developer at, in
+// the form they would set. The names come from the declarations rather than
+// from a sentence written here, because the person reading a refusal is by
+// definition the person who does not already know which agent to name -- and a
+// hardcoded one goes stale the moment a row flips, silently, at exactly the
+// moment it is being read.
+//
+// It offers the flag first and the variable second. The developer reading this
+// is retrying one command, and --launch-agent changes that command; NIWA_AGENT
+// changes every niwa command in the shell, and everything dispatched from it,
+// which is a bigger thing to hand someone who asked for one dispatch.
+//
+// With no launchable agent at all there is nothing useful to suggest, so the
+// hint says what is true rather than pointing at an empty set.
 func launchableAgentsHint() string {
 	launchable := agentplan.LaunchableAgents()
 	if len(launchable) == 0 {
 		return "No agent niwa knows about can be dispatched to"
 	}
 	if len(launchable) == 1 {
-		return "Set NIWA_AGENT=" + string(launchable[0])
+		only := string(launchable[0])
+		return "Retry with --" + launchAgentFlagName + " " + only + ", or set NIWA_AGENT=" + only + " for the whole shell"
 	}
 	names := make([]string, len(launchable))
 	for i, ag := range launchable {
 		names[i] = string(ag)
 	}
-	return "Set NIWA_AGENT to one of " + strings.Join(names, ", ")
+	return "Retry with --" + launchAgentFlagName + " set to one of " + strings.Join(names, ", ") +
+		", or set NIWA_AGENT to one of them for the whole shell"
 }
 
 // userHomeDir returns the developer's home directory, or "" when it cannot be

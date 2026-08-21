@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
@@ -272,6 +273,37 @@ func TestLaunchAgentFlagIsRegisteredAndDistinctFromAgent(t *testing.T) {
 	for _, rung := range []string{"NIWA_AGENT", "[workspace].default_agent", "[global].default_agent", "niwa config set default-agent"} {
 		if !strings.Contains(launch.Usage, rung) {
 			t.Errorf("--%s help does not name the %s rung of the precedence: %q", launchAgentFlagName, rung, launch.Usage)
+		}
+	}
+}
+
+// TestLaunchableAgentsHintOffersTheFlagFirst holds the refusal to the surface
+// the developer is standing on. The hint predates --launch-agent and still said
+// only "Set NIWA_AGENT=<agent>", which changes every niwa command in the shell
+// and everything dispatched from it -- a wide answer to someone retrying one
+// command. The flag is named first, the variable second, and both are there.
+//
+// The agent names come from the declarations, so a row that flips changes what
+// the refusal offers instead of leaving a name behind that no longer launches.
+func TestLaunchableAgentsHintOffersTheFlagFirst(t *testing.T) {
+	launchable := agentplan.LaunchableAgents()
+	if len(launchable) == 0 {
+		t.Skip("no launchable agent, so the hint has nothing to point at")
+	}
+
+	hint := launchableAgentsHint()
+	if !strings.Contains(hint, "--"+launchAgentFlagName) {
+		t.Errorf("the refusal never mentions --%s, the rung that changes only the command being retried: %q", launchAgentFlagName, hint)
+	}
+	if !strings.Contains(hint, "NIWA_AGENT") {
+		t.Errorf("the refusal dropped NIWA_AGENT, which is still a way to set the agent: %q", hint)
+	}
+	if flagAt, envAt := strings.Index(hint, "--"+launchAgentFlagName), strings.Index(hint, "NIWA_AGENT"); flagAt > envAt {
+		t.Errorf("the refusal offers the whole shell before the one command: %q", hint)
+	}
+	for _, ag := range launchable {
+		if !strings.Contains(hint, string(ag)) {
+			t.Errorf("the refusal does not name the launchable agent %q: %q", ag, hint)
 		}
 	}
 }
