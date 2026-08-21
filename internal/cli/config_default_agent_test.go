@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -165,6 +166,60 @@ func TestConfigSetDefaultAgent_RejectsUnknownAgentWithoutWriting(t *testing.T) {
 	}
 	if got := loaded.DefaultAgent(); got != "" {
 		t.Fatalf("a rejected value was written anyway: default_agent = %q", got)
+	}
+}
+
+// TestConfigSetDefaultAgent_RejectsEmptyValueWithoutWriting covers the argument
+// that is not a typo and not a request. ParseAgent reads "" as "this source is
+// unset" -- right for the resolver -- and cobra counts "" as an argument, so
+// `niwa config set default-agent "$AGENT"` from a script with AGENT unset would
+// write a machine-wide claude and report success. A scripted setup is where
+// this command earns its keep, so the empty case has to fail loudly and leave
+// whatever was there alone.
+func TestConfigSetDefaultAgent_RejectsEmptyValueWithoutWriting(t *testing.T) {
+	for _, arg := range []string{"", "   ", "\t\n"} {
+		t.Run("arg="+strconv.Quote(arg), func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			path, err := config.GlobalConfigPath()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Seed a real setting, so a write of the wrong value is visible as
+			// a change rather than only as a file that appeared.
+			if _, err := runConfigDefaultAgent(t, runConfigSetDefaultAgent, []string{"codex"}); err != nil {
+				t.Fatalf("seeding the host config: %v", err)
+			}
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, err = runConfigDefaultAgent(t, runConfigSetDefaultAgent, []string{arg})
+			if err == nil {
+				t.Fatalf("config set default-agent %q succeeded, want a rejection", arg)
+			}
+			// The way out of the setting is a different command, and a reader
+			// who meant to clear it has to be told which one.
+			if !strings.Contains(err.Error(), "niwa config unset default-agent") {
+				t.Errorf("rejection does not name the command that clears the setting: %v", err)
+			}
+
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Fatalf("the rejected argument rewrote %s:\nbefore: %s\nafter:  %s", path, before, after)
+			}
+			loaded, lErr := config.LoadGlobalConfig()
+			if lErr != nil {
+				t.Fatalf("loading the host config back: %v", lErr)
+			}
+			if got := loaded.DefaultAgent(); got != "codex" {
+				t.Fatalf("default_agent = %q after a rejected argument, want the seeded %q", got, "codex")
+			}
+		})
 	}
 }
 

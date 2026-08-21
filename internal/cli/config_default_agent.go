@@ -49,10 +49,22 @@ agent niwa supports, whatever any of these say.`,
 }
 
 func runConfigSetDefaultAgent(cmd *cobra.Command, args []string) error {
+	// An empty argument is not a request for the default. ParseAgent reads ""
+	// as "this source is unset", which is right for the resolver and wrong for
+	// a value a developer typed, and cobra.ExactArgs(1) counts "" as an
+	// argument. Without this check a scripted `niwa config set default-agent
+	// "$AGENT"` with AGENT unset writes a machine-wide claude and reports
+	// success -- and a setup script is exactly where this command is most
+	// useful.
+	raw := strings.TrimSpace(args[0])
+	if raw == "" {
+		return fmt.Errorf("niwa config set default-agent needs an agent name; accepted values are %s. To clear the setting, run: niwa config unset default-agent", acceptedAgentNames())
+	}
+
 	// Validate before touching the file, at the same boundary every other
 	// source goes through, so a typo fails here rather than at the next
 	// dispatch with the config already written.
-	chosen, err := agent.ParseAgent(strings.TrimSpace(args[0]))
+	chosen, err := agent.ParseAgent(raw)
 	if err != nil {
 		return err
 	}
