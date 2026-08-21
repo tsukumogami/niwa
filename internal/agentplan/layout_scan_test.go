@@ -20,38 +20,33 @@ import (
 // mention in a comment is not a violation and a mention in code cannot hide
 // behind formatting.
 
-// contextWritersPendingConversion gates the filename half of the workspace scan
-// while the eight context-writer sites still name their targets inline:
+// The filename half of the workspace scan ran behind a conversion window until
+// this change. While the eight context-writer sites still named their targets
+// inline -- three in content.go, one in worktree_content.go, three in
+// workspace_context.go, and the dead rootClaudeFile constant in
+// root_materializer.go -- a literal in one of those four files was skipped
+// rather than failed, and a literal anywhere else failed immediately.
 //
-//	internal/workspace/content.go            (three sites)
-//	internal/workspace/worktree_content.go   (one site)
-//	internal/workspace/workspace_context.go  (three sites)
-//	internal/workspace/root_materializer.go  (the dead rootClaudeFile constant)
+// The window was built to close itself: the skip was reached only while a known
+// site remained, so converting the writers made the scan green without anyone
+// flipping a flag. What happened instead is that the conversion landed in the
+// same change as the scan, so the skip was never reached at all and the window
+// was closed before it was committed.
 //
-// Those sites are red on purpose. A scan that has never failed is a scan nobody
-// has shown to work, and this one is the answer to a prior attempt whose
-// structure compiled cleanly while doing the wrong thing. Issue 5 converts the
-// context writers to plan producers and deletes the dead constant, issue 6
-// finishes the conversion window, and the scan goes green on its own -- the
-// skip below is reached only while a known site remains, so no one has to
-// remember to flip anything.
+// That leaves it as something other than a pending conversion. It is an
+// exemption, and the four files it exempts are the context writers -- the ones
+// a change would reintroduce a filename literal into. A literal in any of them
+// skips; the same literal anywhere else in the package fails. So the half of
+// this scan that guards filenames has never been enforced on the code most
+// likely to break it. Deleting the window is what starts enforcing it, and the
+// list is deleted rather than emptied because a named exemption is an
+// invitation to add a fifth entry to it.
 //
-// Set this to false to see the red: the known sites become a failure naming
-// each one. Deleting the constant, and the branch it guards, is issue 5's to
-// do once the sites are gone. A filename literal appearing in any other file is
-// a failure now, not a skip.
-const contextWritersPendingConversion = true
-
-// knownRedContextWriters names the files whose filename literals are expected
-// until the conversion lands. Membership is by file rather than by line, so an
-// unrelated edit that shifts a line does not turn the window into a false
-// failure -- while a literal in a fifth file still fails immediately.
-var knownRedContextWriters = map[string]bool{
-	"content.go":           true,
-	"worktree_content.go":  true,
-	"workspace_context.go": true,
-	"root_materializer.go": true,
-}
+// The window was also meant to prove the detector fires, by sitting red over
+// eight real violations. It never got to. TestContextFilenameScanReportsALiteral
+// supplies that instead, running the same detector over source written to break
+// the rule. To see the real scan red, name one of the filenames below in any
+// non-test file in internal/workspace; the failure reports the file and line.
 
 // agentContextFilenames is the set of agent context filenames no code in
 // internal/workspace may name. Each one is a filename only one agent reads, so
@@ -158,9 +153,46 @@ func parsePackageFiles(t *testing.T, dir string) []parsedFile {
 	return out
 }
 
+// parseSource parses one in-memory file under the given base name. It is what
+// lets the detector below be exercised against source that is not in the tree,
+// so the scan can be shown to fail without a file in internal/workspace that
+// breaks the rule it enforces.
+func parseSource(t *testing.T, name, src string) parsedFile {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", name, err)
+	}
+	return parsedFile{name: name, fset: fset, file: f}
+}
+
 // position renders a node's line within its file.
 func (p parsedFile) line(n ast.Node) int {
 	return p.fset.Position(n.Pos()).Line
+}
+
+// contextFilenameViolations reports every string literal in files whose value is
+// one of the agent context filenames. It is separate from the test that calls it
+// over internal/workspace so the same detector can be run over source written to
+// break the rule -- see TestContextFilenameScanReportsALiteral.
+func contextFilenameViolations(files []parsedFile) []violation {
+	var found []violation
+	for _, pf := range files {
+		ast.Inspect(pf.file, func(n ast.Node) bool {
+			lit, ok := n.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			value, err := strconv.Unquote(lit.Value)
+			if err != nil || !slices.Contains(agentContextFilenames, value) {
+				return true
+			}
+			found = append(found, violation{pf.name, pf.line(n), "names " + value})
+			return true
+		})
+	}
+	return found
 }
 
 // selectorName returns the "pkg.Name" form of a selector on a plain package
@@ -201,43 +233,60 @@ func TestWorkspaceNamesNoAgentConstant(t *testing.T) {
 }
 
 // TestWorkspaceNamesNoAgentContextFilename asserts no code in the workspace
-// package names a file only one agent reads. See contextWritersPendingConversion
-// for why this is expected to skip until the context writers are converted.
+// package names a file only one agent reads. The filename belongs to the
+// agent's producer in internal/agentplan; a writer that names one has taken a
+// delivery decision where the declaration table cannot review it.
 func TestWorkspaceNamesNoAgentContextFilename(t *testing.T) {
-	var found []violation
-	for _, pf := range parsePackageFiles(t, workspaceDir) {
-		ast.Inspect(pf.file, func(n ast.Node) bool {
-			lit, ok := n.(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				return true
-			}
-			value, err := strconv.Unquote(lit.Value)
-			if err != nil || !slices.Contains(agentContextFilenames, value) {
-				return true
-			}
-			found = append(found, violation{pf.name, pf.line(n), "names " + value})
-			return true
-		})
+	found := contextFilenameViolations(parsePackageFiles(t, workspaceDir))
+	if len(found) > 0 {
+		t.Fatalf("internal/workspace names an agent context filename at %d site(s); the filename belongs to the agent's producer, not to the writer:\n%s", len(found), render(found))
 	}
+}
 
-	var known, unexpected []violation
+// TestContextFilenameScanReportsALiteral runs the same detector the scan above
+// runs, over source written to break the rule, and asserts it reports every
+// forbidden name at the line that names it.
+//
+// This is what the conversion window used to provide. While four files were
+// legitimately red, every run exercised the detector against real violations;
+// now that the tree is clean, the scan is green and would stay green if it
+// stopped detecting anything at all. The synthetic file keeps the demonstration
+// without keeping an exemption.
+//
+// The negative half matters as much as the positive one. The scan reads code
+// rather than text on purpose -- internal/workspace names these files in several
+// comments that are documentation, not behavior -- so a detector that flagged a
+// comment would be reported as a violation the writer cannot fix.
+func TestContextFilenameScanReportsALiteral(t *testing.T) {
+	const src = `package workspace
+
+// This comment names CLAUDE.md and AGENTS.md and is not a violation.
+const claudeRoot = "CLAUDE.md"
+
+func paths() []string {
+	return []string{"CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", "workspace-context.md"}
+}
+`
+	found := contextFilenameViolations([]parsedFile{parseSource(t, "writer.go", src)})
+
+	got := make(map[string]int, len(found))
 	for _, v := range found {
-		if knownRedContextWriters[v.file] {
-			known = append(known, v)
-		} else {
-			unexpected = append(unexpected, v)
+		got[v.detail] = v.line
+	}
+	want := map[string]int{
+		"names CLAUDE.md":          4,
+		"names CLAUDE.local.md":    7,
+		"names AGENTS.md":          7,
+		"names AGENTS.override.md": 7,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("scan reported %d violation(s), want %d:\n%s", len(got), len(want), render(found))
+	}
+	for detail, line := range want {
+		if got[detail] != line {
+			t.Fatalf("scan reported %q at line %d, want line %d:\n%s", detail, got[detail], line, render(found))
 		}
 	}
-	if len(unexpected) > 0 {
-		t.Fatalf("internal/workspace names an agent context filename at %d new site(s), outside the sites issue 5 converts:\n%s", len(unexpected), render(unexpected))
-	}
-	if len(known) == 0 {
-		return
-	}
-	if !contextWritersPendingConversion {
-		t.Fatalf("internal/workspace names an agent context filename at %d site(s); the filename belongs to the agent's producer, not to the writer:\n%s", len(known), render(known))
-	}
-	t.Skipf("expected red until issue 5 converts the context writers and issue 6 closes the window: %d site(s) still name an agent context filename:\n%s", len(known), render(known))
 }
 
 // TestLeafNeverWrites asserts internal/agentplan declares writes without
