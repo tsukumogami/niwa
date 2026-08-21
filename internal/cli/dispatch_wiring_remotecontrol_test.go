@@ -7,8 +7,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/tsukumogami/niwa/internal/agentplan"
 )
 
 // setHostConfig points XDG_CONFIG_HOME at a temp dir and, when body != "",
@@ -57,9 +55,9 @@ func provisionWithInstanceSettings(t *testing.T, f *dispatchFakes, settingsBody 
 
 // captureLaunchPassthrough overrides the launch seam to record the passthrough argv.
 func captureLaunchPassthrough(f *dispatchFakes, got *[]string) {
-	dispatchLaunch = func(_ context.Context, _ agentplan.LaunchSpec, _, _, _ string, passthrough []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, req launchRequest) error {
 		f.launchCalled++
-		*got = passthrough
+		*got = req.Passthrough
 		return nil
 	}
 }

@@ -125,7 +125,7 @@ once, outside the `[claude]` cascade.
 - **Option 2A (chosen): workspace-config default + flag/env override.** A new
   `default_agent` field on `WorkspaceMeta` (TOML `[workspace].default_agent`),
   defaulting to empty (= `claude`). A per-session override via a `--agent` flag on
-  the apply/create entry commands and a `NIWA_AGENT` environment variable.
+  the apply/create entry commands and a `NIWA_DISPATCH_HARNESS` environment variable.
   Resolution precedence, computed once by a small `ResolveAgent` function:
   flag > env > `[workspace].default_agent` > `claude`. This mirrors
   `DispatchModel`'s "config default overridden by a per-invocation flag" shape,
@@ -228,7 +228,8 @@ touching one new concept and four existing seams:
   cycle (see Solution Architecture).
 - **Selector storage (Decision 2).** `WorkspaceMeta.DefaultAgent` (TOML
   `[workspace].default_agent`), a plain string validated via `ParseAgent`, as the
-  shared default; `--agent` flag and `NIWA_AGENT` env as the per-session override.
+  shared default; `--agent` flag and `NIWA_DISPATCH_HARNESS` env as the
+  per-session override.
 - **Filename seam (Decision 1, 3).** The agent-aware filename accessors replace
   the `CLAUDE.md` literals at the workspace-root and group write sites; under
   Codex the repository/worktree installers skip. Under Claude every path is
@@ -338,7 +339,8 @@ that can surface an error, unlike `EphemeralSessionMode`'s post-hoc state read.
 kinds of command, and the agent they carry differs by class.
 
 *Workspace-preparation entry points* prepare a workspace the developer will then
-run an agent in, so they carry the **resolved** agent (flag > `NIWA_AGENT` >
+run an agent in, so they carry the **resolved** agent (flag >
+`NIWA_DISPATCH_HARNESS` >
 `default_agent` > claude):
 
 - `niwa apply` and `niwa create` — the primary apply pipeline (`Applier.Apply` /
@@ -360,7 +362,8 @@ worker cannot read. The shared `realProvisionInstance` therefore pins
 `applier.Agent = AgentClaude` for all three. Because a codex-default workspace
 launching a Claude worker is a mismatch a developer should see rather than have
 silently downgraded, **`niwa dispatch` refuses** when the resolved agent is not
-Claude, naming `NIWA_AGENT=claude` as the escape hatch (its own `--agent` flag is
+Claude, naming `NIWA_DISPATCH_HARNESS=claude` as the escape hatch (its own
+`--agent` flag is
 Claude's subagent passthrough, a different concept). A Codex `SessionStart` hook
 and Codex background dispatch are later features that will carry a Codex agent
 through these paths.
@@ -433,7 +436,8 @@ atomic issues:
    filename mapping. Pure and dependency-free (imports nothing else in the tree);
    lands first.
 2. **Selector config + CLI surface.** Add `WorkspaceMeta.DefaultAgent`, the
-   `--agent` flag on the apply/create commands, and `NIWA_AGENT` env reading;
+   `--agent` flag on the apply/create commands, and `NIWA_DISPATCH_HARNESS`
+   env reading;
    wire `ResolveAgent` at the entry points. Unknown-agent errors surface here.
    Tests: config decode, precedence end-to-end, error on unknown value.
 3. **Filename seam at the niwa-owned levels.** Thread `Agent` onto
@@ -453,7 +457,8 @@ atomic issues:
    Pin the shared `realProvisionInstance` (the Claude `SessionStart` hook,
    `niwa dispatch`, `niwa watch`) to `AgentClaude`, since all three launch a
    Claude worker. Make `niwa dispatch` resolve the workspace agent and refuse when
-   it is not Claude, naming `NIWA_AGENT=claude` as the escape hatch. Cover with a
+   it is not Claude, naming `NIWA_DISPATCH_HARNESS=claude` as the escape
+   hatch. Cover with a
    `@critical` functional scenario (dispatch refuses in a codex-default
    workspace).
 5. **`OPENAI_API_KEY` binding.** Add the scaffold example and a config round-trip
@@ -476,7 +481,8 @@ path.
 
 - **Agent value is a closed set, validated at a single boundary, from three
   sources.** The agent string reaches the system from three inputs — the `--agent`
-  flag, the `NIWA_AGENT` environment variable, and the `[workspace].default_agent`
+  flag, the `NIWA_DISPATCH_HARNESS` environment variable, and the
+  `[workspace].default_agent`
   config field — and every one is forced through `ResolveAgent` → `ParseAgent`,
   which rejects anything outside `{claude, codex}`, before any filename is chosen.
   The config source is the most untrusted of the three: a `workspace.toml` cloned

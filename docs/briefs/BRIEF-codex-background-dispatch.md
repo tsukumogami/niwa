@@ -34,6 +34,11 @@ numbered requirements; the design owns the per-agent launch description,
 how a launch-routed capability binds, and the mechanics of each enforcing
 test.
 
+It describes the tree as it stood when the work was framed, and it is not
+maintained as the branches land -- the present tense here is the state
+the framing argues against, not the state after it. The design and the
+code are the current record.
+
 ## Problem Statement
 
 The code states the problem in two places. `internal/cli/dispatch.go`
@@ -76,9 +81,21 @@ worker the way a Claude-default workspace always could: `niwa dispatch
 "<task>"`, a fresh instance, a worker that starts and does the work, a
 printed session id, and a way back into the session afterward. `niwa list`
 shows the session; finishing or resuming it behaves the same regardless of
-which agent is behind it. No new flag appears -- the agent is the one the
-workspace already resolved from `NIWA_AGENT` and `default_agent`, the same
-convention every other niwa surface uses.
+which agent is behind it. The agent is whichever one the workspace already
+resolves, so a developer who has set one names nothing on the command
+line.
+
+*Amended in the second round.* This paragraph originally ended "No new
+flag appears", and that was the position the work started from: the agent
+resolves from the environment variable and `default_agent`, so no new
+surface was needed. It shipped the opposite -- `--harness`, and `niwa
+config set default-dispatch-harness` behind it -- because resolution
+existing turned out not to be the same as selection being reachable. The
+sentence is corrected here rather than left standing under the
+not-maintained note, which covers descriptions of the tree at authoring
+time and not an outcome that is now the reverse of what was delivered. PRD
+R1 carries the full reversal and preserves the original requirement
+underneath it.
 
 Where a Codex dispatch genuinely differs -- keep-alive doesn't exist for
 it, and a Codex-dispatched instance isn't reclaimed automatically the way a
@@ -101,7 +118,24 @@ was built to prevent.
 
 ## User Journeys
 
-### Dispatching from a codex-default workspace
+### Deciding that this workspace's workers are Codex
+
+A developer has a workspace prepared, as every workspace is, for both
+agents. They want its background workers to be Codex. They find out that
+this is a choice they get to make, and where to make it, without reading
+source: the command that launches workers says so, the guide says so, and
+the setting has a documented home that survives the next `niwa apply`.
+Having made it, they can tell which agent a dispatch will launch before
+they run one. Nothing they do here changes what a workspace is prepared
+with -- both agents stay ready, and the choice is only about who gets
+launched.
+
+This journey is the one the first pass through this brief left out, and
+leaving it out is what made the rest of the feature unreachable. A
+capability whose entry point is an undocumented environment variable is
+not delivered; it is present.
+
+### Dispatching from a workspace whose workers are Codex
 
 A developer's workspace sets `default_agent = "codex"`. They run
 `niwa dispatch "fix the flaky retry test" --detach` from the workspace
@@ -111,6 +145,22 @@ captures the worker's session id, writes the durable session mapping, and
 prints the id with resume hints. The developer comes back an hour later and
 steps into the session to see what happened. At no point did they name an
 agent on the command line.
+
+### Watching the work, when that is what you asked for
+
+A developer runs `niwa dispatch "<task>"` without `--detach`, which is the
+way you say "I want to be in this". The worker's turn runs in their
+terminal and they watch it happen -- the same thing `--detach` exists to
+opt out of. When it finishes they are back at the shell with the session
+id and the command to continue the conversation.
+
+The first round did not deliver this for Codex and delivered something
+that reads like a bug instead: the worker was detached whatever the
+developer asked for, and dispatch then explained that it could not put
+them into the session. Both halves were true. Together they describe a
+command that ignores its own flag and then apologizes. `--detach` should
+decide how the worker is run, not merely whether a step happens after it
+is already too late.
 
 ### The second dispatch doesn't eat the first
 
@@ -152,6 +202,29 @@ work rather than pretending the gap isn't there.
 - Declaring the reclamation gap: a Codex-dispatched instance is safe from
   the reaper and consequently not auto-reclaimed. Declared, published, and
   its closure named as the next feature's work.
+- **Selecting which agent a workspace's background workers are, as a
+  surface a developer can find, set, and verify.** Added in the second
+  round of this chain. The first round put this out of scope on the
+  argument that the environment variable and `default_agent` already
+  resolved the agent, so no new user-facing surface was needed. That was
+  wrong in a way that only shows up from outside: resolution existing is
+  not the same as selection being reachable. What lands here is the entry
+  point rather than a new resolution rule -- the precedence order is unchanged, and
+  nothing here alters what `niwa apply` prepares.
+- **`--detach` deciding the process model rather than a later step.**
+  Third round. Without it, an agent whose runner is a foreground process
+  runs in the developer's terminal and they watch the turn; with it, the
+  worker is detached as today. What made this necessary is that the
+  process model was a property of the *agent* and the flag was a property
+  of the *invocation*, so the two could not meet: Codex was detached
+  unconditionally and then found to be un-attachable, which is a problem
+  this feature created rather than one it inherited from Codex.
+- **The documentation of that surface, and of the costs this feature
+  declares.** Also second-round. A cost declared only in a design document
+  is not declared to the person who pays it, and a setting whose only
+  written home is a commented-out line in a generated file is not
+  documented. What the reviewers judge necessary is what this covers; the
+  PRD carries the list.
 
 **Out (each item named as deferred, not absorbed):**
 
@@ -210,6 +283,24 @@ Folding them together produces a diff where neither argument can be made,
 which is how the prior attempt became unreviewable. If PR 2 grows beyond
 one reviewable change, it splits by surface -- launch, then capture and
 liveness, then resume -- never into "the plumbing" and "the behavior."
+
+**This commitment was not kept, and saying so here is the point of having
+made it.** PR 2 grew to 27 commits across five increments -- the Codex
+delivery, the selection surface, three defects review found, the
+process-model amendment, and a folded-in spike -- and did not split. It
+was reviewed at ten commits and roughly 1,400 added lines; it is several
+times that now. The direct cause was an instruction to collapse the stack
+so one merge would finish the work, which is a legitimate call and not
+one this brief anticipated. The cost is the one this paragraph predicted:
+a reviewer who read the first version has to re-enter a much larger diff,
+and the argument for each increment is harder to make in isolation than
+it would have been in its own pull request.
+
+What limited the damage was not the split but the review that replaced
+it: the delta is grouped by concern rather than chronologically, and each
+group names what it is weakest at. That is a worse instrument than a
+split and better than nothing, and it is worth writing down which one
+actually happened.
 
 ## Open Questions
 

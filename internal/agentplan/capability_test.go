@@ -107,10 +107,9 @@ func TestLookupAnswersEachDeclaredPair(t *testing.T) {
 }
 
 // codexFinalGaps is the Codex column at its target, unavailable half: the
-// thirteen rows that stay unavailable once every Codex delivery has landed,
-// each with the reason kind the PRD's matrix gives it. Eleven are inherent to
-// the agent; the last two name a route that exists and is out of this work's
-// scope.
+// twelve rows that stay unavailable once every Codex delivery has landed, each
+// with the reason kind the PRD's matrix gives it. Eleven are inherent to the
+// agent; the last names a route that exists and is out of this work's scope.
 //
 // Writing them out here is what makes an accidental flip fail with a name in
 // the message. A row missing from this map is one whose delivery is still
@@ -129,11 +128,10 @@ var codexFinalGaps = map[Capability]ReasonKind{
 	NiwaPlugin:              ReasonNotBuilt,
 	RemoteControl:           ReasonNoSuchConcept,
 	DispatchKeepAlive:       ReasonNoSuchConcept,
-	DispatchLaunch:          ReasonNotBuilt,
 }
 
 // codexDelivered is what niwa delivers to Codex today, and with this work
-// complete it is also the column's target: eleven rows against the thirteen in
+// complete it is also the column's target: twelve rows against the twelve in
 // codexFinalGaps. Directory trust is the first, and deliberately so -- every
 // trust-gated row downstream names it in Requires, and the closure test refuses
 // such an edge while it is unavailable. The list grew one entry per delivery,
@@ -155,6 +153,7 @@ var codexDelivered = []Capability{
 	GitExcludeBookkeeping,
 	DotenvFiles,
 	FileDistribution,
+	DispatchLaunch,
 }
 
 // TestCodexColumnTotals pins the shape of the finished column as a pair of
@@ -164,7 +163,7 @@ var codexDelivered = []Capability{
 // per-row check by moving a name from one list to the other -- still has to
 // face a number somebody wrote down on purpose.
 func TestCodexColumnTotals(t *testing.T) {
-	const wantImplemented, wantUnavailable = 11, 13
+	const wantImplemented, wantUnavailable = 12, 12
 
 	implemented, unavailable := 0, 0
 	for _, c := range All() {

@@ -62,6 +62,19 @@ type SessionMapping struct {
 	// existed describes a Claude session, because that is the only kind niwa
 	// wrote one for.
 	Agent string `json:"agent,omitempty"`
+	// Handle is the string the agent's own verbs accept for this session,
+	// which is not always the session id: one agent's management verbs reject
+	// the full UUID and take the name of the record directory instead. The
+	// dispatch path learns both when it captures the session and records the
+	// handle here, because a reader that has only the id cannot derive it --
+	// and a resume command built from the wrong one fails at the binary.
+	//
+	// omitempty, and an absent value means the mapping predates this field or
+	// was written by a path that never learned a handle. A reader then falls
+	// back to the session id ONLY for an agent whose declaration says the id
+	// is the handle, and otherwise offers nothing rather than a command that
+	// would not work.
+	Handle string `json:"handle,omitempty"`
 	// Label is an optional human-friendly alias derived later from the
 	// session topic. It is metadata only and is never used to rename the
 	// on-disk instance directory. omitempty keeps it absent when unset.
@@ -81,10 +94,18 @@ type SessionMapping struct {
 	KeepAlive bool `json:"keep_alive,omitempty"`
 }
 
+// sessionsDirName is the directory under the config dir that holds the session
+// mapping store. It is a named constant because two places must agree on it:
+// this store, which writes it, and the snapshot writer, which has to carry it
+// across the swap that replaces the config dir wholesale (preserveSessionMappings).
+// A literal in both would let them drift apart silently, and the way that shows
+// up is every dispatch handle in the workspace disappearing on the next refresh.
+const sessionsDirName = "sessions"
+
 // sessionsDir returns the workspace-root session mapping directory,
 // .niwa/sessions, under workspaceRoot.
 func sessionsDir(workspaceRoot string) string {
-	return filepath.Join(workspaceRoot, StateDir, "sessions")
+	return filepath.Join(workspaceRoot, StateDir, sessionsDirName)
 }
 
 // sessionMappingPath returns the on-disk path for a session mapping after

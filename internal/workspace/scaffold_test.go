@@ -94,6 +94,70 @@ func TestScaffold_EmptyName(t *testing.T) {
 	}
 }
 
+// TestScaffold_DefaultAgentCommentNamesEveryRung keeps the template honest
+// about a ladder that has grown. The comment described two rungs -- the key
+// itself and NIWA_DISPATCH_HARNESS -- while the resolution has four, so the reader most
+// likely to be sitting in this file was told nothing about the flag that
+// overrides it for one command or the personal setting that fills in when the
+// key is absent.
+func TestScaffold_DefaultAgentCommentNamesEveryRung(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := Scaffold(dir, "rungs"); err != nil {
+		t.Fatalf("Scaffold returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, StateDir, WorkspaceConfigFile))
+	if err != nil {
+		t.Fatalf("workspace.toml not created: %v", err)
+	}
+	content := string(data)
+
+	// Scoped to the comment block, not the whole file. A file-wide substring
+	// scan passes if the four tokens appear anywhere -- and two of them appear
+	// on their own already, since the template carries a commented
+	// `# default_agent = "codex"` line. Deleting the entire explanation and
+	// scattering the tokens elsewhere would satisfy a whole-file check, which
+	// is the opposite of what this test is named for.
+	comment := defaultAgentCommentBlock(content)
+	if comment == "" {
+		t.Fatalf("no default_agent comment block in the scaffolded config:\n%s", content)
+	}
+
+	for _, rung := range []string{"--harness", "NIWA_DISPATCH_HARNESS", "[workspace].default_agent", "[global].default_dispatch_harness"} {
+		if !strings.Contains(comment, rung) {
+			t.Errorf("the default_agent comment does not name the %s rung of the resolution:\n%s", rung, comment)
+		}
+	}
+}
+
+// defaultAgentCommentBlock returns the run of consecutive comment lines that
+// explains default_agent, or "" when there is none. It is the contiguous block
+// of `#` lines ending at the commented `default_agent =` example, which is how
+// the template is written.
+func defaultAgentCommentBlock(content string) string {
+	lines := strings.Split(content, "\n")
+	end := -1
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "# default_agent =") {
+			end = i
+			break
+		}
+	}
+	if end < 0 {
+		return ""
+	}
+	start := end
+	for start > 0 {
+		prev := strings.TrimSpace(lines[start-1])
+		if !strings.HasPrefix(prev, "#") {
+			break
+		}
+		start--
+	}
+	return strings.Join(lines[start:end+1], "\n")
+}
+
 func TestScaffold_ValidTOMLWhenStripped(t *testing.T) {
 	dir := t.TempDir()
 

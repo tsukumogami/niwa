@@ -98,6 +98,36 @@ Feature: workspace config sources (snapshot model)
     # The brief must survive the refresh so the dispatched worker can read it.
     And the dispatch brief "probe.md" still exists in the workspace root
 
+  # A dispatched session's mapping lives in that same config dir, at
+  # <workspaceRoot>/.niwa/sessions/<id>.json, and the swap took it too. It is
+  # the only record of which instance a session became: losing it strands a
+  # running worker behind a handle nothing can name any more and leaves the
+  # reaper with no join between an instance and the session that owns it.
+
+  @critical
+  Scenario: niwa apply preserves a dispatched session's mapping across a config-snapshot refresh
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "mapws" exists with body:
+      """
+      [workspace]
+      name = "mapws"
+      """
+    When I run niwa init from config repo "mapws"
+    Then the exit code is 0
+    And the provenance marker exists
+    Given a fake codex for dispatch with session "01a40000-0000-7000-8000-00000000d1ce"
+    When I run "niwa dispatch some-task --detach --harness codex" from the workspace root
+    Then the exit code is 0
+    And a dispatch-origin mapping exists for session "01a40000-0000-7000-8000-00000000d1ce"
+    When I run "niwa apply mapws"
+    Then the exit code is 0
+    And a dispatch-origin mapping exists for session "01a40000-0000-7000-8000-00000000d1ce"
+    # And the session is still reachable, which is what the mapping is for.
+    When I run "niwa list" from the workspace root
+    Then the exit code is 0
+    And the output contains "codex resume 01a40000-0000-7000-8000-00000000d1ce"
+
   # --- issue #214: upstream config changes take effect on the SAME apply ---
   # The reconcile that refreshes the workspace-root .niwa/ snapshot from the
   # source must run BEFORE the config drives materialization, and the swapped

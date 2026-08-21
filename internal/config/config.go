@@ -326,8 +326,10 @@ type WorkspaceMeta struct {
 	DefaultBranch string `toml:"default_branch,omitempty"`
 	ContentDir    string `toml:"content_dir,omitempty"`
 	SetupDir      string `toml:"setup_dir,omitempty"`
-	// DefaultAgent is the workspace-default coding agent niwa prepares the
-	// workspace for (e.g. "claude" or "codex"). It is a session-global
+	// DefaultAgent names the coding agent a niwa-launched session runs as
+	// (e.g. "claude" or "codex"). It does not affect what apply prepares:
+	// every apply prepares the workspace for every agent niwa supports, so
+	// changing this value needs no re-apply. It is a session-global
 	// discriminator, not a per-repo mergeable value, so it lives here on the
 	// workspace metadata rather than in the [claude] override cascade. It is
 	// stored as a raw string (validated at resolution time by

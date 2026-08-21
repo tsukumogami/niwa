@@ -16,6 +16,7 @@ package agent
 import (
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // Agent identifies the coding agent a workspace is prepared for.
@@ -41,9 +42,21 @@ var known = []Agent{AgentClaude, AgentCodex}
 // caller that iterates it.
 func All() []Agent { return slices.Clone(known) }
 
+// acceptedValues renders the accepted set for the parse error, comma-joined in
+// declaration order. It reads the same list All() serves rather than spelling
+// the names out again, so adding a third agent updates the message a developer
+// reads instead of leaving the last hardcoded copy of the set quietly wrong.
+func acceptedValues() string {
+	names := make([]string, 0, len(known))
+	for _, a := range known {
+		names = append(names, string(a))
+	}
+	return strings.Join(names, ", ")
+}
+
 // ParseAgent validates s against the accepted set and returns the matching
 // Agent. An empty string resolves to AgentClaude (the default). Any value
-// outside {"claude", "codex"} returns an error naming the accepted set.
+// outside the accepted set returns an error naming that set.
 func ParseAgent(s string) (Agent, error) {
 	switch Agent(s) {
 	case "", AgentClaude:
@@ -51,7 +64,7 @@ func ParseAgent(s string) (Agent, error) {
 	case AgentCodex:
 		return AgentCodex, nil
 	default:
-		return "", fmt.Errorf("unknown agent %q; accepted values are: claude, codex", s)
+		return "", fmt.Errorf("unknown agent %q; accepted values are: %s", s, acceptedValues())
 	}
 }
 
@@ -92,12 +105,21 @@ func (a Agent) LocalContextFileName() string {
 	return "CLAUDE.local.md"
 }
 
-// ResolveAgent computes the session agent from its three sources, once, in
-// precedence order: flag > env > workspaceDefault > claude. Each argument is a
-// raw string (empty means "not set" for that source); the chosen value is
-// validated via ParseAgent, so an invalid value from any source returns an
-// error naming the accepted set.
-func ResolveAgent(flag, env, workspaceDefault string) (Agent, error) {
+// ResolveAgent computes the session agent from its four sources, once, in
+// precedence order: flag > env > workspaceDefault > hostDefault > claude. Each
+// argument is a raw string (empty means "not set" for that source); the chosen
+// value is validated via ParseAgent, so an invalid value from any source
+// returns an error naming the accepted set.
+//
+// hostDefault is the broadest rung: the developer's own machine-wide default,
+// read from their personal niwa config rather than from anything a workspace
+// ships. It sits BELOW workspaceDefault deliberately. A workspace that states
+// an agent is stating it for everyone who works in it, and the same ordering
+// already governs niwa's other host-level dispatch defaults, where a downstream
+// setting outranks the personal one. A developer who wants the other agent for
+// one shell or one command reaches for env or flag, which both outrank the
+// workspace.
+func ResolveAgent(flag, env, workspaceDefault, hostDefault string) (Agent, error) {
 	switch {
 	case flag != "":
 		return ParseAgent(flag)
@@ -105,6 +127,8 @@ func ResolveAgent(flag, env, workspaceDefault string) (Agent, error) {
 		return ParseAgent(env)
 	case workspaceDefault != "":
 		return ParseAgent(workspaceDefault)
+	case hostDefault != "":
+		return ParseAgent(hostDefault)
 	default:
 		return AgentClaude, nil
 	}

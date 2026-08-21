@@ -456,6 +456,16 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 		return rank, fmt.Errorf("EnsureConfigSnapshot: preserve dispatch briefs: %w", err)
 	}
 
+	// Preserve sessions/ for the same reason as the two above: the session
+	// mapping store is niwa-written local state under the config dir. Losing it
+	// costs more than losing a brief, because a mapping is the only record of
+	// which instance a dispatched session became -- so the swap would take the
+	// resume handle with it and leave the reaper's mapped sweep with no join.
+	if err := preserveSessionMappings(configDir, staging); err != nil {
+		_ = safeRemoveAll(staging)
+		return rank, fmt.Errorf("EnsureConfigSnapshot: preserve session mappings: %w", err)
+	}
+
 	if err := SwapSnapshotAtomic(configDir, staging); err != nil {
 		_ = safeRemoveAll(staging)
 		return rank, fmt.Errorf("EnsureConfigSnapshot: %w", err)
@@ -519,6 +529,54 @@ func preserveDispatchBriefs(configDir, staging string) error {
 	dst := filepath.Join(staging, dispatchBriefsDirName)
 	if err := copySubtree(src, dst); err != nil {
 		return fmt.Errorf("copy %s: %w", src, err)
+	}
+	return nil
+}
+
+// preserveSessionMappings copies <configDir>/sessions/ into staging when it
+// exists, so the atomic swap doesn't clobber the session mapping store. It is
+// the third member of the carry-over set and follows preserveDispatchBriefs
+// exactly, down to leaving a non-directory at the path alone.
+//
+// What it protects is the only durable record of a dispatched session: which
+// instance it became, which agent launched it, and whether keep-alive was
+// armed. `niwa dispatch` prints the handle once and writes the mapping here;
+// after that the mapping is what `niwa list` and the reaper's mapped sweep
+// read. A refresh that dropped it would leave a running worker with no way
+// back into it and an instance the reaper can no longer join to a session.
+//
+// The trigger is not rare. For a non-GitHub config source the swap fires on
+// every reconcile; for a GitHub one it fires whenever upstream has moved, so a
+// teammate pushing to the shared config repo is enough.
+//
+// No-op when the directory is absent, which is every workspace that has never
+// dispatched and never run an ephemeral session.
+func preserveSessionMappings(configDir, staging string) error {
+	src := filepath.Join(configDir, sessionsDirName)
+	info, err := os.Stat(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat %s: %w", src, err)
+	}
+	if !info.IsDir() {
+		return nil
+	}
+	dst := filepath.Join(staging, sessionsDirName)
+	if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dst, err)
+	}
+	if err := copySubtree(src, dst); err != nil {
+		return fmt.Errorf("copy %s: %w", src, err)
+	}
+	// The store's own writer creates this directory 0700 and its files 0600,
+	// while copySubtree creates directories 0755 and MkdirAll is subject to the
+	// umask. A carry-over must not quietly widen what the store asked for, so
+	// the mode is set explicitly. The files keep their own modes through the
+	// copy.
+	if err := os.Chmod(dst, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("chmod %s: %w", dst, err)
 	}
 	return nil
 }

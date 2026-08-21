@@ -39,6 +39,14 @@ sequenced pull requests. The downstream design owns the shape of the
 per-agent launch description, the mechanics of the launch-route binding,
 the structural scan's construction, and the resume handle's type.
 
+Every present-tense description of the tree below -- "refuses", "pins
+the refusal", "today's correct behavior", and the file:line citations
+that go with them -- is the tree as it stood when these requirements
+were written, which is what the requirements are stated against. It is
+not maintained as the branches land, and after PR 2 most of it is
+deliberately no longer true. For the current shape of the code, read the
+design and the code; for what was asked for and why, read this.
+
 ## Problem Statement
 
 `internal/cli/dispatch.go` refuses, at its step (2b), any workspace whose
@@ -120,17 +128,80 @@ hardcoded pass the capability contract exists to prevent.
 
 ### Selection and the gate
 
-- **R1. No new selection flag.** The agent a dispatch launches is resolved
-  exactly as every other niwa surface resolves it: `NIWA_AGENT`, then the
-  workspace `default_agent`, through the existing resolution call with an
-  empty flag argument. `niwa dispatch --agent` keeps its current meaning
-  -- Claude's subagent-type passthrough, forwarded to the worker -- and
-  never participates in niwa-agent resolution. No `--agent-type` or any
-  other selector is added; a planning document elsewhere used that
-  spelling, and it corresponds to nothing in the code. Acceptance: a test
-  fails if dispatch's flag set gains an agent selector, or if a dispatch
-  in a codex-default workspace with `--agent <subagent>` set resolves to
-  anything but Codex.
+- **R1. Selecting the launched agent is a reachable surface.** *Rewritten in
+  the second round; the original requirement is preserved below because
+  what it got wrong is the useful part.*
+
+  A developer can choose which agent a dispatch launches, and can do it
+  three ways matching three lifetimes: per dispatch with `--harness`, per
+  shell with `NIWA_DISPATCH_HARNESS`, and durably for the host with `niwa
+  config set default-dispatch-harness`. The three surfaces are one setting
+  and say one word, so a developer who learns any of them can guess the
+  other two. The environment variable's previous name is not read as a
+  fallback, and a dispatch that finds it set says so on stderr, naming the
+  value and the line to change -- a rung the developer believes is set and
+  niwa does not read must not fail silently, and resolution cannot report
+  it, because nothing held a bad value. The full precedence is flag > `NIWA_DISPATCH_HARNESS` >
+  `[workspace].default_agent` > `[global].default_dispatch_harness` >
+  claude, and every rung of it is stated in the command's own help, not
+  only in a guide. Nothing here changes what `niwa apply` prepares: every apply
+  prepares every supported agent, and selection names a launch target.
+
+  The flag is a new name rather than a repointing of `niwa dispatch
+  --agent`. That flag is the subagent-type passthrough -- a role within
+  the launched agent -- and the launch spec's own field is named
+  `SubagentType`, so the codebase already calls the concept by its right
+  name and only the user-facing flag disagrees. Repointing `--agent` would
+  be a silent behavior change for `--agent claude`. Renaming the
+  passthrough to `--subagent-type` with a deprecated alias is the correct
+  eventual fix and is recorded as follow-on, but it cannot deliver
+  `--agent` for selection during its own deprecation window, so selection
+  needs its own name either way.
+
+  Acceptance: a dispatch in a workspace with no stated agent launches the
+  one `niwa config set` recorded; a workspace that states an agent
+  outranks that; `NIWA_DISPATCH_HARNESS` outranks both; the flag outranks
+  all three. A test fails if any rung is unreachable or if the order
+  differs from the one above. `niwa dispatch --agent <subagent>` still
+  resolves the launch target from the other rungs and forwards the subagent
+  type untouched.
+  `niwa create` and `niwa apply` gain no agent flag, and the functional
+  scenario asserting `apply --agent codex` is an unknown flag stands.
+
+  **What the original R1 said, and why it was wrong.** It required that no
+  selection flag be added at all, on the argument that the environment
+  variable and `default_agent` already resolved the agent and a flag would
+  be new
+  user-facing surface for no gain. Every fact in that argument was true and
+  the conclusion did not follow. Resolution existing is not the same as
+  selection being reachable: the resolution call's flag parameter had
+  exactly one caller passing an empty string, `niwa config set` is not a
+  key/value setter and could not write the value, and the environment
+  variable appeared in no committed documentation. The requirement
+  described the code's internals accurately and the developer's position
+  not at all, which is the failure mode a requirement written from inside
+  the implementation is prone to.
+
+- **R1a. The durable home is a file niwa owns, not the materialized
+  snapshot.** `niwa config set default-dispatch-harness` writes
+  `[global].default_dispatch_harness` to `~/.config/niwa/config.toml`,
+  alongside the dispatch-scoped host defaults already there (`dispatch_model`,
+  `remote_control_on_dispatch`, `keep_alive_on_dispatch`). It must not
+  write `<workspace>/.niwa/workspace.toml`: that tree is materialized from
+  a source repo and replaced wholesale on the next reconcile, so a write
+  there produces a setting that works and then silently stops.
+  A matching `niwa config unset` removes it. Acceptance: a test fails if
+  the write target is inside `.niwa/`, and the failure this catches is a
+  setting that survives the command and not the next `niwa apply`.
+
+  Where the value beats a workspace's own `default_agent` is settled the
+  way its neighbours settle it -- the host default is the weaker rung, and
+  a workspace that states an agent keeps saying it. The two sibling
+  settings both document a downstream workspace value outranking the host
+  default, and a third key in the same file with the opposite polarity
+  would make that file's precedence something a reader looks up per key
+  rather than learns once. The personal-machine case is served by
+  `NIWA_DISPATCH_HARNESS` and by the flag.
 - **R2. The gate is a declaration lookup.** Dispatch's agent gate consults
   the `DispatchLaunch` declaration for the resolved agent instead of
   comparing against an agent constant. A declared-implemented agent
@@ -206,6 +277,40 @@ hardcoded pass the capability contract exists to prevent.
   Acceptance: a launcher that leaves stdin open fails a test rather than
   hanging one; merged streams fail; a healthy run with non-empty stderr
   is not reported as an error.
+- **R7a. `--detach` decides the process model, not a step after it.**
+  *Third round.* Whether a worker is detached is a question about the
+  invocation, so the flag that asks it has to reach the decision. Without
+  `--detach`, an agent whose runner executes the turn in the foreground
+  runs it in the developer's terminal, with the worker's own output as
+  the session they asked to be in; with `--detach`, that agent's worker is
+  detached exactly as it is today. An agent whose runner backgrounds its
+  own session is unaffected in either case -- there is nothing to run in
+  the foreground, and the attach step remains what `--detach` skips.
+
+  Three properties from R7 survive the foreground path unchanged and are
+  the ones most likely to be lost by an implementation that reaches for
+  "just inherit stdio": stdin stays `/dev/null` even when stdout and
+  stderr are the terminal, because the blocking read is on stdin
+  specifically and a foreground worker that hangs is worse than a
+  detached one; the prompt stays a single argv element; and exit status
+  still does not mean the task succeeded, so what the foreground run
+  reports at the end is that the turn ended.
+
+  The machine-readable stream flag belongs to the detached path only. It
+  exists so niwa can parse a log nobody is watching; in the foreground the
+  developer is the reader, and giving them a JSON event stream instead of
+  the human output is a regression dressed as consistency. Capture is
+  unaffected either way, because the session id comes from the record on
+  disk rather than from the stream.
+
+  Acceptance: a dispatch without `--detach` in a workspace whose agent
+  runs turns in the foreground does not return until the turn ends, and
+  the developer sees the worker's output as it happens; the same dispatch
+  with `--detach` returns promptly and writes the worker's output to the
+  instance. The failure this catches is the one that shipped: a flag that
+  is read only after the process model has already been chosen without
+  it. A test fails if the launch mode is decided from the agent's
+  declaration alone.
 - **R8. The launch works from an instance root: `--skip-git-repo-check`,
   and nothing written there.** An instance root is not a git repository,
   and the Codex launch will not start in one without
@@ -396,7 +501,7 @@ hardcoded pass the capability contract exists to prevent.
     one fact they are missing.
   - The gate runs even when the workspace config cannot be loaded.
     Previously the whole gate sat inside a successful-config-load
-    branch, so `NIWA_AGENT=codex` with an unreadable config skipped the
+    branch, so `NIWA_DISPATCH_HARNESS=codex` with an unreadable config skipped the
     check and launched Claude anyway; the agent now resolves from the
     environment alone and the refusal fires. A genuine fix riding along,
     named as one rather than found.
@@ -558,7 +663,11 @@ so this feature introduces the gap rather than inheriting it, and it is
 worse than "unoriented": discovery is fixed at session construction and
 keyed to the launch directory, following neither the working directory
 nor an instruction naming a repository, and readable-on-request files are
-a categorically weaker delivery than context. The contract cannot
+a categorically weaker delivery than context. What is lost is niwa's
+delivery rather than the agent's whole surface: the developer's own
+user-level skills and configuration still load, since niwa neither
+delivers nor withholds those, and stating it the looser way would
+overstate a gap that is real enough as it stands. The contract cannot
 currently express this gap -- declarations are per capability and agent,
 two states, scoped by who receives and never by where from -- and no new
 capability row is invented for it (R5 stands). Whether closing it is this

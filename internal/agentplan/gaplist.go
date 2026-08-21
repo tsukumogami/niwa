@@ -74,14 +74,21 @@ var gapSubjects = map[Capability]string{
 	WorkSummaryHooks:        "A written summary of the work a session did",
 	PRBodyHook:              "Filling in a pull request's body from the session",
 	WorktreeHookDelegation:  "Worktree-hook delegation and the deny fallback behind it",
-	EphemeralSessions:       "A dedicated niwa instance provisioned for each dispatched session",
-	RootProjectSkills:       "Instance-root skills such as `/dispatch`",
-	NiwaPlugin:              "niwa's own plugin, which carries the migrate-config skill",
-	RemoteControl:           "Remote control of a session at startup",
-	DispatchKeepAlive:       "Keeping a dispatched background session warm",
-	DispatchLaunch:          "Launching a background worker with `niwa dispatch`",
-	DirectoryTrust:          "The per-directory trust entry that lets an agent read a project-layer configuration niwa wrote",
-	GitExcludeBookkeeping:   "Git-exclude coverage for the files niwa writes into a repository",
+	// The title says "niwa did not launch" because the distinction became load-
+	// bearing once background dispatch reached a second agent. This row is the
+	// session-start hook: a session that starts on its own gets an instance
+	// provisioned for it. `niwa dispatch` provisions its own instance
+	// explicitly, before it launches anything, and does so for every agent it
+	// can launch -- so a title reading "for each dispatched session" would now
+	// tell a developer the opposite of what happens.
+	EphemeralSessions:     "An instance provisioned automatically for a session niwa did not launch",
+	RootProjectSkills:     "Instance-root skills such as `/dispatch`",
+	NiwaPlugin:            "niwa's own plugin, which carries the migrate-config skill",
+	RemoteControl:         "Remote control of a session at startup",
+	DispatchKeepAlive:     "Keeping a dispatched background session warm",
+	DispatchLaunch:        "Launching a background worker with `niwa dispatch`",
+	DirectoryTrust:        "The per-directory trust entry that lets an agent read a project-layer configuration niwa wrote",
+	GitExcludeBookkeeping: "Git-exclude coverage for the files niwa writes into a repository",
 }
 
 // gapGroup is one rendered group: a reason kind, the heading it gets, and the

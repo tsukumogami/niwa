@@ -1,13 +1,16 @@
 package cli
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -214,54 +217,131 @@ func TestReap_LiveIdleEphemeral_Spared(t *testing.T) {
 	}
 }
 
-// TestReap_MappingWithNoLaunchableAgent_Spared is the safety property the
-// mapping's agent field exists for.
+// TestReap_MappingWhoseLivenessCannotBeRead_Spared is the safety property the
+// mapping's agent field exists for, and it is written against the declaration
+// rather than against a named agent so it keeps meaning something as the table
+// changes.
 //
-// The entry-present liveness rule reads one agent's record store. A mapping for
-// an agent niwa launches no background worker for -- or one whose sessions
-// leave no record that distinguishes a live session from a deleted one -- gives
-// that rule no evidence, and the store it does read will always come back
-// empty, which is indistinguishable from "the developer deleted this session".
-// Reclaiming on that would destroy the instance a working session lives in, and
-// it would do it silently.
+// The entry-present rule needs a record that disappears when the developer
+// deletes a session. An agent niwa launches no worker for has no record store
+// at all; an agent whose records are never removed has one that says a session
+// once existed and nothing about whether it still does. Either way the sweep
+// has no evidence, and the store it reads comes back empty -- which is
+// indistinguishable from "the developer deleted this session". Reclaiming on
+// that destroys the instance a working session lives in, silently.
 //
 // The reaper therefore spares anything it cannot prove is gone. Sparing an
 // instance nobody is using costs a directory; the other mistake costs the work
 // in it.
-func TestReap_MappingWithNoLaunchableAgent_Spared(t *testing.T) {
+func TestReap_MappingWhoseLivenessCannotBeRead_Spared(t *testing.T) {
+	for _, ag := range agent.All() {
+		spec, hasSpec := agentplan.For(ag).LaunchSpec()
+		if hasSpec && spec.Records.Liveness == agentplan.LivenessRecordPresence {
+			// This agent's records do answer the question; the sweep is
+			// entitled to act on them, and the tests around this one cover it.
+			continue
+		}
+
+		t.Run(string(ag), func(t *testing.T) {
+			root := setupHookWorkspace(t, true)
+			jobsDir := t.TempDir()
+			now := time.Now()
+
+			inst := makeReapInstance(t, root, "test-ws-unreadable")
+			m := workspace.SessionMapping{
+				SessionID:    reapDeadSessionID,
+				InstanceName: filepath.Base(inst),
+				InstancePath: inst,
+				Ephemeral:    true,
+				Agent:        string(ag),
+			}
+			if err := workspace.WriteSessionMapping(root, m); err != nil {
+				t.Fatal(err)
+			}
+
+			destroyed := stubDestroyAll(t)
+
+			n, err := reapWorkspace(root, jobsDir, now)
+			if err != nil {
+				t.Fatalf("reapWorkspace error: %v", err)
+			}
+			if n != 0 {
+				t.Fatalf("reaped count = %d, want 0 (a session whose liveness cannot be read must never be reclaimed)", n)
+			}
+			if len(*destroyed) != 0 {
+				t.Fatalf("destroyed = %v, want []", *destroyed)
+			}
+			if _, err := workspace.ReadSessionMapping(root, reapDeadSessionID); err != nil {
+				t.Fatalf("the mapping must survive a spared sweep: %v", err)
+			}
+		})
+	}
+}
+
+// TestReap_SparedInstancesAreReported is the visible half of a declared gap.
+//
+// An instance whose liveness cannot be read is spared forever, which means it
+// accumulates. A sweep that spares something and says nothing is
+// indistinguishable from a sweep that found nothing, so the accumulation has no
+// symptom until somebody counts directories. This asserts every spared instance
+// is named, with a reason, and with something to do about it.
+func TestReap_SparedInstancesAreReported(t *testing.T) {
+	unreadable := []agent.Agent{}
+	for _, ag := range agent.All() {
+		if _, spared := livenessUnreadable(string(ag)); spared {
+			unreadable = append(unreadable, ag)
+		}
+	}
+	if len(unreadable) == 0 {
+		t.Skip("every agent's liveness is readable; nothing is spared for this reason")
+	}
+
 	root := setupHookWorkspace(t, true)
 	jobsDir := t.TempDir()
-	now := time.Now()
 
-	inst := makeReapInstance(t, root, "test-ws-otheragent")
-	m := workspace.SessionMapping{
+	inst := makeReapInstance(t, root, "test-ws-spared")
+	if err := workspace.WriteSessionMapping(root, workspace.SessionMapping{
 		SessionID:    reapDeadSessionID,
 		InstanceName: filepath.Base(inst),
 		InstancePath: inst,
 		Ephemeral:    true,
-		// An accepted agent with no launch spec behind it. There is no record
-		// store for the liveness rule to read, and none of the Claude-shaped
-		// evidence below is about this session.
-		Agent: string(agent.AgentCodex),
-	}
-	if err := workspace.WriteSessionMapping(root, m); err != nil {
+		Agent:        string(unreadable[0]),
+	}); err != nil {
 		t.Fatal(err)
 	}
 
-	destroyed := stubDestroyAll(t)
-
-	n, err := reapWorkspace(root, jobsDir, now)
+	_, spared, err := selectReapTargets(root, jobsDir, time.Now())
 	if err != nil {
-		t.Fatalf("reapWorkspace error: %v", err)
+		t.Fatalf("selectReapTargets: %v", err)
 	}
-	if n != 0 {
-		t.Fatalf("reaped count = %d, want 0 (a session whose liveness cannot be read must never be reclaimed)", n)
+	if len(spared) != 1 {
+		t.Fatalf("spared %d instance(s), want 1", len(spared))
 	}
-	if len(*destroyed) != 0 {
-		t.Fatalf("destroyed = %v, want []", *destroyed)
+	// The name rather than the path, because that is what `niwa destroy` takes
+	// and a report you have to translate before you can act on it is a report
+	// that does not get acted on.
+	if spared[0].Name != filepath.Base(inst) {
+		t.Errorf("spared name = %q, want %q", spared[0].Name, filepath.Base(inst))
 	}
-	if _, err := workspace.ReadSessionMapping(root, reapDeadSessionID); err != nil {
-		t.Fatalf("the mapping must survive a spared sweep: %v", err)
+	if spared[0].Reason == "" {
+		t.Error("an instance was spared with no reason; a reader cannot act on that")
+	}
+	if !strings.Contains(spared[0].Reason, string(unreadable[0])) {
+		t.Errorf("the reason %q does not name the agent it is about", spared[0].Reason)
+	}
+}
+
+// TestReap_MalformedAgentIsSparedAndNamed covers the value nothing validates on
+// the way in. A mapping recording an agent this build cannot parse is spared
+// permanently -- an instance leak rather than data loss, which is the right
+// direction -- but silently it would be a leak with no symptom at all.
+func TestReap_MalformedAgentIsSparedAndNamed(t *testing.T) {
+	reason, spared := livenessUnreadable("Claude")
+	if !spared {
+		t.Fatal("a mapping recording an unparseable agent was judged readable")
+	}
+	if !strings.Contains(reason, "Claude") {
+		t.Errorf("the reason %q does not quote the value it could not parse", reason)
 	}
 }
 
@@ -434,7 +514,7 @@ func TestSelectReapTargets_DeterministicSelection(t *testing.T) {
 	mapEphemeral(t, root, reapNonEphSessionID, dev, false)
 	writeJobEntry(t, jobsDir, reapLiveSessionID)
 
-	targets, err := selectReapTargets(root, jobsDir, now)
+	targets, _, err := selectReapTargets(root, jobsDir, now)
 	if err != nil {
 		t.Fatalf("selectReapTargets error: %v", err)
 	}
@@ -451,5 +531,55 @@ func TestSelectReapTargets_DeterministicSelection(t *testing.T) {
 	}
 	if targets[0].SessionID != reapDeadSessionID {
 		t.Errorf("target session id = %q, want %q", targets[0].SessionID, reapDeadSessionID)
+	}
+}
+
+// TestReportSparedInstances_HeadlineLeavesTheStateOfTheWorkToTheReason covers
+// the sentence a developer reads on every sweep once anything is spared.
+//
+// Two unrelated things are reported through this one line: an instance whose
+// session liveness cannot be read, and one whose turn finished and left work
+// niwa could not attach to a session. The headline is shared, so any claim it
+// makes about whether the work finished is false for one of them -- and the
+// reason it prints immediately afterwards says so, in the same line.
+func TestReportSparedInstances_HeadlineLeavesTheStateOfTheWorkToTheReason(t *testing.T) {
+	spared := []sparedInstance{
+		{
+			Name:   "test-ws+-0000aa11",
+			Reason: "a codex turn finished here but no session record was found, so niwa could not identify the session",
+		},
+		{
+			Name:   "test-ws+-0000bb22",
+			Reason: "codex never removes a session's record, so its presence cannot tell a live session from a deleted one",
+		},
+	}
+
+	var buf bytes.Buffer
+	reportSparedInstances(&buf, spared)
+	out := buf.String()
+
+	for _, s := range spared {
+		var line string
+		for _, candidate := range strings.Split(out, "\n") {
+			if strings.Contains(candidate, s.Name) {
+				line = candidate
+				break
+			}
+		}
+		if line == "" {
+			t.Fatalf("no line names %s; a spared instance nobody can see accumulates without a symptom.\n%s", s.Name, out)
+		}
+		headline, _, found := strings.Cut(line, s.Reason)
+		if !found {
+			t.Fatalf("the line for %s does not carry its reason: %q", s.Name, line)
+		}
+		// The headline runs ahead of a reason that answers this for each case
+		// separately, so it must not answer it first.
+		if strings.Contains(headline, "finished") {
+			t.Errorf("the headline %q says something about whether the work finished, and the reason it introduces is %q. One of the two cases reported here is the opposite, so a shared headline that takes a side is wrong every time the other one comes up.", headline, s.Reason)
+		}
+	}
+	if !strings.Contains(out, "niwa destroy") {
+		t.Errorf("the report never says how to reclaim one, so a developer watching directories accumulate has nothing to do about it.\n%s", out)
 	}
 }

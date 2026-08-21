@@ -27,8 +27,9 @@ func init() {
 	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session (sanitized into a slug; also names the niwa instance: <config>+-<id> with no name, <config>+<slug>-<id> with one -- '+' always marks the end of the config name)")
 	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", dispatchModelFlagHelp())
 	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker; dropped for an agent that has no such flag")
-	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "subagent type to forward to the background worker; this selects a role within the launched agent, not which agent is launched (that is NIWA_AGENT and the workspace default_agent). Dropped for an agent that has no such flag")
-	dispatchCmd.Flags().BoolVarP(&dispatchDetach, "detach", "d", false, "do not attach the terminal to the new session; print hints and return")
+	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "subagent type to forward to the background worker; this selects a role within the launched agent, not which agent is launched (that is --harness). Dropped for an agent that has no such flag")
+	dispatchCmd.Flags().StringVar(&dispatchHarness, harnessFlagName, "", harnessFlagUsage())
+	dispatchCmd.Flags().BoolVarP(&dispatchDetach, "detach", "d", false, "put the worker out of this terminal's reach: for an agent whose runner executes the turn in the foreground, run it detached instead of here; for one that backgrounds its own session, skip the attach. Either way, print hints and return")
 	dispatchCmd.Flags().IntVar(&dispatchParallel, "parallel", 0,
 		"maximum repos to clone concurrently when provisioning the dispatch instance (>=1). Lower this on slow or flaky networks; 1 clones serially. Overrides the [global] clone_workers config. 0 (the default) uses clone_workers, else niwa's built-in default.")
 	// --keep-alive is tri-state (unset / explicit true / explicit false) so it
@@ -46,6 +47,7 @@ var (
 	dispatchModel          string
 	dispatchPermissionMode string
 	dispatchAgent          string
+	dispatchHarness        string
 	dispatchDetach         bool
 	dispatchParallel       int
 	// dispatchKeepAlive holds the tri-state --keep-alive value: nil when the
@@ -72,10 +74,36 @@ const (
 	// case), so the orphan window is closed (DESIGN Decision 4).
 	dispatchPendingMarker = ".niwa/dispatch-pending"
 
+	// dispatchRetainMarker is dropped in an instance whose worker finished and
+	// produced work, but whose session could not be identified -- so there is
+	// no mapping, and the reaper's backstop would otherwise judge the directory
+	// an abandoned dispatch and delete it once it aged past the TTL.
+	//
+	// It exists because the in-process rollback is not the only thing that
+	// deletes an instance. Disarming that rollback keeps the work for the
+	// length of the command; the backstop runs out-of-process at the top of the
+	// next create, dispatch or watch, and its eligibility signal is the
+	// directory NAME. Removing the pending marker does not help -- the age
+	// check falls back to the directory mtime -- so keeping the work needs a
+	// signal the sweep honors rather than the absence of one.
+	//
+	// The contents are the reason, in the words a developer needs to decide
+	// what to do with the directory. The sweep spares any instance carrying
+	// this file and says so, which is the same treatment an instance whose
+	// liveness cannot be read already gets.
+	dispatchRetainMarker = ".niwa/dispatch-retain"
+
 	// dispatchCaptureTimeout bounds the jobs-dir cwd-correlation poll that
 	// recovers the worker's session UUID. Exhaustion is a capture failure that
 	// triggers self-rollback, never a hang (DESIGN Decision 3, R20/R22).
 	dispatchCaptureTimeout = 30 * time.Second
+
+	// dispatchForegroundCaptureTimeout bounds the same poll when the launch ran
+	// the turn in this terminal and has already returned. The record was
+	// written while the turn ran or it was never written at all, so this is a
+	// grace period for a slow filesystem rather than a wait for work in
+	// progress.
+	dispatchForegroundCaptureTimeout = 2 * time.Second
 
 	// maxArgStringBytes is the largest byte length niwa lets a SINGLE argv
 	// element reach. The prompt is handed to claude as one discrete argv element
@@ -144,12 +172,18 @@ var dispatchCapture = captureSessionID
 // a (non-fatal) failure without a real binary. It runs ONLY as the final step,
 // after the mapping is durable, so its failure never rolls back (DESIGN
 // Decision 1).
-var dispatchAttach = func(spec agentplan.LaunchSpec, handle string) error {
+var dispatchAttach = func(spec agentplan.LaunchSpec, handle, workdir string) error {
 	bin, err := lookAgentBinary(spec.Binary)
 	if err != nil {
 		return fmt.Errorf("%s binary not found in PATH: %w", spec.Binary, err)
 	}
 	cmd := exec.Command(bin, append(slices.Clone(spec.ResumeArgs), handle)...)
+	// The resumed session runs where it ran. An agent that narrows its own
+	// session list by working directory would otherwise refuse to find a
+	// session started somewhere else, and a session that reopened in the
+	// terminal's directory rather than its own would be a different session in
+	// every way that matters to the work in it.
+	cmd.Dir = workdir
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -158,11 +192,19 @@ var dispatchAttach = func(spec agentplan.LaunchSpec, handle string) error {
 
 var dispatchCmd = &cobra.Command{
 	Use:   "dispatch [prompt]",
-	Short: "Launch a background Claude Code worker in a fresh ephemeral instance",
-	Long: `dispatch creates a fresh ephemeral niwa instance, launches a Claude Code
-background worker rooted inside it, captures the worker's session id, and
-records an ephemeral dispatch-origin mapping so the instance is reclaimed when
-the session ends.
+	Short: "Launch a background worker in a fresh ephemeral instance",
+	Long: `dispatch creates a fresh ephemeral niwa instance, launches a background
+worker rooted inside it, captures the worker's session id, and records an
+ephemeral dispatch-origin mapping so the instance is reclaimed when the session
+ends.
+
+Which agent the worker runs as is resolved once, in this order: --harness, then
+NIWA_DISPATCH_HARNESS, then the workspace's [workspace].default_agent, then your
+own [global].default_dispatch_harness (niwa config set
+default-dispatch-harness). Every instance is prepared for every agent niwa
+supports whatever those say, so this picks a launch target and takes nothing
+away from the other agent. Not to be confused
+with --agent, which forwards a subagent type INTO whichever agent is launched.
 
 The prompt is optional. With no prompt argument, dispatch opens an interactive
 capture on the terminal: paste or type the task, press Enter to dispatch,
@@ -178,19 +220,29 @@ line and the rest reaches the shell; pass the prompt as an argument there.
 With no prompt AND no terminal -- a script, a hook, a cron job -- dispatch fails
 immediately rather than waiting on input that will never arrive.
 
-By default the terminal then attaches to the new session (like docker run);
-pass --detach/-d to skip the attach and return after printing the
-attach/logs/stop hints (the mode for fan-out and scripting).
+--detach/-d chooses how the worker runs, not only whether a step follows it.
+Without it, an agent whose runner executes the turn in the foreground runs it
+here: the output is this terminal's and dispatch does not return until the turn
+ends. An agent that backgrounds its own session instead has the terminal attach
+to it (like docker run) if it can hand a session over mid-turn, and says so and
+returns if it cannot -- the session is yours to resume once the turn ends.
+
+With --detach the worker is put out of this terminal's reach: a foreground
+runner is detached, with its output kept in the instance, and an agent that
+backgrounds its own session simply skips the attach. Either way dispatch
+returns after printing the launched agent's own management hints, which is the
+mode for fan-out and scripting.
 
 Any failure before the mapping is durable destroys the just-created instance,
-so dispatch never leaves an unreclaimable instance DIRECTORY. One caveat: if the
-worker launch succeeds but session-id capture then fails, the rollback deletes
-the instance directory, but the detached background process keeps running -- we
-never captured its session id, so we cannot stop it. That process has no mapping
-and it is yours to 'claude stop' once you find it in 'claude list'. It is mostly
-harmless, with one caveat: a prompt too large to pass as a command argument is
-written into the instance, so a worker in that window may find its task file
-already deleted and proceed on the excerpt it was given.`,
+so dispatch never leaves an unreclaimable instance DIRECTORY. One caveat, for a
+worker that is still running when that happens: if the launch succeeds but
+session-id capture then fails, the rollback deletes the instance directory, but
+the background process keeps running -- we never captured its session id, so we
+cannot stop it. That process has no mapping and stopping it is yours to do, with
+the launched agent's own stop verb, once you find it in that agent's own session
+list. It is mostly harmless, with one caveat: a prompt too large to pass as a
+command argument is written into the instance, so a worker in that window may
+find its task file already deleted and proceed on the excerpt it was given.`,
 	Args:          cobra.MaximumNArgs(1),
 	SilenceErrors: true,
 	SilenceUsage:  true,
@@ -241,22 +293,64 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	}
 	workspaceRoot := class.WorkspaceRoot
 
-	// (2b) Resolve which agent this dispatch launches, from NIWA_AGENT and the
-	// workspace default_agent. dispatch's own --agent flag is the launched
-	// agent's subagent-type passthrough, a different thing, so it is
-	// deliberately not consulted here. A config that cannot be loaded resolves
-	// against the environment alone and leaves the failure to the provisioning
-	// path to report.
+	// (2a) Load the host global config ONCE, best-effort, and reuse it below.
+	// It carries two things this command reads: the machine-wide dispatch
+	// harness (broadest rung of the agent resolution just below) and the
+	// dispatch_model and remote-control defaults consumed after provisioning. A missing or
+	// unreadable config degrades to "none of those set", which is today's
+	// behavior for every one of them -- they are all opt-in defaults.
+	gc, gcErr := config.LoadGlobalConfig()
+
+	// (2b) Resolve which agent this dispatch launches, from --harness,
+	// NIWA_DISPATCH_HARNESS, the workspace default_agent, and the host
+	// default_dispatch_harness, in that order. dispatch's own --agent flag is
+	// the launched agent's subagent-type passthrough, a different thing, so it
+	// is deliberately not consulted here. A config that cannot be loaded resolves against the
+	// sources that did load and leaves the failure to the provisioning path to
+	// report -- but it says so first, because a rung that was skipped rather
+	// than consulted is the one case where the resolution's answer is right
+	// about the inputs it had and wrong about the ones the developer wrote.
+	wsConfigPath := filepath.Join(workspaceRoot, workspace.StateDir, workspace.WorkspaceConfigFile)
 	var wsConfig *config.WorkspaceConfig
-	if wsCfg, cfgErr := config.Load(filepath.Join(workspaceRoot, workspace.StateDir, workspace.WorkspaceConfigFile)); cfgErr == nil {
+	wsCfg, cfgErr := config.Load(wsConfigPath)
+	if cfgErr == nil {
 		wsConfig = wsCfg.Config
+	} else if notice := unreadableAgentRungNotice(wsConfigPath, cfgErr); notice != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", notice)
 	}
-	dispatchedAgent, agErr := resolveSessionAgent("", wsConfig)
+	// A profile that still sets the pre-rename variable is a rung the developer
+	// believes is set and niwa does not read. Say so before resolving, because
+	// resolution reports no error for it -- nothing held a bad value, the
+	// variable simply is not consulted.
+	if notice := renamedHarnessEnvNotice(); notice != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", notice)
+	}
+	var hostCfg *config.GlobalConfig
+	if gcErr == nil {
+		hostCfg = gc
+	}
+	dispatchedAgent, agErr := resolveSessionAgent(dispatchHarness, wsConfig, wsConfigPath, hostCfg)
 	if agErr != nil {
 		return fmt.Errorf("niwa: error: %w", agErr)
 	}
 
-	// (2c) The gate is the declaration, not a comparison against an agent this
+	// (2c) --agent names a subagent type, not an agent to launch, and the two
+	// readings are one keystroke apart. A developer who means "launch codex"
+	// and types --agent codex gets a Claude worker started with a subagent type
+	// no installation defines, which fails inside the worker rather than here.
+	// So say it, once, before anything is provisioned or launched.
+	//
+	// A warning rather than a refusal: an agent name is a legitimate
+	// subagent-type name -- a role called "claude" is a real thing to have --
+	// and refusing would break setups that already work. The trigger is
+	// deliberately narrow: the value has to parse as an agent niwa knows AND
+	// disagree with the one actually being launched, so --agent reviewer says
+	// nothing and --agent claude on a Claude dispatch says nothing either.
+	if warning := harnessMismatchWarning(dispatchAgent, dispatchedAgent); warning != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", warning)
+	}
+
+	// (2d) The gate is the declaration, not a comparison against an agent this
 	// code names. Launching a background worker is a declared capability, so
 	// whether niwa can launch one for this agent is a lookup, and the refusal
 	// quotes the same reason the generated gap list publishes -- which is what
@@ -282,7 +376,31 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("niwa: error: %s binary not found in PATH; install it before dispatching", spec.Binary)
 	}
 
-	// (3b) With no positional prompt, capture one from the terminal. This sits
+	// (3b) A worker is launched at the instance root, and for an agent that
+	// cannot be oriented there it starts without any of what the workspace
+	// delivers -- which it will not say, because it has no way to know
+	// something was withheld. Documented in the guide, invisible at the moment
+	// it happens, and the difference between those two is a developer reading a
+	// plausible answer from an uninformed worker and never learning why.
+	//
+	// It prints here, after every preflight and BEFORE the prompt is captured,
+	// because what it changes is the prompt. A worker with no orientation needs
+	// a briefing the prompt has to carry, and a developer who reads this after
+	// the launch has already written one that assumes otherwise -- and stopping
+	// the result means finding the process by hand. Read first, then type, or
+	// press Ctrl-C having spent nothing.
+	//
+	// The trigger is row 2's declaration rather than a name, so it fires for
+	// exactly the agents it is true of. The sentence is niwa's own rather than
+	// the declaration's reason, because what a root-launched worker loses is
+	// wider than orientation and the reason speaks only to that.
+	if d, err := agentplan.Lookup(agentplan.RootSessionOrientation, dispatchedAgent); err == nil && d.State != agentplan.StateImplemented {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"niwa dispatch: the worker starts at the instance root, where a %s session receives none of the workspace's orientation, skills, MCP servers or posture -- those reach a session from inside a repository. Its prompt is its whole briefing.\n",
+			dispatchedAgent)
+	}
+
+	// (3c) With no positional prompt, capture one from the terminal. This sits
 	// after every preflight check and before anything is created, so abandoning
 	// the capture costs nothing -- there is no instance to roll back -- and a
 	// wrong workspace or a missing claude fails before the developer types.
@@ -366,11 +484,8 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("niwa: error: writing dispatch pending-marker: %w", err)
 	}
 
-	// (9) Load the host global config ONCE, best-effort. A missing or unreadable
-	// config degrades to "no dispatch_model default" and "no remote-control
-	// injection" -- neither can fail the dispatch (both features are opt-in
-	// defaults, so absence just means today's behavior).
-	gc, gcErr := config.LoadGlobalConfig()
+	// (9) The host global config was loaded once at (2a), before the agent
+	// resolution that also reads it. gc/gcErr below are that same result.
 
 	// (9a) Resolve the effective main-loop model. The --model flag wins; when it
 	// is unset the host [global] dispatch_model default fills in; when neither is
@@ -472,16 +587,42 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 	promptPrefix := ""
 	keepAliveArmed := false
-	if keepAliveDeliverable && resolveDispatchKeepAlive(dispatchKeepAlive, hostGlobal, inst) {
-		if remoteControlEnabled(rcInjected, inst) {
-			promptPrefix = keepAliveArmingInstruction
-			keepAliveArmed = true
-		} else {
-			fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", keepAliveNonRCWarning)
-		}
+	switch {
+	case !resolveDispatchKeepAlive(dispatchKeepAlive, hostGlobal, inst):
+		// Not asked for. Nothing to say and nothing to do.
+	case !keepAliveDeliverable:
+		// Asked for and undeliverable. Saying so is the point: a flag that is
+		// silently ignored for one agent is a developer believing they armed
+		// something they did not, and the declaration already carries the
+		// sentence that explains why.
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: --keep-alive does not apply to the %q agent and was ignored. %s\n",
+			dispatchedAgent, kaDecl.Reason)
+	case !remoteControlEnabled(rcInjected, inst):
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", keepAliveNonRCWarning)
+	default:
+		promptPrefix = keepAliveArmingInstruction
+		keepAliveArmed = true
 	}
 
-	if err := dispatchLaunch(cmd.Context(), spec, instancePath, promptPrefix, prompt, passthrough, nil); err != nil {
+	// (9b) The process model, resolved from both of its inputs: what this
+	// agent's runner is, and whether this invocation asked to detach. Reading
+	// the declaration alone could not see the flag; see RunnerKind.ModeFor.
+	//
+	// Without --detach, a foreground runner's turn runs here, in this terminal,
+	// and this call does not return until it ends. The developer watches the
+	// work; for that runner, that is what attaching would have been.
+	launchMode := spec.Runner.ModeFor(dispatchDetach)
+
+	if err := dispatchLaunch(cmd.Context(), launchRequest{
+		Spec:        spec,
+		Mode:        launchMode,
+		InstanceDir: instancePath,
+		Prefix:      promptPrefix,
+		Body:        prompt,
+		Passthrough: passthrough,
+		Stdout:      cmd.OutOrStdout(),
+		Stderr:      cmd.ErrOrStderr(),
+	}); err != nil {
 		return fmt.Errorf("niwa: error: launching dispatch worker: %w", err)
 	}
 
@@ -491,14 +632,71 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// the agent's management verbs accept, and for one agent those two are
 	// different strings, which is why capture returns both rather than deriving
 	// one from the other.
+	//
 	// On failure the deferred rollback destroys the instance DIRECTORY, but the
 	// background worker launched above may still be running: capture failed, so
 	// we never obtained its session id and cannot stop it. The orphaned process
 	// has no mapping and is harmless, but it is not auto-killed -- the user must
 	// stop it manually. The backstop reclaims the directory, not the process.
+	//
+	// The rollback also destroys the worker's own log, which is the only place
+	// the real cause is written down. A worker that died at startup -- a flag it
+	// would not parse, a configuration it would not load -- says so there, writes
+	// no session record, and is reported here as a capture timeout, which
+	// describes the symptom and not the cause. So the log's tail is read out
+	// BEFORE returning, while the directory still exists.
+	//
+	// The foreground path disarms the rollback BEFORE capture instead, and the
+	// difference is which of the two is the deliverable. Detached, the worker
+	// started moments ago and the instance holds nothing but its own logs, so
+	// destroying it costs a diagnostic and no work. Foreground, the launch
+	// already waited for the turn to end and everything the worker produced is
+	// inside this directory: a run that did real work and then failed to yield
+	// a discoverable session record -- a refused prompt, a crash after writing
+	// files, a record the scanner cannot match -- would have its output deleted
+	// by a rollback armed for the case where there was none.
+	if launchMode == agentplan.LaunchForeground {
+		success = true
+	}
+
 	recordsRoot := recordStoreRoot(spec.Records, userHomeDir(), os.Getenv)
-	sessionID, handle, err := dispatchCapture(spec.Records, recordsRoot, instancePath, dispatchCaptureTimeout, nil, 0)
+	// The poll's deadline depends on what it is waiting for. Detached, the
+	// worker started moments ago and the record is about to appear, so the full
+	// timeout is the point. Foreground, the launch already waited for the turn
+	// to end -- the record either exists on the first pass or never will, and
+	// waiting the full thirty seconds after the developer watched the turn
+	// finish buys nothing while rescanning the whole record store roughly
+	// twelve hundred times.
+	captureTimeout := dispatchCaptureTimeout
+	if launchMode == agentplan.LaunchForeground {
+		captureTimeout = dispatchForegroundCaptureTimeout
+	}
+	sessionID, handle, err := dispatchCapture(spec.Records, recordsRoot, instancePath, captureTimeout, nil, 0)
 	if err != nil {
+		if launchMode == agentplan.LaunchForeground {
+			// The turn ran here, so the developer has already seen whatever the
+			// worker said; what they need is the directory and why there is no
+			// session to resume.
+			//
+			// Keeping it means more than not deleting it now. Without a
+			// mapping this directory is exactly what the reaper's backstop
+			// exists to reclaim, so the retain marker is what makes "kept" true
+			// past the next sweep rather than for thirty minutes.
+			reason := fmt.Sprintf("a %s turn finished here but no session record was found, so niwa could not identify the session", spec.Binary)
+			if mErr := writeDispatchRetainMarker(instancePath, reason); mErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(),
+					"niwa: warning: could not mark %s to be kept, so a later sweep may reclaim it: %v\n", instancePath, mErr)
+			}
+			removeDispatchMarker(instancePath)
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"niwa: warning: the turn ended but no session record was found, so there is nothing to resume: %v\n", err)
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"niwa: the work is kept at %s -- remove it with `niwa destroy` when you are done with it\n", instancePath)
+			return nil
+		}
+		if tail := readWorkerLogTail(instancePath, spec.Binary); tail != "" {
+			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: the %s worker's own output, which the rollback is about to delete:\n%s\n", spec.Binary, tail)
+		}
 		return fmt.Errorf("niwa: error: capturing dispatch session id: %w", err)
 	}
 
@@ -512,6 +710,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		InstanceName: res.Name,
 		InstancePath: instancePath,
 		Agent:        string(dispatchedAgent),
+		Handle:       handle,
 		Ephemeral:    true,
 		Origin:       "dispatch",
 		Label:        dispatchLabel,
@@ -519,6 +718,23 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		Created:      time.Now().UTC(),
 	}
 	if err := workspace.WriteSessionMapping(workspaceRoot, mapping); err != nil {
+		// The same hazard as the capture-failure branch, on a narrower path.
+		// Foreground, the rollback was already disarmed above, so returning
+		// here leaves a dispatch-named unmapped instance holding a finished
+		// turn's work -- the backstop's exact target, deleted half an hour
+		// later. Detached there is nothing to keep and the rollback is still
+		// armed, so the deferred destroy does the right thing and this does
+		// not run.
+		if launchMode == agentplan.LaunchForeground {
+			reason := fmt.Sprintf("a %s turn finished here but its session mapping could not be written, so niwa cannot find the session again", spec.Binary)
+			if mErr := writeDispatchRetainMarker(instancePath, reason); mErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(),
+					"niwa: warning: could not mark %s to be kept, so a later sweep may reclaim it: %v\n", instancePath, mErr)
+			}
+			removeDispatchMarker(instancePath)
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"niwa: the work is kept at %s -- remove it with `niwa destroy` when you are done with it\n", instancePath)
+		}
 		return fmt.Errorf("niwa: error: writing dispatch session mapping: %w", err)
 	}
 
@@ -536,17 +752,52 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Dispatched session %s\n", sessionID)
 	fmt.Fprintf(out, "  instance: %s\n", instancePath)
+
 	for _, verb := range spec.HintVerbs {
 		fmt.Fprintf(out, "  %s %s %s\n", spec.Binary, verb, handle)
 	}
 
-	// (14) Unless --detach, step the terminal into the new session as the FINAL
-	// step, through the agent's own resume verb and keyed on the handle. A
-	// failure here is NON-fatal: the session and instance survive, so degrade to
-	// a warning and never roll back or delete the mapping (success is already
-	// true; DESIGN Decision 1).
+	// (14) The last step is about the session the developer ends up in, and
+	// which of three things happens is decided by the process model the launch
+	// actually used rather than by the flag alone.
+	//
+	// A foreground turn has already ended by the time this runs -- the launch
+	// waited for it -- so there is nothing to attach to and nothing to
+	// apologize for. What is left to say is that the turn ended, which is the
+	// only thing a finished run of that kind honestly reports.
+	if launchMode == agentplan.LaunchForeground {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"niwa: the turn ended. That is what the run reports -- not whether the task succeeded -- so read the work, and resume the session with the command above to carry on.\n")
+		return nil
+	}
+
+	// Otherwise the worker is still going. An agent that will not hand over a
+	// session in that state would answer an attach with an error from its own
+	// session store, which reads like a broken dispatch rather than like a
+	// thing that resolves itself a minute later. Say what is true instead: the
+	// hint above is already the command to run, so this does not repeat it.
+	// This holds whether or not --detach was passed, because in both cases the
+	// worker is running and the session is not yet openable.
+	//
+	// The text is built by unopenableSessionNotice rather than written inline
+	// so a test can name this exact message. Its words are not distinctive:
+	// "still running" also appears in the reaper's sparing report, which
+	// reaches the same stderr on the same command because the opportunistic
+	// sweep runs at the top of every dispatch. A test grepping for a substring
+	// could pass with this message reworded away and fail with it absent but a
+	// spared instance present, so it greps for nothing and calls this instead.
+	if !spec.ResumeDuringTurn {
+		fmt.Fprint(cmd.ErrOrStderr(), unopenableSessionNotice(spec.Binary))
+		return nil
+	}
+
+	// And for an agent that does hand one over, step the terminal into the new
+	// session through its own resume verb, keyed on the handle, unless the
+	// developer asked to be left where they are. A failure here is NON-fatal:
+	// the session and instance survive, so degrade to a warning and never roll
+	// back or delete the mapping (success is already true; DESIGN Decision 1).
 	if !dispatchDetach {
-		if err := dispatchAttach(spec, handle); err != nil {
+		if err := dispatchAttach(spec, handle, instancePath); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: warning: could not attach to session %s: %v\n", sessionID, err)
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: the session is running; attach later with: %s %s %s\n",
 				spec.Binary, strings.Join(spec.ResumeArgs, " "), handle)
@@ -686,12 +937,30 @@ func buildDispatchPassthrough(flags agentplan.LaunchFlags, slug, model string) [
 	return pass
 }
 
+// unopenableSessionNotice is what dispatch says when the worker it just
+// started belongs to an agent that will not hand over a session whose turn is
+// running. It exists as a function so the message has a name: the test that
+// holds it absent from the foreground path calls this rather than grepping for
+// words, because the words it would grep for are not unique to it -- the
+// reaper's sparing report says "still running" too, and lands on the same
+// stderr on the same command.
+func unopenableSessionNotice(binary string) string {
+	return fmt.Sprintf(
+		"niwa: %s will not open a session while its turn is still running. The worker is going; resume it with the command above once it finishes.\n",
+		binary)
+}
+
 // launchableAgentsHint names the agents a refusal can point a developer at, in
 // the form they would set. The names come from the declarations rather than
 // from a sentence written here, because the person reading a refusal is by
 // definition the person who does not already know which agent to name -- and a
 // hardcoded one goes stale the moment a row flips, silently, at exactly the
 // moment it is being read.
+//
+// It offers the flag first and the variable second. The developer reading this
+// is retrying one command, and --harness changes that command; NIWA_DISPATCH_HARNESS
+// changes every niwa command in the shell, and everything dispatched from it,
+// which is a bigger thing to hand someone who asked for one dispatch.
 //
 // With no launchable agent at all there is nothing useful to suggest, so the
 // hint says what is true rather than pointing at an empty set.
@@ -701,13 +970,15 @@ func launchableAgentsHint() string {
 		return "No agent niwa knows about can be dispatched to"
 	}
 	if len(launchable) == 1 {
-		return "Set NIWA_AGENT=" + string(launchable[0])
+		only := string(launchable[0])
+		return "Retry with --" + harnessFlagName + " " + only + ", or set NIWA_DISPATCH_HARNESS=" + only + " for the whole shell"
 	}
 	names := make([]string, len(launchable))
 	for i, ag := range launchable {
 		names[i] = string(ag)
 	}
-	return "Set NIWA_AGENT to one of " + strings.Join(names, ", ")
+	return "Retry with --" + harnessFlagName + " set to one of " + strings.Join(names, ", ") +
+		", or set NIWA_DISPATCH_HARNESS to one of them for the whole shell"
 }
 
 // userHomeDir returns the developer's home directory, or "" when it cannot be
@@ -715,7 +986,11 @@ func launchableAgentsHint() string {
 // same fail-safe the jobs-directory resolution has always taken: without a home
 // there is no evidence either way, and a reader with no evidence must not
 // answer.
-func userHomeDir() string {
+// It is a package variable so a test can point every record-store lookup at a
+// fixture home, which is what keeps the reaper's guards from reading -- and
+// being slowed by -- whatever the developer running the suite happens to have
+// on disk.
+var userHomeDir = func() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
@@ -742,6 +1017,35 @@ func writeDispatchMarker(instancePath string) error {
 // beside a written mapping is never acted on.
 func removeDispatchMarker(instancePath string) {
 	_ = os.Remove(filepath.Join(instancePath, dispatchPendingMarker))
+}
+
+// writeDispatchRetainMarker records that this instance holds work niwa could
+// not attach a session to, so the reaper's backstop spares it instead of
+// judging it an abandoned dispatch. The reason is written into the file because
+// the developer meeting this directory later needs to know why it is here, and
+// the sweep reads it back to say so rather than reporting a bare path.
+func writeDispatchRetainMarker(instancePath, reason string) error {
+	path := filepath.Join(instancePath, dispatchRetainMarker)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(reason+"\n"), 0o600)
+}
+
+// dispatchRetainReason returns the recorded reason an instance is being kept,
+// and whether the marker is present at all. An unreadable marker still counts
+// as present: the file existing is the retain signal, and a sweep that deleted
+// a directory because it could not read the note explaining why to keep it
+// would be the worst possible reading of it.
+func dispatchRetainReason(instancePath string) (string, bool) {
+	data, err := os.ReadFile(filepath.Join(instancePath, dispatchRetainMarker))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false
+		}
+		return "", true
+	}
+	return strings.TrimSpace(string(data)), true
 }
 
 // validateDispatchPrompt applies the same rules to a captured prompt as to a

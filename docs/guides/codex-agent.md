@@ -1,10 +1,11 @@
 # Running Codex in a niwa workspace
 
 niwa prepares a workspace for whichever coding agent you open it with. There's
-no agent flag on `niwa create` or `niwa apply` and no per-machine setting to
-pick one: every apply prepares both Claude Code and Codex, and you decide which
-one to launch by launching it. Nothing you do for one agent takes anything away
-from the other.
+no agent flag on `niwa create` or `niwa apply`: every apply prepares both Claude
+Code and Codex, and you decide which one to launch by launching it. Nothing you
+do for one agent takes anything away from the other. There are settings that
+pick a launch target — the next section is about them — but none of them narrow
+what gets prepared.
 
 What that preparation amounts to isn't identical for the two, though, and this
 guide says where the difference is. The short version: a Codex session inside a
@@ -13,10 +14,133 @@ environment, and its approval posture. What it doesn't get is mostly Claude
 Code harness surface — hooks and the features built on them — plus a few routes
 niwa simply hasn't wired up yet.
 
+## Choosing which agent niwa launches
+
+The paragraphs above are about preparation. Launching is a separate question,
+and four things answer it. Each has a different lifetime, and the shorter-lived
+one wins:
+
+| Source | Lasts | Set it with |
+|--------|-------|-------------|
+| `--harness` | one command | `niwa dispatch "..." --harness codex` |
+| `NIWA_DISPATCH_HARNESS` | one shell, and every worker dispatched from it | `NIWA_DISPATCH_HARNESS=codex niwa dispatch "..."` |
+| `[workspace].default_agent` | one workspace, for everyone in it | editing the workspace config |
+| `[global].default_dispatch_harness` | your machine, every workspace | `niwa config set default-dispatch-harness codex` |
+
+Nothing set anywhere means `claude`. The rest of this section takes them from
+the bottom of that table upward, since the workspace setting is the one with
+something to watch out for.
+
+Three of the four say "dispatch harness", which is what the setting picks: the
+coding agent that harnesses a dispatched turn. It's the same sense of the word
+this guide already uses further down, where "Claude Code harness surface" means
+that agent's own runtime and the features built on it — you are choosing which
+harness runs the work. The workspace rung is the odd one out and still spells
+itself `default_agent`, because it is a shipped key sitting in committed
+`workspace.toml` files; renaming it would break every workspace that already
+sets it.
+
+The two one-off rungs differ in reach, and the difference is easy to miss.
+`--harness` really does last one command: the worker it starts knows nothing
+about it, so a worker that dispatches a sibling gets whatever the other rungs
+resolve to. `NIWA_DISPATCH_HARNESS` is inherited, because a dispatched worker
+runs with your environment — so it reaches that worker, and anything that
+worker dispatches, with no bound. If you want one command in codex, the flag is
+the narrower instrument.
+
+The variable used to be called `NIWA_AGENT`. It is renamed rather than aliased,
+so if your shell profile still exports the old name, niwa no longer reads it —
+and `niwa dispatch` says so on stderr, naming the value you set and the line to
+change, rather than quietly launching the other agent.
+
+### The workspace setting
+
+`default_agent` lives on the `[workspace]` table of the `workspace.toml` that
+drives your workspace.
+
+```toml
+[workspace]
+name = "my-workspace"
+default_agent = "codex"
+```
+
+Check which copy of that file you edit before you touch it: `cat
+.niwa/.niwa-snapshot.toml` at the workspace root. A marker naming a source repo
+means `.niwa/` is a snapshot materialized from that repo, and the durable edit
+belongs upstream in that repo, not here — an in-place edit takes effect and then
+silently stops the next time niwa re-materializes the directory. No such file,
+and `.niwa/` is yours to edit in place. See
+[workspace-config-sources.md](workspace-config-sources.md) for the model.
+
+Two things to know if you do go upstream. The value lands one command late —
+`niwa dispatch` resolves the agent before it refreshes the snapshot, so run
+`niwa apply` once after pushing. And an overlay is no help: `[workspace]` in an
+overlay is inert, so a `default_agent` there is dropped without a warning. If
+neither the wait nor the push access suits you, the next section is the way
+around both: your own machine-wide setting is durable, immediate, and touches no
+snapshot.
+
+It's a workspace-level setting, with no per-instance form — every instance of a
+workspace launches the same agent unless something shorter-lived says
+otherwise. Accepted values are `claude` and `codex` wherever you set them, and
+an unknown value is rejected with the accepted set named rather than quietly
+ignored.
+
+### Your own machine-wide default
+
+If you'd rather not touch a workspace's config at all — or you can't, because
+it's a snapshot and the source repo isn't yours — set it for your machine:
+
+```bash
+niwa config set default-dispatch-harness codex
+niwa config unset default-dispatch-harness   # back to the built-in claude default
+```
+
+That writes `[global].default_dispatch_harness` to
+`~/.config/niwa/config.toml`, next to the other host-level dispatch defaults
+(`dispatch_model`, `keep_alive_on_dispatch`). It's your own file. niwa never
+materializes it from anywhere, so nothing replaces it and the trap above
+doesn't apply.
+
+It's the weakest of the four, deliberately. A workspace that states an agent
+keeps launching that agent, because that statement is for everyone who works in
+the workspace and your personal file shouldn't quietly override it. Your
+machine-wide setting fills in for every workspace that states nothing. When you
+do want the other agent in a workspace that has an opinion, use
+`NIWA_DISPATCH_HARNESS` or the flag — both outrank the workspace.
+
+### Per command
+
+```bash
+niwa dispatch "fix the flaky retry test" --harness codex
+```
+
+`--harness` outranks everything else and lasts exactly one command. It's the
+quickest way to try the other agent on one task without changing anything.
+
+The name is not `--agent` because that one is already taken on `niwa dispatch`,
+by something else: it forwards a **subagent type** to the worker — a role inside
+the agent that gets launched — and is dropped for an agent that has no such
+flag, which today means Codex. It never picks the agent. The two coexist, so
+`niwa dispatch --harness claude --agent reviewer` launches Claude Code and hands
+it the `reviewer` role, while `--harness codex --agent reviewer` launches Codex
+and drops the role, since Codex has nothing to forward it to.
+`niwa create` and `niwa apply` have neither flag and reject both as unknown.
+
+### What none of them do
+
+None of them change what `niwa apply` prepares. Every apply prepares the tree
+for every agent niwa supports no matter what any of these four say, so changing
+one needs no re-apply and takes nothing away from the other agent. They pick a
+launch target, and that's all they do. The one command that reads them today is
+`niwa dispatch`, which uses the result to decide which agent the background
+worker runs as.
+
 ## What a Codex session gets
 
-Everything below lands inside the instance, in the repository you open the
-session in.
+Everything up to background dispatch lands inside the instance, in the
+repository you open the session in. Background dispatch is the one that starts
+somewhere else, which turns out to matter.
 
 **Orientation.** niwa composes the workspace-level and group-level context into
 each repository's own `AGENTS.md`, because Codex reads context from the nearest
@@ -68,6 +192,62 @@ front of a Claude Code one. See `docs/guides/file-distribution.md`.
 **Git-exclude coverage.** Every name niwa writes into a working tree is covered
 by the repository's exclude block, so a prepared tree doesn't read dirty.
 
+**Background dispatch.** `niwa dispatch` launches a Codex worker the same way it
+launches a Claude one, with the same command — the agent is whichever one the
+four sources above resolve to, so `--harness codex` picks it for a single
+dispatch and the settings pick it standing. It provisions a fresh instance, runs
+`codex exec` inside it, recovers the session id from the session record Codex
+writes, and prints `codex resume <id>`. `niwa list` prints that command again
+beside the instance for as long as the instance exists, so the handle isn't
+stranded in the terminal that dispatched it.
+
+`--detach` decides how the worker runs. Without it the turn runs in your
+terminal: `codex exec` executes the whole turn in the foreground, so niwa runs
+it there and you watch the work as it happens, and the command doesn't return
+until the turn ends. For this runner that's what attaching to the session would
+have been — Codex won't hand over a session whose turn is still running, so
+there's no attach to be had, and watching the run is the better half of that
+trade rather than a consolation for it. When it ends, `codex resume <id>` picks
+the conversation up. Ctrl-C reaches a worker running in front of you, the same
+as any other command.
+
+With `--detach` the worker goes out of the terminal's reach and dispatch returns
+straight away, which is the mode for fan-out and scripting. The session is
+yours to resume once the turn ends — until then Codex refuses, since it holds a
+writer on the session for the length of the turn, and dispatch says so rather
+than leaving you to discover it. The worker's own output is kept in the
+instance, at `.niwa/dispatch-codex.out` and `.niwa/dispatch-codex.err`, which is
+where to look when a detached run does something you didn't expect. A
+foreground run keeps nothing there: the output was on your terminal.
+
+Three things are worth knowing before you rely on it.
+
+The worker starts in the instance root, and everything the sections above
+deliver lands inside the repositories below it — so a dispatched worker gets
+none of it. No composed orientation, none of the workspace's skills, no MCP
+servers, no posture from the project layer. Codex fixes what it reads when the
+session is constructed, keyed to the directory it started in, and it doesn't
+pick things up later from a directory you tell it to work in. Your own
+user-level Codex skills still load, since those aren't part of what niwa
+delivers; so does your environment, and so does the task you gave it, and the
+repository files are all there to read. But a dispatched worker is briefed by
+its prompt rather than by the workspace, so write the prompt accordingly.
+
+A Codex run's exit status doesn't tell you whether the work happened. A worker
+that couldn't write still exits 0, and an API failure of any kind — including
+running out of quota — exits 1 alongside every other error. Read the last
+message or the run's output rather than the exit code.
+
+And a dispatched Codex instance isn't reclaimed automatically. `niwa reap`
+reclaims an instance once its session's record is gone, and Codex never removes
+those records, so there's no way to tell a session you finished with from one
+you're coming back to. niwa spares it rather than guess, says so when it runs,
+and leaves it to you: `niwa destroy <instance>` when you're done with the
+session. That holds even for an instance whose dispatch died before it was
+recorded, which reap otherwise cleans up on age — if a Codex session was
+started there, reap can't tell whether that worker is still writing, so it
+leaves the directory alone.
+
 ## What a Codex session doesn't get
 
 <!-- BEGIN GENERATED: codex gap list (internal/agentplan/gaplist.go) -->
@@ -95,7 +275,7 @@ the session would never read it, so these move only if the agent changes.
   delivered as hooks, which Codex cannot receive.
 - **Filling in a pull request's body from the session.** The pull-request body
   capture is delivered as a hook, which Codex cannot receive.
-- **A dedicated niwa instance provisioned for each dispatched session.**
+- **An instance provisioned automatically for a session niwa did not launch.**
   Provisioning rides a session-start hook and the harness job-state file;
   Codex has neither.
 - **Instance-root skills such as `/dispatch`.** Root-installed skills serve
@@ -108,9 +288,6 @@ debt, and it's the one group that can shrink without the agent changing.
 
 - **niwa's own plugin, which carries the migrate-config skill.** Codex accepts
   the identical plugin manifest; the wiring is unbuilt.
-- **Launching a background worker with `niwa dispatch`.** Nothing in niwa
-  knows how to start a Codex worker, recover which session it became, or step
-  back into one.
 
 ### What doesn't apply to Codex
 

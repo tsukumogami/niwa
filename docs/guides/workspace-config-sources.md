@@ -15,7 +15,7 @@ materializes the config on disk.
 > code paths in `configsync.go`/`overlaysync.go`/`init.go`; that work
 > is the remaining scope of PR #73 and lands in follow-up commits.
 > User-facing behavior described below reflects the eventual contract
-> per [DESIGN-workspace-config-sources.md](../designs/DESIGN-workspace-config-sources.md).
+> per [DESIGN-workspace-config-sources.md](../designs/current/DESIGN-workspace-config-sources.md).
 
 ## What you get
 
@@ -305,6 +305,7 @@ a one-time coordination cost; subsequent applies behave normally.
 |---------|---------|
 | `niwa init <name> --from <slug>` | Register and clone a new workspace from a source slug. |
 | `niwa config set global <slug>` | Set the personal-overlay source. |
+| `niwa config set default-dispatch-harness <agent>` | Set which coding agent a niwa-launched session runs as, machine-wide. Writes `[global].default_dispatch_harness` in your own `~/.config/niwa/config.toml`, never inside a snapshot. `niwa config unset default-dispatch-harness` removes it. See [codex-agent.md](codex-agent.md). |
 | `niwa apply` | Fetch the latest snapshot and re-materialize. Detects URL changes and refuses without `--force`. |
 | `niwa apply --force` | Discard the on-disk `.niwa/` and re-materialize from the registered source. Required after a registered URL change. |
 | `niwa status` | Display the resolved source slug, the cached `resolved_commit`, and `(default branch)` annotation when no ref is pinned. |
@@ -315,7 +316,7 @@ a one-time coordination cost; subsequent applies behave normally.
 The snapshot pipeline's primary security surface is the GitHub
 tarball + tar extraction path. The defense suite is documented in
 [DESIGN-workspace-config-sources.md §Security
-Considerations](../designs/DESIGN-workspace-config-sources.md#security-considerations);
+Considerations](../designs/current/DESIGN-workspace-config-sources.md#security-considerations);
 in summary:
 
 - Positive type allowlist: only regular files and directories are

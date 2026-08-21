@@ -29,6 +29,75 @@ import (
 // it fails, and a spec for an agent the table does not declare implemented
 // fails.
 
+// RunnerKind says what an agent's worker binary is: whether it puts the worker
+// in the background itself, or runs the whole turn in the foreground of the
+// process niwa starts. That is a property of the agent, so it is declared here.
+//
+// It is deliberately not the process model. A runner that executes the turn in
+// the foreground offers two -- run it where the developer can watch, or detach
+// it -- and which one an invocation gets is decided with --detach in hand. A
+// runner that backgrounds its own session offers one, and no flag overrides it
+// into the other, because there is nothing to run in the foreground.
+type RunnerKind uint8
+
+const (
+	// RunnerSelfBackgrounding means the binary puts the worker in the
+	// background itself and exits, so the process niwa starts is the hand-off
+	// rather than the work.
+	RunnerSelfBackgrounding RunnerKind = iota + 1
+
+	// RunnerForeground means the binary runs the whole turn in the foreground
+	// of the process niwa starts.
+	RunnerForeground
+)
+
+// LaunchMode says how the dispatch path runs an agent's worker binary for one
+// invocation. It is resolved from both of its inputs -- what the agent's runner
+// is, and whether this invocation asked to detach -- and never from the
+// declaration alone. See ModeFor.
+type LaunchMode uint8
+
+const (
+	// LaunchBackgrounded means the binary backgrounds the worker itself. The
+	// launcher runs it and waits, because the process it started is not the
+	// worker -- waiting costs the time it takes to hand off, and its exit
+	// status says whether the hand-off happened.
+	LaunchBackgrounded LaunchMode = iota + 1
+
+	// LaunchForeground means the worker's whole turn runs in the caller's
+	// terminal. The launcher waits for it and the developer watches it, which
+	// for a foreground runner is what attaching to the session would have been.
+	LaunchForeground
+
+	// LaunchDetached means the worker's turn is put out of the terminal's
+	// reach. The launcher starts it in a session of its own, hands it a closed
+	// stdin and files for its output, and releases it without waiting --
+	// waiting would block the dispatch for the length of the task, and a
+	// context cancelled when the dispatch returns would kill the worker
+	// outright.
+	LaunchDetached
+)
+
+// ModeFor resolves the process model for one invocation from both of its
+// inputs: what this runner is, and whether the developer asked to detach.
+//
+// The flag is an input here rather than a step that runs afterwards. Deciding
+// the model from the runner alone leaves --detach unable to change how a worker
+// is started: a foreground runner would be detached whether or not anybody
+// asked, and the flag would only choose whether a step followed.
+func (r RunnerKind) ModeFor(detach bool) LaunchMode {
+	if r == RunnerForeground {
+		if detach {
+			return LaunchDetached
+		}
+		return LaunchForeground
+	}
+	// A runner that backgrounds its own session has one process model, and
+	// --detach cannot override it into another. What the flag still decides
+	// for it is whether the attach step runs afterwards.
+	return LaunchBackgrounded
+}
+
 // HandleKind says what the user-facing handle for a session is: the thing a
 // developer types after the binary's own management verbs, and the thing
 // niwa's resume passes.
@@ -154,19 +223,26 @@ type LaunchFlags struct {
 // LaunchSpec is everything the dispatch path needs to know about one agent.
 // A spec exists exactly for the agents the table declares DispatchLaunch
 // implemented for; see dispatch_test.go for the check in both directions.
-//
-// One thing it deliberately does not carry yet is the process model. Every
-// agent niwa launches today puts its own worker in the background and exits, so
-// there is one process model and no field is choosing between them. Declaring
-// the choice before a second answer exists would put a constant here that
-// nothing branches on, which is the shape this contract exists to catch.
 type LaunchSpec struct {
 	// Binary is the executable name looked up on PATH.
 	Binary string
 
+	// Runner says what the binary is: whether it backgrounds its own worker,
+	// or runs the turn in the foreground. Which process model an invocation
+	// gets is ModeFor's answer, not this field's.
+	Runner RunnerKind
+
 	// LeadingArgs are the arguments that always precede the pass-through
 	// flags: a subcommand, and whatever policy niwa fixes for every dispatch.
 	LeadingArgs []string
+
+	// DetachedArgs are the arguments added only when the worker is detached:
+	// the ones that exist because niwa, rather than a developer, is the reader
+	// of the output. In the foreground the developer is the reader, and handing
+	// them a machine-readable event stream instead of the human output would be
+	// a regression justified as consistency. Empty for an agent with no such
+	// argument.
+	DetachedArgs []string
 
 	// PromptSeparator says a bare "--" must precede the prompt, so a prompt
 	// that begins with a dash is read as the prompt rather than as a flag.
@@ -174,6 +250,22 @@ type LaunchSpec struct {
 
 	// Flags is the spelling of each pass-through intent.
 	Flags LaunchFlags
+
+	// WorkdirGrantArgs are the arguments that grant this one invocation the
+	// write posture niwa intends for a directory it owns, with the absolute
+	// working directory substituted for the single %q verb in the last
+	// element. Empty for an agent that needs no such grant.
+	//
+	// The grant is per invocation and deliberately so. An agent that decides a
+	// session's posture from a persistent registry offers niwa two ways to
+	// elevate one: write the registry, or override it for the process being
+	// started. Writing it vouches for anything anybody ever runs in that
+	// directory afterwards, including sessions niwa did not launch and has no
+	// opinion about; overriding it vouches for exactly the worker niwa is
+	// starting, and the grant is gone when that worker exits. The narrower one
+	// is the right one, and it also happens to leave the developer's own
+	// configuration untouched.
+	WorkdirGrantArgs []string
 
 	// ModelCategories maps niwa's portable capability categories to the
 	// concrete versionless model name this agent is given. The values are
@@ -194,6 +286,24 @@ type LaunchSpec struct {
 	// into a session interactively.
 	ResumeArgs []string
 
+	// ResumeDuringTurn reports whether the agent will hand over a session
+	// whose launched turn is still running.
+	//
+	// It exists because dispatch's last step, without --detach, is to resume
+	// the session it just started -- at which point the worker is by
+	// definition still working. An agent that backgrounds its own session
+	// expects exactly that and hands it over. An agent that holds an exclusive
+	// writer on the session for the length of the turn refuses, and the
+	// refusal is not niwa's to route around: waiting for the turn would make
+	// dispatch block for as long as the task, and forcing it would corrupt the
+	// record both sides are writing. So niwa declines to try, says the worker
+	// is still running, and leaves the developer the resume command.
+	//
+	// False is the conservative default: an agent whose behavior here has not
+	// been measured gets the honest message rather than an error from its own
+	// session store.
+	ResumeDuringTurn bool
+
 	// HintVerbs are the agent's own management verbs, printed after a
 	// successful dispatch as "<binary> <verb> <handle>" so a developer can
 	// reach the session without niwa in the way. They are the agent's
@@ -206,6 +316,7 @@ type LaunchSpec struct {
 var launchSpecs = map[agent.Agent]LaunchSpec{
 	agent.AgentClaude: {
 		Binary:      "claude",
+		Runner:      RunnerSelfBackgrounding,
 		LeadingArgs: []string{"--bg"},
 		Flags: LaunchFlags{
 			Model:          "--model",
@@ -236,7 +347,87 @@ var launchSpecs = map[agent.Agent]LaunchSpec{
 			Liveness: LivenessRecordPresence,
 		},
 		ResumeArgs: []string{"attach"},
-		HintVerbs:  []string{"attach", "logs", "stop"},
+		// A backgrounded session is meant to be attached to while it works;
+		// that is what backgrounding it is for.
+		ResumeDuringTurn: true,
+		HintVerbs:        []string{"attach", "logs", "stop"},
+	},
+
+	agent.AgentCodex: {
+		Binary: "codex",
+		// The exec subcommand runs the whole turn in the foreground of the
+		// process it is started as, so this agent offers both process models
+		// and --detach picks one.
+		Runner: RunnerForeground,
+		// --skip-git-repo-check is not optional, because a dispatch instance
+		// root is not a git repository and the run refuses to start in one
+		// without it. Trusting the directory does not satisfy that check --
+		// measured, and the identical startup failure reproduces with the path
+		// trusted.
+		//
+		// --ephemeral is deliberately absent and must stay absent: it runs
+		// without persisting the session record, which is the substrate
+		// capture reads.
+		LeadingArgs: []string{"exec", "--skip-git-repo-check"},
+		// --json makes the run's own event stream parseable, which is what the
+		// instance log is for. It rides the detached launch only: there, the
+		// output goes to a file nobody is watching, and niwa is the one that
+		// has to be able to read it back.
+		DetachedArgs:    []string{"--json"},
+		PromptSeparator: true,
+		// The grant is a whole-table override rather than a dotted path. The
+		// dotted form parses without error and silently does nothing, which is
+		// worth knowing generally: a clean exit from one of these overrides is
+		// not evidence it took effect.
+		WorkdirGrantArgs: []string{"-c", `projects={%q={trust_level="trusted"}}`},
+		Flags: LaunchFlags{
+			Model: "--model",
+			// The sandbox is this agent's permission posture. niwa passes
+			// nothing here of its own -- the grant above decides the default
+			// -- so this spelling exists for a developer who asks for a
+			// posture deliberately.
+			PermissionMode: "--sandbox",
+			// No subagent types, no session display name, and no inline
+			// settings document. Each is a niwa-side intent this agent has no
+			// flag for, and an intent with no flag is dropped rather than
+			// guessed at.
+		},
+		ModelCategories: map[string]string{
+			"fast":     "gpt-5-codex-mini",
+			"balanced": "gpt-5-codex",
+			"powerful": "gpt-5",
+		},
+		KnownModels: []string{"gpt-5", "gpt-5-codex", "gpt-5-codex-mini"},
+		Records: SessionRecords{
+			HomeEnv:  "CODEX_HOME",
+			HomePath: []string{".codex", "sessions"},
+			// The records are nested under the year, month, and day the
+			// session started -- in the host's local time rather than UTC.
+			Depth: 3,
+			// One file per session, and the record is that file's first line:
+			// the rest of it is the conversation.
+			FileGlob:      "rollout-*.jsonl",
+			FirstLineOnly: true,
+			CwdPath:       []string{"payload", "cwd"},
+			IDPath:        []string{"payload", "session_id"},
+			// The session id is the handle: this agent's resume verb takes it
+			// directly and there is no shorter form.
+			Handle: HandleSessionID,
+			// A record is never removed, so its presence says a session once
+			// existed and nothing about whether it still does. Anything asking
+			// whether a session is gone gets no evidence here, and must not
+			// act as though it did.
+			Liveness: LivenessNone,
+		},
+		ResumeArgs: []string{"resume"},
+		// Measured against 0.147.0, both verbs: resuming a session whose turn
+		// is still running exits 1 with "thread-store conflict: thread <id>
+		// already has an active writer", the interactive form failing the same
+		// way during TUI bootstrap under a real pty. A per-thread writer lock
+		// is what produces it, so the refusal is deterministic rather than a
+		// race, and it clears when the turn ends.
+		ResumeDuringTurn: false,
+		HintVerbs:        []string{"resume"},
 	},
 }
 

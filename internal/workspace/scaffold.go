@@ -14,10 +14,18 @@ name = "%s"
 # version = "0.1.0"
 default_branch = "main"
 content_dir = "claude"
-# default_agent names the coding agent this workspace's background workers are
-# launched as. It does not select what niwa prepares: every apply prepares the
-# workspace for every agent niwa supports, so a session can be opened as either
-# one without re-applying. NIWA_AGENT overrides it per shell.
+# [workspace].default_agent names the coding agent this workspace's background
+# workers are launched as, for everyone who works in it. It does not select what
+# niwa prepares: every apply prepares the workspace for every agent niwa
+# supports, so a session can be opened as any of them without re-applying.
+#
+# The whole ladder, most specific first:
+#   --harness                          one niwa dispatch
+#   NIWA_DISPATCH_HARNESS              one shell, and every worker dispatched from it
+#   [workspace].default_agent          this workspace, for everyone in it
+#   [global].default_dispatch_harness  this machine
+#                                      (niwa config set default-dispatch-harness)
+# and niwa's built-in default when none of them is set.
 # default_agent = "codex"
 
 # --- Sources: GitHub orgs to discover repos from ---

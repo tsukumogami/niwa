@@ -1,9 +1,11 @@
 Feature: prepare every instance for both agents
-  Every instance niwa prepares serves Claude Code and Codex alike. There is no
-  agent flag on create or apply and no per-machine setting that picks one:
-  default_agent selects which agent a niwa-launched session runs, not what
-  preparation produces. niwa still writes no AGENTS.md inside a cloned
-  repository, so a repo's own committed AGENTS.md is never clobbered.
+  Every instance niwa prepares serves Claude Code and Codex alike. Nothing
+  narrows that: create and apply take no agent flag, and default_agent --
+  whether a workspace states it or a developer sets it machine-wide -- selects
+  which agent a niwa-launched session runs, not what preparation produces.
+  Which agent gets launched is agent-selection.feature's subject. niwa still
+  writes no AGENTS.md inside a cloned repository, so a repo's own committed
+  AGENTS.md is never clobbered.
 
   Design: docs/designs/current/DESIGN-agent-capability-contract.md
   Requirements: docs/prds/PRD-agent-capability-contract.md
@@ -80,18 +82,23 @@ Feature: prepare every instance for both agents
     And the error output contains "unknown flag"
 
   @critical
-  Scenario: dispatch's refusal in a codex-default workspace is the declared gap
-    # niwa dispatch refuses when it has no way to launch a background worker for
-    # the workspace's agent, rather than provisioning an instance and then
-    # failing. The refusal fires before anything is created.
+  Scenario: dispatch launches a Codex worker in a codex-default workspace
+    # This scenario used to pin dispatch's refusal in a codex-default
+    # workspace, and it is the same scenario rather than a new one beside it:
+    # what changed is the declaration, so what it asserts follows.
     #
-    # The refusal is not a rule this scenario knows on its own, and it is not a
-    # rule the command knows either: launching a background worker is a declared
-    # capability, the gate is a lookup against that declaration, and the message
-    # carries the declaration's own reason. The three assertions below pin the
-    # table, the guide, and the binary against each other, so a gap cannot end
-    # up described three different ways -- which is what happens the moment a
-    # hand-written refusal string and a table are edited separately.
+    # None of it is a rule this scenario knows on its own, and none of it is a
+    # rule the command knows either. Launching a background worker is a
+    # declared capability; the gate is a lookup against that declaration; the
+    # launch flags come from the same declaration; and the guide is generated
+    # from it. The assertions pin the table, the guide, and the binary against
+    # each other, so a delivery cannot end up described three different ways --
+    # which is what happens the moment a hand-written string and a table are
+    # edited separately.
+    #
+    # No agent is named on the command line. The workspace's default_agent is
+    # the whole selection surface, which is the convention every other niwa
+    # command already follows.
     Given a clean niwa environment
     And a local git server is set up
     And a config repo "ws" exists with body:
@@ -102,13 +109,76 @@ Feature: prepare every instance for both agents
       """
     When I run niwa init from config repo "ws"
     Then the exit code is 0
+    Given a fake codex for dispatch with session "01a00000-0000-7000-8000-00000000beef"
     When I run "niwa dispatch some-task --detach" from the workspace root
-    Then the exit code is not 0
-    And the error output contains "cannot launch a background worker"
-    And the error output contains "Set NIWA_AGENT="
-    And the capability "dispatch-launch" is declared unavailable for Codex
-    And the refusal carries the declared reason for "dispatch-launch"
-    And the committed Codex gap list carries the declared reason for "dispatch-launch"
+    Then the exit code is 0
+    And the capability "dispatch-launch" is declared implemented for Codex
+    And the committed Codex gap list does not mention "Launching a background worker"
+    # The session id came from the record the worker wrote, correlated to the
+    # instance it was launched in, and it keys the durable mapping.
+    And the dispatch mapping for session "01a00000-0000-7000-8000-00000000beef" records agent "codex"
+    # The management hint niwa prints is the agent's own verb, so it is a
+    # command the binary actually has.
+    And the output contains "codex resume 01a00000-0000-7000-8000-00000000beef"
+    # The launch flags are a contract with the real binary. Without the
+    # git-repo-check skip the run refuses to start at all, since an instance
+    # root is not a git repository; the trust override is what decides whether
+    # the worker can write, granted for this invocation rather than written
+    # into the developer's own configuration; and --ephemeral would suppress
+    # the very record the capture above read.
+    And the codex launch argv contains "exec"
+    And the codex launch argv contains "--skip-git-repo-check"
+    And the codex launch argv contains "trust_level"
+    And the codex launch argv does not contain "--ephemeral"
+    And the codex launch argv does not contain "--sandbox"
+    # The machine-readable stream flag rides this path, because the output goes
+    # to a file inside the instance and niwa is the one that reads it back.
+    And the codex launch argv contains "--json"
+    # And the worker's own output went there rather than here: a detached
+    # dispatch returns without the turn, so there is nothing to watch.
+    And the output does not contain "fake codex: running the turn"
+
+  @critical
+  Scenario: a plain dispatch runs the turn in the terminal that asked for it
+    # The other half of the flag. This agent's runner executes the whole turn
+    # in the foreground of the process it is started as, so without --detach
+    # niwa runs it here and the developer watches the work -- which for this
+    # runner is what attaching to the session would have been. The same
+    # dispatch with --detach is the scenario above.
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+      default_agent = "codex"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    Given a fake codex for dispatch with session "01a00000-0000-7000-8000-00000000cafe"
+    When I run "niwa dispatch some-task" from the workspace root
+    Then the exit code is 0
+    # The turn ran in front of the caller: its output is on this terminal.
+    And the output contains "fake codex: running the turn"
+    # Capture is indifferent to which way the worker was started -- the session
+    # id comes from the record on disk, not from the stream -- so the durable
+    # mapping is written here exactly as it is for a detached launch. Asserted
+    # rather than assumed, because "it follows" is how a path stops being
+    # covered.
+    And the dispatch mapping for session "01a00000-0000-7000-8000-00000000cafe" records agent "codex"
+    And the output contains "codex resume 01a00000-0000-7000-8000-00000000cafe"
+    # The developer is the reader here, so the flag that exists to make the
+    # output machine-readable is not sent. Everything else is what the detached
+    # launch sends.
+    And the codex launch argv does not contain "--json"
+    And the codex launch argv contains "exec"
+    And the codex launch argv contains "--skip-git-repo-check"
+    And the codex launch argv contains "trust_level"
+    And the codex launch argv does not contain "--ephemeral"
+    # And nothing apologizes for a session it could not open, because there was
+    # nothing to open: the turn the developer just watched has ended.
+    And the error output does not contain "still running"
+    And the error output contains "turn ended"
 
   @critical
   Scenario: a claude-default workspace materializes both agents' context too

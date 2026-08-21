@@ -115,7 +115,7 @@ forthcoming DESIGN-interactive-codex-session document owns those choices.
 - **R3.** niwa SHALL let a single session override the workspace default agent,
   affecting only that session and leaving the persisted workspace default
   unchanged. The override SHALL be surfaced through **both** a command-line flag
-  (e.g. `--agent <name>`) and an environment variable (e.g. `NIWA_AGENT`), so a
+  (e.g. `--agent <name>`) and an environment variable (e.g. `NIWA_DISPATCH_HARNESS`), so a
   developer can switch per-invocation or per-shell. When both are supplied, the
   flag wins; when neither is supplied, the workspace default applies; when there
   is no workspace default, the agent is `claude`. (The exact flag/env spelling and
