@@ -32,10 +32,13 @@ the bottom of that table upward, since the workspace setting is the one with
 something to watch out for.
 
 Three of the four say "dispatch harness", which is what the setting picks: the
-coding agent that harnesses a dispatched turn. The workspace rung is the odd
-one out and still spells itself `default_agent`, because it is a shipped key
-sitting in committed `workspace.toml` files; renaming it would break every
-workspace that already sets it.
+coding agent that harnesses a dispatched turn. It's the same sense of the word
+this guide already uses further down, where "Claude Code harness surface" means
+that agent's own runtime and the features built on it — you are choosing which
+harness runs the work. The workspace rung is the odd one out and still spells
+itself `default_agent`, because it is a shipped key sitting in committed
+`workspace.toml` files; renaming it would break every workspace that already
+sets it.
 
 The two one-off rungs differ in reach, and the difference is easy to miss.
 `--harness` really does last one command: the worker it starts knows nothing
