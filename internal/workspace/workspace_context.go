@@ -207,18 +207,89 @@ func InstallWorkspaceContext(cfg *config.WorkspaceConfig, classified []Classifie
 	return []string{contextPath, rulesPath}, nil
 }
 
+// readOverlayContextLayer reads the private overlay's addendum without writing
+// anything, returning (nil, nil) when the overlay declares none. It is the
+// single resolution of that source: the file beside the instance-root document
+// is copied from it, and so is the layer folded into the document itself for an
+// agent that cannot follow the reference between them.
+func readOverlayContextLayer(overlayDir string) ([]byte, error) {
+	if overlayDir == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(filepath.Join(overlayDir, overlayClaudeFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", overlayClaudeFile, err)
+	}
+	return data, nil
+}
+
+// readGlobalContextLayer is readOverlayContextLayer's counterpart for the
+// global layer, resolved from the developer's global config directory.
+func readGlobalContextLayer(globalConfigDir string) ([]byte, error) {
+	if globalConfigDir == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(filepath.Join(globalConfigDir, globalClaudeFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", globalClaudeFile, err)
+	}
+	return data, nil
+}
+
+// InstanceRootImportedLayers renders, in the order the @import lines establish
+// them, the documents an instance-root session reads only by following a
+// reference out of the root context document: the generated workspace context,
+// the private overlay's addendum, and the global layer.
+//
+// An agent with an import mechanism reads them where they are written and this
+// slice is ignored for it. An agent without one has them folded into the root
+// document, because a reference it cannot follow is content it does not have.
+// Which it is, is the producer's answer, not this function's -- this side only
+// resolves the sources, exactly as it does for every other layer.
+//
+// Every layer is resolved here rather than at the step that writes it, because
+// the root document is written before the files beside it are: the ordering the
+// import lines need is established by writing the workspace context first, and
+// the composed document has to know all three regardless.
+func InstanceRootImportedLayers(cfg *config.WorkspaceConfig, classified []ClassifiedRepo, overlayDir, globalConfigDir string) ([][]byte, error) {
+	layers := [][]byte{[]byte(generateWorkspaceContext(cfg, classified))}
+
+	overlay, err := readOverlayContextLayer(overlayDir)
+	if err != nil {
+		return nil, err
+	}
+	if overlay != nil {
+		layers = append(layers, overlay)
+	}
+
+	global, err := readGlobalContextLayer(globalConfigDir)
+	if err != nil {
+		return nil, err
+	}
+	if global != nil {
+		layers = append(layers, global)
+	}
+
+	return layers, nil
+}
+
 // InstallOverlayClaudeContent copies CLAUDE.overlay.md from the overlay clone
 // into the instance root and appends an absolute @import to
 // .claude/rules/workspace-imports.md. Returns the installed path when the file
 // was present, or ("", nil) when it was absent.
 func InstallOverlayClaudeContent(overlayDir, instanceRoot string) (string, error) {
-	srcPath := filepath.Join(overlayDir, overlayClaudeFile)
-	data, err := os.ReadFile(srcPath)
+	data, err := readOverlayContextLayer(overlayDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", fmt.Errorf("reading %s: %w", overlayClaudeFile, err)
+		return "", err
+	}
+	if data == nil {
+		return "", nil
 	}
 
 	destPath := filepath.Join(instanceRoot, overlayClaudeFile)
@@ -395,13 +466,12 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 // .claude/rules/workspace-imports.md.
 // Returns nil, nil when CLAUDE.global.md does not exist in globalConfigDir.
 func InstallGlobalClaudeContent(globalConfigDir, instanceRoot string) ([]string, error) {
-	srcPath := filepath.Join(globalConfigDir, globalClaudeFile)
-	data, err := os.ReadFile(srcPath)
+	data, err := readGlobalContextLayer(globalConfigDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("reading %s: %w", globalClaudeFile, err)
+		return nil, err
+	}
+	if data == nil {
+		return nil, nil
 	}
 
 	destPath := filepath.Join(instanceRoot, globalClaudeFile)

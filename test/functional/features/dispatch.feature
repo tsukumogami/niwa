@@ -252,17 +252,23 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     Then the exit code is 0
     And the output contains "codex resume 01a10000-0000-7000-8000-00000000ab1e"
 
-  # --- The unoriented-worker warning, before the prompt rather than after ---
+  # --- The under-equipped-worker warning, before the prompt rather than after ---
   #
-  # A worker launched at the instance root receives none of the workspace's
-  # orientation, and the warning that says so is advice about a prompt that has
-  # not been written yet. This scenario asks for a prompt niwa cannot get -- no
-  # terminal to capture one from -- so the run ends before anything is
-  # provisioned or launched. The warning still has to be there: if it printed
-  # with the completion hints, as it once did, this run would say nothing.
+  # A worker launched at the instance root reads the orientation written there
+  # and none of the project layer -- no workspace skills, no MCP servers, no
+  # posture, because niwa writes that layer inside repositories. The warning
+  # that says so is advice about a prompt that has not been written yet. This
+  # scenario asks for a prompt niwa cannot get -- no terminal to capture one
+  # from -- so the run ends before anything is provisioned or launched. The
+  # warning still has to be there: if it printed with the completion hints, as
+  # it once did, this run would say nothing.
+  #
+  # The wording narrowed when row 2 was corrected. It used to say the worker
+  # received no orientation either, which was true of the declaration at the
+  # time and false of the agent.
 
   @critical
-  Scenario: the unoriented-worker warning arrives before the prompt is asked for
+  Scenario: the under-equipped-worker warning arrives before the prompt is asked for
     Given a clean niwa environment
     And a local git server is set up
     And a config repo "myws" exists with body:
@@ -276,4 +282,4 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     When I run "niwa dispatch --harness codex" with stdin held open
     Then the exit code is 1
     And the error output contains "not an interactive terminal"
-    And the error output contains "receives none of the workspace's orientation"
+    And the error output contains "none of the workspace's skills, MCP servers or posture"

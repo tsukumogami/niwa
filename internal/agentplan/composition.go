@@ -238,6 +238,24 @@ func (p Producer) ContextProbeSpec(dir string) ContextProbeSpec {
 // Only trailing newlines are normalized, so a layer's bytes are otherwise passed
 // through unmodified and a committed context file is inlined verbatim.
 func composeDocument(layers ...[]byte) []byte {
+	joined := joinLayers(layers...)
+	if joined == nil {
+		return nil
+	}
+	return []byte(generationMarker + "\n\n" + string(joined))
+}
+
+// joinLayers is composeDocument without the ownership marker: every layer that
+// carries content, outermost first, separated by a blank line and closed by a
+// newline, and nil when no layer contributed.
+//
+// It is separate because the marker belongs to the ownership rule rather than to
+// composition. A directory niwa owns outright -- the workspace root, an instance
+// root -- has no ownership rule to answer to and no committed file to displace,
+// so a document composed for one carries the layers and nothing else. A
+// directory niwa shares with a repository has both, and composeDocument adds the
+// marker that makes the next apply able to recognize its own work.
+func joinLayers(layers ...[]byte) []byte {
 	var present []string
 	for _, layer := range layers {
 		if strings.TrimSpace(string(layer)) == "" {
@@ -249,15 +267,7 @@ func composeDocument(layers ...[]byte) []byte {
 		return nil
 	}
 
-	var b strings.Builder
-	b.WriteString(generationMarker)
-	b.WriteString("\n")
-	for _, layer := range present {
-		b.WriteString("\n")
-		b.WriteString(layer)
-		b.WriteString("\n")
-	}
-	return []byte(b.String())
+	return []byte(strings.Join(present, "\n\n") + "\n")
 }
 
 // conflictWarning is the line reported for one path niwa refused to write.

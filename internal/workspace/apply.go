@@ -1518,12 +1518,27 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// which is which is the declaration table's answer rather than a flag's. A
 	// workspace prepared for one agent is prepared for the other at the same
 	// time, so switching between them needs no re-apply.
+	// The documents the root context document points at are resolved before it
+	// is written, not after. Their own files land further down, at step 4.5 and
+	// step 5c, in the order the @import lines need -- but an agent with no
+	// import mechanism reads a reference as nothing at all, so the layers have
+	// to be in hand here for the producer that folds them in.
+	globalLayerDir := ""
+	if a.GlobalConfigDir != "" && !opts.skipGlobal {
+		globalLayerDir = a.GlobalConfigDir
+	}
+	rootImports, err := InstanceRootImportedLayers(effectiveCfg, classified, overlayDir, globalLayerDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolving instance-root context layers: %w", err)
+	}
+
 	for _, ag := range agent.All() {
-		wsFiles, err := InstallWorkspaceContent(effectiveCfg, configDir, instanceRoot, ag)
+		wsFiles, wsWarnings, err := InstallWorkspaceContent(effectiveCfg, configDir, instanceRoot, ag, rootImports)
 		if err != nil {
 			return nil, fmt.Errorf("installing workspace content: %w", err)
 		}
 		writtenFiles = append(writtenFiles, wsFiles...)
+		allWarnings = append(allWarnings, wsWarnings...)
 	}
 
 	// Build repo name -> on-disk path index (used by marketplace resolution

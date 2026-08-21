@@ -409,7 +409,7 @@ working prior-attempt code; none is inferred.
 | # | Capability | Claude | Codex | Codex reason / notes |
 |---|---|---|---|---|
 | 1 | Workspace/group orientation reaches a repo session | Implemented | Implemented | Composed into each repo's own context file rather than placed at the root |
-| 2 | A session at the workspace or instance root is oriented | Implemented | Unavailable (cannot-receive) | Codex reads context only from the nearest project-root marker downward; an instance root has none |
+| 2 | A session at the workspace or instance root is oriented | Implemented | Implemented (amended) | Settled here as Unavailable (cannot-receive) on a reason measured false; see the amendment below the table |
 | 3 | Repo-level orientation doc (requires trust for the budget override) | Implemented | Implemented | Requires: directory trust |
 | 4 | Worktree-level orientation doc | Implemented | Implemented | Requires: directory trust; a linked worktree's `.git` pointer file satisfies the project-root marker (measured, R13) |
 | 5 | Workspace-declared plugin skills usable in the session | Implemented | Implemented | Loads even untrusted; delivery must not depend on Claude Code's presence (R14) |
@@ -425,7 +425,7 @@ working prior-attempt code; none is inferred.
 | 15 | PR-body hook | Implemented | Unavailable (cannot-receive) | Delivered as a hook; follows row 13 |
 | 16 | Worktree-hook delegation (or the deny fallback) | Implemented | Unavailable (no-such-concept) | The mechanism is Claude Code harness surface; Codex has neither the events nor the tools |
 | 17 | Ephemeral-session provisioning | Implemented | Unavailable (cannot-receive) | Rides a session-start hook and the harness's job-state file; Codex has neither |
-| 18 | Root-installed project skills (e.g. dispatch) | Implemented | Unavailable (cannot-receive) | They serve root-started sessions, where Codex reads no configuration |
+| 18 | Root-installed project skills (e.g. dispatch) | Implemented | Unavailable (not-built) (amended) | Settled here as cannot-receive on row 2's reason; see the amendment below the table |
 | 19 | niwa's own plugin (migrate-config skill) | Implemented | Unavailable (not-built) | Codex accepts the identical plugin manifest; the wiring is unbuilt and out of this PRD's scope |
 | 20 | Remote-control-at-startup | Implemented | Unavailable (no-such-concept) | Names claude.ai's remote-control bridge; no Codex equivalent |
 | 21 | Dispatch keep-alive | Implemented | Unavailable (no-such-concept) | No background-session bridge to keep warm |
@@ -435,6 +435,33 @@ working prior-attempt code; none is inferred.
 
 Target totals for Codex: 11 implemented, 13 unavailable. For Claude: 23
 implemented, 1 unavailable.
+
+**Amendment to rows 2 and 18.** This matrix is cited by name in
+`internal/agentplan/capability_test.go` as the authority its own map of final
+reason kinds follows, so an unamended row here is a test disagreeing with the
+document it says it is obeying. Two rows changed after this PRD was settled.
+
+Both rested on one reason: Codex reads context only from the nearest
+project-root marker downward, and an instance root has none. The second clause
+is true and the conclusion does not follow. A session's own working directory
+always contributes its context file — it is the last directory of the walk
+whether the walk began at a marker-bearing ancestor or, with no marker anywhere
+above, at the working directory itself. Measured against codex-cli 0.147.0 both
+ways, with a negative control that puts the document one directory up and sees
+it not arrive.
+
+Row 2 is implemented: an instance root and the workspace root each carry a
+context document, composed for an agent that cannot follow an `@import`. Row 18
+stays unavailable and becomes not-built: Codex does load a skills tree from a
+project layer at a root-started session's own working directory, untrusted, so
+what is missing is niwa writing one there. Rows 5, 8, 9 and 12 stay
+repository-scoped, which this matrix has no axis to express — see
+`docs/designs/current/DESIGN-agent-capability-contract.md` for that limit and
+`docs/guides/codex-agent.md` for what it means for a session at the root.
+
+Row 22 is also no longer this matrix's answer: background dispatch for Codex was
+built. The settled column is 13 implemented and 11 unavailable, asserted by
+`TestCodexColumnTotals`, which is the authority the target totals above are not.
 
 ## Acceptance Criteria
 

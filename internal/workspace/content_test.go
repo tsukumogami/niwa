@@ -34,7 +34,7 @@ func TestInstallWorkspaceContent(t *testing.T) {
 	}
 
 	instanceRoot := filepath.Join(tmpDir, "instance")
-	files, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, agent.AgentClaude)
+	files, _, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, agent.AgentClaude, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -97,16 +97,23 @@ func setupWorkspaceContentFixture(t *testing.T) (cfg *config.WorkspaceConfig, co
 }
 
 // TestNiwaOwnedContentGoesToTheDeclaredAgentsOnly asserts what the instance
-// root and the group directories receive. Claude gets a document at each; Codex
-// gets neither, and for two different reasons the declaration table already
-// records: an instance root is not a project root, so a session started there
-// reads nothing at all, and a group directory is above the repository where the
-// walk stops, so its layer travels composed into each repository's own document
-// instead.
+// root and the group directories receive, which is no longer the same answer at
+// the two levels for the two agents.
+//
+// Both agents get an instance-root document, under their own filename. A
+// session started there is at the last directory of its own discovery whether
+// or not a project-root marker was found above it, so the document is read
+// either way -- which is what row 2's corrected reason says.
+//
+// Only Claude gets a group document. A group directory is above the repository
+// where a project-root walk stops, so a document written there would be bytes a
+// Codex session never opens; the group layer travels to it composed into each
+// repository's own document instead. Two levels, two different answers, and the
+// declaration table carries both.
 func TestNiwaOwnedContentGoesToTheDeclaredAgentsOnly(t *testing.T) {
 	cfg, configDir, instanceRoot := setupWorkspaceContentFixture(t)
 
-	wsFiles, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, agent.AgentClaude)
+	wsFiles, _, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, agent.AgentClaude, nil)
 	if err != nil {
 		t.Fatalf("InstallWorkspaceContent: %v", err)
 	}
@@ -121,19 +128,68 @@ func TestNiwaOwnedContentGoesToTheDeclaredAgentsOnly(t *testing.T) {
 		t.Fatalf("claude group files = %v, want one CLAUDE.md", grpFiles)
 	}
 
-	codexWS, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, agent.AgentCodex)
+	codexWS, _, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, agent.AgentCodex, nil)
 	if err != nil {
 		t.Fatalf("InstallWorkspaceContent: %v", err)
 	}
+	if len(codexWS) != 1 || filepath.Base(codexWS[0]) != "AGENTS.md" {
+		t.Fatalf("codex workspace files = %v, want one AGENTS.md", codexWS)
+	}
+	if body := readFile(t, codexWS[0]); !strings.Contains(body, "Workspace body") {
+		t.Errorf("codex instance-root document does not carry the workspace layer:\n%s", body)
+	}
+
 	codexGrp, err := InstallGroupContent(cfg, configDir, instanceRoot, "public", agent.AgentCodex)
 	if err != nil {
 		t.Fatalf("InstallGroupContent: %v", err)
 	}
-	if len(codexWS) != 0 || len(codexGrp) != 0 {
-		t.Fatalf("codex niwa-owned files = %v / %v, want none at either level", codexWS, codexGrp)
+	if len(codexGrp) != 0 {
+		t.Fatalf("codex group files = %v, want none; the group layer travels composed into each repository", codexGrp)
 	}
-	assertNotExist(t, filepath.Join(instanceRoot, "AGENTS.md"))
 	assertNotExist(t, filepath.Join(instanceRoot, "public", "AGENTS.md"))
+}
+
+// TestInstanceRootDocumentFoldsTheImportedLayersForCodex is the delivery a
+// filename check cannot see. At the instance root Claude reaches the generated
+// workspace context, the private overlay and the global layer through @import
+// lines beside its document; Codex has no import mechanism, so those layers are
+// folded into the document itself and a reference would deliver nothing.
+//
+// The Claude assertion is the control. If it ever starts carrying the folded
+// layers, niwa is writing the same content twice into a session that already
+// had it once, against a budget it shares with everything else.
+func TestInstanceRootDocumentFoldsTheImportedLayersForCodex(t *testing.T) {
+	cfg, configDir, instanceRoot := setupWorkspaceContentFixture(t)
+	imported := [][]byte{
+		[]byte("# Repos\n\nthe generated repo listing\n"),
+		[]byte("# Overlay\n\nthe private addendum\n"),
+	}
+
+	codexFiles, _, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, agent.AgentCodex, imported)
+	if err != nil {
+		t.Fatalf("InstallWorkspaceContent(codex): %v", err)
+	}
+	if len(codexFiles) != 1 {
+		t.Fatalf("codex workspace files = %v, want one", codexFiles)
+	}
+	body := readFile(t, codexFiles[0])
+	for _, want := range []string{"Workspace body", "the generated repo listing", "the private addendum"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("codex instance-root document is missing %q:\n%s", want, body)
+		}
+	}
+
+	claudeFiles, _, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, agent.AgentClaude, imported)
+	if err != nil {
+		t.Fatalf("InstallWorkspaceContent(claude): %v", err)
+	}
+	if len(claudeFiles) != 1 {
+		t.Fatalf("claude workspace files = %v, want one", claudeFiles)
+	}
+	claudeBody := readFile(t, claudeFiles[0])
+	if strings.Contains(claudeBody, "the generated repo listing") {
+		t.Errorf("claude instance-root document folded in a layer it already reads by @import:\n%s", claudeBody)
+	}
 }
 
 // TestRepoContentComposesTheChainUnderCodex is the repository level: Claude gets
@@ -321,7 +377,7 @@ func TestComposedDocumentRefusesToReadASymlinkedContextFile(t *testing.T) {
 func TestContentTreesCoexist(t *testing.T) {
 	cfg, configDir, instanceRoot := setupWorkspaceContentFixture(t)
 	for _, ag := range agent.All() {
-		if _, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, ag); err != nil {
+		if _, _, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, ag, nil); err != nil {
 			t.Fatalf("workspace content for %s: %v", ag, err)
 		}
 		if _, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp", ag); err != nil {
@@ -363,7 +419,7 @@ func TestInstallWorkspaceContentNoSource(t *testing.T) {
 	}
 
 	// Should be a no-op, not an error.
-	files, err := InstallWorkspaceContent(cfg, "/tmp", "/tmp/instance", agent.AgentClaude)
+	files, _, err := InstallWorkspaceContent(cfg, "/tmp", "/tmp/instance", agent.AgentClaude, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -840,7 +896,7 @@ func TestInstallContentFileContainment(t *testing.T) {
 	}
 
 	instanceRoot := filepath.Join(tmpDir, "instance")
-	_, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, agent.AgentClaude)
+	_, _, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, agent.AgentClaude, nil)
 	if err == nil {
 		t.Fatal("expected error for path traversal, got nil")
 	}

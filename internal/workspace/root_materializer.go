@@ -102,8 +102,8 @@ type RootMaterializeOptions struct {
 //     SessionEnd entry -- teardown is reaper-driven, DESIGN Decision 6),
 //     the permission posture (permissions.defaultMode, sourced the same way
 //     instance materialization sources it), and the ephemeral-session-mode flag.
-//   - <workspaceRoot>/CLAUDE.md carrying workspace-context content at root
-//     altitude.
+//   - one context document per agent, under that agent's own root filename,
+//     carrying workspace-context content at root altitude.
 //
 // It is the workspace-root counterpart to InstallWorkspaceRootSettings (which,
 // despite its name, targets an INSTANCE root). The true workspace root -- the
@@ -129,10 +129,11 @@ func MaterializeWorkspaceRoot(cfg *config.WorkspaceConfig, workspaceRoot string,
 	}
 	written = append(written, settingsPaths...)
 
-	// Every enumerated agent's plan is produced here too. The workspace root is
-	// not a repository and holds no project-root marker, so an agent whose
-	// discovery starts from one reads nothing here at all -- and its declaration
-	// says so, which is why this loop still produces one file rather than two.
+	// Every enumerated agent's plan is produced here too. The workspace root
+	// holds no project-root marker, and that turns out not to decide anything:
+	// a session started here is at the last directory of its own discovery
+	// whether or not a marker was found above it, so both agents read what is
+	// written here, each under its own filename.
 	for _, ag := range agent.All() {
 		rootContext, err := writeRootContext(cfg, workspaceRoot, ag)
 		if err != nil {
@@ -150,7 +151,8 @@ func MaterializeWorkspaceRoot(cfg *config.WorkspaceConfig, workspaceRoot string,
 	// Distribute [root.files] verbatim (no .local) to the workspace root.
 	// Unlike the instance root, the workspace root has no managed-file state
 	// store, so these writes are overwrite-idempotent like the other
-	// root-managed files (settings.json, CLAUDE.md, skills): re-written every
+	// root-managed files (settings.json, the context documents, skills):
+	// re-written every
 	// apply, not removal-cleaned. The returned paths are reported but the
 	// callers do not yet track them.
 	if rootFiles := MergeInstanceOverrides(cfg).RootFiles; len(rootFiles) > 0 {
@@ -364,9 +366,13 @@ func pluginMarketplace(plugin string) string {
 // writeRootContext writes the workspace-root context document for one agent. A
 // session launched at the workspace root loads it at startup; without it the
 // coordinator and any root session start with no workspace orientation. The
-// producer decides the filename and whether the document is written at all, so
-// an agent that would never read one here gets nothing rather than a file
-// nobody opens.
+// producer decides the filename and whether the document is written at all,
+// which is the whole of what this function knows about the agent.
+//
+// No imported layers are passed, and that is a property of this level rather
+// than an omission: the workspace root's document is generated whole below and
+// references nothing beside it. The instance-root document does, and its
+// installer resolves those layers.
 //
 // At init time the workspace has no cloned repos to enumerate, so this does not
 // reuse generateWorkspaceContext (which classifies discovered repos). It writes
@@ -375,7 +381,7 @@ func pluginMarketplace(plugin string) string {
 func writeRootContext(cfg *config.WorkspaceConfig, workspaceRoot string, ag agent.Agent) ([]string, error) {
 	plan, err := agentplan.For(ag).RootContextPlan(agentplan.RootContextInputs{
 		Dir:     workspaceRoot,
-		Body:    []byte(generateRootClaudeContent(cfg)),
+		Body:    []byte(generateRootContextContent(cfg)),
 		HasBody: true,
 	})
 	if err != nil {
@@ -388,11 +394,17 @@ func writeRootContext(cfg *config.WorkspaceConfig, workspaceRoot string, ag agen
 	return written, nil
 }
 
-// generateRootClaudeContent produces the markdown for the workspace-root
-// CLAUDE.md. It orients a session launched at the workspace root: the workspace
-// is a multi-repo tree of instances, each a separate managed sandbox, and a
-// dispatched background session is provisioned its own ephemeral instance.
-func generateRootClaudeContent(cfg *config.WorkspaceConfig) string {
+// generateRootContextContent produces the markdown for the workspace-root
+// context document. It orients a session launched at the workspace root: the
+// workspace is a multi-repo tree of instances, each a separate managed sandbox,
+// and a dispatched background session is provisioned its own ephemeral instance.
+//
+// Every agent niwa prepares for reads this same document, under its own
+// filename, so it says what is true of the workspace rather than what one
+// harness offers. Where a route exists only in one agent, it is named as that
+// agent's -- a reader told to invoke a skill its session has no way to load
+// would be worse served than one told nothing.
+func generateRootContextContent(cfg *config.WorkspaceConfig) string {
 	name := ""
 	if cfg != nil {
 		name = cfg.Workspace.Name
@@ -419,12 +431,16 @@ cloned repos.
 ## Dispatching work to an isolated agent
 
 When you have been discussing what to build and are ready to hand the work off to
-run on its own, invoke the ` + "`/dispatch`" + ` skill. It synthesizes the conversation
-into a self-contained task brief and launches a background worker in its own fresh
-niwa instance via ` + "`niwa dispatch`" + ` -- the worker boots rooted in that instance
-(loading its full configuration) and appears in Agent View. The underlying command is
-` + "`niwa dispatch \"<task>\" --name <slug> [--detach]`" + `; ` + "`/dispatch`" + ` is the
-front door that writes the brief and runs it for you.
+run on its own, dispatch it. ` + "`niwa dispatch \"<task>\" --name <slug> [--detach]`" + `
+launches a background worker in its own fresh niwa instance -- the worker boots
+rooted in that instance, loading its full configuration. The task is the worker's
+only context, so write it as a self-contained brief rather than a reference to
+this conversation.
+
+In a Claude Code session the ` + "`/dispatch`" + ` skill is the front door: it
+synthesizes the conversation into that brief, runs the command for you, and the
+worker appears in Agent View. It is a root-installed skill, so it is there only
+for an agent that loads them; elsewhere, write the brief and run the command.
 
 ## Ephemeral sessions
 
@@ -433,7 +449,9 @@ session. When ephemeral-session mode is enabled, a background session launched
 at this root is given its own niwa instance on SessionStart. The instance is
 kept while the session exists -- including after it finishes a task or goes idle
 (the session stays resumable) -- and is reclaimed by ` + "`niwa reap`" + ` only once the
-session is deleted. The SessionStart hook in
-` + "`.claude/settings.json`" + ` drives provisioning; it invokes ` + "`niwa instance from-hook`" + `.
+session is deleted. Provisioning rides the SessionStart hook niwa installs in
+` + "`.claude/settings.json`" + `, which invokes ` + "`niwa instance from-hook`" + `. That is
+Claude Code surface: a session started by an agent with no such event gets no
+instance this way, and works in the instance it was launched in.
 `
 }

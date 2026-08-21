@@ -275,10 +275,18 @@ func TestDispatchSharedHalfRunsForEveryAgent(t *testing.T) {
 // asserts each fires for exactly the agents the table says it is true of.
 //
 // A gap documented in a guide and invisible at runtime is a developer reading a
-// plausible answer from an uninformed worker and never learning why, or
+// plausible answer from an under-equipped worker and never learning why, or
 // believing they armed a flag that was silently dropped. Both notices are
 // triggered by a declaration rather than by a name, so neither can drift out of
 // step with the table.
+//
+// The row this one follows changed with row 2's correction. It was row 2, when
+// a root-launched worker received nothing at all; it is row 18 now, which is
+// what says niwa writes no project layer at an instance root -- the skills, MCP
+// servers and posture that ride it are what a root-launched worker still does
+// not get. Orientation does reach it, and the notice no longer claims
+// otherwise. Deriving the expectation from the table rather than restating it
+// is what let this test point at the new row without inventing a new rule.
 func TestDispatchWarnsWhenTheWorkerStartsUnoriented(t *testing.T) {
 	for _, ag := range agentplan.LaunchableAgents() {
 		t.Run(string(ag), func(t *testing.T) {
@@ -294,14 +302,14 @@ func TestDispatchWarnsWhenTheWorkerStartsUnoriented(t *testing.T) {
 				t.Fatalf("dispatch: %v", err)
 			}
 
-			decl, err := agentplan.Lookup(agentplan.RootSessionOrientation, ag)
+			decl, err := agentplan.Lookup(agentplan.RootProjectSkills, ag)
 			if err != nil {
-				t.Fatalf("Lookup(root-session-orientation, %s): %v", ag, err)
+				t.Fatalf("Lookup(root-project-skills, %s): %v", ag, err)
 			}
 			warned := strings.Contains(stderr, "starts at the instance root")
-			if unoriented := decl.State != agentplan.StateImplemented; unoriented != warned {
-				t.Errorf("(%s): root-session-orientation implemented=%v, warned=%v; the notice must follow the declaration\n%s",
-					ag, !unoriented, warned, stderr)
+			if unequipped := decl.State != agentplan.StateImplemented; unequipped != warned {
+				t.Errorf("(%s): root-project-skills implemented=%v, warned=%v; the notice must follow the declaration\n%s",
+					ag, !unequipped, warned, stderr)
 			}
 		})
 	}
