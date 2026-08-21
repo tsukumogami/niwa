@@ -113,11 +113,49 @@ func TestScaffold_DefaultAgentCommentNamesEveryRung(t *testing.T) {
 	}
 	content := string(data)
 
-	for _, rung := range []string{"default_agent", "--launch-agent", "NIWA_AGENT", "[global].default_agent"} {
-		if !strings.Contains(content, rung) {
-			t.Errorf("the default_agent comment does not name the %s rung of the resolution:\n%s", rung, content)
+	// Scoped to the comment block, not the whole file. A file-wide substring
+	// scan passes if the four tokens appear anywhere -- and two of them appear
+	// on their own already, since the template carries a commented
+	// `# default_agent = "codex"` line. Deleting the entire explanation and
+	// scattering the tokens elsewhere would satisfy a whole-file check, which
+	// is the opposite of what this test is named for.
+	comment := defaultAgentCommentBlock(content)
+	if comment == "" {
+		t.Fatalf("no default_agent comment block in the scaffolded config:\n%s", content)
+	}
+
+	for _, rung := range []string{"--launch-agent", "NIWA_AGENT", "[workspace].default_agent", "[global].default_agent"} {
+		if !strings.Contains(comment, rung) {
+			t.Errorf("the default_agent comment does not name the %s rung of the resolution:\n%s", rung, comment)
 		}
 	}
+}
+
+// defaultAgentCommentBlock returns the run of consecutive comment lines that
+// explains default_agent, or "" when there is none. It is the contiguous block
+// of `#` lines ending at the commented `default_agent =` example, which is how
+// the template is written.
+func defaultAgentCommentBlock(content string) string {
+	lines := strings.Split(content, "\n")
+	end := -1
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "# default_agent =") {
+			end = i
+			break
+		}
+	}
+	if end < 0 {
+		return ""
+	}
+	start := end
+	for start > 0 {
+		prev := strings.TrimSpace(lines[start-1])
+		if !strings.HasPrefix(prev, "#") {
+			break
+		}
+		start--
+	}
+	return strings.Join(lines[start:end+1], "\n")
 }
 
 func TestScaffold_ValidTOMLWhenStripped(t *testing.T) {

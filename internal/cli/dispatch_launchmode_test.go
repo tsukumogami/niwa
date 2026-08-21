@@ -162,6 +162,60 @@ func TestDispatchForegroundCaptureFailureKeepsTheWork(t *testing.T) {
 	}
 }
 
+// TestDispatchForegroundMappingFailureKeepsTheWork is the second error exit
+// below the point where the foreground path disarms its rollback, and it needs
+// its own test for the same reason the first one did.
+//
+// Once `success` is true, every later `return` leaves the instance on disk. Two
+// of them can happen before a mapping exists: the capture failing, and the
+// mapping write itself failing. An instance with no mapping is dispatch-named
+// and unmapped, which is the reaper backstop's target, so both have to leave the
+// retain marker behind or the work is deleted half an hour later by an
+// unrelated command.
+//
+// The capture branch got the marker first and this one was added afterwards,
+// without a test -- so disabling it left the whole package green. The existing
+// rollback test for a mapping-write failure drives the *backgrounded* path,
+// where the rollback is still armed and this branch never runs.
+//
+// The failure is forced the way that test forces it: capture returns an id that
+// is not a UUID, which WriteSessionMapping rejects without writing.
+func TestDispatchForegroundMappingFailureKeepsTheWork(t *testing.T) {
+	base, ok := agentplan.For(agent.AgentClaude).LaunchSpec()
+	if !ok {
+		t.Fatal("no launch spec for the default agent")
+	}
+	spec := base
+	spec.Runner = agentplan.RunnerForeground
+
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, "")
+	f := installDispatchFakes(t, root)
+	substituteLaunchSpec(t, spec)
+	dispatchDetach = false
+
+	prevCapture := dispatchCapture
+	dispatchCapture = func(_ agentplan.SessionRecords, _, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
+		return "not-a-uuid", "shortid1", nil
+	}
+	t.Cleanup(func() { dispatchCapture = prevCapture })
+
+	_, stderr, err := runDispatchCmd(t, "do a thing")
+	if err == nil {
+		t.Fatal("a mapping that could not be written is an error, whatever else is kept")
+	}
+	if f.destroyCalled != 0 {
+		t.Errorf("destroy called %d times; the turn already ran, so its output is in that directory", f.destroyCalled)
+	}
+	if _, marked := dispatchRetainReason(f.instancePath); !marked {
+		t.Error("no retain marker was written, so the next sweep will delete the finished turn's work")
+	}
+	if !strings.Contains(stderr, "the work is kept at") {
+		t.Errorf("the developer was never told the directory was kept:\n%s", stderr)
+	}
+}
+
 // TestDispatchDoesNotApologizeForATurnTheDeveloperWatched covers the surface
 // that stops being true the moment a foreground run is possible.
 //
