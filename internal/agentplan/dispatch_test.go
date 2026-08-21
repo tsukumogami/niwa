@@ -187,58 +187,385 @@ func checkRecords(t *testing.T, ag agent.Agent, r SessionRecords) {
 // merge quietly. Completeness suites that check a field is *populated* do not
 // catch this: a populated field nothing reads is exactly the failure.
 //
-// The check is deliberately coarse in one direction and exact in the other. A
-// field name that coincides with an unrelated selector elsewhere would count as
-// read, so this cannot prove a field is read *for the right reason*. It can and
-// does prove a field is read nowhere at all, which is the shape that closed the
-// prior attempt.
+// A read counts only when the field is selected off a value the scan can show
+// holds the structure that declares it. Matching the field name anywhere in
+// these two packages would not do: Mode, Depth, Handle, Settings, Model and
+// Flags each appear as a selector on some unrelated value here -- cmd.Flags()
+// alone is on about twenty cobra commands -- so a name-based scan reports
+// LaunchSpec.Flags, the container for every pass-through spelling, as read no
+// matter what the launcher does with it.
 //
-// The names that actually collide today are worth knowing before you trust a
-// pass here: Mode, Depth, Handle, Settings, and Model each appear as a selector
-// on some unrelated value in these two packages. Deleting the read of one of
-// those from the launcher leaves this test green, so anything load-bearing about
-// them needs its own assertion -- Runner's is in dispatch_launcher_test.go,
-// which pins the argv and the process model each declared runner produces
-// rather than settling for membership in the closed set.
+// What replaces the name match, with no type checker behind it, is a walk from
+// a root the scan can name. Roots are the values these two packages declare as
+// one of the three structures: a parameter or receiver typed as one, a function
+// or method returning one, a variable holding one, a struct field declared as
+// one -- all collected from the declarations rather than written out here, so
+// renaming any of them keeps this working. From a root the chain resolves left
+// to right against the structures' own fields (spec.Records.Depth marks
+// LaunchSpec.Records and then SessionRecords.Depth), which is exact in both
+// directions.
+//
+// The cost is that a value reaching a field by a shape the walk cannot follow
+// reads as unread, and the failure looks like dead plumbing when it is really a
+// gap in the scan. If you hit that, the fix is to teach
+// collectLaunchDescriptionProducers the new shape -- not to loosen the walk
+// back to matching names.
 func TestEveryLaunchSpecFieldIsRead(t *testing.T) {
-	fields := map[string]string{}
-	for _, decl := range []struct {
-		owner string
-		typ   reflect.Type
-	}{
-		{"LaunchSpec", reflect.TypeOf(LaunchSpec{})},
-		{"SessionRecords", reflect.TypeOf(SessionRecords{})},
-		{"LaunchFlags", reflect.TypeOf(LaunchFlags{})},
-	} {
-		for i := 0; i < decl.typ.NumField(); i++ {
-			fields[decl.typ.Field(i).Name] = decl.owner
+	fields := map[string]map[string]bool{}
+	for _, typ := range launchDescriptionTypes() {
+		seen := map[string]bool{}
+		for i := 0; i < typ.NumField(); i++ {
+			seen[typ.Field(i).Name] = false
 		}
+		fields[typ.Name()] = seen
 	}
 
-	// Composite-literal keys are plain identifiers rather than selectors, so
-	// the table that declares these fields does not count as reading them.
-	read := map[string]bool{}
+	var files []*ast.File
 	for _, dir := range []string{leafDir, "../cli"} {
 		for _, pf := range parsePackageFiles(t, dir) {
-			ast.Inspect(pf.file, func(n ast.Node) bool {
-				if sel, ok := n.(*ast.SelectorExpr); ok {
-					read[sel.Sel.Name] = true
-				}
-				return true
-			})
+			files = append(files, pf.file)
 		}
+	}
+	producers := map[string]string{}
+	for _, f := range files {
+		collectLaunchDescriptionProducers(f, producers)
+	}
+	if len(producers) == 0 {
+		t.Fatal("nothing in these two packages declares a launch description; the scan would report every field unread")
+	}
+	for _, f := range files {
+		markLaunchDescriptionReads(f, producers, fields)
 	}
 
 	var unread []string
-	for name, owner := range fields {
-		if !read[name] {
-			unread = append(unread, owner+"."+name)
+	for owner, seen := range fields {
+		for name, ok := range seen {
+			if !ok {
+				unread = append(unread, owner+"."+name)
+			}
 		}
 	}
 	if len(unread) > 0 {
 		slices.Sort(unread)
 		t.Fatalf("%d launch-description field(s) are declared and read by nothing:\n  %s\nEither wire the field up, or delete it until the change that needs it. A field nothing reads is the shape that closed the prior attempt at this feature.",
 			len(unread), strings.Join(unread, "\n  "))
+	}
+}
+
+// launchDescriptionTypes is the launch description and the two structures it
+// carries.
+func launchDescriptionTypes() []reflect.Type {
+	return []reflect.Type{
+		reflect.TypeOf(LaunchSpec{}),
+		reflect.TypeOf(SessionRecords{}),
+		reflect.TypeOf(LaunchFlags{}),
+	}
+}
+
+// launchDescriptionFieldTypes maps each of the three structures to its fields,
+// and each field to the structure its own type is when that type is also one of
+// the three -- "" otherwise. It is the oracle the chain walk resolves against,
+// taken from the types themselves rather than written out, so a field that
+// starts or stops carrying one of them needs no edit here.
+func launchDescriptionFieldTypes() map[string]map[string]string {
+	tracked := map[string]bool{}
+	for _, typ := range launchDescriptionTypes() {
+		tracked[typ.Name()] = true
+	}
+	out := map[string]map[string]string{}
+	for _, typ := range launchDescriptionTypes() {
+		fields := map[string]string{}
+		for i := 0; i < typ.NumField(); i++ {
+			f := typ.Field(i)
+			if f.Type.Kind() == reflect.Struct && tracked[f.Type.Name()] {
+				fields[f.Name] = f.Type.Name()
+				continue
+			}
+			fields[f.Name] = ""
+		}
+		out[typ.Name()] = fields
+	}
+	return out
+}
+
+// collectLaunchDescriptionProducers records every name in these two packages
+// that yields one of the three structures: a function or method that returns
+// one, a variable holding one (the table, a func value), and a struct field
+// declared as one. They are read off the declarations rather than written out,
+// so renaming any of them keeps the scan working, and a new way to reach a spec
+// shows up here rather than as a field the guard says nothing reads.
+func collectLaunchDescriptionProducers(file *ast.File, into map[string]string) {
+	named := launchDescriptionNamer(file)
+
+	resultType := func(ft *ast.FuncType) (string, bool) {
+		if ft == nil || ft.Results == nil {
+			return "", false
+		}
+		for _, r := range ft.Results.List {
+			if name, ok := named(r.Type); ok {
+				return name, true
+			}
+		}
+		return "", false
+	}
+
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if name, ok := resultType(d.Type); ok {
+				into[d.Name.Name] = name
+			}
+		case *ast.GenDecl:
+			for _, spec := range d.Specs {
+				switch sp := spec.(type) {
+				case *ast.TypeSpec:
+					st, isStruct := sp.Type.(*ast.StructType)
+					if !isStruct || st.Fields == nil {
+						continue
+					}
+					for _, f := range st.Fields.List {
+						name, ok := named(f.Type)
+						if !ok {
+							continue
+						}
+						for _, id := range f.Names {
+							into[id.Name] = name
+						}
+					}
+				case *ast.ValueSpec:
+					for i, id := range sp.Names {
+						if name, ok := containedType(sp.Type, named); ok {
+							into[id.Name] = name
+							continue
+						}
+						if i >= len(sp.Values) {
+							continue
+						}
+						if lit, isLit := sp.Values[i].(*ast.FuncLit); isLit {
+							if name, ok := resultType(lit.Type); ok {
+								into[id.Name] = name
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// containedType resolves the tracked structure a declared type yields when it
+// is asked for one: the type itself, a map or slice of it, or a function
+// returning it.
+func containedType(expr ast.Expr, named func(ast.Expr) (string, bool)) (string, bool) {
+	if expr == nil {
+		return "", false
+	}
+	if name, ok := named(expr); ok {
+		return name, true
+	}
+	switch e := expr.(type) {
+	case *ast.MapType:
+		return containedType(e.Value, named)
+	case *ast.ArrayType:
+		return containedType(e.Elt, named)
+	case *ast.FuncType:
+		if e.Results == nil {
+			return "", false
+		}
+		for _, r := range e.Results.List {
+			if name, ok := named(r.Type); ok {
+				return name, true
+			}
+		}
+	}
+	return "", false
+}
+
+// markLaunchDescriptionReads walks one file and marks a field read only when it
+// is selected off a value the scan can show holds the structure that declares
+// it. See TestEveryLaunchSpecFieldIsRead for why the name alone will not do.
+func markLaunchDescriptionReads(file *ast.File, producers map[string]string, read map[string]map[string]bool) {
+	types := launchDescriptionFieldTypes()
+	namedType := launchDescriptionNamer(file)
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			return true
+		}
+		// Identifiers this function can be shown to hold one of the three
+		// structures in, and which one.
+		roots := map[string]string{}
+		addField := func(list *ast.FieldList) {
+			if list == nil {
+				return
+			}
+			for _, f := range list.List {
+				name, ok := namedType(f.Type)
+				if !ok {
+					continue
+				}
+				for _, id := range f.Names {
+					roots[id.Name] = name
+				}
+			}
+		}
+		addField(fn.Recv)
+		addField(fn.Type.Params)
+		addField(fn.Type.Results)
+
+		// The type of a chain, resolved left to right, marking each field it
+		// steps through as read. A chain the scan cannot root is not a read.
+		var chainType func(expr ast.Expr) (string, bool)
+		chainType = func(expr ast.Expr) (string, bool) {
+			switch e := expr.(type) {
+			case *ast.ParenExpr:
+				return chainType(e.X)
+			case *ast.StarExpr:
+				return chainType(e.X)
+			case *ast.UnaryExpr:
+				return chainType(e.X)
+			case *ast.Ident:
+				name, ok := roots[e.Name]
+				if !ok {
+					name, ok = producers[e.Name]
+				}
+				return name, ok
+			case *ast.IndexExpr:
+				return chainType(e.X)
+			case *ast.CompositeLit:
+				return namedType(e.Type)
+			case *ast.CallExpr:
+				switch fn := e.Fun.(type) {
+				case *ast.Ident:
+					name, ok := producers[fn.Name]
+					return name, ok
+				case *ast.SelectorExpr:
+					name, ok := producers[fn.Sel.Name]
+					return name, ok
+				}
+				return "", false
+			case *ast.SelectorExpr:
+				owner, ok := chainType(e.X)
+				if !ok {
+					// A selector that names a producer is one whatever it
+					// sits on: req.Spec is declared as a launch spec, so it is
+					// one however req got here.
+					name, isProducer := producers[e.Sel.Name]
+					return name, isProducer
+				}
+				fieldType, isField := types[owner][e.Sel.Name]
+				if !isField {
+					return "", false
+				}
+				read[owner][e.Sel.Name] = true
+				return fieldType, fieldType != ""
+			}
+			return "", false
+		}
+
+		// Two passes, because a chain may be assigned to a local before the
+		// pass that would have discovered that local ran.
+		for pass := 0; pass < 2; pass++ {
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				switch s := n.(type) {
+				case *ast.AssignStmt:
+					for i, lhs := range s.Lhs {
+						id, isIdent := lhs.(*ast.Ident)
+						if !isIdent || i >= len(s.Rhs) {
+							continue
+						}
+						if name, ok := chainType(s.Rhs[i]); ok {
+							roots[id.Name] = name
+						}
+					}
+					// x, ok := m[k] and x, ok := f() land here.
+					if len(s.Lhs) == 2 && len(s.Rhs) == 1 {
+						if id, isIdent := s.Lhs[0].(*ast.Ident); isIdent {
+							if name, ok := chainType(s.Rhs[0]); ok {
+								roots[id.Name] = name
+							}
+						}
+					}
+				case *ast.RangeStmt:
+					if s.Value != nil {
+						if id, isIdent := s.Value.(*ast.Ident); isIdent {
+							if name, ok := chainType(s.X); ok {
+								roots[id.Name] = name
+							}
+						}
+					}
+				case *ast.ValueSpec:
+					name, ok := namedType(s.Type)
+					if !ok {
+						return true
+					}
+					for _, id := range s.Names {
+						roots[id.Name] = name
+					}
+				}
+				return true
+			})
+		}
+
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if sel, isSel := n.(*ast.SelectorExpr); isSel {
+				chainType(sel)
+			}
+			return true
+		})
+		return true
+	})
+}
+
+// launchDescriptionNamer answers, for one file, whether a type expression names
+// one of the three structures: LaunchSpec inside this package,
+// agentplan.LaunchSpec outside it, under whatever alias the file's own import
+// gives this package, so an aliased import cannot blind the scan.
+func launchDescriptionNamer(file *ast.File) func(ast.Expr) (string, bool) {
+	types := launchDescriptionFieldTypes()
+	alias := ""
+	for _, imp := range file.Imports {
+		path := strings.Trim(imp.Path.Value, `"`)
+		if !strings.HasSuffix(path, "/internal/agentplan") {
+			continue
+		}
+		alias = "agentplan"
+		if imp.Name != nil {
+			alias = imp.Name.Name
+		}
+	}
+	unwrap := func(expr ast.Expr) ast.Expr {
+		for {
+			switch e := expr.(type) {
+			case *ast.StarExpr:
+				expr = e.X
+			case *ast.ParenExpr:
+				expr = e.X
+			default:
+				return expr
+			}
+		}
+	}
+	return func(expr ast.Expr) (string, bool) {
+		if expr == nil {
+			return "", false
+		}
+		switch e := unwrap(expr).(type) {
+		case *ast.Ident:
+			if _, ok := types[e.Name]; ok && alias == "" {
+				return e.Name, true
+			}
+		case *ast.SelectorExpr:
+			pkg, isIdent := e.X.(*ast.Ident)
+			if !isIdent || alias == "" || pkg.Name != alias {
+				return "", false
+			}
+			if _, ok := types[e.Sel.Name]; ok {
+				return e.Sel.Name, true
+			}
+		}
+		return "", false
 	}
 }
 
