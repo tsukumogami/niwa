@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path"
 	"slices"
 	"sort"
 	"strconv"
@@ -76,10 +77,22 @@ var dispatchPathFiles = []string{
 var dispatchAgentConstants = []string{"AgentClaude", "AgentCodex"}
 
 // dispatchAgentLiterals is the set of string literals no scanned file may
-// contain. Each one names a specific agent -- its binary, or the directory it
-// keeps its own state in -- so writing one is the same decision as naming the
-// agent, taken where it cannot be reviewed as one. They are the launch path's
-// equivalent of the agent context filenames the workspace scan forbids.
+// contain. Each one names a specific agent -- its binary, the directory it
+// keeps its own state in, or a field of the session record it writes there --
+// so writing one is the same decision as naming the agent, taken where it
+// cannot be reviewed as one. They are the launch path's equivalent of the agent
+// context filenames the workspace scan forbids.
+//
+// The second group is the record schema, and it is here because the capture
+// path's agent-specific knowledge is not the word "codex". It is where the
+// records live, what the files are called, and which key inside one holds the
+// session id -- every part of which agentplan's SessionRecords declares
+// (HomeEnv, HomePath, FileName, FileGlob, IDPath) and the capture path is
+// supposed to read from there. A capture that spells any of them out has
+// re-derived the schema at the call site while still passing a scan that only
+// looks for the agent's name, which is exactly what a reviewer demonstrated by
+// planting a table of them in dispatch_capture.go and watching both scans come
+// back clean.
 var dispatchAgentLiterals = []string{
 	"claude",
 	"codex",
@@ -87,7 +100,25 @@ var dispatchAgentLiterals = []string{
 	".codex",
 	"CLAUDE.md",
 	"AGENTS.md",
+
+	// The session-record schema, one entry per declared field.
+	"CODEX_HOME",      // SessionRecords.HomeEnv
+	"jobs",            // SessionRecords.HomePath, one agent's store
+	"state.json",      // SessionRecords.FileName
+	"rollout-*.jsonl", // SessionRecords.FileGlob
+	"sessionId",       // SessionRecords.IDPath
 }
+
+// "sessions" -- the other agent's HomePath tail, and the obvious companion to
+// "jobs" above -- is deliberately absent. It is not this agent's word: niwa has
+// its own sessions and keeps them in `.niwa/sessions`, which apply.go,
+// completion.go, and session_from_hook_cmd.go each build from that same
+// literal. Forbidding it would fail the package guard at three sites that have
+// nothing to do with any agent, and the only way to keep them green would be to
+// excuse three unrelated files with reasons that are not true. A scan that has
+// to be lied to in order to pass is worse than a scan with one fewer string in
+// it. "jobs" carries no such collision -- nothing in niwa is called a job --
+// which is why the pair splits.
 
 // dispatchViolation is one place the scan found what it forbids.
 type dispatchViolation struct {
@@ -146,6 +177,64 @@ func (p parsedDispatchFile) line(n ast.Node) int {
 	return p.fset.Position(n.Pos()).Line
 }
 
+// agentPackagePath is the import path the discriminator constants live at.
+const agentPackagePath = "github.com/tsukumogami/niwa/internal/agent"
+
+// agentPackageBinding is how one file refers to the agent package: the
+// identifier it is bound to, or dot-imported so its constants appear bare.
+type agentPackageBinding struct {
+	ident string
+	dot   bool
+}
+
+// resolveAgentPackageBinding reads the file's own import declarations rather
+// than assuming the package identifier is "agent".
+//
+// Assuming it is a hole the width of one keyword: `import ag ".../agent"`
+// followed by `ag.AgentCodex` is the same hardcoded branch the constant scan
+// exists to catch, written by anyone who runs goimports next to a variable
+// already called agent -- and a scan comparing against the literal "agent"
+// never sees it. A dot import is the same evasion one step further, putting
+// AgentCodex in scope as a bare identifier with no selector at all.
+//
+// A file that imports nothing under the name "agent" falls back to it anyway,
+// so the scan does not go quiet on a fixture or a file whose import is written
+// in a form this cannot resolve. The fallback yields only where some other
+// import has already claimed the identifier, because there `agent.X` provably
+// is not this package.
+func resolveAgentPackageBinding(f *ast.File) agentPackageBinding {
+	claimedByAnother := false
+	for _, spec := range f.Imports {
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err != nil {
+			continue
+		}
+		local := path.Base(importPath)
+		if spec.Name != nil {
+			local = spec.Name.Name
+		}
+		if importPath != agentPackagePath {
+			if local == "agent" {
+				claimedByAnother = true
+			}
+			continue
+		}
+		switch local {
+		case ".":
+			return agentPackageBinding{dot: true}
+		case "_":
+			// Imported for side effects only; nothing can be named through it.
+			return agentPackageBinding{}
+		default:
+			return agentPackageBinding{ident: local}
+		}
+	}
+	if claimedByAnother {
+		return agentPackageBinding{}
+	}
+	return agentPackageBinding{ident: "agent"}
+}
+
 // dispatchSelectorName returns the "pkg.Name" form of a selector on a plain
 // package identifier, and false for anything else.
 func dispatchSelectorName(n ast.Node) (pkg, name string, ok bool) {
@@ -161,15 +250,32 @@ func dispatchSelectorName(n ast.Node) (pkg, name string, ok bool) {
 }
 
 // agentConstantViolations returns every agent discriminator constant named in
-// one parsed file.
+// one parsed file, under whatever identifier that file binds the agent package
+// to.
 func agentConstantViolations(pf parsedDispatchFile) []dispatchViolation {
+	binding := resolveAgentPackageBinding(pf.file)
 	var found []dispatchViolation
+	record := func(n ast.Node, qualifier, name string) {
+		found = append(found, dispatchViolation{pf.name, pf.line(n), "names " + qualifier + name})
+	}
 	ast.Inspect(pf.file, func(n ast.Node) bool {
-		pkg, name, ok := dispatchSelectorName(n)
-		if !ok || pkg != "agent" || !slices.Contains(dispatchAgentConstants, name) {
+		if binding.dot {
+			// Dot-imported: the constants are in scope unqualified, and a
+			// selector on them cannot occur, so bare identifiers are the whole
+			// surface.
+			if ident, isIdent := n.(*ast.Ident); isIdent && slices.Contains(dispatchAgentConstants, ident.Name) {
+				record(n, "", ident.Name)
+			}
 			return true
 		}
-		found = append(found, dispatchViolation{pf.name, pf.line(n), "names agent." + name})
+		if binding.ident == "" {
+			return false
+		}
+		pkg, name, ok := dispatchSelectorName(n)
+		if !ok || pkg != binding.ident || !slices.Contains(dispatchAgentConstants, name) {
+			return true
+		}
+		record(n, binding.ident+".", name)
 		return true
 	})
 	return found
@@ -274,6 +380,113 @@ func offender(ag agent.Agent) string {
 			t.Errorf("the scan flagged a comment at %s:%d (%s); it must read code, not prose", v.file, v.line, v.detail)
 		}
 	}
+}
+
+// parseDispatchFixture parses in-memory source as if it were a scanned file.
+func parseDispatchFixture(t *testing.T, name, src string) parsedDispatchFile {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parsing the fixture: %v", err)
+	}
+	return parsedDispatchFile{name: name, fset: fset, file: f}
+}
+
+// TestDispatchScanDetectsARecordSchemaTable replants, verbatim, the table a
+// reviewer put in dispatch_capture.go to show the literal scan was looking for
+// the wrong thing. It named no agent -- neither "codex" nor ".codex" appears in
+// it -- and yet it hardcoded the entire Codex record schema: the environment
+// variable holding the store root, the filename pattern, the other agent's
+// record filename, and the key inside it. Both scans passed.
+//
+// The strings are the whole test. If someone trims dispatchAgentLiterals back
+// to agent names, this goes red with the same table that got through before.
+func TestDispatchScanDetectsARecordSchemaTable(t *testing.T) {
+	const src = `package cli
+
+var mutationProbeHome = map[string]string{
+	"CODEX_HOME": "rollout-*.jsonl",
+	"state.json": "sessionId",
+}
+`
+	pf := parseDispatchFixture(t, "dispatch_capture.go", src)
+
+	found := agentLiteralViolations(pf)
+	if len(found) != 4 {
+		t.Fatalf("the literal scan found %d violation(s) in a table that hardcodes four schema fields; the record schema belongs to the launch declaration:\n%s",
+			len(found), renderDispatchViolations(found))
+	}
+	for _, want := range []string{"CODEX_HOME", "rollout-*.jsonl", "state.json", "sessionId"} {
+		if !violationsName(found, want) {
+			t.Errorf("the scan did not flag %q", want)
+		}
+	}
+}
+
+// TestDispatchScanFollowsAnImportAlias pins the other half of the same evasion.
+// The constant scan used to compare the selector's package identifier against
+// the literal string "agent", so renaming the import defeated it completely --
+// `import ag ".../internal/agent"` and then `ag.AgentCodex` is the same
+// hardcoded branch under a name the scan was not told to look for. The
+// identifier now comes from the file's own import declarations.
+func TestDispatchScanFollowsAnImportAlias(t *testing.T) {
+	t.Run("alias", func(t *testing.T) {
+		src := `package cli
+
+import ag "` + agentPackagePath + `"
+
+func offender(a ag.Agent) bool {
+	return a == ag.AgentCodex || a == ag.AgentClaude
+}
+`
+		found := agentConstantViolations(parseDispatchFixture(t, "offender.go", src))
+		if len(found) != 2 {
+			t.Fatalf("the constant scan found %d violation(s) behind an import alias; want 2:\n%s",
+				len(found), renderDispatchViolations(found))
+		}
+	})
+
+	t.Run("dot import", func(t *testing.T) {
+		src := `package cli
+
+import . "` + agentPackagePath + `"
+
+func offender(a Agent) bool {
+	return a == AgentCodex
+}
+`
+		found := agentConstantViolations(parseDispatchFixture(t, "offender.go", src))
+		if len(found) != 1 {
+			t.Fatalf("the constant scan found %d violation(s) behind a dot import; want 1:\n%s",
+				len(found), renderDispatchViolations(found))
+		}
+	})
+
+	t.Run("an unrelated package called agent is not the agent package", func(t *testing.T) {
+		// The fallback must not turn any selector spelled `agent.X` into a
+		// violation when the file imports something else under that name.
+		src := `package cli
+
+import "example.com/other/agent"
+
+func fine() string { return agent.AgentCodex }
+`
+		found := agentConstantViolations(parseDispatchFixture(t, "fine.go", src))
+		if len(found) != 0 {
+			t.Errorf("the scan flagged a selector on a different package named agent:\n%s", renderDispatchViolations(found))
+		}
+	})
+}
+
+// violationsName reports whether any violation's detail names the given value.
+func violationsName(vs []dispatchViolation, value string) bool {
+	for _, v := range vs {
+		if strings.Contains(v.detail, value) {
+			return true
+		}
+	}
+	return false
 }
 
 // excusedAgentNamingFiles are the files in this package that may name an agent,
