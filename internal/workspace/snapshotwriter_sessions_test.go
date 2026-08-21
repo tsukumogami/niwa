@@ -100,6 +100,13 @@ func TestEnsureConfigSnapshot_PreservesSessionMappingsAcrossRefresh(t *testing.T
 // directory 0700 and its files 0600; a copy that recreated the directory 0755
 // would publish which sessions a developer is running to every account on the
 // machine.
+//
+// The modes are asserted absolutely rather than against what the directory
+// happened to be before the refresh. Both sides of a before-and-after
+// comparison come through the same umask, so under `umask 077` a carry-over
+// that recreated the store 0755 still lands at 0700 and the comparison holds on
+// genuinely broken code. 0700 is what this code intends, so 0700 is what it is
+// checked against.
 func TestEnsureConfigSnapshot_PreservedSessionStoreKeepsItsMode(t *testing.T) {
 	root, configDir := planSnapshotWorkspace(t)
 	if err := WriteSessionMapping(root, SessionMapping{
@@ -114,6 +121,9 @@ func TestEnsureConfigSnapshot_PreservedSessionStoreKeepsItsMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if before.Mode().Perm() != 0o700 {
+		t.Fatalf("the session store was created %v, not 0700; the carry-over check below is written against what the store asks for", before.Mode().Perm())
+	}
 	if err := EnsureConfigSnapshot(context.Background(), configDir, driftedFetcher(t), nil); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
@@ -121,8 +131,8 @@ func TestEnsureConfigSnapshot_PreservedSessionStoreKeepsItsMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session store missing after refresh: %v", err)
 	}
-	if after.Mode().Perm() != before.Mode().Perm() {
-		t.Errorf("session store mode changed across refresh: was %v, now %v", before.Mode().Perm(), after.Mode().Perm())
+	if after.Mode().Perm() != 0o700 {
+		t.Errorf("session store is %v after the refresh, want 0700; a carried-over store must not be readable by anyone but its owner", after.Mode().Perm())
 	}
 	entry, err := os.Stat(filepath.Join(configDir, sessionsDirName, preservedSessionID+".json"))
 	if err != nil {
