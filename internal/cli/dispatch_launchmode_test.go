@@ -142,6 +142,24 @@ func TestDispatchForegroundCaptureFailureKeepsTheWork(t *testing.T) {
 	if !strings.Contains(stderr, "nothing to resume") {
 		t.Errorf("the developer was not told why there is no session to resume:\n%s", stderr)
 	}
+
+	// The retain marker, asserted here rather than left to the reaper's own
+	// test. Disarming the rollback only keeps this directory for the length of
+	// the command; reapBackstop runs out-of-process at the top of the next
+	// dispatch, create or watch, and its eligibility signal is the directory
+	// NAME. This instance is dispatch-named and unmapped, and the capture timed
+	// out -- which is precisely the condition under which no session record
+	// names this cwd, so nothing spares it. Thirty minutes later the work is
+	// gone.
+	//
+	// Without this line the marker's write can be deleted and every assertion
+	// above still passes: destroy is not called during this command, and the
+	// message is still printed. The reaper's test proves it HONORS a marker,
+	// not that the dispatch writes one, so the two halves were held together by
+	// a comment and nothing else.
+	if _, marked := dispatchRetainReason(f.instancePath); !marked {
+		t.Error("no retain marker was written, so the next sweep will delete the work this dispatch said it was keeping")
+	}
 }
 
 // TestDispatchDoesNotApologizeForATurnTheDeveloperWatched covers the surface
