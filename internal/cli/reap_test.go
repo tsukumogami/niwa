@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"sort"
@@ -530,5 +531,55 @@ func TestSelectReapTargets_DeterministicSelection(t *testing.T) {
 	}
 	if targets[0].SessionID != reapDeadSessionID {
 		t.Errorf("target session id = %q, want %q", targets[0].SessionID, reapDeadSessionID)
+	}
+}
+
+// TestReportSparedInstances_HeadlineLeavesTheStateOfTheWorkToTheReason covers
+// the sentence a developer reads on every sweep once anything is spared.
+//
+// Two unrelated things are reported through this one line: an instance whose
+// session liveness cannot be read, and one whose turn finished and left work
+// niwa could not attach to a session. The headline is shared, so any claim it
+// makes about whether the work finished is false for one of them -- and the
+// reason it prints immediately afterwards says so, in the same line.
+func TestReportSparedInstances_HeadlineLeavesTheStateOfTheWorkToTheReason(t *testing.T) {
+	spared := []sparedInstance{
+		{
+			Name:   "test-ws+-0000aa11",
+			Reason: "a codex turn finished here but no session record was found, so niwa could not identify the session",
+		},
+		{
+			Name:   "test-ws+-0000bb22",
+			Reason: "codex never removes a session's record, so its presence cannot tell a live session from a deleted one",
+		},
+	}
+
+	var buf bytes.Buffer
+	reportSparedInstances(&buf, spared)
+	out := buf.String()
+
+	for _, s := range spared {
+		var line string
+		for _, candidate := range strings.Split(out, "\n") {
+			if strings.Contains(candidate, s.Name) {
+				line = candidate
+				break
+			}
+		}
+		if line == "" {
+			t.Fatalf("no line names %s; a spared instance nobody can see accumulates without a symptom.\n%s", s.Name, out)
+		}
+		headline, _, found := strings.Cut(line, s.Reason)
+		if !found {
+			t.Fatalf("the line for %s does not carry its reason: %q", s.Name, line)
+		}
+		// The headline runs ahead of a reason that answers this for each case
+		// separately, so it must not answer it first.
+		if strings.Contains(headline, "finished") {
+			t.Errorf("the headline %q says something about whether the work finished, and the reason it introduces is %q. One of the two cases reported here is the opposite, so a shared headline that takes a side is wrong every time the other one comes up.", headline, s.Reason)
+		}
+	}
+	if !strings.Contains(out, "niwa destroy") {
+		t.Errorf("the report never says how to reclaim one, so a developer watching directories accumulate has nothing to do about it.\n%s", out)
 	}
 }

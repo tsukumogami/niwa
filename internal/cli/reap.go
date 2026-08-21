@@ -118,6 +118,13 @@ const maxSparedNamesListed = 3
 // reason. A report that grew with the number of spared instances would be
 // training to ignore it within a day, and a warning nobody reads crowds out
 // the ones they would have read.
+//
+// The headline says only that the sweep will not reclaim these on its own, and
+// leaves what happened to the reason. Two different things land here -- an
+// instance whose session liveness cannot be read, and one whose turn finished
+// and left work niwa could not attach to a session -- so a headline that
+// asserted either would be printing something false about the other every time
+// the other came up.
 func reportSparedInstances(w io.Writer, spared []sparedInstance) {
 	if len(spared) == 0 {
 		return
@@ -138,16 +145,17 @@ func reportSparedInstances(w io.Writer, spared []sparedInstance) {
 			listed = listed[:maxSparedNamesListed]
 			suffix = fmt.Sprintf(" and %d more", len(names)-maxSparedNamesListed)
 		}
-		fmt.Fprintf(w, "niwa: spared %d instance(s) niwa cannot tell are finished (%s%s): %s\n",
+		fmt.Fprintf(w, "niwa: kept %d instance(s) no sweep will reclaim (%s%s): %s\n",
 			len(names), strings.Join(listed, ", "), suffix, reason)
 	}
 	// The name rather than the path, because that is what the command takes.
 	fmt.Fprintf(w, "niwa: reclaim one with `niwa destroy <name>` when you are done with its session\n")
 }
 
-// sparedInstance is an instance the sweep left alone because it could not read
-// whether the session was still there, with the reason in the words a user
-// needs to understand why their disk is not getting emptier.
+// sparedInstance is an instance the sweep left alone -- because it could not
+// read whether the session was still there, or because the instance is marked
+// to be kept -- with the reason in the words a user needs to understand why
+// their disk is not getting emptier.
 //
 // Name rather than path, because `niwa destroy` takes a name and a report that
 // prints one thing while telling you to type another is a report you have to
