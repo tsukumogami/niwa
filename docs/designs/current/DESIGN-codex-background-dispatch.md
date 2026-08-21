@@ -1533,6 +1533,19 @@ subdirectory, but only via the CLI flag or the user layer -- declaring
 the marker inside the instance root's own configuration is inert, and
 adding `.git` to the list defeats it.
 
+**Update: the orientation half of this was taken as a follow-on.** Row 2's
+reason is corrected and its state flipped, and an instance root now
+carries an `AGENTS.md` composing the workspace layer and the documents a
+Claude Code session reaches from there by `@import`. A dispatched worker
+is oriented. The rest of this section still holds: rows 5, 8, 9 and 12
+remain repository-scoped, for the reason stated above -- the contract has
+no where-from axis -- plus one the follow-on measured, that delivering
+the configuration half at the instance root would need a trust entry for
+that directory, which niwa does not write today. Row 18 moved with row 2
+rather than being delivered: it rested on the same false reason and is
+now declared niwa's own debt. See `docs/guides/codex-agent.md`,
+"Starting a session at the instance root".
+
 ## Decision Outcome
 
 The launch route binds the way the plan and procedure routes already do:

@@ -1,6 +1,7 @@
 package agentplan
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -106,25 +107,97 @@ type RootContextInputs struct {
 	Dir     string
 	Body    []byte
 	HasBody bool
+
+	// Imported are the further documents a session in Dir reads only because
+	// the agent follows a reference out of the main one -- the generated
+	// workspace context, the private overlay's addendum, the global layer -- in
+	// the order the references establish. The caller renders them from the same
+	// sources the files beside the document are written from.
+	//
+	// An agent with an import mechanism ignores them here and reads them where
+	// they are written. An agent without one gets them folded into the document
+	// itself, because a reference it cannot follow is content it does not have.
+	// Which it is, is the composition table's answer.
+	Imported [][]byte
 }
 
-// RootContextPlan declares the instance-root context document -- the one a
-// session started at the root of a prepared instance reads.
+// RootContextPlan declares the context document for a directory niwa owns
+// outright: an instance root, or the workspace root above it. It is the document
+// a session started there reads.
 //
-// An agent that finds context by walking up from its working directory reads it;
-// an agent that finds a project root first and reads downward from there never
-// does, because an instance root is not a project root. The declaration table
-// carries that difference, so this producer asks it rather than testing anything
-// about the directory.
+// Every agent niwa prepares for reads it. An agent that walks up from its
+// working directory finds it above; an agent that fixes a project root first and
+// reads downward finds it because the working directory is always the last
+// directory of that walk, whether or not a marker was found above it -- measured
+// against codex-cli 0.147.0 both ways, with a negative control that puts the
+// document one directory up and sees it not arrive.
+//
+// For an agent that composes its outer layers, the imported documents are folded
+// in and the composition is measured: a chain past the default budget is cut
+// with nothing in the text and nothing on stderr, and there is no project-layer
+// configuration at a directory like this one to declare a larger budget in, so
+// the overflow is reported here or nowhere.
 func (p Producer) RootContextPlan(in RootContextInputs) (*Plan, error) {
 	ok, err := p.delivers(RootSessionOrientation)
 	if err != nil {
 		return nil, err
 	}
-	if !ok || !in.HasBody {
+	if !ok {
 		return &Plan{}, nil
 	}
-	return &Plan{Entries: []Entry{p.rootContextEntry(RootSessionOrientation, in.Dir, in.Body)}}, nil
+
+	comp := p.composition()
+	if !comp.composesOuterLayers {
+		if !in.HasBody {
+			return &Plan{}, nil
+		}
+		return &Plan{Entries: []Entry{p.rootContextEntry(RootSessionOrientation, in.Dir, in.Body)}}, nil
+	}
+
+	var layers [][]byte
+	if in.HasBody {
+		layers = append(layers, in.Body)
+	}
+	layers = append(layers, in.Imported...)
+
+	doc := joinLayers(layers...)
+	if doc == nil {
+		return &Plan{}, nil
+	}
+
+	plan := &Plan{Entries: []Entry{p.rootContextEntry(RootSessionOrientation, in.Dir, doc)}}
+	// The measure is this document alone, and where it is inexact it under-
+	// reports rather than over-reports. niwa writes a root document at the
+	// workspace root as well as at each instance root under it, and the two are
+	// in the same chain whenever a marker-bearing ancestor sits above the
+	// workspace root -- the walk starts there, descends through both, and spends
+	// one budget across them. Neither check sees the sum.
+	//
+	// It is left inexact deliberately. The two documents are produced by
+	// separate materializers reached from separate commands, so making either
+	// check see both means threading one's size into the other's inputs, which
+	// couples them for a bound that the workspace-root document -- generated,
+	// fixed, and around a kilobyte -- moves by a rounding error. The condition
+	// to revisit this is the workspace-root document becoming configurable.
+	if comp.measuresChain && len(doc) > codexDocBudget {
+		plan.Warnings = append(plan.Warnings, rootBudgetWarning(p.rootContextPath(in.Dir), len(doc)))
+	}
+	return plan, nil
+}
+
+// rootBudgetWarning is the line reported for a root document composed past the
+// default context budget.
+//
+// It names the size rather than advising a fix, because the fix is not niwa's to
+// apply here: the budget is a project-layer key, the project layer is a
+// directory niwa writes into repositories, and a directory niwa owns outright
+// has none. Saying nothing would leave a developer with a document whose tail
+// silently stopped arriving and no way to learn it from the tool that wrote it.
+func rootBudgetWarning(path string, size int) string {
+	return fmt.Sprintf(
+		"%s composes to %d bytes, past the %d-byte default a Codex session spends on its whole context chain; the overflow is cut with nothing in the text and nothing on stderr, and niwa declares no larger budget at a directory it owns outright. Shorten the workspace-level context, or raise project_doc_max_bytes for this directory in your own Codex configuration.",
+		path, size, codexDocBudget,
+	)
 }
 
 // GroupContextPlan declares a group directory's context document.

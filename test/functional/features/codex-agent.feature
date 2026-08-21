@@ -20,12 +20,13 @@ Feature: prepare every instance for both agents
   -- the silent failure the whole override design exists to prevent. No step
   needs a live session, a network, or a model.
 
-  Everything niwa writes for Codex lands inside a repository, never at the
-  instance root: Codex reads a project layer and a context chain from the
-  nearest project root downward, and an instance root is not one. So the
-  payload assertions below are keyed by a working-tree location, and the
-  declaration table carries the instance-root gap rather than a file sitting
-  there unread.
+  The project layer niwa writes for Codex -- skills, MCP servers, environment,
+  posture -- lands inside a repository and nowhere else, so the payload
+  assertions below are keyed by a working-tree location. Orientation is the one
+  thing that also lands at the instance root, because a session started there
+  reads its own working directory whether or not a project-root marker was ever
+  found above it. The walker below models that: with no marker in the ancestry
+  it treats the starting directory as the root, which is what codex-cli does.
 
   The scenarios that do need a live session gate on `codex` being on PATH and
   skip when it is absent, so the @critical set stays offline and fast. They are
@@ -303,6 +304,75 @@ Feature: prepare every instance for both agents
     And the Codex payload at "ws/tools/app" declares no credentials
     And the git status of every repo in instance "ws" is clean
     And the git exclude of repo "app" in instance "ws" carries the Codex patterns
+
+  # ---------------------------------------------------------------------
+  # The other place a session gets started: the instance root itself, which is
+  # where `niwa dispatch` puts a background worker's working directory. This is
+  # the scenario for capability row 2, whose declaration said for a long time
+  # that a Codex session here could receive nothing, on the reasoning that an
+  # instance root holds no project-root marker. It holds none, and it does not
+  # need one.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: a session started at the instance root is oriented
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "app" exists
+    And a staged file ".niwa/content/instance.md" with body:
+      """
+      Instance layer. SENTINEL-INSTANCE
+      """
+    And a staged file ".niwa/content/group.md" with body:
+      """
+      Group layer. SENTINEL-GROUP
+      """
+    And a config repo "ws" exists with the staged files and body:
+      """
+      [workspace]
+      name = "ws"
+      content_dir = "content"
+
+      [groups.tools]
+
+      [content.workspace]
+      source = "instance.md"
+
+      [content.groups.tools]
+      source = "group.md"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    # Both agents get a document, each under its own root filename.
+    And the file "CLAUDE.md" exists in instance "ws"
+    And the file "AGENTS.md" exists in instance "ws"
+    # No marker anywhere above the instance root, so the walk is one directory
+    # long and that directory is the session's own. Selecting AGENTS.md is the
+    # whole claim row 2 used to deny.
+    And the Codex context at "ws" selects "AGENTS.md"
+    And the Codex context at "ws" contains "SENTINEL-INSTANCE"
+    # Claude reads the generated repo listing by following an @import beside
+    # the document; Codex cannot follow one, so it is folded in. Asserting the
+    # listing's own text rather than the file's existence is the point: the
+    # file exists either way, and only one of the two agents has the content.
+    And the Codex context at "ws" contains "each subdirectory under the group folders is a"
+    And the Codex context at "ws" contains "tools/app/"
+    # The group layer stays out. A group directory sits above the repository
+    # where a repo session's walk begins and below the instance root where this
+    # one begins, so a document there would be read by nobody; it travels
+    # composed into each repository instead.
+    And the file "tools/AGENTS.md" does not exist in instance "ws"
+    And the Codex context at "ws" does not contain "SENTINEL-GROUP"
+    # The delivery and the declaration are pinned to each other in both
+    # directions: this scenario would still pass on a table that had quietly
+    # gone back to declaring the row unavailable.
+    And the capability "root-session-orientation" is declared implemented for Codex
 
   # ---------------------------------------------------------------------
   # With nothing configured at any layer, niwa writes no file at its own name.

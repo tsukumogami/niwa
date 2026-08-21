@@ -24,27 +24,35 @@ func (w ContentWarning) String() string {
 // InstallWorkspaceContent reads the workspace content source file, expands
 // template variables, and installs it at the instance root for one agent.
 //
-// The producer decides both the filename and whether the document is written at
-// all. An agent that finds context by walking up from its working directory
-// reads it; an agent that finds a project root first and reads downward from
-// there never would, and its declaration says so, so nothing is written for it
-// rather than a file nothing reads. Returns the list of files written.
-func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoot string, ag agent.Agent) ([]string, error) {
+// imported are the further documents an instance-root session reads only by
+// following a reference out of this one, in the order those references
+// establish. This side resolves them and the producer decides what to do with
+// them: an agent with an import mechanism reads them where they are written, an
+// agent without one has them folded in. Resolve them with
+// InstanceRootImportedLayers, so every caller composes the same layers in the
+// same order.
+//
+// The producer decides the filename and the content. Returns the files written
+// and any warning the plan carried -- a composed document past the agent's
+// context budget is reported here, because a directory niwa owns outright
+// carries no configuration layer to declare a larger one in.
+func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoot string, ag agent.Agent, imported [][]byte) ([]string, []string, error) {
 	body, ok, err := renderWorkspaceLayer(cfg, configDir, instanceRoot)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	plan, err := agentplan.For(ag).RootContextPlan(agentplan.RootContextInputs{
-		Dir:     instanceRoot,
-		Body:    []byte(body),
-		HasBody: ok,
+		Dir:      instanceRoot,
+		Body:     []byte(body),
+		HasBody:  ok,
+		Imported: imported,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	written, _, err := applyPlan(plan)
-	return written, err
+	return written, plan.Warnings, err
 }
 
 // InstallGroupContent reads the group content source file, expands template

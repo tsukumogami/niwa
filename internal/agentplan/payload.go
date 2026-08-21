@@ -327,10 +327,28 @@ type payloadLayout struct {
 // reach the verbatim route already has: a project .mcp.json under a repository
 // would have to be distributed under a .local name that Claude Code does not
 // read, and writing it under the plain name would put niwa in a fight with the
-// .mcp.json plenty of repositories commit. Codex's goes in each repository and
-// nowhere else, for the mirror-image reason: Codex reads a project layer from
-// the nearest project root downward, and an instance root is not one, so a
-// configuration written there would be bytes no session ever loads.
+// .mcp.json plenty of repositories commit.
+//
+// Codex's goes in each repository and nowhere else. This used to be recorded as
+// the mirror-image reason -- Codex reads a project layer from the nearest
+// project root downward, an instance root is not one, so a configuration
+// written there would be bytes no session ever loads. That was measured false
+// along with row 2, and the correction belongs here because this table is where
+// someone widening the scope would look. A project layer at an instance root is
+// read: the working directory is always its own walk's last directory whether
+// or not a marker was found above it, and a `.codex/` there resolves like any
+// other -- skills untrusted, configuration keys once the directory carries a
+// trust entry (measured against codex-cli 0.147.0 in both ancestries).
+//
+// The placement is unchanged, on the reason that does hold. Every configuration
+// key in this document needs a `[projects."<path>"]` entry in the developer's
+// own Codex configuration to take effect, and niwa writes exactly one such
+// entry per cloned repository -- never for the instance root. Written there
+// today the file would be read and then ignored, which is the same nothing by a
+// different route. Widening this scope is therefore a decision about what niwa
+// writes outside an instance, not a table edit; rows 5, 8, 9 and 12 stay
+// repository-scoped until that decision is taken, and the guide says so where a
+// developer will see it.
 var payloadLayouts = map[agent.Agent]payloadLayout{
 	agent.AgentClaude: {
 		scope:            PayloadAtInstanceRoot,

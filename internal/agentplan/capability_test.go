@@ -83,7 +83,7 @@ func TestLookupAnswersEachDeclaredPair(t *testing.T) {
 	}{
 		{"implemented for claude", Hooks, agent.AgentClaude, StateImplemented, 0},
 		{"the empty agent is claude", Hooks, agent.Agent(""), StateImplemented, 0},
-		{"inherent gap for codex", RootSessionOrientation, agent.AgentCodex, StateUnavailable, ReasonAgentCannotReceive},
+		{"inherent gap for codex", MarketplaceRegistration, agent.AgentCodex, StateUnavailable, ReasonAgentCannotReceive},
 		{"niwa's own debt for codex", NiwaPlugin, agent.AgentCodex, StateUnavailable, ReasonNotBuilt},
 		{"claude's one gap", DirectoryTrust, agent.AgentClaude, StateUnavailable, ReasonNoSuchConcept},
 	}
@@ -107,16 +107,27 @@ func TestLookupAnswersEachDeclaredPair(t *testing.T) {
 }
 
 // codexFinalGaps is the Codex column at its target, unavailable half: the
-// twelve rows that stay unavailable once every Codex delivery has landed, each
-// with the reason kind the PRD's matrix gives it. Eleven are inherent to the
+// ten rows that stay unavailable once every Codex delivery has landed, each
+// with the reason kind the PRD's matrix gives it. Nine are inherent to the
 // agent; the last names a route that exists and is out of this work's scope.
 //
 // Writing them out here is what makes an accidental flip fail with a name in
 // the message. A row missing from this map is one whose delivery is still
 // pending, and TestCodexColumnStatesWhatIsDelivered checks it is unavailable
 // with the not-built kind until it lands.
+//
+// Two rows left this map after the matrix was drawn, and for the same reason
+// rather than two. Row 2 was declared an inherent gap on a reason measurement
+// showed is false -- a session's own working directory always contributes its
+// context file -- so it moved to codexDelivered. Row 18 rested on that same
+// reason, and moved out to the pending side: it is niwa's own debt now, not
+// something the agent cannot receive.
+//
+// The PRD is amended to match rather than left to disagree, because this
+// comment names it as the authority and a citation that contradicts its source
+// is worse than no citation. See the amendment under the matrix in
+// docs/prds/PRD-agent-capability-contract.md.
 var codexFinalGaps = map[Capability]ReasonKind{
-	RootSessionOrientation:  ReasonAgentCannotReceive,
 	MarketplaceRegistration: ReasonAgentCannotReceive,
 	SubagentTypes:           ReasonNoSuchConcept,
 	Hooks:                   ReasonAgentCannotReceive,
@@ -124,18 +135,17 @@ var codexFinalGaps = map[Capability]ReasonKind{
 	PRBodyHook:              ReasonAgentCannotReceive,
 	WorktreeHookDelegation:  ReasonNoSuchConcept,
 	EphemeralSessions:       ReasonAgentCannotReceive,
-	RootProjectSkills:       ReasonAgentCannotReceive,
 	NiwaPlugin:              ReasonNotBuilt,
 	RemoteControl:           ReasonNoSuchConcept,
 	DispatchKeepAlive:       ReasonNoSuchConcept,
 }
 
-// codexDelivered is what niwa delivers to Codex today, and with this work
-// complete it is also the column's target: twelve rows against the twelve in
-// codexFinalGaps. Directory trust is the first, and deliberately so -- every
-// trust-gated row downstream names it in Requires, and the closure test refuses
-// such an edge while it is unavailable. The list grew one entry per delivery,
-// in the change that landed the delivery, never before it.
+// codexDelivered is what niwa delivers to Codex today: thirteen rows against
+// the ten final gaps in codexFinalGaps, with row 18 pending on the side.
+// Directory trust is the first, and deliberately so -- every trust-gated row
+// downstream names it in Requires, and the closure test refuses such an edge
+// while it is unavailable. The list grew one entry per delivery, in the change
+// that landed the delivery, never before it.
 //
 // The two agent-agnostic rows at the end have no Codex-specific delivery at
 // all: the dotenv writer and the file distributor put the same bytes on disk
@@ -143,6 +153,7 @@ var codexFinalGaps = map[Capability]ReasonKind{
 // and its binding, not the code that writes.
 var codexDelivered = []Capability{
 	WorkspaceOrientation,
+	RootSessionOrientation,
 	RepoOrientationDoc,
 	WorktreeOrientationDoc,
 	PluginSkills,
@@ -163,7 +174,7 @@ var codexDelivered = []Capability{
 // per-row check by moving a name from one list to the other -- still has to
 // face a number somebody wrote down on purpose.
 func TestCodexColumnTotals(t *testing.T) {
-	const wantImplemented, wantUnavailable = 12, 12
+	const wantImplemented, wantUnavailable = 13, 11
 
 	implemented, unavailable := 0, 0
 	for _, c := range All() {

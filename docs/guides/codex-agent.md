@@ -10,9 +10,12 @@ what gets prepared.
 What that preparation amounts to isn't identical for the two, though, and this
 guide says where the difference is. The short version: a Codex session inside a
 cloned repository gets its orientation, its skills, its MCP servers, its
-environment, and its approval posture. What it doesn't get is mostly Claude
-Code harness surface — hooks and the features built on them — plus a few routes
-niwa simply hasn't wired up yet.
+environment, and its approval posture. A session you start at an instance root
+instead gets its orientation and, for now, nothing else — see "Starting a
+session at the instance root" below, because the difference matters most to a
+dispatched worker. What no Codex session gets is mostly Claude Code harness
+surface — hooks and the features built on them — plus a few routes niwa simply
+hasn't wired up yet.
 
 ## Choosing which agent niwa launches
 
@@ -138,24 +141,26 @@ worker runs as.
 
 ## What a Codex session gets
 
-Everything up to background dispatch lands inside the instance, in the
-repository you open the session in. Background dispatch is the one that starts
-somewhere else, which turns out to matter.
+Everything below lands inside the instance. Most of it is written into the
+repository you open the session in; the orientation document is also written at
+the instance root and the workspace root, which is where background dispatch
+starts a worker and why that placement matters.
 
 **Orientation.** niwa composes the workspace-level and group-level context into
 each repository's own `AGENTS.md`, because Codex reads context from the nearest
 project-root marker downward and never visits the directories above a
 repository. A linked worktree gets its own `AGENTS.override.md` — a worktree
 root is a project root as far as Codex is concerned, since its `.git` pointer
-file satisfies the marker check. The composed chain has a budget: Codex spends
-32768 bytes across the whole chain by default and cuts the overflow off the
-innermost layer with nothing in the text and nothing on stderr. niwa measures
-the chain as it composes it, and where that chain needs more than the default it
-declares a `project_doc_max_bytes` covering it — with headroom, so the bound
-doesn't start truncating the first time a context file grows. Where the chain
-fits, niwa writes no budget key at all and whatever you set for yourself stands.
-Raising the budget is one of several things that only work in a trusted
-directory (see below).
+file satisfies the marker check. And an instance root gets one too, under the
+plain `AGENTS.md`, for a session you start there rather than inside a repo. The
+composed chain has a budget: Codex spends 32768 bytes across the whole chain by
+default and cuts the overflow off the innermost layer with nothing in the text
+and nothing on stderr. niwa measures the chain as it composes it, and where that
+chain needs more than the default it declares a `project_doc_max_bytes` covering
+it — with headroom, so the bound doesn't start truncating the first time a
+context file grows. Where the chain fits, niwa writes no budget key at all and
+whatever you set for yourself stands. Raising the budget is one of several things
+that only work in a trusted directory (see below).
 
 **Skills.** Workspace-declared plugin skills are delivered whole into
 `.codex/skills/<plugin>`, where Codex resolves them to the same
@@ -222,16 +227,16 @@ foreground run keeps nothing there: the output was on your terminal.
 
 Three things are worth knowing before you rely on it.
 
-The worker starts in the instance root, and everything the sections above
-deliver lands inside the repositories below it — so a dispatched worker gets
-none of it. No composed orientation, none of the workspace's skills, no MCP
-servers, no posture from the project layer. Codex fixes what it reads when the
-session is constructed, keyed to the directory it started in, and it doesn't
+The worker starts in the instance root, so what it gets is what a root-started
+session gets: the composed orientation document, and none of the project layer.
+No workspace skills, no MCP servers, no posture. Codex fixes what it reads when
+the session is constructed, keyed to the directory it started in, and it doesn't
 pick things up later from a directory you tell it to work in. Your own
 user-level Codex skills still load, since those aren't part of what niwa
 delivers; so does your environment, and so does the task you gave it, and the
-repository files are all there to read. But a dispatched worker is briefed by
-its prompt rather than by the workspace, so write the prompt accordingly.
+repository files are all there to read. The next section is the detail: what
+lands at the instance root, what doesn't, and why. A dispatched worker is
+oriented but not equipped, so the prompt still has to carry the task.
 
 A Codex run's exit status doesn't tell you whether the work happened. A worker
 that couldn't write still exits 0, and an API failure of any kind — including
@@ -248,6 +253,67 @@ recorded, which reap otherwise cleans up on age — if a Codex session was
 started there, reap can't tell whether that worker is still writing, so it
 leaves the directory alone.
 
+## Starting a session at the instance root
+
+Most of this guide is about a session you open inside a cloned repository. A
+session started at the instance root is a different case, and it's the one a
+dispatched worker is in: `niwa dispatch` launches its worker with the instance
+root as its working directory.
+
+**It gets its orientation.** The instance root carries an `AGENTS.md` composing
+the workspace-level context and everything a Claude Code session reaches from
+there by `@import` — the generated repo listing, the private overlay's addendum,
+the global layer. Claude follows references; Codex has no import mechanism, so a
+reference would deliver nothing and the layers are folded into the document
+instead.
+
+This works even though an instance root holds no project-root marker. It doesn't
+need one: a session's own working directory is always the last directory of its
+discovery walk, whether that walk began at a marker-bearing ancestor or, with no
+marker anywhere above, at the working directory itself. Measured against
+codex-cli 0.147.0 both ways.
+
+**It gets nothing else, yet.** Skills, MCP servers, the environment, and the
+approval posture all ride the project-layer `.codex/` directory, and niwa writes
+that directory into each repository and not at the instance root. So a
+root-started session has the orientation and none of the rest, and a worker told
+in its prompt to work in a particular repository doesn't pick that repository's
+up either — Codex fixes its discovery at session construction, keyed to the
+launch directory, and follows neither the working directory as the session moves
+nor an instruction naming a repo. The files stay readable on request, which is
+weaker than the content being in the session's context.
+
+Two things are true about closing that gap, and both are measured. The mechanism
+works: a project layer at a marker-less instance root is read, with skills
+loading untrusted and the configuration keys taking effect once the directory
+carries a trust entry. And niwa doesn't write a trust entry for the instance root
+today — only one per cloned repository — so delivering the configuration half
+would widen what niwa writes into your own Codex config, which is the one thing
+this guide promises stays small. That's why the row for instance-root skills sits
+under "what niwa hasn't built yet" rather than under "what Codex can't receive".
+
+**An interactive session there will ask you to trust the directory.** niwa writes
+a trust entry per cloned repository and none for the instance root, so the TUI
+blocks on its trust prompt the first time you start one there yourself, the way
+it does in any directory you haven't trusted. The orientation still arrives
+either way — the context chain is read whatever the trust state; it's the
+configuration keys that aren't. Answering the prompt writes Codex's own entry,
+which niwa leaves alone.
+
+A dispatched worker doesn't hit that prompt, and not because the directory is
+trusted: `niwa dispatch` grants trust on the launch command line, for that
+invocation only, and writes nothing to your config. So the worker can work, and
+the instance root still carries no standing trust entry — which is exactly why
+the configuration half of the project layer can't be delivered there without a
+decision about widening what niwa writes.
+
+**The root document has no budget key behind it.** `project_doc_max_bytes` is a
+project-layer key and there's no project layer at the instance root, so if the
+composed root document runs past the 32768-byte default it's cut silently like
+any other over-budget chain. niwa can't raise the bound there, so it reports the
+size at apply time instead. If you see that warning, shorten the workspace-level
+context or raise the budget for that directory in your own config.
+
 ## What a Codex session doesn't get
 
 <!-- BEGIN GENERATED: codex gap list (internal/agentplan/gaplist.go) -->
@@ -262,9 +328,6 @@ again.
 Codex's own mechanics put these out of reach. niwa could write something and
 the session would never read it, so these move only if the agent changes.
 
-- **Orientation for a session you start at the workspace or instance root.**
-  Codex reads context only from the nearest project-root marker downward, and
-  an instance root has none.
 - **Registering a marketplace or plugin with the agent's own plugin system.**
   Registration lives in the developer's own Codex configuration rather than
   anywhere a workspace can declare it; skills are delivered directly instead.
@@ -278,14 +341,15 @@ the session would never read it, so these move only if the agent changes.
 - **An instance provisioned automatically for a session niwa did not launch.**
   Provisioning rides a session-start hook and the harness job-state file;
   Codex has neither.
-- **Instance-root skills such as `/dispatch`.** Root-installed skills serve
-  root-started sessions, where Codex reads no configuration at all.
 
 ### What niwa hasn't built yet
 
 A route exists on Codex's side and niwa hasn't wired it up. This is niwa's own
 debt, and it's the one group that can shrink without the agent changing.
 
+- **Instance-root skills such as `/dispatch`.** Codex loads a skills tree from
+  the project layer at a root-started session's own working directory, with no
+  trust entry needed; niwa writes no project layer at an instance root.
 - **niwa's own plugin, which carries the migrate-config skill.** Codex accepts
   the identical plugin manifest; the wiring is unbuilt.
 

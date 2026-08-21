@@ -148,25 +148,62 @@ func TestMaterializeWorkspaceRoot_ClaudeMD(t *testing.T) {
 	}
 }
 
-// TestMaterializeWorkspaceRoot_ContextFileIsClaudeOnly asserts what the true
-// workspace root receives. It takes no agent selection -- every materialize
-// produces every agent's plan -- and it still produces one file, because a
-// workspace root is not a repository and holds no project-root marker, so an
-// agent whose discovery starts from one would read nothing here whatever niwa
-// wrote.
-func TestMaterializeWorkspaceRoot_ContextFileIsClaudeOnly(t *testing.T) {
+// TestMaterializeWorkspaceRoot_ContextFileReachesEveryAgent asserts what the
+// true workspace root receives. It takes no agent selection -- every
+// materialize produces every agent's plan -- and it produces one document per
+// agent, each under that agent's own root filename.
+//
+// This test previously asserted the opposite, that only Claude's document was
+// written, on the reasoning that a workspace root holds no project-root marker
+// and so a marker-driven discovery would read nothing here. That reasoning was
+// measured false: the working directory is the last directory of the walk
+// whether or not a marker was found above it, so a session started here reads
+// what is written here.
+//
+// The two documents carry the same content deliberately. Nothing about the
+// workspace differs by who is reading, so a difference between them would be a
+// bug rather than a feature.
+func TestMaterializeWorkspaceRoot_ContextFileReachesEveryAgent(t *testing.T) {
 	cfg := &config.WorkspaceConfig{Workspace: config.WorkspaceMeta{Name: "my-workspace"}}
 	_, root := materializeRoot(t, cfg, RootMaterializeOptions{EphemeralSessionMode: true})
 
-	data, err := os.ReadFile(filepath.Join(root, "CLAUDE.md"))
+	claude, err := os.ReadFile(filepath.Join(root, "CLAUDE.md"))
 	if err != nil {
 		t.Fatalf("reading root CLAUDE.md: %v", err)
 	}
-	if !strings.Contains(string(data), "my-workspace") {
-		t.Errorf("root CLAUDE.md missing workspace name; got:\n%s", data)
+	if !strings.Contains(string(claude), "my-workspace") {
+		t.Errorf("root CLAUDE.md missing workspace name; got:\n%s", claude)
 	}
-	if _, err := os.Stat(filepath.Join(root, "AGENTS.md")); !os.IsNotExist(err) {
-		t.Errorf("expected AGENTS.md to be absent at the workspace root, stat err = %v", err)
+
+	codex, err := os.ReadFile(filepath.Join(root, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("reading root AGENTS.md: %v", err)
+	}
+	if string(codex) != string(claude) {
+		t.Errorf("the two root documents differ; the workspace is the same workspace whoever reads it\nCLAUDE.md:\n%s\nAGENTS.md:\n%s", claude, codex)
+	}
+}
+
+// TestMaterializeWorkspaceRoot_ContextNamesNoSkillItCannotLoad pins the one
+// thing that changed in the document's text when a second agent started
+// reading it. The dispatch route is stated as the command every agent can run,
+// with the skill named as the front door for the agent that loads skills --
+// because root-installed skills do not reach a Codex session, and a reader told
+// to invoke one it has no way to load is worse served than one told nothing.
+func TestMaterializeWorkspaceRoot_ContextNamesNoSkillItCannotLoad(t *testing.T) {
+	cfg := &config.WorkspaceConfig{Workspace: config.WorkspaceMeta{Name: "ws"}}
+	_, root := materializeRoot(t, cfg, RootMaterializeOptions{EphemeralSessionMode: true})
+
+	data, err := os.ReadFile(filepath.Join(root, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("reading root AGENTS.md: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "niwa dispatch") {
+		t.Errorf("root document does not name the command every agent can run:\n%s", content)
+	}
+	if !strings.Contains(content, "In a Claude Code session") {
+		t.Errorf("root document names the dispatch skill without saying whose surface it is:\n%s", content)
 	}
 }
 

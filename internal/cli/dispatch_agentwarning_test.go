@@ -41,7 +41,15 @@ func recordStderrAtLaunch(t *testing.T, errBuf *bytes.Buffer, into *string) {
 }
 
 // unorientedWarningFragment is the stable middle of the root-launch warning.
-const unorientedWarningFragment = "receives none of the workspace's orientation"
+//
+// The warning used to say a root-launched worker received nothing at all, and
+// was triggered by row 2. Row 2 was corrected -- orientation does reach a
+// session at the instance root -- so the sentence and its trigger both narrowed
+// to what is still true: the project layer niwa writes inside repositories is
+// not written at the root, and the skills, MCP servers and posture that ride it
+// do not arrive. The fragment moved with it, which is the point of pinning a
+// fragment rather than the whole line.
+const unorientedWarningFragment = "none of the workspace's skills, MCP servers or posture"
 
 // TestDispatch_AgentFlagNamingAnotherAgentWarnsBeforeTheLaunch is the defect:
 // `niwa dispatch --agent codex` provisions an instance and launches a Claude
@@ -140,11 +148,12 @@ func TestDispatch_AgentFlagIsNeverARefusal(t *testing.T) {
 }
 
 // TestDispatch_UnorientedWorkerWarningPrintsBeforeThePromptCapture is the
-// timing defect. The warning says the prompt is the worker's whole briefing,
-// which is advice about a prompt that has not been written yet -- so it has to
-// arrive before the capture opens. Printed after the launch, it reaches a
-// developer who has already written a prompt assuming context the worker never
-// had, and undoing that means hunting a detached process by hand.
+// timing defect. The warning is advice about a prompt that has not been written
+// yet -- what the worker will be missing decides what the prompt has to carry
+// -- so it has to arrive before the capture opens. Printed after the launch, it
+// reaches a developer who has already written a prompt assuming a worker that
+// had more than it did, and undoing that means hunting a detached process by
+// hand.
 func TestDispatch_UnorientedWorkerWarningPrintsBeforeThePromptCapture(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)

@@ -85,12 +85,26 @@ var declarations = []Declaration{
 
 	// Row 2: a session started at the workspace or instance root.
 	{Capability: RootSessionOrientation, Agent: agent.AgentClaude, State: StateImplemented},
-	{
-		Capability: RootSessionOrientation, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonAgentCannotReceive,
-		Reason: "Codex reads context only from the nearest project-root marker downward, and an instance root has none.",
-	},
+	// This row was declared unavailable on a reason that measurement showed is
+	// false, and the correction is worth stating rather than quietly dropping:
+	// the reason was believed, published in the guide, and acted on -- it is why
+	// niwa wrote nothing at an instance root, and why a dispatched Codex worker
+	// started at one had its task prompt and nothing else.
+	//
+	// The old reason read: "Codex reads context only from the nearest
+	// project-root marker downward, and an instance root has none." The second
+	// clause is true. The conclusion does not follow, because a session's own
+	// working directory always contributes its context file -- it is the last
+	// directory of the walk whether the walk started at a marker-bearing
+	// ancestor or, with no marker anywhere above, at the working directory
+	// itself. Measured against codex-cli 0.147.0 both ways, with a negative
+	// control that puts the document one directory up and sees it not arrive,
+	// which is what rules out the walk having gone upward.
+	//
+	// The mechanism was already on the record in
+	// docs/spikes/SPIKE-codex-discovery-mechanics.md finding 1, as a warning
+	// about experiments that mislead. Nobody had connected it to this row.
+	{Capability: RootSessionOrientation, Agent: agent.AgentCodex, State: StateImplemented},
 
 	// Row 3: the repository-level orientation document.
 	{Capability: RepoOrientationDoc, Agent: agent.AgentClaude, State: StateImplemented},
@@ -250,11 +264,25 @@ var declarations = []Declaration{
 
 	// Row 18: root-installed project skills.
 	{Capability: RootProjectSkills, Agent: agent.AgentClaude, State: StateImplemented},
+	// This row rested on row 2's false reason and inherits its correction. It
+	// said root-started Codex sessions read no configuration at all; they read
+	// the project layer at their own working directory, and skills are the one
+	// thing in that layer measured to load with no trust entry (spike finding
+	// 5), so a skills tree at an instance root would reach a session started
+	// there.
+	//
+	// The row stays unavailable, and the kind changes from "the agent cannot
+	// receive this" to "niwa has not built it", because that is now the true
+	// statement. Delivering it means giving the Codex payload layout a second
+	// scope -- it is bound to the repository scope alone today -- and that is a
+	// change to what niwa writes rather than to what it claims, so it belongs
+	// with the rest of the instance-root project layer rather than smuggled in
+	// beside a reason correction.
 	{
 		Capability: RootProjectSkills, Agent: agent.AgentCodex,
 		State:  StateUnavailable,
-		Kind:   ReasonAgentCannotReceive,
-		Reason: "Root-installed skills serve root-started sessions, where Codex reads no configuration at all.",
+		Kind:   ReasonNotBuilt,
+		Reason: "Codex loads a skills tree from the project layer at a root-started session's own working directory, with no trust entry needed; niwa writes no project layer at an instance root.",
 	},
 
 	// Row 19: niwa's own plugin.

@@ -376,27 +376,32 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("niwa: error: %s binary not found in PATH; install it before dispatching", spec.Binary)
 	}
 
-	// (3b) A worker is launched at the instance root, and for an agent that
-	// cannot be oriented there it starts without any of what the workspace
-	// delivers -- which it will not say, because it has no way to know
-	// something was withheld. Documented in the guide, invisible at the moment
-	// it happens, and the difference between those two is a developer reading a
-	// plausible answer from an uninformed worker and never learning why.
+	// (3b) A worker is launched at the instance root, and for an agent whose
+	// project layer niwa writes only inside repositories it starts without the
+	// skills, MCP servers and posture the workspace declares -- which it will
+	// not say, because it has no way to know something was withheld. Documented
+	// in the guide, invisible at the moment it happens, and the difference
+	// between those two is a developer reading a plausible answer from an
+	// under-equipped worker and never learning why.
 	//
 	// It prints here, after every preflight and BEFORE the prompt is captured,
-	// because what it changes is the prompt. A worker with no orientation needs
-	// a briefing the prompt has to carry, and a developer who reads this after
-	// the launch has already written one that assumes otherwise -- and stopping
-	// the result means finding the process by hand. Read first, then type, or
-	// press Ctrl-C having spent nothing.
+	// because what it changes is the prompt. A worker missing part of what the
+	// workspace delivers needs the rest of its briefing in the prompt, and a
+	// developer who reads this after the launch has already written one that
+	// assumes otherwise -- and stopping the result means finding the process by
+	// hand. Read first, then type, or press Ctrl-C having spent nothing.
 	//
-	// The trigger is row 2's declaration rather than a name, so it fires for
-	// exactly the agents it is true of. The sentence is niwa's own rather than
-	// the declaration's reason, because what a root-launched worker loses is
-	// wider than orientation and the reason speaks only to that.
-	if d, err := agentplan.Lookup(agentplan.RootSessionOrientation, dispatchedAgent); err == nil && d.State != agentplan.StateImplemented {
+	// The trigger was row 2 when a root-launched worker received nothing at
+	// all. It is row 18 now, because row 2 was corrected: orientation does
+	// reach a session at the instance root, and row 18 is the row that says
+	// niwa writes no project layer there -- which is what the remaining loss
+	// actually is. There is no declaration for "delivered in a repository, not
+	// at the root", so row 18 is the closest thing the table has to one, and
+	// the sentence stays niwa's own rather than the declaration's reason
+	// because what is missing is wider than skills.
+	if d, err := agentplan.Lookup(agentplan.RootProjectSkills, dispatchedAgent); err == nil && d.State != agentplan.StateImplemented {
 		fmt.Fprintf(cmd.ErrOrStderr(),
-			"niwa dispatch: the worker starts at the instance root, where a %s session receives none of the workspace's orientation, skills, MCP servers or posture -- those reach a session from inside a repository. Its prompt is its whole briefing.\n",
+			"niwa dispatch: the worker starts at the instance root. It reads the workspace orientation written there, but none of the workspace's skills, MCP servers or posture -- for a %s session those reach it only from inside a repository. Its prompt still has to carry the task.\n",
 			dispatchedAgent)
 	}
 

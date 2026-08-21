@@ -394,7 +394,7 @@ capability binds through:
 | # | Capability | Route | Claude | Codex | Codex reason / notes |
 |---|---|---|---|---|---|
 | 1 | Workspace/group orientation reaches a repo session | Plan | I | I | Composed into each repo's own context file (the only placement Codex reads) |
-| 2 | Root-started session is oriented | Plan | I | U(cannot-receive) | Codex reads context only from the nearest project-root marker downward; an instance root has none |
+| 2 | Root-started session is oriented | Plan | I | I (corrected) | Settled as U(cannot-receive) on a reason later measured false; see the correction note below the table |
 | 3 | Repo-level orientation doc | Plan | I | I | Requires: DirectoryTrust (byte-budget override) |
 | 4 | Worktree-level orientation doc | Plan | I | I | Requires: DirectoryTrust; a linked worktree's `.git` pointer file satisfies the project-root marker (measured, R13) |
 | 5 | Workspace-declared plugin skills | Plan | I | I | Loads even untrusted; must not depend on Claude Code's presence (R14) |
@@ -410,7 +410,7 @@ capability binds through:
 | 15 | PR-body hook | Plan | I (Requires: Hooks) | U(cannot-receive) | Delivered as a hook; follows row 13 |
 | 16 | Worktree-hook delegation / deny fallback | Plan | I | U(no-such-concept) | Claude Code harness surface; Codex has neither the events nor the tools |
 | 17 | Ephemeral-session provisioning | Plan | I (Requires: Hooks) | U(cannot-receive) | Rides a session-start hook and the harness job-state file |
-| 18 | Root-installed project skills | Plan | I | U(cannot-receive) | Serve root-started sessions, where Codex reads no configuration |
+| 18 | Root-installed project skills | Plan | I | U(not-built) (corrected) | Settled as U(cannot-receive) on row 2's reason; see the correction note below the table |
 | 19 | niwa's own plugin (migrate-config) | Procedure | I | U(not-built) | Codex accepts the identical manifest; wiring unbuilt, out of scope (PRD) |
 | 20 | Remote-control-at-startup | Plan | I | U(no-such-concept) | Names claude.ai's remote-control bridge |
 | 21 | Dispatch keep-alive | Launch | I (Requires: Dispatch) | U(no-such-concept) | No background-session bridge to keep warm |
@@ -418,12 +418,44 @@ capability binds through:
 | 23 | Per-directory trust bootstrap | Procedure | U(no-such-concept) | I | Claude Code keeps no per-directory trust record |
 | 24 | Git-exclude bookkeeping | Procedure | I | I | Agent-agnostic; covers Codex-side names exactly as Claude-side ones |
 
-Totals once PR 2 lands: Codex 11 implemented, 13 unavailable (7
-cannot-receive, 4 no-such-concept, 2 not-built); Claude 23 implemented, 1
-unavailable. In PR 1 the Codex column states main's truth (R11): the seven
-cannot-receive and four no-such-concept rows already carry their inherent
-reasons, and every row PR 2 will implement is declared not-built until PR
-2 flips it.
+**Correction to rows 2 and 18.** Both were settled as U(cannot-receive) on one
+reason: Codex reads context only from the nearest project-root marker downward,
+and an instance root has none. The second clause is true; the conclusion is not.
+A session's own working directory always contributes its context file, because
+it is the last directory of the walk whether the walk began at a marker-bearing
+ancestor or, with no marker anywhere above, at the working directory itself --
+measured against codex-cli 0.147.0 both ways, with a negative control that puts
+the document one directory up and sees it not arrive. The mechanism was already
+in `docs/spikes/SPIKE-codex-discovery-mechanics.md` finding 1 when the matrix
+was drawn; nobody connected it to these two rows.
+
+Row 2 is corrected and implemented: an instance root and the workspace root each
+carry a context document under the agent's own root filename, and for a
+composing agent it folds in the layers a Claude Code session reaches by
+`@import`. Row 18 is corrected to U(not-built) and stays unavailable -- Codex
+does load a skills tree from a project layer at a root-started session's working
+directory, untrusted, so what is missing is niwa writing one there, not the
+agent's ability to read it. Rows 5, 8, 9 and 12 stay repository-scoped: the
+contract has no where-from axis to say "delivered in a repository, not at the
+root", and delivering the configuration half at an instance root would need a
+trust entry for that directory, which niwa does not write. See
+`docs/guides/codex-agent.md`, "Starting a session at the instance root".
+
+Totals this design planned for once PR 2 landed: Codex 11 implemented, 13
+unavailable (7 cannot-receive, 4 no-such-concept, 2 not-built); Claude 23
+implemented, 1 unavailable. In PR 1 the Codex column states main's truth
+(R11): the seven cannot-receive and four no-such-concept rows already carry
+their inherent reasons, and every row PR 2 will implement is declared
+not-built until PR 2 flips it.
+
+**Settled totals, which differ, and the difference is the point.** Codex
+reads 13 implemented, 11 unavailable (5 cannot-receive, 4 no-such-concept,
+2 not-built); Claude is 23 and 1 as planned. Two rows moved after this
+design was written and both moved for the correction above: row 2 from
+cannot-receive to implemented, and row 18 from cannot-receive to not-built.
+Row 22 flipped separately when background dispatch was built. The counts
+are asserted by `TestCodexColumnTotals`, which is the authority; this
+paragraph is the record of what was planned and what it became.
 
 **Row 12 is delivered, and the third safety property is why.** The
 measurement resolved settability affirmatively: `approval_policy` and

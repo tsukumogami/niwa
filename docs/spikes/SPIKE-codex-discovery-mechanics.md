@@ -301,9 +301,21 @@ from anything measured.
 
 ### 12. There is no per-directory config discovery outside the walk
 
-A `.codex/config.toml` in a directory with no project-root marker above it is
-not read. This is a direct consequence of finding 1 and is worth stating
-separately because it is the specific way a naive experiment fails.
+A `.codex/config.toml` in a directory the walk does not visit is not read. This
+is a direct consequence of finding 1 and is worth stating separately because it
+is the specific way a naive experiment fails: a config file placed at a
+*parent* of the project root, or at a sibling, is simply invisible.
+
+**Amended.** This finding originally said "a directory with no project-root
+marker above it", which reads as excluding the marker-less directory the session
+is actually in, and that is false. A later pass measured a `.codex/` layer at a
+marker-less working directory in both ancestries — no marker anywhere, and a
+marker-bearing ancestor above — and it is read in both, on the same trust line
+as anywhere else: the skills tree loaded with no trust entry, and
+`[mcp_servers.*]`, `approval_policy` and `sandbox_mode` took effect once the
+directory carried one. The rule is the walk, and by finding 1 the working
+directory is always the walk's last directory; it is never outside its own
+discovery.
 
 ### 13. Outside a git repository, `--skip-git-repo-check` is mandatory and trust is not a substitute
 
@@ -470,9 +482,10 @@ host — and must never be merged into a `--json` stdout stream.
 
 Reachable from a workspace instance, without touching the developer's own Codex
 configuration: instruction context (via `AGENTS.override.md` at each repository
-root), skills (via a project-layer `skills/` directory), the context budget, MCP
-servers, and environment variables — the last three only where a trust entry
-exists.
+root, and via `AGENTS.md` at a niwa-owned directory a session may be started in,
+per the amendment to finding 12), skills (via a project-layer `skills/`
+directory), the context budget, MCP servers, and environment variables — the
+last three only where a trust entry exists.
 
 Not reachable from the project layer: trust, marker configuration, marketplace
 and plugin registration, and hook installation. Trust in particular has to be

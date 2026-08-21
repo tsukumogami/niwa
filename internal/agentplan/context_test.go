@@ -1,7 +1,9 @@
 package agentplan
 
 import (
+	"bytes"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/agent"
@@ -92,22 +94,145 @@ func TestRepoContextPlanDeclaresEachSubdirDocument(t *testing.T) {
 	}
 }
 
-// TestRootContextPlanIsEmptyForAnUndeclaredAgent pins the gate the conversion
-// moved out of the writers: an agent whose declaration for the document is
-// unavailable gets no entries, and no error either -- the table has already
-// answered. The instance-root document is the case that survives, because an
-// instance root is not a project root and Codex's walk never starts above one.
-func TestRootContextPlanIsEmptyForAnUndeclaredAgent(t *testing.T) {
-	plan, err := For(agent.AgentCodex).RootContextPlan(RootContextInputs{
-		Dir:     filepath.FromSlash("/ws"),
-		Body:    []byte("# workspace\n"),
-		HasBody: true,
+// TestRootContextPlanMatchesItsDeclaration is the binding check for row 2, in
+// the shape its route calls for.
+//
+// Rows delivered by a procedure are bound by name and checked in both
+// directions by TestBindingsMatchTheirDeclarations; rows consulted by the
+// launch path get the same treatment from TestLaunchSpecsMatchTheirDeclarations.
+// Neither mechanism reaches a plan route, where the delivery is not a
+// registered name but entries a producer declares. The route-appropriate
+// question is whether the producer declares any: given a directory with a
+// document to write, an agent the table says receives it must get an entry, and
+// an agent the table says does not must get none.
+//
+// Both directions matter and neither is hypothetical. Row 2 stood declared
+// unavailable for Codex on a false reason while the producer short-circuited on
+// that declaration, so the row and the silence agreed with each other and
+// neither was checked against the agent. Deleting the composed branch below
+// fails this test rather than quietly restoring that state.
+func TestRootContextPlanMatchesItsDeclaration(t *testing.T) {
+	for _, ag := range agent.All() {
+		d, err := Lookup(RootSessionOrientation, ag)
+		if err != nil {
+			t.Fatalf("Lookup(root-session-orientation, %q): %v", ag, err)
+		}
+
+		plan, err := For(ag).RootContextPlan(RootContextInputs{
+			Dir:     filepath.FromSlash("/ws"),
+			Body:    []byte("# workspace\n"),
+			HasBody: true,
+		})
+		if err != nil {
+			t.Fatalf("RootContextPlan(%q): %v", ag, err)
+		}
+
+		switch {
+		case d.State == StateImplemented && len(plan.Entries) == 0:
+			t.Errorf("(%s, %s) is declared implemented, but its producer declares no entry for a directory with a document to write; the declaration stands behind nothing", RootSessionOrientation, ag)
+		case d.State != StateImplemented && len(plan.Entries) > 0:
+			t.Errorf("(%s, %s) is not declared implemented, yet its producer declares %d entr(ies); something delivers a capability nobody declared", RootSessionOrientation, ag, len(plan.Entries))
+		}
+	}
+}
+
+// TestRootContextPlanIsEmptyWithNothingToWrite pins the other reason a plan
+// comes back empty, so the binding check above cannot be satisfied by a
+// producer that writes a file whatever the configuration says. A workspace that
+// declares no root content gets no document, for either agent.
+func TestRootContextPlanIsEmptyWithNothingToWrite(t *testing.T) {
+	for _, ag := range agent.All() {
+		plan, err := For(ag).RootContextPlan(RootContextInputs{Dir: filepath.FromSlash("/ws")})
+		if err != nil {
+			t.Fatalf("RootContextPlan(%q): %v", ag, err)
+		}
+		if len(plan.Entries) != 0 {
+			t.Errorf("root plan for %q declares %d entr(ies) with no body and no imported layer", ag, len(plan.Entries))
+		}
+	}
+}
+
+// TestRootContextPlanFoldsImportedLayersForAComposingAgent is the content half
+// of row 2's delivery. Claude reaches the workspace context, the private
+// overlay and the global layer through @import lines beside the document;
+// Codex has no import mechanism, so a reference it cannot follow is content it
+// does not have, and the layers are folded into the document itself.
+//
+// The Claude half is the one that keeps this honest: the same inputs must leave
+// its document byte-identical to the body alone, or this producer has started
+// writing one agent's content into the other's file.
+func TestRootContextPlanFoldsImportedLayersForAComposingAgent(t *testing.T) {
+	dir := filepath.FromSlash("/ws")
+	in := RootContextInputs{
+		Dir:      dir,
+		Body:     []byte("# workspace\n"),
+		HasBody:  true,
+		Imported: [][]byte{[]byte("# repos\n"), []byte("# overlay\n")},
+	}
+
+	codex, err := For(agent.AgentCodex).RootContextPlan(in)
+	if err != nil {
+		t.Fatalf("RootContextPlan(codex): %v", err)
+	}
+	if len(codex.Entries) != 1 {
+		t.Fatalf("codex root plan has %d entries, want 1", len(codex.Entries))
+	}
+	got := string(codex.Entries[0].Content)
+	for _, want := range []string{"# workspace", "# repos", "# overlay"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("codex root document does not carry %q:\n%s", want, got)
+		}
+	}
+	if codex.Entries[0].Path != filepath.Join(dir, "AGENTS.md") {
+		t.Errorf("codex root document path = %q, want %q", codex.Entries[0].Path, filepath.Join(dir, "AGENTS.md"))
+	}
+
+	claude, err := For(agent.AgentClaude).RootContextPlan(in)
+	if err != nil {
+		t.Fatalf("RootContextPlan(claude): %v", err)
+	}
+	if len(claude.Entries) != 1 {
+		t.Fatalf("claude root plan has %d entries, want 1", len(claude.Entries))
+	}
+	if string(claude.Entries[0].Content) != string(in.Body) {
+		t.Errorf("claude root document = %q, want the body alone %q; the imported layers reach a Claude session where they are written", claude.Entries[0].Content, in.Body)
+	}
+}
+
+// TestRootContextPlanReportsAnOverBudgetComposition pins the one thing a
+// composed root document can silently lose. Codex spends a single byte budget
+// across its whole chain and cuts the overflow with nothing in the text and
+// nothing on stderr, and a directory niwa owns outright carries no project
+// layer to declare a larger budget in -- so if this warning is not produced,
+// nothing anywhere tells the developer their orientation stopped arriving.
+func TestRootContextPlanReportsAnOverBudgetComposition(t *testing.T) {
+	dir := filepath.FromSlash("/ws")
+	big := bytes.Repeat([]byte("x"), codexDocBudget+1)
+
+	over, err := For(agent.AgentCodex).RootContextPlan(RootContextInputs{
+		Dir: dir, Body: big, HasBody: true,
 	})
 	if err != nil {
 		t.Fatalf("RootContextPlan: %v", err)
 	}
-	if len(plan.Entries) != 0 {
-		t.Errorf("root plan declares %d entries for an agent the table says does not receive them", len(plan.Entries))
+	if len(over.Warnings) != 1 {
+		t.Fatalf("an over-budget root document produced %d warnings, want 1", len(over.Warnings))
+	}
+	if !strings.Contains(over.Warnings[0], filepath.Join(dir, "AGENTS.md")) {
+		t.Errorf("the warning does not name the document it is about: %q", over.Warnings[0])
+	}
+	if len(over.Entries) != 1 {
+		t.Errorf("the document was not declared alongside its warning; a warning is not a refusal")
+	}
+
+	under, err := For(agent.AgentCodex).RootContextPlan(RootContextInputs{
+		Dir: dir, Body: []byte("# workspace\n"), HasBody: true,
+	})
+	if err != nil {
+		t.Fatalf("RootContextPlan: %v", err)
+	}
+	if len(under.Warnings) != 0 {
+		t.Errorf("a document inside the budget warned anyway: %q", under.Warnings)
 	}
 }
 
