@@ -48,6 +48,11 @@ runs with your environment — so it reaches that worker, and anything that
 worker dispatches, with no bound. If you want one command in codex, the flag is
 the narrower instrument.
 
+The variable used to be called `NIWA_AGENT`. It is renamed rather than aliased,
+so if your shell profile still exports the old name, niwa no longer reads it —
+and `niwa dispatch` says so on stderr, naming the value you set and the line to
+change, rather than quietly launching the other agent.
+
 ### The workspace setting
 
 `default_agent` lives on the `[workspace]` table of the `workspace.toml` that

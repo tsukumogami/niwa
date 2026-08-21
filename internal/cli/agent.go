@@ -152,6 +152,34 @@ func agentSourceLabel(flagValue, env, workspaceDefault, cfgPath string) string {
 	}
 }
 
+// renamedHarnessEnvNotice is what to say when the developer's shell still sets
+// NIWA_AGENT, the name this variable had through v0.9, and not the name it has
+// now. It returns "" in every other case, including the one where both are set
+// -- a developer mid-migration has already found the new name and does not need
+// telling.
+//
+// The rename is a deliberate break rather than an alias (see harnessFlagName),
+// and the argument for taking it is that the fix is one line in a shell
+// profile. That argument only holds if the developer is told which line.
+// Without this, a profile that has said NIWA_AGENT=codex for a release keeps
+// being read as nothing at all: the dispatch launches claude, the resolution
+// reports no error because no rung held a bad value, and the developer watches
+// the wrong agent start with niwa saying nothing about why.
+//
+// It does not change what resolves. The variable is not read as a fallback,
+// because a permanent fallback would preserve exactly the split the rename
+// exists to close.
+func renamedHarnessEnvNotice() string {
+	if os.Getenv("NIWA_DISPATCH_HARNESS") != "" {
+		return ""
+	}
+	old := os.Getenv("NIWA_AGENT")
+	if old == "" {
+		return ""
+	}
+	return "NIWA_AGENT is set to " + old + " but is no longer read; it was renamed to NIWA_DISPATCH_HARNESS. This dispatch resolved its agent from the other sources. Set NIWA_DISPATCH_HARNESS=" + old + " to get what you meant."
+}
+
 // unreadableAgentRungNotice is what to say when the workspace config could not
 // be read at all. The rung is then not overridden, not empty, and not rejected
 // -- it is skipped, and every one of the messages above describes a resolution

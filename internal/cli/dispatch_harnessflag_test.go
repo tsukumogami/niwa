@@ -398,3 +398,84 @@ func TestDispatchHarnessSurfaceSpellings(t *testing.T) {
 		}
 	})
 }
+
+// TestRenamedHarnessEnvNotice covers the one thing the rename can break
+// silently. NIWA_AGENT shipped in v0.9; after the rename it is not read, and
+// nothing in the resolution reports that -- no rung held a bad value, so there
+// is no error to raise. A developer whose profile has said NIWA_AGENT=codex for
+// a release would otherwise watch claude start and be told nothing.
+//
+// The notice must not resolve anything. It says the variable moved and names
+// the line to change; the agent still comes from the rungs niwa reads.
+func TestRenamedHarnessEnvNotice(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		old     string
+		current string
+		want    string
+	}{
+		{name: "neither set", want: ""},
+		{name: "only the current name", current: "codex", want: ""},
+		{
+			// Already migrated. Warning here would be noise about a variable
+			// the developer has plainly already found.
+			name: "both set", old: "claude", current: "codex", want: "",
+		},
+		{
+			name: "only the old name", old: "codex",
+			want: "NIWA_AGENT is set to codex but is no longer read; it was renamed to NIWA_DISPATCH_HARNESS. This dispatch resolved its agent from the other sources. Set NIWA_DISPATCH_HARNESS=codex to get what you meant.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("NIWA_AGENT", tc.old)
+			t.Setenv("NIWA_DISPATCH_HARNESS", tc.current)
+			if got := renamedHarnessEnvNotice(); got != tc.want {
+				t.Fatalf("renamedHarnessEnvNotice() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("it does not change what resolves", func(t *testing.T) {
+		t.Setenv("NIWA_AGENT", "codex")
+		t.Setenv("NIWA_DISPATCH_HARNESS", "")
+		got, err := resolveSessionAgent("", nil, "", nil)
+		if err != nil {
+			t.Fatalf("resolving with only the old variable set: %v", err)
+		}
+		if got != agent.AgentClaude {
+			t.Fatalf("the notice made NIWA_AGENT select %q; it must only report, never resolve", got)
+		}
+	})
+}
+
+// TestDispatch_StaleNIWA_AGENTIsReportedByTheDispatch holds the WIRING, which
+// TestRenamedHarnessEnvNotice cannot: that test proves the string is correct,
+// and deleting the call site in runDispatch left it passing along with the rest
+// of the package. What a developer needs is not a correct function, it is the
+// sentence on their terminal.
+//
+// The premise is checked first -- the dispatch really did fall through to
+// claude -- so the assertion is about a rung that was genuinely dropped rather
+// than one that would have been honored anyway.
+func TestDispatch_StaleNIWA_AGENTIsReportedByTheDispatch(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, "")
+	installDispatchFakes(t, root)
+	var preflighted []string
+	recordPreflightedBinary(t, &preflighted)
+	dispatchDetach = true
+	t.Setenv("NIWA_DISPATCH_HARNESS", "")
+	t.Setenv("NIWA_AGENT", "codex")
+
+	_, stderr, _ := runDispatchCmd(t, "do a thing")
+
+	if want := binaryFor(t, agent.AgentClaude); len(preflighted) == 0 || preflighted[0] != want {
+		t.Fatalf("preflighted %v with only the old variable set; this test needs the dispatch to have fallen through to %q", preflighted, want)
+	}
+	for _, want := range []string{"NIWA_AGENT", "NIWA_DISPATCH_HARNESS", "codex"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the dispatch never told the developer that %s moved, so a profile set a release ago silently launches the wrong agent.\nstderr: %s", want, stderr)
+		}
+	}
+}

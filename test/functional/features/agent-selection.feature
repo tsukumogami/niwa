@@ -116,6 +116,33 @@ Feature: choosing which agent niwa launches
     And the output contains "No machine-wide default dispatch harness set."
 
   @critical
+  Scenario: a profile that still exports NIWA_AGENT is told the name moved
+    # The variable was renamed rather than aliased, so a shell profile that has
+    # exported NIWA_AGENT=codex since v0.9 now selects nothing. Nothing in the
+    # resolution reports that on its own -- no rung held a bad value, the
+    # variable simply is not read -- so without this the developer watches
+    # claude start and is told nothing about why. The dispatch still runs; this
+    # is a notice, not a refusal.
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "01a30000-0000-7000-8000-00000000ba5e"
+    And I set env "NIWA_AGENT" to "codex"
+    When I run "niwa dispatch some-task --detach" from the workspace root
+    Then the exit code is 0
+    And the error output contains "NIWA_AGENT"
+    And the error output contains "NIWA_DISPATCH_HARNESS=codex"
+    # The notice reports; it never resolves. The launched agent is still the one
+    # the rungs niwa reads resolve to.
+    And the dispatch mapping for session "01a30000-0000-7000-8000-00000000ba5e" records agent "claude"
+
+  @critical
   Scenario: naming an agent in --agent is warned about, not silently obeyed
     # --agent forwards a subagent type INTO the launched agent. A developer who
     # means "launch codex" and types it here gets a Claude worker carrying a

@@ -318,6 +318,13 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	} else if notice := unreadableAgentRungNotice(wsConfigPath, cfgErr); notice != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", notice)
 	}
+	// A profile that still sets the pre-rename variable is a rung the developer
+	// believes is set and niwa does not read. Say so before resolving, because
+	// resolution reports no error for it -- nothing held a bad value, the
+	// variable simply is not consulted.
+	if notice := renamedHarnessEnvNotice(); notice != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", notice)
+	}
 	var hostCfg *config.GlobalConfig
 	if gcErr == nil {
 		hostCfg = gc

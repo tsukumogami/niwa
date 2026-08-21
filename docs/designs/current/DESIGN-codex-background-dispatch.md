@@ -1284,6 +1284,16 @@ so the fix is one line in a profile, and carrying a permanent alias for
 a variable one release old would preserve the split this rename exists
 to close.
 
+That argument only holds if the developer is told which line, so
+`niwa dispatch` prints a notice when the old name is set and the new one
+is not. Without it the break is silent in the worst way available: no
+rung held a bad value, so resolution raises no error, and a profile that
+has said `NIWA_AGENT=codex` for a release launches claude with niwa
+saying nothing. The notice reports and never resolves -- reading the old
+name as a fallback is the alias this decision rejected. It is scoped to
+the case that needs it: both set is a developer mid-migration who has
+already found the new name, and gets silence.
+
 `[workspace].default_agent` keeps its name and is the one rung that does
 not say "harness". It is also shipped, but it lives in committed
 `workspace.toml` files across every workspace that sets it, and those are

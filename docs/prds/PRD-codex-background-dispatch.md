@@ -137,7 +137,11 @@ hardcoded pass the capability contract exists to prevent.
   shell with `NIWA_DISPATCH_HARNESS`, and durably for the host with `niwa
   config set default-dispatch-harness`. The three surfaces are one setting
   and say one word, so a developer who learns any of them can guess the
-  other two. The full precedence is flag > `NIWA_DISPATCH_HARNESS` >
+  other two. The environment variable's previous name is not read as a
+  fallback, and a dispatch that finds it set says so on stderr, naming the
+  value and the line to change -- a rung the developer believes is set and
+  niwa does not read must not fail silently, and resolution cannot report
+  it, because nothing held a bad value. The full precedence is flag > `NIWA_DISPATCH_HARNESS` >
   `[workspace].default_agent` > `[global].default_dispatch_harness` >
   claude, and every rung of it is stated in the command's own help, not
   only in a guide. Nothing here changes what `niwa apply` prepares: every apply
