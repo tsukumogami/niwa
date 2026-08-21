@@ -16,6 +16,7 @@ package agent
 import (
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // Agent identifies the coding agent a workspace is prepared for.
@@ -41,9 +42,21 @@ var known = []Agent{AgentClaude, AgentCodex}
 // caller that iterates it.
 func All() []Agent { return slices.Clone(known) }
 
+// acceptedValues renders the accepted set for the parse error, comma-joined in
+// declaration order. It reads the same list All() serves rather than spelling
+// the names out again, so adding a third agent updates the message a developer
+// reads instead of leaving the last hardcoded copy of the set quietly wrong.
+func acceptedValues() string {
+	names := make([]string, 0, len(known))
+	for _, a := range known {
+		names = append(names, string(a))
+	}
+	return strings.Join(names, ", ")
+}
+
 // ParseAgent validates s against the accepted set and returns the matching
 // Agent. An empty string resolves to AgentClaude (the default). Any value
-// outside {"claude", "codex"} returns an error naming the accepted set.
+// outside the accepted set returns an error naming that set.
 func ParseAgent(s string) (Agent, error) {
 	switch Agent(s) {
 	case "", AgentClaude:
@@ -51,7 +64,7 @@ func ParseAgent(s string) (Agent, error) {
 	case AgentCodex:
 		return AgentCodex, nil
 	default:
-		return "", fmt.Errorf("unknown agent %q; accepted values are: claude, codex", s)
+		return "", fmt.Errorf("unknown agent %q; accepted values are: %s", s, acceptedValues())
 	}
 }
 

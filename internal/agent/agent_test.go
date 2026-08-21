@@ -48,6 +48,29 @@ func TestParseAgentUnknownNamesAcceptedSet(t *testing.T) {
 	}
 }
 
+// TestParseAgentAcceptedSetIsDerivedFromAll pins the whole accepted-values
+// clause to All(), not just the presence of each name. The clause was the last
+// place in the package where the closed set was typed out, and a hand-written
+// list is the kind of thing that goes stale silently: the agent is added, the
+// switch accepts it, and the error a developer reads still names two.
+func TestParseAgentAcceptedSetIsDerivedFromAll(t *testing.T) {
+	joined := ""
+	for i, a := range All() {
+		if i > 0 {
+			joined += ", "
+		}
+		joined += string(a)
+	}
+
+	_, err := ParseAgent("nope")
+	if err == nil {
+		t.Fatal("expected error for unknown agent")
+	}
+	if want := "accepted values are: " + joined; !contains(err.Error(), want) {
+		t.Fatalf("error %q does not carry the accepted set as All() lists it (%q)", err, want)
+	}
+}
+
 func TestAllReturnsAFreshSlice(t *testing.T) {
 	first := All()
 	if len(first) == 0 {
