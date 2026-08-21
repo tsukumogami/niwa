@@ -291,6 +291,22 @@ func SaveGlobalConfig(cfg *GlobalConfig) error {
 // SaveGlobalConfigTo writes the global config to the given path, creating
 // parent directories as needed. The file is created with 0o600 permissions
 // because config.toml may contain sensitive values like repo URLs.
+//
+// KNOWN LOSS, deliberately not fixed here: this re-encodes the parsed struct,
+// and toml.Unmarshal keeps only the keys the struct declares. So every write
+// drops the file's comments and any key this build does not know about --
+// a key written by a newer niwa, or one of the [global] settings that has no
+// setter at all (dispatch_model, remote_control_on_dispatch,
+// keep_alive_on_dispatch, watch_sandbox, watch_max_staged), whose documented
+// way to use them is to hand-edit this file. A developer who hand-edits with a
+// comment explaining why loses it to an unrelated `niwa config set`.
+//
+// It predates any one caller and affects all of them, and fixing it means
+// editing the TOML tree in place rather than round-tripping a struct -- a
+// different encoder and a change to every writer. It is recorded here rather
+// than in a planning document because this is where the next person to touch
+// this function will be standing, and planning documents for this work are
+// deleted when it merges.
 func SaveGlobalConfigTo(path string, cfg *GlobalConfig) error {
 	return writeGlobalConfigFile(path, func(w io.Writer) error {
 		return toml.NewEncoder(w).Encode(cfg)

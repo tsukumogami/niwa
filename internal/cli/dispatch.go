@@ -592,10 +592,8 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	}
 
 	// (9b) The process model, resolved from both of its inputs: what this
-	// agent's runner is, and whether this invocation asked to detach. Read from
-	// the declaration alone it could not see the flag, which is how a runner
-	// that executes its turn in the foreground came to be detached whether or
-	// not anybody asked for that.
+	// agent's runner is, and whether this invocation asked to detach. Reading
+	// the declaration alone could not see the flag; see RunnerKind.ModeFor.
 	//
 	// Without --detach, a foreground runner's turn runs here, in this terminal,
 	// and this call does not return until it ends. The developer watches the
@@ -621,6 +619,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// the agent's management verbs accept, and for one agent those two are
 	// different strings, which is why capture returns both rather than deriving
 	// one from the other.
+	//
 	// On failure the deferred rollback destroys the instance DIRECTORY, but the
 	// background worker launched above may still be running: capture failed, so
 	// we never obtained its session id and cannot stop it. The orphaned process
@@ -632,27 +631,17 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// would not parse, a configuration it would not load -- says so there, writes
 	// no session record, and is reported here as a capture timeout, which
 	// describes the symptom and not the cause. So the log's tail is read out
-	// BEFORE returning, while the directory still exists. Without this the
-	// failure leaves nothing on disk to diagnose it by, which is the exact
-	// condition the launcher hands the worker a closed stdin to avoid.
-	// On the foreground path the rollback is disarmed BEFORE capture, and this
-	// is the difference between the two shapes rather than a nicety.
+	// BEFORE returning, while the directory still exists.
 	//
-	// Detached, a capture failure means the worker started moments ago and the
-	// instance holds nothing but its own logs; destroying it is the right
-	// cleanup and costs a diagnostic, which is why the tail is read out first.
-	// Foreground, the launch already waited for the turn to end. Everything the
-	// worker produced is inside this directory. A run that did real work and
-	// then failed to yield a discoverable session record -- a refused prompt, a
-	// crash after writing files, a record the scanner cannot match -- would have
-	// its output deleted by a rollback armed for the case where there was none.
-	//
-	// The instance is the deliverable there and the session id is a
-	// convenience; detached it is the other way round. The exit-status arm of
-	// this same function already reasons exactly this way and declines to roll
-	// back work that may have happened, so leaving the capture arm to destroy it
-	// would have one half of one function protecting the work and the other half
-	// deleting it.
+	// The foreground path disarms the rollback BEFORE capture instead, and the
+	// difference is which of the two is the deliverable. Detached, the worker
+	// started moments ago and the instance holds nothing but its own logs, so
+	// destroying it costs a diagnostic and no work. Foreground, the launch
+	// already waited for the turn to end and everything the worker produced is
+	// inside this directory: a run that did real work and then failed to yield
+	// a discoverable session record -- a refused prompt, a crash after writing
+	// files, a record the scanner cannot match -- would have its output deleted
+	// by a rollback armed for the case where there was none.
 	if launchMode == agentplan.LaunchForeground {
 		success = true
 	}
@@ -716,6 +705,23 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		Created:      time.Now().UTC(),
 	}
 	if err := workspace.WriteSessionMapping(workspaceRoot, mapping); err != nil {
+		// The same hazard as the capture-failure branch, on a narrower path.
+		// Foreground, the rollback was already disarmed above, so returning
+		// here leaves a dispatch-named unmapped instance holding a finished
+		// turn's work -- the backstop's exact target, deleted half an hour
+		// later. Detached there is nothing to keep and the rollback is still
+		// armed, so the deferred destroy does the right thing and this does
+		// not run.
+		if launchMode == agentplan.LaunchForeground {
+			reason := fmt.Sprintf("a %s turn finished here but its session mapping could not be written, so niwa cannot find the session again", spec.Binary)
+			if mErr := writeDispatchRetainMarker(instancePath, reason); mErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(),
+					"niwa: warning: could not mark %s to be kept, so a later sweep may reclaim it: %v\n", instancePath, mErr)
+			}
+			removeDispatchMarker(instancePath)
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"niwa: the work is kept at %s -- remove it with `niwa destroy` when you are done with it\n", instancePath)
+		}
 		return fmt.Errorf("niwa: error: writing dispatch session mapping: %w", err)
 	}
 
