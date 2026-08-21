@@ -23,13 +23,21 @@ one wins:
 | Source | Lasts | Set it with |
 |--------|-------|-------------|
 | `--launch-agent` | one command | `niwa dispatch "..." --launch-agent codex` |
-| `NIWA_AGENT` | one shell | `NIWA_AGENT=codex niwa dispatch "..."` |
+| `NIWA_AGENT` | one shell, and every worker dispatched from it | `NIWA_AGENT=codex niwa dispatch "..."` |
 | `[workspace].default_agent` | one workspace, for everyone in it | editing the workspace config |
 | `[global].default_agent` | your machine, every workspace | `niwa config set default-agent codex` |
 
 Nothing set anywhere means `claude`. The rest of this section takes them from
 the bottom of that table upward, since the workspace setting is the one with
 something to watch out for.
+
+The two one-off rungs differ in reach, and the difference is easy to miss.
+`--launch-agent` really does last one command: the worker it starts knows
+nothing about it, so a worker that dispatches a sibling gets whatever the other
+rungs resolve to. `NIWA_AGENT` is inherited, because a dispatched worker runs
+with your environment — so it reaches that worker, and anything that worker
+dispatches, with no bound. If you want one command in codex, the flag is the
+narrower instrument.
 
 ### The workspace setting
 
