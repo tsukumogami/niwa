@@ -17,7 +17,10 @@ content_dir = "claude"
 # default_agent names the coding agent this workspace's background workers are
 # launched as. It does not select what niwa prepares: every apply prepares the
 # workspace for every agent niwa supports, so a session can be opened as either
-# one without re-applying. NIWA_AGENT overrides it per shell.
+# one without re-applying. Two rungs override it: --launch-agent on a single
+# niwa dispatch, and NIWA_AGENT for a whole shell. Leave it unset and the
+# machine-wide [global].default_agent decides (niwa config set default-agent),
+# and niwa's built-in default when that is unset too.
 # default_agent = "codex"
 
 # --- Sources: GitHub orgs to discover repos from ---

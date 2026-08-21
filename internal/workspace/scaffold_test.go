@@ -94,6 +94,32 @@ func TestScaffold_EmptyName(t *testing.T) {
 	}
 }
 
+// TestScaffold_DefaultAgentCommentNamesEveryRung keeps the template honest
+// about a ladder that has grown. The comment described two rungs -- the key
+// itself and NIWA_AGENT -- while the resolution has four, so the reader most
+// likely to be sitting in this file was told nothing about the flag that
+// overrides it for one command or the personal setting that fills in when the
+// key is absent.
+func TestScaffold_DefaultAgentCommentNamesEveryRung(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := Scaffold(dir, "rungs"); err != nil {
+		t.Fatalf("Scaffold returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, StateDir, WorkspaceConfigFile))
+	if err != nil {
+		t.Fatalf("workspace.toml not created: %v", err)
+	}
+	content := string(data)
+
+	for _, rung := range []string{"default_agent", "--launch-agent", "NIWA_AGENT", "[global].default_agent"} {
+		if !strings.Contains(content, rung) {
+			t.Errorf("the default_agent comment does not name the %s rung of the resolution:\n%s", rung, content)
+		}
+	}
+}
+
 func TestScaffold_ValidTOMLWhenStripped(t *testing.T) {
 	dir := t.TempDir()
 
