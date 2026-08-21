@@ -97,13 +97,6 @@ func launchAgentMismatchWarning(agentFlagValue string, launched agent.Agent) str
 // only caller of this function. "" means the flag was not given, and the
 // remaining rungs decide.
 //
-// An earlier version of this comment said the empty case also covered entry
-// points that expose no such flag, naming init, reset, from-hook and worktree.
-// Those commands do not consult agent selection at all -- none of them launches
-// anything, and every apply prepares the tree for every supported agent
-// regardless. The sentence was arguably true when dispatch passed "" as well,
-// and adding the flag made it false.
-//
 // cfg is the workspace config and cfgPath the file it was read from; gc is the
 // developer's personal niwa config (~/.config/niwa/config.toml), the broadest
 // rung. Either config may be nil, which reads as "that source is unset" -- a

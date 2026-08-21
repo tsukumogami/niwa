@@ -116,9 +116,8 @@ const maxSparedNamesListed = 3
 // permanent: an instance whose liveness cannot be read is spared on every sweep
 // forever, and every sweep runs under a command somebody ran for another
 // reason. A report that grew with the number of spared instances would be
-// training to ignore it within a day, which costs more than saying nothing --
-// a warning nobody reads is worse than an absent one, because it also crowds
-// out the ones they would have read.
+// training to ignore it within a day, and a warning nobody reads crowds out
+// the ones they would have read.
 func reportSparedInstances(w io.Writer, spared []sparedInstance) {
 	if len(spared) == 0 {
 		return
@@ -253,12 +252,10 @@ func selectReapTargets(workspaceRoot, jobsDir string, now time.Time) ([]reapTarg
 		// still lives in costs the work in it, which is the failure this whole
 		// rule exists to prevent.
 		//
-		// It is reported rather than skipped in silence. A sweep that spares
-		// something and says nothing is indistinguishable from a sweep that
-		// found nothing, and the instances pile up with no way to notice short
-		// of counting directories. This is the runtime half of a gap the
-		// capability table declares: a declared gap nobody can observe while it
-		// is happening is only half declared.
+		// It is reported rather than skipped in silence, for the reason
+		// reportSparedInstances gives: this is the runtime half of a gap the
+		// capability table declares, and a declared gap nobody can observe
+		// while it is happening is only half declared.
 		if reason, spared := livenessUnreadable(mapping.Agent); spared {
 			name := mapping.InstanceName
 			if name == "" {
@@ -474,30 +471,20 @@ func selectBackstopTargets(workspaceRoot, jobsDir string, now time.Time) ([]back
 		// running worker -- doing so was the data-loss bug (it reaped the
 		// caller's own live instance mid-dispatch).
 		//
-		// instanceHasLiveJob reads one agent's harness state, which was the
-		// whole story while niwa launched one agent. instanceHasRecordedSession
-		// asks every launchable agent's own declared session store the same
-		// question, and it is what keeps a worker in an agent whose sessions
-		// live somewhere else entirely from having its working directory
-		// destroyed underneath it.
+		// instanceHasLiveJob reads one agent's harness state;
+		// instanceHasRecordedSession asks every launchable agent's own declared
+		// session store the same question, which is what keeps a worker in an
+		// agent whose sessions live somewhere else entirely from having its
+		// working directory destroyed underneath it.
 		//
-		// For the agent whose declared store IS the jobs directory the two are
-		// near-redundant, not complementary -- same tree, same question -- so
-		// the second call adds almost nothing there, and the first is not dead
-		// weight for the other agent either, it simply never fires.
-		//
-		// Near-redundant and not redundant, and the difference matters to
-		// anyone deciding which to delete. They handle paths differently:
-		// instanceHasLiveJob compares cleaned paths, instanceHasRecordedSession
-		// resolves symlinks first. So an instance reachable only through a
-		// symlinked path -- one whose recorded cwd and whose instance path are
-		// the same directory under two spellings -- is matched by the second
-		// and missed by the first, for BOTH agents. If these ever collapse into
-		// one call, it has to be into the resolving one; collapsing into the
-		// cleaning one would quietly reintroduce a reap this line now prevents.
-		//
-		// Left as two calls here because instanceHasLiveJob's jobsDir is
-		// threaded from the caller and several other call sites depend on that.
+		// The two overlap for the agent whose declared store IS the jobs
+		// directory, but they are not interchangeable: instanceHasLiveJob
+		// compares cleaned paths and instanceHasRecordedSession resolves
+		// symlinks first, so an instance reachable only through a symlinked
+		// path -- one whose recorded cwd and whose instance path are the same
+		// directory under two spellings -- is matched by the second and missed
+		// by the first, for BOTH agents. If these ever collapse into one call,
+		// it has to be into the resolving one.
 		if instanceHasLiveJob(jobsDir, rec.Path) {
 			continue
 		}

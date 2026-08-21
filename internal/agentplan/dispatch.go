@@ -82,9 +82,9 @@ const (
 // inputs: what this runner is, and whether the developer asked to detach.
 //
 // The flag is an input here rather than a step that runs afterwards. Deciding
-// the model from the runner alone is exactly what left --detach unable to
-// change how a worker was started: a foreground runner was detached whether or
-// not anybody asked, and the flag only chose whether a step followed.
+// the model from the runner alone leaves --detach unable to change how a worker
+// is started: a foreground runner would be detached whether or not anybody
+// asked, and the flag would only choose whether a step followed.
 func (r RunnerKind) ModeFor(detach bool) LaunchMode {
 	if r == RunnerForeground {
 		if detach {
@@ -93,9 +93,8 @@ func (r RunnerKind) ModeFor(detach bool) LaunchMode {
 		return LaunchForeground
 	}
 	// A runner that backgrounds its own session has one process model, and
-	// --detach cannot override it into another. What the flag still decides for
-	// it is whether the attach step runs afterwards, which is what it always
-	// meant for this kind of runner.
+	// --detach cannot override it into another. What the flag still decides
+	// for it is whether the attach step runs afterwards.
 	return LaunchBackgrounded
 }
 

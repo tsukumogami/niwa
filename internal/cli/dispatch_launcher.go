@@ -20,11 +20,10 @@ import (
 // is the one reading it.
 //
 // Mode is a field rather than something read off the spec because the process
-// model is not a property of the agent alone. The spec says what the agent's
-// runner is; the caller resolves that against the invocation's --detach
-// (agentplan.RunnerKind.ModeFor) and passes the answer here. A launcher that
-// went back to the declaration for it could not see the flag, which is the
-// defect this shape exists to prevent.
+// model is not a property of the agent alone: the spec says what the agent's
+// runner is, and the caller resolves that against the invocation's --detach
+// (agentplan.RunnerKind.ModeFor). A launcher that went back to the declaration
+// for it could not see the flag.
 type launchRequest struct {
 	// Spec is the launched agent's declaration.
 	Spec agentplan.LaunchSpec
@@ -100,11 +99,10 @@ func realDispatchLaunch(ctx context.Context, req launchRequest) error {
 	//
 	// Two things trigger it. Length is the obvious one. A NUL is the other: an
 	// argv element cannot carry one, so such a prompt dies at exec with an
-	// opaque "invalid argument" -- a defect that predates the spill and is one
-	// paste away, since the capture preserves raw control bytes deliberately.
-	// A prompt argv cannot carry changes vehicle rather than failing, whatever
-	// the reason argv cannot carry it. The file takes raw bytes, so the NUL
-	// survives where the developer put it.
+	// opaque "invalid argument", and it is one paste away since the capture
+	// preserves raw control bytes deliberately. Either way a prompt argv
+	// cannot carry changes vehicle rather than failing, and the file takes raw
+	// bytes, so the NUL survives where the developer put it.
 	prompt := prefix + body
 	if len(prompt) > maxArgStringBytes || strings.ContainsRune(body, 0) {
 		token, err := spillToken()
@@ -120,8 +118,7 @@ func realDispatchLaunch(ctx context.Context, req launchRequest) error {
 
 	// Assertions, not user-facing checks. Under the spill above neither is
 	// reachable in normal operation, which is the point: they guard against a
-	// future prepend that forgets the spill decision, exactly as the size one
-	// used to guard against a prepend that forgot the reserve.
+	// future prepend that forgets the spill decision.
 	if len(prompt) > maxArgStringBytes {
 		return fmt.Errorf("dispatch: prompt is %d bytes, over the %d-byte single-argument exec limit", len(prompt), maxArgStringBytes)
 	}
@@ -160,13 +157,11 @@ func realDispatchLaunch(ctx context.Context, req launchRequest) error {
 		}
 		return nil
 	default:
-		// Named rather than folded into the backgrounded branch, because the
-		// zero LaunchMode used to land there silently. A caller that forgets to
-		// set Mode would then run a foreground agent's whole turn under
-		// cmd.Run() with no stdout or stderr wired -- every byte discarded, the
-		// command blocking for the length of the task with nothing on screen.
-		// The dead-field guard proves each field is read, not that each call
-		// site sets it, so this is the check that covers the difference.
+		// Named rather than folded into the backgrounded branch. A caller that
+		// forgets to set Mode would otherwise land there silently and run a
+		// foreground agent's whole turn under cmd.Run() with no stdout or
+		// stderr wired: every byte discarded, the command blocking for the
+		// length of the task with nothing on screen.
 		return fmt.Errorf("dispatch: launch mode %d is not a process model this launcher implements", req.Mode)
 	}
 }
@@ -176,9 +171,8 @@ func realDispatchLaunch(ctx context.Context, req launchRequest) error {
 // foreground natively, this is what attaching to the session would have been:
 // the developer watches the work rather than being told where to find it.
 //
-// Three things carry over from the detached path, each measured rather than
-// chosen for tidiness. They are also the three an implementation that reaches
-// for "inherit stdio and be done" drops.
+// Two things carry over from the detached path, and both are what an
+// implementation that reaches for "inherit stdio and be done" drops.
 //
 // Stdin is /dev/null, even here. The measured hang is on stdin specifically: an
 // agent that reads it in addition to its prompt blocks on an inherited one --
@@ -186,9 +180,6 @@ func realDispatchLaunch(ctx context.Context, req launchRequest) error {
 // Attaching the terminal's stdout and stderr does not require attaching its
 // stdin, and a foreground worker that hangs is a worse outcome than the
 // detached one it replaces.
-//
-// The prompt is one argv element, built by the same builder as every other
-// mode.
 //
 // And the exit status is not read as task success. A read-only sandbox failure
 // exits 0, so a run that ended is all this can honestly report: an exit code is
@@ -369,9 +360,7 @@ func openWorkerLog(instanceDir, binary, stream string) (*os.File, error) {
 //
 // Returning each value as its own slice element -- and never concatenating into
 // a command line -- is what prevents a crafted prompt or pass-through value from
-// smuggling in an extra flag (D8, security note 1). It is a pure helper so the
-// argv contract is unit-testable without exec, and it reads the agent's spec
-// rather than naming one, so the same test drives it for any agent.
+// smuggling in an extra flag (D8, security note 1).
 func buildLaunchArgs(spec agentplan.LaunchSpec, mode agentplan.LaunchMode, workdir, prompt string, passthrough []string) []string {
 	args := make([]string, 0, len(spec.LeadingArgs)+len(spec.DetachedArgs)+len(spec.WorkdirGrantArgs)+len(passthrough)+2)
 	args = append(args, spec.LeadingArgs...)
