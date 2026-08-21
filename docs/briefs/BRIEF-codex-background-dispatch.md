@@ -87,14 +87,15 @@ line.
 
 *Amended in the second round.* This paragraph originally ended "No new
 flag appears", and that was the position the work started from: the agent
-resolves from `NIWA_DISPATCH_HARNESS` and `default_agent`, so no new surface was
-needed. It shipped the opposite -- `--harness`, and `niwa config set
-default-dispatch-harness` behind it -- because resolution existing turned
-out not to be the same as selection being reachable. The sentence is corrected here
-rather than left standing under the not-maintained note, which covers
-descriptions of the tree at authoring time and not an outcome that is now
-the reverse of what was delivered. PRD R1 carries the full reversal and
-preserves the original requirement underneath it.
+resolves from the environment variable and `default_agent`, so no new
+surface was needed. It shipped the opposite -- `--harness`, and `niwa
+config set default-dispatch-harness` behind it -- because resolution
+existing turned out not to be the same as selection being reachable. The
+sentence is corrected here rather than left standing under the
+not-maintained note, which covers descriptions of the tree at authoring
+time and not an outcome that is now the reverse of what was delivered. PRD
+R1 carries the full reversal and preserves the original requirement
+underneath it.
 
 Where a Codex dispatch genuinely differs -- keep-alive doesn't exist for
 it, and a Codex-dispatched instance isn't reclaimed automatically the way a
@@ -204,11 +205,11 @@ work rather than pretending the gap isn't there.
 - **Selecting which agent a workspace's background workers are, as a
   surface a developer can find, set, and verify.** Added in the second
   round of this chain. The first round put this out of scope on the
-  argument that `NIWA_DISPATCH_HARNESS` and `default_agent` already resolved the
-  agent, so no new user-facing surface was needed. That was wrong in a way
-  that only shows up from outside: resolution existing is not the same as
-  selection being reachable. What lands here is the entry point rather
-  than a new resolution rule -- the precedence order is unchanged, and
+  argument that the environment variable and `default_agent` already
+  resolved the agent, so no new user-facing surface was needed. That was
+  wrong in a way that only shows up from outside: resolution existing is
+  not the same as selection being reachable. What lands here is the entry
+  point rather than a new resolution rule -- the precedence order is unchanged, and
   nothing here alters what `niwa apply` prepares.
 - **`--detach` deciding the process model rather than a later step.**
   Third round. Without it, an agent whose runner is a foreground process
