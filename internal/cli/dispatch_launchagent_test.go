@@ -307,3 +307,45 @@ func TestLaunchableAgentsHintOffersTheFlagFirst(t *testing.T) {
 		}
 	}
 }
+
+// TestDispatch_UnreadableWorkspaceConfigSaysTheRungWasSkipped covers the one
+// resolution outcome that is right about its inputs and wrong about the
+// developer's: a workspace config that states an agent and does not parse. The
+// rung is not overridden and not empty, it is skipped, so the dispatch launches
+// whatever the broader rungs say while the file the developer would point at
+// says something else.
+//
+// The dispatch still runs -- this is a notice, not a refusal, and the config
+// failure has its own consequences further along -- but the agent question is
+// answered before those, so it is answered out loud.
+func TestDispatch_UnreadableWorkspaceConfigSaysTheRungWasSkipped(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	cfgPath := filepath.Join(root, config.ConfigDir, config.ConfigFile)
+	// The agent the developer wrote, and a syntax error below it. TOML decoding
+	// is all-or-nothing, so default_agent goes with the file.
+	broken := "[workspace]\nname = \"test-ws\"\ndefault_agent = \"codex\"\nthis line is not toml\n"
+	if err := os.WriteFile(cfgPath, []byte(broken), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chdir(t, root)
+	setHostConfig(t, "")
+	installDispatchFakes(t, root)
+	var preflighted []string
+	recordPreflightedBinary(t, &preflighted)
+	dispatchDetach = true
+	t.Setenv("NIWA_AGENT", "")
+
+	_, stderr, _ := runDispatchCmd(t, "do a thing")
+
+	// The premise: the stated agent really was dropped. Without this the notice
+	// could be about a rung that was honored anyway.
+	if want := binaryFor(t, agent.AgentClaude); len(preflighted) == 0 || preflighted[0] != want {
+		t.Fatalf("preflighted %v with an unreadable workspace config; this test needs the dispatch to have fallen through to %q", preflighted, want)
+	}
+	if !strings.Contains(stderr, cfgPath) {
+		t.Errorf("the dispatch never named the config it could not read; a developer looking for why codex was not launched has no file to open.\nstderr: %s", stderr)
+	}
+	if !strings.Contains(stderr, "default_agent") {
+		t.Errorf("the notice does not say what was dropped, so it reads as a config problem rather than an agent-selection one.\nstderr: %s", stderr)
+	}
+}

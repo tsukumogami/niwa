@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 
@@ -141,6 +143,28 @@ func agentSourceLabel(flagValue, env, workspaceDefault, cfgPath string) string {
 	default:
 		return "[global].default_agent in " + globalConfigDisplayPath()
 	}
+}
+
+// unreadableAgentRungNotice is what to say when the workspace config could not
+// be read at all. The rung is then not overridden, not empty, and not rejected
+// -- it is skipped, and every one of the messages above describes a resolution
+// that consulted it.
+//
+// Saying nothing is the failure this exists to end: a workspace.toml holding
+// default_agent = "codex" and a syntax error three lines down resolves to
+// whatever the broader rungs say, and the developer watches a dispatch launch
+// the agent they configured against with no indication that their file was
+// never read. The command usually fails a few steps later for the same reason,
+// but by then it has already answered the agent question wrongly.
+//
+// It returns "" for a config that is simply not there, which is not a dropped
+// value and needs no notice.
+func unreadableAgentRungNotice(cfgPath string, err error) string {
+	if err == nil || errors.Is(err, fs.ErrNotExist) {
+		return ""
+	}
+	return fmt.Sprintf("%s could not be read, so any default_agent in it was not applied: %v. The agent is resolved from the rungs that did load.",
+		workspaceConfigDisplayPath(cfgPath), err)
 }
 
 // workspaceConfigDisplayPath is the workspace file to name in a resolution

@@ -306,11 +306,16 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// subagent-type passthrough, a different thing, so it is deliberately not
 	// consulted here. A config that cannot be loaded resolves against the
 	// sources that did load and leaves the failure to the provisioning path to
-	// report.
+	// report -- but it says so first, because a rung that was skipped rather
+	// than consulted is the one case where the resolution's answer is right
+	// about the inputs it had and wrong about the ones the developer wrote.
 	wsConfigPath := filepath.Join(workspaceRoot, workspace.StateDir, workspace.WorkspaceConfigFile)
 	var wsConfig *config.WorkspaceConfig
-	if wsCfg, cfgErr := config.Load(wsConfigPath); cfgErr == nil {
+	wsCfg, cfgErr := config.Load(wsConfigPath)
+	if cfgErr == nil {
 		wsConfig = wsCfg.Config
+	} else if notice := unreadableAgentRungNotice(wsConfigPath, cfgErr); notice != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", notice)
 	}
 	var hostCfg *config.GlobalConfig
 	if gcErr == nil {
