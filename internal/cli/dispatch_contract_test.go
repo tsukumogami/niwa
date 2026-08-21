@@ -19,6 +19,14 @@ import (
 // which branch it takes for that agent and asserts the other half; it never
 // needs editing to keep passing, and it fails immediately if the binary and the
 // table disagree about who can be launched.
+//
+// Which means only half of it runs today. Both agents are declared implemented
+// for dispatch-launch, so every subtest takes the first branch and returns, and
+// everything below it -- the reason quoted verbatim, the named alternative, the
+// refusal landing before anything is provisioned -- is written and waiting
+// rather than covered. It becomes live the day some agent's row is anything but
+// implemented, which is the arrangement this is built for; until then, read a
+// pass here as evidence about the dispatching half only.
 func TestDispatchGateFollowsTheDeclaration(t *testing.T) {
 	for _, ag := range agent.All() {
 		t.Run(string(ag), func(t *testing.T) {
