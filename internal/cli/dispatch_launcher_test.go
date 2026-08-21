@@ -369,3 +369,52 @@ func TestRealDispatchLaunch_EmptyPromptRejected(t *testing.T) {
 		t.Fatal("expected an error for an empty prompt, got nil")
 	}
 }
+
+// TestRealDispatchLaunch_UnrecognizedModeIsRefused holds the launcher's last
+// branch, which exists because of what the zero value used to mean. Mode is
+// resolved by the caller, so a caller that forgets to set it hands the launcher
+// a zero -- and while the switch folded that into the backgrounded case, a
+// foreground agent's whole turn ran under cmd.Run() with no streams wired:
+// every byte discarded, the command blocking for the length of the task with
+// nothing on screen.
+//
+// So the refusal is checked against a worker that would leave a trace if it
+// ran, for the unset value and for one outside the closed set.
+func TestRealDispatchLaunch_UnrecognizedModeIsRefused(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skipf("no shell to launch: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		mode agentplan.LaunchMode
+	}{
+		{"unset", 0},
+		{"outside the closed set", agentplan.LaunchMode(99)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			instance := t.TempDir()
+			marker := filepath.Join(instance, "the-worker-ran")
+			var out bytes.Buffer
+
+			err := realDispatchLaunch(context.Background(), launchRequest{
+				Spec:        foregroundSpec(),
+				Mode:        tc.mode,
+				InstanceDir: instance,
+				Body:        "do the thing",
+				Passthrough: []string{"-c", "touch " + marker},
+				Stdout:      &out,
+				Stderr:      &out,
+			})
+			if err == nil {
+				t.Fatalf("a launch mode of %d was accepted; the caller resolves the process model, and a value this launcher does not implement is a bug in that resolution rather than a default to fall back on", tc.mode)
+			}
+			if !strings.Contains(err.Error(), "launch mode") {
+				t.Errorf("the refusal does not say what was wrong with the request: %v", err)
+			}
+			if _, statErr := os.Stat(marker); statErr == nil {
+				t.Error("the worker ran anyway; a mode the launcher cannot honor must be refused before anything is executed")
+			}
+		})
+	}
+}
