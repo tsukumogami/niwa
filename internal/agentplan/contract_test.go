@@ -2,6 +2,7 @@ package agentplan
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/agent"
@@ -102,6 +103,72 @@ func TestRequiresIsClosed(t *testing.T) {
 			}
 			if req == d.Capability {
 				t.Errorf("(%s, %s) requires itself", d.Capability, d.Agent)
+			}
+		}
+	}
+}
+
+// TestHookDeliveredRowsRestOnTheHooksRow binds the reason of every row that is
+// delivered through hooks to the reason hooks themselves are out of reach.
+//
+// Which rows those are is not written here. A capability is hook-delivered
+// because some agent's implemented declaration says it is -- Requires names
+// Hooks -- so the set is read off the table and grows on its own when a fourth
+// such row is declared. For an agent whose Hooks row is unavailable, three
+// things follow and are asserted: the row cannot be implemented, its reason
+// kind is the one the Hooks row already carries rather than a second opinion
+// about the same obstacle, and its reason says so in words a reader of the
+// generated guide meets on its own, without the Hooks entry beside it.
+//
+// This is a guard rather than a proof, and it is worth being plain about the
+// difference. It does not fail on a row that is merely unavailable for the
+// wrong reason; it fails on one whose reason has drifted off the obstacle
+// entirely -- which is what row 17's did. Its reason cited "the harness
+// job-state file" alongside the hook, a mechanism belonging to the dispatch
+// path, which is a different row, is implemented for both agents, and reads
+// session records this agent demonstrably has (TestLaunchSpecsAreComplete
+// walks the description Codex declares for them). Keeping the hook as the
+// stated obstacle is what stops the sentence the guide publishes from
+// answering a question this row does not own.
+func TestHookDeliveredRowsRestOnTheHooksRow(t *testing.T) {
+	hookDelivered := map[Capability]bool{}
+	for _, d := range declarations {
+		if d.State != StateImplemented {
+			continue
+		}
+		if slices.Contains(d.Requires, Hooks) {
+			hookDelivered[d.Capability] = true
+		}
+	}
+	if len(hookDelivered) == 0 {
+		t.Fatal("no capability declares Hooks in Requires, so this check is asserting nothing; if hook delivery stopped being expressed as a Requires edge, this test has to follow it")
+	}
+
+	for _, ag := range agent.All() {
+		hooks, err := Lookup(Hooks, ag)
+		if err != nil {
+			t.Errorf("(%s, %s): %v", Hooks, ag, err)
+			continue
+		}
+		if hooks.State == StateImplemented {
+			continue
+		}
+
+		for c := range hookDelivered {
+			d, err := Lookup(c, ag)
+			if err != nil {
+				t.Errorf("(%s, %s): %v", c, ag, err)
+				continue
+			}
+			if d.State == StateImplemented {
+				t.Errorf("(%s, %s) is implemented, but it is delivered through %s, which is unavailable for %s", c, ag, Hooks, ag)
+				continue
+			}
+			if d.Kind != hooks.Kind {
+				t.Errorf("(%s, %s) is unavailable with reason kind %d while %s is unavailable for %s with kind %d: a row blocked only by the hook it rides inherits that row's kind rather than declaring a different one", c, ag, d.Kind, Hooks, ag, hooks.Kind)
+			}
+			if !strings.Contains(strings.ToLower(d.Reason), "hook") {
+				t.Errorf("(%s, %s) is unavailable and delivered through %s, but its reason never says so: %q", c, ag, Hooks, d.Reason)
 			}
 		}
 	}
