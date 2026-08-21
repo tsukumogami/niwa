@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -310,6 +311,48 @@ func TestStartDetachedWorker(t *testing.T) {
 	}
 	if strings.TrimSpace(string(pgid)) == strconv.Itoa(syscall.Getpgrp()) {
 		t.Error("the worker shares this process's group; a signal aimed at the launcher would take it down too")
+	}
+}
+
+// TestLaunchRequestEnvDecidesTheWorkersEnvironment drives a real worker and
+// reads back what it was given, because both halves of the field's contract are
+// one decision and only a running process can tell them apart: nil inherits the
+// supervisor's environment, non-nil replaces it whole. A launcher that ignored
+// the field entirely would still satisfy the nil half, so the explicit half is
+// the one that has to be checked against a process.
+func TestLaunchRequestEnvDecidesTheWorkersEnvironment(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skipf("no shell to launch: %v", err)
+	}
+
+	// Set in the supervisor's own environment: an inheriting worker sees it,
+	// and a worker handed an explicit environment must not.
+	t.Setenv("NIWA_TEST_INHERITED", "from-parent")
+
+	script := `echo "explicit=$NIWA_TEST_EXPLICIT inherited=$NIWA_TEST_INHERITED"`
+	run := func(env []string) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := realDispatchLaunch(context.Background(), launchRequest{
+			Spec:        foregroundSpec(),
+			Mode:        agentplan.LaunchForeground,
+			InstanceDir: t.TempDir(),
+			Body:        "do the thing",
+			Passthrough: []string{"-c", script},
+			Env:         env,
+			Stdout:      &out,
+			Stderr:      &out,
+		}); err != nil {
+			t.Fatalf("realDispatchLaunch: %v", err)
+		}
+		return strings.TrimSpace(out.String())
+	}
+
+	if got, want := run([]string{"NIWA_TEST_EXPLICIT=from-request"}), "explicit=from-request inherited="; got != want {
+		t.Errorf("worker saw %q, want %q: a non-nil Env is the worker's whole environment, so the request's variables must reach it and the supervisor's must not", got, want)
+	}
+	if got, want := run(nil), "explicit= inherited=from-parent"; got != want {
+		t.Errorf("worker saw %q, want %q: a nil Env inherits the parent environment", got, want)
 	}
 }
 

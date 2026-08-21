@@ -45,11 +45,12 @@ type launchRequest struct {
 	// argv elements by the caller.
 	Passthrough []string
 
-	// Env is the worker's environment. A nil Env inherits the full parent
-	// environment (os.Environ()), the behavior every ordinary dispatch relies
-	// on; a non-nil Env is used verbatim, which is how a contained caller
-	// passes an allowlisted, credential-scrubbed one. Passing an explicit Env
-	// is the ONLY way the worker's environment differs from the supervisor's.
+	// Env is the worker's environment. No caller sets it today: every dispatch
+	// leaves it nil, so the worker inherits the full parent environment
+	// (os.Environ()). It is an extension point the launcher honors rather than
+	// a seam anything currently goes through -- a non-nil Env is used
+	// verbatim, so a caller that needs to hand the worker an allowlisted or
+	// credential-scrubbed environment has one place to put it.
 	Env []string
 
 	// Stdout and Stderr are where a foreground worker's output goes: the
@@ -134,12 +135,11 @@ func realDispatchLaunch(ctx context.Context, req launchRequest) error {
 	}
 
 	args := buildLaunchArgs(spec, req.Mode, instanceDir, prompt, req.Passthrough)
+	// The parent environment by default, so the worker sees the same context
+	// the supervisor does; a non-nil req.Env replaces it wholesale. See
+	// launchRequest.Env.
 	worker := os.Environ()
 	if req.Env != nil {
-		// Inherit the parent environment so the worker sees the same context
-		// the supervisor does (mirrors the sessionattach supervisor); a
-		// non-nil env replaces it wholesale, which is how a contained caller
-		// passes an allowlisted, credential-scrubbed one.
 		worker = req.Env
 	}
 
