@@ -198,11 +198,12 @@ worker rooted inside it, captures the worker's session id, and records an
 ephemeral dispatch-origin mapping so the instance is reclaimed when the session
 ends.
 
-Which agent the worker runs as is resolved once, in this order: --harness,
-then NIWA_DISPATCH_HARNESS, then the workspace's [workspace].default_agent, then your own
-[global].default_dispatch_harness (niwa config set default-dispatch-harness). Every instance is
-prepared for every agent niwa supports whatever those say, so this picks a
-launch target and takes nothing away from the other agent. Not to be confused
+Which agent the worker runs as is resolved once, in this order: --harness, then
+NIWA_DISPATCH_HARNESS, then the workspace's [workspace].default_agent, then your
+own [global].default_dispatch_harness (niwa config set
+default-dispatch-harness). Every instance is prepared for every agent niwa
+supports whatever those say, so this picks a launch target and takes nothing
+away from the other agent. Not to be confused
 with --agent, which forwards a subagent type INTO whichever agent is launched.
 
 The prompt is optional. With no prompt argument, dispatch opens an interactive
@@ -294,18 +295,17 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 	// (2a) Load the host global config ONCE, best-effort, and reuse it below.
 	// It carries two things this command reads: the machine-wide dispatch
-	// harness
-	// (broadest rung of the agent resolution just below) and the dispatch_model
-	// and remote-control defaults consumed after provisioning. A missing or
+	// harness (broadest rung of the agent resolution just below) and the
+	// dispatch_model and remote-control defaults consumed after provisioning. A missing or
 	// unreadable config degrades to "none of those set", which is today's
 	// behavior for every one of them -- they are all opt-in defaults.
 	gc, gcErr := config.LoadGlobalConfig()
 
 	// (2b) Resolve which agent this dispatch launches, from --harness,
 	// NIWA_DISPATCH_HARNESS, the workspace default_agent, and the host
-	// default_dispatch_harness, in that order. dispatch's own --agent flag is the launched agent's
-	// subagent-type passthrough, a different thing, so it is deliberately not
-	// consulted here. A config that cannot be loaded resolves against the
+	// default_dispatch_harness, in that order. dispatch's own --agent flag is
+	// the launched agent's subagent-type passthrough, a different thing, so it
+	// is deliberately not consulted here. A config that cannot be loaded resolves against the
 	// sources that did load and leaves the failure to the provisioning path to
 	// report -- but it says so first, because a rung that was skipped rather
 	// than consulted is the one case where the resolution's answer is right
