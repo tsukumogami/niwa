@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Current
 problem: |
   `niwa dispatch` provisions a fresh niwa instance for every dispatched
   worker, agent-neutrally, and `niwa reap` reclaims the instance when the
@@ -45,7 +45,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Current
 
 This design owns the reclamation rule for Codex-dispatched instances:
 the liveness signal, the guard-and-trigger split, the order of the two
