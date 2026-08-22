@@ -255,48 +255,22 @@ var declarations = []Declaration{
 
 	// Row 17: ephemeral-session provisioning.
 	{Capability: EphemeralSessions, Agent: agent.AgentClaude, State: StateImplemented, Requires: []Capability{Hooks}},
-	// This row's reason was half overtaken and half misattributed, and the
-	// correction is worth stating rather than quietly dropping. The reason is
-	// published in the guide, and it is the sentence a reader consults on
-	// finding that a dispatched Codex worker's instance is never reclaimed --
-	// a question it appears to answer and does not, because reclamation is a
-	// different row.
+	// This row is scoped to the trigger rather than to provisioning itself,
+	// and losing that distinction is what makes it read as wrong. niwa learns
+	// that a session it did not launch has started only from the agent's own
+	// session-start event, so the row stands or falls with row 13, and Codex
+	// hooks are plugin-delivered behind a blocking review prompt (spike
+	// finding 7).
 	//
-	// The old reason read: "Provisioning rides a session-start hook and the
-	// harness job-state file; Codex has neither."
+	// Provisioning for a session niwa DOES launch needs no hook and is not
+	// this row. One agent-neutral provisioner, shared by the hook path and the
+	// dispatch path, creates the instance before either agent's binary starts,
+	// and that delivery is row 22 -- implemented for both agents. A reader who
+	// finds a Codex worker running in an instance niwa provisioned has found
+	// row 22, not a counterexample to this one.
 	//
-	// The job-state clause is false as of background dispatch. Codex has
-	// session records niwa reads: a rollout's first line carries session_id
-	// and cwd, the agent declares where those records live and how to read one
-	// (SessionRecords, dispatch.go), and dispatch correlates a launched worker
-	// to its instance by matching a record's working directory. The clause
-	// named one agent's file rather than the question that file stood for, and
-	// the question -- can niwa read this agent's session state -- now has the
-	// opposite answer.
-	//
-	// The hook clause is true, and on its own it is the whole obstacle. It is
-	// also the half that states this row's scope, which the row's title
-	// already carries and its reason did not: provisioning for a session niwa
-	// did not launch can only be triggered by the agent's own session-start
-	// event. Codex hooks are plugin-delivered and gated behind a blocking
-	// review prompt (row 13, and spike finding 7), so there is no event to
-	// trigger on and nothing niwa writes would be reached.
-	//
-	// What conflating the two halves obscured: provisioning for a session niwa
-	// DOES launch needs no hook, and is not this row. niwa creates the
-	// instance and then starts the process in it -- one agent-neutral
-	// provisioner, shared by the hook path and the dispatch path, called
-	// before either agent's binary is exec'd -- and that delivery is declared
-	// on row 22, implemented for both agents. Background dispatch narrowed
-	// this row's title for exactly that reason and left the reason behind it
-	// unedited.
-	//
-	// The kind is unchanged, and deliberately so. A hook Codex cannot receive
-	// is the agent's own mechanics putting the capability out of reach, which
-	// is what ReasonAgentCannotReceive means; rows 14 and 15, the other two
-	// rows delivered through hooks, already say it that way. Rewriting this
-	// one as niwa's own debt would claim a route exists, and for a session
-	// niwa never learns about, none does.
+	// The kind follows row 13's, as rows 14 and 15 do;
+	// TestHookDeliveredRowsRestOnTheHooksRow binds all three.
 	{
 		Capability: EphemeralSessions, Agent: agent.AgentCodex,
 		State:  StateUnavailable,
