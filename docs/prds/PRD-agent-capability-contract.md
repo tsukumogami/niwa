@@ -424,7 +424,7 @@ working prior-attempt code; none is inferred.
 | 14 | Work-summary hooks | Implemented | Unavailable (cannot-receive) | Delivered as hooks; follows row 13 |
 | 15 | PR-body hook | Implemented | Unavailable (cannot-receive) | Delivered as a hook; follows row 13 |
 | 16 | Worktree-hook delegation (or the deny fallback) | Implemented | Unavailable (no-such-concept) | The mechanism is Claude Code harness surface; Codex has neither the events nor the tools |
-| 17 | Ephemeral-session provisioning | Implemented | Unavailable (cannot-receive) (amended) | Settled here on a two-part reason whose job-state half is now false; the kind is unchanged — see the amendment below the table |
+| 17 | Ephemeral-session provisioning | Implemented | Unavailable (cannot-receive) | Scoped to the trigger: only a session-start hook announces a session niwa did not launch; follows row 13. See the note below the table |
 | 18 | Root-installed project skills (e.g. dispatch) | Implemented | Unavailable (not-built) (amended) | Settled here as cannot-receive on row 2's reason; see the amendment below the table |
 | 19 | niwa's own plugin (migrate-config skill) | Implemented | Unavailable (not-built) | Codex accepts the identical plugin manifest; the wiring is unbuilt and out of this PRD's scope |
 | 20 | Remote-control-at-startup | Implemented | Unavailable (no-such-concept) | Names claude.ai's remote-control bridge; no Codex equivalent |
@@ -463,36 +463,22 @@ Row 22 is also no longer this matrix's answer: background dispatch for Codex was
 built. The settled column is 13 implemented and 11 unavailable, asserted by
 `TestCodexColumnTotals`, which is the authority the target totals above are not.
 
-**Amendment to row 17.** The row's state and reason kind are unchanged; its
-reason was wrong in one half and misattributed in the other, and it is amended
-here for the same reason rows 2 and 18 were — the sentence is published in
-`docs/guides/codex-agent.md`, and it is what a reader consults on finding that a
-dispatched Codex worker's instance is never reclaimed.
+**Row 17 is scoped to the trigger, not to provisioning.** niwa learns that a
+session it did not launch has started only from the agent's own session-start
+event, so the row stands or falls with row 13, and Codex hooks are
+plugin-delivered behind a blocking review prompt. The kind is cannot-receive to
+match rows 14 and 15, the other two rows delivered through hooks;
+`TestHookDeliveredRowsRestOnTheHooksRow` binds all three to row 13.
 
-The reason read: rides a session-start hook and the harness's job-state file,
-and Codex has neither. The job-state half is false as of background dispatch.
-Codex has session records niwa reads: a rollout's first line carries
-`session_id` and `cwd`, the agent declares where those records live and how to
-read one, and dispatch correlates a launched worker to its instance by matching
-a record's working directory. The half that stands is the hook, and it is the
-whole obstacle: a session niwa did not launch announces itself only through the
-agent's own session-start event, and Codex hooks are plugin-delivered behind a
-blocking review prompt (row 13).
+Provisioning for a session niwa *does* launch needs no hook and is not this row.
+One agent-neutral provisioner, shared by the hook path and the dispatch path,
+creates the instance before either agent's binary starts, and that delivery is
+row 22 — implemented for both agents.
 
-Conflating the two halves obscured that provisioning for a session niwa *does*
-launch needs no hook and is not this row. One agent-neutral provisioner, shared
-by the hook path and the dispatch path, creates the instance before either
-agent's binary is started; that delivery is row 22, implemented for both agents.
-Background dispatch already narrowed this row's title to the trigger it owns and
-left the reason behind it unedited. The kind stays cannot-receive, matching rows
-14 and 15, the other two rows delivered through hooks, and
-`TestHookDeliveredRowsRestOnTheHooksRow` binds all three to row 13 so the next
-drift off the obstacle fails a test.
-
-What this row still has no axis to say is that the capability is out of reach in
-one launch context and delivered in another. That is the same limit rows 5, 8, 9
-and 12 meet, recorded above and in the design document, and it is a product
-decision rather than something a reason correction should invent.
+What this row has no axis to say is that the capability is out of reach in one
+launch context and delivered in another. That is the same limit rows 5, 8, 9 and
+12 meet, recorded above and in the design document, and it is a product decision
+rather than something a reason correction should invent.
 
 ## Acceptance Criteria
 
