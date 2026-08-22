@@ -725,6 +725,20 @@ func reapBackstop(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 
 	reaped := 0
 	for _, t := range targets {
+		// The same re-ask the mapped sweep makes, for the same reason and with
+		// a wider window to close: selection ran before the spared report and
+		// before every earlier destroy in this loop, and this is the half of
+		// the reaper with no mapping to consult, so these two guards are the
+		// whole of what stands between a live worker and its directory.
+		//
+		// It costs one scan of the job tree and one of each agent's records,
+		// which is what selection already paid for this instance moments ago.
+		if instanceHasLiveJob(jobsDir, t.InstancePath) {
+			continue
+		}
+		if _, recorded := instanceHasRecordedSession(t.InstancePath, time.Now()); recorded {
+			continue
+		}
 		if err := destroyInstanceFunc(t.InstancePath); err != nil {
 			fmt.Fprintf(os.Stderr, "niwa: warning: reaping orphaned dispatch instance %s: %v\n", t.InstancePath, err)
 			continue

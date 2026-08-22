@@ -5,6 +5,7 @@ package cli
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"syscall"
 )
 
@@ -42,9 +43,23 @@ func writerLockHeld(lockPath string) (held bool, known bool) {
 	f, err := os.OpenFile(lockPath, os.O_RDWR, 0o600)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			// No lock file: the agent unlinks it when the writer detaches, so
-			// this is a definite "nobody is writing" rather than a failure to
-			// look.
+			// The open cannot tell a missing lock file from a missing lock
+			// directory -- both are ENOENT -- and the two mean opposite things.
+			// A missing file is the answer: the agent unlinks it when the
+			// writer detaches, so nobody is writing. A missing directory means
+			// this build is looking in the wrong place, and reading that as
+			// "nobody is writing" would retire the only gate standing between a
+			// live worker and a destroyed working directory, silently, while
+			// the two-gate design went on looking like it worked.
+			//
+			// So the directory is what gets checked, and only on this branch:
+			// it is a structural fact about the store rather than a per-session
+			// one, so nothing races it the way stat-then-open would race the
+			// lock file's own unlink-and-recreate cycle. Absent, the question is
+			// unanswerable, which everywhere else in this path means spare.
+			if _, statErr := os.Stat(filepath.Dir(lockPath)); statErr != nil {
+				return false, false
+			}
 			return false, true
 		}
 		// Anything else -- a permission error, a path that is not a file --

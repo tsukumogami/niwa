@@ -274,6 +274,12 @@ isn't a warning beforehand. Set `NIWA_REAP_IDLE_GRACE` to change the window; it
 takes a duration like `72h`. `niwa destroy <instance>` still works if you'd
 rather not wait.
 
+One platform caveat. The lock check needs `flock`, which niwa has on Linux and
+macOS and not on Windows. Without it niwa can't tell a finished session from a
+running one, so it declines to judge and spares the instance — safe, but it
+means dispatched Codex instances still accumulate there until you remove them
+with `niwa destroy`.
+
 ## Starting a session at the instance root
 
 Most of this guide is about a session you open inside a cloned repository. A

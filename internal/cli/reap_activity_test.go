@@ -52,10 +52,32 @@ func activityAgent(t *testing.T) (agent.Agent, agentplan.SessionRecords) {
 // that is not.
 const activitySessionID = "01a00000-0000-7000-8000-0000000000bb"
 
+// ensureLockDir creates the lock directory the way a real store has one.
+//
+// This is fixture realism rather than decoration. The agent creates that
+// directory at the first session bootstrap and never removes it -- it holds a
+// coordination lock that outlives every session -- so a store with any rollout
+// in it has one. A fixture that wrote records without it would be modelling a
+// state that cannot occur, and would then exercise the probe's
+// missing-directory branch, which exists to say "this build is looking in the
+// wrong place" and correctly declines to answer.
+func ensureLockDir(t *testing.T, r agentplan.SessionRecords, home string) string {
+	t.Helper()
+	dir := writerLockDir(r, home, func(string) string { return "" })
+	if dir == "" {
+		t.Fatal("the session records resolve to no writer-lock directory under the fixture home")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir lock dir: %v", err)
+	}
+	return dir
+}
+
 // writeActivityRecord writes one session record for cwd and backdates it, so a
 // test can say "last worked in this long ago" rather than sleeping.
 func writeActivityRecord(t *testing.T, r agentplan.SessionRecords, home, cwd string, touched time.Time) string {
 	t.Helper()
+	ensureLockDir(t, r, home)
 	root := recordStoreRoot(r, home, func(string) string { return "" })
 	if root == "" {
 		t.Fatal("the session records resolve to no root under the fixture home")
@@ -103,13 +125,7 @@ func writeActivityRecord(t *testing.T, r agentplan.SessionRecords, home, cwd str
 // process.
 func holdWriterLock(t *testing.T, r agentplan.SessionRecords, home string) string {
 	t.Helper()
-	dir := writerLockDir(r, home, func(string) string { return "" })
-	if dir == "" {
-		t.Fatal("the session records resolve to no writer-lock directory under the fixture home")
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatalf("mkdir lock dir: %v", err)
-	}
+	dir := ensureLockDir(t, r, home)
 	path := filepath.Join(dir, activitySessionID+r.WriterLockSuffix)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -452,6 +468,7 @@ func TestActivity_BackstopSparesLiveQuietWorker(t *testing.T) {
 // directory.
 func writeActivityRecordFor(t *testing.T, r agentplan.SessionRecords, home, cwd, sessionID string, touched time.Time) {
 	t.Helper()
+	ensureLockDir(t, r, home)
 	root := recordStoreRoot(r, home, func(string) string { return "" })
 	dir := root
 	for i := 0; i < r.Depth; i++ {
@@ -740,6 +757,15 @@ func TestWriterLockHeld_ReportsWhatTheKernelDoes(t *testing.T) {
 		t.Errorf("after release: held=%v known=%v, want not held and known", held, known)
 	}
 
+	// A missing lock DIRECTORY is not a missing lock file, and the open cannot
+	// tell them apart -- both are ENOENT. This is the one place where reading
+	// the wrong one resolves toward destroying something: if the agent renamed
+	// that directory, or a permission change hid it, every session would read
+	// as having no writer and the guard would retire itself without a symptom.
+	if held, known := writerLockHeld(filepath.Join(dir, "nosuchdir", "any.lock")); held || known {
+		t.Errorf("missing lock directory: held=%v known=%v, want not held and NOT known -- a store this build cannot find is not a store with nobody writing in it", held, known)
+	}
+
 	// Unanswerable: a directory where a lock file belongs.
 	weird := filepath.Join(dir, "weird.lock")
 	if err := os.MkdirAll(weird, 0o700); err != nil {
@@ -813,7 +839,9 @@ func TestActivity_RecordWithATraversingIDIsNotProbed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dir := writerLockDir(records, home, func(string) string { return "" })
+	// The lock directory exists, as it does in any real store, so a declined id
+	// is declined for being an id rather than for the store looking wrong.
+	dir := ensureLockDir(t, records, home)
 	rel, err := filepath.Rel(dir, outside)
 	if err != nil {
 		t.Fatal(err)
