@@ -510,17 +510,28 @@ func TestBackstop_LiveWorkerOfEveryAgent_Spared(t *testing.T) {
 				t.Fatalf("destroyed = %v, want []", *destroyed)
 			}
 
-			// Sparing on a record the agent never removes is permanent: that
-			// instance is skipped by every future sweep until somebody destroys
-			// it by hand, so the developer has to be told, in words, that their
-			// disk is not going to get emptier on its own. An agent whose
-			// records do disappear needs no such notice -- its instance is
-			// reclaimed the moment the session goes.
+			// Only a permanent spare is reported, and which of the three kinds
+			// is permanent is the whole distinction. An agent whose records
+			// disappear with the session needs no notice: the instance goes
+			// when the session does. An agent answered by activity needs none
+			// either, for a different reason -- the record here was just
+			// written, so the sparing is real but temporary, and it ends on its
+			// own once nobody has touched the session for the grace period.
+			// Only an agent that offers no readable signal at all is spared
+			// forever, and that developer has to be told in words that their
+			// disk is not going to get emptier on its own.
 			_, spared, err := selectBackstopTargets(root, defaultJobsDir(), now)
 			if err != nil {
 				t.Fatalf("selectBackstopTargets error: %v", err)
 			}
-			wantSpared := spec.Records.Liveness != agentplan.LivenessRecordPresence
+			// Worth knowing what this arm is currently worth: no launchable
+			// agent declares LivenessNone any more, so this resolves to false
+			// for every subtest and the branch below asserts only absence. It
+			// is kept as the statement of the rule rather than deleted,
+			// because the kind is still declarable and an agent adopting it
+			// should arrive covered -- but nobody should read a green run here
+			// as evidence that the permanent-spare report works.
+			wantSpared := spec.Records.Liveness == agentplan.LivenessNone
 			if got := len(spared) > 0; got != wantSpared {
 				t.Fatalf("reported spared = %v (%v), want %v for a %s record store", got, spared, wantSpared, ag)
 			}

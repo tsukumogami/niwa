@@ -127,6 +127,20 @@ const (
 	// live session from a deleted one. A caller that cannot prove a session is
 	// gone must not act as though it is.
 	LivenessNone
+
+	// LivenessRecordActivity means the record is never removed, so its
+	// presence proves nothing, but it is appended to whenever the session is
+	// worked in and the agent holds an advisory lock for as long as a writer
+	// is attached to it. Together those answer a question presence cannot: a
+	// record nobody has appended to for long enough, with no writer holding
+	// its lock, belongs to a session nobody came back to.
+	//
+	// This kind asks for a grace period rather than proving a session is
+	// gone, and the difference is deliberate. An agent with no delete verb
+	// never produces the event LivenessRecordPresence waits for, so the
+	// choice for one of these is between a bounded wait and an instance that
+	// is never reclaimed at all.
+	LivenessRecordActivity
 )
 
 // SessionRecords describes where an agent writes the record that says which
@@ -182,6 +196,23 @@ type SessionRecords struct {
 
 	// Liveness says whether the record's presence proves the session exists.
 	Liveness LivenessKind
+
+	// WriterLockPath is the directory holding one advisory lock file per
+	// session, as path components below the agent's own directory under home
+	// -- the component HomeEnv overrides and HomePath's first element names,
+	// so the lock directory is a sibling of the record store rather than a
+	// child of it. Empty for an agent that takes no such lock, and read only
+	// when Liveness is LivenessRecordActivity.
+	//
+	// The lock file within it is the session's own id followed by
+	// WriterLockSuffix. It exists only while a writer is attached: the agent
+	// unlinks it on a clean exit, and the kernel drops the lock itself when a
+	// holder dies without unlinking, so a file left behind by a killed worker
+	// reads as unheld rather than as a live session forever.
+	WriterLockPath []string
+
+	// WriterLockSuffix is appended to the session id to name the lock file.
+	WriterLockSuffix string
 }
 
 // modelCategories is niwa's portable, vendor-neutral vocabulary for model
@@ -414,10 +445,31 @@ var launchSpecs = map[agent.Agent]LaunchSpec{
 			// directly and there is no shorter form.
 			Handle: HandleSessionID,
 			// A record is never removed, so its presence says a session once
-			// existed and nothing about whether it still does. Anything asking
-			// whether a session is gone gets no evidence here, and must not
-			// act as though it did.
-			Liveness: LivenessNone,
+			// existed and nothing about whether it still does. What the record
+			// does carry is when it was last appended to, and the agent holds
+			// an advisory lock beside it for as long as a writer is attached,
+			// so the pair answers what presence alone cannot.
+			//
+			// Measured against 0.147.0. The lock is a real flock taken
+			// LOCK_EX|LOCK_NB at session bootstrap and held unbroken for the
+			// whole turn -- 157.8s and 67.3s across two runs polled twice a
+			// second, with no free sample in between -- and released within
+			// about 0.3s of the worker exiting. A clean exit unlinks the file;
+			// a killed worker leaves it behind, but the kernel drops the lock,
+			// so it reads as unheld. The file is a fresh inode every time,
+			// which is why nothing here may be cached across probes.
+			//
+			// The rollout's own mtime is the other half: it stops moving for
+			// good when a session ends (five rollouts re-stat'd seven minutes
+			// later each matched their own last line's timestamp to the
+			// millisecond, so nothing rewrites them afterwards) and it moves
+			// again on a resume, which appends to the same file. That is what
+			// makes staleness mean "nobody came back" rather than "the turn
+			// ended".
+			Liveness: LivenessRecordActivity,
+
+			WriterLockPath:   []string{"thread-writer-locks"},
+			WriterLockSuffix: ".lock",
 		},
 		ResumeArgs: []string{"resume"},
 		// Measured against 0.147.0, both verbs: resuming a session whose turn

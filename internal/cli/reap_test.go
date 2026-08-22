@@ -288,7 +288,7 @@ func TestReap_MappingWhoseLivenessCannotBeRead_Spared(t *testing.T) {
 func TestReap_SparedInstancesAreReported(t *testing.T) {
 	unreadable := []agent.Agent{}
 	for _, ag := range agent.All() {
-		if _, spared := livenessUnreadable(string(ag)); spared {
+		if v, _ := sessionState(string(ag), reapDeadSessionID, "", "", time.Now()); v == sessionIsUnreadable {
 			unreadable = append(unreadable, ag)
 		}
 	}
@@ -336,8 +336,8 @@ func TestReap_SparedInstancesAreReported(t *testing.T) {
 // permanently -- an instance leak rather than data loss, which is the right
 // direction -- but silently it would be a leak with no symptom at all.
 func TestReap_MalformedAgentIsSparedAndNamed(t *testing.T) {
-	reason, spared := livenessUnreadable("Claude")
-	if !spared {
+	verdict, reason := sessionState("Claude", reapDeadSessionID, "", "", time.Now())
+	if verdict != sessionIsUnreadable {
 		t.Fatal("a mapping recording an unparseable agent was judged readable")
 	}
 	if !strings.Contains(reason, "Claude") {

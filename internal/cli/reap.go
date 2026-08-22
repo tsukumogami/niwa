@@ -28,6 +28,39 @@ import (
 // not job-state.
 const dispatchBackstopTTL = 30 * time.Minute
 
+// defaultReapIdleGrace bounds how long a session an agent will never delete may
+// sit untouched before the instance provisioned for it is reclaimed.
+//
+// It is not a TTL on an instance and it is unrelated to dispatchBackstopTTL
+// above, which bounds an in-flight dispatch -- seconds to tens of seconds of
+// clone and capture. This bounds a person: how long after last working in a
+// session they might reasonably come back to it. A day is chosen to cover
+// stopping for the night, because the cost of guessing short is real. Resuming
+// a session in practice means working in the instance it ran in, so reclaiming
+// that instance is what ends practical resumability, and there is no undo.
+//
+// It applies only to an agent declaring LivenessRecordActivity. An agent whose
+// records disappear when a session is deleted has an exact signal and needs no
+// grace period, and one that offers neither is spared rather than timed.
+const defaultReapIdleGrace = 24 * time.Hour
+
+// reapIdleGrace resolves the grace period, honoring NIWA_REAP_IDLE_GRACE.
+//
+// The override exists because the default is a judgment about how people work
+// rather than a fact about an agent, and because it is the only way to watch
+// the rule act without waiting a day for it. A value that will not parse, or is
+// not positive, is ignored in favor of the default: a typo here would otherwise
+// silently shorten the window before instances are destroyed, which is the one
+// direction a misreading must never go.
+func reapIdleGrace() time.Duration {
+	if env := strings.TrimSpace(os.Getenv("NIWA_REAP_IDLE_GRACE")); env != "" {
+		if d, err := time.ParseDuration(env); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultReapIdleGrace
+}
+
 func init() {
 	rootCmd.AddCommand(reapCmd)
 }
@@ -50,19 +83,33 @@ suspended keeps its record -- and so keeps its instance, which stays resumable
 (developer) instance is NEVER targeted, and an instance is NEVER reaped without
 the ephemeral marker.
 
-Some instances are spared rather than judged, and reap says so on stderr when
-it happens. The liveness rule needs a record that disappears when a session is
-deleted, and not every agent keeps one: an agent whose session records are
-never removed leaves no way to tell a live session from a deleted one, and an
-instance whose session cannot be proven gone is never reclaimed. The same holds
-for a dispatch instance with no mapping at all, which reap otherwise reclaims on
-age -- if an agent's records say a worker was started there, reap cannot tell
-whether it is still writing, so it leaves the directory alone. Spared instances
-pile up until you remove them yourself with niwa destroy. Sparing an instance
-nobody is using costs a directory; the other mistake costs the work inside it.
+What proves a session is still there is the launching agent's own business, and
+there are three answers. Most agents remove a session's record when you delete
+the session, so the record's presence is the proof and the rule above is the
+whole story.
+
+An agent that never removes a record cannot be read that way, because the record
+outlives the session. For those, reap asks a different question: has anybody
+worked in this session lately, and is anything writing to it right now. A
+session nobody has touched for longer than the idle grace period, with no writer
+holding its lock, is treated as finished with, and the instance is reclaimed.
+This is the one path where an instance goes away without you deleting anything,
+so the grace period is generous -- a day by default, and settable with
+NIWA_REAP_IDLE_GRACE. A session you keep coming back to keeps its instance:
+resuming one moves its record, which starts the clock again.
+
+An agent offering neither signal leaves reap with no evidence, and an instance
+whose session cannot be proven gone is never reclaimed. Those are spared, and
+reap says so on stderr rather than silently, because they pile up until you
+remove them yourself with niwa destroy. Sparing an instance nobody is using
+costs a directory; the other mistake costs the work inside it.
+
+The same care applies to a dispatch instance with no mapping at all, which reap
+otherwise reclaims on age: if an agent's records say a worker is still writing
+there, reap leaves the directory alone.
 
 reap runs on demand and is also invoked opportunistically at the start of
-niwa create and niwa dispatch so session fan-out self-bounds.`,
+niwa create, niwa dispatch, and niwa watch so session fan-out self-bounds.`,
 	Args:          cobra.NoArgs,
 	SilenceErrors: true,
 	SilenceUsage:  true,
@@ -93,12 +140,34 @@ func runReap(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// reapNotice is what a reclaimed instance says about itself, empty when the
+// reclamation needs no explanation.
+//
+// Most reclamations follow something the developer did: they deleted the
+// session, and the instance going with it is the thing they asked for. A count
+// is enough for that. Reclaiming on idleness follows nothing they did -- they
+// walked away, and a directory disappeared -- so that one names the instance
+// and the rule. Learning it from a resume into a missing directory instead is
+// the failure this line exists to prevent.
+type reapNotice struct {
+	Name   string
+	Reason string
+}
+
 // reapTarget pairs an instance the reaper has selected for reclamation with the
 // session mapping that justifies it. The session id is carried so the mapping
 // entry can be deleted after the instance is destroyed.
 type reapTarget struct {
 	SessionID    string
 	InstancePath string
+
+	// Agent is the mapping's recorded agent, carried so the verdict can be
+	// re-asked immediately before the destroy without re-reading the mapping.
+	Agent string
+
+	// Notice explains the reclamation when it followed nothing the developer
+	// did, and is zero otherwise. See reapNotice.
+	Notice reapNotice
 }
 
 // maxSparedNamesListed bounds how many instance names one line carries before
@@ -119,12 +188,18 @@ const maxSparedNamesListed = 3
 // training to ignore it within a day, and a warning nobody reads crowds out
 // the ones they would have read.
 //
-// The headline says only that the sweep will not reclaim these on its own, and
-// leaves what happened to the reason. Two different things land here -- an
-// instance whose session liveness cannot be read, and one whose turn finished
-// and left work niwa could not attach to a session -- so a headline that
-// asserted either would be printing something false about the other every time
-// the other came up.
+// The headline speaks for this sweep and leaves what happened to the reason.
+// Three different things land here -- an instance whose agent offers no
+// liveness signal at all, one whose turn finished and left work niwa could not
+// attach to a session, and one whose liveness could not be read this time --
+// so a headline that asserted any of them would print something false about
+// the others every time they came up.
+//
+// The last of those is why the headline stopped claiming no sweep will ever
+// reclaim these. That was true while every reason here was permanent. An
+// unreadable probe is not: a stat that failed once may answer next time, and a
+// sweep that says the instance is yours forever would be sending the developer
+// to niwa destroy for a condition that may already have cleared.
 func reportSparedInstances(w io.Writer, spared []sparedInstance) {
 	if len(spared) == 0 {
 		return
@@ -145,7 +220,7 @@ func reportSparedInstances(w io.Writer, spared []sparedInstance) {
 			listed = listed[:maxSparedNamesListed]
 			suffix = fmt.Sprintf(" and %d more", len(names)-maxSparedNamesListed)
 		}
-		fmt.Fprintf(w, "niwa: kept %d instance(s) no sweep will reclaim (%s%s): %s\n",
+		fmt.Fprintf(w, "niwa: kept %d instance(s) this sweep would not reclaim (%s%s): %s\n",
 			len(names), strings.Join(listed, ", "), suffix, reason)
 	}
 	// The name rather than the path, because that is what the command takes.
@@ -165,29 +240,80 @@ type sparedInstance struct {
 	Reason string
 }
 
-// livenessUnreadable reports whether a mapping's recorded agent leaves the
-// sweep with no way to tell a live session from a deleted one, and why.
+// sessionVerdict is what the sweep concluded about the session behind a
+// mapping. Three answers, and the third is not a shade of the second: an
+// instance whose session is gone is reclaimed, and one whose session cannot be
+// read is left alone.
+type sessionVerdict uint8
+
+const (
+	// sessionIsLive means the session is still there -- running, between
+	// turns, or waiting to be come back to.
+	sessionIsLive sessionVerdict = iota + 1
+
+	// sessionIsGone means the session has been proven finished with.
+	sessionIsGone
+
+	// sessionIsUnreadable means no conclusion was reached.
+	sessionIsUnreadable
+)
+
+// sessionState decides which of the three a mapping is in, by asking the
+// launching agent's own declaration what proves a session is still there.
 //
-// Three shapes reach here and all three mean the same thing to the sweep. An
-// agent outside the accepted set is a mapping written by something this build
-// does not understand. An agent niwa launches no background worker for has no
-// record store to read at all. And an agent whose records are never removed has
-// a store that says a session once existed and nothing about whether it still
-// does -- reading it would answer a different question than the one being
-// asked.
-func livenessUnreadable(recorded string) (string, bool) {
+// The rule is the declaration's, not this function's, and that is the whole
+// shape: a second agent arrives answered by whichever kind it declares, and an
+// agent declaring a kind this build does not know is unreadable rather than
+// silently reclaimed. Three shapes never get as far as a kind at all -- a
+// mapping written by something this build does not recognize, an agent niwa
+// launches no worker for and so keeps no records of, and an agent that declares
+// no readable signal -- and all three mean the same thing here.
+func sessionState(recorded, sessionID, jobsDir, instancePath string, now time.Time) (sessionVerdict, string) {
 	ag, err := agent.ParseAgent(recorded)
 	if err != nil {
-		return fmt.Sprintf("its mapping records agent %q, which this build does not recognize", recorded), true
+		return sessionIsUnreadable, fmt.Sprintf("its mapping records agent %q, which this build does not recognize", recorded)
 	}
 	spec, ok := agentplan.For(ag).LaunchSpec()
 	if !ok {
-		return fmt.Sprintf("niwa launches no background worker for %s, so there are no session records to read", ag), true
+		return sessionIsUnreadable, fmt.Sprintf("niwa launches no background worker for %s, so there are no session records to read", ag)
 	}
-	if spec.Records.Liveness != agentplan.LivenessRecordPresence {
-		return fmt.Sprintf("%s never removes a session's record, so its presence cannot tell a live session from a deleted one", ag), true
+
+	switch spec.Records.Liveness {
+	case agentplan.LivenessRecordPresence:
+		// The record is removed when the session is deleted, so its presence
+		// is the answer and nothing else has to be read.
+		if sessionLive(jobsDir, sessionID, now) {
+			return sessionIsLive, ""
+		}
+		return sessionIsGone, ""
+
+	case agentplan.LivenessRecordActivity:
+		// The record outlives the session, so presence says nothing. What
+		// answers instead is whether anybody has worked in it lately and
+		// whether a writer is attached right now.
+		rec, ok := recordForInstance(spec.Records, instancePath, sessionID)
+		if !ok {
+			// The mapping names a session of this agent's and the store has no
+			// record of it rooted here. That is a store this sweep cannot
+			// reason about rather than a session it may declare gone.
+			return sessionIsUnreadable, fmt.Sprintf("its mapping names a %s session that agent's own records do not describe as having run there", ag)
+		}
+		live, known := recordActivityLive(spec.Records, rec, userHomeDir(), os.Getenv, now, reapIdleGrace())
+		switch {
+		case !known:
+			return sessionIsUnreadable, fmt.Sprintf("niwa could not read whether its %s session is still being worked in", ag)
+		case live:
+			return sessionIsLive, ""
+		default:
+			// The one reclamation nobody asked for, so it is the one that has
+			// to explain itself. The reason travels with the verdict and is
+			// printed when the instance actually goes.
+			return sessionIsGone, fmt.Sprintf("its %s session had gone %s without being worked in, and nothing was writing to it", ag, reapIdleGrace())
+		}
+
+	default:
+		return sessionIsUnreadable, fmt.Sprintf("%s never removes a session's record, so its presence cannot tell a live session from a deleted one", ag)
 	}
-	return "", false
 }
 
 // selectReapTargets joins the workspace's instances against their session
@@ -264,20 +390,23 @@ func selectReapTargets(workspaceRoot, jobsDir string, now time.Time) ([]reapTarg
 		// reportSparedInstances gives: this is the runtime half of a gap the
 		// capability table declares, and a declared gap nobody can observe
 		// while it is happening is only half declared.
-		if reason, spared := livenessUnreadable(mapping.Agent); spared {
-			name := mapping.InstanceName
-			if name == "" {
-				name = filepath.Base(rec.Path)
-			}
+		verdict, reason := sessionState(mapping.Agent, mapping.SessionID, jobsDir, rec.Path, now)
+		name := mapping.InstanceName
+		if name == "" {
+			name = filepath.Base(rec.Path)
+		}
+		switch verdict {
+		case sessionIsUnreadable:
 			unreadable = append(unreadable, sparedInstance{Name: name, Reason: reason})
 			continue
-		}
-
-		if sessionLive(jobsDir, mapping.SessionID, now) {
-			// The session still exists (running or idle-but-resumable): its job
-			// entry is present, so spare the instance. Only a deleted session
-			// (entry gone) is reclaimed.
+		case sessionIsLive:
+			// Still there -- running, between turns, or waiting to be come
+			// back to. Only a session proven finished with is reclaimed.
 			continue
+		}
+		var notice reapNotice
+		if reason != "" {
+			notice = reapNotice{Name: name, Reason: reason}
 		}
 
 		// Defense in depth against the data-loss class this reaper fixes: even
@@ -294,7 +423,7 @@ func selectReapTargets(workspaceRoot, jobsDir string, now time.Time) ([]reapTarg
 		// passed the liveness rule above, so anything permanent about it was
 		// reported there, and saying it twice about one instance would train
 		// the developer to skim both.
-		_, recorded := instanceHasRecordedSession(rec.Path)
+		_, recorded := instanceHasRecordedSession(rec.Path, now)
 		if instanceHasLiveJob(jobsDir, rec.Path) || recorded {
 			continue
 		}
@@ -302,6 +431,8 @@ func selectReapTargets(workspaceRoot, jobsDir string, now time.Time) ([]reapTarg
 		targets = append(targets, reapTarget{
 			SessionID:    mapping.SessionID,
 			InstancePath: rec.Path,
+			Agent:        mapping.Agent,
+			Notice:       notice,
 		})
 	}
 
@@ -323,6 +454,25 @@ func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 
 	reaped := 0
 	for _, t := range targets {
+		// Selection happened before the spared report was printed and before
+		// every earlier destroy in this loop, so a verdict reached up there is
+		// already seconds old by the time it is acted on. For a session
+		// reclaimed on idleness that gap is a window somebody can resume into:
+		// the probe said no writer, a resume took the lock, and the directory
+		// it is now working in is about to be destroyed.
+		//
+		// So that verdict alone is re-asked immediately before the destroy, at
+		// the cost of one stat and at most one lock probe. It does not close
+		// the race -- nothing check-then-act can -- but it narrows it from the
+		// length of a whole sweep to the length of one syscall pair. The notice
+		// printed below is the other reason to bother: without this it could
+		// tell a developer that nobody had been working in a directory
+		// somebody had just opened.
+		if t.Notice.Reason != "" {
+			if verdict, _ := sessionState(t.Agent, t.SessionID, jobsDir, t.InstancePath, time.Now()); verdict != sessionIsGone {
+				continue
+			}
+		}
 		if err := destroyInstanceFunc(t.InstancePath); err != nil {
 			fmt.Fprintf(os.Stderr, "niwa: warning: reaping instance %s: %v\n", t.InstancePath, err)
 			// Leave the mapping in place so a later reap retries this target
@@ -336,6 +486,13 @@ func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 		_ = removeInstanceTrustFunc(t.InstancePath)
 		if err := workspace.DeleteSessionMapping(workspaceRoot, t.SessionID); err != nil {
 			fmt.Fprintf(os.Stderr, "niwa: warning: deleting session mapping %s: %v\n", t.SessionID, err)
+		}
+		// Printed after the destroy rather than before it, so the line is a
+		// report of something that happened rather than of something intended:
+		// a destroy that fails above continues without saying the instance is
+		// gone.
+		if t.Notice.Reason != "" {
+			fmt.Fprintf(os.Stderr, "niwa: reclaimed %s: %s\n", t.Notice.Name, t.Notice.Reason)
 		}
 		reaped++
 	}
@@ -496,10 +653,11 @@ func selectBackstopTargets(workspaceRoot, jobsDir string, now time.Time) ([]back
 		if instanceHasLiveJob(jobsDir, rec.Path) {
 			continue
 		}
-		if reason, recorded := instanceHasRecordedSession(rec.Path); recorded {
-			// A permanent spare is reported; a temporary one is not. See
-			// instanceHasRecordedSession for why this class exists at all and
-			// what would actually close it.
+		if reason, recorded := instanceHasRecordedSession(rec.Path, now); recorded {
+			// A permanent spare is reported; a temporary one is not, and an
+			// agent answered by activity is temporary -- the sparing ends when
+			// the session goes untouched for the grace period. See
+			// instanceHasRecordedSession for what each kind means here.
 			if reason != "" {
 				spared = append(spared, sparedInstance{Name: filepath.Base(rec.Path), Reason: reason})
 			}
