@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/cucumber/godog"
@@ -350,6 +351,74 @@ func theDispatchInstanceIsAgedPastTheBackstopTTL(ctx context.Context) (context.C
 	return ctx, nil
 }
 
+// codexRolloutPath finds the session record the fake codex wrote under the
+// scenario's own CODEX_HOME. There is exactly one per scenario, so a glob is
+// enough and nothing has to know the date directory the fake chose.
+func codexRolloutPath(s *testState) (string, error) {
+	matches, err := filepath.Glob(filepath.Join(s.homeDir, ".codex", "sessions", "*", "*", "*", "rollout-*.jsonl"))
+	if err != nil {
+		return "", fmt.Errorf("looking for the session record: %w", err)
+	}
+	if len(matches) != 1 {
+		return "", fmt.Errorf("found %d session records under the scenario's CODEX_HOME, want exactly 1: %v", len(matches), matches)
+	}
+	return matches[0], nil
+}
+
+// theCodexSessionWasLastWorkedInAgo backdates the session record, which is what
+// the passage of time does to it. The record's mtime is the only thing the idle
+// rule reads for staleness, so moving it is a faithful stand-in for waiting
+// rather than a fixture the rule would not otherwise meet.
+func theCodexSessionWasLastWorkedInAgo(ctx context.Context, ago string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	d, err := time.ParseDuration(ago)
+	if err != nil {
+		return ctx, fmt.Errorf("parsing %q as a duration: %w", ago, err)
+	}
+	path, err := codexRolloutPath(s)
+	if err != nil {
+		return ctx, err
+	}
+	when := time.Now().Add(-d)
+	if err := os.Chtimes(path, when, when); err != nil {
+		return ctx, fmt.Errorf("backdating the session record %s: %w", path, err)
+	}
+	return ctx, nil
+}
+
+// aWriterHoldsTheCodexSessionsLock takes the same advisory lock a live worker
+// holds, on the path the agent's declaration names, and keeps it until the
+// scenario ends.
+//
+// It is a real flock rather than a marker file because that is the whole
+// mechanism: the reaper does not test whether the file exists, it tries to take
+// the lock. A fixture that only created the file would pass a check that had
+// been deleted.
+func aWriterHoldsTheCodexSessionsLock(ctx context.Context, sessionID string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	dir := filepath.Join(s.homeDir, ".codex", "thread-writer-locks")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return ctx, fmt.Errorf("mkdir lock dir: %w", err)
+	}
+	path := filepath.Join(dir, sessionID+".lock")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return ctx, fmt.Errorf("opening the writer lock %s: %w", path, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return ctx, fmt.Errorf("taking the writer lock %s: %w", path, err)
+	}
+	s.heldLocks = append(s.heldLocks, f)
+	return ctx, nil
+}
+
 // theLaunchedClaudeWasInvokedWith asserts that the argv the fake claude recorded
 // on its --bg launch contains the given substring (e.g. "--model opus"). The
 // success-path fake writes its full argument line to $HOME/dispatch-launch-argv.
@@ -384,4 +453,6 @@ func registerDispatchSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the dispatch session "([^"]*)" is deleted from the Agent View$`, theDispatchSessionIsDeleted)
 	ctx.Step(`^the dispatch-origin mapping is removed$`, theDispatchOriginMappingIsRemoved)
 	ctx.Step(`^the dispatch instance is aged past the backstop TTL$`, theDispatchInstanceIsAgedPastTheBackstopTTL)
+	ctx.Step(`^the codex session was last worked in "([^"]*)" ago$`, theCodexSessionWasLastWorkedInAgo)
+	ctx.Step(`^a writer holds the codex session "([^"]*)" lock$`, aWriterHoldsTheCodexSessionsLock)
 }

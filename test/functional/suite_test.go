@@ -118,6 +118,12 @@ type testState struct {
 	// presence/absence without hardcoding the random name suffix.
 	lastDispatchInstancePath string
 
+	// heldLocks are advisory locks a scenario is holding to stand in for a live
+	// worker, kept open because a flock lives on the open file description:
+	// closing the file releases the lock, so the handle has to outlive the step
+	// that took it. Released when the scenario ends.
+	heldLocks []*os.File
+
 	// Codex acceptance state. See codex_agent_steps_test.go.
 
 	// stagedFiles and stagedSymlinks accumulate fixture content (repo-relative
@@ -280,6 +286,13 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 			s.githubFake.Close()
 			s.githubFake = nil
 		}
+		// Closing releases the flock with it, which is the point: a lock left
+		// held would outlive the scenario that meant it to stand for a live
+		// worker.
+		for _, f := range s.heldLocks {
+			_ = f.Close()
+		}
+		s.heldLocks = nil
 		// A scenario that made a directory read-only to force a delivery
 		// failure has to hand it back, or the sandbox it lives in outlives the
 		// run.

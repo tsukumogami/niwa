@@ -767,6 +767,27 @@ runs long after the dispatching process is gone, holds no pid, and a
 finished `codex exec` leaves a resumable session with no process at all
 -- process absence is not session death for either agent.
 
+> **Update — both "explicitly not built" paragraphs above are superseded,
+> and one of them was pointing at the wrong thing.** The reclamation gap
+> this decision deferred is closed in
+> `docs/designs/current/DESIGN-codex-instance-reclamation.md`, and not in
+> the shape predicted here. The process-cwd check named as "the check
+> that actually closes it" was not built and is no longer the recommended
+> route: Codex takes a real advisory lock on a per-session file for as
+> long as a writer is attached, measured against the same 0.147.0 build,
+> and probing one known path answers "is a writer attached to this
+> session" better than a scan of every process answers "is anything
+> running in this directory". It also dissolves rather than answers the
+> portability question this decision raised, since `flock` is available
+> wherever niwa runs.
+>
+> What survives unchanged is the reasoning immediately above. Process
+> absence really is not session death, so the lock could only ever be the
+> guard; the trigger is record staleness, which this decision did not
+> consider because the rollout's mtime had not been measured. The
+> name-plus-TTL analogue proposed here was close to right about the
+> trigger and wrong about what makes it safe.
+
 ### Decision 8 -- the Codex launch shape (R7, R8)
 
 Every element here is settled by measurement against codex-cli 0.147.0,

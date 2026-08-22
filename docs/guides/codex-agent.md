@@ -243,15 +243,42 @@ that couldn't write still exits 0, and an API failure of any kind — including
 running out of quota — exits 1 alongside every other error. Read the last
 message or the run's output rather than the exit code.
 
-And a dispatched Codex instance isn't reclaimed automatically. `niwa reap`
-reclaims an instance once its session's record is gone, and Codex never removes
-those records, so there's no way to tell a session you finished with from one
-you're coming back to. niwa spares it rather than guess, says so when it runs,
-and leaves it to you: `niwa destroy <instance>` when you're done with the
-session. That holds even for an instance whose dispatch died before it was
-recorded, which reap otherwise cleans up on age — if a Codex session was
-started there, reap can't tell whether that worker is still writing, so it
-leaves the directory alone.
+A dispatched Codex instance is reclaimed on age rather than when you delete the
+session, which is the one thing here likely to surprise you. For Claude,
+`niwa reap` waits for the session's record to disappear, which is what deleting
+a session does. Codex never removes a rollout, so there's no such event to wait
+for. Instead reap asks whether anybody has worked in the session lately and
+whether anything is writing to it now: once a rollout has gone a day untouched
+and no writer holds its lock, the instance is reclaimed.
+
+Nothing runs on a schedule. The sweep happens inside `niwa reap`, and
+opportunistically at the start of `niwa create`, `niwa dispatch` and
+`niwa watch` — so an idle instance can outlive the day by as long as you go
+without running one of those.
+
+The practical consequences are small but real. A session you keep resuming
+keeps its instance, because resuming appends to the same rollout and starts the
+clock again. A session you walk away from loses its instance about a day later,
+and since resuming a Codex session means working in the directory it ran in,
+that's the point where resuming stops being practical — so if you want to keep
+one indefinitely, move the work out of the instance or resume it now and then.
+The conversation itself survives either way: Codex keeps the rollout, so the
+session is still listed and still readable. It's the working directory that
+goes. A worker that's still running is never touched, even mid-way through a
+turn that's been quiet for hours, because the lock Codex holds while a writer
+is attached is what reap checks last.
+
+When reap does reclaim an instance this way it says so on stderr, naming the
+instance and how long its session sat — that line is your notice, and there
+isn't a warning beforehand. Set `NIWA_REAP_IDLE_GRACE` to change the window; it
+takes a duration like `72h`. `niwa destroy <instance>` still works if you'd
+rather not wait.
+
+One platform caveat. The lock check needs `flock`, which niwa has on Linux and
+macOS and not on Windows. Without it niwa can't tell a finished session from a
+running one, so it declines to judge and spares the instance — safe, but it
+means dispatched Codex instances still accumulate there until you remove them
+with `niwa destroy`.
 
 ## Starting a session at the instance root
 

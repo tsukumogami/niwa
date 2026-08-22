@@ -433,7 +433,41 @@ when a process opens the thread and removed when it exits. That is what makes
 the refusal deterministic rather than racy. The lock is advisory and the kernel
 releases it when the holder dies, so a file left behind by a killed worker does
 not brick the thread — a later resume acquires it anyway and the file's mtime
-moves. Stale `.lock` files sitting in that directory are routine.
+moves.
+
+**Amended — the last sentence originally read "Stale `.lock` files sitting in
+that directory are routine", and that is false.** A clean exit *unlinks* the
+lock file: across five clean exits the directory held only `.coordination.lock`
+afterwards. So a `.lock` file present with no holder is produced only by an
+abnormal death, and it is litter rather than a routine state. The one file that
+prompted the original claim was re-measured and found to be *held* — a live
+interactive session had held that flock continuously for five days
+(`/proc/locks` showed the row against a running `codex` pid), which is also
+positive evidence that the lock does not decay on long-lived sessions.
+
+Two further mechanics, measured while building instance reclamation on this
+lock. It is a genuine BSD advisory lock rather than a marker file: `strace` of a
+session bootstrap shows `flock(fd, LOCK_EX|LOCK_NB)` against the thread's lock
+file, with no `LOCK_UN` anywhere, so the lock is held for the process lifetime
+and released when the fd closes. Polled from another process every 0.5s it was
+unbroken for the whole turn — 157.8s and 67.3s across two runs, no free sample
+in between — and released within about 0.3s of the worker exiting. And the file
+is a *fresh inode* every time a writer attaches, since it is unlinked at exit
+and re-created at the next open, so anything checking it must open the path
+again on each probe and must never cache an fd or inode.
+
+One hazard for anything probing this lock: opening with `O_CREAT` manufactures
+a lock file for a thread that has already exited, which is indistinguishable
+from a crash leftover. Open without it and read a missing file as "no writer" —
+which, given that a clean exit unlinks, is an answer rather than a failure to
+look. Testing for the file first and opening second would be the same answer
+with a race in the middle.
+
+`.coordination.lock` in the same directory is not a per-session signal. It is a
+directory-wide blocking `LOCK_EX` held only for the instant of a registry
+mutation: across a full 68s live run it never appeared in `/proc/locks` at any
+sample, never appeared in the worker's fd table, and its mtime never moved
+across six sessions.
 
 The refusal is clean, not merely survivable, and that rules out most of what
 you would otherwise have to worry about. Across a rejected resume the worker's
@@ -526,6 +560,18 @@ header and constructs the session before dying at the API boundary. The
 control that validates the bogus-model probe is that
 `--sandbox workspace-write` under it still wrote its trust stanza, which shows
 the write-back happens at session start rather than at any model turn.
+
+Finding 18's amendment and the lock mechanics beside it come from a fourth pass
+against the same build, taken while building instance reclamation on that lock.
+The lock's syscall was established with `strace -f -y -e trace=flock,fcntl` over
+a bogus-model bootstrap, which reaches the lock and costs nothing; the hold
+duration, the release timing, the SIGKILL edge and the unlink-on-clean-exit
+behavior were taken from live runs whose turns were a single `sleep`, polled
+from a separate process with `flock -n` and cross-checked against `/proc/locks`
+by inode. The correction to the "stale locks are routine" claim came from
+checking the one file that had been assumed stale rather than from a new run,
+which is the whole lesson: the assumption had been made twice from the file's
+age alone, and one look at `/proc/locks` refuted it.
 
 Two ways a measurement here can look rigorous and not be. A checksum of
 `$CODEX_HOME/config.toml` is not a usable change signal, because every run
