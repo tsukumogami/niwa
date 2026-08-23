@@ -283,3 +283,69 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     Then the exit code is 1
     And the error output contains "not an interactive terminal"
     And the error output contains "none of the workspace's skills, MCP servers or posture"
+
+  # --- Reclaiming a dispatched Codex instance, and refusing to ---
+  #
+  # Codex never removes a rollout, so the record-gone rule the other agent is
+  # reclaimed by never fires for it. Before the idle rule, that meant a
+  # dispatched Codex instance was spared by every sweep for good and only
+  # `niwa destroy` cleared it. The rule reads two things instead: when the
+  # session was last worked in, and whether a writer holds its lock right now.
+  #
+  # Neither scenario needs a real codex binary, which is the point of running
+  # them here rather than behind @codex-live: the record is a file with an
+  # mtime and the lock is a real flock, and those are the whole mechanism.
+
+  @critical
+  Scenario: niwa reap reclaims a dispatched Codex instance nobody came back to
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake codex for dispatch with session "01a40000-0000-7000-8000-00000000dead"
+    When I run "niwa dispatch abandoned --detach --harness codex" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    And a dispatch-origin mapping exists for session "01a40000-0000-7000-8000-00000000dead"
+    # Still fresh: the sweep leaves it alone, which is what stops the rule
+    # below from being "reap everything".
+    When I run niwa reap from the workspace root
+    Then the exit code is 0
+    And the dispatch instance still exists
+    Given the codex session was last worked in "48h" ago
+    When I run niwa reap from the workspace root
+    Then the exit code is 0
+    And no dispatch instance remains
+    And no dispatch-origin mapping remains
+
+  # The guard, and the case that would have destroyed a working directory. A
+  # single turn can run far longer than the grace period without appending
+  # anything to the rollout, so staleness alone would reap an instance a worker
+  # is writing in. The lock is what a live worker holds throughout its turn.
+
+  @critical
+  Scenario: niwa reap spares a Codex instance whose session has a live writer
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake codex for dispatch with session "01a50000-0000-7000-8000-00000000beef"
+    When I run "niwa dispatch long-turn --detach --harness codex" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    Given the codex session was last worked in "48h" ago
+    And a writer holds the codex session "01a50000-0000-7000-8000-00000000beef" lock
+    When I run niwa reap from the workspace root
+    Then the exit code is 0
+    And the dispatch instance still exists
+    And a dispatch-origin mapping exists for session "01a50000-0000-7000-8000-00000000beef"

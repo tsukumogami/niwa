@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/workspace"
@@ -48,6 +49,17 @@ type sessionRecord struct {
 	// Cwd is the working directory the session was started in, exactly as
 	// recorded. Callers normalize before comparing.
 	Cwd string
+
+	// Touched is when the record file was last written. For a store whose
+	// records are the session's own transcript it moves every time the session
+	// is worked in, including on a resume, and stops for good when the session
+	// ends -- which is what lets a caller tell a session nobody came back to
+	// from one that is merely between turns.
+	//
+	// It is meaningless for a store that rewrites its records for reasons of
+	// its own, so only an agent declaring LivenessRecordActivity has said this
+	// is safe to read.
+	Touched time.Time
 }
 
 // recordStoreRoot resolves the directory an agent keeps its session records
@@ -75,6 +87,79 @@ func recordStoreRoot(r agentplan.SessionRecords, home string, lookupEnv func(str
 		return ""
 	}
 	return filepath.Join(append([]string{home}, r.HomePath...)...)
+}
+
+// writerLockDir resolves the directory an agent keeps its per-session advisory
+// locks in. It is a sibling of the record store rather than a child, so it
+// replaces everything below the agent's own directory under home instead of
+// hanging off the record path.
+//
+// An agent that declares no lock directory yields an empty string, which the
+// caller reads as "this agent takes no such lock" rather than as a path to try.
+func writerLockDir(r agentplan.SessionRecords, home string, lookupEnv func(string) string) string {
+	if len(r.WriterLockPath) == 0 || len(r.HomePath) == 0 {
+		return ""
+	}
+	if r.HomeEnv != "" && lookupEnv != nil {
+		if override := strings.TrimSpace(lookupEnv(r.HomeEnv)); override != "" {
+			return filepath.Join(append([]string{override}, r.WriterLockPath...)...)
+		}
+	}
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(append([]string{home, r.HomePath[0]}, r.WriterLockPath...)...)
+}
+
+// recordActivityLive answers, for an agent whose records are never removed,
+// whether one of them still belongs to a session somebody is using.
+//
+// Two questions in a deliberate order. First, has the record been written to
+// within the grace period -- a plain stat, no side effects. Only if it has not
+// is the writer lock probed, and that order is what keeps the probe both rare
+// and safe: acquiring the lock even for the instant this takes could, in
+// principle, collide with the agent's own attempt and make a concurrent resume
+// fail with a store conflict. Confining it to sessions nobody has touched in
+// hours makes that collision vanishingly unlikely, where probing on every sweep
+// would keep rolling the dice against live sessions.
+//
+// known is false when neither question could be answered. A caller that cannot
+// tell must spare, for the same reason it always has: sparing an instance
+// nobody is using costs a directory, and the other mistake costs the work in
+// it.
+func recordActivityLive(r agentplan.SessionRecords, rec sessionRecord, home string, lookupEnv func(string) string, now time.Time, grace time.Duration) (live bool, known bool) {
+	if rec.Touched.IsZero() {
+		// The record decoded but would not stat. That is strange enough that
+		// guessing either way is worse than declining.
+		return false, false
+	}
+	if now.Sub(rec.Touched) < grace {
+		return true, true
+	}
+
+	dir := writerLockDir(r, home, lookupEnv)
+	if dir == "" {
+		return false, false
+	}
+	// The id is a path component here, and it came out of a JSON file niwa did
+	// not write -- the agent's own record store, which anything on the host can
+	// leave a file in. Validating it before joining is what keeps a record
+	// carrying "../.." from turning this probe into an open on a file outside
+	// the lock directory. It is the same check the capture path applies before
+	// trusting an id, so a record that fails it was never one this build would
+	// have acted on anyway.
+	if !workspace.ValidSessionID(rec.ID) {
+		return false, false
+	}
+	held, ok := writerLockHeld(filepath.Join(dir, rec.ID+r.WriterLockSuffix))
+	if !ok {
+		return false, false
+	}
+	// A held lock is a writer attached right now, whatever the record's age
+	// says: a single turn can run far longer than the grace period without
+	// appending anything, and reclaiming an instance out from under it is
+	// exactly the failure this whole rule exists to prevent.
+	return held, true
 }
 
 // scanSessionRecords walks root to the depth the records declare and decodes
@@ -192,7 +277,15 @@ func decodeSessionRecord(path string, r agentplan.SessionRecords) (sessionRecord
 	if cwd == "" {
 		return sessionRecord{}, false
 	}
-	return sessionRecord{ID: stringAt(doc, r.IDPath), Cwd: cwd}, true
+	// A record that will not stat still decodes: the fields above are what
+	// every caller needs, and only the activity rule reads the timestamp. That
+	// rule reads the zero value as no evidence and declines to answer, rather
+	// than as a very old record it would then be free to reclaim.
+	var touched time.Time
+	if info, err := os.Stat(path); err == nil {
+		touched = info.ModTime()
+	}
+	return sessionRecord{ID: stringAt(doc, r.IDPath), Cwd: cwd, Touched: touched}, true
 }
 
 // readRecordBytes returns the JSON document at path: the whole file, or its
@@ -279,6 +372,46 @@ func matchRecordByCwd(root string, r agentplan.SessionRecords, targetDir string)
 	return found, false, nil
 }
 
+// recordForInstance finds the record belonging to sessionID, confirming it was
+// started in the instance directory.
+//
+// Both halves are load-bearing, and the id half is the one that is easy to
+// leave out. The dispatch capture identifies a session by working directory
+// alone, which is sound there because it has just created a directory nothing
+// else was using and is asking which session appeared in it. The reaper asks
+// the opposite question -- is *this* session, the one the mapping names, still
+// being worked in -- and a directory can hold more than one session's record by
+// the time it is asked. Somebody opening a reclaimed-looking instance to see
+// what is in it starts a second one. Matching on the directory alone would
+// answer about whichever record turned up and report it as the mapped
+// session's fate.
+//
+// A record for the mapped session that is not rooted in its own instance is no
+// match either. That is a mapping and a store disagreeing about where the
+// session ran, and the caller reads no match as a question it cannot answer
+// rather than as a session it may reclaim.
+func recordForInstance(r agentplan.SessionRecords, instancePath, sessionID string) (sessionRecord, bool) {
+	if instancePath == "" || !workspace.ValidSessionID(sessionID) {
+		return sessionRecord{}, false
+	}
+	root := recordStoreRoot(r, userHomeDir(), os.Getenv)
+	records, err := scanSessionRecords(root, r)
+	if err != nil {
+		return sessionRecord{}, false
+	}
+	instance := normalizePath(instancePath)
+	for _, rec := range records {
+		if rec.ID != sessionID {
+			continue
+		}
+		if normalizePath(rec.Cwd) != instance {
+			continue
+		}
+		return rec, true
+	}
+	return sessionRecord{}, false
+}
+
 // instanceHasRecordedSession reports whether any agent niwa can launch has a
 // session record whose working directory is at or under instancePath.
 //
@@ -291,37 +424,42 @@ func matchRecordByCwd(root string, r agentplan.SessionRecords, targetDir string)
 // find nothing, and the backstop would destroy the directory a live worker is
 // working in.
 //
-// It answers "is there a session rooted here", not "is that session still
-// running", and the difference is the whole cost of this guard. For an agent
-// that removes a session's record when the session is deleted, the answer
-// tracks the session and the sparing lasts as long as the session does. For an
-// agent that never removes one, the answer is yes forever: the instance is
-// spared on every sweep from the first worker that ran in it until somebody
-// removes it by hand. That is the mapped sweep's declared cost reaching the
-// backstop, and it is the reason found comes back with a reason to print rather
-// than as a bare bool -- a sweep that silently stops reclaiming a whole class of
-// instance is indistinguishable from one that is working.
+// What "still there" means is the launching agent's own declaration rather
+// than a rule written here, which is what keeps this one guard rather than one
+// per agent.
 //
-// What closes it properly is not more of this. Record presence cannot be made
-// into a liveness signal for an agent that keeps its records; the question the
-// backstop is actually asking is not "did this agent's session end" but "is
-// anything running in this directory right now", and that has an agent-neutral
-// answer one level down: whether any live process has a working directory
-// inside the instance. That needs no cooperation from either agent's
-// bookkeeping and would also catch a worker whose harness state went missing,
-// which nothing here can. It is not built -- internal/worktree's
-// procinfo_linux.go has the beginnings of it in pidStartTime and readPPID, and
-// it is Linux-only as it stands.
+// An agent that removes a session's record when the session is deleted is
+// answered by presence: the sparing tracks the session and ends when it does.
+// An agent that never removes one cannot be answered that way -- presence would
+// mean yes from the first worker that ran in the instance until somebody
+// removed it by hand -- so it is answered by activity instead: a record nobody
+// has appended to for longer than the grace period, with no writer holding its
+// lock, belongs to a session nobody came back to, and the instance stops being
+// spared. An agent that declares neither is spared with a reason to print,
+// because a sweep that silently stops reclaiming a whole class of instance is
+// indistinguishable from one that is working.
+//
+// The activity rule is what the background-dispatch design deferred, and it is
+// deliberately not the shape that design predicted. It expected a process-level
+// check -- whether any live process has a working directory inside the instance
+// -- and named portability beyond Linux as the open question. The lock the
+// agent already takes answers a narrower question better: it is one path rather
+// than a scan of every process, it says whether a writer is attached to this
+// session rather than whether anything at all is running here, and flock is
+// available wherever niwa runs. The process check stays unbuilt, and it would
+// still catch one thing this does not: a worker whose harness state went
+// missing, which no agent's own bookkeeping can report.
 //
 // reason is empty when the sparing ends on its own, because there is nothing
 // worth telling a developer about an instance that will be reclaimed without
 // them; it carries the permanent case's explanation otherwise.
-func instanceHasRecordedSession(instancePath string) (reason string, found bool) {
+func instanceHasRecordedSession(instancePath string, now time.Time) (reason string, found bool) {
 	if instancePath == "" {
 		return "", false
 	}
 	instance := normalizePath(instancePath)
 	home := userHomeDir()
+	grace := reapIdleGrace()
 
 	for _, ag := range agentplan.LaunchableAgents() {
 		spec, ok := agentplan.For(ag).LaunchSpec()
@@ -339,10 +477,26 @@ func instanceHasRecordedSession(instancePath string) (reason string, found bool)
 			if !pathWithin(normalizePath(rec.Cwd), instance) {
 				continue
 			}
-			if spec.Records.Liveness == agentplan.LivenessRecordPresence {
+			switch spec.Records.Liveness {
+			case agentplan.LivenessRecordPresence:
 				return "", true
+			case agentplan.LivenessRecordActivity:
+				live, known := recordActivityLive(spec.Records, rec, home, os.Getenv, now, grace)
+				if !known {
+					return fmt.Sprintf("a %s session was started in it, and niwa could not read whether that session is still being worked in", ag), true
+				}
+				if live {
+					// Temporary, and it ends without anybody doing anything,
+					// so there is nothing here a developer needs told.
+					return "", true
+				}
+				// Worked in once, not since, and nothing is writing to it now.
+				// Another record may still speak for this instance, so keep
+				// looking rather than answering for the whole store.
+				continue
+			default:
+				return fmt.Sprintf("a %s session was started in it, and %s never removes a session's record, so niwa cannot tell whether that worker is still running", ag, ag), true
 			}
-			return fmt.Sprintf("a %s session was started in it, and %s never removes a session's record, so niwa cannot tell whether that worker is still running", ag, ag), true
 		}
 	}
 	return "", false

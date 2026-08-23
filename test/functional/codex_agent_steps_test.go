@@ -1566,8 +1566,15 @@ case "$1" in
     # one whose output went to a file inside the instance.
     echo "fake codex: running the turn"
     sid="${FAKE_CODEX_SESSION_ID:-01a00000-0000-7000-8000-000000000000}"
-    root="${CODEX_HOME:-$HOME/.codex}/sessions/2026/08/19"
+    home="${CODEX_HOME:-$HOME/.codex}"
+    root="$home/sessions/2026/08/19"
     mkdir -p "$root"
+    # The real binary creates its writer-lock directory at session bootstrap and
+    # leaves it there, so any store holding a rollout has one. The reaper reads
+    # its absence as "this build is looking in the wrong place" and declines to
+    # judge, which is right against a real store and wrong against a fake that
+    # forgot to make it.
+    mkdir -p "$home/thread-writer-locks"
     cwd=$(pwd)
     printf '{"timestamp":"2026-08-19T04:00:00.000Z","ordinal":0,"type":"session_meta","payload":{"id":"%s","session_id":"%s","cwd":"%s","originator":"codex_exec","cli_version":"0.147.0","source":"exec"}}\n' "$sid" "$sid" "$cwd" > "$root/rollout-2026-08-19T04-00-00-$sid.jsonl"
     printf '{"timestamp":"2026-08-19T04:00:01.000Z","ordinal":1,"type":"turn_context","payload":{}}\n' >> "$root/rollout-2026-08-19T04-00-00-$sid.jsonl"

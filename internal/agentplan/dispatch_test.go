@@ -166,6 +166,27 @@ func checkRecords(t *testing.T, ag agent.Agent, r SessionRecords) {
 	}
 	switch r.Liveness {
 	case LivenessRecordPresence, LivenessNone:
+		// Neither reads a lock, so declaring where one lives would be a fact
+		// nothing consults -- and a reader that later grew to consult it would
+		// be acting on a claim nobody checked.
+		if len(r.WriterLockPath) > 0 || r.WriterLockSuffix != "" {
+			t.Errorf("(%s): the session records describe a writer lock that liveness kind %d never reads", ag, r.Liveness)
+		}
+	case LivenessRecordActivity:
+		// Both halves of the activity rule are dereferenced by the reader, so
+		// an incomplete description is a probe against a path built from an
+		// empty string rather than a test failure.
+		if len(r.WriterLockPath) == 0 {
+			t.Errorf("(%s): liveness is read from record activity, but the records name no writer-lock directory", ag)
+		}
+		if r.WriterLockSuffix == "" {
+			t.Errorf("(%s): liveness is read from record activity, but the records name no writer-lock file suffix", ag)
+		}
+		// The lock file is named for the session id, so a store that cannot
+		// produce one has nothing to build the path from.
+		if len(r.IDPath) == 0 {
+			t.Errorf("(%s): liveness is read from record activity, but the records name no session-id field to find the lock by", ag)
+		}
 	default:
 		t.Errorf("(%s): liveness kind %d is outside the closed set", ag, r.Liveness)
 	}
