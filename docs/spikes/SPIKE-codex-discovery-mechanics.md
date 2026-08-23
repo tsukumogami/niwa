@@ -72,6 +72,21 @@ project root reads that directory's file, which looks like an upward walk
 working. Neither observation generalizes; both are the bounded walk plus the
 always-last working directory seen from awkward angles.
 
+**Amended — the same walk governs skills, measured with real plugin trees as
+both controls.** A fifth pass repeated this finding's shape against the skills
+surface at a marker-less working directory: a real plugin tree symlinked at
+`<session dir>/.codex/skills/<plugin>` resolved all 20 of its skills,
+namespaced `<plugin>:<skill>`, with no trust entry and no project-root marker
+anywhere in the ancestry — and an identical real tree placed one directory
+*above* the session resolved none of its skills, with Codex's own bundled
+skills the only other entries. The negative control is what makes the positive
+one evidence about discovery rather than placement: the tree above was really
+there and really loadable, and the session did not load it. Anything asserting
+that a delivered tree "reaches a session" needs both halves — a tree present
+at the working directory that appears, and a tree one directory up that does
+not — or it cannot tell "loaded from where the session stands" from "the walk
+went somewhere else".
+
 ### 2. One file per directory, strict first-match
 
 Each directory in the walk contributes at most one context file, chosen by
@@ -170,6 +185,19 @@ config load, not just that key: `forced_login_method = "apikey"` failed with
 `unknown variant`, and `experimental_thread_store_endpoint` is rejected
 outright. "Codex ignores what it does not understand" is unsafe as an assumption
 for anything generating this file.
+
+**Two further amendments from the fifth pass, both on the skills bullet.** A
+*copied* plugin tree at `.codex/skills/<plugin>` resolves exactly as a
+symlinked one — the same 20 namespaced skills from the same real tree — and a
+sentinel file a deliverer plants inside the copied tree neither breaks
+discovery nor surfaces as a skill. So symlink-versus-copy is free as far as
+Codex is concerned and can be decided on the deliverer's own reconcile terms.
+And the `<plugin>:<skill>` namespace is produced by a
+`.claude-plugin/plugin.json` at the tree root, nothing else: a tree shipping
+only its own marketplace-format `manifest.json` resolves its skill *bare*,
+under the skill's own frontmatter name, while the identical tree plus the
+plugin manifest resolves it namespaced. A delivered tree that is meant to
+namespace must ship that file.
 
 ### 6. `shell_environment_policy` is the environment route, with three traps
 
@@ -560,6 +588,16 @@ header and constructs the session before dying at the API boundary. The
 control that validates the bogus-model probe is that
 `--sandbox workspace-write` under it still wrote its trust stanza, which shows
 the write-back happens at session start rather than at any model turn.
+
+The amendments marked as a fifth pass in findings 1 and 5 were taken against
+the same build while designing skills delivery at a workspace instance root,
+with the same isolation discipline and zero model turns: a real 20-skill
+plugin tree, symlinked and separately copied, at and one directory above a
+marker-less session directory, rendered with `codex debug prompt-input` under
+an isolated and completely empty `CODEX_HOME` — empty is load-bearing, since
+it is also what established that the render needs no credential. The
+namespacing measurement varied exactly one thing between runs: the presence of
+`.claude-plugin/plugin.json` at the delivered tree's root.
 
 Finding 18's amendment and the lock mechanics beside it come from a fourth pass
 against the same build, taken while building instance reclamation on that lock.
