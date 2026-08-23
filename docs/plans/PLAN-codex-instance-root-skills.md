@@ -342,42 +342,6 @@ discovery (R18, R19; asserts R2's name and R5/R6 behavior end to end).
 
 **Type**: code
 
-## Dependency Graph
-
-```mermaid
-graph TD
-    I1["1: refactor(plugin): unhook internal/plugin"]
-    I2["2: feat(plugin): embedded tree manifest"]
-    I3["3: feat(agentplan): leaf vocabulary"]
-    I4["4: feat(workspace): register deliveries"]
-    I5["5: refactor(cli): re-gate dispatch warning"]
-    I6["6: feat(agentplan): flip and bind"]
-    I7["7: test(functional): acceptance scenarios"]
-
-    I1 --> I4
-    I3 --> I4
-    I3 --> I5
-    I2 --> I6
-    I4 --> I6
-    I5 --> I6
-    I6 --> I7
-
-    classDef done fill:#c8e6c9
-    classDef ready fill:#bbdefb
-    classDef blocked fill:#fff9c4
-    classDef needsDesign fill:#e1bee7
-    classDef needsPrd fill:#b3e5fc
-    classDef needsSpike fill:#ffcdd2
-    classDef needsDecision fill:#d1c4e9
-    classDef tracksDesign fill:#FFE0B2,stroke:#F57C00,color:#000
-    classDef tracksPlan fill:#FFE0B2,stroke:#F57C00,color:#000
-
-    class I1,I2,I3 ready
-    class I4,I5,I6,I7 blocked
-```
-
-**Legend**: Green = done, Blue = ready, Yellow = blocked, Purple = needsDesign, LightBlue = needsPrd, Red = needsSpike, Indigo = needsDecision, Orange = tracksDesign, Orange = tracksPlan
-
 ## Implementation Sequence
 
 **Recommended order: 1, 2, 3, 4, 5, 6, 7** -- the design's own increment
@@ -386,6 +350,11 @@ each commit keeps the suite green: 1 is behavior-preserving, 2 is inert
 on the install path, 3 and 4 are gated off while the rows are
 unavailable, 5 changes the warning's gate to a predicate that is already
 true for Codex, 6 flips everything at once, and 7 proves it.
+
+**Dependencies**, stated rather than drawn, since this is a single-PR plan
+and the commits land in one order anyway: issue 4 needs issues 1 and 3;
+issue 5 needs issue 3; issue 6 needs issues 2, 4 and 5; issue 7 needs
+issue 6. Issues 1, 2 and 3 depend on nothing.
 
 **Critical path**: 1 (or 3) -> 4 -> 6 -> 7, length 4.
 
