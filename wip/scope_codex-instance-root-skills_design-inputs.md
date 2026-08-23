@@ -217,3 +217,33 @@ capability yields an entry, so nothing forces the reverse order either. The
 constraint is the declaration table's own stated rule: "Every implemented row
 flipped in the change that delivered it, never before." Land the delivery and
 the flip in one change.
+
+**Correction to the acceptance-scenario sketch: the two scenarios prove
+different things, and only one of them carries the acceptance bar.**
+
+Confirmed by reading the harness: `s.workspaceRoot` is the *workspace* root (it
+holds `.niwa/sessions/`), instances live under it, so `resolveLocation("ws")` is
+the instance root and `resolveLocation(".")` is one directory above it. The path
+claim stands.
+
+But the offline scenario's negative control is weak on its own. Asserting that
+the workspace root holds zero Codex skills trees proves only that niwa did not
+write one there — it says nothing about where a session's discovery walk
+reaches, because no session runs. That is a **placement** assertion.
+
+The acceptance bar the task sets is a **discovery** claim: that the tree loaded
+from where the session stands, and not from somewhere else the walk wandered to.
+Only the live scenario can carry it, because only it runs the real binary and
+reads back the skills a session actually resolved. Its control must be a real
+skills tree one directory above the session that does *not* appear in the
+output — which is exactly the shape measured by hand during exploration, where
+the tree at the session directory yielded 20 namespaced skills and an identical
+tree one level up yielded none.
+
+So: the offline scenario gates CI on placement and reconciliation, the live
+scenario carries the acceptance bar on discovery, and the design should say
+which is which rather than letting the offline one look like it proves more than
+it does. Do not let the pair be described as "the acceptance scenario and its
+negative control" without that distinction — collapsing them is how the two
+earlier workers on this initiative got a discovery claim wrong in opposite
+directions.
