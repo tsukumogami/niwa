@@ -15,9 +15,11 @@ planned_chain:
 chain_ran:
   - name: brief
     started_at: 2026-08-23T17:35:00Z
+  - name: prd
+    started_at: 2026-08-23T17:50:00Z
 parent_orchestration:
-  active_child: prd
-  invoked_at: 2026-08-23T17:50:00Z
+  active_child: design
+  invoked_at: 2026-08-23T18:25:00Z
 chain_skipped: []
 exit:
 exit_artifacts: []
@@ -96,3 +98,30 @@ chain, no child held back.
 
 Running in `--auto`, the `Proceed / Adjust / Bail` confirmation resolves to
 **Proceed**.
+
+## Phase 2 — brief hop
+
+`/brief` ran and produced `docs/briefs/BRIEF-codex-instance-root-skills.md`,
+status Accepted, on a both-PASS Phase 4 jury. Validator clean at
+`--visibility=Public`; no `wip/` references and no private repo names.
+
+## Phase 2 — prd hop
+
+`/prd` ran and produced `docs/prds/PRD-codex-instance-root-skills.md`, status
+Draft. Validator clean at `--visibility=Public`; no `wip/` references and no
+private repo names.
+
+### Consolidation judgment: brief->prd
+
+- hop: brief->prd
+- stage: judgment
+- verdict: keep
+- finding: The BRIEF holds material the PRD does not carry and would lose. Its
+  four user journeys are experience-shaped narratives across four distinct roles
+  (a dispatched worker, a developer hitting the remaining gap, a maintainer
+  auditing the contract, a reviewer verifying at zero model cost); the PRD's
+  user-story section is requirement-shaped and does not reproduce them. The
+  BRIEF is also the PRD's declared upstream and is cited by path from the PRD's
+  References section, so the citation preflight refuses a fold on its own —
+  which can reach no verdict stronger than keep regardless of the content
+  question.
