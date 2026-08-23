@@ -12,10 +12,12 @@ planned_chain:
   - prd
   - design
   - plan
-chain_ran: []
+chain_ran:
+  - name: brief
+    started_at: 2026-08-23T17:35:00Z
 parent_orchestration:
-  active_child: brief
-  invoked_at: 2026-08-23T17:35:00Z
+  active_child: prd
+  invoked_at: 2026-08-23T17:50:00Z
 chain_skipped: []
 exit:
 exit_artifacts: []
