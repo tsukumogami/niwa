@@ -197,3 +197,23 @@ comments around both lists need rewriting rather than editing.
 
 Regenerate the guide with
 `go test ./internal/agentplan -run TestCodexGuideGapSectionMatchesDeclarations -update`.
+
+## Late verifications (added after the design inputs were first written)
+
+**Adding `.claude-plugin/plugin.json` to the embedded tree is mechanically
+safe.** `Embedded()` in `internal/plugin/embed.go` reads only
+`files/niwa/manifest.json` and ignores every other file in the tree;
+`readInstalledManifest` compares only `manifest.json` for the idempotency check;
+`stageAndRename` copies the whole tree by `fs.WalkDir` without an expected file
+list. No test in `internal/plugin/` asserts the tree's file set. So the new file
+rides along to the install path and changes nothing in that package's behavior.
+
+**Ordering between the delivery code and the declaration flip is safe either
+way, but they should still land together.** A `RootSkillsPlan` gating on
+`p.delivers(RootProjectSkills)` returns an empty plan while the row is
+unavailable — no entries, no failure — so the delivery can exist before the
+flip. There is no global test asserting that every implemented plan-routed
+capability yields an entry, so nothing forces the reverse order either. The
+constraint is the declaration table's own stated rule: "Every implemented row
+flipped in the change that delivered it, never before." Land the delivery and
+the flip in one change.
