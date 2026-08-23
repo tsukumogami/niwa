@@ -49,8 +49,8 @@ the PLAN's own Implementation Sequence calls parallelization theoretical only.
 
 ### Issue progress
 
-- [ ] 1 — refactor(plugin): unhook internal/plugin from internal/workspace
-- [ ] 2 — feat(plugin): add the Claude plugin manifest to the embedded tree
+- [x] 1 — refactor(plugin): unhook internal/plugin from internal/workspace
+- [x] 2 — feat(plugin): add the Claude plugin manifest to the embedded tree
 - [ ] 3 — feat(agentplan): add root skills and niwa-plugin leaf vocabulary
 - [ ] 4 — feat(workspace): register the root skills and niwa-plugin deliveries
 - [ ] 5 — refactor(cli): gate the dispatch warning on the payload-scope predicate
@@ -75,3 +75,45 @@ existed only in the diagram is now stated in text.
 
 Neither choice is wrong; the inconsistency is upstream in shirabe and is worth
 an issue there rather than a local workaround repeated by every plan author.
+
+## Issue 1 — verified
+
+Commit 19089fc. All five acceptance criteria re-checked by this orchestrator
+rather than taken on the child's word:
+
+- `go list -f '{{join .Deps "\n"}}' ./internal/plugin | grep -c 'internal/workspace'`
+  prints 0.
+- `plugin.Install` takes the developer home as data and returns its `Action`;
+  the always-nil state parameter is gone.
+- `plugin.MaterializeTo` is exported at `internal/plugin/installer.go:191`.
+- `internal/cli/plugin_adapter.go` is deleted and no non-test file references
+  `InstallNiwaPlugin`.
+- `go build ./...`, `go vet ./...` and the full `go test ./...` are green.
+
+Editor diagnostics reported compile errors mid-run; they were from an
+intermediate state and do not reproduce against the committed tree.
+
+## Issue 2 — verified, and it caught a trap the chain had missed
+
+Commit e7b8617. The BRIEF, PRD, design and plan all recorded that adding
+`.claude-plugin/plugin.json` was mechanically safe because the installer copies
+the whole tree and no test pins the file set. All of that is true and none of it
+was sufficient: `//go:embed files/niwa` is a plain directory pattern, and Go's
+embed silently drops every path element beginning with a dot.
+
+Measured rather than reasoned. With the file added and the directive untouched,
+walking `pluginFS` listed only `manifest.json` and the skill — the new manifest
+was on disk and absent from the binary. Adding the `all:` prefix put it in.
+
+Nothing downstream would have reported the loss, because the manifest the
+installer actually reads is `manifest.json`, which embeds either way; the only
+symptom would have been a session resolving the bare skill name.
+
+Verified end to end afterwards: materializing the tree through the exported
+`MaterializeTo` and symlinking it at a session's own `.codex/skills/niwa`
+resolves **`niwa:niwa-migrate-config`** against the real binary, under an
+isolated empty `CODEX_HOME`, with no credential and no model turn. That is the
+name issue 7's live scenario asserts.
+
+`TestEmbedded_CarriesThePluginManifest` reads the file back through `pluginFS`,
+not off disk, so the regression it guards is the one that actually bites.
