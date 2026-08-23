@@ -60,3 +60,32 @@ func TestInstallPath_LandsUnderTheGivenHome(t *testing.T) {
 		t.Errorf("InstallPath = %q, want it under the given home", got)
 	}
 }
+
+// TestEmbedded_CarriesThePluginManifest pins the one thing a bare
+// //go:embed directory pattern silently takes away.
+//
+// The tree's `.claude-plugin/plugin.json` is what makes a delivered copy
+// resolve its skills as `niwa:<skill>` rather than as bare loose names.
+// Go's embed drops every path element beginning with a dot unless the
+// pattern carries the `all:` prefix, so losing that prefix leaves the file
+// on disk, out of the binary, and unmentioned by any error: the manifest
+// the installer reads is `manifest.json`, which embeds either way, so
+// nothing downstream notices until a session resolves the wrong name.
+//
+// Reading through pluginFS rather than off disk is the whole point — the
+// on-disk tree is not the artifact that ships.
+func TestEmbedded_CarriesThePluginManifest(t *testing.T) {
+	data, err := pluginFS.ReadFile(pluginSourceRoot + "/.claude-plugin/plugin.json")
+	if err != nil {
+		t.Fatalf("embedded tree is missing .claude-plugin/plugin.json: %v (does the //go:embed directive still carry its all: prefix?)", err)
+	}
+	var m struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("parsing the embedded plugin manifest: %v", err)
+	}
+	if m.Name != "niwa" {
+		t.Errorf("embedded plugin manifest name = %q, want %q", m.Name, "niwa")
+	}
+}

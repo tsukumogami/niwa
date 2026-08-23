@@ -22,7 +22,16 @@ import (
 // directive resolves paths relative to the directory containing
 // this file, so the tree must be co-located with the package.
 //
-//go:embed files/niwa
+// The `all:` prefix is load-bearing and not decoration. A bare
+// `//go:embed files/niwa` walks the directory but silently drops every
+// path element beginning with a dot or an underscore, which would leave
+// `.claude-plugin/plugin.json` out of the binary while the tree on disk
+// looks complete. That file is what makes a delivered tree resolve as
+// `niwa:<skill>` rather than as a bare loose skill, so losing it costs
+// the namespace and nothing reports the loss: the manifest the installer
+// reads is `manifest.json`, which embeds either way.
+//
+//go:embed all:files/niwa
 var pluginFS embed.FS
 
 // InstalledPlugin captures the in-memory description of the embedded
