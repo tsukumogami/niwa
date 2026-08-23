@@ -264,3 +264,41 @@ how the dispatch warning is re-gated — are decisions for the design hop, not
 things more research would settle.
 
 ## Decision: Crystallize
+
+## Post-crystallize observation (recorded during the scope chain)
+
+While preparing design inputs, the Claude side of row 19 was inspected on this
+live machine and does not appear to work. The evidence, all direct:
+
+- `~/.claude/plugins/marketplaces/niwa/` exists and holds exactly what
+  `plugin.Install` writes: `manifest.json` plus `skills/migrate-config/SKILL.md`.
+- It has **no `.claude-plugin/` directory**. Every other marketplace under that
+  path does — shirabe's carries both `marketplace.json` and `plugin.json`.
+- `~/.claude/plugins/known_marketplaces.json` lists seven marketplaces and
+  **`niwa` is not one of them**, while `shirabe` is.
+- The Claude Code session running this chain surfaces `shirabe:*` and
+  `tsukumogami:*` skills and **no `niwa:*` skill at all**.
+
+Read together: niwa installs its own plugin into a directory Claude Code's
+marketplace registry does not know about, in a format that is niwa's own rather
+than Claude's plugin format, and the skill it carries is not reachable from a
+session. Row 19 is declared implemented for Claude.
+
+Two consequences for the design hop.
+
+First, it dissolves the risk that blocked D6. The concern was that adding
+`.claude-plugin/plugin.json` to the embedded tree could silently rename the
+documented `/niwa:migrate-config` command for existing Claude users. There is no
+working resolution to break — the command does not resolve today on this
+machine.
+
+Second, it is a defect adjacent to this work rather than inside it. Binding row
+19 for Claude means naming `plugin.Install` as the delivery behind a declaration
+that says the capability is delivered, and a delivery that writes bytes nothing
+reads is the exact failure the binding rule exists to surface. The design must
+decide whether to say so and stop, or to fix the tree's shape as part of giving
+Codex the same tree. It must not bind the row silently as though the Claude side
+were sound.
+
+This is one machine, so the claim is scoped to what was observed rather than
+asserted of every install.

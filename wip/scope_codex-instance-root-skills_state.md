@@ -13,6 +13,9 @@ planned_chain:
   - design
   - plan
 chain_ran: []
+parent_orchestration:
+  active_child: brief
+  invoked_at: 2026-08-23T17:35:00Z
 chain_skipped: []
 exit:
 exit_artifacts: []
