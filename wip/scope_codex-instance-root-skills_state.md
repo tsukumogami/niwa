@@ -17,9 +17,11 @@ chain_ran:
     started_at: 2026-08-23T17:35:00Z
   - name: prd
     started_at: 2026-08-23T17:50:00Z
+  - name: design
+    started_at: 2026-08-23T18:25:00Z
 parent_orchestration:
-  active_child: design
-  invoked_at: 2026-08-23T18:25:00Z
+  active_child: plan
+  invoked_at: 2026-08-23T18:20:00Z
 chain_skipped: []
 exit:
 exit_artifacts: []
@@ -125,3 +127,40 @@ private repo names.
   References section, so the citation preflight refuses a fold on its own —
   which can reach no verdict stronger than keep regardless of the content
   question.
+
+## Phase 2 — design hop
+
+`/design` ran and produced `docs/designs/DESIGN-codex-instance-root-skills.md`,
+transitioned Proposed -> Accepted at this chain boundary. It also amended
+`docs/spikes/SPIKE-codex-discovery-mechanics.md` in place (additive only, 38
+insertions) rather than creating a second spike, which is what R17 requires.
+Both artifacts validator-clean at `--visibility=Public`; no `wip/` references,
+no private repo names; `go build` and `go vet` clean.
+
+The PRD auto-transitioned Accepted -> In Progress under the sentinel, which is
+the expected chain-driven behavior.
+
+All four decisions settled with rejected alternatives recorded. The design also
+found an obstacle the parent's inputs had missed: `internal/plugin` imports
+`internal/workspace`, so registering a row-19 procedure there is an import
+cycle. Increment 1 breaks it.
+
+Note on placement: the design sits at `docs/designs/DESIGN-<topic>.md`, not
+under `current/`. That is correct for this repo — Proposed, Accepted and Planned
+designs live at the `docs/designs/` root, and only `Current` moves to `current/`
+(and `Superseded` to `archive/`). Every prior design here has already reached
+Current, which is why the root looked empty.
+
+### Consolidation judgment: prd->design
+
+- hop: prd->design
+- stage: preflight
+- verdict: keep
+- finding: The citation preflight refuses the fold on its own — the design cites
+  the PRD by path from its Upstream Design Reference section and its References
+  section, and the PRD is the design's declared upstream. A preflight refusal
+  can reach no verdict stronger than keep. On the content question the answer
+  would have been the same: the PRD carries seventeen numbered requirements and
+  a full acceptance-criteria set that the design references rather than
+  restates, so folding would lose the requirement text the acceptance criteria
+  are written against.
