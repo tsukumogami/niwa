@@ -314,8 +314,12 @@ Delivery, measured:
   the defined collision behavior is observed and asserted by a test;
   neither tree is silently overwritten.
 - [ ] The per-repository and worktree scenarios that pass today pass
-  unchanged, and no new file appears inside any cloned repository or
-  above the instance root.
+  unchanged, and apply writes no new file inside any cloned repository,
+  above the instance root, or in the developer's own Codex
+  configuration.
+- [ ] With a root delivery target made unwritable, apply fails with a
+  named error identifying the capability, rather than warning and
+  continuing.
 
 Contract and structure:
 
