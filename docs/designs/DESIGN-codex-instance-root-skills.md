@@ -1,5 +1,43 @@
 ---
+schema: design/v1
+status: Proposed
 upstream: docs/prds/PRD-codex-instance-root-skills.md
+decision_provenance: inline-resolved
+problem: |
+  A Codex worker dispatched to a workspace instance root resolves none of
+  the workspace's skills, while the identical session inside any cloned
+  repository resolves them all -- and the root's own orientation document
+  tells the worker to invoke a skill it doesn't have. Rows 18 and 19 of
+  the capability contract record the gap as niwa's own unbuilt work, both
+  outside the bound-capability set, so nothing mechanical ties the
+  declarations to any delivery; and the dispatch warning describing the
+  gap is gated on a row that goes silent the moment it flips.
+decision: |
+  Deliver the same plugin trees one directory higher through the existing
+  plan machinery: a RootSkillsPlan producer method whose entries carry
+  their own capability tag, driven by a registered RootSkillsMaterializer,
+  with Claude's instance-root settings registration converted to a
+  registered materializer so both row-18 pairs bind to real write paths.
+  Row 19 binds as two runnable procedures once the shallow
+  plugin-to-workspace import cycle is removed: Claude's calls
+  plugin.Install; Codex's extracts the embedded tree to .niwa/plugin/niwa
+  -- a site that cannot collide with configured marketplace content --
+  and links it into the root skills directory. The embedded tree gains
+  .claude-plugin/plugin.json so the delivered skill resolves as
+  niwa:niwa-migrate-config, and the dispatch warning re-gates on an
+  exported payload-scope predicate.
+rationale: |
+  Every binding names the type the pipeline actually drives, so both
+  drift directions fail a test and the dead-abstraction failure the
+  contract exists to prevent has nothing to hide behind. The sibling
+  producer method is the tree's own precedent for one capability at two
+  scopes, the runnable-procedure shape is the trust writer's, and the
+  materialization site makes the collision case impossible by
+  construction rather than handled by convention. The warning's new gate
+  reads the same table cell that scopes everything still missing at the
+  root, so it stays truthful across future flips; and the Claude row-19
+  binding is stated over a recorded one-machine defect rather than
+  papered over, which is the honest maximum inside this scope.
 ---
 
 # DESIGN: codex instance root skills
@@ -7,6 +45,16 @@ upstream: docs/prds/PRD-codex-instance-root-skills.md
 ## Status
 
 Proposed
+
+This design owns the mechanism for closing rows 18 (`RootProjectSkills`)
+and 19 (`NiwaPlugin`) of the capability contract for Codex: the delivery
+shapes, the binding of both rows for both agents, the materialization
+site and collision rules for niwa's embedded plugin tree, the dispatch
+warning's new gate, and the verification split between placement and
+discovery. The upstream PRD owns the requirements (R1-R19, N1-N2) and
+is cited, not re-opened. Discovery mechanics are consumed from
+docs/spikes/SPIKE-codex-discovery-mechanics.md, which this work's
+measurements amend rather than fork.
 
 ## Upstream Design Reference
 
@@ -787,8 +835,9 @@ yields an empty plan).
 `RootSkillsMaterializer`, the `RootSettingsMaterializer` conversion,
 both niwa-plugin procedures, the `procedureInput` fields, and the
 pipeline wiring (root skills at the instance-root step; the niwa-plugin
-deliver pass replacing the seam). The offline functional scenario lands
-here in its pre-flip shape where applicable.
+deliver pass replacing the seam). All of it is inert until the flip: a
+producer gated on an unavailable capability yields an empty plan, and
+`procedureFor` answers false for an unimplemented pair.
 
 ### Increment 5: the warning re-gates
 
@@ -912,3 +961,34 @@ durable home the PRD names.
   matrix amendment and the binding comment), scoped as a one-machine
   observation, with the correction path -- registering the marketplace
   -- explicitly named as future work.
+
+## References
+
+- docs/prds/PRD-codex-instance-root-skills.md -- the upstream
+  requirements (R1-R19, N1-N2) and acceptance criteria this design
+  implements.
+- docs/briefs/BRIEF-codex-instance-root-skills.md -- the framing whose
+  four open questions Decisions 1 through 4 close at mechanism level.
+- docs/designs/current/DESIGN-agent-capability-contract.md -- the
+  contract being extended: the plan model, the declaration table and
+  routes, and the enforcement-test families the new bindings ride.
+- docs/spikes/SPIKE-codex-discovery-mechanics.md -- the measured
+  discovery mechanics (findings 1 and 5, including this work's
+  amendments: the root-layer positive and negative controls, the
+  copy-equals-symlink result, and the plugin-manifest namespacing
+  rule).
+- docs/prds/PRD-agent-capability-contract.md -- the capability matrix,
+  taking an appended amendment for rows 18 and 19.
+- docs/guides/codex-agent.md -- the guide whose generated gap list
+  regenerates and whose instance-root section is corrected.
+- `internal/agentplan/capability.go`, `internal/agentplan/skills.go`,
+  `internal/agentplan/binding.go`, `internal/agentplan/payload.go` --
+  the leaf surfaces this design extends.
+- `internal/workspace/delivery_binding.go` and its test,
+  `internal/workspace/pluginskills.go`, `internal/workspace/apply.go`
+  -- the executor-side registries and pipeline steps.
+- `internal/plugin/embed.go`, `internal/plugin/installer.go` -- the
+  embedded tree and installer this design unhooks from
+  `internal/workspace`.
+- `internal/cli/dispatch.go`, `test/functional/features/codex-agent.feature`
+  -- the warning and the acceptance surfaces.

@@ -20,6 +20,14 @@ parent-delegated-approval (Phase 6). Terminal status: Proposed.
 session can do; the one novel hazard (upward-searching exclude writes)
 is named and forbidden in the design.
 
+## Final Review (Phase 6)
+**Jury:** serial-self (dispatch fallback); all three rubrics PASS, one
+architecture fix applied (increment 4 wording). Strawman check PASS.
+**Validator:** shirabe validate --visibility=Public clean on the DESIGN,
+the amended spike, and the PRD.
+**Terminal state:** Proposed at docs/designs/DESIGN-codex-instance-root-skills.md,
+handed back to the parent per parent-delegated-approval. No PR opened.
+
 ## Current Status
-**Phase:** 5 - Security complete; entering Phase 6
+**Phase:** 6 - complete
 **Last Updated:** 2026-08-23
