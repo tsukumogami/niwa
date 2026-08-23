@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Draft
+status: Accepted
 problem: |
   Every background worker niwa dispatches stands at a workspace instance
   root, and a Codex worker standing there receives none of the workspace's
@@ -34,7 +34,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 This PRD owns the requirements for closing rows 18 (`RootProjectSkills`)
 and 19 (`NiwaPlugin`) of the capability contract for Codex: skills at the
