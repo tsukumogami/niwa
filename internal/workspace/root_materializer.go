@@ -430,12 +430,19 @@ cloned repos.
 
 ## Dispatching work to an isolated agent
 
-When you have been discussing what to build and are ready to hand the work off to
-run on its own, dispatch it. ` + "`niwa dispatch \"<task>\" --name <slug> [--detach]`" + `
-launches a background worker in its own fresh niwa instance -- the worker boots
-rooted in that instance, loading its full configuration. The task is the worker's
-only context, so write it as a self-contained brief rather than a reference to
-this conversation.
+When the work being discussed should run somewhere other than this conversation,
+dispatch it. ` + "`niwa dispatch \"<task>\" --name <slug> [--detach]`" + ` launches a
+background worker in its own fresh niwa instance -- its own clone, its own
+branch, its own session -- booted rooted in that instance with its full
+configuration. Reach for it when a planning chat turns into doing, when several
+independent units should be worked at once (one dispatch per unit, each in its
+own instance), when nobody wants to wait on the result, or when the working tree
+here must not be touched.
+
+The task is the worker's only context: it starts with the repos' pushed state and
+none of this conversation, so write a self-contained brief rather than a
+reference to what was said here, and remember the worker cannot see uncommitted
+or unpushed local work.
 
 In a Claude Code session the ` + "`/dispatch`" + ` skill is the front door: it
 synthesizes the conversation into that brief, runs the command for you, and the
