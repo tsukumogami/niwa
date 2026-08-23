@@ -1,0 +1,76 @@
+# Lead: How is row 19 `NiwaPlugin` delivered for Claude today, and what is the "identical plugin manifest" wiring that is unbuilt for Codex?
+
+## Findings
+
+**1. Every `NiwaPlugin` occurrence.**
+
+- `internal/agentplan/capability.go:114-116` — the constant, with doc comment "niwa's own plugin, carrying the migrate-config skill (row 19)."
+- `internal/agentplan/capability.go:191` — catalog row: `{NiwaPlugin, "niwa-plugin", RouteProcedure}`. Route is `RouteProcedure`, **not** `RoutePlan` — it is "a side effect outside the instance, which a plan entry cannot express honestly" (capability.go:149-151).
+- `internal/agentplan/declaration.go:305-309` — Claude: `StateImplemented`. Codex: `StateUnavailable`, `ReasonNotBuilt`, "Codex accepts the identical plugin manifest; the wiring is unbuilt."
+- `internal/agentplan/gaplist.go:86` — description string used in the gap report.
+- `internal/agentplan/capability_test.go:87,138` — declaration-table tests asserting the Codex row's state/reason.
+- `internal/workspace/apply.go:116-122` — `Applier.InstallNiwaPlugin` is a function-field seam ("the test seam for the niwa plugin"), called unconditionally at four call sites (apply.go:524-525, 692-693, 1064-1065, 1093-1094) as `a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)`. **None of these call sites consult `agentplan.Lookup` or iterate over agents** — it fires once per apply run regardless of which agents are enabled.
+- `internal/cli/plugin_adapter.go` — the cli-side adapter (`installNiwaPluginAdapter`) that wires `Applier.InstallNiwaPlugin` to `plugin.Install`, breaking a workspace→plugin→workspace import cycle. `configurePluginAutoInstall` (called from every CLI surface that builds an `Applier`) sets this seam.
+- `internal/cli/dispatch_plugins.go` — references to `InstallNiwaPlugin` in the auto-install test wiring.
+
+**2. How niwa's own plugin reaches a Claude session.**
+
+It is **not** embedded in the skills/plugin-tree delivery pipeline at all. Instead:
+
+- The plugin source tree is embedded at build time via `//go:embed files/niwa` in `internal/plugin/embed.go:24`, sourced from `internal/plugin/files/niwa/` (manifest.json + `skills/migrate-config/SKILL.md`).
+- `plugin.Embedded()` (`internal/plugin/embed.go:52-83`) resolves the install target to a **fixed, global, per-user path**: `filepath.Join(homeDir, ".claude", "plugins", "marketplaces", "niwa")` (embed.go:78) — i.e. `~/.claude/plugins/marketplaces/niwa/`. This is outside any niwa instance or repository entirely.
+- `plugin.Install()` (`internal/plugin/installer.go:64-98`) does an idempotent atomic stage-and-rename of the embedded tree into that path. It never touches `.claude/settings.json`.
+- Registration: I grepped `materialize.go`/`apply.go` for any place niwa adds `"niwa"` to an `enabledPlugins` list or marketplace registry written into `.claude/settings.json` — there is none. The plugin is discovered purely because Claude Code itself scans `~/.claude/plugins/marketplaces/*` for installed marketplaces/plugins; niwa writes bytes to a path Claude Code's own plugin system already watches, and registers nothing in any settings file niwa materializes (contrast with `MarketplaceRegistration`, capability row 6, `RouteProcedure`, which is the code path that *does* write configured third-party plugins into `.claude/settings.json`'s marketplace/`enabledPlugins` keys — see `internal/workspace/materialize.go:924-930`).
+- User-facing notice: `internal/workspace/disclosure.go:41` — `"note: niwa Claude Code plugin installed at ~/.claude/plugins/marketplaces/niwa/. Use /niwa:migrate-config to invoke the migration skill."`
+- The migrate-config skill on disk: `internal/plugin/files/niwa/skills/migrate-config/SKILL.md`, source-of-truth per embed.go's header comment at `//plugins/niwa/` in the niwa repo (the embed path is relative, `internal/plugin/files/niwa/` co-located with the package). Manifest: `internal/plugin/files/niwa/manifest.json` — `{"name": "niwa", "version": "0.1.0", "skills": [{"name": "migrate-config", "path": "skills/migrate-config/SKILL.md", ...}]}`.
+
+**3. Instance-root-only, per-repo, or both?**
+
+**Neither**, in the sense row 18/19 use those terms. It's delivered once, globally, to the invoking user's home directory (`~/.claude/plugins/marketplaces/niwa/`), completely independent of which instance or repository triggered the apply. It is installed as a side effect of running `niwa apply` (or `create`/`reset`) at all, not scoped to an instance root or to any repo directory the way `RootProjectSkills` (row 18) or third-party `PluginSkills` (row 5, delivered per-repo into each cloned repo) are.
+
+**4. Is row 19 a consequence of row 18, or independent?**
+
+**Independent — confirmed by direct evidence, not inference.**
+
+- Row 18/`PluginSkills`'s delivery path is `ResolvePluginTrees` (`internal/workspace/pluginskills.go:113-153`) → `InstallRepoSkills`, which resolves `agentplan.PluginTree{Name, Root}` entries from **`in.Plugins`**, and the sole caller feeds it `Plugins: MergeInstanceOverrides(effectiveCfg).Plugins` (`internal/workspace/apply.go:1645`) — the **workspace-configured** plugin list (from `dot-niwa`/workspace.toml `[claude]`/plugins config), resolved through configured marketplaces. Niwa's own embedded plugin name (`"niwa"`) never appears in that configured list; it is not fed through `ResolvePluginTrees` at all.
+- Row 19's delivery (`plugin.Install`) is invoked directly from `apply.go` via the `InstallNiwaPlugin` function-field seam, completely outside the `agentplan.Producer`/`SkillsPlan`/`PluginTree` machinery — no `agentplan.Entry{Capability: NiwaPlugin, ...}` is ever constructed anywhere in the repo (confirmed: no `Entry{` literal in agentplan carries `Capability: NiwaPlugin`; row 19 is `RouteProcedure`, and `RoutePlan` is the only route that uses `Entry.Capability` tagging).
+- Therefore: **niwa's own plugin does not "ride along" as one more `PluginTree` once a skills tree is delivered at the instance root.** Building row 19 for Codex requires a *new, separate* code path — either (a) teaching the existing skills-delivery pipeline to also feed the embedded niwa plugin in as a synthetic `agentplan.PluginTree` (pointed at a location Codex could read, since `~/.claude/plugins/marketplaces/niwa/` is a Claude-specific global path with no Codex equivalent — Codex has no `$HOME`-global plugin/marketplace concept), or (b) a second procedure, parallel to `plugin.Install`, that materializes the embedded tree at `<instance-root>/.codex/skills/niwa` (or per-repo `<repo>/.codex/skills/niwa`) directly. Nothing in `ResolvePluginTrees`'s configured-plugins list would pick this up "for free" even if row 18 for Codex ships — row 18 only handles workspace-configured third-party plugins, not niwa's own embedded one.
+
+**5. What is a "delivery" in the binding model, and what would row 19's bound delivery look like?**
+
+From `internal/agentplan/binding.go:9-33`: a `Delivery` is a named string constant identifying "one concrete thing in internal/workspace that delivers a capability" — e.g. `DeliveryEnv` = `EnvMaterializer`, `DeliveryFiles` = `FilesMaterializer`, `DeliveryHooks` = `HooksMaterializer`, `DeliveryCodexTrust` = the Codex trust writer. A `Binding{Capability, Agent, Delivery}` row pairs an implemented (capability, agent) declaration with the name of the thing that delivers it. Two disjoint binding mechanisms exist:
+- **Plan-borne capabilities** (`RoutePlan`) bind implicitly by tagging their `agentplan.Entry.Capability` field — "needs no name" (binding.go:16-17).
+- **Everything else** (procedure/launch-routed, or a plan-borne capability whose materializer predates the contract) needs an explicit `Delivery` name in `boundCapabilities`/`bindings` because there's no `Entry` to tag.
+
+**Surprising finding**: `NiwaPlugin` (row 19) is currently in **neither** bucket. It is `RouteProcedure` (needs a named `Delivery`) but it is **absent from `boundCapabilities`** (`internal/agentplan/binding.go:66-71`, which lists only `DotenvFiles, FileDistribution, Hooks, DirectoryTrust`) and absent from `bindings` (binding.go:79-87). `TestBindingsMatchTheirDeclarations` (`internal/agentplan/binding_test.go:14-59`) only iterates over `bound := BoundCapabilities()`, so it currently asserts nothing at all about row 19 — even though (NiwaPlugin, Claude) is declared `StateImplemented`. This means today's binding test would **not** catch row 19 for Claude having no formal delivery record; it's a structurally-unchecked gap that predates this Codex work.
+
+A concretely bound row 19 would need:
+- A new `Delivery` constant, e.g. `DeliveryNiwaPlugin Delivery = "niwa-plugin"`, naming the materializer (`plugin.Install`, or its future Codex-side counterpart).
+- `NiwaPlugin` added to `boundCapabilities`.
+- `{Capability: NiwaPlugin, Agent: agent.AgentClaude, Delivery: DeliveryNiwaPlugin}` and, once implemented, `{Capability: NiwaPlugin, Agent: agent.AgentCodex, Delivery: DeliveryNiwaPlugin}` (or a second delivery name if the Codex materializer is a genuinely different function) added to `bindings`.
+- Since `Lookup(NiwaPlugin, AgentCodex)` currently returns `StateUnavailable`, adding a Codex row to `bindings` today would fail `TestBindingsMatchTheirDeclarations`'s `d.State != StateImplemented` check (binding_test.go:36-39) — the declaration must flip to `StateImplemented` in the same change that adds the binding.
+
+**6. Is the manifest compatible with the Codex skills layout `skills.go` documents?**
+
+Structurally, yes. `internal/agentplan/skills.go:14-24` documents: "a plugin tree delivered at `.codex/skills/<plugin>` loads with the same `<plugin>:<skill>` namespace Claude Code produces, with no rewriting of skill content... Namespacing derives from the nearest plugin manifest above a skill on disk." The niwa plugin's on-disk shape is exactly that: `manifest.json` (name: `"niwa"`) at the tree root, `skills/migrate-config/SKILL.md` beneath it — same shape as any marketplace-sourced plugin `ResolvePluginTrees` resolves. If the embedded tree (or a materialized copy of it) were fed into the same `SkillsPlan`/`PluginTree` mechanism as a `PluginTree{Name: "niwa", Root: <embedded-tree-path>}`, it would land at `.codex/skills/niwa` and load as `niwa:migrate-config` — matching the SKILL.md's own frontmatter name `niwa-migrate-config` and its documented invocation `/niwa:migrate-config`. The manifest itself carries no agent-specific content (embed.go:36-40 — just name/version/description) and no reference to Claude-only mechanics, so nothing in the manifest blocks reuse; the only real work is *routing* the embedded tree to a Codex-reachable path, since `~/.claude/plugins/marketplaces/niwa/` (Claude's install target) is meaningless to Codex.
+
+## Implications
+
+- Row 19 and row 18 must be built as genuinely separate deliveries; solving row 18 (instance-root skills tree for Codex) does not automatically solve row 19. The gap-report reason "the wiring is unbuilt" understates this — it's not a missing wire between two existing systems, it's a delivery mechanism (embedded-plugin-to-global-home-dir) that has no Codex-shaped counterpart at all yet.
+- The natural design is to make niwa's own embedded plugin one more `PluginTree` fed alongside the workspace-configured ones into the *existing* `SkillsPlan`/`InstallRepoSkills` machinery (reusing row 18's/row 5's Codex layout code), rather than inventing a third bespoke procedure. That would need: (a) materializing the embedded tree to a stable on-disk path per instance (since `PluginTree.Root` must be a real path `ResolvePluginTrees`/`InstallRepoSkills` can read, not bytes in an `embed.FS`), and (b) injecting a synthetic `PluginTree{Name: "niwa", Root: <that path>}` into the list `ResolvePluginTrees` returns (or beside it) so Codex's per-repo/per-instance-root skills delivery picks it up the same way a configured plugin would.
+- Whatever is chosen, `internal/agentplan/binding.go`'s `boundCapabilities`/`bindings` tables need a new entry for `NiwaPlugin` on both agents, and the currently-unenforced Claude side of row 19 should be brought into that table in the same change (see Surprises).
+
+## Surprises
+
+- **Row 19 for Claude is currently unbound in the binding-rule test.** `NiwaPlugin` is `RouteProcedure` (needs a `Delivery` name to bind) but is missing from `boundCapabilities`, so `TestBindingsMatchTheirDeclarations` silently skips it entirely — it neither confirms nor denies that `plugin.Install` backs the Claude declaration. This is worth fixing regardless of the Codex work, and doing it alongside the Codex delivery (rather than before) risks conflating "add the missing Claude binding" with "add the new Codex binding" in one diff — worth calling out explicitly if the plan does both at once.
+- `InstallNiwaPlugin` fires **unconditionally** on every apply, with no per-agent gating and no `agentplan.Lookup` consultation — it doesn't know or care whether Claude is enabled for the workspace. Any Codex-side counterpart will need to decide independently whether it should also fire unconditionally or should respect the Codex-enabled gate the rest of the per-repo pipeline uses.
+- The plugin installs to a **global, per-user** path (`$HOME`), not scoped to the instance or workspace at all — unlike every other row-18/19-adjacent mechanism in this exploration, which is instance- or repo-scoped. A Codex delivery that instead writes into `.codex/skills/niwa` at an instance root or per-repo would be instance-scoped, which is an asymmetry from the Claude side worth the plan author noticing rather than silently copying.
+
+## Open Questions
+
+- Should the Codex delivery of niwa's own plugin be scoped like row 18 (instance root only) or like row 5/`PluginSkills` (per repository, or both)? Nothing in the declaration table or capability docs pins this down for row 19 specifically.
+- Should the embedded tree be materialized once per instance (e.g. under `.niwa/` internal state, mirroring how `marketplaceContentRoot` stages fetched marketplaces in `internal/workspace/pluginskills.go:30-33`) so it can be fed as a `PluginTree.Root`, or should a bespoke procedure copy straight from the `embed.FS` to `.codex/skills/niwa` without reusing `ResolvePluginTrees` at all?
+
+## Summary
+
+Row 19 for Claude is a wholly separate delivery from row 18: `plugin.Install` (`internal/plugin/installer.go`) copies the build-embedded `internal/plugin/files/niwa/` tree (manifest.json + `skills/migrate-config/SKILL.md`) straight to the global, per-user `~/.claude/plugins/marketplaces/niwa/`, fired unconditionally from `apply.go`'s `InstallNiwaPlugin` seam — it never touches `agentplan.Entry`, `ResolvePluginTrees`, or any workspace-configured plugin list, so it does not ride along with row 18's instance-root skills tree. The manifest's shape is fully compatible with the Codex `.codex/skills/<plugin>` layout `skills.go` documents, but building row 19 for Codex means routing the embedded tree into that layout as a genuinely new `PluginTree`-like delivery (materialized somewhere Codex-reachable, since the Claude install path is meaningless to Codex) — and, as a structural surprise, the Claude side of row 19 isn't even covered by `binding.go`'s `boundCapabilities`/`bindings` tables today, so that gap should be closed in the same effort.
