@@ -19,6 +19,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/guardrail"
 	"github.com/tsukumogami/niwa/internal/keyreport"
+	"github.com/tsukumogami/niwa/internal/plugin"
 	"github.com/tsukumogami/niwa/internal/pluginrecord"
 	"github.com/tsukumogami/niwa/internal/secret"
 	"github.com/tsukumogami/niwa/internal/vault"
@@ -112,14 +113,6 @@ type Applier struct {
 	// plugin installer emits the skip-notice instead of materializing
 	// the embedded plugin. The CLI wires this from flag + global config.
 	SkipPluginInstall bool
-
-	// InstallNiwaPlugin is the test seam for the niwa plugin
-	// auto-installer. Production wires this to plugin.Install via
-	// NewApplier; tests override to capture install-or-skip behavior
-	// without writing to the user's home directory. When nil, the
-	// installer is a no-op — useful for unit tests that don't
-	// exercise rank-2 + plugin-install at the same time.
-	InstallNiwaPlugin func(state *InstanceState, reporter *Reporter, skipInstall bool)
 
 	// PrewarmDeclaredPlugins resolves the instance's workspace-declared Claude
 	// marketplaces/plugins (the github-sourced ones) to disk after the pipeline
@@ -521,9 +514,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		}
 		EmitRank2Notice(NoticeIDRank2TeamConfig, identifier, a.Reporter)
 		result.disclosedNotices = append(result.disclosedNotices, NoticeIDRank2TeamConfig)
-		if a.InstallNiwaPlugin != nil {
-			a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
-		}
+		a.deliverNiwaPlugin()
 	}
 
 	// Resolve the workspace-declared marketplaces/plugins to disk now, while the
@@ -686,12 +677,10 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		EmitRank2Notice(NoticeIDRank2TeamConfig, identifier, a.Reporter)
 		result.disclosedNotices = append(result.disclosedNotices, NoticeIDRank2TeamConfig)
 		// PRD R16-R20: install the embedded niwa plugin so
-		// /niwa:migrate-config is available. The installer emits its
-		// own notice (installed/up-to-date or skipped); the rank-2
+		// /niwa:migrate-config is available. The delivery reports its
+		// own outcome (installed/up-to-date or skipped); the rank-2
 		// notice above is independent.
-		if a.InstallNiwaPlugin != nil {
-			a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
-		}
+		a.deliverNiwaPlugin()
 	}
 
 	// Pre-warm the workspace-declared marketplaces/plugins to disk on every apply
@@ -1061,9 +1050,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			if overlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
 				EmitRank2Notice(NoticeIDRank2Overlay, opts.overlayURL, a.Reporter)
 				newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
-				if a.InstallNiwaPlugin != nil {
-					a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
-				}
+				a.deliverNiwaPlugin()
 			}
 
 		case opts.configSourceURL != "":
@@ -1090,9 +1077,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 					if overlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
 						EmitRank2Notice(NoticeIDRank2Overlay, conventionURL, a.Reporter)
 						newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
-						if a.InstallNiwaPlugin != nil {
-							a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
-						}
+						a.deliverNiwaPlugin()
 					}
 				}
 			}
@@ -2070,6 +2055,37 @@ func (a *Applier) deliverDirectoryTrust(repoRoots []string, existing *InstanceSt
 		}
 	}
 	return recorded, firstErr
+}
+
+// deliverNiwaPlugin installs the embedded niwa plugin under the developer's
+// home and reports what happened. It is the pass the rank-2 branches run when
+// they surface the deprecation notice, and it stands where a capability
+// delivery will: today it names the installer directly, the way the pipeline
+// named it through a function field before, and it is the single place that
+// changes when the delivery is asked of the declaration table instead.
+//
+// An Applier with no developer home has not been wired to write outside the
+// instance, so the delivery does not run. That is the same gate
+// deliverDirectoryTrust states for the same reason: every unit suite in this
+// package builds an Applier without one, and a default that resolved the real
+// home would have each of them install into the developer's own directory.
+//
+// Nothing here fails an apply. A user-environment failure comes back as
+// Failed, whose notice carries the manual-install command, and the only error
+// the installer returns is a build-time invariant violation -- a malformed
+// embedded manifest -- which is worth a warning and not worth stopping a
+// create over.
+func (a *Applier) deliverNiwaPlugin() {
+	if a.DeveloperHome == "" {
+		return
+	}
+
+	action, err := plugin.Install(a.DeveloperHome, plugin.InstallOpts{SkipInstall: a.SkipPluginInstall})
+	if err != nil {
+		a.Reporter.DeferWarn("could not install the niwa plugin: %v", err)
+		return
+	}
+	EmitPluginInstallNotice(action, a.Reporter)
 }
 
 // hashManagedFile builds one managed-file record: the file's content hash, the

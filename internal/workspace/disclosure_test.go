@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/tsukumogami/niwa/internal/plugin"
 )
 
 func TestEmitRank2Notice_LogsAllRequiredSubstrings(t *testing.T) {
@@ -50,4 +52,35 @@ func TestEmitPluginNotice_SkippedIncludesManualCmd(t *testing.T) {
 func TestEmitPluginNotice_NilReporterIsNoOp(t *testing.T) {
 	// No panic when reporter is missing.
 	EmitPluginNotice(NoticeIDPluginInstalled, "niwa plugins install", nil)
+}
+
+// The installer reports by returning an Action and the caller turns
+// that into a notice, so this mapping is what the user actually
+// hears. All four actions are covered: an unmapped one would leave a
+// rank-2 apply silent about the plugin it just installed or skipped.
+func TestEmitPluginInstallNotice_MapsEveryAction(t *testing.T) {
+	cases := []struct {
+		name   string
+		action plugin.Action
+		want   string
+	}{
+		{"installed", plugin.Installed, "installed at"},
+		{"up to date", plugin.UpToDate, "installed at"},
+		{"skipped", plugin.Skipped, plugin.ManualInstallCommand},
+		{"failed", plugin.Failed, plugin.ManualInstallCommand},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			EmitPluginInstallNotice(tc.action, NewReporter(&buf))
+			if !strings.Contains(buf.String(), tc.want) {
+				t.Errorf("notice for %v = %q, want it to contain %q", tc.action, buf.String(), tc.want)
+			}
+		})
+	}
+}
+
+func TestEmitPluginInstallNotice_NilReporterIsNoOp(t *testing.T) {
+	// No panic when reporter is missing.
+	EmitPluginInstallNotice(plugin.Installed, nil)
 }

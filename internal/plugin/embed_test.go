@@ -24,7 +24,7 @@ func TestEmbedded_ManifestNameIsNiwa(t *testing.T) {
 	}
 }
 
-func TestEmbedded_ReturnsCanonicalInstallPath(t *testing.T) {
+func TestEmbedded_DescribesTheEmbeddedManifest(t *testing.T) {
 	p, err := Embedded()
 	if err != nil {
 		t.Fatalf("Embedded: %v", err)
@@ -35,7 +35,28 @@ func TestEmbedded_ReturnsCanonicalInstallPath(t *testing.T) {
 	if p.Version == "" {
 		t.Error("Version is empty")
 	}
-	if !strings.HasSuffix(p.Path, "/.claude/plugins/marketplaces/niwa") {
-		t.Errorf("Path = %q, want suffix /.claude/plugins/marketplaces/niwa", p.Path)
+}
+
+// A home the caller never supplied is a wiring error rather than a
+// prompt to guess one, so InstallPath refuses instead of returning a
+// path relative to nothing.
+func TestInstallPath_EmptyHomeIsAnError(t *testing.T) {
+	for _, home := range []string{"", "   "} {
+		if _, err := InstallPath(home); err == nil {
+			t.Errorf("InstallPath(%q) returned nil error", home)
+		}
+	}
+}
+
+func TestInstallPath_LandsUnderTheGivenHome(t *testing.T) {
+	got, err := InstallPath("/home/somebody")
+	if err != nil {
+		t.Fatalf("InstallPath: %v", err)
+	}
+	if !strings.HasSuffix(got, "/.claude/plugins/marketplaces/niwa") {
+		t.Errorf("InstallPath = %q, want suffix /.claude/plugins/marketplaces/niwa", got)
+	}
+	if !strings.HasPrefix(got, "/home/somebody/") {
+		t.Errorf("InstallPath = %q, want it under the given home", got)
 	}
 }

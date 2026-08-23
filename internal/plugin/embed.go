@@ -13,8 +13,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
+	"strings"
 )
 
 // pluginFS captures the embedded plugin source tree at build time.
@@ -27,10 +27,13 @@ var pluginFS embed.FS
 
 // InstalledPlugin captures the in-memory description of the embedded
 // niwa plugin after Embedded() has resolved its manifest.
+//
+// There is no install path in here. Where the plugin lands is a
+// function of the developer's home directory, and this package never
+// resolves that home itself — callers pass it in (see InstallPath).
 type InstalledPlugin struct {
 	Name    string
 	Version string
-	Path    string
 }
 
 // manifest is the on-disk shape of plugins/niwa/manifest.json.
@@ -45,16 +48,16 @@ type manifest struct {
 const pluginSourceRoot = "files/niwa"
 
 // Embedded returns the canonical description of the embedded plugin.
-// It reads the embedded manifest, verifies the plugin name is "niwa"
-// (a build-time invariant — anyone forking the niwa binary should
-// also rename the plugin), and computes the install path from the
-// current user's $HOME.
+// It reads the embedded manifest and verifies the plugin name is
+// "niwa" (a build-time invariant — anyone forking the niwa binary
+// should also rename the plugin).
 //
-// Returns a programmer-error error only if the embedded manifest is
-// missing or malformed — those are build-time invariants that should
-// fail loudly. User-environment errors (no $HOME, permission denied)
-// surface from Install (which calls Embedded) and are reported as
-// (Failed, nil) so the apply pipeline can warn-and-continue.
+// Returns an error only if the embedded manifest is missing or
+// malformed — those are build-time invariants that should fail
+// loudly, so every error out of here is a programmer error.
+// User-environment errors (permission denied under the install path)
+// surface from Install and are reported as (Failed, nil) so the apply
+// pipeline can warn-and-continue.
 func Embedded() (InstalledPlugin, error) {
 	data, err := pluginFS.ReadFile(pluginSourceRoot + "/manifest.json")
 	if err != nil {
@@ -71,15 +74,25 @@ func Embedded() (InstalledPlugin, error) {
 		return InstalledPlugin{}, errors.New("plugin: embedded manifest has empty version")
 	}
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return InstalledPlugin{}, fmt.Errorf("plugin: resolve home directory: %w", err)
-	}
-	installPath := filepath.Join(homeDir, ".claude", "plugins", "marketplaces", "niwa")
-
 	return InstalledPlugin{
 		Name:    m.Name,
 		Version: m.Version,
-		Path:    installPath,
 	}, nil
+}
+
+// InstallPath returns where the embedded plugin belongs under the
+// given developer home: <home>/.claude/plugins/marketplaces/niwa.
+//
+// The home arrives as data rather than being resolved here, the same
+// posture workspace.EnsureCodexTrust takes for the one other file
+// niwa writes outside an instance: a caller that was never wired to a
+// real home cannot reach the developer's own directory by accident,
+// and a test can point the write anywhere without redirecting $HOME
+// for the whole process. An empty home is a wiring error, not a user
+// environment to work around, so it fails rather than defaulting.
+func InstallPath(home string) (string, error) {
+	if strings.TrimSpace(home) == "" {
+		return "", errors.New("plugin: no home directory to resolve the install path under")
+	}
+	return filepath.Join(home, ".claude", "plugins", "marketplaces", "niwa"), nil
 }

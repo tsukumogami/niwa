@@ -1,26 +1,23 @@
 package plugin
 
 import (
-	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
-// withFakeHome redirects $HOME to a t.TempDir so install runs under
-// test isolation and the t.Cleanup restores the prior value.
-func withFakeHome(t *testing.T) string {
-	t.Helper()
-	tmp := t.TempDir()
-	orig := os.Getenv("HOME")
-	t.Setenv("HOME", tmp)
-	t.Cleanup(func() { os.Setenv("HOME", orig) })
-	return tmp
+// installPathUnder is the canonical install path under a developer
+// home, spelled out here rather than computed by the code under test.
+//
+// Install takes the home as data, so every test below names its own
+// t.TempDir and passes it in. Nothing redirects $HOME: the package no
+// longer reads it, and a test that had to would be testing the
+// process environment rather than the installer.
+func installPathUnder(home string) string {
+	return filepath.Join(home, ".claude", "plugins", "marketplaces", "niwa")
 }
 
 func readManifestAt(t *testing.T, dir string) manifest {
@@ -37,14 +34,12 @@ func readManifestAt(t *testing.T, dir string) manifest {
 }
 
 // AC-I2: fresh install from a clean home produces (Installed, nil),
-// writes manifest to the install path, emits the install notice on
-// the reporter, and leaves no .next/.prev staging directories behind.
+// writes manifest to the install path, and leaves no .next/.prev
+// staging directories behind.
 func TestInstall_FreshInstall(t *testing.T) {
-	home := withFakeHome(t)
-	var buf bytes.Buffer
-	reporter := workspace.NewReporter(&buf)
+	home := t.TempDir()
 
-	action, err := Install(nil, reporter, InstallOpts{})
+	action, err := Install(home, InstallOpts{})
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -52,7 +47,7 @@ func TestInstall_FreshInstall(t *testing.T) {
 		t.Errorf("action = %v, want Installed", action)
 	}
 
-	installPath := filepath.Join(home, ".claude", "plugins", "marketplaces", "niwa")
+	installPath := installPathUnder(home)
 	got := readManifestAt(t, installPath)
 	if got.Name != "niwa" {
 		t.Errorf("installed manifest name = %q, want niwa", got.Name)
@@ -69,10 +64,6 @@ func TestInstall_FreshInstall(t *testing.T) {
 	if _, statErr := os.Stat(installPath + ".prev"); statErr == nil {
 		t.Error(".prev/ staging dir survived install")
 	}
-
-	if !strings.Contains(buf.String(), "installed at") {
-		t.Errorf("install notice not emitted via reporter:\n%s", buf.String())
-	}
 }
 
 // AC-I3: a second Install on the same machine returns (UpToDate, nil)
@@ -80,16 +71,13 @@ func TestInstall_FreshInstall(t *testing.T) {
 // guarantee is enforced by callers (apply.go) via DisclosedNotices;
 // the plugin package itself remains stateless across calls.
 func TestInstall_IdempotentReinvocation(t *testing.T) {
-	withFakeHome(t)
+	home := t.TempDir()
 
-	var buf bytes.Buffer
-	reporter := workspace.NewReporter(&buf)
-
-	if _, err := Install(nil, reporter, InstallOpts{}); err != nil {
+	if _, err := Install(home, InstallOpts{}); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 
-	action, err := Install(nil, reporter, InstallOpts{})
+	action, err := Install(home, InstallOpts{})
 	if err != nil {
 		t.Fatalf("second install: %v", err)
 	}
@@ -101,21 +89,17 @@ func TestInstall_IdempotentReinvocation(t *testing.T) {
 // AC-I4: manually deleting the install path causes the next Install
 // call to recreate it (returns Installed, not UpToDate).
 func TestInstall_SelfHealAfterDelete(t *testing.T) {
-	home := withFakeHome(t)
-	var buf bytes.Buffer
-	reporter := workspace.NewReporter(&buf)
+	home := t.TempDir()
 
-	if _, err := Install(nil, reporter, InstallOpts{}); err != nil {
+	if _, err := Install(home, InstallOpts{}); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
-	installPath := filepath.Join(home, ".claude", "plugins", "marketplaces", "niwa")
+	installPath := installPathUnder(home)
 	if err := os.RemoveAll(installPath); err != nil {
 		t.Fatalf("delete install path: %v", err)
 	}
 
-	var buf2 bytes.Buffer
-	reporter2 := workspace.NewReporter(&buf2)
-	action, err := Install(nil, reporter2, InstallOpts{})
+	action, err := Install(home, InstallOpts{})
 	if err != nil {
 		t.Fatalf("self-heal install: %v", err)
 	}
@@ -128,13 +112,13 @@ func TestInstall_SelfHealAfterDelete(t *testing.T) {
 }
 
 // AC-I5a: opt-out via opts.SkipInstall=true returns (Skipped, nil)
-// and emits the skip-notice with the manual-install command.
+// and touches nothing under the install path. What the user hears
+// about it is the caller's business now — see
+// TestEmitPluginInstallNotice_* in internal/workspace.
 func TestInstall_SkipInstallOptOut(t *testing.T) {
-	home := withFakeHome(t)
-	var buf bytes.Buffer
-	reporter := workspace.NewReporter(&buf)
+	home := t.TempDir()
 
-	action, err := Install(nil, reporter, InstallOpts{SkipInstall: true})
+	action, err := Install(home, InstallOpts{SkipInstall: true})
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -142,33 +126,50 @@ func TestInstall_SkipInstallOptOut(t *testing.T) {
 		t.Errorf("action = %v, want Skipped", action)
 	}
 
-	installPath := filepath.Join(home, ".claude", "plugins", "marketplaces", "niwa")
-	if _, statErr := os.Stat(installPath); statErr == nil {
+	if _, statErr := os.Stat(installPathUnder(home)); statErr == nil {
 		t.Error("install path exists after Skipped action")
-	}
-
-	if !strings.Contains(buf.String(), "niwa plugins install") {
-		t.Errorf("skip notice missing manual-install command:\n%s", buf.String())
 	}
 }
 
-// AC-I6: read-only $HOME → (Failed, nil) + skip notice + no install
-// path. The install path must not exist, and .next/ must be cleaned up.
+// A caller that was never wired to a developer home must not fall
+// back to one. The empty home is a wiring error, so it comes back as
+// (Failed, err) rather than installing somewhere by default.
+func TestInstall_EmptyHomeIsAnError(t *testing.T) {
+	action, err := Install("", InstallOpts{})
+	if err == nil {
+		t.Fatal("Install with no home returned nil error")
+	}
+	if action != Failed {
+		t.Errorf("action = %v, want Failed", action)
+	}
+}
+
+// The opt-out is checked before the home, so an unwired caller that
+// skips is not made to fail over a home it was never going to use.
+func TestInstall_SkipInstallWinsOverEmptyHome(t *testing.T) {
+	action, err := Install("", InstallOpts{SkipInstall: true})
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if action != Skipped {
+		t.Errorf("action = %v, want Skipped", action)
+	}
+}
+
+// AC-I6: a read-only home → (Failed, nil) and no install path. The
+// install path must not exist, and .next/ must be cleaned up.
 func TestInstall_ReadOnlyHomeFailsGracefully(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("read-only test does not work under root (chmod is bypassed)")
 	}
-	home := withFakeHome(t)
+	home := t.TempDir()
 	// Make the home directory read-only so MkdirAll under it fails.
 	if err := os.Chmod(home, 0o500); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
 	t.Cleanup(func() { os.Chmod(home, 0o755) })
 
-	var buf bytes.Buffer
-	reporter := workspace.NewReporter(&buf)
-
-	action, err := Install(nil, reporter, InstallOpts{})
+	action, err := Install(home, InstallOpts{})
 	if err != nil {
 		t.Fatalf("Install should not return error on user-env failure: %v", err)
 	}
@@ -176,30 +177,71 @@ func TestInstall_ReadOnlyHomeFailsGracefully(t *testing.T) {
 		t.Errorf("action = %v, want Failed", action)
 	}
 
-	installPath := filepath.Join(home, ".claude", "plugins", "marketplaces", "niwa")
+	installPath := installPathUnder(home)
 	if _, statErr := os.Stat(installPath); statErr == nil {
 		t.Error("install path exists after Failed action")
 	}
 	if _, statErr := os.Stat(installPath + ".next"); statErr == nil {
 		t.Error(".next/ survived mid-failure cleanup")
 	}
+}
 
-	if !strings.Contains(buf.String(), "niwa plugins install") {
-		t.Errorf("skip-notice with manual-install command not emitted on failure:\n%s", buf.String())
+// TestInstallPath_ComputedFromHomeOnly verifies that the install path
+// is computed purely from the given home and no user-supplied
+// component.
+func TestInstallPath_ComputedFromHomeOnly(t *testing.T) {
+	home := t.TempDir()
+	got, err := InstallPath(home)
+	if err != nil {
+		t.Fatalf("InstallPath: %v", err)
+	}
+	if want := installPathUnder(home); got != want {
+		t.Errorf("InstallPath = %q, want %q", got, want)
 	}
 }
 
-// TestInstallPath_ComputedFromHomeOnly verifies that the install
-// path is computed purely from $HOME and no user-supplied component.
-func TestInstallPath_ComputedFromHomeOnly(t *testing.T) {
-	home := withFakeHome(t)
-	p, err := Embedded()
+// TestMaterializeTo_WritesTheEmbeddedTree pins the export the
+// non-install callers need: the embedded tree, written to an
+// arbitrary destination, with no manifest comparison and no atomic
+// swap around it.
+func TestMaterializeTo_WritesTheEmbeddedTree(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "niwa")
+	if err := MaterializeTo(dst); err != nil {
+		t.Fatalf("MaterializeTo: %v", err)
+	}
+
+	embedded, err := Embedded()
 	if err != nil {
 		t.Fatalf("Embedded: %v", err)
 	}
-	want := filepath.Join(home, ".claude", "plugins", "marketplaces", "niwa")
-	if p.Path != want {
-		t.Errorf("Path = %q, want %q", p.Path, want)
+	got := readManifestAt(t, dst)
+	if got.Version != embedded.Version {
+		t.Errorf("materialized version = %q, want %q", got.Version, embedded.Version)
+	}
+
+	// The tree is more than its manifest: a destination holding only
+	// the manifest would satisfy a version check and ship no skills.
+	entries, err := os.ReadDir(dst)
+	if err != nil {
+		t.Fatalf("read materialized tree: %v", err)
+	}
+	if len(entries) < 2 {
+		t.Errorf("materialized tree has %d entries, want the whole tree", len(entries))
+	}
+}
+
+// TestPlugin_IsALeaf pins the property the whole package shape exists
+// to hold: nothing here reaches internal/workspace, transitively
+// included. The workspace registry calls this package, so an import
+// back would be a cycle, and the seam that used to stand in for one
+// would have to come back with it.
+func TestPlugin_IsALeaf(t *testing.T) {
+	out, err := exec.Command("go", "list", "-f", "{{range .Deps}}{{.}}\n{{end}}", "github.com/tsukumogami/niwa/internal/plugin").Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	if strings.Contains(string(out), "github.com/tsukumogami/niwa/internal/workspace\n") {
+		t.Error("internal/plugin depends on internal/workspace; the package must stay a leaf")
 	}
 }
 
@@ -207,8 +249,7 @@ func TestInstallPath_ComputedFromHomeOnly(t *testing.T) {
 // not directly import any archive parser. The installer must
 // materialize the embedded plugin via embed.FS + fs.WalkDir +
 // os.WriteFile — never via archive/tar, archive/zip, or
-// compress/gzip. (Transitive deps via workspace.InstanceState are
-// expected and unrelated; this test pins direct imports only.)
+// compress/gzip.
 func TestPlugin_NoArchiveDeps(t *testing.T) {
 	cmd := exec.Command("go", "list", "-f", "{{range .Imports}}{{.}}\n{{end}}", "github.com/tsukumogami/niwa/internal/plugin")
 	out, err := cmd.Output()
@@ -238,7 +279,7 @@ func TestPlugin_NoArchiveDeps(t *testing.T) {
 //
 // Implementation note: stageAndRename's flow:
 //  1. RemoveAll(.next, .prev) (cleanup)
-//  2. writeEmbeddedTree(.next)
+//  2. MaterializeTo(.next)
 //  3. If install exists: Rename(install, .prev) — moves aside
 //  4. Rename(.next, install) — promote
 //  5. On step-4 failure with move-aside: Rename(.prev, install) — rollback
@@ -257,15 +298,13 @@ func TestInstall_RenameFailureRollsBack(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("chmod-based fault injection does not work under root")
 	}
-	home := withFakeHome(t)
-	var buf bytes.Buffer
-	reporter := workspace.NewReporter(&buf)
+	home := t.TempDir()
 
 	// Step 1: fresh install lands cleanly.
-	if _, err := Install(nil, reporter, InstallOpts{}); err != nil {
+	if _, err := Install(home, InstallOpts{}); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
-	installPath := filepath.Join(home, ".claude", "plugins", "marketplaces", "niwa")
+	installPath := installPathUnder(home)
 	manifestPath := filepath.Join(installPath, "manifest.json")
 	preFailManifest := readManifestAt(t, installPath)
 
