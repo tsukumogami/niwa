@@ -302,3 +302,15 @@ were sound.
 
 This is one machine, so the claim is scoped to what was observed rather than
 asserted of every install.
+
+### Copy delivery resolves identically to a symlink
+
+Measured the same way, zero model turns: a plugin tree **copied** into
+`<session dir>/.codex/skills/shirabe` — the shape the executor's Windows
+fallback produces — resolved the same 20 namespaced skills as the symlinked
+tree, and niwa's own `.niwa-delivered-tree` sentinel file sitting inside the
+copied tree did not interfere with discovery or appear as a skill.
+
+So the delivery shape is free at the root: symlink and copy both work, and the
+choice can be made on the reconcile mechanism's terms rather than on whether
+Codex will read the result.
