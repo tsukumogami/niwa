@@ -14,6 +14,12 @@ trust line intact.
 decision-bypass-with-inline-resolution (Phase 2), serial-self-jury +
 parent-delegated-approval (Phase 6). Terminal status: Proposed.
 
+## Security Review (Phase 5)
+**Outcome:** Option 2 (document considerations)
+**Summary:** Widens where declared content is readable, not what a
+session can do; the one novel hazard (upward-searching exclude writes)
+is named and forbidden in the design.
+
 ## Current Status
-**Phase:** 1 - Decomposition
+**Phase:** 5 - Security complete; entering Phase 6
 **Last Updated:** 2026-08-23
