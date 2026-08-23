@@ -495,7 +495,12 @@ func violationsName(vs []dispatchViolation, value string) bool {
 // whole reason the map holds a reason string rather than just a name.
 var excusedAgentNamingFiles = map[string]string{
 	"dispatch_plugins.go": "drives one agent's own plugin subcommand and, for the same reason, hosts the accessor the other agent-specific paths read that agent's launch description through; MarketplaceRegistration (row 6) is declared AgentCannotReceive for the other agent",
-	"job_state.go":        "reads one agent's harness job-state file, for EphemeralSessions (row 17, AgentCannotReceive for the other) and for niwa watch's review continuation",
+	// This justification named row 17 for the whole file and left its largest
+	// consumer out, which is the same conflation row 17's own reason carried:
+	// the hook guard is row 17's, but the reaper reads this file about a
+	// session niwa launched, which is row 22's. Naming both is what keeps the
+	// excusal a claim a reader can check.
+	"job_state.go": "reads one agent's harness job-state file for three callers: the session-start hook's background-worker guard (EphemeralSessions, row 17, AgentCannotReceive for the other agent), the reaper's liveness rule for a session that agent launched (DispatchLaunch, row 22, where the other agent's records are read agent-neutrally through session_records.go), and niwa watch's review continuation",
 
 	// The three below were red on this guard's first run, which is the guard
 	// doing its job: each is agent-specific code in this package that no

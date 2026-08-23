@@ -339,8 +339,8 @@ the session would never read it, so these move only if the agent changes.
 - **Filling in a pull request's body from the session.** The pull-request body
   capture is delivered as a hook, which Codex cannot receive.
 - **An instance provisioned automatically for a session niwa did not launch.**
-  Provisioning rides a session-start hook and the harness job-state file;
-  Codex has neither.
+  niwa learns that a session it did not launch has started only from the
+  agent's own session-start hook, which Codex cannot receive.
 
 ### What niwa hasn't built yet
 

@@ -255,11 +255,27 @@ var declarations = []Declaration{
 
 	// Row 17: ephemeral-session provisioning.
 	{Capability: EphemeralSessions, Agent: agent.AgentClaude, State: StateImplemented, Requires: []Capability{Hooks}},
+	// This row is scoped to the trigger rather than to provisioning itself,
+	// and losing that distinction is what makes it read as wrong. niwa learns
+	// that a session it did not launch has started only from the agent's own
+	// session-start event, so the row stands or falls with row 13, and Codex
+	// hooks are plugin-delivered behind a blocking review prompt (spike
+	// finding 7).
+	//
+	// Provisioning for a session niwa DOES launch needs no hook and is not
+	// this row. One agent-neutral provisioner, shared by the hook path and the
+	// dispatch path, creates the instance before either agent's binary starts,
+	// and that delivery is row 22 -- implemented for both agents. A reader who
+	// finds a Codex worker running in an instance niwa provisioned has found
+	// row 22, not a counterexample to this one.
+	//
+	// The kind follows row 13's, as rows 14 and 15 do;
+	// TestHookDeliveredRowsRestOnTheHooksRow binds all three.
 	{
 		Capability: EphemeralSessions, Agent: agent.AgentCodex,
 		State:  StateUnavailable,
 		Kind:   ReasonAgentCannotReceive,
-		Reason: "Provisioning rides a session-start hook and the harness job-state file; Codex has neither.",
+		Reason: "niwa learns that a session it did not launch has started only from the agent's own session-start hook, which Codex cannot receive.",
 	},
 
 	// Row 18: root-installed project skills.
