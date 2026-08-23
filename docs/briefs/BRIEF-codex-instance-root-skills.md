@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   Every background worker niwa dispatches stands at a workspace instance
   root, and a Codex worker standing there receives none of the
@@ -27,7 +27,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 ## Problem Statement
 
