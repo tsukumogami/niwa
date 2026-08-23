@@ -1,7 +1,7 @@
 ---
 topic: codex-instance-root-skills
 last_updated: 2026-08-23
-phase_pointer: phase-2-chain-orchestration
+phase_pointer: phase-3-exit-finalization
 chain_started: 2026-08-23T17:00:00Z
 visibility: Public
 execution_mode: auto
@@ -19,12 +19,14 @@ chain_ran:
     started_at: 2026-08-23T17:50:00Z
   - name: design
     started_at: 2026-08-23T18:25:00Z
-parent_orchestration:
-  active_child: plan
-  invoked_at: 2026-08-23T18:20:00Z
+  - name: plan
+    started_at: 2026-08-23T18:20:00Z
 chain_skipped: []
-exit:
-exit_artifacts: []
+exit: full-run
+chain_completed: 2026-08-23T18:45:00Z
+plan_execution_mode: single-pr
+exit_artifacts:
+  - docs/plans/PLAN-codex-instance-root-skills.md
 ---
 
 # /scope state: codex-instance-root-skills
@@ -164,3 +166,49 @@ Current, which is why the root looked empty.
   a full acceptance-criteria set that the design references rather than
   restates, so folding would lose the requirement text the acceptance criteria
   are written against.
+
+## Phase 2 — plan hop
+
+`/plan` ran and produced `docs/plans/PLAN-codex-instance-root-skills.md`,
+status Active, `execution_mode: single-pr`, seven issues mapping one-to-one onto
+the design's seven increments. Producing it moved the design Accepted ->
+Planned, which is that document's own lifecycle.
+
+The validator raised one notice (FC14): a `single-pr` plan should not carry a
+populated Dependency Graph. `single-pr` is not negotiable — the PRD requires
+both rows to flip in one change and `/execute` accepts only `single-pr` or
+`coordinated` — so the mermaid diagram was removed and its full edge set folded
+into the Implementation Sequence prose, where most of it already lived. One
+edge (issue 2 before issue 6) was only in the diagram and is now stated. Plan
+revalidates clean: 0 errors, 0 notices.
+
+### Consolidation judgment: design->plan
+
+- hop: design->plan
+- stage: preflight
+- verdict: keep
+- finding: The citation preflight refuses the fold — the PLAN names the design
+  as its `upstream:` in frontmatter and cites it by path in its Status and Scope
+  Summary. A preflight refusal reaches no verdict stronger than keep. The
+  content question would agree: the design carries the four decisions with their
+  rejected alternatives, the solution architecture and the security
+  considerations, none of which the PLAN restates — it references them and
+  sequences the work.
+
+## Phase 3 — exit finalization
+
+Exit: **full-run**. The chain completed through `/plan`.
+
+`exit_artifacts:` records the terminal PLAN. `plan_execution_mode: single-pr` is
+set because `plan` appears in `chain_ran`. No `boundary:` or
+`decision_record_sub_shape:` is written — those are conditional on
+`exit: re-evaluation`, which did not fire. No `consumed_upstream:` — no
+`--upstream` was supplied. `consumed_handoff:` records the `/explore` handoff
+this run consumed.
+
+All four hops ran; `chain_skipped:` is empty; no child was held back by
+re-entry protection, and no consolidation judgment reached `absorb`.
+
+Phase 4 (wip cleanup) is deferred: `/execute` consumes the PLAN and the
+implementation branch carries the wip artifacts until its own cleanup step
+removes them before the PR merges.
