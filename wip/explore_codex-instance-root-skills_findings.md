@@ -190,6 +190,77 @@ The skill's own frontmatter name is already `niwa-migrate-config`, so the
 namespaced form is the redundant-looking `niwa:niwa-migrate-config`. That
 redundancy exists on the Claude side today and is not this work's to fix.
 
-### Round-2 lead findings
+### What remains missing at the root has exactly one cause
 
-Pending — `lead-remaining-gap` and `lead-niwa-plugin-delivery` are in flight.
+(`lead-remaining-gap`, verified.) After root skills land, a root-started Codex
+session still lacks MCP servers, the session environment, and the approval and
+sandbox posture — plus the doc-budget key. All four are keys in
+`.codex/config.toml`, and all four are gated by the single line
+`payloadLayouts[agent.AgentCodex].scope = PayloadInRepo`. One cause, one code
+location, and row 18 does not touch it. That is what lets the two prose sites be
+corrected precisely instead of deleted.
+
+Three consequences the lead pinned down:
+
+- The `dispatch.go` warning is gated on `Lookup(RootProjectSkills, …)` and will
+  **go silent** when row 18 flips, while the gap it warns about is still real.
+  It must be re-gated on the payload-scope fact itself. No declaration row means
+  "delivered in a repository, not at the root", and inventing one is forbidden,
+  so the gate has to read the payload layout — which needs a new exported
+  predicate, since `payloadLayout()` is unexported and nothing else exposes
+  scope support. Its two pinning tests move with it
+  (`dispatch_agentwarning_test.go`, `dispatch_contract_test.go`).
+- The warning already omits the session environment from its list, which is a
+  pre-existing inaccuracy worth folding into the same rewrite.
+- In the guide, the budget paragraph's premise ("there's no project layer at the
+  instance root") narrows rather than dies: after this change a `.codex/`
+  directory does exist at the root — it just has no `config.toml`. Easy to miss
+  if only the "gets nothing else" sentence is patched.
+
+### The binding route is fixed per capability, and it decides the implementation
+
+(`lead-niwa-plugin-delivery`, verified against `internal/agentplan/capability.go`
+and `internal/workspace/delivery_binding_test.go`.) The catalog assigns each
+capability a `Route`, and `TestDeliveriesMatchTheBindings` sends a binding to
+the registry its route names:
+
+- `RootProjectSkills` is **`RoutePlan`** → a binding for it must name a
+  `Delivery` registered in the `deliveries` map as a `Materializer`
+  (`Name() string` plus `Materialize`), whose `Name()` matches the delivery
+  name.
+- `NiwaPlugin` is **`RouteProcedure`** → its binding must name a `Delivery`
+  registered in the `procedures` map, for **both** agents.
+
+This is the single most consequential structural fact found. It means row 19's
+Codex delivery, even though it writes inside the instance and is mechanically a
+skills-tree write, must still be registered as a procedure. And
+`procedureInput` carries no instance root today, so it needs one — a struct
+whose doc comment currently leans on "a side effect outside the instance."
+
+Two further facts about Claude's row 19 that the brief did not anticipate:
+`plugin.Install` fires only inside rank-2-config-detection branches, not on
+every apply, and it records nothing in instance state — it is global,
+once-per-developer-machine, and untouched by `niwa destroy`/`reap`. The two
+agents' row-19 deliveries therefore have genuinely different lifecycles.
+
+### An unmeasured risk the design must not step on
+
+Adding `.claude-plugin/plugin.json` to the embedded tree is what would give
+Codex the `niwa:` namespace. But the documented command is
+`/niwa:migrate-config`, which comes from the *marketplace manifest's*
+`skills[].name` (`migrate-config`), while the SKILL.md frontmatter says
+`niwa-migrate-config`. How Claude Code resolves this exact tree shape today is
+not evidenced anywhere in the repo and was not measured. Changing the tree's
+shape could silently rename the command for existing Claude users. This needs
+its own measurement before the tree is touched, or the change must be scoped so
+the Claude path cannot move.
+
+### Leads are exhausted
+
+Every question raised in round 1 has been answered or converted into a design
+choice with its options and consequences enumerated. What is left — which
+binding shape row 18 takes, whether the embedded tree gains a plugin manifest,
+how the dispatch warning is re-gated — are decisions for the design hop, not
+things more research would settle.
+
+## Decision: Crystallize
