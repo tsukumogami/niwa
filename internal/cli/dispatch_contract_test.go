@@ -302,14 +302,31 @@ func TestDispatchWarnsWhenTheWorkerStartsUnoriented(t *testing.T) {
 				t.Fatalf("dispatch: %v", err)
 			}
 
-			decl, err := agentplan.Lookup(agentplan.RootProjectSkills, ag)
-			if err != nil {
-				t.Fatalf("Lookup(root-project-skills, %s): %v", ag, err)
-			}
+			// The gate is the payload layout's scope, not a declaration row
+			// and not the agent's name. No row can express "delivered in a
+			// repository, not at the root" -- the schema scopes rows by who
+			// receives a capability and never by where from -- and a name
+			// check here is the hardcoded branch the contract exists to
+			// prevent. So the test asks the same predicate the code asks, and
+			// a change to either side that leaves them disagreeing fails here.
+			repoScoped := agentplan.ConfigDocRepoScoped(ag)
 			warned := strings.Contains(stderr, "starts at the instance root")
-			if unequipped := decl.State != agentplan.StateImplemented; unequipped != warned {
-				t.Errorf("(%s): root-project-skills implemented=%v, warned=%v; the notice must follow the declaration\n%s",
-					ag, !unequipped, warned, stderr)
+			if repoScoped != warned {
+				t.Errorf("(%s): config document repo-scoped=%v, warned=%v; the notice must follow the layout scope\n%s",
+					ag, repoScoped, warned, stderr)
+			}
+			if warned {
+				// The text has to name what is actually missing. Claiming
+				// skills after row 18 delivers them would send a developer
+				// looking for a gap that closed.
+				for _, want := range []string{"MCP servers", "session environment", "approval and sandbox posture"} {
+					if !strings.Contains(stderr, want) {
+						t.Errorf("(%s): the notice does not name %q\n%s", ag, want, stderr)
+					}
+				}
+				if strings.Contains(stderr, "skills written there, but not") == false {
+					t.Errorf("(%s): the notice does not say skills DO reach the root\n%s", ag, stderr)
+				}
 			}
 		})
 	}

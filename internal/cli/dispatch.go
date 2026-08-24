@@ -391,17 +391,29 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// assumes otherwise -- and stopping the result means finding the process by
 	// hand. Read first, then type, or press Ctrl-C having spent nothing.
 	//
-	// The trigger was row 2 when a root-launched worker received nothing at
-	// all. It is row 18 now, because row 2 was corrected: orientation does
-	// reach a session at the instance root, and row 18 is the row that says
-	// niwa writes no project layer there -- which is what the remaining loss
-	// actually is. There is no declaration for "delivered in a repository, not
-	// at the root", so row 18 is the closest thing the table has to one, and
-	// the sentence stays niwa's own rather than the declaration's reason
-	// because what is missing is wider than skills.
-	if d, err := agentplan.Lookup(agentplan.RootProjectSkills, dispatchedAgent); err == nil && d.State != agentplan.StateImplemented {
+	// The trigger has moved twice, and where it sits now is the point. It was
+	// row 2 when a root-launched worker received nothing at all. It became row
+	// 18 when row 2 was corrected, on the reading that row 18 was the closest
+	// thing the table had to "delivered in a repository, not at the root".
+	//
+	// That reading does not survive row 18 being delivered. Skills now reach a
+	// root-started session, so a gate on row 18 would go silent -- while MCP
+	// servers, the session environment and the posture are still missing, for
+	// a reason row 18 never described. A warning that disappears because a
+	// different gap was closed is worse than no warning: it reads as an
+	// all-clear.
+	//
+	// So the gate is the fact itself. Everything still missing here is a key in
+	// the agent's generated configuration document, and that document's scope
+	// is a property of the agent's own layout -- which ConfigDocRepoScoped
+	// reports. Two alternatives were available and both are worse: inventing a
+	// declaration row for "in a repository, not at the root" contradicts the
+	// schema decision that rows are scoped by who receives a capability and
+	// never by where from, and checking the agent's name here reintroduces
+	// exactly the hardcoded branch the contract's tests exist to prevent.
+	if agentplan.ConfigDocRepoScoped(dispatchedAgent) {
 		fmt.Fprintf(cmd.ErrOrStderr(),
-			"niwa dispatch: the worker starts at the instance root. It reads the workspace orientation written there, but none of the workspace's skills, MCP servers or posture -- for a %s session those reach it only from inside a repository. Its prompt still has to carry the task.\n",
+			"niwa dispatch: the worker starts at the instance root. It reads the workspace orientation and skills written there, but not the workspace's MCP servers, session environment, or approval and sandbox posture -- for a %s session those live in a configuration document that reaches it only from inside a repository. Its prompt still has to carry the task.\n",
 			dispatchedAgent)
 	}
 
