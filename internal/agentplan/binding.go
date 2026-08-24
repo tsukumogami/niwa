@@ -35,6 +35,28 @@ const (
 	// configuration. It is procedure-routed: the write lands outside every
 	// instance, so no plan entry could describe it honestly.
 	DeliveryCodexTrust Delivery = "codex-trust"
+
+	// DeliveryRootSkills is the materializer that delivers the workspace's
+	// plugin trees into the instance root's skills directory, for an agent
+	// whose skills arrive as delivered trees.
+	DeliveryRootSkills Delivery = "root-skills"
+
+	// DeliveryRootSettings is the materializer that writes the instance
+	// root's settings document, for an agent whose root-installed skills
+	// arrive by registration rather than as delivered trees.
+	DeliveryRootSettings Delivery = "root-settings"
+
+	// DeliveryNiwaPluginClaude and DeliveryNiwaPluginCodex are niwa's own
+	// plugin, per agent.
+	//
+	// One capability, two delivery names, because the two agents' deliveries
+	// are not the same act. One materializes the embedded tree into the
+	// developer's own home, outside every instance and outliving all of them;
+	// the other materializes it inside one instance and is reclaimed with it.
+	// A single name over both would assert an equivalence that does not hold,
+	// and the binding test's whole job is to make such an assertion checkable.
+	DeliveryNiwaPluginClaude Delivery = "niwa-plugin-claude"
+	DeliveryNiwaPluginCodex  Delivery = "niwa-plugin-codex"
 )
 
 // Binding says which delivery satisfies one implemented (capability, agent)
