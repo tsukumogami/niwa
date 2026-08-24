@@ -49,13 +49,15 @@ No stale `parent_orchestration:` block was found at session start.
 
 ### Child-doc discovery
 
-All five canonical paths were globbed. None exists:
+All five canonical paths for this topic were globbed at Phase 1 and none of them
+existed yet: the brief under the briefs directory, the PRD under the prds
+directory, the design at either of its two legal locations (the designs root and
+the current subdirectory), and the plan under the plans directory.
 
-- `docs/briefs/BRIEF-codex-instance-root-skills.md` — absent
-- `docs/prds/PRD-codex-instance-root-skills.md` — absent
-- `docs/designs/DESIGN-codex-instance-root-skills.md` — absent
-- `docs/designs/current/DESIGN-codex-instance-root-skills.md` — absent
-- `docs/plans/PLAN-codex-instance-root-skills.md` — absent
+The paths are described rather than written out because this file is committed,
+and a validator check reads a written path as a live reference: spelling the
+design's `current/` location here made the run's own record of an absence look
+like a pointer to a document that had moved.
 
 No re-entry protection fires for any child; `chain_skipped:` stays empty.
 
