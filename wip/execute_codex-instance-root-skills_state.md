@@ -52,10 +52,10 @@ the PLAN's own Implementation Sequence calls parallelization theoretical only.
 - [x] 1 — refactor(plugin): unhook internal/plugin from internal/workspace
 - [x] 2 — feat(plugin): add the Claude plugin manifest to the embedded tree
 - [x] 3 — feat(agentplan): add root skills and niwa-plugin leaf vocabulary
-- [ ] 4 — feat(workspace): register the root skills and niwa-plugin deliveries
+- [x] 4 — feat(workspace): register the root skills and niwa-plugin deliveries
 - [x] 5 — refactor(cli): gate the dispatch warning on the payload-scope predicate
-- [ ] 6 — feat(agentplan): flip rows 18 and 19 for codex and bind both capabilities
-- [ ] 7 — test(functional): add root skills placement and discovery scenarios
+- [x] 6 — feat(agentplan): flip rows 18 and 19 for codex and bind both capabilities
+- [x] 7 — test(functional): add root skills placement and discovery scenarios
 
 ## Drift observed, for the coordinator handoff
 
@@ -157,3 +157,54 @@ a pointer to a moved document. The glob results are now described in prose.
 `pr-body` failed PB2: the body had no `---` separator between the squash commit
 body and the reviewer context. Rewritten to the two-part convention and checked
 offline with `shirabe validate --pr-body` before posting.
+
+## Issues 4, 6 and 7 — done
+
+**Issue 4** (`f58edc8`, `5fccace`) landed the executor side. Two conflicts the
+outline had not anticipated came back from it, and both were real.
+
+It proposed a `pendingDeliveries` staging map so the four new deliveries could be
+registered before their bindings without tripping the binding check's reverse
+direction. Declined, and the map reverted in `ce1aeed`. It was self-policing in
+one direction but switched the "registered but nothing bound to it" check off for
+exactly the four names this work adds — a hole in the one test that makes these
+rows' claims falsifiable, inside the change whose purpose is submitting them to
+it. The registrations moved to issue 6 alongside the bindings instead, which is
+the declaration table's own rule and needs no new mechanism.
+
+Its second finding was accepted: delivering niwa's plugin only on rank-2 config
+detection would have row 19 declare a capability an ordinary apply never
+delivers. It is a per-apply pass beside directory trust now. The consequence —
+`plugin.Install` running every apply for Claude — is handled by routing its
+notice through the one-time disclosure record, keyed on the outcome so a
+workspace that opts out and back in still hears the new result.
+
+**Issue 6** (`da8bab9`) is the flip, in one commit. Verified beyond the report:
+
+- Both rows read implemented for Codex; all four bindings present; no
+  declaration row carries `ReasonNotBuilt` any more (only the enum's own
+  definition mentions it).
+- The guide's gap list shrank **by regeneration**: both bullets and the whole
+  "What niwa hasn't built yet" heading are gone, because the generator omits an
+  empty group, and the drift test passes with no `-update` and no manual edit.
+- The binding rule is load-bearing in **both** drift directions, proven on a
+  scratch copy rather than argued. Reverting row 18 while its delivery stays
+  bound fails with "is bound to delivery \"root-skills\" but is not declared
+  implemented; something delivers a capability nobody declared". Deleting the
+  registration while the declaration stands fails with "the contract binds
+  (root-project-skills, codex) to delivery \"root-skills\", which nothing in
+  internal/workspace registers".
+- The PRD took a 26-line appended amendment with zero deletions, so the matrix
+  body is untouched.
+
+**Issue 7** (`a4e689f`) is the acceptance bar. Three offline `@critical`
+scenarios cover placement, idempotence, reconcile-on-removal and both collision
+cases; one `@codex-discovery` scenario carries discovery against the real binary.
+
+The live scenario's control is the part that matters and it is built correctly:
+it renders from one directory **below** the instance root, so the real populated
+tree it just resolved sits immediately overhead, and asserts those skills are
+absent. An empty-directory control could not tell "loaded from where the session
+stands" from "the walk went somewhere else and found them anyway". It also
+asserts each skill was read from a file under the instance root, which rules out
+a same-named skill the machine happened to have elsewhere.
