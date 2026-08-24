@@ -51,9 +51,9 @@ the PLAN's own Implementation Sequence calls parallelization theoretical only.
 
 - [x] 1 — refactor(plugin): unhook internal/plugin from internal/workspace
 - [x] 2 — feat(plugin): add the Claude plugin manifest to the embedded tree
-- [ ] 3 — feat(agentplan): add root skills and niwa-plugin leaf vocabulary
+- [x] 3 — feat(agentplan): add root skills and niwa-plugin leaf vocabulary
 - [ ] 4 — feat(workspace): register the root skills and niwa-plugin deliveries
-- [ ] 5 — refactor(cli): gate the dispatch warning on the payload-scope predicate
+- [x] 5 — refactor(cli): gate the dispatch warning on the payload-scope predicate
 - [ ] 6 — feat(agentplan): flip rows 18 and 19 for codex and bind both capabilities
 - [ ] 7 — test(functional): add root skills placement and discovery scenarios
 
@@ -117,3 +117,43 @@ name issue 7's live scenario asserts.
 
 `TestEmbedded_CarriesThePluginManifest` reads the file back through `pluginFS`,
 not off disk, so the regression it guards is the one that actually bites.
+
+## Issues 3 and 5 — done in this session
+
+The delegated agent for issue 3 hit a model session limit and returned nothing;
+it left the tree clean, so there was no partial work to reconcile. Both issues
+were implemented here instead.
+
+**Issue 3** (commit 4c01f95) added `RootSkillsPlan`, `RootSkillsReconcileSpec`,
+`NiwaPluginPlan`, `NiwaPluginTreeName`, `ConfigDocRepoScoped` and the four
+delivery constants. All inert: a producer gated on an unimplemented capability
+yields an empty plan, which the tests assert directly. One test skips by design
+until row 18 flips, and says so rather than passing vacuously.
+
+The root plan deliberately sets no `ExcludeAs`. That field feeds git-exclude
+coverage for a path inside a working tree, and the helper consuming it searches
+*upward* for an enclosing repository — so aiming it at an instance root that
+happens to sit inside somebody's checkout would write into that repository's
+exclude file. The omission is commented at the call site.
+
+**Issue 5** (commit 411c55f) re-gated the dispatch warning. This had to land
+before the flip, not after: the warning fired on row 18 being unimplemented, so
+delivering row 18 would have silenced it while MCP servers, the session
+environment and the posture were still missing. Verified both branches actually
+run — the contract test exercises `claude` and `codex` subtests, and Codex warns
+while Claude does not.
+
+## CI failures fixed
+
+Two checks were red on the first push, both from the docs chain rather than the
+code.
+
+`validate-docs` failed FC20: a reference to
+the design's `current/` location named no file. It came from this run's own
+scope state file, where Phase 1 had recorded that path as **absent** — the check
+reads a written path as a live reference, so a record of an absence looked like
+a pointer to a moved document. The glob results are now described in prose.
+
+`pr-body` failed PB2: the body had no `---` separator between the squash commit
+body and the reviewer context. Rewritten to the two-part convention and checked
+offline with `shirabe validate --pr-body` before posting.
