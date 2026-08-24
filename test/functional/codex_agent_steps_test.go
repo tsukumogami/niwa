@@ -1,6 +1,7 @@
 package functional
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -80,6 +81,12 @@ const (
 	codexGapRegionEnd   = "END GENERATED: codex gap list"
 	// codexLiveTimeout bounds a gated live Codex invocation.
 	codexLiveTimeout = 3 * time.Minute
+
+	// codexPostureTimeout bounds a posture probe. The record it reads is
+	// written as the turn bootstraps -- a second or two in -- so this is a
+	// backstop against a run that will never end rather than a budget the
+	// measurement spends.
+	codexPostureTimeout = 45 * time.Second
 	// codexInteractiveDwell is how long the gated interactive scenario lets the
 	// TUI run before killing it. A trust or approval prompt appears immediately
 	// on startup, so reaching the end of the dwell with none is the signal.
@@ -151,6 +158,12 @@ func registerCodexAgentSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the codex launch argv contains "([^"]*)"$`, theCodexLaunchArgvContains)
 	ctx.Step(`^the codex launch argv does not contain "([^"]*)"$`, theCodexLaunchArgvDoesNotContain)
 	ctx.Step(`^the printed resume command for "([^"]*)" grants the dispatched instance$`, thePrintedResumeCommandGrantsTheInstance)
+	ctx.Step(`^an isolated Codex home whose model endpoint is unreachable$`, codexOfflineHome)
+	ctx.Step(`^the dispatched session recorded these postures in order:$`, theDispatchedSessionRecordedPostures)
+	ctx.Step(`^I resume the dispatched session with the grant niwa printed$`, iResumeTheDispatchedSessionWithTheGrantNiwaPrinted)
+	ctx.Step(`^I resume the dispatched session without the grant$`, iResumeTheDispatchedSessionWithoutTheGrant)
+	ctx.Step(`^the sandbox Codex home holds no trust stanza$`, theSandboxCodexHomeHoldsNoTrustStanza)
+	ctx.Step(`^the dispatched worker has finished$`, theDispatchedWorkerHasFinished)
 
 	// Live, codex-gated.
 	ctx.Step(`^codex is available$`, codexIsAvailable)
@@ -2153,4 +2166,297 @@ func pathIsUnder(path, dir string) bool {
 	}
 	rel, err := filepath.Rel(resolvedDir, resolvedPath)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// --- posture, codex-gated, zero model cost -----------------------------
+
+// codexOfflineHome prepares an isolated Codex home inside the sandbox whose
+// default model provider points at an endpoint nothing is listening on.
+//
+// That is what makes this whole lane free. Codex writes each turn's resolved
+// sandbox policy into the session rollout at turn bootstrap, BEFORE the first
+// model request, so a provider that cannot be reached lets the bootstrap run,
+// records the posture, and then fails on connect. No credential is needed and
+// no tokens are spent, which is why this scenario gates on the binary alone.
+func codexOfflineHome(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	home := filepath.Join(s.homeDir, ".codex")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return ctx, err
+	}
+	const cfg = `model_provider = "offline"
+
+[model_providers.offline]
+name = "offline"
+base_url = "http://127.0.0.1:9/v1"
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+`
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(cfg), 0o600); err != nil {
+		return ctx, err
+	}
+	return ctx, nil
+}
+
+// codexRollouts returns every session rollout under the sandbox Codex home,
+// newest first.
+func codexRollouts(s *testState) ([]string, error) {
+	var out []string
+	root := filepath.Join(s.homeDir, ".codex", "sessions")
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() && strings.HasPrefix(d.Name(), "rollout-") && strings.HasSuffix(d.Name(), ".jsonl") {
+			out = append(out, p)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(out)))
+	return out, nil
+}
+
+// recordedSandboxPolicies reads the sandbox policy of every turn recorded in a
+// rollout, in order. This is the measurement: not what niwa put on a command
+// line, but what the binary resolved when it ran it.
+func recordedSandboxPolicies(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var out []string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
+	for sc.Scan() {
+		var rec struct {
+			Type    string `json:"type"`
+			Payload struct {
+				SandboxPolicy struct {
+					Type string `json:"type"`
+				} `json:"sandbox_policy"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal(sc.Bytes(), &rec) != nil || rec.Type != "turn_context" {
+			continue
+		}
+		out = append(out, rec.Payload.SandboxPolicy.Type)
+	}
+	return out, sc.Err()
+}
+
+// codexSessionIDOf reads the session id a rollout records.
+func codexSessionIDOf(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
+	if !sc.Scan() {
+		return "", fmt.Errorf("%s is empty", path)
+	}
+	var meta struct {
+		Payload struct {
+			SessionID string `json:"session_id"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(sc.Bytes(), &meta); err != nil {
+		return "", err
+	}
+	return meta.Payload.SessionID, nil
+}
+
+// theDispatchedSessionRecordedPostures asserts the postures the real binary
+// recorded across every turn of the dispatched session, in order.
+func theDispatchedSessionRecordedPostures(ctx context.Context, want *godog.Table) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	var wanted []string
+	for _, row := range want.Rows[1:] {
+		wanted = append(wanted, row.Cells[0].Value)
+	}
+
+	// The record is written as the turn bootstraps, and a detached dispatch
+	// returns as soon as it has captured the session id -- which comes off the
+	// rollout's first line, before the turn context is on its second. So this
+	// waits for the turn rather than reading once and calling an unfinished
+	// bootstrap a wrong posture.
+	var got []string
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		rollouts, err := codexRollouts(s)
+		if err == nil && len(rollouts) > 0 {
+			if got, err = recordedSandboxPolicies(rollouts[0]); err != nil {
+				return ctx, err
+			}
+		}
+		if len(got) >= len(wanted) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if len(got) != len(wanted) {
+		return ctx, fmt.Errorf("the session recorded %d turn(s) %v, want %d %v", len(got), got, len(wanted), wanted)
+	}
+	for i := range wanted {
+		if got[i] != wanted[i] {
+			return ctx, fmt.Errorf("turn %d recorded sandbox %q, want %q (all turns: %v)", i+1, got[i], wanted[i], got)
+		}
+	}
+	return ctx, nil
+}
+
+// iResumeTheDispatchedSessionWithTheGrantNiwaPrinted takes the grant out of the
+// command `niwa list` prints and resumes the session with it.
+//
+// The grant token is niwa's own, lifted verbatim from what it printed rather
+// than rebuilt here -- that is what makes this a measurement of niwa's output
+// rather than of a string this test composed. What the step does substitute is
+// the non-interactive resume form: the command niwa prints opens Codex's
+// terminal interface, which needs a pty, and the posture record is written
+// identically either way.
+func iResumeTheDispatchedSessionWithTheGrantNiwaPrinted(ctx context.Context) (context.Context, error) {
+	return resumeDispatchedSession(ctx, true)
+}
+
+// iResumeTheDispatchedSessionWithoutTheGrant is the negative control: the same
+// resume, the same binary, the same session, with only the grant removed. It is
+// what the command niwa printed before this change looked like, and it is what
+// makes the measurement above mean something.
+func iResumeTheDispatchedSessionWithoutTheGrant(ctx context.Context) (context.Context, error) {
+	return resumeDispatchedSession(ctx, false)
+}
+
+func resumeDispatchedSession(ctx context.Context, withGrant bool) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	rollouts, err := codexRollouts(s)
+	if err != nil || len(rollouts) == 0 {
+		return ctx, fmt.Errorf("no session to resume: %v", err)
+	}
+	sessionID, err := codexSessionIDOf(rollouts[0])
+	if err != nil {
+		return ctx, err
+	}
+
+	args := []string{"exec", "resume", sessionID, "--skip-git-repo-check"}
+	workdir := s.workspaceRoot
+	if withGrant {
+		grant, dir, err := grantFromPrintedResume(s.stdout)
+		if err != nil {
+			return ctx, err
+		}
+		args = append(args, "-c", grant)
+		workdir = dir
+	}
+	args = append(args, "--", "probe")
+
+	// Bounded, because this run is never expected to end well: the endpoint is
+	// unreachable and the binary treats that as a network problem worth
+	// retrying rather than a turn that failed. The posture is recorded as the
+	// turn bootstraps, long before any of that, so the deadline costs the
+	// measurement nothing and the exit status is not read.
+	runCtx, cancel := context.WithTimeout(ctx, codexPostureTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(runCtx, "codex", args...)
+	cmd.Dir = workdir
+	cmd.Env = append(os.Environ(), "CODEX_HOME="+filepath.Join(s.homeDir, ".codex"))
+	_ = cmd.Run()
+	return ctx, nil
+}
+
+// grantFromPrintedResume pulls the `-c <grant>` pair out of the resume command
+// niwa printed, and the instance directory named inside it.
+func grantFromPrintedResume(stdout string) (grant, dir string, err error) {
+	for _, line := range strings.Split(stdout, "\n") {
+		_, after, found := strings.Cut(line, "-c '")
+		if !found {
+			continue
+		}
+		grant, _, found = strings.Cut(after, "'")
+		if !found {
+			continue
+		}
+		_, inner, found := strings.Cut(grant, `projects={"`)
+		if !found {
+			continue
+		}
+		dir, _, _ = strings.Cut(inner, `"`)
+		return grant, dir, nil
+	}
+	return "", "", fmt.Errorf("no printed resume command carried a grant:\n%s", stdout)
+}
+
+// theSandboxCodexHomeHoldsNoTrustStanza is the zero-footprint half, asserted on
+// the same run that recorded the posture rather than on its own.
+//
+// It counts `[projects.` stanzas rather than hashing the file, because the
+// binary rewrites unrelated bookkeeping in there on every run -- a checksum
+// would report a change that says nothing about trust. The trap matters here:
+// asking for the same elevation through a sandbox flag makes the binary append
+// the stanza itself, so this is what keeps the narrow route honest.
+func theSandboxCodexHomeHoldsNoTrustStanza(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	data, err := os.ReadFile(filepath.Join(s.homeDir, ".codex", "config.toml"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ctx, nil
+		}
+		return ctx, err
+	}
+	if n := strings.Count(string(data), "[projects."); n != 0 {
+		return ctx, fmt.Errorf("the isolated Codex home grew %d trust stanza(s):\n%s", n, string(data))
+	}
+	return ctx, nil
+}
+
+// theDispatchedWorkerHasFinished ends the launched worker so the session can be
+// resumed.
+//
+// Codex holds an exclusive writer on a session for the length of its turn and
+// refuses to hand it over while that lasts -- which is the agent's own declared
+// behavior, not something this scenario is working around. The launched worker
+// here never finishes on its own: its model endpoint is unreachable, and the
+// binary treats that as a network problem worth retrying rather than a turn
+// that failed.
+//
+// Processes are matched on the scenario's own sandbox path, which appears in
+// the worker's command line and is unique to this run, so nothing outside this
+// sandbox is a candidate. A developer's own Codex session cannot match.
+func theDispatchedWorkerHasFinished(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	root := s.workspaceRoot
+	if !strings.HasPrefix(root, os.TempDir()) {
+		return ctx, fmt.Errorf("refusing to match processes outside a temporary sandbox: %s", root)
+	}
+	for _, sig := range []string{"-TERM", "-KILL"} {
+		_ = exec.Command("pkill", sig, "-f", root).Run()
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			if err := exec.Command("pgrep", "-f", root).Run(); err != nil {
+				return ctx, nil // nothing left running under this sandbox
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+	return ctx, fmt.Errorf("a process is still running under the sandbox at %s", root)
 }
