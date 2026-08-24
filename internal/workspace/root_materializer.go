@@ -105,7 +105,7 @@ type RootMaterializeOptions struct {
 //   - one context document per agent, under that agent's own root filename,
 //     carrying workspace-context content at root altitude.
 //
-// It is the workspace-root counterpart to InstallWorkspaceRootSettings (which,
+// It is the workspace-root counterpart to RootSettingsMaterializer (which,
 // despite its name, targets an INSTANCE root). The true workspace root -- the
 // parent directory holding .niwa/workspace.toml and the instance subdirs -- is
 // not a managed surface today; this is the materializer that makes it one.

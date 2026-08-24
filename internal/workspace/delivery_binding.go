@@ -22,24 +22,47 @@ import (
 // options each one takes. What they are good for is answering "is the thing
 // registered under this name really this materializer", which is what the
 // binding test asks and what keeps the registration from agreeing with itself.
+// The two root materializers are registered ahead of the binding that names
+// them, which agentplan.PendingDeliveries records. Registration is not what
+// makes them run -- the pipeline drives both on every apply already -- it is
+// what will make them traceable from the declaration table once the rows they
+// serve are bound.
 var deliveries = map[agentplan.Delivery]Materializer{
-	agentplan.DeliveryEnv:   &EnvMaterializer{},
-	agentplan.DeliveryFiles: &FilesMaterializer{},
-	agentplan.DeliveryHooks: &HooksMaterializer{},
+	agentplan.DeliveryEnv:          &EnvMaterializer{},
+	agentplan.DeliveryFiles:        &FilesMaterializer{},
+	agentplan.DeliveryHooks:        &HooksMaterializer{},
+	agentplan.DeliveryRootSkills:   &RootSkillsMaterializer{},
+	agentplan.DeliveryRootSettings: &RootSettingsMaterializer{},
 }
 
-// procedureInput is what the pipeline hands a procedure-routed delivery: the
-// developer home it may write under, the repository roots this apply
-// materialized, and the record of what earlier applies wrote there.
+// procedureInput is what the pipeline hands a procedure-routed delivery: what
+// this apply prepared, and where the delivery may write.
 //
-// It is deliberately the same shape for every procedure. A procedure's whole
-// distinguishing feature is the side effect it performs outside the instance;
-// what it is told about the apply is not where the variety belongs.
+// It is deliberately the same shape for every procedure, and every procedure
+// ignores most of it. What distinguishes a procedure-routed delivery is that a
+// plan entry cannot describe it honestly -- the trust entry lands outside every
+// instance, and the niwa plugin tree has to reach disk before an entry can name
+// it as a source -- and that is a statement about the write, not about what the
+// writer needs to be told. So the fields grow as deliveries arrive and the
+// procedures that do not want them do not read them; a shape per procedure
+// would put the variety in the wrong place.
 type procedureInput struct {
 	// DeveloperHome is the developer's own home directory. Empty means the
 	// caller has not been wired to supply one, and the pipeline skips every
 	// procedure rather than resolving a home itself -- see Applier.DeveloperHome.
 	DeveloperHome string
+
+	// InstanceRoot is the instance this apply prepared. A delivery that lands
+	// inside it -- niwa's own plugin tree, extracted where a session started at
+	// the root can be linked to it -- reads it from here rather than resolving
+	// a root of its own.
+	InstanceRoot string
+
+	// Producer is the agent's producer for this delivery, already gated. A
+	// procedure that finishes through the plan machinery declares its entry
+	// from this, so the layout stays the producer's answer even where the
+	// delivery could not be plan-borne end to end.
+	Producer agentplan.Producer
 
 	// RepoRoots are the repository roots this apply materialized, in
 	// classification order.
@@ -49,6 +72,20 @@ type procedureInput struct {
 	// the instance on earlier applies. It is the sole authority for what the
 	// procedure may retract.
 	Recorded []string
+
+	// SkipPluginInstall carries the developer's own opt-out of niwa's plugin
+	// install (--no-install-plugins, or the global setting). It reaches the
+	// delivery as data for the same reason the home does: a procedure that
+	// read the flag itself would be deciding a user's preference from inside
+	// the write it applies to.
+	SkipPluginInstall bool
+
+	// Reporter is where a delivery says what it did. It is here rather than in
+	// the result because what these procedures report is a notice -- the
+	// installation status a developer expects to see once -- and a notice is
+	// not a warning, which is all a procedureResult can carry. Nil is a no-op,
+	// which is what every unit suite in this package hands it.
+	Reporter *Reporter
 }
 
 // procedureResult is what one returns: the record to persist and what the user
@@ -85,8 +122,16 @@ type procedure interface {
 // git-exclude bookkeeping are implemented and still unbound; their bindings land
 // with the work that converts them, and until then their absence from
 // agentplan.BoundCapabilities is what records that honestly.
+//
+// The two niwa-plugin procedures are the other way around: they are registered
+// ahead of the binding that reaches them, so procedureFor answers false for
+// both agents and nothing calls them yet. That staging is recorded in
+// agentplan.PendingDeliveries rather than left for a reader to infer from a
+// registration nothing points at.
 var procedures = map[agentplan.Delivery]procedure{
-	agentplan.DeliveryCodexTrust: codexTrustProcedure{},
+	agentplan.DeliveryCodexTrust:       codexTrustProcedure{},
+	agentplan.DeliveryNiwaPluginClaude: claudeNiwaPluginProcedure{},
+	agentplan.DeliveryNiwaPluginCodex:  codexNiwaPluginProcedure{},
 }
 
 // procedureFor returns the procedure that delivers c to ag, and false when the

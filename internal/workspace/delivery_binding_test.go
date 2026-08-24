@@ -37,12 +37,26 @@ func TestDeliveriesMatchTheBindings(t *testing.T) {
 		}
 	}
 
+	// A registration nothing is bound to is either dead code or a delivery
+	// staged ahead of its binding, and the contract is what tells the two
+	// apart: a name in agentplan.PendingDeliveries is waiting on a capability
+	// the table has not bound yet, and every other unbound name is dead. The
+	// pending list cannot quietly cover a name forever -- agentplan fails the
+	// moment an entry's capability becomes bound, which is the change that has
+	// to delete the entry.
+	pending := agentplan.PendingDeliveries()
 	for name := range deliveries {
+		if _, staged := pending[name]; staged {
+			continue
+		}
 		if !namedMaterializers[name] {
 			t.Errorf("delivery %q is registered but no declaration is bound to it", name)
 		}
 	}
 	for name := range procedures {
+		if _, staged := pending[name]; staged {
+			continue
+		}
 		if !namedProcedures[name] {
 			t.Errorf("procedure %q is registered but no declaration is bound to it", name)
 		}

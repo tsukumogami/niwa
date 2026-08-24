@@ -54,7 +54,7 @@ func TestPromoteDeclaredWithNoValue(t *testing.T) {
 		cfg.Claude.Env.Vars.Values = map[string]config.MaybeSecret{"KEPT": {Plain: "yes"}}
 
 		configDir, instanceRoot := rootSettingsDirs(t)
-		if _, err := InstallWorkspaceRootSettings(cfg, configDir, instanceRoot, nil); err != nil {
+		if _, err := (&RootSettingsMaterializer{}).Materialize(&MaterializeContext{Config: cfg, ConfigDir: configDir, RepoDir: instanceRoot}); err != nil {
 			t.Fatalf("workspace root settings must survive a promoted key with no value: %v", err)
 		}
 
@@ -82,7 +82,7 @@ func TestPromoteDeclaredWithNoValue(t *testing.T) {
 		cfg.Claude.Env.Promote = []string{"GH_TOEKN"}
 
 		configDir, instanceRoot := rootSettingsDirs(t)
-		_, err := InstallWorkspaceRootSettings(cfg, configDir, instanceRoot, nil)
+		_, err := (&RootSettingsMaterializer{}).Materialize(&MaterializeContext{Config: cfg, ConfigDir: configDir, RepoDir: instanceRoot})
 		if err == nil {
 			t.Fatal("a promoted key declared nowhere must stay a hard error")
 		}

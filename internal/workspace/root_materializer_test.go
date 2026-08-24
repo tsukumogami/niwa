@@ -448,7 +448,7 @@ func contains(haystack []string, needle string) bool {
 	return false
 }
 
-func TestInstallWorkspaceRootSettings_InstanceFilesVerbatimTracked(t *testing.T) {
+func TestRootSettingsMaterializer_InstanceFilesVerbatimTracked(t *testing.T) {
 	tmp := t.TempDir()
 	configDir := filepath.Join(tmp, ".niwa")
 	instanceRoot := filepath.Join(tmp, "instance")
@@ -467,9 +467,9 @@ func TestInstallWorkspaceRootSettings_InstanceFilesVerbatimTracked(t *testing.T)
 		Instance:  config.InstanceConfig{Files: map[string]string{"mcp.json": ".mcp.json"}},
 	}
 
-	written, err := InstallWorkspaceRootSettings(cfg, configDir, instanceRoot, map[string]string{})
+	written, err := (&RootSettingsMaterializer{}).Materialize(&MaterializeContext{Config: cfg, ConfigDir: configDir, RepoDir: instanceRoot, RepoIndex: map[string]string{}})
 	if err != nil {
-		t.Fatalf("InstallWorkspaceRootSettings: %v", err)
+		t.Fatalf("RootSettingsMaterializer: %v", err)
 	}
 
 	verbatim := filepath.Join(instanceRoot, ".mcp.json")

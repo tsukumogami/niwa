@@ -17,7 +17,7 @@ type settingsPermissionsDoc struct {
 
 // WorkerPermissionMode reads the coordinator's materialized permission mode from
 // <instanceRoot>/.claude/settings.json. The instance root receives settings.json
-// (not settings.local.json) because InstallWorkspaceRootSettings writes there;
+// (not settings.local.json) because RootSettingsMaterializer writes there;
 // per-repo dirs get settings.local.json instead. Returns "bypassPermissions" if
 // the file exists and permissions.defaultMode equals that value. Returns
 // "acceptEdits" in all other cases: file absent, unreadable, malformed JSON, key

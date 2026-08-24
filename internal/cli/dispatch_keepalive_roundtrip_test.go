@@ -11,7 +11,7 @@ import (
 
 // TestKeepAliveKey_EndToEnd_MaterializeReadBack drives the real path a
 // downstream keep-alive decision travels: a [claude.settings].keepAliveOnDispatch
-// value -> InstallWorkspaceRootSettings -> readInstanceSettings. A one-sided
+// value -> RootSettingsMaterializer -> readInstanceSettings. A one-sided
 // rename of the emit key or the read-back struct tag breaks this test, exactly
 // like the remote-control mirror (TestRemoteControlKey_EndToEnd_MaterializeReadBack):
 // a silent read-back-as-absent would let the host default override a downstream
@@ -40,8 +40,8 @@ func TestKeepAliveKey_EndToEnd_MaterializeReadBack(t *testing.T) {
 					},
 				},
 			}
-			if _, err := workspace.InstallWorkspaceRootSettings(cfg, configDir, instanceRoot, map[string]string{}); err != nil {
-				t.Fatalf("InstallWorkspaceRootSettings: %v", err)
+			if _, err := (&workspace.RootSettingsMaterializer{}).Materialize(&workspace.MaterializeContext{Config: cfg, ConfigDir: configDir, RepoDir: instanceRoot, RepoIndex: map[string]string{}}); err != nil {
+				t.Fatalf("RootSettingsMaterializer: %v", err)
 			}
 			inst, err := readInstanceSettings(instanceRoot)
 			if err != nil {

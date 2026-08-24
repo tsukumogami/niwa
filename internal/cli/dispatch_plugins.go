@@ -214,7 +214,7 @@ type marketplaceSource struct {
 
 // readInstanceSettings reads the dispatched instance's Claude settings from
 // <instancePath>/.claude/settings.json. The instance root receives settings.json
-// (per InstallWorkspaceRootSettings; see internal/workspace/permissions.go) -- the
+// (per RootSettingsMaterializer; see internal/workspace/permissions.go) -- the
 // settings.local.json variant is for per-repo dirs, never the root, so it is not
 // consulted here. Returns an error when the file is absent or not valid JSON;
 // callers treat any error as "nothing to pre-warm."
