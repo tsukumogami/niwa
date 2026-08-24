@@ -67,12 +67,12 @@ type Declaration struct {
 // The Codex column states what niwa delivers today and nothing more. Directory
 // trust is the first row it delivers: the entry that makes every later
 // trust-gated row possible arrives with the writer that produces it, in the
-// same change. Eleven Codex rows are implemented and thirteen are unavailable
-// -- the eleven whose reason is inherent to the agent plus the two whose route
-// exists and is out of this work's scope. Every implemented row flipped in the
-// change that delivered it, never before: writing a future state down early
-// would make the table a plan rather than a record, which is the failure this
-// contract exists to prevent.
+// same change. Fifteen Codex rows are implemented and nine are unavailable, and
+// all nine are inherent to the agent -- no Codex row carries the not-built kind
+// any more, which is to say niwa owes this column nothing a route exists for.
+// Every implemented row flipped in the change that delivered it, never before:
+// writing a future state down early would make the table a plan rather than a
+// record, which is the failure this contract exists to prevent.
 var declarations = []Declaration{
 	// Row 1: workspace and group orientation reaching a repo session.
 	{Capability: WorkspaceOrientation, Agent: agent.AgentClaude, State: StateImplemented},
@@ -280,35 +280,38 @@ var declarations = []Declaration{
 
 	// Row 18: root-installed project skills.
 	{Capability: RootProjectSkills, Agent: agent.AgentClaude, State: StateImplemented},
-	// This row rested on row 2's false reason and inherits its correction. It
-	// said root-started Codex sessions read no configuration at all; they read
-	// the project layer at their own working directory, and skills are the one
-	// thing in that layer measured to load with no trust entry (spike finding
-	// 5), so a skills tree at an instance root would reach a session started
-	// there.
+	// This row rested on row 2's false reason, was corrected to niwa's own debt
+	// once measurement disproved it, and is now paid. Codex loads a skills tree
+	// from the project layer at a root-started session's own working directory,
+	// with no trust entry needed (spike finding 5) -- and niwa writes that half
+	// of the layer at the instance root: the same plugin trees a cloned
+	// repository receives, one directory higher.
 	//
-	// The row stays unavailable, and the kind changes from "the agent cannot
-	// receive this" to "niwa has not built it", because that is now the true
-	// statement. Delivering it means giving the Codex payload layout a second
-	// scope -- it is bound to the repository scope alone today -- and that is a
-	// change to what niwa writes rather than to what it claims, so it belongs
-	// with the rest of the instance-root project layer rather than smuggled in
-	// beside a reason correction.
-	{
-		Capability: RootProjectSkills, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "Codex loads a skills tree from the project layer at a root-started session's own working directory, with no trust entry needed; niwa writes no project layer at an instance root.",
-	},
+	// There is deliberately no Requires edge on directory trust, for the reason
+	// row 5 carries none. Skills are the one thing in the project layer
+	// measured to load untrusted; the configuration keys beside them are not,
+	// and niwa still writes no configuration document at an instance root for
+	// this agent. That scope limit is not something a row here can say -- the
+	// table declares who receives a capability, never from where -- so it lives
+	// in the design and in the guide rather than in an invented row.
+	//
+	// Keeping it a separate row from row 5 is what makes it observable. The
+	// delivery has its own producer method and tags its own entries, so this
+	// row's state can move without silently changing what row 5 delivers.
+	{Capability: RootProjectSkills, Agent: agent.AgentCodex, State: StateImplemented},
 
 	// Row 19: niwa's own plugin.
 	{Capability: NiwaPlugin, Agent: agent.AgentClaude, State: StateImplemented},
-	{
-		Capability: NiwaPlugin, Agent: agent.AgentCodex,
-		State:  StateUnavailable,
-		Kind:   ReasonNotBuilt,
-		Reason: "Codex accepts the identical plugin manifest; the wiring is unbuilt.",
-	},
+	// Codex accepts the identical plugin manifest, and the wiring it was
+	// waiting on is built: the embedded tree is extracted inside the instance
+	// and delivered into the instance root's skills directory, under the one
+	// name row 18's reconcile keeps rather than sweeps.
+	//
+	// The two agents bind to different deliveries under this one row. Claude's
+	// tree lands in the developer's own home and outlives every instance;
+	// Codex's lands inside one instance and is reclaimed with it. One delivery
+	// name over both would assert an equivalence that does not hold.
+	{Capability: NiwaPlugin, Agent: agent.AgentCodex, State: StateImplemented},
 
 	// Row 20: remote-control-at-startup.
 	{Capability: RemoteControl, Agent: agent.AgentClaude, State: StateImplemented},

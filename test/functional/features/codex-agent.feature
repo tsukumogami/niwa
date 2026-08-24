@@ -20,19 +20,27 @@ Feature: prepare every instance for both agents
   -- the silent failure the whole override design exists to prevent. No step
   needs a live session, a network, or a model.
 
-  The project layer niwa writes for Codex -- skills, MCP servers, environment,
-  posture -- lands inside a repository and nowhere else, so the payload
-  assertions below are keyed by a working-tree location. Orientation is the one
-  thing that also lands at the instance root, because a session started there
-  reads its own working directory whether or not a project-root marker was ever
-  found above it. The walker below models that: with no marker in the ancestry
-  it treats the starting directory as the root, which is what codex-cli does.
+  The project layer niwa writes for Codex splits by scope. The configuration
+  half -- MCP servers, environment, posture, all of it one `.codex/config.toml`
+  -- lands inside a repository and nowhere else, so the payload assertions below
+  are keyed by a working-tree location. Orientation and skills also land at the
+  instance root, because a session started there reads its own working directory
+  whether or not a project-root marker was ever found above it, and skills load
+  from that directory without a trust entry while the configuration keys do not.
+  The walker below models the discovery half: with no marker in the ancestry it
+  treats the starting directory as the root, which is what codex-cli does.
 
   The scenarios that do need a live session gate on `codex` being on PATH and
-  skip when it is absent, so the @critical set stays offline and fast. They are
-  tagged @codex-live and are never the only coverage for a mechanism, except
-  the interactive start, where a live check carries information nothing else
-  can.
+  skip when it is absent, so the @critical set stays offline and fast. They
+  come under two tags, because they cost two different things. @codex-live
+  scenarios run a model turn, so their gate wants a login as well as a binary
+  and they are never the only coverage for a mechanism -- except the
+  interactive start, where a live check carries information nothing else can.
+  The @codex-discovery scenario spends nothing: it renders a session's own
+  prompt and reads it, so its gate is the binary alone and it skips only where
+  Codex is not installed. That one is deliberately the only coverage for what
+  it claims, since what a session resolves is not something an offline check
+  can decide.
 
   @critical
   Scenario: a codex-default workspace still materializes the whole Claude tree
@@ -547,6 +555,259 @@ Feature: prepare every instance for both agents
     And the git status of every repo in instance "ws" is clean
 
   # ---------------------------------------------------------------------
+  # The same trees one directory higher, at the instance root -- which is where
+  # `niwa dispatch` puts a background worker's working directory, and the one
+  # place a session stands that belongs to no repository. Beside the plugins the
+  # workspace configures sits the plugin niwa ships itself, extracted out of the
+  # binary into the instance and delivered under its own name.
+  #
+  # Every assertion below is about placement: what niwa wrote, where, and what
+  # it took away again. No session runs here, so none of it says anything about
+  # what a session resolves -- that claim needs the real binary, and it is the
+  # subject of the credential-free live scenario at the end of this file.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: the instance root receives the workspace's skills beside niwa's own
+    Given a clean niwa environment
+    And a local git server is set up
+    And a fake claude for plugin pre-warming
+    And a staged file ".claude-plugin/marketplace.json" with body:
+      """
+      {"name":"demo-market","plugins":[{"name":"demo","source":"./plugins/demo"}]}
+      """
+    And a staged file "plugins/demo/.claude-plugin/plugin.json" with body:
+      """
+      {"name":"demo","version":"0.1.0"}
+      """
+    And a staged file "plugins/demo/skills/greet/SKILL.md" with body:
+      """
+      ---
+      name: greet
+      ---
+      SENTINEL-SKILL-BODY
+      """
+    And a source repo "mkt" exists with the staged files
+    And a source repo "app" exists
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [claude]
+      plugins = ["demo@demo-market"]
+
+      [[claude.marketplaces]]
+      source = "repo:mkt/.claude-plugin/marketplace.json"
+
+      [repos.mkt]
+      url = "{repo:mkt}"
+      group = "tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    # The configured plugin arrives whole, the same bytes it arrives as inside a
+    # repository, and niwa's own arrives beside it from the extraction site the
+    # instance keeps under .niwa/plugin.
+    And the Codex skills tree "demo" at "ws" mirrors "ws/tools/mkt/plugins/demo"
+    And the Codex skills tree "niwa" at "ws" mirrors "ws/.niwa/plugin/niwa"
+    And the file ".codex/skills/niwa/skills/migrate-config/SKILL.md" exists at "ws"
+    And "ws" holds exactly 2 Codex skills trees
+    # And nothing one directory above it. The workspace root holds every other
+    # instance and whatever else the developer keeps there; a tree landing up
+    # here would be niwa writing outside the instance it was asked to prepare.
+    And "." holds exactly 0 Codex skills trees
+    # Reconciliation, not accumulation, at the root as in a repository.
+    When I run "niwa apply ws"
+    Then the exit code is 0
+    When I run "niwa apply ws"
+    Then the exit code is 0
+    And "ws" holds exactly 2 Codex skills trees
+    And the Codex skills tree "demo" at "ws" mirrors "ws/tools/mkt/plugins/demo"
+    And the Codex skills tree "niwa" at "ws" mirrors "ws/.niwa/plugin/niwa"
+    # De-configuring the plugin takes its tree away on the next apply and leaves
+    # niwa's own where it is. The two are delivered by different capabilities
+    # into one directory, so a cleanup built from the configured names alone
+    # would sweep a tree nobody de-configured.
+    When the config repo "ws" is re-pushed with the staged files and body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [[claude.marketplaces]]
+      source = "repo:mkt/.claude-plugin/marketplace.json"
+
+      [repos.mkt]
+      url = "{repo:mkt}"
+      group = "tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    And I run "niwa apply ws"
+    Then the exit code is 0
+    And the file ".codex/skills/demo" does not exist at "ws"
+    And "ws" holds exactly 1 Codex skills tree
+    And the Codex skills tree "niwa" at "ws" mirrors "ws/.niwa/plugin/niwa"
+    And the git status of every repo in instance "ws" is clean
+
+  # ---------------------------------------------------------------------
+  # A workspace is free to call a marketplace `niwa`, and nothing about that
+  # reaches the plugin niwa ships itself. Marketplace content is kept under the
+  # instance's .niwa/marketplaces and niwa's own tree is extracted under
+  # .niwa/plugin, so the two cannot land on each other whatever either is
+  # named; and only a plugin's name ever becomes a delivery name at the root,
+  # never a marketplace's. Both trees arrive, independently, and this scenario
+  # is what keeps that true.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: a marketplace named niwa and niwa's own plugin both land at the root
+    Given a clean niwa environment
+    And a local git server is set up
+    And a fake claude for plugin pre-warming
+    And a staged file ".claude-plugin/marketplace.json" with body:
+      """
+      {"name":"niwa","plugins":[{"name":"demo","source":"./plugins/demo"}]}
+      """
+    And a staged file "plugins/demo/.claude-plugin/plugin.json" with body:
+      """
+      {"name":"demo","version":"0.1.0"}
+      """
+    And a staged file "plugins/demo/skills/greet/SKILL.md" with body:
+      """
+      ---
+      name: greet
+      ---
+      SENTINEL-MARKETPLACE-NAMED-NIWA
+      """
+    And a source repo "mkt" exists with the staged files
+    And a source repo "app" exists
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [claude]
+      plugins = ["demo@niwa"]
+
+      [[claude.marketplaces]]
+      source = "repo:mkt/.claude-plugin/marketplace.json"
+
+      [repos.mkt]
+      url = "{repo:mkt}"
+      group = "tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    # Both trees, each its own source's content: the marketplace's plugin under
+    # the plugin's own name, niwa's under the name only niwa delivers.
+    And "ws" holds exactly 2 Codex skills trees
+    And the Codex skills tree "demo" at "ws" mirrors "ws/tools/mkt/plugins/demo"
+    And the Codex skills tree "niwa" at "ws" mirrors "ws/.niwa/plugin/niwa"
+    And the file ".codex/skills/niwa/skills/migrate-config/SKILL.md" exists at "ws"
+    # Nothing was refused, because nothing collided.
+    And the error output does not contain "is not delivered at the instance root"
+    # The per-repository delivery is the marketplace's plugin and only that.
+    And "ws/tools/app" holds exactly 1 Codex skills tree
+    And the Codex skills tree "demo" at "ws/tools/app" mirrors "ws/tools/mkt/plugins/demo"
+    And the git status of every repo in instance "ws" is clean
+
+  # ---------------------------------------------------------------------
+  # A workspace plugin called `niwa` is the collision that is real: two trees
+  # want one name in one directory, and whichever write ran last would win in
+  # silence. The configured one is refused at the root by stated rule, and the
+  # refusal names both sources, because a developer who configured that plugin
+  # has no other way to tell which tree they are looking at.
+  #
+  # Only the root is affected. Inside a repository there is no niwa tree to
+  # collide with, so the configured plugin is delivered there exactly as any
+  # other -- the refusal is scoped to the one directory that has a conflict,
+  # not to the plugin.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: a workspace plugin named niwa is refused at the root and kept in the repositories
+    Given a clean niwa environment
+    And a local git server is set up
+    And a fake claude for plugin pre-warming
+    And a staged file ".claude-plugin/marketplace.json" with body:
+      """
+      {"name":"demo-market","plugins":[{"name":"niwa","source":"./plugins/niwa"}]}
+      """
+    And a staged file "plugins/niwa/.claude-plugin/plugin.json" with body:
+      """
+      {"name":"niwa","version":"0.1.0"}
+      """
+    And a staged file "plugins/niwa/skills/greet/SKILL.md" with body:
+      """
+      ---
+      name: greet
+      ---
+      SENTINEL-WORKSPACE-PLUGIN-NAMED-NIWA
+      """
+    And a source repo "mkt" exists with the staged files
+    And a source repo "app" exists
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [claude]
+      plugins = ["niwa@demo-market"]
+
+      [[claude.marketplaces]]
+      source = "repo:mkt/.claude-plugin/marketplace.json"
+
+      [repos.mkt]
+      url = "{repo:mkt}"
+      group = "tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    # Reported, and reported with both sources in it: the configured tree that
+    # was skipped, and what holds the name instead.
+    And the error output contains "is not delivered at the instance root"
+    And the error output contains "tools/mkt/plugins/niwa"
+    And the error output contains "that name carries niwa's own plugin there"
+    # The one tree at the root is niwa's own, asserted by content rather than by
+    # name: mirroring is exact, and the configured plugin's tree is not this.
+    And "ws" holds exactly 1 Codex skills tree
+    And the Codex skills tree "niwa" at "ws" mirrors "ws/.niwa/plugin/niwa"
+    And the file ".codex/skills/niwa/skills/migrate-config/SKILL.md" exists at "ws"
+    # And down in the repository, the configured plugin is delivered untouched.
+    And "ws/tools/app" holds exactly 1 Codex skills tree
+    And the Codex skills tree "niwa" at "ws/tools/app" mirrors "ws/tools/mkt/plugins/niwa"
+    And the git status of every repo in instance "ws" is clean
+
+  # ---------------------------------------------------------------------
   # The one write outside the instance. The workspace root is reached through a
   # symlink here, so an entry keyed by the path as handed to niwa -- present,
   # well-formed, and useless -- fails the canonical check.
@@ -993,3 +1254,85 @@ Feature: prepare every instance for both agents
     Then the codex session reached its ready state
     And the codex session output shows no trust or approval prompt
     And the git status of every repo in instance "ws" is clean
+
+  # ---------------------------------------------------------------------
+  # The only scenario in this file that decides what a session resolves rather
+  # than what niwa wrote. `codex debug prompt-input` renders the developer
+  # message a session opens with, and its skills block names every skill the
+  # session resolved and the file each was read from. It consults no credential
+  # and calls no model, so the gate is the binary on PATH and nothing else: a
+  # machine without Codex skips this, a machine without a login does not.
+  #
+  # The second run is what makes the first one mean anything. It stands one
+  # directory below the instance root, so a real, populated skills tree -- the
+  # very one the first run resolved -- sits immediately above it. Those skills
+  # being absent from the second render is what separates "the session loaded
+  # from where it stands" from "the discovery walk went somewhere else and
+  # found them anyway". A negative control that was merely an empty directory
+  # would not tell the two apart.
+  # ---------------------------------------------------------------------
+
+  @codex-discovery
+  Scenario: a live Codex session at the instance root resolves the skills delivered there
+    Given a clean niwa environment
+    And the codex binary is on PATH
+    And a local git server is set up
+    And a fake claude for plugin pre-warming
+    And a staged file ".claude-plugin/marketplace.json" with body:
+      """
+      {"name":"demo-market","plugins":[{"name":"demo","source":"./plugins/demo"}]}
+      """
+    And a staged file "plugins/demo/.claude-plugin/plugin.json" with body:
+      """
+      {"name":"demo","version":"0.1.0"}
+      """
+    And a staged file "plugins/demo/skills/greet/SKILL.md" with body:
+      """
+      ---
+      name: greet
+      description: Greet somebody, for a scenario that needs a resolvable skill.
+      ---
+      SENTINEL-SKILL-BODY
+      """
+    And a source repo "mkt" exists with the staged files
+    And a source repo "app" exists
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [claude]
+      plugins = ["demo@demo-market"]
+
+      [[claude.marketplaces]]
+      source = "repo:mkt/.claude-plugin/marketplace.json"
+
+      [repos.mkt]
+      url = "{repo:mkt}"
+      group = "tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    # A session started where `niwa dispatch` starts one. Both delivered
+    # plugins resolve, each under the same `<plugin>:<skill>` name a Claude
+    # session invokes it by -- niwa's own included, whose doubled name is what
+    # its own frontmatter says it is called.
+    When I render the skills a Codex session at "ws" resolves
+    Then the resolved skills include "demo:greet"
+    And the resolved skills include "niwa:niwa-migrate-config"
+    # And each came out of the tree niwa delivered, not from a skill of the
+    # same name the machine happened to have elsewhere.
+    And the resolved skill "demo:greet" was read from a file under "ws"
+    And the resolved skill "niwa:niwa-migrate-config" was read from a file under "ws"
+    # The control: one directory down, with that whole tree directly overhead.
+    When I render the skills a Codex session at "ws/tools" resolves
+    Then the resolved skills do not include "demo:greet"
+    And the resolved skills do not include "niwa:niwa-migrate-config"

@@ -13,6 +13,7 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
+	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -23,6 +24,30 @@ import (
 // on startup. It is generous (clones are normally seconds) so a slow-but-working
 // network is not cut off.
 const prewarmCmdTimeout = 120 * time.Second
+
+// configurePluginAutoInstall wires the plugin opt-out and the pre-warm seam
+// onto an Applier. Every CLI surface that constructs an Applier (apply, create,
+// reset, ...) must call this helper, so both behave the same regardless of
+// which command surfaced the rank-2 notice.
+//
+// flagOptOut is the per-invocation --no-install-plugins value; the persistent
+// auto_install_plugins = false global-config setting is OR'd in here so callers
+// don't have to load GlobalConfig twice. The opt-out gates two things at once:
+// the embedded niwa plugin's install, and the pre-warming of the workspace's
+// declared marketplaces.
+//
+// What is NOT wired here is the embedded plugin's installer. It used to arrive
+// as a function field, because internal/plugin imported internal/workspace and
+// the cli was the only place that could see both; internal/plugin is a leaf
+// now, so the pipeline calls it directly and there is nothing to inject.
+func configurePluginAutoInstall(applier *workspace.Applier, flagOptOut bool) {
+	skipFromGlobal := false
+	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
+		skipFromGlobal = globalCfg.SkipPluginInstall()
+	}
+	applier.SkipPluginInstall = flagOptOut || skipFromGlobal
+	applier.PrewarmDeclaredPlugins = prewarmDeclaredPlugins
+}
 
 // prewarmDeclaredPlugins resolves an instance's workspace-declared Claude
 // marketplaces and plugins to disk so the FIRST Claude session started in the
@@ -41,9 +66,10 @@ const prewarmCmdTimeout = 120 * time.Second
 // the materialized, post-overlay-merge set of marketplaces/plugins, so reading it
 // back keeps this self-contained and needs no extra config plumbing from the caller.
 //
-// It is best-effort. skipInstall (the same opt-out that gates InstallNiwaPlugin,
-// already OR'd with the global auto_install_plugins setting by the caller) short-
-// circuits it. Every other failure (claude absent, CLI error, unreadable settings)
+// It is best-effort. skipInstall (the same opt-out that gates the embedded
+// plugin's install, already OR'd with the global auto_install_plugins setting by
+// the caller) short-circuits it. Every other failure (claude absent, CLI error,
+// unreadable settings)
 // is a warning, never fatal: Claude still installs from settings.json at startup, so
 // pre-warming only removes the race -- a provision must never be less robust than
 // before when the plugin CLI is unavailable. reporter may be nil.
@@ -99,7 +125,8 @@ func prewarmDeclaredPlugins(instanceRoot string, reporter *workspace.Reporter, s
 }
 
 // warnPrewarm emits a best-effort warning, tolerating a nil reporter (the seam
-// contract allows a nil reporter, mirroring InstallNiwaPlugin).
+// contract allows a nil reporter, mirroring the notice emitters in
+// internal/workspace).
 func warnPrewarm(reporter *workspace.Reporter, format string, a ...any) {
 	if reporter != nil {
 		reporter.Warn(format, a...)
@@ -187,7 +214,7 @@ type marketplaceSource struct {
 
 // readInstanceSettings reads the dispatched instance's Claude settings from
 // <instancePath>/.claude/settings.json. The instance root receives settings.json
-// (per InstallWorkspaceRootSettings; see internal/workspace/permissions.go) -- the
+// (per RootSettingsMaterializer; see internal/workspace/permissions.go) -- the
 // settings.local.json variant is for per-repo dirs, never the root, so it is not
 // consulted here. Returns an error when the file is absent or not valid JSON;
 // callers treat any error as "nothing to pre-warm."

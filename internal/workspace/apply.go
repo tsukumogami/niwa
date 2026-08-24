@@ -113,14 +113,6 @@ type Applier struct {
 	// the embedded plugin. The CLI wires this from flag + global config.
 	SkipPluginInstall bool
 
-	// InstallNiwaPlugin is the test seam for the niwa plugin
-	// auto-installer. Production wires this to plugin.Install via
-	// NewApplier; tests override to capture install-or-skip behavior
-	// without writing to the user's home directory. When nil, the
-	// installer is a no-op — useful for unit tests that don't
-	// exercise rank-2 + plugin-install at the same time.
-	InstallNiwaPlugin func(state *InstanceState, reporter *Reporter, skipInstall bool)
-
 	// PrewarmDeclaredPlugins resolves the instance's workspace-declared Claude
 	// marketplaces/plugins (the github-sourced ones) to disk after the pipeline
 	// materializes .claude/settings.json, so the FIRST Claude session started in
@@ -513,7 +505,11 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 
 	// PRD R10: emit the rank-2 deprecation notice for the team config
 	// once per workspace when the source resolves to the legacy
-	// whole-repo layout, and trigger the niwa plugin auto-install.
+	// whole-repo layout. The notice is all this does now. The plugin carrying
+	// /niwa:migrate-config used to be installed from here; it is a capability
+	// delivery the pipeline makes once per apply, for whichever agents the
+	// contract declares it for, so a workspace on the deprecated layout is no
+	// longer the thing that triggers it.
 	if teamConfigRank == 2 && !sliceContains(initDisclosedNotices, NoticeIDRank2TeamConfig) {
 		identifier := a.ConfigSourceURL
 		if identifier == "" {
@@ -521,9 +517,6 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		}
 		EmitRank2Notice(NoticeIDRank2TeamConfig, identifier, a.Reporter)
 		result.disclosedNotices = append(result.disclosedNotices, NoticeIDRank2TeamConfig)
-		if a.InstallNiwaPlugin != nil {
-			a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
-		}
 	}
 
 	// Resolve the workspace-declared marketplaces/plugins to disk now, while the
@@ -685,13 +678,6 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		}
 		EmitRank2Notice(NoticeIDRank2TeamConfig, identifier, a.Reporter)
 		result.disclosedNotices = append(result.disclosedNotices, NoticeIDRank2TeamConfig)
-		// PRD R16-R20: install the embedded niwa plugin so
-		// /niwa:migrate-config is available. The installer emits its
-		// own notice (installed/up-to-date or skipped); the rank-2
-		// notice above is independent.
-		if a.InstallNiwaPlugin != nil {
-			a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
-		}
 	}
 
 	// Pre-warm the workspace-declared marketplaces/plugins to disk on every apply
@@ -1061,9 +1047,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			if overlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
 				EmitRank2Notice(NoticeIDRank2Overlay, opts.overlayURL, a.Reporter)
 				newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
-				if a.InstallNiwaPlugin != nil {
-					a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
-				}
 			}
 
 		case opts.configSourceURL != "":
@@ -1090,9 +1073,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 					if overlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
 						EmitRank2Notice(NoticeIDRank2Overlay, conventionURL, a.Reporter)
 						newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
-						if a.InstallNiwaPlugin != nil {
-							a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
-						}
 					}
 				}
 			}
@@ -1575,7 +1555,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
-	rootSettingsFiles, err := InstallWorkspaceRootSettings(effectiveCfg, configDir, instanceRoot, repoIndex)
+	rootSettings := &RootSettingsMaterializer{}
+	rootSettingsFiles, err := rootSettings.Materialize(&MaterializeContext{
+		Config:    effectiveCfg,
+		ConfigDir: configDir,
+		RepoDir:   instanceRoot,
+		RepoIndex: repoIndex,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("installing workspace root settings: %w", err)
 	}
@@ -1663,6 +1649,33 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			allWarnings = append(allWarnings, skills.Warnings...)
 			contentExcludes[repoDir] = append(contentExcludes[repoDir], skills.Excludes...)
 		}
+	}
+
+	// Step 6.2b: Deliver the same resolved trees into the instance root, for
+	// each agent whose declaration says root-started sessions read skills from
+	// there. It is a second delivery of the same bytes one directory higher,
+	// answering to its own capability: who receives a delivery is what the two
+	// rows differ on, and a session started at the instance root is not a
+	// session started inside a repository.
+	//
+	// The gate is the workspace-level one -- the same AgentEnabled lookup asked
+	// with no repository name -- because the instance root belongs to no
+	// repository. Step 6.3's sibling payload call below gates the root the same
+	// way.
+	//
+	// Nothing here feeds contentExcludes. That map is keyed by working tree and
+	// consumed by the repository exclude writer, which searches upward for an
+	// enclosing repository; the instance root has none of its own, so its
+	// coverage is written at the root itself by EnsureInstanceGitignore.
+	for _, ag := range agent.All() {
+		rootSkills := &RootSkillsMaterializer{
+			Plugins:  pluginTrees,
+			Producer: agentplan.For(ag).Gated(AgentEnabled(effectiveCfg, "", string(ag))),
+		}
+		if _, err := rootSkills.Materialize(&MaterializeContext{RepoDir: instanceRoot}); err != nil {
+			return nil, fmt.Errorf("delivering %s at the instance root: %w", agentplan.RootProjectSkills, err)
+		}
+		allWarnings = append(allWarnings, rootSkills.Warnings...)
 	}
 
 	// Step 6.3: Generate the workspace's declared MCP servers and session
@@ -1884,7 +1897,26 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	for _, cr := range classified {
 		repoRoots = append(repoRoots, filepath.Join(instanceRoot, cr.Group, cr.Repo.Name))
 	}
-	trustKeys, trustErr := a.deliverDirectoryTrust(repoRoots, opts.existingState, &allWarnings)
+	trustKeys, procErr := a.deliverDirectoryTrust(repoRoots, opts.existingState, &allWarnings)
+
+	// Step 6.5b: Deliver niwa's own plugin, for whichever agents the contract
+	// declares it implemented for. It runs after the root skills delivery
+	// above, so the directory its per-instance half links into has already been
+	// reconciled -- and the reconcile's Keep set carries this tree's name
+	// wherever it is delivered, so the two passes never fight over it.
+	//
+	// Its failure joins the trust failure in the same carried-out error. The
+	// first one wins: what both say is that this apply left something
+	// undelivered, and the instance is on disk either way.
+	//
+	// The notices it emitted join newDisclosures, which is how every other
+	// once-per-workspace notice in this pipeline stops repeating: the caller
+	// persists them, and the next apply hands them back as already told.
+	pluginDisclosures, pluginErr := a.deliverNiwaPlugin(instanceRoot, effectiveCfg, opts.disclosedNotices, &allWarnings)
+	newDisclosures = append(newDisclosures, pluginDisclosures...)
+	if pluginErr != nil && procErr == nil {
+		procErr = pluginErr
+	}
 
 	// Step 6.6: Refresh the env of the instance's existing worktrees, sourcing
 	// from the clones just materialized above. This is the apply-side fan-out of
@@ -2011,7 +2043,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		overlayCommit:    pipelineOverlayCommit,
 		disclosedNotices: newDisclosures,
 		trustKeys:        trustKeys,
-		procedureErr:     trustErr,
+		procedureErr:     procErr,
 		exemptPaths:      exemptPaths,
 	}, nil
 }
@@ -2070,6 +2102,76 @@ func (a *Applier) deliverDirectoryTrust(repoRoots []string, existing *InstanceSt
 		}
 	}
 	return recorded, firstErr
+}
+
+// deliverNiwaPlugin runs the delivery of niwa's own plugin for whichever agents
+// the contract declares it implemented for, and returns the first failure.
+//
+// It replaces the pass that named the installer directly. There is no agent
+// here and no installer call: the loop asks the declaration table which agents
+// receive the capability and the binding which registered procedure serves it,
+// exactly as deliverDirectoryTrust does. The two agents' deliveries are
+// genuinely different acts -- one writes a global tree under the developer's
+// home, the other extracts a per-instance tree and links it into the root
+// skills directory -- and each is a procedure of its own, which is why nothing
+// here has to know which one it just ran.
+//
+// It runs once per apply rather than off the rank-2 deprecation notice, which
+// is where the previous pass hung. A per-instance tree that arrives only for
+// workspaces on a deprecated config layout would be a capability the table
+// declares and an ordinary apply never delivers.
+//
+// An Applier with no developer home has not been wired to write outside the
+// instance, and the pass does not run at all. That is deliberately the whole
+// gate rather than a per-procedure one: every unit suite in this package builds
+// an Applier without a home, and a pass that ran the inside-the-instance half
+// for them would have those suites extracting trees they never asked for. The
+// CLI sets the field on every surface that constructs an Applier.
+//
+// The record is untouched by both procedures, so nothing is carried back. What
+// a record is for is retraction, and neither delivery leaves an entry that
+// could outlive what asked for it: the global tree owns its install path and
+// replaces it wholesale, and the per-instance tree is reclaimed with the
+// instance.
+//
+// What is carried back is the one-time notices a delivery emitted. The install
+// runs on every apply, so without the disclosure record its notice would print
+// on every apply for every workspace -- orientation the first time, noise
+// forever after. disclosed is what the workspace has already been told; the
+// returned ids are what this run added to that.
+func (a *Applier) deliverNiwaPlugin(instanceRoot string, cfg *config.WorkspaceConfig, disclosed []string, warnings *[]string) ([]string, error) {
+	if a.DeveloperHome == "" {
+		return nil, nil
+	}
+
+	var newDisclosures []string
+	var firstErr error
+	for _, ag := range agent.All() {
+		p, ok := procedureFor(agentplan.NiwaPlugin, ag)
+		if !ok {
+			continue
+		}
+		res, err := p.Deliver(procedureInput{
+			DeveloperHome: a.DeveloperHome,
+			InstanceRoot:  instanceRoot,
+			// The instance root belongs to no repository, so the gate is the
+			// workspace-level lookup -- the same one the root skills delivery
+			// and the root payload ask with no repository name.
+			Producer:          agentplan.For(ag).Gated(AgentEnabled(cfg, "", string(ag))),
+			SkipPluginInstall: a.SkipPluginInstall,
+			Reporter:          a.Reporter,
+			// Notices this run has already emitted count as disclosed for the
+			// agents after it, so two agents delivering the same global tree
+			// report it once between them rather than once each.
+			Disclosed: append(append([]string(nil), disclosed...), newDisclosures...),
+		})
+		*warnings = append(*warnings, res.Warnings...)
+		newDisclosures = append(newDisclosures, res.Disclosed...)
+		if err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("delivering %s to %s: %w", agentplan.NiwaPlugin, ag, err)
+		}
+	}
+	return newDisclosures, firstErr
 }
 
 // hashManagedFile builds one managed-file record: the file's content hash, the

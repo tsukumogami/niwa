@@ -1,0 +1,12 @@
+{
+  "name": "niwa",
+  "description": "niwa-managed skills, auto-installed by niwa when needed",
+  "version": "0.1.0",
+  "author": {
+    "name": "tsukumogami"
+  },
+  "homepage": "https://github.com/tsukumogami/niwa",
+  "repository": "https://github.com/tsukumogami/niwa",
+  "license": "Apache-2.0",
+  "skills": "./skills/"
+}

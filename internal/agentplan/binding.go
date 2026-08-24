@@ -35,6 +35,28 @@ const (
 	// configuration. It is procedure-routed: the write lands outside every
 	// instance, so no plan entry could describe it honestly.
 	DeliveryCodexTrust Delivery = "codex-trust"
+
+	// DeliveryRootSkills is the materializer that delivers the workspace's
+	// plugin trees into the instance root's skills directory, for an agent
+	// whose skills arrive as delivered trees.
+	DeliveryRootSkills Delivery = "root-skills"
+
+	// DeliveryRootSettings is the materializer that writes the instance
+	// root's settings document, for an agent whose root-installed skills
+	// arrive by registration rather than as delivered trees.
+	DeliveryRootSettings Delivery = "root-settings"
+
+	// DeliveryNiwaPluginClaude and DeliveryNiwaPluginCodex are niwa's own
+	// plugin, per agent.
+	//
+	// One capability, two delivery names, because the two agents' deliveries
+	// are not the same act. One materializes the embedded tree into the
+	// developer's own home, outside every instance and outliving all of them;
+	// the other materializes it inside one instance and is reclaimed with it.
+	// A single name over both would assert an equivalence that does not hold,
+	// and the binding test's whole job is to make such an assertion checkable.
+	DeliveryNiwaPluginClaude Delivery = "niwa-plugin-claude"
+	DeliveryNiwaPluginCodex  Delivery = "niwa-plugin-codex"
 )
 
 // Binding says which delivery satisfies one implemented (capability, agent)
@@ -49,9 +71,10 @@ type Binding struct {
 
 // boundCapabilities lists the capabilities a named delivery answers for today:
 // the agent-agnostic materializers that this contract declares and binds
-// without restructuring, plus the directory-trust writer, whose delivery is
-// procedure-routed. Their delivery is unchanged -- what is new is that it is
-// now answerable to the declaration table.
+// without restructuring, the directory-trust writer, and the two instance-root
+// rows -- root-installed skills and niwa's own plugin -- whose deliveries are
+// per-agent. For the first three, delivery is unchanged and what is new is that
+// it is now answerable to the declaration table.
 //
 // The list is explicit rather than derived from bindings below, so that
 // deleting a binding is a test failure instead of a quiet narrowing of what
@@ -63,16 +86,19 @@ var boundCapabilities = []Capability{
 	DotenvFiles,
 	FileDistribution,
 	Hooks,
+	RootProjectSkills,
+	NiwaPlugin,
 	DirectoryTrust,
 }
 
 // bindings is one row per implemented (capability, agent) pair among the bound
-// capabilities. Directory trust is the one Codex row: it is implemented for
-// Codex and no such concept for Claude, so it binds in exactly the column the
-// table declares it in. An entry here for a pair the table does not declare
-// implemented is a delivery nobody declared, and a bound capability implemented
-// with no entry here is a declaration nobody delivers. The structural suite
-// checks both directions.
+// capabilities. Each binds in exactly the column the table declares it in:
+// directory trust is Codex-only and no such concept for Claude, hooks are
+// Claude-only, and the two instance-root rows are declared for both agents and
+// bind to a different delivery in each. An entry here for a pair the table does
+// not declare implemented is a delivery nobody declared, and a bound capability
+// implemented with no entry here is a declaration nobody delivers. The
+// structural suite checks both directions.
 var bindings = []Binding{
 	// Both agents bind to the same delivery for the two agent-agnostic
 	// materializers: one writer, one set of bytes, two sessions that read them.
@@ -84,6 +110,31 @@ var bindings = []Binding{
 	{Capability: FileDistribution, Agent: agent.AgentClaude, Delivery: DeliveryFiles},
 	{Capability: FileDistribution, Agent: agent.AgentCodex, Delivery: DeliveryFiles},
 	{Capability: Hooks, Agent: agent.AgentClaude, Delivery: DeliveryHooks},
+
+	// Row 18 is one capability delivered two ways, because the two agents take
+	// root-installed skills by different mechanisms. Codex reads them out of
+	// trees delivered into the instance root's skills directory; Claude takes
+	// them by registration, so what serves its column is the root settings
+	// document that declares the plugins and marketplaces its own startup
+	// reconciler then materializes.
+	{Capability: RootProjectSkills, Agent: agent.AgentCodex, Delivery: DeliveryRootSkills},
+	{Capability: RootProjectSkills, Agent: agent.AgentClaude, Delivery: DeliveryRootSettings},
+
+	// Row 19 is the same shape for a different reason: not two mechanisms but
+	// two lifetimes. Codex's delivery extracts niwa's embedded tree inside the
+	// instance and links it into the instance root's skills directory, where
+	// the session reads it and the instance's own teardown reclaims it.
+	//
+	// Claude's delivery materializes that same tree at the user-level install
+	// path, in Claude Code's plugin format. The claim stops there: it does not
+	// say a Claude session resolves it. On the machine that prepared this work
+	// the marketplace was absent from Claude Code's own registry and no `niwa:*`
+	// skill resolved -- one observation on one machine, recorded so the binding
+	// is not read as promising more than the write it names. Repairing the
+	// registration is separate work.
+	{Capability: NiwaPlugin, Agent: agent.AgentClaude, Delivery: DeliveryNiwaPluginClaude},
+	{Capability: NiwaPlugin, Agent: agent.AgentCodex, Delivery: DeliveryNiwaPluginCodex},
+
 	{Capability: DirectoryTrust, Agent: agent.AgentCodex, Delivery: DeliveryCodexTrust},
 }
 

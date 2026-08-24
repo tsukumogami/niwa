@@ -699,8 +699,17 @@ func runInit(cmd *cobra.Command, args []string) error {
 			// invokes Claude Code. SkipInstall ORs the per-invocation
 			// --no-install-plugins flag with the persistent
 			// auto_install_plugins = false global-config setting (PRD R19).
+			// The developer home arrives as data now, so it is resolved
+			// here rather than inside the installer, and the notice the
+			// installer used to emit is emitted here too. An
+			// unresolvable home comes back as an error, which this path
+			// treats the way it always has: the plugin is not installed
+			// and the init carries on regardless.
 			skipInstall := initNoInstallPlugins || globalCfg.SkipPluginInstall()
-			plugin.Install(nil, reporter, plugin.InstallOpts{SkipInstall: skipInstall})
+			home, _ := os.UserHomeDir()
+			if action, installErr := plugin.Install(home, plugin.InstallOpts{SkipInstall: skipInstall}); installErr == nil {
+				workspace.EmitPluginInstallNotice(action, reporter)
+			}
 		}
 	}
 

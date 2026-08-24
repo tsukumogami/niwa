@@ -311,12 +311,32 @@ func InstallOverlayClaudeContent(overlayDir, instanceRoot string) (string, error
 	return destPath, nil
 }
 
-// InstallWorkspaceRootSettings generates .claude/settings.json at the instance
+// RootSettingsMaterializer generates .claude/settings.json at the instance
 // root with hooks, permissions, env, plugins, and marketplaces. Uses
 // settings.json (not .local) because the instance root is a non-git directory.
 // Plugins and marketplaces are declared declaratively -- Claude Code's startup
-// reconciler handles materialization.
-func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instanceRoot string, repoIndex map[string]string) ([]string, error) {
+// reconciler handles materialization, which is how root-installed skills reach
+// an agent whose plugins arrive by registration rather than as delivered trees.
+//
+// It carries no fields, and that is the whole of what the conversion from a
+// free function changed: every input it needs -- the config, the config
+// directory, the instance root, the repo index -- is already a
+// MaterializeContext field, so there was nothing left over to carry. What the
+// type buys is the name: the declaration table says which agent receives
+// root-installed skills, and the registry in delivery_binding.go says this is
+// what serves that row. A free function delivers the same bytes with nothing
+// tying it to the row it answers for.
+type RootSettingsMaterializer struct{}
+
+// Name is the delivery name the contract binds this materializer under.
+func (m *RootSettingsMaterializer) Name() string { return string(agentplan.DeliveryRootSettings) }
+
+// Materialize writes the instance root's settings document. ctx.RepoDir is the
+// instance root; the field is named for the repositories most materializers
+// write into, and what it means here is the directory being materialized.
+func (m *RootSettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, error) {
+	cfg, configDir, instanceRoot, repoIndex := ctx.Config, ctx.ConfigDir, ctx.RepoDir, ctx.RepoIndex
+
 	effective := MergeInstanceOverrides(cfg)
 
 	// Merge discovered hooks.

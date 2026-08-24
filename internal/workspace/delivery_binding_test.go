@@ -37,6 +37,12 @@ func TestDeliveriesMatchTheBindings(t *testing.T) {
 		}
 	}
 
+	// A registration nothing is bound to is dead code, and this check says so
+	// with no exception. There is deliberately no staging list letting a name
+	// sit here ahead of its binding: a delivery and its binding land in the
+	// same change, so the window this would cover does not exist, and a
+	// tolerated name is a hole in the one check that makes an implemented
+	// capability traceable to the code behind it.
 	for name := range deliveries {
 		if !namedMaterializers[name] {
 			t.Errorf("delivery %q is registered but no declaration is bound to it", name)

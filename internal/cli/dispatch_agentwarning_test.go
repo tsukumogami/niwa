@@ -42,14 +42,19 @@ func recordStderrAtLaunch(t *testing.T, errBuf *bytes.Buffer, into *string) {
 
 // unorientedWarningFragment is the stable middle of the root-launch warning.
 //
-// The warning used to say a root-launched worker received nothing at all, and
-// was triggered by row 2. Row 2 was corrected -- orientation does reach a
-// session at the instance root -- so the sentence and its trigger both narrowed
-// to what is still true: the project layer niwa writes inside repositories is
-// not written at the root, and the skills, MCP servers and posture that ride it
-// do not arrive. The fragment moved with it, which is the point of pinning a
-// fragment rather than the whole line.
-const unorientedWarningFragment = "none of the workspace's skills, MCP servers or posture"
+// It has narrowed twice, and pinning a fragment rather than the whole line is
+// what has let it. The warning first said a root-launched worker received
+// nothing at all, triggered by row 2. Row 2 was corrected -- orientation does
+// reach a session at the instance root -- so the sentence narrowed to the
+// project layer, and the trigger moved to row 18.
+//
+// It has narrowed again for the same kind of reason. Skills now reach a
+// root-started session too, so the warning no longer claims them; what stays
+// missing is the generated configuration document and the three things that
+// ride it. The trigger moved off row 18 as well, because a gate on a row that
+// is now delivered would go silent while the gap it warned about is still
+// real -- see the comment on the warning itself.
+const unorientedWarningFragment = "not the workspace's MCP servers, session environment, or approval and sandbox posture"
 
 // TestDispatch_AgentFlagNamingAnotherAgentWarnsBeforeTheLaunch is the defect:
 // `niwa dispatch --agent codex` provisions an instance and launches a Claude

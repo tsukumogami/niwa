@@ -101,9 +101,17 @@ func TestClaudeGenerationMatchesTheVerbatimRoute(t *testing.T) {
 }
 
 // TestEachAgentTakesOneScope pins where each generated configuration lands. The
-// placements are not symmetric and the asymmetry is the point: Claude reads a
-// project document at the instance root, and Codex reads a project layer only
-// from a project root downward, which an instance root is not.
+// placements are not symmetric and the asymmetry is the point: Claude's
+// generated document goes to the instance root, and Codex's goes inside each
+// repository.
+//
+// The asymmetry is about trust rather than about discovery. Codex does read a
+// project layer at an instance root -- a session's own working directory is
+// always the last of its walk, marker above it or not, which is measured and is
+// how the root skills delivery reaches it. What it will not read there are the
+// configuration keys, which take effect only once the directory carries a trust
+// entry, and niwa writes none for the instance root. So the document has no
+// scope there to be written at, and this test says so by placement.
 func TestEachAgentTakesOneScope(t *testing.T) {
 	servers := []MCPServer{stdioServer()}
 	cases := []struct {
