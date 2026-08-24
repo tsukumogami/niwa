@@ -1,6 +1,24 @@
 ---
 name: dispatch
-description: Hand the work you just discussed to an isolated background agent via `niwa dispatch`. Use when, after a planning chat at the workspace root, you are ready to launch the actual work in its own ephemeral niwa instance rather than doing it in this session. Triggers on "dispatch this", "hand this off", "launch a worker for this", "let's kick this off in its own instance".
+description: >-
+  Run the work just discussed as a background agent in its own fresh niwa
+  instance -- its own clone, its own branch, its own Agent View session --
+  instead of doing it in this conversation. Reach for it at the workspace root
+  when a planning chat turns into doing ("alright, go build it"), when several
+  independent units should be worked at once ("can you do these three
+  refactors in parallel?", "knock all of these out"), when the user wants to
+  stop waiting ("this'll take a while, don't block on me"), when isolation is
+  the constraint ("don't touch my working tree", "start clean on this one"),
+  and on "farm this out", "put it in the background", "queue this up", "fire
+  and forget" -- usually nobody says the word dispatch. The worker starts
+  blind, with the remotes' pushed state and none of this chat, so the
+  self-contained brief this skill writes is its only context; skip it and the
+  work either quietly happens here or lands on a worker that has no idea what
+  was decided. What separates this from an in-session Agent-tool fan-out, or
+  from `shirabe:work-on` and `shirabe:execute`, is where the work runs --
+  another session, another clone -- not what the work is. Do NOT use when the
+  user wants the work done in this session, or when the task depends on
+  uncommitted or unpushed local state the worker's clone cannot see.
 ---
 
 # /dispatch
