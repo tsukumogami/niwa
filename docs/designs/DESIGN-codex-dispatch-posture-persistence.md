@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Proposed
+status: Planned
 upstream: docs/prds/PRD-codex-dispatch-posture-persistence.md
 problem: |
   niwa elevates a dispatched Codex worker with a per-invocation trust
@@ -52,7 +52,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Planned
 
 This design owns the mechanism for carrying niwa's per-invocation workdir
 grant through every command that steps back into a dispatched session:
