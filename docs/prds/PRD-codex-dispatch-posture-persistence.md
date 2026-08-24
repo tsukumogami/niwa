@@ -20,7 +20,8 @@ goals: |
   when the grant stops reaching any re-entry surface, and the
   acceptance evidence is a measurement against the real binary with a
   control, runnable without a login and at zero model cost.
-upstream: docs/briefs/BRIEF-codex-dispatch-posture-persistence.md
+absorbed:
+  - docs/briefs/BRIEF-codex-dispatch-posture-persistence.md
 source_issue: 273
 motivating_context: |
   Measured against the real binary (codex-cli 0.149.0, isolated
@@ -44,6 +45,40 @@ session. It closes its upstream brief's two open questions -- how an
 explicitly requested posture composes with the grant, and which
 re-entry surfaces exist today -- and leaves every mechanism to the
 downstream design.
+
+Absorbed [BRIEF-codex-dispatch-posture-persistence](docs/briefs/BRIEF-codex-dispatch-posture-persistence.md); carried in Absorbed Brief.
+
+## Absorbed Brief
+
+The framing this PRD was written from, carried forward because the brief
+that held it was folded in here.
+
+niwa has to make a dispatched worker writable in a directory the agent
+has never seen, and it does that for one process rather than by writing
+the developer's own configuration. That is a deliberate trade and it is
+the reason the feature exists in the shape it does: a per-process
+override vouches for the one worker niwa starts, while a persisted entry
+would vouch for anything anybody runs in that directory afterwards. So
+the problem is not "the worker can't write" -- it is that a guarantee
+scoped to one process was never carried to the next one, and every door
+back into the session goes through a new process.
+
+The outcome the framing commits to has three parts, and the requirements
+below are written against all three. A developer stepping back into a
+dispatched session finds the worker in the posture niwa launched it
+with, whichever command they came through. A developer who names a
+posture deliberately gets the one they named -- the grant is niwa's
+default for its own workers, not the last word over a person. And niwa's
+footprint does not grow: the fix extends the grant's reach, never its
+blast radius.
+
+That last clause is the boundary, and it was drawn at framing time
+rather than trimmed later. Persisting trust into the developer's own
+configuration would also fix resume, and it is refused anyway, because
+it fixes it by vouching for every future session anyone starts in that
+directory. Whether niwa should ever widen what it writes there is a
+product question that belongs to whoever owns that decision; it is not
+this feature's to settle, and nothing below assumes an answer to it.
 
 ## Problem Statement
 
