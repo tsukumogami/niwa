@@ -21,8 +21,9 @@ import (
 // how the defect this file fixes reached a release.
 //
 // So this file is the only non-test file in the package permitted to read
-// ResumeArgs or HintVerbs, and dispatch_layout_test.go fails any other that
-// does. Both fields are covered, not just the first: the hint block is built
+// ResumeArgs or HintVerbs, and the scan rule that lands with it in
+// dispatch_layout_test.go fails any other that does. Both fields are covered,
+// not just the first: the hint block is built
 // from HintVerbs alone, so a rule naming only ResumeArgs would leave a whole
 // surface able to emit a grantless command without tripping anything.
 //
@@ -98,9 +99,17 @@ func shellToken(s string) string {
 // for this threat already, but stripping produces a command that still looks
 // runnable and no longer does what it says; refusing produces no command, which
 // is a state every caller here already handles.
+//
+// Worth knowing which token this actually guards. The instance directory
+// arrives already neutralised, but only because both declared grant verbs
+// render it with a quoting format verb, which turns a control byte into the
+// text of an escape rather than the escape itself. A future declaration that
+// substituted the path raw would hand this gate the first token that could
+// really redraw a line, and that is the case it is here for -- along with the
+// binary name and the resume arguments, which reach the line unquoted.
 func printableToken(s string) bool {
 	for _, r := range s {
-		if r == 0x1b || unicode.IsControl(r) {
+		if unicode.IsControl(r) {
 			return false
 		}
 	}
@@ -149,24 +158,27 @@ func reentryCommand(spec agentplan.LaunchSpec, handle, workdir string) string {
 // this function knows no agent. An agent whose resume line cannot be rendered
 // gets no hints at all rather than a block missing its most useful line.
 func reentryHints(spec agentplan.LaunchSpec, handle, workdir string) []string {
-	if spec.Binary == "" || len(spec.HintVerbs) == 0 {
+	if spec.Binary == "" || len(spec.HintVerbs) == 0 || len(spec.ResumeArgs) == 0 {
 		return nil
 	}
-	resumeVerb := ""
-	if len(spec.ResumeArgs) > 0 {
-		resumeVerb = spec.ResumeArgs[0]
+	if !watch.IsSafeHandle(handle) {
+		return nil
 	}
+	resumeVerb := spec.ResumeArgs[0]
 	lines := make([]string, 0, len(spec.HintVerbs))
 	for _, verb := range spec.HintVerbs {
+		line := spec.Binary + " " + verb + " " + handle
 		if verb == resumeVerb {
-			cmd := reentryCommand(spec, handle, workdir)
-			if cmd == "" {
-				return nil
-			}
-			lines = append(lines, cmd)
-			continue
+			line = reentryCommand(spec, handle, workdir)
 		}
-		lines = append(lines, spec.Binary+" "+verb+" "+handle)
+		// Every line is printed, so every line passes the print gate -- not
+		// just the one that happens to route through reentryCommand. A block
+		// whose other verbs skipped the gate would be a hole that opened
+		// whenever no hint verb matched the resume verb.
+		if line == "" || !printableToken(line) {
+			return nil
+		}
+		lines = append(lines, line)
 	}
 	return lines
 }

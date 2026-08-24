@@ -23,9 +23,14 @@ const reentryTestDir = "/tmp/inst dir"
 // table instead of the spec it was handed.
 func grantSpec() agentplan.LaunchSpec {
 	return agentplan.LaunchSpec{
-		Binary:           "invented-agent",
-		ResumeArgs:       []string{"reopen", "--by-id"},
-		HintVerbs:        []string{"reopen", "tail", "halt"},
+		Binary:     "invented-agent",
+		ResumeArgs: []string{"reopen", "--by-id"},
+		// The resume verb is deliberately NOT first. With it first, an
+		// implementation that just grants line zero -- never reading
+		// ResumeArgs at all -- passes every assertion below, and both real
+		// agents also declare their resume verb first, so the production
+		// table could never catch it either.
+		HintVerbs:        []string{"tail", "reopen", "halt"},
 		WorkdirGrantArgs: []string{"--vouch", `dir=%q,level="full"`},
 	}
 }
@@ -36,7 +41,7 @@ func grantlessSpec() agentplan.LaunchSpec {
 	return agentplan.LaunchSpec{
 		Binary:     "plain-agent",
 		ResumeArgs: []string{"attach"},
-		HintVerbs:  []string{"attach", "logs"},
+		HintVerbs:  []string{"logs", "attach"},
 	}
 }
 
@@ -72,13 +77,9 @@ func TestReentryArgsWithoutAGrantIsUnchanged(t *testing.T) {
 
 func TestReentryArgsWithoutAnInstanceDirectoryCarriesNoGrant(t *testing.T) {
 	// The degraded case is no grant, never a grant naming nothing.
-	got := reentryArgs(grantSpec(), "sess-1", "")
-	eq(t, got, []string{"reopen", "--by-id", "sess-1"}, "reentryArgs with no workdir")
-	for _, a := range got {
-		if strings.Contains(a, "dir=") {
-			t.Fatalf("a grant was built from an empty working directory: %#v", got)
-		}
-	}
+	eq(t, reentryArgs(grantSpec(), "sess-1", ""),
+		[]string{"reopen", "--by-id", "sess-1"},
+		"reentryArgs with no workdir")
 }
 
 func TestReentryArgsRefusesAnAgentWithNoWayBackIn(t *testing.T) {
@@ -113,6 +114,50 @@ func TestShellTokenQuotesWhatAShellWouldReinterpret(t *testing.T) {
 	}
 }
 
+// wantBareBytes is the set of bytes shellToken may leave unquoted, written out
+// here rather than read from the production constant.
+//
+// That distinction is the whole value of this test. An earlier version derived
+// the expectation from shellSafeToken itself, which meant widening the constant
+// widened the expectation with it: adding `*` -- so a printed path would then
+// glob -- passed. A literal is what makes the sweep able to fail.
+const wantBareBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-"
+
+// TestShellTokenAllowlistIsExact walks every printable ASCII byte and requires
+// bare output exactly when the byte is one this test says is safe. The
+// hand-written table above covers the shapes a reader cares about; this covers
+// the ones nobody thought to write down.
+func TestShellTokenAllowlistIsExact(t *testing.T) {
+	for b := byte(0x20); b <= 0x7e; b++ {
+		in := string(b)
+		bare := shellToken(in) == in
+		safe := strings.ContainsRune(wantBareBytes, rune(b))
+		if bare != safe {
+			t.Errorf("shellToken(%q): passed through bare = %v, want %v", in, bare, safe)
+		}
+	}
+}
+
+// TestReentryHintsRefuseWhenNoVerbResumes covers the shape where no hint verb
+// matches the resume verb. Every line is then a plain management hint carrying
+// the handle, and without a gate on each line niwa would print an unvalidated
+// handle it never checked.
+func TestReentryHintsRefuseWhenNoVerbResumes(t *testing.T) {
+	spec := grantSpec()
+	spec.HintVerbs = []string{"tail", "halt"}
+	eq(t, reentryHints(spec, "sess-1", reentryTestDir),
+		[]string{"invented-agent tail sess-1", "invented-agent halt sess-1"},
+		"reentryHints with no verb matching the resume verb")
+
+	if got := reentryHints(spec, "sess 1; rm -rf /", reentryTestDir); got != nil {
+		t.Errorf("reentryHints = %#v, want nil for an unsafe handle", got)
+	}
+	spec.ResumeArgs = nil
+	if got := reentryHints(spec, "sess-1", reentryTestDir); got != nil {
+		t.Errorf("reentryHints = %#v, want nil when the declaration names no resume verb", got)
+	}
+}
+
 func TestPrintableTokenRefusesWhatRedrawsTheLine(t *testing.T) {
 	for _, ok := range []string{"codex", "/a/b c", `x={"y"}`} {
 		if !printableToken(ok) {
@@ -140,6 +185,9 @@ func TestReentryCommandFailsClosed(t *testing.T) {
 		{"empty handle", func(*agentplan.LaunchSpec) {}, "", reentryTestDir},
 		{"escape in the declaration", func(s *agentplan.LaunchSpec) {
 			s.ResumeArgs = []string{"reopen", "--mode=\x1b[2K"}
+		}, "sess-1", reentryTestDir},
+		{"carriage return in the declaration", func(s *agentplan.LaunchSpec) {
+			s.ResumeArgs = []string{"reopen", "--mode=a\rb"}
 		}, "sess-1", reentryTestDir},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -179,16 +227,19 @@ func TestReentryHintsGrantOnlyTheResumeLine(t *testing.T) {
 	// identical output there. Three verbs and a grant tell them apart.
 	got := reentryHints(grantSpec(), "sess-1", reentryTestDir)
 	want := []string{
-		`invented-agent reopen --by-id --vouch 'dir="/tmp/inst dir",level="full"' sess-1`,
 		"invented-agent tail sess-1",
+		`invented-agent reopen --by-id --vouch 'dir="/tmp/inst dir",level="full"' sess-1`,
 		"invented-agent halt sess-1",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("reentryHints returned %d lines, want %d: %#v", len(got), len(want), got)
 	}
 	eq(t, got, want, "reentryHints")
 }
 
 func TestReentryHintsWithoutAGrantAreUnchanged(t *testing.T) {
 	eq(t, reentryHints(grantlessSpec(), "job-7", reentryTestDir),
-		[]string{"plain-agent attach job-7", "plain-agent logs job-7"},
+		[]string{"plain-agent logs job-7", "plain-agent attach job-7"},
 		"reentryHints for an agent declaring no grant")
 }
 
@@ -231,12 +282,30 @@ func TestPrintedCommandsSurviveAPosixShell(t *testing.T) {
 	eq(t, recordArgv(t, spec.Binary, reentryCommand(spec, "sess-1", reentryTestDir)),
 		wantResume, "argv the shell handed the binary for reentryCommand")
 
-	for i, line := range reentryHints(spec, "sess-1", reentryTestDir) {
+	hints := reentryHints(spec, "sess-1", reentryTestDir)
+	// Pinned: a renderer that returned only the resume line would otherwise
+	// satisfy every per-line assertion below by never reaching them.
+	if len(hints) != 3 {
+		t.Fatalf("reentryHints returned %d lines, want 3: %#v", len(hints), hints)
+	}
+	for i, line := range hints {
 		want := [][]string{
-			wantResume,
 			{"tail", "sess-1"},
+			wantResume,
 			{"halt", "sess-1"},
 		}[i]
 		eq(t, recordArgv(t, spec.Binary, line), want, "argv for hint line "+line)
+	}
+
+	// The hardest tokens go through a real shell rather than being compared as
+	// strings: an embedded single quote, a dollar, and a backtick are where a
+	// quoter that looks right on paper comes apart.
+	for _, dir := range []string{`/tmp/it's dir`, `/tmp/$HOME dir`, "/tmp/`id` dir"} {
+		s2 := spec
+		s2.WorkdirGrantArgs = []string{"--vouch", "dir=%s"}
+		cmd := reentryCommand(s2, "sess-1", dir)
+		eq(t, recordArgv(t, s2.Binary, cmd),
+			[]string{"reopen", "--by-id", "--vouch", "dir=" + dir, "sess-1"},
+			"argv for a directory containing "+dir)
 	}
 }
