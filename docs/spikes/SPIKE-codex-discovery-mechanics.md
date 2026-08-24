@@ -540,6 +540,63 @@ launcher's process group.
 stderr is not empty on a healthy run — 1.4KB of MCP tracing on the measuring
 host — and must never be merged into a `--json` stdout stream.
 
+### 20. The trust override is per process, and a resume is a new process
+
+This finding and the two after it were measured against `codex-cli 0.149.0`, a
+newer build than the rest of this document.
+
+The inline-table override from finding 14 —
+`-c 'projects={"<dir>"={trust_level="trusted"}}'` — grants posture to the one
+invocation carrying it, and a resume is a new invocation. A session launched
+with the override records `sandbox_policy: workspace-write` on its first turn.
+The same session resumed without the override records `read-only`; resumed
+with it, `workspace-write` again.
+
+Two alternative readings were ruled out by measurement rather than argument.
+The drop is not subagent contamination: subagent threads write their own
+separate rollout files, and the drop reproduces on a plain `codex exec resume`
+with no subagent present. And it is not decay within a process: the launched
+process stays `workspace-write` for its whole life, with the first `read-only`
+turn appearing only at the next process's bootstrap.
+
+### 21. A session's resolved posture is observable at zero model cost, with no credential
+
+Codex writes each turn's `turn_context`, carrying `sandbox_policy` and
+`approval_policy`, into the session rollout at turn bootstrap, before the
+first model request. Declaring a model provider whose `base_url` points at an
+unreachable endpoint therefore lets every turn bootstrap, record its posture,
+and then fail on connect. This needs no login, which matters because CI has
+none.
+
+The standing `-m bogus-model-xyz` probe recorded in the Method section still
+works but does need a credential: with one present it constructs the session
+and dies at the API boundary with a 400; under an empty `CODEX_HOME` on
+0.149.0 it did not reach session construction within 60 seconds. Two more
+mechanics bound what a probe can do: a session whose turn is still running
+cannot be resumed (finding 18's writer lock), and against an unreachable
+endpoint the binary retries rather than ending the turn, so a probe has to
+bound its own runs.
+
+### 22. An explicit sandbox selection outranks the trust-derived default, and the two resume forms differ
+
+On the interactive `codex resume`, the override alone records
+`workspace-write`; the override plus an appended `--sandbox read-only` records
+`read-only`. A posture the developer names wins, and it wins in the binary's
+own resolution rather than by argument ordering. The flag surface differs
+between the two resume forms: `codex resume` accepts both `-c` and
+`-s/--sandbox`; `codex exec resume` accepts `-c` and has no sandbox flag at
+all (`error: unexpected argument '--sandbox' found`), which matches the usage
+line recorded in finding 18.
+
+The whole-table override also merges rather than replacing, even though it
+names the entire `projects` table: with the developer's own configuration
+trusting directory A, an invocation in A carrying an override naming only B
+still resolves writable for A. The override adds trust for the directory it
+names and does not strip trust granted elsewhere. The measured case is the
+disjoint one, which is the only shape niwa produces. And the grant is keyed to
+the directory it names: an invocation in an untrusted B resolves read-only,
+and the same invocation with an override naming B resolves writable.
+
 ## What this rules in and out for a writer
 
 Reachable from a workspace instance, without touching the developer's own Codex
@@ -610,6 +667,17 @@ by inode. The correction to the "stale locks are routine" claim came from
 checking the one file that had been assumed stale rather than from a new run,
 which is the whole lesson: the assumption had been made twice from the file's
 age alone, and one look at `/proc/locks` refuted it.
+
+Findings 20 through 22 come from a sixth pass, taken against
+`codex-cli 0.149.0`, a newer build than the rest of this document, while
+making dispatched workers resumable at their launch posture. The isolation
+discipline is the same: an isolated `CODEX_HOME`, with the developer's real
+`~/.codex` never written. Posture was read from each turn's `turn_context`
+line in the session rollout, which finding 21 establishes as written at turn
+bootstrap. The runs needed no credential, because a declared model provider
+with an unreachable `base_url` lets a turn bootstrap and record its posture
+before failing on connect, and each run was bounded from outside, since the
+binary retries the connect rather than ending the turn.
 
 Two ways a measurement here can look rigorous and not be. A checksum of
 `$CODEX_HOME/config.toml` is not a usable change signal, because every run

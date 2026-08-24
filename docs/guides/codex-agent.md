@@ -205,9 +205,33 @@ launches a Claude one, with the same command — the agent is whichever one the
 four sources above resolve to, so `--harness codex` picks it for a single
 dispatch and the settings pick it standing. It provisions a fresh instance, runs
 `codex exec` inside it, recovers the session id from the session record Codex
-writes, and prints `codex resume <id>`. `niwa list` prints that command again
+writes, and prints the resume command — `codex resume <id>` with a trust
+override for the instance directory on it. `niwa list` prints the same command
 beside the instance for as long as the instance exists, so the handle isn't
 stranded in the terminal that dispatched it.
+
+The override is why a session you step back into can still work. Trust granted
+this way is per process: it vouches for the one process you just started and
+evaporates with it, and a resume is a new process. So a `codex resume <id>` you
+type from memory carries no override and comes up read-only with per-command
+approval — the same conversation, minus the posture. The command niwa prints
+carries the override, so a resume you copy from `niwa list` is writable in the
+instance directory, the same as the launch turn. Measured against codex-cli
+0.149.0.
+
+That per-process shape is deliberate, and it's why the override isn't a line in
+your config instead: a persisted entry would vouch for anything anybody runs in
+that directory afterwards, where the override vouches for the one process it
+was handed to and nothing more. niwa still writes exactly one thing into your
+own Codex configuration — one `[projects."<path>"]` block per cloned
+repository, and nothing else; the instance root is not among them. The Safety
+section below is the full account.
+
+If a resume without the override lands you on Codex's own trust prompt, decline
+it and re-copy the command from `niwa list`. Answering yes appends a trust
+entry to your own configuration — niwa didn't write it, and it outlives the
+session. And the override only sets the default: an explicit sandbox choice you
+add to the command wins over it, measured on the interactive resume form.
 
 `--detach` decides how the worker runs. Without it the turn runs in your
 terminal: `codex exec` executes the whole turn in the foreground, so niwa runs
