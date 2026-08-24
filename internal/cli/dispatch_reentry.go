@@ -20,10 +20,12 @@ import (
 // in that was added later and forgot to would fail silently, which is exactly
 // how the defect this file fixes reached a release.
 //
-// So this file is the only non-test file in the package permitted to read
-// ResumeArgs or HintVerbs, and the scan rule that lands with it in
-// dispatch_layout_test.go fails any other that does. Both fields are covered,
-// not just the first: the hint block is built
+// So this file is to be the only non-test file in the package that reads
+// ResumeArgs or HintVerbs, and a scan rule in dispatch_layout_test.go is what
+// will hold that. Neither is true yet at this commit: dispatch.go and list.go
+// still read both fields and still emit the grantless commands this file
+// exists to replace, and the rule lands with the unit that migrates them. Both
+// fields are covered by it, not just the first: the hint block is built
 // from HintVerbs alone, so a rule naming only ResumeArgs would leave a whole
 // surface able to emit a grantless command without tripping anything.
 //
@@ -31,10 +33,10 @@ import (
 // nothing into the developer's own Codex configuration here, exactly as it
 // writes nothing there at launch: an override vouches for the one process it
 // is handed to, where a persisted entry would vouch for anything anybody ever
-// runs in that directory afterwards. Measured against codex-cli 0.149.0: a
-// resumed session carrying the override records workspace-write, the same
-// posture as the launch turn, and the isolated configuration directory it ran
-// against was left without a configuration file at all.
+// runs in that directory afterwards. That the override actually restores the
+// launch posture on a resume, and writes nothing, is measured in the design
+// document with the binary version it was measured against; a version number
+// in a file comment nobody re-measures goes stale quietly.
 
 // reentryArgs returns the argv, excluding the binary, that steps back into a
 // dispatched session: the agent's own resume arguments, then the workdir grant
@@ -56,7 +58,7 @@ func reentryArgs(spec agentplan.LaunchSpec, handle, workdir string) []string {
 	return append(args, handle)
 }
 
-// shellSafeToken is the set of bytes a token may be built from and still be
+// shellSafeBytes is the set of bytes a token may be built from and still be
 // handed to a POSIX shell unquoted. It is an allowlist rather than a denylist
 // on purpose: a denylist that misses one byte prints that byte unquoted, and
 // the whole point of quoting here is that the grant's value carries braces,
@@ -66,7 +68,14 @@ func reentryArgs(spec agentplan.LaunchSpec, handle, workdir string) []string {
 // shell, and `!` is history expansion in an interactive one -- neither is
 // dangerous, both would silently hand the binary something other than what was
 // printed.
-const shellSafeToken = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-"
+//
+// Two other quoters already exist in this repository, in internal/watch and
+// internal/workspace, and this is not a third by oversight. Both of those quote
+// unconditionally, because both embed a value inside a larger command string
+// where bare is never safe. This one renders a command a person reads, and
+// quoting the binary name and the session id would make the common case worse
+// for no gain. A fourth would be the one to argue with.
+const shellSafeBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-"
 
 // shellToken renders one argv element for a command a person will paste into a
 // POSIX shell. A token made only of shell-safe bytes passes through bare, so
@@ -76,13 +85,9 @@ const shellSafeToken = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123
 // The empty string is quoted rather than passed through: bare, it would vanish
 // from the command line instead of arriving as an empty argument.
 func shellToken(s string) string {
-	if s != "" && strings.IndexFunc(s, func(r rune) bool {
-		return !strings.ContainsRune(shellSafeToken, r)
-	}) < 0 {
+	if s != "" && strings.Trim(s, shellSafeBytes) == "" {
 		return s
 	}
-	// The standard escape: close the quoted run, emit a backslash-escaped
-	// quote, reopen it.
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
@@ -148,15 +153,26 @@ func reentryCommand(spec agentplan.LaunchSpec, handle, workdir string) string {
 // reentryHints returns the block of management hints printed after a successful
 // dispatch, one line per verb the agent declares.
 //
-// One of those verbs is the way back into the session, and that line is the
-// whole command -- grant included -- so a developer who pastes it lands in the
-// posture niwa launched the worker with. The others are printed as they always
-// were: a verb that reads logs or stops a worker starts no session, so a grant
-// on it would vouch for nothing and give the developer more to paste around.
+// One of those lines is the way back into the session, and that one is the whole
+// command -- grant included -- so a developer who pastes it lands in the posture
+// niwa launched the worker with. The others are printed as they always were: a
+// verb that reads logs or stops a worker starts no session, so a grant on it
+// would vouch for nothing and give the developer more to paste around.
 //
-// Which verb is which is read from the declaration rather than named here, so
-// this function knows no agent. An agent whose resume line cannot be rendered
-// gets no hints at all rather than a block missing its most useful line.
+// Which line is which is derived from the declaration, so this function names no
+// agent. The derivation is deliberately total rather than positional: a hint
+// verb counts as naming the way back in when it appears ANYWHERE in the resume
+// arguments, the first such verb becomes the full command, and any later one is
+// dropped.
+//
+// That shape exists for a declaration nobody has written yet. Matching only
+// ResumeArgs[0] works for both agents niwa ships, and breaks quietly on the
+// first agent whose resume verb is more than one word: an agent declaring
+// ResumeArgs {"session", "resume"} and HintVerbs {"session", "resume"} would
+// match on "session", put the grant on that line, and then print
+// "<binary> resume <handle>" underneath it -- a command that works, carries no
+// grant, and looks exactly like the one a developer wants. Dropping the later
+// verb is what stops the grantless twin being printed at all.
 func reentryHints(spec agentplan.LaunchSpec, handle, workdir string) []string {
 	if spec.Binary == "" || len(spec.HintVerbs) == 0 || len(spec.ResumeArgs) == 0 {
 		return nil
@@ -164,18 +180,27 @@ func reentryHints(spec agentplan.LaunchSpec, handle, workdir string) []string {
 	if !watch.IsSafeHandle(handle) {
 		return nil
 	}
-	resumeVerb := spec.ResumeArgs[0]
 	lines := make([]string, 0, len(spec.HintVerbs))
+	resumed := false
 	for _, verb := range spec.HintVerbs {
-		line := spec.Binary + " " + verb + " " + handle
-		if verb == resumeVerb {
-			line = reentryCommand(spec, handle, workdir)
+		if slices.Contains(spec.ResumeArgs, verb) {
+			if resumed {
+				continue
+			}
+			resumed = true
+			cmd := reentryCommand(spec, handle, workdir)
+			if cmd == "" {
+				return nil
+			}
+			lines = append(lines, cmd)
+			continue
 		}
-		// Every line is printed, so every line passes the print gate -- not
-		// just the one that happens to route through reentryCommand. A block
-		// whose other verbs skipped the gate would be a hole that opened
-		// whenever no hint verb matched the resume verb.
-		if line == "" || !printableToken(line) {
+		// Every printed line is quoted and gated, not just the one that routes
+		// through reentryCommand. A block whose other verbs skipped that would
+		// be a hole that opened the moment a declaration carried something a
+		// shell or a terminal reinterprets.
+		line := spec.Binary + " " + shellToken(verb) + " " + shellToken(handle)
+		if !printableToken(line) {
 			return nil
 		}
 		lines = append(lines, line)

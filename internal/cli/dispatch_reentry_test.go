@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -47,7 +48,7 @@ func grantlessSpec() agentplan.LaunchSpec {
 
 func eq(t *testing.T, got, want []string, what string) {
 	t.Helper()
-	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+	if !slices.Equal(got, want) {
 		t.Errorf("%s =\n  %#v\nwant\n  %#v", what, got, want)
 	}
 }
@@ -121,6 +122,7 @@ func TestShellTokenQuotesWhatAShellWouldReinterpret(t *testing.T) {
 // the expectation from shellSafeToken itself, which meant widening the constant
 // widened the expectation with it: adding `*` -- so a printed path would then
 // glob -- passed. A literal is what makes the sweep able to fail.
+// nolint: this mirrors shellSafeBytes on purpose; see the comment above.
 const wantBareBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-"
 
 // TestShellTokenAllowlistIsExact walks every printable ASCII byte and requires
@@ -155,6 +157,30 @@ func TestReentryHintsRefuseWhenNoVerbResumes(t *testing.T) {
 	spec.ResumeArgs = nil
 	if got := reentryHints(spec, "sess-1", reentryTestDir); got != nil {
 		t.Errorf("reentryHints = %#v, want nil when the declaration names no resume verb", got)
+	}
+}
+
+// TestReentryHintsHandleAMultiWordResumeVerb is the case the whole derivation
+// was made total for. Matching only the first resume argument puts the grant on
+// the "session" line and then prints "invented-agent resume sess-1" underneath
+// it -- a working, grantless re-entry command that looks exactly like the one a
+// developer wants, which is the silent failure this file exists to close.
+func TestReentryHintsHandleAMultiWordResumeVerb(t *testing.T) {
+	spec := grantSpec()
+	spec.ResumeArgs = []string{"session", "resume"}
+	spec.HintVerbs = []string{"session", "tail", "resume"}
+
+	got := reentryHints(spec, "sess-1", reentryTestDir)
+	want := []string{
+		`invented-agent session resume --vouch 'dir="/tmp/inst dir",level="full"' sess-1`,
+		"invented-agent tail sess-1",
+	}
+	eq(t, got, want, "reentryHints for a multi-word resume verb")
+
+	for _, line := range got {
+		if line == "invented-agent resume sess-1" {
+			t.Fatal("a grantless twin of the resume command was printed")
+		}
 	}
 }
 
@@ -300,6 +326,12 @@ func TestPrintedCommandsSurviveAPosixShell(t *testing.T) {
 	// The hardest tokens go through a real shell rather than being compared as
 	// strings: an embedded single quote, a dollar, and a backtick are where a
 	// quoter that looks right on paper comes apart.
+	//
+	// These use a grant verb that substitutes the path RAW, which is the point.
+	// Both shipped declarations quote it, and that is what keeps a control byte
+	// in a path from ever reaching the line -- but the shell metacharacters
+	// below are not control bytes, so quoting the path would hide whether the
+	// quoter handles them. Raw substitution puts them in front of it.
 	for _, dir := range []string{`/tmp/it's dir`, `/tmp/$HOME dir`, "/tmp/`id` dir"} {
 		s2 := spec
 		s2.WorkdirGrantArgs = []string{"--vouch", "dir=%s"}
