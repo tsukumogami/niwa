@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Planned
+status: Current
 upstream: docs/prds/PRD-codex-instance-root-skills.md
 decision_provenance: inline-resolved
 problem: |
@@ -44,7 +44,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 This design owns the mechanism for closing rows 18 (`RootProjectSkills`)
 and 19 (`NiwaPlugin`) of the capability contract for Codex: the delivery

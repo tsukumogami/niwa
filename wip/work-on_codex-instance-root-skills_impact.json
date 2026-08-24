@@ -1,6 +1,0 @@
-{
-  "impact": "none",
-  "rationale": "origin/main has not advanced since this branch's base commit fc50683: `git rev-list --count fc50683..origin/main` returns 0. There is nothing to rebase onto and no upstream change that could touch the PLAN's foundation, so the classification is about an empty change set rather than a benign one. Every file the PLAN edits (internal/agentplan, internal/workspace, internal/plugin, internal/cli, test/functional, and the docs the finalization cascade transitions) is at the same revision the design was written against.",
-  "rebase_head": "4e5681467caaa5de32d92e59492e53b6baa1a9e7",
-  "main_head": "fc50683fcd27724475108daa571f98c192c93710"
-}
