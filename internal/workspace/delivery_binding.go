@@ -87,6 +87,12 @@ type procedureInput struct {
 	// not a warning, which is all a procedureResult can carry. Nil is a no-op,
 	// which is what every unit suite in this package hands it.
 	Reporter *Reporter
+
+	// Disclosed are the one-time notice ids this workspace has already been
+	// shown. A delivery that runs on every apply and reports what it found
+	// would otherwise repeat itself forever; this is what it checks before
+	// speaking, and Disclosed in the result is how it records that it did.
+	Disclosed []string
 }
 
 // procedureResult is what one returns: the record to persist and what the user
@@ -99,6 +105,11 @@ type procedureResult struct {
 
 	// Warnings are reported alongside the pipeline's other deferred warnings.
 	Warnings []string
+
+	// Disclosed are the one-time notice ids this delivery emitted, for the
+	// caller to persist. Unlike Recorded it adds rather than replaces: it is a
+	// list of things the user has been told, and nothing untells them.
+	Disclosed []string
 }
 
 // procedure is one procedure-routed delivery: a side effect outside the

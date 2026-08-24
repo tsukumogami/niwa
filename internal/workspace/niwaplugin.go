@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/plugin"
@@ -64,7 +65,15 @@ type claudeNiwaPluginProcedure struct{}
 func (claudeNiwaPluginProcedure) Name() string { return string(agentplan.DeliveryNiwaPluginClaude) }
 
 // Deliver installs the embedded plugin under the developer's own home and
-// reports what happened.
+// reports what happened, once.
+//
+// The install itself runs on every apply and is meant to: it is idempotent, and
+// a version that moved on is how the developer gets the current plugin. The
+// notice is the part that must not repeat. It says where the plugin landed and
+// which skill to invoke, which is orientation a developer needs the first time
+// and noise on every apply after it -- so it goes through the same one-time
+// disclosure record the other once-per-workspace notices use, rather than
+// firing alongside every prepared instance.
 //
 // Nothing here fails an apply, which is the posture the installer was built
 // for: a user-environment failure comes back as Failed, whose notice carries
@@ -84,8 +93,16 @@ func (claudeNiwaPluginProcedure) Deliver(in procedureInput) (procedureResult, er
 			Warnings: []string{fmt.Sprintf("could not install the niwa plugin: %v", err)},
 		}, nil
 	}
-	EmitPluginInstallNotice(action, in.Reporter)
-	return procedureResult{Recorded: in.Recorded}, nil
+
+	// A different outcome than last time is a different notice, and the user
+	// hears each one once: a workspace that opted out and later opted back in
+	// is told the plugin is there, having previously been told it was not.
+	id := PluginInstallNoticeID(action)
+	if id == "" || slices.Contains(in.Disclosed, id) {
+		return procedureResult{Recorded: in.Recorded}, nil
+	}
+	EmitPluginNotice(id, plugin.ManualInstallCommand, in.Reporter)
+	return procedureResult{Recorded: in.Recorded, Disclosed: []string{id}}, nil
 }
 
 // codexNiwaPluginProcedure delivers niwa's own plugin to an agent that reads

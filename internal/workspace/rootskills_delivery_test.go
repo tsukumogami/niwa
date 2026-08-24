@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -185,6 +186,85 @@ func TestNiwaPluginTreeIsIdempotentAndPathStable(t *testing.T) {
 	}
 	if _, err := os.Stat(first + ".staging"); err == nil {
 		t.Error("the staging directory outlived the promotion")
+	}
+}
+
+// TestRootDeliveryTypesCarryTheContractsNames pins the four names ahead of the
+// registration that will use them.
+//
+// The registration and the binding land together, in the change that flips the
+// declarations these serve -- that is the rule, and the registry's own test
+// enforces it in both directions. Until then nothing reads these names, so this
+// is what keeps one from drifting in the meantime and turning that change into
+// a debugging session. It also pins the interfaces: a type that stopped
+// satisfying Materializer or procedure would fail here rather than at the
+// moment it is registered.
+func TestRootDeliveryTypesCarryTheContractsNames(t *testing.T) {
+	materializers := map[agentplan.Delivery]Materializer{
+		agentplan.DeliveryRootSkills:   &RootSkillsMaterializer{},
+		agentplan.DeliveryRootSettings: &RootSettingsMaterializer{},
+	}
+	for name, m := range materializers {
+		if got := m.Name(); got != string(name) {
+			t.Errorf("%T names itself %q, want %q", m, got, name)
+		}
+	}
+
+	procs := map[agentplan.Delivery]procedure{
+		agentplan.DeliveryNiwaPluginClaude: claudeNiwaPluginProcedure{},
+		agentplan.DeliveryNiwaPluginCodex:  codexNiwaPluginProcedure{},
+	}
+	for name, p := range procs {
+		if got := p.Name(); got != string(name) {
+			t.Errorf("%T names itself %q, want %q", p, got, name)
+		}
+	}
+}
+
+// TestNiwaPluginNoticeIsToldOnceNotOnEveryApply pins the half of the delivery
+// the user hears.
+//
+// The install runs on every apply, which is what keeps the plugin current, and
+// the notice must not: it says where the plugin landed and which skill to
+// invoke, which is orientation the first time and noise afterwards. The
+// disclosure record is what separates the two, so this runs the delivery twice
+// with the first run's record fed back in and asserts the install happened both
+// times while the notice printed once.
+func TestNiwaPluginNoticeIsToldOnceNotOnEveryApply(t *testing.T) {
+	home := t.TempDir()
+	installed := filepath.Join(home, ".claude", "plugins", "marketplaces", agentplan.NiwaPluginTreeName)
+
+	var out bytes.Buffer
+	in := procedureInput{DeveloperHome: home, Reporter: NewReporter(&out)}
+
+	first, err := (claudeNiwaPluginProcedure{}).Deliver(in)
+	if err != nil {
+		t.Fatalf("first delivery: %v", err)
+	}
+	if out.Len() == 0 {
+		t.Error("the first delivery said nothing about the plugin it installed")
+	}
+	if len(first.Disclosed) != 1 {
+		t.Fatalf("first delivery disclosed %v, want exactly one notice id", first.Disclosed)
+	}
+	if _, statErr := os.Stat(installed); statErr != nil {
+		t.Fatalf("the plugin was not installed: %v", statErr)
+	}
+
+	out.Reset()
+	in.Disclosed = first.Disclosed
+	second, err := (claudeNiwaPluginProcedure{}).Deliver(in)
+	if err != nil {
+		t.Fatalf("second delivery: %v", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("the notice repeated on a later apply: %q", out.String())
+	}
+	if len(second.Disclosed) != 0 {
+		t.Errorf("a repeat delivery disclosed %v", second.Disclosed)
+	}
+	if _, statErr := os.Stat(installed); statErr != nil {
+		t.Errorf("the second delivery left no plugin behind: %v", statErr)
 	}
 }
 

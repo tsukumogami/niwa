@@ -87,6 +87,12 @@ func (codexTrustProcedure) Name() string { return string(agentplan.DeliveryCodex
 // what niwa may later remove from the developer's config, so a run that could
 // not write must still carry forward what earlier runs did. Forgetting a key
 // would strand the entry it names with nothing left able to retract it.
+//
+// Five of the input's fields go unread here, and that is the shape working as
+// intended rather than an oversight: the instance root, the producer, the
+// plugin opt-out, the reporter, and the disclosure record all belong to the
+// niwa-plugin deliveries. This one writes outside every instance, declares no
+// plan, reports through its warnings, and has no notice to repeat.
 func (codexTrustProcedure) Deliver(in procedureInput) (procedureResult, error) {
 	res, err := EnsureCodexTrust(CodexTrustRequest{
 		DeveloperHome: in.DeveloperHome,

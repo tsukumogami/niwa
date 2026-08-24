@@ -1908,8 +1908,14 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Its failure joins the trust failure in the same carried-out error. The
 	// first one wins: what both say is that this apply left something
 	// undelivered, and the instance is on disk either way.
-	if err := a.deliverNiwaPlugin(instanceRoot, effectiveCfg, &allWarnings); err != nil && procErr == nil {
-		procErr = err
+	//
+	// The notices it emitted join newDisclosures, which is how every other
+	// once-per-workspace notice in this pipeline stops repeating: the caller
+	// persists them, and the next apply hands them back as already told.
+	pluginDisclosures, pluginErr := a.deliverNiwaPlugin(instanceRoot, effectiveCfg, opts.disclosedNotices, &allWarnings)
+	newDisclosures = append(newDisclosures, pluginDisclosures...)
+	if pluginErr != nil && procErr == nil {
+		procErr = pluginErr
 	}
 
 	// Step 6.6: Refresh the env of the instance's existing worktrees, sourcing
@@ -2127,11 +2133,18 @@ func (a *Applier) deliverDirectoryTrust(repoRoots []string, existing *InstanceSt
 // could outlive what asked for it: the global tree owns its install path and
 // replaces it wholesale, and the per-instance tree is reclaimed with the
 // instance.
-func (a *Applier) deliverNiwaPlugin(instanceRoot string, cfg *config.WorkspaceConfig, warnings *[]string) error {
+//
+// What is carried back is the one-time notices a delivery emitted. The install
+// runs on every apply, so without the disclosure record its notice would print
+// on every apply for every workspace -- orientation the first time, noise
+// forever after. disclosed is what the workspace has already been told; the
+// returned ids are what this run added to that.
+func (a *Applier) deliverNiwaPlugin(instanceRoot string, cfg *config.WorkspaceConfig, disclosed []string, warnings *[]string) ([]string, error) {
 	if a.DeveloperHome == "" {
-		return nil
+		return nil, nil
 	}
 
+	var newDisclosures []string
 	var firstErr error
 	for _, ag := range agent.All() {
 		p, ok := procedureFor(agentplan.NiwaPlugin, ag)
@@ -2147,13 +2160,18 @@ func (a *Applier) deliverNiwaPlugin(instanceRoot string, cfg *config.WorkspaceCo
 			Producer:          agentplan.For(ag).Gated(AgentEnabled(cfg, "", string(ag))),
 			SkipPluginInstall: a.SkipPluginInstall,
 			Reporter:          a.Reporter,
+			// Notices this run has already emitted count as disclosed for the
+			// agents after it, so two agents delivering the same global tree
+			// report it once between them rather than once each.
+			Disclosed: append(append([]string(nil), disclosed...), newDisclosures...),
 		})
 		*warnings = append(*warnings, res.Warnings...)
+		newDisclosures = append(newDisclosures, res.Disclosed...)
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("delivering %s to %s: %w", agentplan.NiwaPlugin, ag, err)
 		}
 	}
-	return firstErr
+	return newDisclosures, firstErr
 }
 
 // hashManagedFile builds one managed-file record: the file's content hash, the
