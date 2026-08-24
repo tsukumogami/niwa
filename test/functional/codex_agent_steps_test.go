@@ -34,14 +34,22 @@ import (
 //     and no model. The rules it mirrors are the standing spike's measured
 //     findings: a bounded walk from the nearest project-root marker down to the
 //     working directory, one file per directory by strict precedence.
-//   - Everything niwa writes for Codex lands inside a repository, never at the
-//     instance root: Codex reads a project layer from the nearest project root
-//     downward, and an instance root is not one. So the payload steps below are
-//     keyed by a working-tree location rather than by an instance.
-//   - Checks that genuinely need a live session gate on `codex` being on PATH
-//     and on a login the session can use, and skip rather than fail when either
-//     is absent, following the repo's existing pattern for the `claude`-gated
-//     scenarios. See codexIsAvailable for why the login has to be seeded.
+//   - What niwa writes for Codex splits by scope, so the assertions are keyed
+//     by directory rather than by instance. The configuration half -- the
+//     generated `.codex/config.toml` -- lands inside a repository and nowhere
+//     else, because Codex reads a project layer from the nearest project root
+//     downward and an instance root is not one. Orientation and skills also
+//     land at the instance root, which a session started there reads as its own
+//     working directory. resolveLocation is what lets one vocabulary address
+//     both: "ws" is an instance root, "ws/tools/app" a repository inside it,
+//     and "." the workspace root above.
+//   - Checks that genuinely need the real binary skip rather than fail when it
+//     is missing, following the repo's existing pattern for the `claude`-gated
+//     scenarios, and they gate at two different weights. A check that runs a
+//     model turn needs a login as well, which codexIsAvailable seeds and
+//     explains. A check that only renders a session's own prompt needs neither,
+//     so theCodexBinaryIsOnPath gates on the binary alone -- reusing the
+//     heavier gate would make it skip on the machines best placed to run it.
 
 const (
 	// codexPayloadDir is the payload directory niwa owns inside every
@@ -64,6 +72,12 @@ const (
 	// codexGuidePath is the committed user guide whose gap-list section is
 	// generated from the declaration table.
 	codexGuidePath = "../../docs/guides/codex-agent.md"
+	// codexGapRegionBegin and codexGapRegionEnd bound the generated block
+	// inside that guide. Assertions about what the guide publishes as a gap
+	// read between them, so a guide that lost the block fails loudly instead
+	// of passing every such assertion by absence.
+	codexGapRegionBegin = "BEGIN GENERATED: codex gap list"
+	codexGapRegionEnd   = "END GENERATED: codex gap list"
 	// codexLiveTimeout bounds a gated live Codex invocation.
 	codexLiveTimeout = 3 * time.Minute
 	// codexInteractiveDwell is how long the gated interactive scenario lets the
@@ -139,6 +153,11 @@ func registerCodexAgentSteps(ctx *godog.ScenarioContext) {
 
 	// Live, codex-gated.
 	ctx.Step(`^codex is available$`, codexIsAvailable)
+	ctx.Step(`^the codex binary is on PATH$`, theCodexBinaryIsOnPath)
+	ctx.Step(`^I render the skills a Codex session at "([^"]*)" resolves$`, iRenderTheSkillsACodexSessionResolves)
+	ctx.Step(`^the resolved skills include "([^"]*)"$`, theResolvedSkillsInclude)
+	ctx.Step(`^the resolved skills do not include "([^"]*)"$`, theResolvedSkillsDoNotInclude)
+	ctx.Step(`^the resolved skill "([^"]*)" was read from a file under "([^"]*)"$`, theResolvedSkillWasReadFromAFileUnder)
 	ctx.Step(`^the Codex sandbox can run here$`, theCodexSandboxCanRunHere)
 	ctx.Step(`^I run codex exec from "([^"]*)" with prompt:$`, iRunCodexExecFrom)
 	ctx.Step(`^I start an interactive codex session at "([^"]*)" under a pty$`, iStartInteractiveCodexAt)
@@ -1524,21 +1543,35 @@ func theCapabilityIsDeclaredImplementedForCodex(ctx context.Context, name string
 // was never regenerated leaves a developer reading that niwa cannot do
 // something it now does, which is the direction a gap list must never be wrong
 // in.
+//
+// The not-built heading is rendered only when something is under it, so a guide
+// with no such heading is the strongest form of this pass rather than a check
+// that could not run: niwa owes this agent nothing at all. What is not
+// negotiable is that the generated region be present and be the thing read --
+// a guide whose generated block went missing would otherwise satisfy every
+// assertion of this shape at once, which is the vacuous pass the region markers
+// exist to make impossible.
 func theGapListDoesNotMention(ctx context.Context, phrase string) error {
 	data, err := os.ReadFile(codexGuidePath)
 	if err != nil {
 		return fmt.Errorf("reading the committed guide: %w", err)
 	}
 	flat := strings.Join(strings.Fields(string(data)), " ")
-	start := strings.Index(flat, "What niwa hasn't built yet")
+	regionStart := strings.Index(flat, codexGapRegionBegin)
+	regionEnd := strings.Index(flat, codexGapRegionEnd)
+	if regionStart < 0 || regionEnd <= regionStart {
+		return fmt.Errorf("the committed guide carries no generated Codex gap list region, so what it publishes as a gap is not decidable from it")
+	}
+	region := flat[regionStart:regionEnd]
+	start := strings.Index(region, "What niwa hasn't built yet")
 	if start < 0 {
-		return fmt.Errorf("the guide has no not-built section to check")
+		return nil
 	}
-	end := strings.Index(flat[start:], "What doesn't apply to")
+	end := strings.Index(region[start:], "What doesn't apply to")
 	if end < 0 {
-		end = len(flat) - start
+		end = len(region) - start
 	}
-	if section := flat[start : start+end]; strings.Contains(section, phrase) {
+	if section := region[start : start+end]; strings.Contains(section, phrase) {
 		return fmt.Errorf("the guide still lists %q as something niwa has not built:\n%s", phrase, section)
 	}
 	return nil
@@ -1855,4 +1888,226 @@ func theCodexSessionReachedReadyState(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// --- live, binary-gated: what a session resolves -----------------------
+//
+// These steps carry the one claim nothing offline can carry: that a real Codex
+// session, standing where niwa put a delivery, resolves it. `codex debug
+// prompt-input` renders the developer message a session would open with, and
+// its skills block names every skill the session resolved together with the
+// file each was read from. No credential is consulted and no model is called,
+// so the gate below is the binary and nothing else.
+
+// codexPromptInputSkill is one entry from that block: the name a session would
+// invoke, and the file it came from. The file is what separates a delivered
+// skill from a same-named one somewhere else on the machine.
+type codexPromptInputSkill struct {
+	Name string
+	File string
+}
+
+// codexPromptInputHomeDir is the Codex home the render runs under: a directory
+// inside the scenario sandbox that holds no credential, and that both renders in
+// a scenario share, so the only thing differing between them is the directory
+// the session stood in.
+const codexPromptInputHomeDir = ".codex-prompt-input"
+
+// theCodexBinaryIsOnPath gates the discovery scenario, and the binary is the
+// whole gate.
+//
+// It deliberately does not reuse codexIsAvailable. That gate seeds the sandbox
+// with the developer's real credential, because the scenarios behind it spend
+// quota on a model turn and would otherwise die at a 401. This one renders a
+// prompt and stops, so requiring a login would make it skip on precisely the
+// machines that can run it -- a machine with Codex installed and no session
+// signed in is exactly where this check is worth having.
+func theCodexBinaryIsOnPath(ctx context.Context) (context.Context, error) {
+	if _, err := exec.LookPath("codex"); err != nil {
+		return ctx, godog.ErrPending
+	}
+	return ctx, nil
+}
+
+// iRenderTheSkillsACodexSessionResolves runs `codex debug prompt-input` from a
+// location and records the skills it reported.
+//
+// The run is confined to an empty Codex home inside the sandbox. That keeps the
+// developer's own configuration and login out of the measurement, and it is
+// also the assertion R19 asks for in the only form a test can make it: the home
+// this runs against has no credential in it, and the render still produces the
+// block.
+func iRenderTheSkillsACodexSessionResolves(ctx context.Context, loc string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	dir, err := s.resolveLocation(loc)
+	if err != nil {
+		return ctx, err
+	}
+	codexHome := filepath.Join(s.homeDir, codexPromptInputHomeDir)
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		return ctx, fmt.Errorf("creating the isolated Codex home: %w", err)
+	}
+	if _, err := os.Lstat(filepath.Join(codexHome, codexCredentialName)); err == nil {
+		return ctx, fmt.Errorf("the isolated Codex home holds a credential file; this check must not depend on a login")
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, codexLiveTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, "codex", "debug", "prompt-input")
+	cmd.Dir = dir
+	cmd.Env = append(codexLiveEnv(s), "CODEX_HOME="+codexHome)
+	var out, errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	if err := cmd.Run(); err != nil {
+		return ctx, fmt.Errorf("rendering the prompt input at %s: %w\n%s", dir, err, errOut.String())
+	}
+	skills, err := parseCodexPromptInputSkills(out.Bytes())
+	if err != nil {
+		return ctx, fmt.Errorf("at %s: %w", dir, err)
+	}
+	s.codexResolvedSkills = skills
+	s.codexResolvedSkillsDir = dir
+	return ctx, nil
+}
+
+// parseCodexPromptInputSkills pulls the resolved-skills list out of the JSON
+// prompt-input renders.
+//
+// It fails on a render carrying no skills block, and on a block listing no
+// skills at all. Both are the same guard: every "does not include" assertion
+// downstream would pass against an empty list, so an absence only means
+// something once the mechanism is known to have produced a list.
+func parseCodexPromptInputSkills(raw []byte) ([]codexPromptInputSkill, error) {
+	var items []struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, fmt.Errorf("decoding the rendered prompt input: %w", err)
+	}
+
+	block := ""
+	for _, item := range items {
+		for _, content := range item.Content {
+			if strings.Contains(content.Text, "<skills_instructions>") {
+				block = content.Text
+			}
+		}
+	}
+	if block == "" {
+		return nil, fmt.Errorf("the rendered prompt input carries no skills block, so what the session resolved is not decidable from it")
+	}
+
+	var skills []codexPromptInputSkill
+	for _, line := range strings.Split(block, "\n") {
+		entry, ok := strings.CutPrefix(strings.TrimSpace(line), "- ")
+		if !ok {
+			continue
+		}
+		name, rest, ok := strings.Cut(entry, ": ")
+		if !ok {
+			continue
+		}
+		skill := codexPromptInputSkill{Name: name}
+		if i := strings.LastIndex(rest, "(file: "); i >= 0 {
+			skill.File = strings.TrimSuffix(rest[i+len("(file: "):], ")")
+		}
+		skills = append(skills, skill)
+	}
+	if len(skills) == 0 {
+		return nil, fmt.Errorf("the skills block listed no skills at all, so an absence in it would prove nothing:\n%s", block)
+	}
+	return skills, nil
+}
+
+// codexResolvedSkillNames renders the recorded list for an error message.
+func codexResolvedSkillNames(skills []codexPromptInputSkill) []string {
+	names := make([]string, 0, len(skills))
+	for _, sk := range skills {
+		names = append(names, sk.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func theResolvedSkillsInclude(ctx context.Context, name string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	for _, sk := range s.codexResolvedSkills {
+		if sk.Name == name {
+			return nil
+		}
+	}
+	return fmt.Errorf("a session at %s resolved no skill named %q; it resolved %v", s.codexResolvedSkillsDir, name, codexResolvedSkillNames(s.codexResolvedSkills))
+}
+
+func theResolvedSkillsDoNotInclude(ctx context.Context, name string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	for _, sk := range s.codexResolvedSkills {
+		if sk.Name == name {
+			return fmt.Errorf("a session at %s resolved %q, from %s, and must not have", s.codexResolvedSkillsDir, name, sk.File)
+		}
+	}
+	return nil
+}
+
+// theResolvedSkillWasReadFromAFileUnder pins a resolved skill to the delivery
+// it came from. Without it a scenario would pass on a skill of the same name
+// that the machine happened to have somewhere else -- in the developer's Codex
+// home, say -- which is the one way the positive assertion could be right about
+// the name and wrong about the delivery.
+func theResolvedSkillWasReadFromAFileUnder(ctx context.Context, name, loc string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	dir, err := s.resolveLocation(loc)
+	if err != nil {
+		return err
+	}
+	for _, sk := range s.codexResolvedSkills {
+		if sk.Name != name {
+			continue
+		}
+		if sk.File == "" {
+			return fmt.Errorf("the skills block named %q with no source file, so where it was read from is not decidable", name)
+		}
+		if pathIsUnder(sk.File, dir) {
+			return nil
+		}
+		return fmt.Errorf("%q was read from %s, which is not under %s", name, sk.File, dir)
+	}
+	return fmt.Errorf("a session at %s resolved no skill named %q; it resolved %v", s.codexResolvedSkillsDir, name, codexResolvedSkillNames(s.codexResolvedSkills))
+}
+
+// pathIsUnder reports whether path sits inside dir, comparing the resolved form
+// of each when the literal comparison fails. The sandbox is a temporary
+// directory, which on some platforms is itself reached through a symlink, so a
+// literal prefix test alone would be reporting the platform rather than the
+// delivery.
+func pathIsUnder(path, dir string) bool {
+	if rel, err := filepath.Rel(dir, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return true
+	}
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(resolvedDir, resolvedPath)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

@@ -254,18 +254,22 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
 
   # --- The under-equipped-worker warning, before the prompt rather than after ---
   #
-  # A worker launched at the instance root reads the orientation written there
-  # and none of the project layer -- no workspace skills, no MCP servers, no
-  # posture, because niwa writes that layer inside repositories. The warning
-  # that says so is advice about a prompt that has not been written yet. This
-  # scenario asks for a prompt niwa cannot get -- no terminal to capture one
-  # from -- so the run ends before anything is provisioned or launched. The
-  # warning still has to be there: if it printed with the completion hints, as
-  # it once did, this run would say nothing.
+  # A worker launched at the instance root reads the orientation and the
+  # workspace's skills written there, and none of the configuration half -- no
+  # MCP servers, no session environment, no posture -- because for a Codex
+  # session that half lives in a document niwa writes inside repositories. The
+  # warning that says so is advice about a prompt that has not been written
+  # yet. This scenario asks for a prompt niwa cannot get -- no terminal to
+  # capture one from -- so the run ends before anything is provisioned or
+  # launched. The warning still has to be there: if it printed with the
+  # completion hints, as it once did, this run would say nothing.
   #
-  # The wording narrowed when row 2 was corrected. It used to say the worker
-  # received no orientation either, which was true of the declaration at the
-  # time and false of the agent.
+  # The wording has narrowed twice, each time because a delivery arrived rather
+  # than because the sentence was softened. It used to say the worker received
+  # no orientation, which the declaration said and the agent contradicted; then
+  # the workspace's skills started reaching the root too, and the warning
+  # stopped claiming those were missing. Both halves are asserted below, so a
+  # warning that drifts in either direction fails here.
 
   @critical
   Scenario: the under-equipped-worker warning arrives before the prompt is asked for
@@ -282,7 +286,8 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     When I run "niwa dispatch --harness codex" with stdin held open
     Then the exit code is 1
     And the error output contains "not an interactive terminal"
-    And the error output contains "none of the workspace's skills, MCP servers or posture"
+    And the error output contains "reads the workspace orientation and skills written there"
+    And the error output contains "but not the workspace's MCP servers, session environment, or approval and sandbox posture"
 
   # --- Reclaiming a dispatched Codex instance, and refusing to ---
   #

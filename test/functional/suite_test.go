@@ -152,6 +152,13 @@ type testState struct {
 	// invocation, for the gated scenarios that inspect what a session printed.
 	codexSessionOutput string
 
+	// codexResolvedSkills is the skills list the last prompt-input render
+	// reported, and codexResolvedSkillsDir the directory that render ran from.
+	// The directory is kept because every assertion about the list is really
+	// an assertion about where the session stood.
+	codexResolvedSkills    []codexPromptInputSkill
+	codexResolvedSkillsDir string
+
 	// restoreOnCleanup are directories a scenario made read-only on purpose.
 	// The After hook puts them back, because a sandbox holding an unwritable
 	// directory cannot be removed with the rest of them.
