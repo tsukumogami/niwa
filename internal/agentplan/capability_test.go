@@ -84,7 +84,6 @@ func TestLookupAnswersEachDeclaredPair(t *testing.T) {
 		{"implemented for claude", Hooks, agent.AgentClaude, StateImplemented, 0},
 		{"the empty agent is claude", Hooks, agent.Agent(""), StateImplemented, 0},
 		{"inherent gap for codex", MarketplaceRegistration, agent.AgentCodex, StateUnavailable, ReasonAgentCannotReceive},
-		{"niwa's own debt for codex", NiwaPlugin, agent.AgentCodex, StateUnavailable, ReasonNotBuilt},
 		{"claude's one gap", DirectoryTrust, agent.AgentClaude, StateUnavailable, ReasonNoSuchConcept},
 	}
 	for _, tt := range tests {
@@ -106,26 +105,33 @@ func TestLookupAnswersEachDeclaredPair(t *testing.T) {
 	}
 }
 
-// codexFinalGaps is the Codex column at its target, unavailable half: the
-// ten rows that stay unavailable once every Codex delivery has landed, each
-// with the reason kind the PRD's matrix gives it. Nine are inherent to the
-// agent; the last names a route that exists and is out of this work's scope.
+// codexFinalGaps is the Codex column at its target, unavailable half: the nine
+// rows that stay unavailable once every Codex delivery has landed, each with
+// the reason kind the PRD's matrix gives it.
 //
-// Writing them out here is what makes an accidental flip fail with a name in
-// the message. A row missing from this map is one whose delivery is still
+// Every one of them is now inherent to the agent -- five its own mechanics put
+// out of reach, four naming surface that exists only in the other harness. The
+// not-built kind, the one category a developer could act on, is empty for this
+// column: niwa owes Codex nothing that a route exists for. That is a fact about
+// today rather than a rule, which is why the kind survives in the checks below
+// and in the guide's renderer; a capability added tomorrow with a route and no
+// delivery lands there again.
+//
+// Writing the rows out here is what makes an accidental flip fail with a name
+// in the message. A row missing from this map is one whose delivery is still
 // pending, and TestCodexColumnStatesWhatIsDelivered checks it is unavailable
 // with the not-built kind until it lands.
 //
-// Two rows left this map after the matrix was drawn, and for the same reason
-// rather than two. Row 2 was declared an inherent gap on a reason measurement
-// showed is false -- a session's own working directory always contributes its
-// context file -- so it moved to codexDelivered. Row 18 rested on that same
-// reason, and moved out to the pending side: it is niwa's own debt now, not
-// something the agent cannot receive.
+// Three rows left this map after the matrix was drawn. Rows 2 and 18 both
+// rested on one reason measurement showed is false -- that Codex reads nothing
+// at a directory with no project-root marker above it, when a session's own
+// working directory always contributes -- and both are delivered now, row 2 as
+// the composed root document and row 18 as the skills trees beside it. Row 19
+// left as its wiring was built, for both agents.
 //
 // The PRD is amended to match rather than left to disagree, because this
 // comment names it as the authority and a citation that contradicts its source
-// is worse than no citation. See the amendment under the matrix in
+// is worse than no citation. See the amendments under the matrix in
 // docs/prds/PRD-agent-capability-contract.md.
 var codexFinalGaps = map[Capability]ReasonKind{
 	MarketplaceRegistration: ReasonAgentCannotReceive,
@@ -135,22 +141,28 @@ var codexFinalGaps = map[Capability]ReasonKind{
 	PRBodyHook:              ReasonAgentCannotReceive,
 	WorktreeHookDelegation:  ReasonNoSuchConcept,
 	EphemeralSessions:       ReasonAgentCannotReceive,
-	NiwaPlugin:              ReasonNotBuilt,
 	RemoteControl:           ReasonNoSuchConcept,
 	DispatchKeepAlive:       ReasonNoSuchConcept,
 }
 
-// codexDelivered is what niwa delivers to Codex today: thirteen rows against
-// the ten final gaps in codexFinalGaps, with row 18 pending on the side.
-// Directory trust is the first, and deliberately so -- every trust-gated row
-// downstream names it in Requires, and the closure test refuses such an edge
-// while it is unavailable. The list grew one entry per delivery, in the change
-// that landed the delivery, never before it.
+// codexDelivered is what niwa delivers to Codex today: fifteen rows against the
+// nine final gaps in codexFinalGaps, which is the whole column with nothing
+// pending between them. Directory trust is the first, and deliberately so --
+// every trust-gated row downstream names it in Requires, and the closure test
+// refuses such an edge while it is unavailable. The list grew one entry per
+// delivery, in the change that landed the delivery, never before it.
 //
-// The two agent-agnostic rows at the end have no Codex-specific delivery at
-// all: the dotenv writer and the file distributor put the same bytes on disk
-// for whoever opens the session, so what changed for them was the declaration
-// and its binding, not the code that writes.
+// The two instance-root rows at the end are the ones that close the column.
+// Neither needs trust: skills are the one part of the project layer measured to
+// load from an untrusted directory, which is what let them reach a root nobody
+// wrote a trust entry for. The configuration keys beside them still do need it,
+// and still land only inside a repository -- a scope the declaration table has
+// no axis to state, so no row here says it.
+//
+// The two agent-agnostic rows -- dotenv files and file distribution -- have no
+// Codex-specific delivery at all: the dotenv writer and the file distributor
+// put the same bytes on disk for whoever opens the session, so what changed for
+// them was the declaration and its binding, not the code that writes.
 var codexDelivered = []Capability{
 	WorkspaceOrientation,
 	RootSessionOrientation,
@@ -165,6 +177,8 @@ var codexDelivered = []Capability{
 	DotenvFiles,
 	FileDistribution,
 	DispatchLaunch,
+	RootProjectSkills,
+	NiwaPlugin,
 }
 
 // TestCodexColumnTotals pins the shape of the finished column as a pair of
@@ -174,7 +188,7 @@ var codexDelivered = []Capability{
 // per-row check by moving a name from one list to the other -- still has to
 // face a number somebody wrote down on purpose.
 func TestCodexColumnTotals(t *testing.T) {
-	const wantImplemented, wantUnavailable = 13, 11
+	const wantImplemented, wantUnavailable = 15, 9
 
 	implemented, unavailable := 0, 0
 	for _, c := range All() {
@@ -200,6 +214,12 @@ func TestCodexColumnTotals(t *testing.T) {
 // it is finished. A row that flips without its delivery fails here, and so does
 // a row whose final reason kind is edited away from the one the matrix settled
 // on -- which is the drift the reason kinds exist to make visible.
+//
+// Today those two things coincide: every Codex row is either delivered or an
+// inherent gap, so the pending branch below matches nothing. It is kept because
+// what it guards is the next capability added to the closed set, not the last
+// one removed from the pending side -- a new row with a route and no delivery
+// must declare niwa's own debt rather than borrow an inherent reason.
 func TestCodexColumnStatesWhatIsDelivered(t *testing.T) {
 	for _, c := range All() {
 		d, err := Lookup(c, agent.AgentCodex)

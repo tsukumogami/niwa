@@ -20,13 +20,15 @@ Feature: prepare every instance for both agents
   -- the silent failure the whole override design exists to prevent. No step
   needs a live session, a network, or a model.
 
-  The project layer niwa writes for Codex -- skills, MCP servers, environment,
-  posture -- lands inside a repository and nowhere else, so the payload
-  assertions below are keyed by a working-tree location. Orientation is the one
-  thing that also lands at the instance root, because a session started there
-  reads its own working directory whether or not a project-root marker was ever
-  found above it. The walker below models that: with no marker in the ancestry
-  it treats the starting directory as the root, which is what codex-cli does.
+  The project layer niwa writes for Codex splits by scope. The configuration
+  half -- MCP servers, environment, posture, all of it one `.codex/config.toml`
+  -- lands inside a repository and nowhere else, so the payload assertions below
+  are keyed by a working-tree location. Orientation and skills also land at the
+  instance root, because a session started there reads its own working directory
+  whether or not a project-root marker was ever found above it, and skills load
+  from that directory without a trust entry while the configuration keys do not.
+  The walker below models the discovery half: with no marker in the ancestry it
+  treats the starting directory as the root, which is what codex-cli does.
 
   The scenarios that do need a live session gate on `codex` being on PATH and
   skip when it is absent, so the @critical set stays offline and fast. They are

@@ -17,23 +17,24 @@ import (
 // restructuring code that was never agent-shaped would be churn with no
 // property behind it.
 //
+// The two root materializers are the exception to the agent-agnostic rule
+// above. They serve one capability -- root-installed skills -- through two
+// different mechanisms, because the agents take those skills two different
+// ways: one reads delivered trees out of the root's skills directory, the other
+// takes them by registration from the root's settings document. Which one
+// serves which column is the contract's answer, not this map's.
+//
 // The values are zero-value instances used as the identity of the delivery, not
 // as runnable materializers: the pipeline builds its own with the call-site
 // options each one takes. What they are good for is answering "is the thing
 // registered under this name really this materializer", which is what the
 // binding test asks and what keeps the registration from agreeing with itself.
-// The root materializers exist and the pipeline drives them, but they are not
-// registered here yet, and the omission is deliberate. Registration is half of
-// a binding; the other half is a row in agentplan.Bindings, and this map's own
-// test fails on either half without the other. Landing them together -- in the
-// change that flips the declarations they serve -- is the declaration table's
-// stated rule, and it needs no staging mechanism to hold. A registration parked
-// here ahead of its binding would need the binding check taught to tolerate it,
-// which is a hole in the one test that makes these rows' claims falsifiable.
 var deliveries = map[agentplan.Delivery]Materializer{
-	agentplan.DeliveryEnv:   &EnvMaterializer{},
-	agentplan.DeliveryFiles: &FilesMaterializer{},
-	agentplan.DeliveryHooks: &HooksMaterializer{},
+	agentplan.DeliveryEnv:          &EnvMaterializer{},
+	agentplan.DeliveryFiles:        &FilesMaterializer{},
+	agentplan.DeliveryHooks:        &HooksMaterializer{},
+	agentplan.DeliveryRootSkills:   &RootSkillsMaterializer{},
+	agentplan.DeliveryRootSettings: &RootSettingsMaterializer{},
 }
 
 // procedureInput is what the pipeline hands a procedure-routed delivery: what
@@ -130,18 +131,20 @@ type procedure interface {
 // layer exists, so the entry that makes a prepared instance usable goes into the
 // developer's own configuration and could not be a plan entry.
 //
+// niwa's own plugin is the second, and it is one capability under two names.
+// The two deliveries are not the same act -- one lands in the developer's own
+// home and outlives every instance, the other lands inside one instance and is
+// reclaimed with it -- so a single name over both would assert an equivalence
+// that does not hold and this map could not tell them apart.
+//
 // Not every procedure-routed capability is here. Marketplace registration and
 // git-exclude bookkeeping are implemented and still unbound; their bindings land
 // with the work that converts them, and until then their absence from
 // agentplan.BoundCapabilities is what records that honestly.
-//
-// The two niwa-plugin procedures are the same case as the root materializers
-// above: both types exist, procedureFor is already the path that would reach
-// them, and neither is registered until the change that binds the capability
-// they serve. Until then procedureFor answers false for every agent on that
-// row, which is what "inert until the flip" means here.
 var procedures = map[agentplan.Delivery]procedure{
-	agentplan.DeliveryCodexTrust: codexTrustProcedure{},
+	agentplan.DeliveryCodexTrust:       codexTrustProcedure{},
+	agentplan.DeliveryNiwaPluginClaude: claudeNiwaPluginProcedure{},
+	agentplan.DeliveryNiwaPluginCodex:  codexNiwaPluginProcedure{},
 }
 
 // procedureFor returns the procedure that delivers c to ag, and false when the

@@ -463,6 +463,32 @@ Row 22 is also no longer this matrix's answer: background dispatch for Codex was
 built. The settled column is 13 implemented and 11 unavailable, asserted by
 `TestCodexColumnTotals`, which is the authority the target totals above are not.
 
+**Amendment to rows 18 and 19.** Both are now implemented for Codex, and the
+column above is superseded a second time. Row 18's amendment stands as written —
+the reason it rested on was measured false — and what changed since is that the
+debt it named was paid: niwa delivers the workspace's plugin trees into the
+instance root's skills directory, one directory above the per-repository
+delivery and the same bytes. Row 19's wiring was built alongside it, for both
+agents. The settled Codex column is 15 implemented and 9 unavailable, asserted
+by `TestCodexColumnTotals`; the not-built kind now names no Codex row at all,
+which `TestCodexColumnStatesWhatIsDelivered` and the generated gap list in
+`docs/guides/codex-agent.md` both reflect.
+
+Neither row needed a trust entry, and that is why they could land while rows 5,
+8, 9 and 12 stay repository-scoped. Skills load from an untrusted directory;
+the configuration keys beside them take effect only once the directory carries
+one, and niwa still writes no trust entry for the instance root. The scope split
+that leaves is the same limit this matrix has no axis to express, recorded above
+and in the design document.
+
+Row 19 binds to a different delivery per agent, and the Claude claim is narrower
+than the row's word. What that delivery does is materialize niwa's plugin tree
+at the user-level install path in Claude Code's plugin format; it does not claim
+a Claude session resolves it. On the one machine that prepared this work, that
+marketplace was absent from Claude Code's own registry and no `niwa:*` skill
+resolved. That is a single observation, recorded rather than generalized;
+repairing the registration is separate work and out of this row's scope.
+
 **Row 17 is scoped to the trigger, not to provisioning.** niwa learns that a
 session it did not launch has started only from the agent's own session-start
 event, so the row stands or falls with row 13, and Codex hooks are
