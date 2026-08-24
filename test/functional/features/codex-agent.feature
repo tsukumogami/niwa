@@ -128,7 +128,10 @@ Feature: prepare every instance for both agents
     And the dispatch mapping for session "01a00000-0000-7000-8000-00000000beef" records agent "codex"
     # The management hint niwa prints is the agent's own verb, so it is a
     # command the binary actually has.
-    And the output contains "codex resume 01a00000-0000-7000-8000-00000000beef"
+    # This one reads the grant rather than the prefix: the command niwa prints
+    # vouches for the instance the worker was dispatched into, so a developer
+    # who pastes it lands in the posture the launch turn had.
+    And the printed resume command for "01a00000-0000-7000-8000-00000000beef" grants the dispatched instance
     # The launch flags are a contract with the real binary. Without the
     # git-repo-check skip the run refuses to start at all, since an instance
     # root is not a git repository; the trust override is what decides whether
@@ -175,7 +178,7 @@ Feature: prepare every instance for both agents
     # rather than assumed, because "it follows" is how a path stops being
     # covered.
     And the dispatch mapping for session "01a00000-0000-7000-8000-00000000cafe" records agent "codex"
-    And the output contains "codex resume 01a00000-0000-7000-8000-00000000cafe"
+    And the printed resume command for "01a00000-0000-7000-8000-00000000cafe" grants the dispatched instance
     # The developer is the reader here, so the flag that exists to make the
     # output machine-readable is not sent. Everything else is what the detached
     # launch sends.

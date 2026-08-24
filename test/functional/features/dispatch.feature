@@ -250,7 +250,8 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     Then the exit code is 0
     When I run "niwa list" from the workspace root
     Then the exit code is 0
-    And the output contains "codex resume 01a10000-0000-7000-8000-00000000ab1e"
+    And the output contains "codex resume -c "
+    And the output contains "01a10000-0000-7000-8000-00000000ab1e"
 
   # --- The under-equipped-worker warning, before the prompt rather than after ---
   #

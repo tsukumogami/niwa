@@ -150,6 +150,7 @@ func registerCodexAgentSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the dispatch mapping for session "([^"]*)" records agent "([^"]*)"$`, theDispatchMappingRecordsAgent)
 	ctx.Step(`^the codex launch argv contains "([^"]*)"$`, theCodexLaunchArgvContains)
 	ctx.Step(`^the codex launch argv does not contain "([^"]*)"$`, theCodexLaunchArgvDoesNotContain)
+	ctx.Step(`^the printed resume command for "([^"]*)" grants the dispatched instance$`, thePrintedResumeCommandGrantsTheInstance)
 
 	// Live, codex-gated.
 	ctx.Step(`^codex is available$`, codexIsAvailable)
@@ -1706,6 +1707,48 @@ func theCodexLaunchArgvDoesNotContain(ctx context.Context, fragment string) erro
 	}
 	if strings.Contains(string(data), fragment) {
 		return fmt.Errorf("the launch argv contains %q, which it must not:\n%s", fragment, string(data))
+	}
+	return nil
+}
+
+// thePrintedResumeCommandGrantsTheInstance asserts the resume command niwa
+// printed carries the trust override for the instance the worker was dispatched
+// into, not merely the verb and the handle.
+//
+// The grantless form is what the defect looked like: `codex resume <id>` is a
+// command that runs, reaches the right session, and comes up read-only. So a
+// scenario that only asserted the verb and the handle passed throughout the
+// defect's whole life, which is why this step reads the grant.
+func thePrintedResumeCommandGrantsTheInstance(ctx context.Context, handle string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	var line string
+	for _, l := range strings.Split(s.stdout, "\n") {
+		if strings.Contains(l, "resume") && strings.Contains(l, handle) {
+			line = strings.TrimSpace(l)
+			break
+		}
+	}
+	if line == "" {
+		return fmt.Errorf("no printed resume command for handle %q:\n%s", handle, s.stdout)
+	}
+	// The instance directory is the one dispatch reported, so the assertion
+	// names the same path the developer would paste rather than a guess at it.
+	instance := ""
+	for _, l := range strings.Split(s.stdout, "\n") {
+		if _, after, found := strings.Cut(l, "instance: "); found {
+			instance = strings.TrimSpace(after)
+			break
+		}
+	}
+	if instance == "" {
+		return fmt.Errorf("dispatch printed no instance path:\n%s", s.stdout)
+	}
+	want := `projects={"` + instance + `"={trust_level="trusted"}}`
+	if !strings.Contains(line, want) {
+		return fmt.Errorf("the printed resume command does not grant the instance.\nwant %q in:\n  %s", want, line)
 	}
 	return nil
 }
