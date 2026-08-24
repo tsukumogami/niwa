@@ -176,7 +176,14 @@ var dispatchAttach = func(spec agentplan.LaunchSpec, handle, workdir string) err
 	if err != nil {
 		return fmt.Errorf("%s binary not found in PATH: %w", spec.Binary, err)
 	}
-	cmd := exec.Command(bin, reentryArgs(spec, handle, workdir)...)
+	args := reentryArgs(spec, handle, workdir)
+	if len(args) == 0 {
+		// An agent that declares no way back into a session. Running the binary
+		// bare would start a FRESH one, which looks like a successful attach
+		// and is a different session in every way that matters to the work.
+		return fmt.Errorf("%s declares no way to step back into a session", spec.Binary)
+	}
+	cmd := exec.Command(bin, args...)
 	// The resumed session runs where it ran. An agent that narrows its own
 	// session list by working directory would otherwise refuse to find a
 	// session started somewhere else, and a session that reopened in the

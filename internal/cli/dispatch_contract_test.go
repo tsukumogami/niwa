@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -666,4 +667,78 @@ func dispatchedInstancePath(t *testing.T, stdout string) string {
 	}
 	t.Fatalf("dispatch printed no instance path:\n%s", stdout)
 	return ""
+}
+
+// TestDispatchAttachFailureFallbackCarriesTheGrant covers the third printed
+// surface: the line dispatch prints when the attach it tried could not run.
+//
+// It gets its own test because it is the one a reader skims past. Reverting it
+// to the old hand-joined form left the whole package suite green -- nothing
+// else mentions it -- and a developer who lands there is by definition already
+// having a bad time, so handing them a command that comes up read-only is the
+// worst moment to do it.
+func TestDispatchAttachFailureFallbackCarriesTheGrant(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, "")
+	installDispatchFakes(t, root)
+	dispatchDetach = false
+
+	spec := grantingSpec()
+	prevSpec := dispatchLaunchSpec
+	dispatchLaunchSpec = func(agent.Agent) (agentplan.LaunchSpec, bool) { return spec, true }
+	t.Cleanup(func() { dispatchLaunchSpec = prevSpec })
+
+	prevLook := lookAgentBinary
+	lookAgentBinary = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	t.Cleanup(func() { lookAgentBinary = prevLook })
+
+	prevAttach := dispatchAttach
+	dispatchAttach = func(agentplan.LaunchSpec, string, string) error {
+		return fmt.Errorf("the terminal could not be handed over")
+	}
+	t.Cleanup(func() { dispatchAttach = prevAttach })
+
+	stdout, stderr, err := runDispatchCmd(t, "do a thing")
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	instance := dispatchedInstancePath(t, stdout)
+	want := "granting-agent reopen --vouch " + shellToken(`dir="`+instance+`"`) + " " + dispatchTestShortID
+	if !strings.Contains(stderr, want) {
+		t.Errorf("the attach-failure fallback does not carry the grant.\nwant %q in:\n%s", want, stderr)
+	}
+}
+
+// TestSessionResumeCommandFailsClosed pins the cases niwa list must answer with
+// nothing rather than with a command that fails at the binary.
+//
+// Two of these guards used to live in sessionResumeCommand's own preamble and
+// now live in the constructor it delegates to. The behaviour is the same; this
+// is what makes that delegation something a later refactor cannot quietly
+// undo.
+func TestSessionResumeCommandFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mapping workspace.SessionMapping
+		spec    agentplan.LaunchSpec
+		ok      bool
+	}{
+		{"an agent that does not parse", workspace.SessionMapping{Agent: "not-an-agent", Handle: "h1", InstancePath: "/i"}, grantingSpec(), true},
+		{"a spec that does not resolve", workspace.SessionMapping{Agent: string(agent.AgentCodex), Handle: "h1", InstancePath: "/i"}, agentplan.LaunchSpec{}, false},
+		{"an empty binary", workspace.SessionMapping{Agent: string(agent.AgentCodex), Handle: "h1", InstancePath: "/i"}, agentplan.LaunchSpec{ResumeArgs: []string{"reopen"}}, true},
+		{"a declaration naming no way back in", workspace.SessionMapping{Agent: string(agent.AgentCodex), Handle: "h1", InstancePath: "/i"}, agentplan.LaunchSpec{Binary: "granting-agent"}, true},
+		{"no usable handle", workspace.SessionMapping{Agent: string(agent.AgentCodex), InstancePath: "/i"}, agentplan.LaunchSpec{Binary: "b", ResumeArgs: []string{"reopen"}, Records: agentplan.SessionRecords{Handle: agentplan.HandleRecordDir}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, ok := tc.spec, tc.ok
+			prev := dispatchLaunchSpec
+			dispatchLaunchSpec = func(agent.Agent) (agentplan.LaunchSpec, bool) { return spec, ok }
+			t.Cleanup(func() { dispatchLaunchSpec = prev })
+
+			if got := sessionResumeCommand(tc.mapping); got != "" {
+				t.Errorf("sessionResumeCommand = %q, want \"\"", got)
+			}
+		})
+	}
 }

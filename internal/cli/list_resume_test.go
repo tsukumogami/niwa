@@ -234,7 +234,6 @@ func TestList_LegacyMappingOffersNothingItCannotBack(t *testing.T) {
 // TestList_UnmappedInstanceStaysAPlainLine keeps the new line bound to
 // dispatched sessions: an ordinary instance lists exactly as it did.
 func TestList_UnmappedInstanceStaysAPlainLine(t *testing.T) {
-	useInventedSpecs(t)
 	t.Setenv("HOME", t.TempDir())
 	root := setupDispatchWorkspace(t)
 	seedInstance(t, root, "test-ws-1", 1)

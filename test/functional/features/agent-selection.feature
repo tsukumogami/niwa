@@ -42,9 +42,11 @@ Feature: choosing which agent niwa launches
     And the dispatch mapping for session "01b00000-0000-7000-8000-00000000cafe" records agent "codex"
     # The verb and the handle are the agent's own, and the trust override rides
     # with them: a resume command without it reaches the right session and comes
-    # up read-only, which is exactly the shape the defect had.
-    And the output contains "codex resume -c "
-    And the output contains "01b00000-0000-7000-8000-00000000cafe"
+    # up read-only, which is exactly the shape the defect had. Asserted as one
+    # line rather than as two substrings -- dispatch prints the session id on a
+    # line of its own, so a bare id assertion passes even when the hint block
+    # names a different handle entirely.
+    And the printed resume command for "01b00000-0000-7000-8000-00000000cafe" grants the dispatched instance
 
   @critical
   Scenario: the machine-wide setting picks the agent, and dispatch reads it
