@@ -109,39 +109,6 @@ var bindings = []Binding{
 	{Capability: DirectoryTrust, Agent: agent.AgentCodex, Delivery: DeliveryCodexTrust},
 }
 
-// pendingDeliveries names the deliveries whose implementation has landed in
-// internal/workspace ahead of the binding that reaches them, and the capability
-// each one is waiting on.
-//
-// It exists because a delivery and its binding do not have to land in the same
-// change, and the binding check reads a registration nothing points at as dead
-// code. Both readings are right at different moments: a registration that will
-// never be bound is dead, and one whose declaration has not flipped yet is
-// staged. This map is where the difference is stated, so the check can keep
-// failing on the first without failing on the second.
-//
-// Every entry is a debt. The capability it names is not in boundCapabilities
-// yet, and TestPendingDeliveriesAreStillUnbound fails the moment it is -- so the
-// change that binds a capability cannot leave its entry here to rot, and the
-// staging window closes itself rather than being remembered shut.
-var pendingDeliveries = map[Delivery]Capability{
-	DeliveryRootSkills:       RootProjectSkills,
-	DeliveryRootSettings:     RootProjectSkills,
-	DeliveryNiwaPluginClaude: NiwaPlugin,
-	DeliveryNiwaPluginCodex:  NiwaPlugin,
-}
-
-// PendingDeliveries returns the deliveries registered ahead of their binding,
-// keyed to the capability each is waiting on. The result is a fresh map, so a
-// caller cannot grow the set the binding checks tolerate.
-func PendingDeliveries() map[Delivery]Capability {
-	out := make(map[Delivery]Capability, len(pendingDeliveries))
-	for d, c := range pendingDeliveries {
-		out[d] = c
-	}
-	return out
-}
-
 // BoundCapabilities returns the capabilities a named delivery answers for, in
 // matrix order. The result is a fresh slice.
 func BoundCapabilities() []Capability { return slices.Clone(boundCapabilities) }

@@ -22,17 +22,18 @@ import (
 // options each one takes. What they are good for is answering "is the thing
 // registered under this name really this materializer", which is what the
 // binding test asks and what keeps the registration from agreeing with itself.
-// The two root materializers are registered ahead of the binding that names
-// them, which agentplan.PendingDeliveries records. Registration is not what
-// makes them run -- the pipeline drives both on every apply already -- it is
-// what will make them traceable from the declaration table once the rows they
-// serve are bound.
+// The root materializers exist and the pipeline drives them, but they are not
+// registered here yet, and the omission is deliberate. Registration is half of
+// a binding; the other half is a row in agentplan.Bindings, and this map's own
+// test fails on either half without the other. Landing them together -- in the
+// change that flips the declarations they serve -- is the declaration table's
+// stated rule, and it needs no staging mechanism to hold. A registration parked
+// here ahead of its binding would need the binding check taught to tolerate it,
+// which is a hole in the one test that makes these rows' claims falsifiable.
 var deliveries = map[agentplan.Delivery]Materializer{
-	agentplan.DeliveryEnv:          &EnvMaterializer{},
-	agentplan.DeliveryFiles:        &FilesMaterializer{},
-	agentplan.DeliveryHooks:        &HooksMaterializer{},
-	agentplan.DeliveryRootSkills:   &RootSkillsMaterializer{},
-	agentplan.DeliveryRootSettings: &RootSettingsMaterializer{},
+	agentplan.DeliveryEnv:   &EnvMaterializer{},
+	agentplan.DeliveryFiles: &FilesMaterializer{},
+	agentplan.DeliveryHooks: &HooksMaterializer{},
 }
 
 // procedureInput is what the pipeline hands a procedure-routed delivery: what
@@ -123,15 +124,13 @@ type procedure interface {
 // with the work that converts them, and until then their absence from
 // agentplan.BoundCapabilities is what records that honestly.
 //
-// The two niwa-plugin procedures are the other way around: they are registered
-// ahead of the binding that reaches them, so procedureFor answers false for
-// both agents and nothing calls them yet. That staging is recorded in
-// agentplan.PendingDeliveries rather than left for a reader to infer from a
-// registration nothing points at.
+// The two niwa-plugin procedures are the same case as the root materializers
+// above: both types exist, procedureFor is already the path that would reach
+// them, and neither is registered until the change that binds the capability
+// they serve. Until then procedureFor answers false for every agent on that
+// row, which is what "inert until the flip" means here.
 var procedures = map[agentplan.Delivery]procedure{
-	agentplan.DeliveryCodexTrust:       codexTrustProcedure{},
-	agentplan.DeliveryNiwaPluginClaude: claudeNiwaPluginProcedure{},
-	agentplan.DeliveryNiwaPluginCodex:  codexNiwaPluginProcedure{},
+	agentplan.DeliveryCodexTrust: codexTrustProcedure{},
 }
 
 // procedureFor returns the procedure that delivers c to ag, and false when the

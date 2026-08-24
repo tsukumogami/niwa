@@ -85,32 +85,3 @@ func TestBindingAccessorsReturnFreshSlices(t *testing.T) {
 		t.Error("Bindings() handed out the package's own slice")
 	}
 }
-
-// TestPendingDeliveriesAreStillUnbound is what closes the staging window. A
-// delivery is listed as pending because the capability it serves has no binding
-// yet; the moment that capability is bound, the entry stops being a statement
-// about a missing binding and becomes a hole in the check that would otherwise
-// notice a dead registration. So the change that binds a capability has to
-// delete its pending entries, and this is what tells it to.
-func TestPendingDeliveriesAreStillUnbound(t *testing.T) {
-	bound := BoundCapabilities()
-	for delivery, c := range PendingDeliveries() {
-		if !slices.Contains(All(), c) {
-			t.Errorf("delivery %q is pending on %s, which is outside the closed set", delivery, c)
-			continue
-		}
-		if slices.Contains(bound, c) {
-			t.Errorf("delivery %q is still listed as pending on %s, which is bound now; delete the pending entry so a dead registration is visible again", delivery, c)
-		}
-	}
-}
-
-// TestPendingDeliveriesAreFresh matches the posture of the other accessors: a
-// caller cannot add a name to the set the binding checks tolerate.
-func TestPendingDeliveriesAreFresh(t *testing.T) {
-	first := PendingDeliveries()
-	first["invented"] = RootProjectSkills
-	if _, leaked := PendingDeliveries()["invented"]; leaked {
-		t.Error("PendingDeliveries() handed out the package's own map")
-	}
-}

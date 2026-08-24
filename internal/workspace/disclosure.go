@@ -57,12 +57,27 @@ func EmitPluginNotice(id, manualCmd string, reporter *Reporter) {
 // both read as skipped, since in both cases the plugin is absent and
 // the manual command is the way to get it.
 func EmitPluginInstallNotice(action plugin.Action, reporter *Reporter) {
+	if id := PluginInstallNoticeID(action); id != "" {
+		EmitPluginNotice(id, plugin.ManualInstallCommand, reporter)
+	}
+}
+
+// PluginInstallNoticeID is the notice an action maps to, without emitting it.
+//
+// The mapping and the emission were one function until the install became a
+// delivery the pipeline makes on every apply. A caller that has to dedup the
+// notice needs the id twice -- once to ask whether this workspace has already
+// heard it, once to record that it now has -- and deriving it a second time at
+// the call site would let the two mappings drift, which is how a user ends up
+// told about one notice and spared a different one.
+func PluginInstallNoticeID(action plugin.Action) string {
 	switch action {
 	case plugin.Installed, plugin.UpToDate:
-		EmitPluginNotice(NoticeIDPluginInstalled, plugin.ManualInstallCommand, reporter)
+		return NoticeIDPluginInstalled
 	case plugin.Skipped, plugin.Failed:
-		EmitPluginNotice(NoticeIDPluginSkipped, plugin.ManualInstallCommand, reporter)
+		return NoticeIDPluginSkipped
 	}
+	return ""
 }
 
 // EmitRank2Notice emits the PRD R10 rank-2 deprecation notice for
