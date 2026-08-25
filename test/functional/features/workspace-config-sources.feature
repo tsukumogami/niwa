@@ -126,7 +126,8 @@ Feature: workspace config sources (snapshot model)
     # And the session is still reachable, which is what the mapping is for.
     When I run "niwa list" from the workspace root
     Then the exit code is 0
-    And the output contains "codex resume 01a40000-0000-7000-8000-00000000d1ce"
+    And the output contains "codex resume -c "
+    And the output contains "01a40000-0000-7000-8000-00000000d1ce"
 
   # --- issue #214: upstream config changes take effect on the SAME apply ---
   # The reconcile that refreshes the workspace-root .niwa/ snapshot from the

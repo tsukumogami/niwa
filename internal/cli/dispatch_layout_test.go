@@ -39,6 +39,7 @@ import (
 // are the whole of the DispatchLaunch capability's delivery.
 var dispatchPathFiles = []string{
 	"dispatch.go",
+	"dispatch_reentry.go",
 	"dispatch_capture.go",
 	"dispatch_keepalive.go",
 	"dispatch_launcher.go",
@@ -587,6 +588,130 @@ func TestDispatchPathFilesAreAllPresent(t *testing.T) {
 		}
 		if slices.Contains(dispatchPathFiles, name) {
 			t.Errorf("%s is both scanned and excused; it cannot be held to two rules", name)
+		}
+	}
+}
+
+// reentryFieldsOwner is the one non-test file in this package allowed to read
+// the declaration fields that name a way back into a session.
+const reentryFieldsOwner = "dispatch_reentry.go"
+
+// reentryFields are the two fields that decide what a re-entry command looks
+// like. Both are covered, and covering only the first would leave a whole
+// surface open: the hint block is built from HintVerbs alone, so a file that
+// iterated those and printed a verb with a handle would emit a working,
+// grantless re-entry command without ever touching ResumeArgs.
+var reentryFields = []string{"ResumeArgs", "HintVerbs"}
+
+// reentryFieldViolations reports every selector in one file that reads a
+// re-entry field.
+//
+// It matches on the field name alone rather than on the receiver's type. The
+// scan reads one file at a time and does no type checking, so it cannot know
+// what a selector's base resolves to -- and a rule that only fired on a
+// receiver it could name would be silent on exactly the case it exists for, a
+// new file that reaches the declaration by some route this rule never
+// anticipated. Neither name appears in this package on anything else.
+func reentryFieldViolations(pf parsedDispatchFile) []dispatchViolation {
+	var out []dispatchViolation
+	ast.Inspect(pf.file, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if slices.Contains(reentryFields, sel.Sel.Name) {
+			out = append(out, dispatchViolation{
+				file:   pf.name,
+				line:   pf.line(sel),
+				detail: "reads ." + sel.Sel.Name + " outside " + reentryFieldsOwner,
+			})
+		}
+		return true
+	})
+	return out
+}
+
+// TestOnlyTheReentryFileReadsTheReentryFields is the enforcement behind the
+// claim that every command stepping back into a dispatched session is built in
+// one place.
+//
+// Without it that claim is a comment. The defect this branch fixes was exactly
+// a surface that read these fields and forgot the grant, and it shipped because
+// nothing could notice -- the command it produced runs, reaches the right
+// session, and quietly comes up read-only.
+//
+// The rule ranges over every non-test .go file in the package rather than over
+// a list. A list is the same failure one level up: a file nobody remembered to
+// add is a file the rule never reads, which is the silent omission this exists
+// to close.
+func TestOnlyTheReentryFileReadsTheReentryFields(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading the package directory: %v", err)
+	}
+	var violations []dispatchViolation
+	scanned := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		if name == reentryFieldsOwner {
+			continue
+		}
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		scanned++
+		violations = append(violations, reentryFieldViolations(parsedDispatchFile{name: name, fset: fset, file: f})...)
+	}
+	if scanned == 0 {
+		t.Fatal("no files scanned; the rule would pass vacuously")
+	}
+	if _, err := os.Stat(reentryFieldsOwner); err != nil {
+		t.Fatalf("%s is missing, so the rule excuses a file that is not there: %v", reentryFieldsOwner, err)
+	}
+	if len(violations) > 0 {
+		t.Errorf("%d file(s) in this package read a re-entry field outside %s.\n"+
+			"Build the command through that file instead; a surface that assembles its own\n"+
+			"is how a resumed session silently loses the posture niwa granted it.\n%s",
+			len(violations), reentryFieldsOwner, renderDispatchViolations(violations))
+	}
+}
+
+// TestReentryFieldRuleDetectsWhatItForbids is the rule's control, and it is a
+// permanent case rather than a demonstration somebody once ran. A rule that has
+// never failed is a rule nobody has shown to work, and this one would pass
+// forever on an empty match.
+func TestReentryFieldRuleDetectsWhatItForbids(t *testing.T) {
+	const src = `package cli
+
+// A comment naming spec.ResumeArgs and spec.HintVerbs, which is prose about
+// where a mechanism came from and must not be a violation.
+func offender(spec agentplan.LaunchSpec) []string {
+	args := spec.ResumeArgs
+	for _, v := range spec.HintVerbs {
+		args = append(args, v)
+	}
+	return args
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "offender.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parsing the fixture: %v", err)
+	}
+	got := reentryFieldViolations(parsedDispatchFile{name: "offender.go", fset: fset, file: f})
+	if len(got) != 2 {
+		t.Fatalf("the rule found %d violation(s) in source with 2:\n%s", len(got), renderDispatchViolations(got))
+	}
+	// The comment sits on lines 3 and 4. The rule reads the syntax tree, so
+	// nothing it found may point at prose.
+	for _, v := range got {
+		if v.line <= 4 {
+			t.Errorf("the rule flagged a comment at %s:%d (%s); it must read code, not prose", v.file, v.line, v.detail)
 		}
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -151,7 +150,7 @@ func sessionResumeCommand(m workspace.SessionMapping) string {
 		return ""
 	}
 	spec, ok := dispatchLaunchSpec(ag)
-	if !ok || spec.Binary == "" || len(spec.ResumeArgs) == 0 {
+	if !ok {
 		return ""
 	}
 	handle := m.Handle
@@ -166,6 +165,9 @@ func sessionResumeCommand(m workspace.SessionMapping) string {
 		}
 		handle = m.SessionID
 	}
-	parts := append([]string{spec.Binary}, spec.ResumeArgs...)
-	return strings.Join(append(parts, handle), " ")
+	// The instance directory is what the grant names, and the mapping already
+	// records it. A mapping written without one yields a command with no grant
+	// rather than one naming nothing -- inherited from the constructor, not
+	// re-checked here.
+	return reentryCommand(spec, handle, m.InstancePath)
 }

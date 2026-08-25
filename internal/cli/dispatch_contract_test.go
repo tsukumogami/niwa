@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -562,5 +565,180 @@ func TestDispatchDoesNotResumeAnAgentThatRefusesMidTurn(t *testing.T) {
 	}
 	if !attached {
 		t.Error("dispatch skipped the attach for an agent that declares it hands over a running session")
+	}
+}
+
+// grantingSpec is a declaration for an agent niwa does not ship, carrying a
+// workdir grant shaped like nothing in the real table. Every expectation below
+// is written against it, so a test here cannot be satisfied by code that read
+// the production table instead of the spec it was handed -- and cannot go green
+// with the production table wrong.
+func grantingSpec() agentplan.LaunchSpec {
+	return agentplan.LaunchSpec{
+		Binary:           "granting-agent",
+		LeadingArgs:      []string{"start"},
+		ResumeArgs:       []string{"reopen"},
+		HintVerbs:        []string{"tail", "reopen"},
+		WorkdirGrantArgs: []string{"--vouch", "dir=%q"},
+		ResumeDuringTurn: true,
+	}
+}
+
+// wantGrantFor is the grant argument pair a granting declaration produces for a
+// directory: written out here, never asked of the code under test.
+func wantGrantFor(dir string) []string { return []string{"--vouch", `dir="` + dir + `"`} }
+
+// TestDispatchHintBlockCarriesTheGrant is the first of the three per-surface
+// checks. Each one exists so removing the grant from ONE surface fails a test
+// naming that surface -- a single check covering "some surface carries it"
+// would stay green while two of the three regressed.
+func TestDispatchHintBlockCarriesTheGrant(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, "")
+	installDispatchFakes(t, root)
+	dispatchDetach = true
+
+	spec := grantingSpec()
+	prevSpec := dispatchLaunchSpec
+	dispatchLaunchSpec = func(agent.Agent) (agentplan.LaunchSpec, bool) { return spec, true }
+	t.Cleanup(func() { dispatchLaunchSpec = prevSpec })
+
+	prevLook := lookAgentBinary
+	lookAgentBinary = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	t.Cleanup(func() { lookAgentBinary = prevLook })
+
+	stdout, _, err := runDispatchCmd(t, "do a thing")
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	instance := dispatchedInstancePath(t, stdout)
+	wantResume := "granting-agent reopen --vouch " + shellToken(`dir="`+instance+`"`) + " " + dispatchTestShortID
+	if !strings.Contains(stdout, wantResume) {
+		t.Errorf("the printed hint block does not carry the grant.\nwant %q in:\n%s", wantResume, stdout)
+	}
+	// The verb that starts no session is printed exactly as it always was.
+	if wantPlain := "granting-agent tail " + dispatchTestShortID; !strings.Contains(stdout, wantPlain) {
+		t.Errorf("the non-resume hint changed shape.\nwant %q in:\n%s", wantPlain, stdout)
+	}
+}
+
+// TestDispatchAttachCarriesTheGrant runs the REAL dispatchAttach body rather
+// than the package variable tests usually replace, against a stub binary that
+// records the argv it was given. Asserting through the seam would pass on a
+// constructor unit test that never reaches the call site this is about.
+func TestDispatchAttachCarriesTheGrant(t *testing.T) {
+	dir := t.TempDir()
+	argvFile := filepath.Join(dir, "argv")
+	stub := filepath.Join(dir, "granting-agent")
+	script := "#!/bin/sh\n: > " + argvFile + "\nfor a in \"$@\"; do printf '%s\\0' \"$a\" >> " + argvFile + "; done\n"
+	if err := os.WriteFile(stub, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prevLook := lookAgentBinary
+	lookAgentBinary = func(name string) (string, error) { return filepath.Join(dir, name), nil }
+	t.Cleanup(func() { lookAgentBinary = prevLook })
+
+	workdir := t.TempDir()
+	if err := dispatchAttach(grantingSpec(), dispatchTestShortID, workdir); err != nil {
+		t.Fatalf("dispatchAttach: %v", err)
+	}
+
+	raw, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
+	want := append(append([]string{"reopen"}, wantGrantFor(workdir)...), dispatchTestShortID)
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("the attach exec ran with argv\n  %#v\nwant\n  %#v", got, want)
+	}
+}
+
+// dispatchedInstancePath recovers the instance directory dispatch printed, so a
+// test can assert the grant names that directory rather than guessing at it.
+func dispatchedInstancePath(t *testing.T, stdout string) string {
+	t.Helper()
+	for _, line := range strings.Split(stdout, "\n") {
+		if _, after, found := strings.Cut(line, "instance: "); found {
+			return strings.TrimSpace(after)
+		}
+	}
+	t.Fatalf("dispatch printed no instance path:\n%s", stdout)
+	return ""
+}
+
+// TestDispatchAttachFailureFallbackCarriesTheGrant covers the third printed
+// surface: the line dispatch prints when the attach it tried could not run.
+//
+// It gets its own test because it is the one a reader skims past. Reverting it
+// to the old hand-joined form left the whole package suite green -- nothing
+// else mentions it -- and a developer who lands there is by definition already
+// having a bad time, so handing them a command that comes up read-only is the
+// worst moment to do it.
+func TestDispatchAttachFailureFallbackCarriesTheGrant(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, "")
+	installDispatchFakes(t, root)
+	dispatchDetach = false
+
+	spec := grantingSpec()
+	prevSpec := dispatchLaunchSpec
+	dispatchLaunchSpec = func(agent.Agent) (agentplan.LaunchSpec, bool) { return spec, true }
+	t.Cleanup(func() { dispatchLaunchSpec = prevSpec })
+
+	prevLook := lookAgentBinary
+	lookAgentBinary = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	t.Cleanup(func() { lookAgentBinary = prevLook })
+
+	prevAttach := dispatchAttach
+	dispatchAttach = func(agentplan.LaunchSpec, string, string) error {
+		return fmt.Errorf("the terminal could not be handed over")
+	}
+	t.Cleanup(func() { dispatchAttach = prevAttach })
+
+	stdout, stderr, err := runDispatchCmd(t, "do a thing")
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	instance := dispatchedInstancePath(t, stdout)
+	want := "granting-agent reopen --vouch " + shellToken(`dir="`+instance+`"`) + " " + dispatchTestShortID
+	if !strings.Contains(stderr, want) {
+		t.Errorf("the attach-failure fallback does not carry the grant.\nwant %q in:\n%s", want, stderr)
+	}
+}
+
+// TestSessionResumeCommandFailsClosed pins the cases niwa list must answer with
+// nothing rather than with a command that fails at the binary.
+//
+// Two of these guards used to live in sessionResumeCommand's own preamble and
+// now live in the constructor it delegates to. The behaviour is the same; this
+// is what makes that delegation something a later refactor cannot quietly
+// undo.
+func TestSessionResumeCommandFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mapping workspace.SessionMapping
+		spec    agentplan.LaunchSpec
+		ok      bool
+	}{
+		{"an agent that does not parse", workspace.SessionMapping{Agent: "not-an-agent", Handle: "h1", InstancePath: "/i"}, grantingSpec(), true},
+		{"a spec that does not resolve", workspace.SessionMapping{Agent: string(agent.AgentCodex), Handle: "h1", InstancePath: "/i"}, agentplan.LaunchSpec{}, false},
+		{"an empty binary", workspace.SessionMapping{Agent: string(agent.AgentCodex), Handle: "h1", InstancePath: "/i"}, agentplan.LaunchSpec{ResumeArgs: []string{"reopen"}}, true},
+		{"a declaration naming no way back in", workspace.SessionMapping{Agent: string(agent.AgentCodex), Handle: "h1", InstancePath: "/i"}, agentplan.LaunchSpec{Binary: "granting-agent"}, true},
+		{"no usable handle", workspace.SessionMapping{Agent: string(agent.AgentCodex), InstancePath: "/i"}, agentplan.LaunchSpec{Binary: "b", ResumeArgs: []string{"reopen"}, Records: agentplan.SessionRecords{Handle: agentplan.HandleRecordDir}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, ok := tc.spec, tc.ok
+			prev := dispatchLaunchSpec
+			dispatchLaunchSpec = func(agent.Agent) (agentplan.LaunchSpec, bool) { return spec, ok }
+			t.Cleanup(func() { dispatchLaunchSpec = prev })
+
+			if got := sessionResumeCommand(tc.mapping); got != "" {
+				t.Errorf("sessionResumeCommand = %q, want \"\"", got)
+			}
+		})
 	}
 }

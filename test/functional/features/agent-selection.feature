@@ -40,7 +40,13 @@ Feature: choosing which agent niwa launches
     When I run "niwa dispatch some-task --detach --harness codex" from the workspace root
     Then the exit code is 0
     And the dispatch mapping for session "01b00000-0000-7000-8000-00000000cafe" records agent "codex"
-    And the output contains "codex resume 01b00000-0000-7000-8000-00000000cafe"
+    # The verb and the handle are the agent's own, and the trust override rides
+    # with them: a resume command without it reaches the right session and comes
+    # up read-only, which is exactly the shape the defect had. Asserted as one
+    # line rather than as two substrings -- dispatch prints the session id on a
+    # line of its own, so a bare id assertion passes even when the hint block
+    # names a different handle entirely.
+    And the printed resume command for "01b00000-0000-7000-8000-00000000cafe" grants the dispatched instance
 
   @critical
   Scenario: the machine-wide setting picks the agent, and dispatch reads it

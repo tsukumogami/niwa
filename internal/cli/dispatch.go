@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 
@@ -177,7 +176,14 @@ var dispatchAttach = func(spec agentplan.LaunchSpec, handle, workdir string) err
 	if err != nil {
 		return fmt.Errorf("%s binary not found in PATH: %w", spec.Binary, err)
 	}
-	cmd := exec.Command(bin, append(slices.Clone(spec.ResumeArgs), handle)...)
+	args := reentryArgs(spec, handle, workdir)
+	if len(args) == 0 {
+		// An agent that declares no way back into a session. Running the binary
+		// bare would start a FRESH one, which looks like a successful attach
+		// and is a different session in every way that matters to the work.
+		return fmt.Errorf("%s declares no way to step back into a session", spec.Binary)
+	}
+	cmd := exec.Command(bin, args...)
 	// The resumed session runs where it ran. An agent that narrows its own
 	// session list by working directory would otherwise refuse to find a
 	// session started somewhere else, and a session that reopened in the
@@ -770,8 +776,8 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(out, "Dispatched session %s\n", sessionID)
 	fmt.Fprintf(out, "  instance: %s\n", instancePath)
 
-	for _, verb := range spec.HintVerbs {
-		fmt.Fprintf(out, "  %s %s %s\n", spec.Binary, verb, handle)
+	for _, line := range reentryHints(spec, handle, instancePath) {
+		fmt.Fprintf(out, "  %s\n", line)
 	}
 
 	// (14) The last step is about the session the developer ends up in, and
@@ -816,8 +822,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if !dispatchDetach {
 		if err := dispatchAttach(spec, handle, instancePath); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: warning: could not attach to session %s: %v\n", sessionID, err)
-			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: the session is running; attach later with: %s %s %s\n",
-				spec.Binary, strings.Join(spec.ResumeArgs, " "), handle)
+			if again := reentryCommand(spec, handle, instancePath); again != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "niwa: the session is running; attach later with: %s\n", again)
+			}
 		}
 	}
 

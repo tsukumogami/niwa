@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -32,17 +33,53 @@ func runListHuman(t *testing.T) string {
 	return out.String()
 }
 
-// wantResumeFor builds the command an agent's own declaration says reaches a
-// session. Reading it from the launch spec rather than typing "codex resume"
-// keeps this test pinned to the declaration, which is where the binary and the
-// verb are decided.
-func wantResumeFor(t *testing.T, ag agent.Agent, handle string) string {
-	t.Helper()
-	spec, ok := dispatchLaunchSpec(ag)
-	if !ok {
-		t.Skipf("no launch spec declared for %q", ag)
+// The two declarations below are invented: they belong to no agent niwa ships,
+// and every expectation in this file is written against them.
+//
+// The previous version of this helper built its expectation by reading the
+// production launch table, which meant the assertion and the code under test
+// were quoting the same source at each other. A table that lost the grant would
+// have taken the expectation down with it and the suite would have stayed green
+// -- the exact way an earlier change in this area kept passing while the
+// production binary name was mutated.
+var (
+	listGrantSpec = agentplan.LaunchSpec{
+		Binary:           "invented-granting-agent",
+		ResumeArgs:       []string{"reopen"},
+		WorkdirGrantArgs: []string{"--vouch", "dir=%q"},
+		Records:          agentplan.SessionRecords{Handle: agentplan.HandleSessionID},
 	}
-	return strings.Join(append(append([]string{spec.Binary}, spec.ResumeArgs...), handle), " ")
+	listPlainSpec = agentplan.LaunchSpec{
+		Binary:     "invented-plain-agent",
+		ResumeArgs: []string{"latch"},
+		Records:    agentplan.SessionRecords{Handle: agentplan.HandleRecordDir},
+	}
+)
+
+// useInventedSpecs points the list path at the two declarations above, keyed by
+// the agent a mapping recorded -- so a test can still prove the command follows
+// the RECORDED agent while asserting against values this file owns.
+func useInventedSpecs(t *testing.T) {
+	t.Helper()
+	prev := dispatchLaunchSpec
+	dispatchLaunchSpec = func(ag agent.Agent) (agentplan.LaunchSpec, bool) {
+		switch ag {
+		case agent.AgentCodex:
+			return listGrantSpec, true
+		case agent.AgentClaude:
+			return listPlainSpec, true
+		}
+		return agentplan.LaunchSpec{}, false
+	}
+	t.Cleanup(func() { dispatchLaunchSpec = prev })
+}
+
+// wantGrantedResume is the literal command a granting declaration produces for a
+// session in instanceDir: the resume verb, the grant with the directory quoted
+// into it, then the handle. Written out here rather than derived.
+func wantGrantedResume(instanceDir, handle string) string {
+	return "invented-granting-agent reopen --vouch " +
+		shellToken(`dir="`+instanceDir+`"`) + " " + handle
 }
 
 // TestList_DispatchedInstanceCarriesItsResumeCommand is the defect: a
@@ -52,6 +89,7 @@ func wantResumeFor(t *testing.T, ag agent.Agent, handle string) string {
 // the only way the session is ever used -- and niwa list, the command a
 // developer already runs to see what is here, said nothing about it.
 func TestList_DispatchedInstanceCarriesItsResumeCommand(t *testing.T) {
+	useInventedSpecs(t)
 	t.Setenv("HOME", t.TempDir())
 	root := setupDispatchWorkspace(t)
 	instance := seedInstance(t, root, "test-ws+task-aaaa1111", 1)
@@ -70,7 +108,7 @@ func TestList_DispatchedInstanceCarriesItsResumeCommand(t *testing.T) {
 	}
 
 	stdout := runListHuman(t)
-	want := wantResumeFor(t, agent.AgentCodex, resumeSessionID)
+	want := wantGrantedResume(instance, resumeSessionID)
 	if !strings.Contains(stdout, want) {
 		t.Fatalf("a dispatched instance listed with no way to reach its session; want %q in:\n%s", want, stdout)
 	}
@@ -81,6 +119,7 @@ func TestList_DispatchedInstanceCarriesItsResumeCommand(t *testing.T) {
 // from a name list.go decided on. Two instances, two agents, two different
 // binaries and verbs.
 func TestList_ResumeCommandComesFromTheRecordedAgent(t *testing.T) {
+	useInventedSpecs(t)
 	t.Setenv("HOME", t.TempDir())
 	root := setupDispatchWorkspace(t)
 	codexInstance := seedInstance(t, root, "test-ws+codex-aaaa1111", 1)
@@ -107,8 +146,13 @@ func TestList_ResumeCommandComesFromTheRecordedAgent(t *testing.T) {
 
 	stdout := runListHuman(t)
 	for _, want := range []string{
-		wantResumeFor(t, agent.AgentCodex, resumeSessionID),
-		wantResumeFor(t, agent.AgentClaude, claudeHandle),
+		// The granting declaration's command, carrying the grant for the
+		// instance the codex-recorded mapping names...
+		wantGrantedResume(codexInstance, resumeSessionID),
+		// ...and the plain one's, which carries no grant because its
+		// declaration asks for none. Same list, two declarations, keyed by
+		// what the mapping recorded.
+		"invented-plain-agent latch " + claudeHandle,
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("want %q in list output:\n%s", want, stdout)
@@ -121,6 +165,7 @@ func TestList_ResumeCommandComesFromTheRecordedAgent(t *testing.T) {
 // and take the record directory's name instead, so a command built from the id
 // would be a command that fails at the binary.
 func TestList_ResumeCommandUsesTheHandleNotTheSessionID(t *testing.T) {
+	useInventedSpecs(t)
 	t.Setenv("HOME", t.TempDir())
 	root := setupDispatchWorkspace(t)
 	instance := seedInstance(t, root, "test-ws+task-aaaa1111", 1)
@@ -140,7 +185,7 @@ func TestList_ResumeCommandUsesTheHandleNotTheSessionID(t *testing.T) {
 	}
 
 	stdout := runListHuman(t)
-	if !strings.Contains(stdout, wantResumeFor(t, agent.AgentClaude, handle)) {
+	if !strings.Contains(stdout, "invented-plain-agent latch "+handle) {
 		t.Fatalf("the resume command must be built from the recorded handle, got:\n%s", stdout)
 	}
 	if strings.Contains(stdout, resumeSessionID) {
@@ -153,6 +198,7 @@ func TestList_ResumeCommandUsesTheHandleNotTheSessionID(t *testing.T) {
 // the handle it still works; where it does not, niwa has no handle and must
 // print nothing rather than a command that fails.
 func TestList_LegacyMappingOffersNothingItCannotBack(t *testing.T) {
+	useInventedSpecs(t)
 	t.Setenv("HOME", t.TempDir())
 	root := setupDispatchWorkspace(t)
 	codexInstance := seedInstance(t, root, "test-ws+codex-aaaa1111", 1)
@@ -177,7 +223,7 @@ func TestList_LegacyMappingOffersNothingItCannotBack(t *testing.T) {
 	}
 
 	stdout := runListHuman(t)
-	if !strings.Contains(stdout, wantResumeFor(t, agent.AgentCodex, resumeSessionID)) {
+	if !strings.Contains(stdout, wantGrantedResume(codexInstance, resumeSessionID)) {
 		t.Errorf("a legacy mapping for an agent whose handle IS the session id still has a reachable session, got:\n%s", stdout)
 	}
 	if strings.Contains(stdout, otherResumeSessionID) {
@@ -203,6 +249,7 @@ func TestList_UnmappedInstanceStaysAPlainLine(t *testing.T) {
 // command is human output; --json consumers iterate the documented keys and
 // must not have to cope with a new one.
 func TestList_JSONShapeIsUnchanged(t *testing.T) {
+	useInventedSpecs(t)
 	t.Setenv("HOME", t.TempDir())
 	root := setupDispatchWorkspace(t)
 	instance := seedInstance(t, root, "test-ws+task-aaaa1111", 1)

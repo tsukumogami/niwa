@@ -128,7 +128,10 @@ Feature: prepare every instance for both agents
     And the dispatch mapping for session "01a00000-0000-7000-8000-00000000beef" records agent "codex"
     # The management hint niwa prints is the agent's own verb, so it is a
     # command the binary actually has.
-    And the output contains "codex resume 01a00000-0000-7000-8000-00000000beef"
+    # This one reads the grant rather than the prefix: the command niwa prints
+    # vouches for the instance the worker was dispatched into, so a developer
+    # who pastes it lands in the posture the launch turn had.
+    And the printed resume command for "01a00000-0000-7000-8000-00000000beef" grants the dispatched instance
     # The launch flags are a contract with the real binary. Without the
     # git-repo-check skip the run refuses to start at all, since an instance
     # root is not a git repository; the trust override is what decides whether
@@ -175,7 +178,7 @@ Feature: prepare every instance for both agents
     # rather than assumed, because "it follows" is how a path stops being
     # covered.
     And the dispatch mapping for session "01a00000-0000-7000-8000-00000000cafe" records agent "codex"
-    And the output contains "codex resume 01a00000-0000-7000-8000-00000000cafe"
+    And the printed resume command for "01a00000-0000-7000-8000-00000000cafe" grants the dispatched instance
     # The developer is the reader here, so the flag that exists to make the
     # output machine-readable is not sent. Everything else is what the detached
     # launch sends.
@@ -1336,3 +1339,67 @@ Feature: prepare every instance for both agents
     When I render the skills a Codex session at "ws/tools" resolves
     Then the resolved skills do not include "demo:greet"
     And the resolved skills do not include "niwa:niwa-migrate-config"
+
+  @codex-posture
+  Scenario: a dispatched Codex worker keeps its granted posture across a resume
+    # The acceptance evidence for the defect this feature fixes, and it is a
+    # measurement rather than an assertion about arguments. niwa elevates a
+    # dispatched worker by overriding trust for that one process; the bug was
+    # that nothing carried the override to the next one, so every way back into
+    # the session came up read-only with per-command approval -- a command that
+    # runs, reaches the right session, and quietly cannot write.
+    #
+    # Reading the argv niwa built proves nothing about that: the whole defect
+    # lived downstream of a correct-looking command line. So this reads what the
+    # binary itself resolved, out of the record it writes for each turn.
+    #
+    # It spends nothing and needs no login. Codex records a turn's resolved
+    # sandbox policy at turn bootstrap, before its first model request, so an
+    # unreachable model endpoint lets every turn bootstrap, record, and then
+    # fail on connect. That is why the gate here is the binary alone.
+    Given a clean niwa environment
+    And the codex binary is on PATH
+    And an isolated Codex home whose model endpoint is unreachable
+    And a local git server is set up
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+      default_agent = "codex"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I run "niwa dispatch probe --detach" from the workspace root
+    Then the exit code is 0
+    # Turn one, from the launch niwa performed: the grant took effect and the
+    # worker can write in the instance it was dispatched into.
+    And the dispatched session recorded these postures in order:
+      | sandbox         |
+      | workspace-write |
+    # Codex will not hand over a session while its own turn is still running,
+    # which it declares and niwa respects. The worker here never finishes on its
+    # own -- an unreachable endpoint reads as a network problem it keeps
+    # retrying -- so the scenario ends it before stepping back in.
+    When the dispatched worker has finished
+    # The negative control comes first on purpose. This is the command niwa
+    # printed before the fix -- the verb and the handle, nothing else -- and it
+    # is what the defect looked like from the inside.
+    When I resume the dispatched session without the grant
+    Then the dispatched session recorded these postures in order:
+      | sandbox         |
+      | workspace-write |
+      | read-only       |
+    # And the same resume carrying the grant niwa now prints, lifted verbatim
+    # out of its own output: the posture is the launch turn's again.
+    When I resume the dispatched session with the grant niwa printed
+    Then the dispatched session recorded these postures in order:
+      | sandbox         |
+      | workspace-write |
+      | read-only       |
+      | workspace-write |
+    # Measured on the same runs, not separately: the elevation left the Codex
+    # configuration alone, which is the property the per-invocation grant exists
+    # for and the one a persisted trust entry would have traded away.
+    And the sandbox Codex home holds no trust stanza
