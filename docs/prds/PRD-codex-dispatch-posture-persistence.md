@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: Done
 problem: |
   niwa elevates a dispatched Codex worker with arguments on that one
   process's command line -- a deliberate per-invocation grant that dies
@@ -37,7 +37,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 This PRD owns the requirements for carrying niwa's per-invocation
 workdir grant through every command that steps back into a dispatched
