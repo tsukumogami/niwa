@@ -21,6 +21,15 @@ outcome: |
 
 Accepted
 
+Codebase research during PRD drafting (PRD-dispatch-permission-mode) found
+that niwa's only other dispatch-capable agent, Codex, already gets an
+equivalent trust posture through a separate mechanism
+(`WorkdirGrantArgs`), and that its permission-equivalent flag (`--sandbox`)
+takes a value vocabulary this feature's derived value would not fit. The
+Scope Boundary below is updated accordingly: this feature covers Claude
+Code workers only, narrower than the "non-Claude agents" language it
+originally carried.
+
 ## Problem Statement
 
 An operator who declares `permissions = "bypass"` in a workspace's
@@ -110,9 +119,8 @@ from today's behavior.
   any workspace-derived value.
 - Leaving today's behavior unchanged for a workspace that declares no
   permission posture, or declares `"ask"`.
-- Covering both Claude Code workers and non-Claude agents through
-  whichever flag `agentplan.LaunchFlags` already defines as that agent's
-  equivalent of bypass mode.
+- Covering Claude Code workers — the agent whose dispatch permission flag
+  (`--permission-mode`) this derivation targets.
 - **A purely internal fix.** An operator's side of this is unchanged: the
   same `workspace.toml` `permissions = "bypass"` declaration and the same
   `niwa dispatch` invocation they already use today, with no new flag, no
@@ -138,6 +146,12 @@ from today's behavior.
   mesh daemon, and its fallback semantics (mapping every non-bypass case
   to `acceptEdits`) don't match this feature's requirement to forward
   nothing when bypass isn't configured.
+- Deriving or forwarding any value for Codex-launched workers. Codex's
+  dispatch permission-equivalent flag (`--sandbox`) takes a value
+  vocabulary unrelated to `bypassPermissions`, and Codex workers already
+  receive an equivalent trust posture through a separate mechanism
+  (`WorkdirGrantArgs`'s `trust_level="trusted"` grant). This narrows the
+  scope from this brief's original framing — see the Status section.
 
 ## References
 
