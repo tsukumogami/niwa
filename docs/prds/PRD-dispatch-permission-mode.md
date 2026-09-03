@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Draft
 problem: |
   Operators who declare `permissions = "bypass"` in a workspace's
@@ -48,7 +49,12 @@ workspace's own declared `permissions` posture.
 
 A workspace configured for `bypass` therefore gets a worker that silently
 starts in whatever mode the *invoking operator's own global* Claude Code
-settings default to. Because dispatched workers run headless, every tool
+settings default to. (The workspace's `permissions = "bypass"` declaration
+and the instance's materialized `permissions.defaultMode: "bypassPermissions"`
+are the same trust decision at two altitudes: `RootSettingsMaterializer`
+writes the latter from the former today, at instance-creation time. The
+requirements below read the already-materialized instance-level value —
+see R5 — rather than re-reading the workspace-level declaration.) Because dispatched workers run headless, every tool
 call that mode gates on approval — including messages a coordinator session
 sends the worker after launch, which arrive as tool calls too — simply
 stalls. Nothing signals the operator that the cause is a Claude Code
@@ -126,7 +132,18 @@ called (`internal/cli/dispatch.go:534`), so the derived value is available
 to be included in the argv `buildDispatchPassthrough` builds on the same
 invocation. The existing read at `internal/cli/dispatch.go:554` (consumed by
 the remote-control and keep-alive default-fill logic) MAY be consolidated
-into this earlier read rather than duplicated.
+into this earlier read rather than duplicated. If consolidated, the
+remote-control and keep-alive behaviors this read already feeds SHALL remain
+unchanged.
+
+**R7 (functional, error handling).** When the materialized-settings read
+fails — the file is absent, unreadable, or not valid JSON — the derivation
+SHALL behave exactly as R3 specifies for "no posture declared": no
+`--permission-mode` flag is forwarded from this path. A settings-read
+failure SHALL NOT fail the `niwa dispatch` invocation itself, consistent
+with `readInstanceSettings`'s existing error contract (callers already treat
+any read error as "nothing to act on," per its remote-control and keep-alive
+consumers).
 
 ## Acceptance Criteria
 
@@ -149,6 +166,21 @@ into this earlier read rather than duplicated.
   bypass-configured Claude Code dispatch and absent for each of: no posture
   declared, `"ask"` posture, a Codex dispatch, and an explicit
   `--permission-mode` already supplied.
+- [ ] AC6: A test constructs a fixture where the workspace's
+  `workspace.toml` `permissions` value and the materialized
+  `.claude/settings.json` `permissions.defaultMode` value disagree (e.g.
+  `workspace.toml` unset or `"ask"` while the materialized settings say
+  `"bypassPermissions"`, and the reverse), and asserts the derived flag
+  tracks the materialized settings value in both directions — proving the
+  derivation reads materialized settings, not `workspace.toml` (R5).
+- [ ] AC7: A materialized `.claude/settings.json` that is absent, unreadable,
+  or not valid JSON results in no `--permission-mode` flag being forwarded
+  from this derivation path, and the `niwa dispatch` invocation does not
+  fail because of it (R7).
+- [ ] AC8: After consolidating the settings read per R6, the existing
+  remote-control default-fill and keep-alive arming behaviors exercised by
+  `dispatch_remotecontrol_roundtrip_test.go` and
+  `dispatch_keepalive_roundtrip_test.go` are unchanged.
 
 ## Out of Scope
 
