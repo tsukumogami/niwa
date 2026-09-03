@@ -22,7 +22,8 @@ rationale: |
   single-read intent. Pushing the read and the agent-vocabulary branch into
   `buildDispatchPassthrough` itself was rejected for breaking that
   function's existing pure-argv-builder contract.
-upstream: docs/prds/PRD-dispatch-permission-mode.md
+absorbed:
+  - docs/prds/PRD-dispatch-permission-mode.md
 decision_provenance: inline-resolved
 ---
 
@@ -31,6 +32,38 @@ decision_provenance: inline-resolved
 ## Status
 
 Accepted
+
+Absorbed [PRD-dispatch-permission-mode](docs/prds/PRD-dispatch-permission-mode.md); carried in Absorbed PRD.
+
+## Absorbed PRD
+
+The requirements this design implements, carried forward because the PRD
+that held them was folded in here. Acceptance Criteria AC1-AC8 in the
+Implementation Approach section below are this design's record of how each
+is verified.
+
+**R1.** When a workspace's materialized settings declare bypass and the
+operator supplies no explicit `--permission-mode`, the launched worker's
+argv must include `--permission-mode bypassPermissions`.
+
+**R2.** An operator-supplied `--permission-mode` always reaches the worker
+as typed, taking precedence over any workspace-derived value.
+
+**R3.** No declared posture, or `"ask"`, forwards nothing — unchanged from
+today.
+
+**R4.** The derivation fires only for the agent whose permission flag is
+Claude's spelling; it never touches Codex's `--sandbox`.
+
+**R5.** The derivation reads the already-materialized `.claude/settings.json`,
+never `workspace.toml` directly.
+
+**R6.** The settings read must precede the passthrough build, without
+regressing the remote-control or keep-alive behaviors that already consume
+it.
+
+**R7.** A settings-read failure degrades to "nothing derived" rather than
+failing the dispatch.
 
 ## Context and Problem Statement
 
@@ -239,8 +272,8 @@ just these two) has `""` in that field where not implemented.
    (AC7); the existing `dispatch_remotecontrol_roundtrip_test.go` and
    `dispatch_keepalive_roundtrip_test.go` suites are re-run unmodified to
    confirm the call-site move didn't regress them (AC8).
-5. Run `go test ./internal/cli/... -run TestDispatch -v` and the full
-   `go test ./...` suite per the PRD's Validation.
+5. Run `go test ./internal/cli/... -run TestDispatch -v` for the targeted
+   unit coverage, then the full `go test ./...` suite.
 
 ## Security Considerations
 
@@ -288,9 +321,10 @@ that containment whenever its workspace declared `bypass` and the
 materialized-settings channel still worked, i.e. on every Claude Code
 release before 2.1.258. This design restores that pre-existing posture;
 it does not add containment `niwa dispatch` never had, and doing so is
-out of scope for a fix whose PRD is explicitly scoped to compatibility
-restoration (see PRD-dispatch-permission-mode's Out of Scope). It is
-worth a follow-up issue evaluating whether `niwa dispatch` should gain
+out of scope for a fix scoped to compatibility restoration (see this
+design's own Absorbed PRD section, R1-R7, none of which touch
+containment). It is worth a follow-up issue evaluating whether `niwa
+dispatch` should gain
 `watch`-equivalent containment independent of this fix, since the
 underlying risk (a bypass worker processing untrusted content) is not
 new here and is not fully mitigated anywhere in `niwa dispatch` today.
@@ -322,8 +356,7 @@ path and looks, at a glance, like it does this derivation already. It is
 dead code (its only caller, the removed mesh daemon, is gone), and its
 fallback semantics — mapping every non-bypass case to `"acceptEdits"` —
 would grant a stronger-than-today posture to every workspace with no
-declared `bypass` posture, which R3 explicitly forbids. See the PRD's Out
-of Scope for the same rejection at requirements altitude.
+declared `bypass` posture, which R3 explicitly forbids.
 
 **Audit signal.** Because the derived flag changes a worker's behavior
 based on config rather than an explicit per-invocation choice, the
