@@ -193,6 +193,7 @@ if dispatchPermissionMode == "" &&
     inst != nil && inst.Permissions != nil &&
     inst.Permissions.DefaultMode == "bypassPermissions" {
     dispatchPermissionMode = "bypassPermissions"
+    fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: derived --permission-mode bypassPermissions from the workspace's declared permissions posture\n")
 }
 passthrough := buildDispatchPassthrough(spec.Flags, slug, resolvedModel)
 ```
@@ -221,7 +222,12 @@ just these two) has `""` in that field where not implemented.
    now-redundant call at the old site.
 3. Add the derivation conditional (DD3's agent-scoping check, R1's
    bypass-value check, R7's nil-safety) immediately after the moved read
-   and before `buildDispatchPassthrough` is called.
+   and before `buildDispatchPassthrough` is called. When the conditional
+   fires, print a one-line notice to stderr (mirroring the existing
+   `modelWarning` pattern a few lines below at step 9a) naming that
+   `--permission-mode bypassPermissions` was derived from the workspace's
+   declared posture rather than typed explicitly, so an operator reading
+   `niwa dispatch`'s output can tell the two apart after the fact.
 4. Add/extend tests: a fixture with `permissions.defaultMode:
    "bypassPermissions"` and no explicit flag asserts the derived flag
    appears (AC1); an explicit `--permission-mode` asserts it wins (AC2); no
@@ -238,19 +244,93 @@ just these two) has `""` in that field where not implemented.
 
 ## Security Considerations
 
-The derivation reads a file niwa itself already wrote
-(`<instance>/.claude/settings.json`, via `RootSettingsMaterializer`) into an
-argv element for a process niwa itself launches with `cmd.Env =
-os.Environ()` in the same operator's own security context — no new trust
-boundary is crossed. The value forwarded is a closed enum member
-(`"bypassPermissions"`), never interpolated as a free-form string, and it
-only ever *widens* a worker's permission posture to match what the
-workspace's own configuration already declared, on the same instance the
-operator already created. `spec.Flags.PermissionMode` is read from the
-statically-declared `launchSpecs` table (`internal/agentplan/dispatch.go`),
-not from any user- or network-supplied input, so DD3's gate is not an
-injectable comparison. No new file is read that wasn't already read by this
-same function a few lines later; no new write path is introduced.
+**This restores parity with pre-2.1.258 behavior; it does not grant a
+workspace anything it could not already grant itself.** Before 2.1.258, a
+workspace's `permissions = "bypass"` declaration reached a dispatched
+worker automatically through the materialized `.claude/settings.json`
+channel. This design's whole purpose is to carry the *same* operator
+decision through a *different* channel Claude Code still honors
+(`--permission-mode`). The set of workspaces that end up with a bypass
+worker is unchanged by this feature; only the mechanism that delivers the
+already-declared posture changes.
+
+**Why 2.1.258 likely stopped honoring project-level settings, and why
+that reasoning does not indict this design.** The most plausible reason
+to stop trusting a project's `.claude/settings.json` for
+`defaultMode: "bypassPermissions"` is that a project settings file can
+arrive by a channel the operator never consciously reviewed — checked
+into a repo, introduced by a branch or PR, inherited from a template.
+Silently trusting *that* is a real hole. The value this design reads is
+not that file in the general case: it is the file `RootSettingsMaterializer`
+writes from the workspace's own `workspace.toml` `permissions` key —
+config the operator (or whoever administers the workspace) declared
+directly, through niwa's own control plane, not through arbitrary repo
+content. The derivation trusts the operator's own declared posture, the
+same thing `--permission-mode` typed by hand would express; it does not
+reach into an arbitrary project's checked-in settings file on the
+operator's behalf. If `workspace.toml` itself can be modified by an
+untrusted party, that is a pre-existing trust question the workspace
+config model already has to answer — it is not created or worsened by
+this derivation reading one more of its outputs.
+
+**Known gap this design does not close: `niwa dispatch` has no
+containment for a bypass worker, unlike `niwa watch`'s sandbox mode.**
+`internal/watch/guardfs.go` and `internal/watch/containment.go` exist
+because a session running under `bypassPermissions` skips the permission
+system for file writes (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`) and for
+network egress (`WebFetch`/`WebSearch`/MCP tools) — both of which a
+prompt-injected agent processing untrusted content (an issue body, a PR,
+a web page) could otherwise abuse. `niwa watch`'s sandbox mode closes that
+with PreToolUse hooks that fire even under `bypassPermissions`.
+`internal/cli/dispatch*.go` has no equivalent hooks today, and this
+design does not add any — a `niwa dispatch` worker already ran without
+that containment whenever its workspace declared `bypass` and the
+materialized-settings channel still worked, i.e. on every Claude Code
+release before 2.1.258. This design restores that pre-existing posture;
+it does not add containment `niwa dispatch` never had, and doing so is
+out of scope for a fix whose PRD is explicitly scoped to compatibility
+restoration (see PRD-dispatch-permission-mode's Out of Scope). It is
+worth a follow-up issue evaluating whether `niwa dispatch` should gain
+`watch`-equivalent containment independent of this fix, since the
+underlying risk (a bypass worker processing untrusted content) is not
+new here and is not fully mitigated anywhere in `niwa dispatch` today.
+
+**The trust-boundary claim, stated precisely.** The boundary that matters
+is the approval gate, not file provenance. Before this design: an
+operator had to either declare `bypass` in `workspace.toml` (which,
+before 2.1.258, silently reached the worker) or type `--permission-mode`
+by hand on the invocation. After this design: the same `workspace.toml`
+declaration reaches the worker again, through a different flag. No
+workspace gains standing bypass access it did not already have the means
+to grant itself through the config key that has existed since before this
+feature. The risk this design's Out of Scope section already excludes —
+whether `workspace.toml`'s `permissions` key should itself require
+tighter review or provenance — is the correct place for that question,
+not here.
+
+**Mechanical safety.** The value forwarded is a closed enum member
+(`"bypassPermissions"`), never interpolated as a free-form string.
+`spec.Flags.PermissionMode` is read from the statically-declared
+`launchSpecs` table (`internal/agentplan/dispatch.go`), not from any user-
+or network-supplied input, so DD3's gate is not an injectable comparison.
+No new file is read that wasn't already read by this same function a few
+lines later; no new write path is introduced.
+
+**Considered and rejected: reusing `internal/workspace/permissions.go`'s
+`WorkerPermissionMode`.** It reads the identical `permissions.defaultMode`
+path and looks, at a glance, like it does this derivation already. It is
+dead code (its only caller, the removed mesh daemon, is gone), and its
+fallback semantics — mapping every non-bypass case to `"acceptEdits"` —
+would grant a stronger-than-today posture to every workspace with no
+declared `bypass` posture, which R3 explicitly forbids. See the PRD's Out
+of Scope for the same rejection at requirements altitude.
+
+**Audit signal.** Because the derived flag changes a worker's behavior
+based on config rather than an explicit per-invocation choice, the
+Implementation Approach adds a log line at the point of derivation (see
+step 3 below) so an operator inspecting `niwa dispatch`'s output can tell,
+after the fact, whether `bypassPermissions` came from an explicit flag or
+from the workspace's declared posture.
 
 ## Consequences
 
