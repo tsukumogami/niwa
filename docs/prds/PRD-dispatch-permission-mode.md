@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Draft
+status: Accepted
 problem: |
   Operators who declare `permissions = "bypass"` in a workspace's
   `workspace.toml` expect every Claude Code worker `niwa dispatch` launches
@@ -27,7 +27,7 @@ source_issue: 276
 
 ## Status
 
-Draft
+Accepted
 
 Absorbed [BRIEF-dispatch-permission-mode](docs/briefs/BRIEF-dispatch-permission-mode.md); carried in Absorbed Brief.
 
