@@ -38,6 +38,55 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     And a dispatch instance was created with a well-formed instance file
     And a dispatch-origin mapping exists for session "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
+  # --- Permission-mode derivation from the workspace's declared posture ---
+  #
+  # Claude Code 2.1.258 stopped honoring permissions.defaultMode from a
+  # project's materialized .claude/settings.json; --permission-mode is one of
+  # the two channels still honored. This is niwa's regression fix: a workspace
+  # that declares permissions = "bypass" gets that posture forwarded to the
+  # launched worker via --permission-mode, restoring pre-2.1.258 behavior.
+  #
+  # Design: docs/designs/current/DESIGN-dispatch-permission-mode.md
+
+  @critical
+  Scenario: dispatch derives --permission-mode from a bypass-declared workspace
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [claude.settings]
+      permissions = "bypass"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "12121212-1212-4212-8212-121212121212"
+    When I run "niwa dispatch bypass-task --detach" from the workspace root
+    Then the exit code is 0
+    And the launched claude was invoked with "--permission-mode bypassPermissions"
+
+  @critical
+  Scenario: an explicit --permission-mode wins over a bypass-declared workspace
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [claude.settings]
+      permissions = "bypass"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "13131313-1313-4313-8313-131313131313"
+    When I run "niwa dispatch explicit-task --permission-mode acceptEdits --detach" from the workspace root
+    Then the exit code is 0
+    And the launched claude was invoked with "--permission-mode acceptEdits"
+    And the launched claude was not invoked with "bypassPermissions"
+
   # --- Model selection resolves a category to a concrete model ---
 
   @critical

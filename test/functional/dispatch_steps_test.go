@@ -438,10 +438,30 @@ func theLaunchedClaudeWasInvokedWith(ctx context.Context, want string) error {
 	return nil
 }
 
+// theLaunchedClaudeWasNotInvokedWith is theLaunchedClaudeWasInvokedWith's
+// negation, for scenarios asserting a flag or value was deliberately withheld
+// (e.g. permission-mode derivation that must not fire).
+func theLaunchedClaudeWasNotInvokedWith(ctx context.Context, notWant string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.homeDir, "dispatch-launch-argv")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading launched claude argv %s: %w\nstdout:\n%s\nstderr:\n%s", path, err, s.stdout, s.stderr)
+	}
+	if strings.Contains(string(data), notWant) {
+		return fmt.Errorf("launched claude argv %q unexpectedly contains %q", strings.TrimSpace(string(data)), notWant)
+	}
+	return nil
+}
+
 // registerDispatchSteps wires the dispatch-lifecycle steps into the scenario
 // context. Called from initializeScenario.
 func registerDispatchSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the launched claude was invoked with "([^"]*)"$`, theLaunchedClaudeWasInvokedWith)
+	ctx.Step(`^the launched claude was not invoked with "([^"]*)"$`, theLaunchedClaudeWasNotInvokedWith)
 	ctx.Step(`^a fake claude for dispatch with session "([^"]*)"$`, aFakeClaudeForDispatchWithSession)
 	ctx.Step(`^a fake claude for dispatch that fails to launch$`, aFakeClaudeForDispatchThatFailsToLaunch)
 	ctx.Step(`^I run "([^"]*)" from the workspace root$`, iRunCommandFromTheWorkspaceRoot)

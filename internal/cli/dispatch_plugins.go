@@ -181,8 +181,8 @@ var runClaudePluginCmd = func(ctx context.Context, dir string, args ...string) e
 }
 
 // instanceSettings is the narrow projection of .claude/settings.json this package
-// reads back: just the plugin/marketplace declarations niwa materialized. Unknown
-// fields are ignored.
+// reads back: the plugin/marketplace, remote-control, keep-alive, and permissions
+// declarations niwa materialized. Unknown fields are ignored.
 type instanceSettings struct {
 	EnabledPlugins         map[string]bool             `json:"enabledPlugins"`
 	ExtraKnownMarketplaces map[string]marketplaceEntry `json:"extraKnownMarketplaces"`
@@ -195,6 +195,13 @@ type instanceSettings struct {
 	// set it; the dispatch keep-alive resolver reads it as the downstream layer
 	// between the --keep-alive flag and the host default.
 	KeepAliveOnDispatch *bool `json:"keepAliveOnDispatch"`
+	// Permissions mirrors the materialized settings.json permissions key.
+	// Non-nil only when the file declared one; a nil Permissions or a
+	// DefaultMode other than "bypassPermissions" both mean "nothing to
+	// derive" to every reader of this field.
+	Permissions *struct {
+		DefaultMode string `json:"defaultMode"`
+	} `json:"permissions"`
 }
 
 type marketplaceEntry struct {
