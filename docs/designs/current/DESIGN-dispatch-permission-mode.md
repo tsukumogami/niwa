@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Planned
+status: Current
 problem: |
   `buildDispatchPassthrough` only forwards `--permission-mode` when the
   operator supplies it explicitly; nothing derives it from the workspace's
@@ -32,7 +32,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Planned
+Current
 
 Absorbed [BRIEF-dispatch-permission-mode](docs/briefs/BRIEF-dispatch-permission-mode.md); carried in Absorbed Brief.
 Absorbed [PRD-dispatch-permission-mode](docs/prds/PRD-dispatch-permission-mode.md); carried in Absorbed PRD.
