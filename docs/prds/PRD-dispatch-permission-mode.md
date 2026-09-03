@@ -18,13 +18,30 @@ goals: |
   they invoke `niwa dispatch`. An explicit `--permission-mode` still wins
   over the derived value, and a workspace with no declared posture (or
   `"ask"`) is unaffected. The fix is internal to niwa's dispatch pipeline.
-upstream: docs/briefs/BRIEF-dispatch-permission-mode.md
+absorbed:
+  - docs/briefs/BRIEF-dispatch-permission-mode.md
 source_issue: 276
 ---
+
+# PRD: dispatch permission mode
 
 ## Status
 
 Draft
+
+Absorbed [BRIEF-dispatch-permission-mode](docs/briefs/BRIEF-dispatch-permission-mode.md); carried in Absorbed Brief.
+
+## Absorbed Brief
+
+The framing this PRD was written from, carried forward because the brief
+that held it was folded in here. A workspace's `permissions = "bypass"`
+declaration is a trust decision: dispatched workers should act without a
+human approving each tool call. Claude Code 2.1.258 broke the channel that
+decision used to reach a worker automatically, so operators need it to keep
+working through no action of their own — the same `workspace.toml`
+declaration and the same `niwa dispatch` invocation, an explicit
+`--permission-mode` still winning, and an untouched no-op for workspaces
+that never opted into bypass.
 
 ## Problem Statement
 
