@@ -23,6 +23,7 @@ rationale: |
   `buildDispatchPassthrough` itself was rejected for breaking that
   function's existing pure-argv-builder contract.
 absorbed:
+  - docs/briefs/BRIEF-dispatch-permission-mode.md
   - docs/prds/PRD-dispatch-permission-mode.md
 decision_provenance: inline-resolved
 ---
@@ -33,7 +34,21 @@ decision_provenance: inline-resolved
 
 Planned
 
+Absorbed [BRIEF-dispatch-permission-mode](docs/briefs/BRIEF-dispatch-permission-mode.md); carried in Absorbed Brief.
 Absorbed [PRD-dispatch-permission-mode](docs/prds/PRD-dispatch-permission-mode.md); carried in Absorbed PRD.
+
+## Absorbed Brief
+
+The framing this design was ultimately written from, carried forward
+because the brief that held it — then the PRD that absorbed the brief —
+were both folded in here. A workspace's `permissions = "bypass"`
+declaration is a trust decision: dispatched workers should act without a
+human approving each tool call. Claude Code 2.1.258 broke the channel that
+decision used to reach a worker automatically, so operators need it to keep
+working through no action of their own — the same `workspace.toml`
+declaration and the same `niwa dispatch` invocation, an explicit
+`--permission-mode` still winning, and an untouched no-op for workspaces
+that never opted into bypass.
 
 ## Absorbed PRD
 
