@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Proposed
+status: Accepted
 problem: |
   `buildDispatchPassthrough` only forwards `--permission-mode` when the
   operator supplies it explicitly; nothing derives it from the workspace's
@@ -30,7 +30,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
