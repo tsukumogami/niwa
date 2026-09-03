@@ -195,6 +195,13 @@ type instanceSettings struct {
 	// set it; the dispatch keep-alive resolver reads it as the downstream layer
 	// between the --keep-alive flag and the host default.
 	KeepAliveOnDispatch *bool `json:"keepAliveOnDispatch"`
+	// Permissions mirrors the materialized settings.json permissions key.
+	// Non-nil only when the file declared one; a nil Permissions or a
+	// DefaultMode other than "bypassPermissions" both mean "nothing to
+	// derive" to every reader of this field.
+	Permissions *struct {
+		DefaultMode string `json:"defaultMode"`
+	} `json:"permissions"`
 }
 
 type marketplaceEntry struct {

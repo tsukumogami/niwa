@@ -526,6 +526,36 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", modelWarning)
 	}
 
+	// (9a-derive) Read the instance's materialized settings once, ahead of the
+	// passthrough build so a derived --permission-mode can ride the same argv
+	// this call produces. The 9c/9d consumers below reuse this same `inst`
+	// value instead of reading the file again -- this is the "read once" the
+	// (9c) comment below already promised, moved one step earlier so (9b) can
+	// share it too.
+	//
+	// A workspace's own declared `permissions = "bypass"` posture is carried
+	// through the materialized `.claude/settings.json` (RootSettingsMaterializer
+	// writes it there from workspace.toml). Since Claude Code 2.1.258 that
+	// posture no longer reaches a worker through the settings-file channel; the
+	// only channel still honored is this CLI flag. Deriving it here restores
+	// parity with pre-2.1.258 behavior for a workspace that already declared
+	// the posture -- it does not grant anything new. The derivation is scoped
+	// to the agent whose permission flag is Claude's own spelling
+	// (`--permission-mode`): Codex's equivalent (`--sandbox`) takes an
+	// unrelated value vocabulary and Codex workers already get full trust
+	// through WorkdirGrantArgs, so forwarding "bypassPermissions" there would
+	// be wrong rather than merely unhelpful. A missing, unreadable, or
+	// malformed settings file degrades to "nothing derived", consistent with
+	// every other reader of readInstanceSettings, and never fails the dispatch.
+	inst, _ := readInstanceSettings(instancePath)
+	if dispatchPermissionMode == "" &&
+		spec.Flags.PermissionMode == "--permission-mode" &&
+		inst != nil && inst.Permissions != nil &&
+		inst.Permissions.DefaultMode == "bypassPermissions" {
+		dispatchPermissionMode = "bypassPermissions"
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: derived --permission-mode bypassPermissions from the workspace's declared permissions posture\n")
+	}
+
 	// (9b) Build the pass-through argv. Flags become discrete argv elements --
 	// never string-concatenated -- so a crafted value cannot inject a flag
 	// (DESIGN Decision 8). The spelling of each flag is the launched agent's,
@@ -544,14 +574,14 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// is treated as unset), and an unreadable instance settings file is treated as
 	// "downstream unset" -- so the host default-fill still applies. Either way the
 	// dispatch always launches. The global config is loaded once in step (9) and
-	// reused here. The instance settings are read once too -- the keep-alive
-	// resolution in (9d) consults the same projection.
+	// reused here. The instance settings were read once too, ahead of (9b) at
+	// (9a-derive) -- the keep-alive resolution in (9d) consults the same
+	// projection.
 	//
 	// Remote control is its own capability row, and it reaches a session as a
 	// settings document the agent reads. An agent that has no such flag has
 	// nowhere for the document to go, so the injection is gated on the
 	// declaration rather than attempted and dropped.
-	inst, _ := readInstanceSettings(instancePath)
 	rcInjected := false
 	rcDecl, rcErr := agentplan.Lookup(agentplan.RemoteControl, dispatchedAgent)
 	rcDeliverable := rcErr == nil && rcDecl.State == agentplan.StateImplemented && spec.Flags.Settings != ""
