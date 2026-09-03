@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   A workspace can declare `permissions = "bypass"` in `workspace.toml`, but
   Claude Code 2.1.258 stopped honoring `defaultMode: "bypassPermissions"` when
@@ -19,7 +19,7 @@ outcome: |
 
 ## Status
 
-Draft
+Accepted
 
 ## Problem Statement
 
