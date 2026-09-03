@@ -527,11 +527,11 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	}
 
 	// (9a-derive) Read the instance's materialized settings once, ahead of the
-	// passthrough build so a derived --permission-mode can ride the same argv
-	// this call produces. The 9c/9d consumers below reuse this same `inst`
-	// value instead of reading the file again -- this is the "read once" the
-	// (9c) comment below already promised, moved one step earlier so (9b) can
-	// share it too.
+	// passthrough build so a derived --permission-mode can be assigned to
+	// dispatchPermissionMode before (9b) reads that variable. The 9c/9d
+	// consumers below reuse this same `inst` value instead of reading the
+	// file again -- this is the "read once" the (9c) comment below already
+	// promised, moved one step earlier so this derivation can share it too.
 	//
 	// A workspace's own declared `permissions = "bypass"` posture is carried
 	// through the materialized `.claude/settings.json` (RootSettingsMaterializer

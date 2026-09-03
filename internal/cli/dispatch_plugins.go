@@ -181,8 +181,8 @@ var runClaudePluginCmd = func(ctx context.Context, dir string, args ...string) e
 }
 
 // instanceSettings is the narrow projection of .claude/settings.json this package
-// reads back: just the plugin/marketplace declarations niwa materialized. Unknown
-// fields are ignored.
+// reads back: the plugin/marketplace, remote-control, keep-alive, and permissions
+// declarations niwa materialized. Unknown fields are ignored.
 type instanceSettings struct {
 	EnabledPlugins         map[string]bool             `json:"enabledPlugins"`
 	ExtraKnownMarketplaces map[string]marketplaceEntry `json:"extraKnownMarketplaces"`
