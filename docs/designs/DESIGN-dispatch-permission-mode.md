@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 problem: |
   `buildDispatchPassthrough` only forwards `--permission-mode` when the
   operator supplies it explicitly; nothing derives it from the workspace's
@@ -31,7 +31,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Accepted
+Planned
 
 Absorbed [PRD-dispatch-permission-mode](docs/prds/PRD-dispatch-permission-mode.md); carried in Absorbed PRD.
 
@@ -95,14 +95,15 @@ within:
    (`projects={...trust_level="trusted"}`). A derivation keyed only on "does
    this agent have a permission flag" would wrongly touch Codex.
 
-The PRD already settled three architectural questions (see PRD-
-dispatch-permission-mode's Decisions and Trade-offs): read materialized
-settings rather than `workspace.toml`, move the settings read ahead of the
+This document's own frontmatter `decision:` and `rationale:` fields already
+settle three architectural questions carried forward from upstream
+requirements analysis: read materialized settings rather than
+`workspace.toml`, move the settings read ahead of the
 `buildDispatchPassthrough` call rather than duplicating it, and scope the
-derivation to Claude's flag spelling only. What remains open is the concrete
-shape: where the derivation function lives, how it's invoked relative to the
-existing 9b/9c/9d step ordering, and how the agent-scoping check
-(requirement R4) is expressed in code.
+derivation to Claude's flag spelling only. What remains open here is the
+concrete shape: where the derivation function lives, how it's invoked
+relative to the existing 9b/9c/9d step ordering, and how the agent-scoping
+check (requirement R4) is expressed in code.
 
 ## Decision Drivers
 
