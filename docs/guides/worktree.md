@@ -43,10 +43,16 @@ it exactly. A worktree's env is byte-identical to its instance clone's, for
 every configured target and format (dotenv, json, shell, custom names).
 
 Because there's no resolution step, `niwa worktree create` and
-`niwa worktree apply` need no secret source and no network access. They can't
-fail on an unreachable vault, a wrong-org session, or an unassembled provider
-reference — those concerns belong to `niwa apply`, which already resolved the
-environment into the clone.
+`niwa worktree apply` need no secret source. They can't fail on an unreachable
+vault, a wrong-org session, or an unassembled provider reference — those
+concerns belong to `niwa apply`, which already resolved the environment into the
+clone.
+
+That guarantee is about secret resolution specifically, not about the network in
+general. A repo that has opted into [setup scripts](setup-scripts.md) running in
+its worktrees can have those scripts do whatever they do — `npm ci` reaches the
+network, and so does the same script on the clone path today. niwa itself
+resolves nothing and contacts nothing.
 
 The same inherit-don't-resolve rule covers `[claude.env] promote`. When a
 promoted key's value comes from a secret source — a vault reference or the
@@ -337,9 +343,10 @@ git branch --list 'session/*' # list all worktree branches
 
 Creates a worktree for a repo: scaffolds the worktree on a new branch,
 installs the repo's CLAUDE content plus the worktree rules import and the
-purpose/branch layer, runs worktree hooks, and writes the state file. The
-worktree inherits the instance clone's already-materialized environment; it
-resolves no secrets and needs no network access (see
+purpose/branch layer, runs worktree hooks, runs the repo's own
+[setup scripts](setup-scripts.md) if it has opted in, and writes the state file.
+The worktree inherits the instance clone's already-materialized environment; it
+resolves no secrets (see
 [How a worktree gets its environment](#how-a-worktree-gets-its-environment)). If
 the clone has no env output to inherit, create exits non-zero and points you at
 `niwa apply`.
