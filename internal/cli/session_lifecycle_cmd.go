@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -191,10 +192,14 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	// gets from `niwa apply`. The worktree already exists at this point; an
 	// install failure is surfaced but does not unwind the worktree (it can
 	// be re-synced later).
-	written, err := applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch)
+	var setup workspace.SetupResult
+	written, err := applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch, &setup)
 	if err != nil {
 		return fmt.Errorf("niwa: error: installing content into worktree %s (the worktree exists; re-sync it later): %w", sessionID, err)
 	}
+	// Reported on stderr so --json mode's stdout object stays the only thing
+	// on stdout, exactly as the content-file lines below are suppressed there.
+	reportWorktreeSetup(cmd.ErrOrStderr(), worktreePath, &setup)
 
 	// --json mode emits a single stable object and suppresses the human
 	// summary / content-file lines. The landing-path side effects below still
@@ -271,10 +276,12 @@ func runSessionApply(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	written, err := applyContentToWorktree(instanceRoot, state.WorktreePath, state.Repo, state.Purpose, state.EffectiveBranchName())
+	var setup workspace.SetupResult
+	written, err := applyContentToWorktree(instanceRoot, state.WorktreePath, state.Repo, state.Purpose, state.EffectiveBranchName(), &setup)
 	if err != nil {
 		return fmt.Errorf("niwa: error: re-syncing content into worktree %s: %w", sessionID, err)
 	}
+	reportWorktreeSetup(cmd.ErrOrStderr(), state.WorktreePath, &setup)
 
 	fmt.Fprintf(cmd.OutOrStdout(), "session: applied %s at %s\n", sessionID, state.WorktreePath)
 	printWorktreeContentFiles(cmd, written)
@@ -295,7 +302,31 @@ func runSessionApply(cmd *cobra.Command, args []string) error {
 // inherit model: it takes the environment its instance already materialized,
 // and converging it must not advance it past the instance it belongs to.
 // Reconcile by converging the instance.
-func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch string) ([]string, error) {
+// reportWorktreeSetup writes a setup-script failure to stderr, naming the
+// worktree and the failing script.
+//
+// It is deliberately not on stdout. The delegated WorktreeCreate path's stdout
+// carries ONLY the absolute worktree path, which Claude Code reads as the
+// session working directory -- so a diagnostic printed there would satisfy
+// "report the failure" while breaking the hook contract. Every surface reports
+// through this one function so that property holds on all of them.
+//
+// It names the worktree rather than the repo because a repo can have several
+// worktrees plus its clone, and "setup failed for app" does not say which tree
+// is unprovisioned.
+func reportWorktreeSetup(stderr io.Writer, worktreePath string, result *workspace.SetupResult) {
+	if result == nil {
+		return
+	}
+	for _, s := range result.Scripts {
+		if s.Error != nil {
+			fmt.Fprintf(stderr, "niwa: warning: setup script %s failed in worktree %s: %v\n",
+				s.Name, worktreePath, s.Error)
+		}
+	}
+}
+
+func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch string, setup *workspace.SetupResult) ([]string, error) {
 	configPath, configDir, err := config.Discover(instanceRoot)
 	if err != nil {
 		return nil, fmt.Errorf("locating workspace config: %w", err)
@@ -311,7 +342,7 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 		return nil, err
 	}
 
-	opts := workspace.WorktreeApplyOptions{Stderr: os.Stderr}
+	opts := workspace.WorktreeApplyOptions{Stderr: os.Stderr, Setup: setup}
 
 	// Decision 9: record the same worktree-delegation configuration the clone
 	// carries, so a worktree's settings do not drift from its clone's. The

@@ -397,15 +397,44 @@ type pipelineResult struct {
 // said the apply succeeded. It is a plain Log rather than a Warn and is not
 // deferred, so it stays attached to the verdict; the per-script warnings still
 // carry the detail below it.
-func (a *Applier) logSetupIncomplete(repos []string) {
-	switch len(repos) {
+func (a *Applier) logSetupIncomplete(locations []string) {
+	// Entries are locations rather than repo names, because one repo can fail
+	// in its clone and in each of its worktrees. Naming them all "niwa" would
+	// render as "setup incomplete for 3 repos: niwa, niwa, niwa" and tell the
+	// operator nothing about which tree is unprovisioned.
+	//
+	// The noun follows the contents: a clone-only failure still reads "repo",
+	// which keeps the wording the clone path has always had, and a run
+	// involving worktrees reads "location" because that is what the entries
+	// then are.
+	noun, nounPlural := "repo", "repos"
+	for _, l := range locations {
+		if strings.Contains(l, worktreeLocationMarker) {
+			noun, nounPlural = "location", "locations"
+			break
+		}
+	}
+
+	switch len(locations) {
 	case 0:
 		return
 	case 1:
-		a.Reporter.Log("setup incomplete for 1 repo: %s", repos[0])
+		a.Reporter.Log("setup incomplete for 1 %s: %s", noun, locations[0])
 	default:
-		a.Reporter.Log("setup incomplete for %d repos: %s", len(repos), strings.Join(repos, ", "))
+		a.Reporter.Log("setup incomplete for %d %s: %s", len(locations), nounPlural, strings.Join(locations, ", "))
 	}
+}
+
+// worktreeLocationMarker distinguishes a worktree entry from a clone entry in
+// the setup-incomplete list. It is a substring rather than a separate field
+// because the list is rendered verbatim into one line; the marker is what
+// logSetupIncomplete keys its noun on.
+const worktreeLocationMarker = " (worktree "
+
+// worktreeSetupLocation labels a repo's worktree for the setup-incomplete
+// verdict, so the operator can tell which of a repo's trees failed.
+func worktreeSetupLocation(repo, worktreePath string) string {
+	return repo + worktreeLocationMarker + filepath.Base(worktreePath) + ")"
 }
 
 // Create creates a new workspace instance under workspaceRoot, runs the full
@@ -2002,6 +2031,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		allowPlaintextSecrets:  a.AllowPlaintextSecrets,
 		worktreeDelegation:     worktreeDelegation,
 		exempt:                 &exemptPaths,
+		redactor:               redactor,
+		setupIncomplete:        &setupIncomplete,
 	})
 	if err != nil {
 		return nil, err
@@ -2375,6 +2406,16 @@ type worktreeRefreshInputs struct {
 	// The pipeline passes its own list so cleanRemovedFiles sees them; a test
 	// that only cares about env output may leave it nil.
 	exempt *[]string
+	// redactor is the pipeline's own, threaded so a worktree's setup-script
+	// output is scrubbed to the same standard the clone's is. The standalone
+	// worktree commands cannot borrow it -- they resolve no secrets, so a
+	// redactor built in those processes holds no fragments at all.
+	redactor *secret.Redactor
+	// setupIncomplete, when non-nil, receives a location label for each
+	// worktree whose setup scripts did not all finish. Same output-sink idiom
+	// as exempt above: the pipeline passes one so the failures reach the
+	// counted verdict, and a caller that does not care passes nothing.
+	setupIncomplete *[]string
 }
 
 // refreshWorktreeEnvs enumerates the instance's session-backed worktrees and, for
@@ -2435,14 +2476,14 @@ func (a *Applier) refreshWorktreeEnvs(in worktreeRefreshInputs) ([]ManagedFile, 
 		// Missing working dir -> absent. Warn, skip, do NOT forward-carry: the
 		// files are gone, so cleanup pruning the stale entries is correct.
 		if _, statErr := os.Stat(wtPath); statErr != nil {
-			a.Reporter.DeferWarn("worktree %s (repo %s) directory is missing; skipping env refresh", wtPath, s.Repo)
+			a.Reporter.DeferWarn("worktree %s (repo %s) directory is missing; skipping content and setup", wtPath, s.Repo)
 			continue
 		}
 
 		// Attached -> another process holds the lock. Skip-but-live: forward-carry.
 		// reapStale MUST be false; apply must never reap another process's lock.
 		if _, avail, _ := worktree.ReadAttachState(wtPath, false); avail == worktree.AttachAttached {
-			a.Reporter.DeferWarn("worktree %s (repo %s) is attached (locked) by another process; skipping env refresh", wtPath, s.Repo)
+			a.Reporter.DeferWarn("worktree %s (repo %s) is attached (locked) by another process; skipping content and setup", wtPath, s.Repo)
 			out = append(out, forwardCarry(priorByWorktree, wtPath)...)
 			continue
 		}
@@ -2451,7 +2492,7 @@ func (a *Applier) refreshWorktreeEnvs(in worktreeRefreshInputs) ([]ManagedFile, 
 		// live: forward-carry. An undetectable worktree defaults to skip.
 		cloneDir := filepath.Join(in.instanceRoot, group, s.Repo)
 		if !gitRegistered(cloneDir, wtPath) {
-			a.Reporter.DeferWarn("worktree %s (repo %s) is not registered with git (detached); skipping env refresh", wtPath, s.Repo)
+			a.Reporter.DeferWarn("worktree %s (repo %s) is not registered with git (detached); skipping content and setup", wtPath, s.Repo)
 			out = append(out, forwardCarry(priorByWorktree, wtPath)...)
 			continue
 		}
@@ -2459,14 +2500,21 @@ func (a *Applier) refreshWorktreeEnvs(in worktreeRefreshInputs) ([]ManagedFile, 
 		// Included: refresh via the inherit path. Failure to refresh a single
 		// worktree is non-fatal — warn, forward-carry its prior entries (it is
 		// live), and move on rather than failing the whole apply.
+		var setup SetupResult
 		written, refreshErr := ApplyToWorktree(
 			in.cfg, in.configDir, in.instanceRoot, wtPath, group, s.Repo,
 			s.Purpose, s.EffectiveBranchName(),
 			WorktreeApplyOptions{
-				Exempt:                 in.exempt,
-				OverlayDir:             in.overlayDir,
-				AllowPlaintextSecrets:  in.allowPlaintextSecrets,
-				Stderr:                 a.Reporter.Writer(),
+				Exempt:                in.exempt,
+				OverlayDir:            in.overlayDir,
+				AllowPlaintextSecrets: in.allowPlaintextSecrets,
+				Stderr:                a.Reporter.Writer(),
+				// The pipeline's own reporter and redactor, so a worktree's
+				// setup output is announced and scrubbed exactly as the clone's
+				// is, and its failures land in the same deferred-warning stream.
+				Reporter:               a.Reporter,
+				Redactor:               in.redactor,
+				Setup:                  &setup,
 				GlobalEnvExamplePolicy: in.globalEnvExamplePolicy,
 				GlobalEnvOutput:        in.globalEnvOutput,
 				DeveloperHome:          a.DeveloperHome,
@@ -2479,6 +2527,23 @@ func (a *Applier) refreshWorktreeEnvs(in worktreeRefreshInputs) ([]ManagedFile, 
 			a.Reporter.DeferWarn("could not refresh env for worktree %s (repo %s): %v; retaining prior managed entries", wtPath, s.Repo, refreshErr)
 			out = append(out, forwardCarry(priorByWorktree, wtPath)...)
 			continue
+		}
+
+		// A setup failure in this worktree is data, not an error: it never
+		// reached refreshErr above, so the worktree keeps its content and the
+		// apply keeps going. It is reported here and counted in the verdict,
+		// named by worktree so a repo failing in several trees does not render
+		// as its own name repeated.
+		var worktreeSetupFailed bool
+		for _, sr := range setup.Scripts {
+			if sr.Error != nil {
+				worktreeSetupFailed = true
+				a.Reporter.DeferWarn("setup script %s failed in worktree %s (repo %s): %v",
+					sr.Name, wtPath, s.Repo, sr.Error)
+			}
+		}
+		if worktreeSetupFailed && in.setupIncomplete != nil {
+			*in.setupIncomplete = append(*in.setupIncomplete, worktreeSetupLocation(s.Repo, wtPath))
 		}
 
 		for _, p := range written {

@@ -141,7 +141,14 @@ func runFromHookCreate(cmd *cobra.Command, payload hookPayload) error {
 	// the degraded checkout this feature exists to eliminate. A key the vault
 	// cannot supply is marked and carried through rather than failing here; a
 	// hard failure still fails creation.
-	if _, err := applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch); err != nil {
+	// The setup outcome comes back as data and is reported on stderr below.
+	// It must NOT reach stdout: the hook contract is that stdout carries only
+	// the absolute worktree path, which Claude Code reads as the session's
+	// working directory. And it must not become an error either -- that would
+	// route into reconcileFailedHookCreate and destroy a worktree whose only
+	// fault is a failing setup script.
+	var setup workspace.SetupResult
+	if _, err := applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch, &setup); err != nil {
 		// Reconcile rather than strand (design Decision 8). CreateSession is
 		// already atomic — every failure after `git worktree add` cleans up after
 		// itself — but content install is not, so without this the tool call fails
@@ -156,6 +163,11 @@ func runFromHookCreate(cmd *cobra.Command, payload hookPayload) error {
 		// enters the directory on this path and will not come back to it.
 		return reconcileFailedHookCreate(cmd.ErrOrStderr(), instanceRoot, sessionID, err)
 	}
+
+	// A setup failure is reported and the worktree is kept. The agent lands in
+	// a tree that exists and is navigable, with the reason on stderr, rather
+	// than having its worktree deleted for a script's failure.
+	reportWorktreeSetup(cmd.ErrOrStderr(), worktreePath, &setup)
 
 	// Hook contract: stdout carries ONLY the absolute worktree path. Claude
 	// uses this as the session working directory.
