@@ -23,7 +23,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 The framing is settled. Both Phase 4 jury reviewers returned PASS and two
 reviewers standing in for the author approved the transition.
