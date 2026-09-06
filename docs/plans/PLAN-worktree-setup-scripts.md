@@ -151,7 +151,12 @@ path that copies config.
 - [ ] A test asserts a repo's opt-in survives **a vault-resolved apply**.
       Omitting the field from `deepCopyRepos` must fail it — the opt-in would
       otherwise work on `worktree create` and silently not on `niwa apply`, and
-      no linter or field-count guard in this repo catches it.
+      no linter or field-count guard in this repo catches it. This is not a
+      hypothetical: `deepCopyRepos` already lists eleven of `RepoOverride`'s
+      twelve fields, and the omitted one, `Codex`, is dropped to nil on that
+      path today. Fixing that is out of scope here, but it is the reason this
+      criterion is worded against the vault-resolved path rather than against
+      the copy.
 - [ ] An opt-in on repo A does not cause setup to run for repo B. (R3)
 - [ ] With no opt-in anywhere, nothing about the clone path changes. (R15)
 
