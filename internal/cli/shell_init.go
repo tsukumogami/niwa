@@ -25,15 +25,32 @@ var shellInitCmd = &cobra.Command{
 	Short: "Generate shell integration (wrapper function and completions)",
 	Long: `Generate shell wrapper function and completions for niwa.
 
-The wrapper intercepts cd-eligible commands (create, go) so that niwa can
-change the shell's working directory after creating or switching to a
-workspace instance.
+The wrapper intercepts cd-eligible commands (create, destroy, go, init, and
+worktree create) so that niwa can change the shell's working directory after
+creating or switching to a workspace instance or a worktree.
 
 Add this to your shell profile:
 
   eval "$(niwa shell-init auto)"`,
 }
 
+// shellWrapperTemplate is the shell function the wrapper installs. It is
+// regenerated from this binary every time it is loaded -- niwa's own ~/.niwa/env
+// evals `niwa shell-init auto` at shell startup, and the tsuku recipe produces
+// its share/shell.d fragment by running `niwa shell-init <shell>` at
+// post-install -- so a change here reaches a user on their next new shell after
+// upgrading, with nothing to re-run by hand.
+//
+// A command belongs in the case dispatcher only if it calls writeLandingPath;
+// that call is what puts a directory in NIWA_RESPONSE_FILE for __niwa_cd_wrap to
+// read. Under `worktree`, only `create` does (runSessionCreate), which is also
+// the only worktree subcommand docs/guides/worktree.md promises navigation for.
+// `worktree destroy` removes the directory you may be standing in but writes no
+// landing path, so wrapping it would add a case arm that can never fire; that
+// gap is tracked separately in issue #283.
+//
+// The nested case matches `worktree` and its deprecated `session` alias
+// together, so both spellings land in the new worktree.
 const shellWrapperTemplate = `export _NIWA_SHELL_INIT=1
 
 __niwa_cd_wrap() {
@@ -54,7 +71,7 @@ niwa() {
         create|destroy|go|init)
             __niwa_cd_wrap "$@"
             ;;
-        session)
+        worktree|session)
             case "$2" in
                 create)
                     __niwa_cd_wrap "$@"
