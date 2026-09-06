@@ -68,6 +68,56 @@ func reporterFor(opts WorktreeApplyOptions) *Reporter {
 	return NewReporter(os.Stderr)
 }
 
+// worktreeSetupEnv is what a repo's setup script receives when it runs against
+// a worktree rather than a clone.
+//
+// It reuses the NIWA_WORKTREE_* shape runWorktreeHooks already exports, because
+// opening a second namespace for the same four facts would be a divergence with
+// nothing behind it.
+//
+// NIWA_INSTANCE_ROOT is the substantive addition, and it is the whole point.
+// Setup scripts have only ever had one working directory, so they find the
+// instance root by walking up from it -- `cd ../..` from
+// <instanceRoot>/<group>/<repo>. From a worktree, whose path is
+// <instanceRoot>/.niwa/worktrees/<repo>-<sid>, that same expression reaches
+// <instanceRoot>/.niwa: a directory that exists and is writable, so the script
+// succeeds, writes to the wrong place, and exits 0. There is no error for any
+// warning stream to carry. The group segment is absent from the worktree path
+// too, so a script reaching sideways to a peer repo is wrong in a second,
+// independent way. Exporting the anchor is what retires the idiom.
+//
+// A script tells the two apart by the presence of NIWA_WORKTREE_PATH, which is
+// absent on the clone path. That is the mechanism a repo uses when one
+// scripts/setup/ directory holds both a per-tree dependency install and a
+// shared-state step like a git-hooks installer -- git hooks live in the shared
+// git-common-dir, so running that per tree is duplicate work at best.
+//
+// Nothing here is secret-derived. Paths and names only; see RunSetupScripts.
+func worktreeSetupEnv(instanceRoot, worktreePath, repo, purpose, branch string) []string {
+	return []string{
+		"NIWA_WORKTREE_PATH=" + worktreePath,
+		"NIWA_WORKTREE_REPO=" + repo,
+		"NIWA_WORKTREE_PURPOSE=" + purpose,
+		"NIWA_WORKTREE_BRANCH=" + branch,
+		"NIWA_INSTANCE_ROOT=" + instanceRoot,
+	}
+}
+
+// cloneSetupEnv is what a repo's setup script receives when it runs against the
+// clone. It carries the instance-root anchor and nothing else.
+//
+// The anchor goes on BOTH surfaces deliberately. Exporting it only in worktrees
+// would leave `cd ../..` working in clones and therefore still load-bearing --
+// fixing the symptom in the new location while the fragile idiom stays in the
+// old one, ready to break again at the next layout change. R15's
+// clone-behaviour guarantee explicitly permits adding non-secret niwa-supplied
+// entries for this reason.
+//
+// The absence of NIWA_WORKTREE_PATH here is the signal a script gates on.
+func cloneSetupEnv(instanceRoot string) []string {
+	return []string{"NIWA_INSTANCE_ROOT=" + instanceRoot}
+}
+
 // recordSetupOutcome copies a setup outcome into the caller's sink when one was
 // supplied, and does nothing when it was not.
 //
@@ -820,6 +870,34 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	//    no agent's gate decides whether they run.
 	if err := runWorktreeHooks(configDir, worktreePath, repo, purpose, branch, opts.Stderr); err != nil {
 		return nil, err
+	}
+
+	// 6. The repo's OWN setup scripts, when this repo has opted in. Step 5
+	//    above runs the workspace's lifecycle scripts, which live in the config
+	//    repo and fire for every repo; these are the repo's own, which is the
+	//    cell that was missing -- a worktree got every accessory a clone gets
+	//    except the one its repo's scripts produce.
+	//
+	//    RunSetupScripts is reused verbatim rather than forked. It never
+	//    touches git and is already parameterized on the directory it runs in,
+	//    so pointing it at the worktree gives the same discovery, ordering and
+	//    executable-bit policy the clone run has, for free.
+	//
+	//    The outcome leaves on opts.Setup and NEVER as an error. That is the
+	//    constraint the whole design turns on: the delegated WorktreeCreate
+	//    path treats a failed content install as a reason to run a guarded
+	//    teardown, and that teardown retains only a tree git reports dirty --
+	//    while everything niwa writes is git-excluded at step 4 above. So a
+	//    script that fails after writing only into an ignored path leaves the
+	//    tree reading clean and its work is deleted, and a script that fails
+	//    after writing an unignored file survives. Returning an error here
+	//    would make retention depend on what the script happened to touch. See
+	//    niwa#285; a later change that makes this fatal reopens that path.
+	if config.EffectiveWorktreeSetup(cfg, repo) {
+		setupDir := ResolveSetupDir(cfg, repo)
+		result := RunSetupScripts(worktreePath, setupDir, reporterFor(opts), opts.Redactor,
+			worktreeSetupEnv(instanceRoot, worktreePath, repo, purpose, branch)...)
+		recordSetupOutcome(opts.Setup, result)
 	}
 
 	return written, nil

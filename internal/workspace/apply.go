@@ -1948,7 +1948,11 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	for _, cr := range classified {
 		setupDir := ResolveSetupDir(effectiveCfg, cr.Repo.Name)
 		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
-		result := RunSetupScripts(repoDir, setupDir, a.Reporter, redactor)
+		// The instance-root anchor goes to clone scripts too, so a script can
+		// stop deriving it by walking up from its working directory. Doing this
+		// only in worktrees would leave the fragile idiom load-bearing here.
+		result := RunSetupScripts(repoDir, setupDir, a.Reporter, redactor,
+			cloneSetupEnv(instanceRoot)...)
 
 		if result.Disabled || result.Skipped {
 			continue
