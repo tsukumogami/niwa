@@ -126,6 +126,17 @@ itself:
 git config core.hooksPath .githooks
 ```
 
+**This gate puts a niwa-specific assumption inside the repo, and that is a real
+cost for some repos.** A public repo someone might clone on its own, with no
+workspace manager anywhere, now carries a line that only means something under
+niwa. If your project's convention is that a repo's own files must make sense to
+someone who cloned that repo into an empty directory, this pattern breaks it.
+
+When it does, keep the shared-state step in a `worktree-hooks/` script in your
+config repo, where a niwa-specific gate belongs, and put only the generic part
+in the repo's `scripts/setup/`. That is not a half-migration or leftover debt —
+it is the split the two mechanisms exist for.
+
 ### Scripts must be committed
 
 `git worktree add` materializes tracked files only. An uncommitted script exists
@@ -170,20 +181,32 @@ line — so do not rely on redaction for a secret short enough to be a word.
 ## Migrating from a `worktree-hooks/` workaround
 
 If your config repo carries a `worktree-hooks/apply/` script that provisions
-worktrees by branching on `NIWA_WORKTREE_REPO`, this feature replaces it.
+worktrees by branching on `NIWA_WORKTREE_REPO`, this feature can replace some or
+all of it.
 
 1. Move each repo's provisioning into that repo's own `scripts/setup/`, and
    commit it.
 2. Add `worktree_setup = true` for those repos in `workspace.toml`.
-3. Delete the branching hook from the config repo.
+3. Delete the branches you moved out of the hook.
 
 The gain is that per-repo knowledge stops living in a foreign repository's
 switch statement. A repo that knows how to provision itself does so in its own
 tree, on the clone and in every worktree, with no config-repo edit when it
-changes.
+changes. A contributor who clones only that repo gets a documented bootstrap
+they did not have before.
 
-Worktree hooks remain the right mechanism for anything genuinely
-workspace-wide — see [worktree hooks](worktree.md#worktree-hooks).
+**Migrating every branch is not the goal, and a hook you keep is not debt.**
+Two cases are better served where they are:
+
+- **A step that needs the worktree gate, in a repo that should not know about
+  niwa.** See [above](#scripts-that-must-not-run-per-worktree). Move the generic
+  part to `scripts/setup/`, leave the gated part in the hook.
+- **Anything genuinely workspace-wide**, which was never per-repo knowledge in
+  the first place.
+
+A config repo that ends up with a smaller hook and several repos carrying their
+own generic setup has finished migrating. See
+[worktree hooks](worktree.md#worktree-hooks) for what stays.
 
 ## What this does not do
 

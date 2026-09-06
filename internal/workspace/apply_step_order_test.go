@@ -144,3 +144,48 @@ func TestPipeline_CloneSetupRunsBeforeWorktreeFanOut(t *testing.T) {
 			"clone setup at %d, fan-out at %d\n%s", setupAt, fanOutAt, got)
 	}
 }
+
+// TestPipeline_CloneSetupReceivesInstanceRootAnchor is the clone-path
+// end-to-end for NIWA_INSTANCE_ROOT, and it exists because without it the
+// anchor can be dropped from the pipeline in silence.
+//
+// TestCloneSetupEnv_DoesNotCarryTheWorktreeSignal asserts the builder RETURNS
+// the anchor, which is a different claim: it pins what cloneSetupEnv produces,
+// not that anything passes the result to a script. Deleting
+// `cloneSetupEnv(instanceRoot)...` from the RunSetupScripts call left both
+// internal/workspace and internal/cli green.
+//
+// The worktree side already had its end-to-end equivalent --
+// TestApplyToWorktree_SetupEnvironment runs a script that echoes the variable --
+// and the clone side had none. Worth recording why that asymmetry was easy to
+// miss: a single call site is not self-guarding. It is safe only when some
+// end-to-end test exercises it, and here the only test was a direct-helper one,
+// so one call site was exactly as unguarded as two would have been.
+//
+// The anchor is on the clone path deliberately. Exporting it only in worktrees
+// would leave `cd ../..` working in clones and therefore still load-bearing --
+// fixing the symptom in the new location while the fragile idiom waits in the
+// old one for the next layout change.
+func TestPipeline_CloneSetupReceivesInstanceRootAnchor(t *testing.T) {
+	h := newSetupVerdictHarness(t, []string{"alpha"}, map[string]string{
+		"alpha": "#!/bin/sh\necho \"ANCHOR=[$NIWA_INSTANCE_ROOT]\"\n",
+	})
+
+	instanceRoot, err := h.applier.Create(context.Background(), h.cfg, h.niwaDir, h.workspaceRoot, h.instanceName)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got := h.out.String()
+	if !strings.Contains(got, "ANCHOR=[") {
+		t.Fatalf("the clone's setup script did not run, so this test says nothing "+
+			"about its environment:\n%s", got)
+	}
+	want := "ANCHOR=[" + instanceRoot + "]"
+	if !strings.Contains(got, want) {
+		t.Errorf("a clone setup script did not receive NIWA_INSTANCE_ROOT=%q, so it "+
+			"still has to find the instance root by walking up from its working "+
+			"directory -- the idiom this anchor exists to retire:\n%s",
+			instanceRoot, got)
+	}
+}
