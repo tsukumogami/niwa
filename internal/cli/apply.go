@@ -303,10 +303,12 @@ func runApplyWorktreeScope(cmd *cobra.Command, scope *workspace.ApplyScope) erro
 		return err
 	}
 
-	written, err := applyContentToWorktree(target.InstanceRoot, target.WorktreePath, state.Repo, state.Purpose, state.EffectiveBranchName())
+	var setup workspace.SetupResult
+	written, err := applyContentToWorktree(target.InstanceRoot, target.WorktreePath, state.Repo, state.Purpose, state.EffectiveBranchName(), &setup, cmd.ErrOrStderr())
 	if err != nil {
 		return fmt.Errorf("re-syncing content into worktree %s: %w", target.WorktreePath, err)
 	}
+	reportWorktreeSetup(cmd.ErrOrStderr(), target.WorktreePath, &setup)
 
 	fmt.Fprintf(cmd.OutOrStdout(), "apply: converged worktree at %s\n", target.WorktreePath)
 	printWorktreeContentFiles(cmd, written)

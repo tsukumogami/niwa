@@ -295,97 +295,17 @@ func walkVaultRefsForUnknownProvider(cfg *WorkspaceConfig, known map[string]bool
 		return nil
 	}
 
-	checkEnvMap := func(prefix string, env EnvConfig) error {
-		for k, v := range env.Vars.Values {
-			if err := check(fmt.Sprintf("%s.vars.%s", prefix, k), v.Plain); err != nil {
-				return err
-			}
-		}
-		for k, v := range env.Secrets.Values {
-			if err := check(fmt.Sprintf("%s.secrets.%s", prefix, k), v.Plain); err != nil {
-				return err
-			}
-		}
-		return nil
+	// Every MaybeSecret VALUE slot is enumerated once, in
+	// WalkMaybeSecretSlots, and shared with the worktree output redactor.
+	// Keeping a second copy of this list here is how one of them goes stale:
+	// a new secret-capable field wired into only one would be validated and
+	// not scrubbed, or scrubbed and not validated.
+	if err := WalkMaybeSecretSlots(cfg, func(slot MaybeSecretSlot) error {
+		return check(slot.Location, slot.Value.Plain)
+	}); err != nil {
+		return err
 	}
 
-	checkClaudeEnv := func(prefix string, env ClaudeEnvConfig) error {
-		for k, v := range env.Vars.Values {
-			if err := check(fmt.Sprintf("%s.vars.%s", prefix, k), v.Plain); err != nil {
-				return err
-			}
-		}
-		for k, v := range env.Secrets.Values {
-			if err := check(fmt.Sprintf("%s.secrets.%s", prefix, k), v.Plain); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	if err := checkEnvMap("env", cfg.Env); err != nil {
-		return err
-	}
-	if err := checkClaudeEnv("claude.env", cfg.Claude.Env); err != nil {
-		return err
-	}
-	for k, v := range cfg.Claude.Settings {
-		if err := check(fmt.Sprintf("claude.settings.%s", k), v.Plain); err != nil {
-			return err
-		}
-	}
-	for name, ov := range cfg.Repos {
-		if err := checkEnvMap(fmt.Sprintf("repos.%s.env", name), ov.Env); err != nil {
-			return err
-		}
-		if ov.Claude != nil {
-			if err := checkClaudeEnv(fmt.Sprintf("repos.%s.claude.env", name), ov.Claude.Env); err != nil {
-				return err
-			}
-			for k, v := range ov.Claude.Settings {
-				if err := check(fmt.Sprintf("repos.%s.claude.settings.%s", name, k), v.Plain); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	if err := checkEnvMap("instance.env", cfg.Instance.Env); err != nil {
-		return err
-	}
-	if cfg.Instance.Claude != nil {
-		if err := checkClaudeEnv("instance.claude.env", cfg.Instance.Claude.Env); err != nil {
-			return err
-		}
-		for k, v := range cfg.Instance.Claude.Settings {
-			if err := check(fmt.Sprintf("instance.claude.settings.%s", k), v.Plain); err != nil {
-				return err
-			}
-		}
-	}
-	// [mcp.servers.*] env and headers values are the two MaybeSecret slots
-	// in the agent-neutral MCP declaration. They take vault:// references
-	// like any other value slot, so the same-file provider rule applies.
-	for _, name := range cfg.MCP.MCPServerNames() {
-		srv := cfg.MCP.Servers[name]
-		for k, v := range srv.Env {
-			if err := check(fmt.Sprintf("mcp.servers.%s.env.%s", name, k), v.Plain); err != nil {
-				return err
-			}
-		}
-		for k, v := range srv.Headers {
-			if err := check(fmt.Sprintf("mcp.servers.%s.headers.%s", name, k), v.Plain); err != nil {
-				return err
-			}
-		}
-	}
-	// [session.env.vars] is the MaybeSecret slot in the agent-neutral session
-	// declaration. It takes vault:// references like every other value slot,
-	// so the same-file provider rule applies here too.
-	for k, v := range cfg.Session.Env.Vars.Values {
-		if err := check(fmt.Sprintf("session.env.vars.%s", k), v.Plain); err != nil {
-			return err
-		}
-	}
 	// [files] source KEYS are plain strings; per R3 they may be
 	// vault:// references. Per the same-file rule we still validate
 	// that the referenced provider is declared here.

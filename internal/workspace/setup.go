@@ -50,7 +50,18 @@ func ResolveSetupDir(ws *config.WorkspaceConfig, repoName string) string {
 // non-nil, every emitted line is scrubbed of the secrets it has registered.
 // Passing nil means no scrubbing, which is appropriate only where no secret
 // has been resolved into the repo's working tree.
-func RunSetupScripts(repoDir, setupDir string, r *Reporter, red *secret.Redactor) *SetupResult {
+// extraEnv is appended to the inherited process environment for each script.
+// It is variadic so every existing caller is unchanged: the clone path passes
+// nothing and its scripts see exactly the environment they see today, which is
+// what R15's regression guarantee needs.
+//
+// Go runs a subprocess with the parent's environment when cmd.Env is nil, so
+// appending to os.Environ() produces that identical set plus these entries.
+// DESIGN-post-clone-scripts.md's security section reasons about this function
+// setting no cmd.Env; the claim it actually makes is that secrets reach setup
+// scripts by FILE only, and nothing here carries a resolved secret -- these are
+// paths and names. That claim stays true.
+func RunSetupScripts(repoDir, setupDir string, r *Reporter, red *secret.Redactor, extraEnv ...string) *SetupResult {
 	// The repo name reaches output, and while it comes from workspace config
 	// rather than from the repo, it costs nothing to hold it to the same
 	// standard as the script names below.
@@ -121,6 +132,9 @@ func RunSetupScripts(repoDir, setupDir string, r *Reporter, red *secret.Redactor
 
 		cmd := exec.Command(scriptPath)
 		cmd.Dir = repoDir
+		if len(extraEnv) > 0 {
+			cmd.Env = append(os.Environ(), extraEnv...)
+		}
 
 		if err := runCmdWithReporter(r, cmd, prefix, red); err != nil {
 			result.Scripts = append(result.Scripts, ScriptResult{
