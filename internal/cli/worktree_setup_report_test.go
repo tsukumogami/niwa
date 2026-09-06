@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/workspace"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // writeFailingRepoSetup drops a setup script into a repo's scripts/setup/ and
@@ -157,6 +158,79 @@ func TestFromHookCreate_SetupFailureKeepsWorktreeAndStdout(t *testing.T) {
 	// with extra steps.
 	if !strings.Contains(stderr, "01-fails.sh") {
 		t.Errorf("the setup failure was not reported on stderr: %q", stderr)
+	}
+}
+
+// TestFromHookCreate_StaleHookEventDirectoryDoesNotDestroyWorktree is PRD R11,
+// asserted at the layer the requirement is actually about.
+//
+// R11 says the criterion must be a test rather than an argument, and the
+// argument was sound: the unknown-event error is downgraded inside
+// runWorktreeHooks, so it never reaches ApplyToWorktree's return, so
+// reconcileFailedHookCreate is never called, so nothing is destroyed. But that
+// chain depends on the content-install error remaining the ONLY thing that
+// triggers teardown on this path. Nothing pinned that. Someone adding a second
+// failure route in runFromHookCreate would break R11 without touching anything
+// the discovery-level tests cover.
+//
+// This is the same shape as the gap found in Issue 1 -- a test at the wrong
+// level testing the right property -- one layer further out.
+func TestFromHookCreate_StaleHookEventDirectoryDoesNotDestroyWorktree(t *testing.T) {
+	f := newCreateFlowFixture(t)
+
+	// A config repo still holding a hook under an event niwa does not consume.
+	// This is not hypothetical: a real workspace built create/ first, because
+	// the guide reads as though it works.
+	staleDir := filepath.Join(f.root, ".niwa", "worktree-hooks", "create")
+	if err := os.MkdirAll(staleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleDir, "01-bootstrap.sh"),
+		[]byte("#!/bin/sh\ntrue\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := runFromHook(t, f.repoPath, mustHookJSON(t, map[string]any{
+		"hook_event_name": "WorktreeCreate",
+		"name":            "stale-hook-dir",
+		"cwd":             f.repoPath,
+	}))
+	if err != nil {
+		t.Fatalf("a stale worktree-hooks/create/ directory must not fail the "+
+			"delegated create: %v\nstderr: %s", err, stderr)
+	}
+
+	wtPath := strings.TrimSpace(stdout)
+	if wtPath == "" {
+		t.Fatal("stdout carried no worktree path")
+	}
+	if _, statErr := os.Stat(wtPath); statErr != nil {
+		t.Fatalf("the worktree was DESTROYED by a stale hook-event directory in a "+
+			"different repository. Nothing had been written into the tree except "+
+			"niwa's own git-excluded files, so the teardown's dirty guard passes "+
+			"and the deletion succeeds every time: %v", statErr)
+	}
+
+	// And the session record must not have been moved to a terminal state.
+	states, listErr := worktree.ListSessionLifecycleStates(f.sessionsDir)
+	if listErr != nil {
+		t.Fatalf("listing session states: %v", listErr)
+	}
+	var sawActive bool
+	for _, st := range states {
+		if st.WorktreePath == wtPath && st.Status == worktree.SessionStatusActive {
+			sawActive = true
+		}
+	}
+	if !sawActive {
+		t.Errorf("no active session record for %s; the stale hook directory moved the "+
+			"session to a terminal state", wtPath)
+	}
+
+	// The operator has to learn about it, or this is the original silent no-op
+	// with extra steps.
+	if !strings.Contains(stderr, "create") {
+		t.Errorf("the unknown hook event was not reported on stderr: %q", stderr)
 	}
 }
 

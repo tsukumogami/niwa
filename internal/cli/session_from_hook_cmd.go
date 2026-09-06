@@ -148,7 +148,7 @@ func runFromHookCreate(cmd *cobra.Command, payload hookPayload) error {
 	// route into reconcileFailedHookCreate and destroy a worktree whose only
 	// fault is a failing setup script.
 	var setup workspace.SetupResult
-	if _, err := applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch, &setup); err != nil {
+	if _, err := applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch, &setup, cmd.ErrOrStderr()); err != nil {
 		// Reconcile rather than strand (design Decision 8). CreateSession is
 		// already atomic — every failure after `git worktree add` cleans up after
 		// itself — but content install is not, so without this the tool call fails

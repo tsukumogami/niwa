@@ -193,7 +193,7 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	// install failure is surfaced but does not unwind the worktree (it can
 	// be re-synced later).
 	var setup workspace.SetupResult
-	written, err := applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch, &setup)
+	written, err := applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch, &setup, cmd.ErrOrStderr())
 	if err != nil {
 		return fmt.Errorf("niwa: error: installing content into worktree %s (the worktree exists; re-sync it later): %w", sessionID, err)
 	}
@@ -277,7 +277,7 @@ func runSessionApply(cmd *cobra.Command, args []string) error {
 	}
 
 	var setup workspace.SetupResult
-	written, err := applyContentToWorktree(instanceRoot, state.WorktreePath, state.Repo, state.Purpose, state.EffectiveBranchName(), &setup)
+	written, err := applyContentToWorktree(instanceRoot, state.WorktreePath, state.Repo, state.Purpose, state.EffectiveBranchName(), &setup, cmd.ErrOrStderr())
 	if err != nil {
 		return fmt.Errorf("niwa: error: re-syncing content into worktree %s: %w", sessionID, err)
 	}
@@ -326,7 +326,10 @@ func reportWorktreeSetup(stderr io.Writer, worktreePath string, result *workspac
 	}
 }
 
-func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch string, setup *workspace.SetupResult) ([]string, error) {
+func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch string, setup *workspace.SetupResult, stderr io.Writer) ([]string, error) {
+	if stderr == nil {
+		stderr = os.Stderr
+	}
 	configPath, configDir, err := config.Discover(instanceRoot)
 	if err != nil {
 		return nil, fmt.Errorf("locating workspace config: %w", err)
@@ -342,7 +345,11 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 		return nil, err
 	}
 
-	opts := workspace.WorktreeApplyOptions{Stderr: os.Stderr, Setup: setup}
+	// stderr is the caller's stream rather than os.Stderr, so a worktree-hook
+	// or setup diagnostic reaches the same place every other message from the
+	// command does -- and can be observed by a test rather than escaping to the
+	// process's own stderr.
+	opts := workspace.WorktreeApplyOptions{Stderr: stderr, Setup: setup}
 
 	// Decision 9: record the same worktree-delegation configuration the clone
 	// carries, so a worktree's settings do not drift from its clone's. The

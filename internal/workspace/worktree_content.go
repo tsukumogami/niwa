@@ -118,6 +118,61 @@ func cloneSetupEnv(instanceRoot string) []string {
 	return []string{"NIWA_INSTANCE_ROOT=" + instanceRoot}
 }
 
+// worktreeRedactor builds the scrubber for output produced inside a worktree,
+// for the surfaces that cannot borrow the apply pipeline's.
+//
+// The problem it solves is not wiring. `niwa worktree create` and
+// `niwa worktree apply` resolve no secrets -- that is the whole point of the
+// inherit design -- so a secret.NewRedactor() constructed in those processes
+// holds zero fragments and Scrub short-circuits. Meanwhile the worktree DOES
+// contain the clone's byte-copied env output, at 0600, in the working directory
+// a setup script runs in. So the material is there and the scrubber is empty.
+//
+// The fix reads nothing new: the values come from a file this same process just
+// placed in that tree. It registers the resolved value of every key
+// config.SecretCapableKeys names -- which is derived from the one enumeration
+// of MaybeSecret slots, shared with vault provider validation, rather than from
+// a hand-written list of tables that would go stale the first time someone adds
+// a secret-capable field.
+//
+// A nil return means there is nothing to scrub, which RunSetupScripts treats as
+// no redaction. That is correct rather than a fallback: it happens when the repo
+// declares no secret-capable keys at all.
+//
+// The minimum-fragment-length guard inside Register stays underneath, so a
+// short declared value does not turn every occurrence of a common word into a
+// placeholder.
+func worktreeRedactor(cfg *config.WorkspaceConfig, cloneRepoDir, repo string, globalEnvOutput config.OutputTargets) *secret.Redactor {
+	keys := config.SecretCapableKeys(cfg, repo)
+	if len(keys) == 0 {
+		return nil
+	}
+
+	values, _, err := readCloneEnvOutput(cloneRepoDir, cfg, repo, globalEnvOutput)
+	if err != nil {
+		// A worktree we cannot read the inherited env for is one we cannot
+		// scrub precisely. Returning nil here would silently disable
+		// redaction, so the caller treats a nil redactor as "nothing declared"
+		// rather than "read failed" -- and this path returns an empty-but-real
+		// redactor instead, which scrubs nothing and says nothing, matching
+		// the pre-existing behaviour without claiming coverage it lacks.
+		return secret.NewRedactor()
+	}
+
+	red := secret.NewRedactor()
+	var registered int
+	for key, value := range values {
+		if keys[key] && value != "" {
+			red.Register([]byte(value))
+			registered++
+		}
+	}
+	if registered == 0 {
+		return nil
+	}
+	return red
+}
+
 // recordSetupOutcome copies a setup outcome into the caller's sink when one was
 // supplied, and does nothing when it was not.
 //
@@ -868,7 +923,20 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	//    executed against the worktree, with worktree context in the env.
 	//    These are the workspace's own lifecycle scripts, not an agent's, so
 	//    no agent's gate decides whether they run.
-	if err := runWorktreeHooks(configDir, worktreePath, repo, purpose, branch, opts.Stderr); err != nil {
+	// The hook runner streams its scripts' output through the same scrubbing
+	// choke point setup scripts use. It did not before: it piped cmd.Stdout
+	// straight to the writer with no redactor at all, on these same surfaces,
+	// in a tree holding the clone's copied plaintext. So DESIGN-post-clone-
+	// scripts.md Decision C's premise -- that setup output would otherwise be
+	// the only unscrubbed subprocess output in niwa -- was already false, at
+	// the exact call site this feature inserts beside. Routing it through here
+	// is what makes that decision true rather than preserved.
+	hookRed := opts.Redactor
+	if hookRed == nil {
+		hookRed = worktreeRedactor(cfg, filepath.Join(instanceRoot, group, repo), repo, opts.GlobalEnvOutput)
+	}
+	if err := runWorktreeHooks(configDir, worktreePath, repo, purpose, branch,
+		reporterFor(opts), hookRed); err != nil {
 		return nil, err
 	}
 
@@ -895,7 +963,16 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	//    niwa#285; a later change that makes this fatal reopens that path.
 	if config.EffectiveWorktreeSetup(cfg, repo) {
 		setupDir := ResolveSetupDir(cfg, repo)
-		result := RunSetupScripts(worktreePath, setupDir, reporterFor(opts), opts.Redactor,
+		// The apply pipeline supplies its own redactor, populated from what it
+		// resolved this run. The standalone commands cannot: they resolve
+		// nothing, so one built there is empty. They get one derived from the
+		// repo's declarations intersected with the env this worktree actually
+		// inherited -- see worktreeRedactor.
+		red := opts.Redactor
+		if red == nil {
+			red = worktreeRedactor(cfg, filepath.Join(instanceRoot, group, repo), repo, opts.GlobalEnvOutput)
+		}
+		result := RunSetupScripts(worktreePath, setupDir, reporterFor(opts), red,
 			worktreeSetupEnv(instanceRoot, worktreePath, repo, purpose, branch)...)
 		recordSetupOutcome(opts.Setup, result)
 	}
@@ -1245,10 +1322,11 @@ func renderWorktreeLayerBody(cfg *config.WorkspaceConfig, configDir, instanceRoo
 // Scripts run in lexical order; the first non-zero exit stops the run and is
 // surfaced as an error (mirroring the setup-script contract). A missing
 // worktree-hooks/ directory or no scripts for the event is a no-op.
-func runWorktreeHooks(configDir, worktreePath, repo, purpose, branch string, stderr io.Writer) error {
-	if stderr == nil {
-		stderr = os.Stderr
+func runWorktreeHooks(configDir, worktreePath, repo, purpose, branch string, r *Reporter, red *secret.Redactor) error {
+	if r == nil {
+		r = NewReporter(os.Stderr)
 	}
+	stderr := r.Writer()
 
 	hooks, err := DiscoverWorktreeHooks(configDir)
 	if err != nil {
@@ -1308,8 +1386,6 @@ func runWorktreeHooks(configDir, worktreePath, repo, purpose, branch string, std
 
 		cmd := exec.Command(scriptPath)
 		cmd.Dir = worktreePath
-		cmd.Stdout = stderr
-		cmd.Stderr = stderr
 		// purpose is exported as content data only; the worktree dir name and
 		// cmd.Dir are derived from worktreePath, never from purpose.
 		cmd.Env = append(os.Environ(),
@@ -1318,7 +1394,14 @@ func runWorktreeHooks(configDir, worktreePath, repo, purpose, branch string, std
 			"NIWA_WORKTREE_PURPOSE="+purpose,
 			"NIWA_WORKTREE_BRANCH="+branch,
 		)
-		if err := cmd.Run(); err != nil {
+		// Routed through the same scan-strip-scrub choke point setup scripts
+		// use, instead of piping cmd.Stdout straight at the writer as this did
+		// before. That raw wiring meant hook output was never scrubbed on any
+		// surface, in a tree holding the clone's byte-copied plaintext env --
+		// so the claim that setup output would otherwise be the only
+		// unscrubbed subprocess output in niwa was already false here.
+		prefix := fmt.Sprintf("[%s] ", stripEscapes(filepath.Base(scriptPath)))
+		if err := runCmdWithReporter(r, cmd, prefix, red); err != nil {
 			return fmt.Errorf("worktree hook %s failed: %w", scriptPath, err)
 		}
 	}
