@@ -189,3 +189,270 @@ func TestPipeline_CloneSetupReceivesInstanceRootAnchor(t *testing.T) {
 			instanceRoot, got)
 	}
 }
+
+// TestPipeline_SetupVerdictNamesEachWorktreeDistinctly is PRD R8's attribution
+// requirement, and it had no test until a sweep for helpers whose only coverage
+// is a direct call found worktreeSetupLocation with none at all.
+//
+// The verdict line counts locations whose setup did not finish. Before this
+// feature a location was always a repo, so naming it by repo was unambiguous.
+// Now one repo can fail in its clone and in each of its worktrees, and the
+// unchanged rendering would read "setup incomplete for 3 repos: alpha, alpha,
+// alpha" -- which tells an operator that something is wrong and nothing about
+// where.
+//
+// The assertion is that the entries are DISTINCT and that the worktree ones are
+// identifiable, not that they match an exact string: the wording is allowed to
+// change, the ambiguity is not.
+func TestPipeline_SetupVerdictNamesEachWorktreeDistinctly(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolving temp dir: %v", err)
+	}
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configTOML := "[workspace]\nname = \"myws\"\n\n[[sources]]\norg = \"testorg\"\n\n[groups.all]\nvisibility = \"public\"\n\n[repos.alpha]\nworktree_setup = true\n"
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, cfgErr := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if cfgErr != nil {
+		t.Fatalf("loading config: %v", cfgErr)
+	}
+
+	const instanceName = "myws"
+	repoDir := filepath.Join(tmpDir, instanceName, "all", "alpha")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitWT(t, repoDir, "init", "-q", "-b", "main")
+
+	// A setup script that always fails, COMMITTED so it materializes in each
+	// worktree -- git worktree add carries tracked files only.
+	setupDir := filepath.Join(repoDir, "scripts", "setup")
+	if err := os.MkdirAll(setupDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(setupDir, "01-fails.sh"),
+		[]byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitWT(t, repoDir, "add", "-A")
+	runGitWT(t, repoDir, "commit", "-qm", "init")
+
+	sessionsDir := filepath.Join(tmpDir, instanceName, ".niwa", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, sid := range []string{"0a1b2c3d", "0e5f6a7b"} {
+		wtPath := filepath.Join(tmpDir, instanceName, ".niwa", "worktrees", "alpha-"+sid)
+		runGitWT(t, repoDir, "worktree", "add", "-q", "-b", "session/"+sid, wtPath)
+		if err := worktree.WriteSessionLifecycleState(sessionsDir, worktree.SessionLifecycleState{
+			SessionID:    sid,
+			Repo:         "alpha",
+			Purpose:      "verdict",
+			WorktreePath: wtPath,
+			Status:       worktree.SessionStatusActive,
+		}); err != nil {
+			t.Fatalf("writing session record: %v", err)
+		}
+	}
+
+	applier := NewApplier(&mockGitHubClient{repos: map[string][]github.Repo{"testorg": {{
+		Name: "alpha", Visibility: "public", SSHURL: "git@github.com:testorg/alpha.git",
+	}}}})
+	applier.Cloner = &Cloner{}
+	var out syncBuffer
+	applier.Reporter = NewReporterWithTTY(&out, false)
+
+	if _, err := applier.Create(context.Background(), loaded.Config, niwaDir, tmpDir, instanceName); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got := out.String()
+	line := ""
+	for _, l := range strings.Split(got, "\n") {
+		if strings.Contains(l, "setup incomplete") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("no setup-incomplete verdict was printed, so this test says nothing "+
+			"about how failures are named:\n%s", got)
+	}
+
+	// Positive control: the clone and both worktrees must all actually have
+	// failed, or a verdict naming one location passes this trivially. Matched
+	// with the surrounding spaces on purpose -- a bare "3" also matches the
+	// session id 0a1b2c3d, so the loose form would hold against a one-entry
+	// verdict.
+	if !strings.Contains(line, " 3 ") {
+		t.Fatalf("expected three failed locations (the clone and both worktrees); "+
+			"verdict was %q\n%s", line, got)
+	}
+
+	for _, sid := range []string{"0a1b2c3d", "0e5f6a7b"} {
+		if !strings.Contains(line, "alpha-"+sid) {
+			t.Errorf("the verdict does not identify worktree alpha-%s, so an operator "+
+				"cannot tell which tree is unprovisioned: %q", sid, line)
+		}
+	}
+
+	// The noun is the second half of the same promise, and it fails together
+	// with the first: logSetupIncomplete picks "location" over "repo" by
+	// scanning entries for worktreeLocationMarker, so a labelling that stops
+	// emitting the marker also silently reverts the noun. Asserting only the
+	// names would leave that coupling unobserved.
+	if !strings.Contains(line, "locations") {
+		t.Errorf("the verdict counts these as repos, but three of them belong to one "+
+			"repo -- the noun has to follow the contents: %q", line)
+	}
+
+	// The verdict is a count; the detail lives in the deferred per-script
+	// warning below it, and that warning was the third emission in this PR that
+	// no test read. It names the script, because "setup incomplete" alone does
+	// not tell an operator what to fix.
+	//
+	// Each report must be tied to ITS worktree, and must be a REPORT OF FAILURE.
+	// Both halves were learned by mutation here. Asserting only that
+	// "01-fails.sh" appears somewhere is satisfied by the clone-path warning,
+	// since the clone fails too. And adding the worktree name is still not
+	// enough: the progress line "running setup script alpha-0a1b2c3d/01-fails.sh"
+	// carries the script and the tree and is printed before the script runs, so
+	// a version of this loop keyed on those two alone stayed green while the
+	// failure warning was stripped of both. Requiring "failed" on the same line
+	// is what separates a report of the outcome from an announcement of the
+	// attempt.
+	for _, sid := range []string{"0a1b2c3d", "0e5f6a7b"} {
+		var paired bool
+		for _, l := range strings.Split(got, "\n") {
+			if strings.Contains(l, "01-fails.sh") && strings.Contains(l, "alpha-"+sid) &&
+				strings.Contains(l, "failed") {
+				paired = true
+			}
+		}
+		if !paired {
+			t.Errorf("no single warning reports the failure of 01-fails.sh in worktree "+
+				"alpha-%s, so the operator cannot pair a failure with a tree:\n%s", sid, got)
+		}
+	}
+}
+
+// TestPipeline_SkippedWorktreeIsNotReportedAsSetupFailure closes the last
+// human-facing emission in this change that no test read.
+//
+// A worktree the fan-out cannot provision -- missing, locked by another
+// process, or no longer registered with git -- is skipped with a deferred
+// warning. This change widened those warnings from "skipping content" to
+// "skipping content and setup", and that wording is a promise about the
+// verdict: a skipped tree ran no setup, so it must not appear in the
+// setup-incomplete list. Reporting an unprovisioned tree as a FAILED one sends
+// the operator to look for a broken script that does not exist, and the fix for
+// a skip is to re-run apply, not to debug anything.
+//
+// The repo's clone still fails here on purpose. A test where nothing at all is
+// reported cannot tell "the skip was excluded" from "the verdict never
+// printed"; with the clone failing, the verdict exists and the assertion is
+// about what it does NOT contain.
+func TestPipeline_SkippedWorktreeIsNotReportedAsSetupFailure(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolving temp dir: %v", err)
+	}
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configTOML := "[workspace]\nname = \"myws\"\n\n[[sources]]\norg = \"testorg\"\n\n[groups.all]\nvisibility = \"public\"\n\n[repos.alpha]\nworktree_setup = true\n"
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, cfgErr := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if cfgErr != nil {
+		t.Fatalf("loading config: %v", cfgErr)
+	}
+
+	const instanceName = "myws"
+	repoDir := filepath.Join(tmpDir, instanceName, "all", "alpha")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitWT(t, repoDir, "init", "-q", "-b", "main")
+	setupDir := filepath.Join(repoDir, "scripts", "setup")
+	if err := os.MkdirAll(setupDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(setupDir, "01-fails.sh"),
+		[]byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitWT(t, repoDir, "add", "-A")
+	runGitWT(t, repoDir, "commit", "-qm", "init")
+
+	// A session record pointing at a worktree that is not there. This is the
+	// ordinary case after someone removes a tree by hand.
+	sessionsDir := filepath.Join(tmpDir, instanceName, ".niwa", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ghostPath := filepath.Join(tmpDir, instanceName, ".niwa", "worktrees", "alpha-deadbeef")
+	if err := worktree.WriteSessionLifecycleState(sessionsDir, worktree.SessionLifecycleState{
+		SessionID:    "deadbeef",
+		Repo:         "alpha",
+		Purpose:      "skipped",
+		WorktreePath: ghostPath,
+		Status:       worktree.SessionStatusActive,
+	}); err != nil {
+		t.Fatalf("writing session record: %v", err)
+	}
+
+	applier := NewApplier(&mockGitHubClient{repos: map[string][]github.Repo{"testorg": {{
+		Name: "alpha", Visibility: "public", SSHURL: "git@github.com:testorg/alpha.git",
+	}}}})
+	applier.Cloner = &Cloner{}
+	var out syncBuffer
+	applier.Reporter = NewReporterWithTTY(&out, false)
+
+	if _, err := applier.Create(context.Background(), loaded.Config, niwaDir, tmpDir, instanceName); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got := out.String()
+	line := ""
+	for _, l := range strings.Split(got, "\n") {
+		if strings.Contains(l, "setup incomplete") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("the clone's setup failed, so a verdict must have printed; without "+
+			"one this test cannot say what the verdict excludes:\n%s", got)
+	}
+	if strings.Contains(line, "alpha-deadbeef") {
+		t.Errorf("the verdict reports a SKIPPED worktree as a setup failure, sending "+
+			"the operator to debug a script that never ran: %q", line)
+	}
+
+	// And the skip has to say that setup was skipped with it, or an operator
+	// reading only the warning concludes the tree was provisioned.
+	var sawSkip bool
+	for _, l := range strings.Split(got, "\n") {
+		if strings.Contains(l, "alpha-deadbeef") && strings.Contains(l, "setup") {
+			sawSkip = true
+		}
+	}
+	if !sawSkip {
+		t.Errorf("nothing tells the operator that skipping this worktree also skipped "+
+			"its setup:\n%s", got)
+	}
+}

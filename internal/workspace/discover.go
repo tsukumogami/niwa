@@ -105,8 +105,8 @@ func DiscoverHooks(configDir string) (config.HooksConfig, error) {
 // A containment or directory-read failure returns immediately with that error
 // ALONE, never joined with unknown-event diagnostics collected earlier in the
 // same walk. errors.Is matches a sentinel anywhere inside a joined error, so a
-// combined return would let a symlink escape ride inside what the caller treats
-// as the non-fatal case and be swallowed.
+// combined return would let a containment failure ride inside what the caller
+// treats as the non-fatal case and be swallowed.
 func DiscoverWorktreeHooks(configDir string) (config.HooksConfig, error) {
 	hooksDir := filepath.Join(configDir, "worktree-hooks")
 

@@ -1,0 +1,6 @@
+{
+  "impact": "none",
+  "rationale": "origin/main has not advanced since this branch was cut. git rev-list --count HEAD..origin/main is 0, and origin/main is still d25ad4d, the commit the exploration branch this work descends from was based on. No rebase was needed and no upstream change can have moved the PLAN's foundation.",
+  "rebase_head": "64bc5eeaaee526fac58ea323ff44d427d60c47b5",
+  "main_head": "d25ad4defdb8204418e59e51afbb991f401732c2"
+}

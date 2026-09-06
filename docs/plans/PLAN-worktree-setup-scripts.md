@@ -18,6 +18,28 @@ below are the unit of work. This file is deleted by the work-on cascade in the
 same commit set that transitions the BRIEF and PRD to Done and the DESIGN to
 Current.
 
+### Issues this branch closes
+
+Recorded here rather than decided at flip time. The cascade specifies the status
+transitions and says nothing about which `Closes` lines the PR body carries, so
+without this the set is re-derived by whoever happens to run it.
+
+- `Closes #280` — worktrees never run their repo's setup scripts.
+- `Closes #282` — worktree hooks under an unconsumed event are discovered and
+  silently never run.
+- `Closes #289` — `deepCopyRepos` dropped the `Codex` override. Found while
+  adding `WorktreeSetup` to the same function and fixed here, because the
+  exhaustiveness guard this branch adds fails against the tree without it. It is
+  the one that gets missed: the PR is not *about* it, so merging without this
+  line leaves an issue open whose fix has already shipped, and nothing in the
+  body is false — something true is just absent.
+
+**`#290` must stay open.** Only its comment half rides this branch: the wording
+claiming `validateWithinDir` resolves symlinks is corrected wherever it appeared,
+but the function is unchanged, and the design question of whether these paths
+should resolve symlinks at all is untouched. `grep -c EvalSymlinks
+internal/workspace/discover.go` returning 0 is the check.
+
 ## Scope Summary
 
 Make a niwa worktree run its repo's setup scripts, and make a worktree-hook
