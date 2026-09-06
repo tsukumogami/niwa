@@ -12,11 +12,11 @@ outcome: |
   visibly does not. A lifecycle hook either runs or says why it will not.
 motivating_context: |
   A session could not run a single test file in a fresh worktree and pushed the
-  question to CI -- a twelve-minute round trip for something that takes eighteen
-  seconds locally. A repo that uses niwa now documents the workaround in its
-  README. Separately, a hook written under worktree-hooks/create/ was discovered,
-  indexed, and never ran, caught only by a positive control that finished in
-  zero seconds.
+  question to CI -- a twelve-minute round trip for something a provisioned
+  worktree answers in seconds, after an eighteen-second setup. A repo that uses
+  niwa now documents the workaround in its README. Separately, a hook written
+  under worktree-hooks/create/ was discovered, indexed, and never ran, caught
+  only by a positive control that finished in zero seconds.
 ---
 
 # BRIEF: Worktree Setup Scripts
@@ -45,8 +45,9 @@ settings and hooks and rules import -- and none of its dependency tree. No
 
 The cost lands on whoever is standing in the worktree. A session that wanted to
 run one test file could not, and pushed the question to CI instead: a
-twelve-minute round trip to answer something that takes eighteen seconds
-locally. Worse, the failure does not name its cause. The symptom reported from
+twelve-minute round trip to answer something a provisioned worktree answers in
+seconds, once an eighteen-second setup has run.
+Worse, the failure does not name its cause. The symptom reported from
 the field was a bundler error about a package's `exports` field, which reads as
 a broken dependency and points nowhere near provisioning. A repo that uses niwa
 has since written the workaround into its README, telling readers that in "a git
