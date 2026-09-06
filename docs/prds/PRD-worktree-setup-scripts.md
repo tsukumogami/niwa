@@ -472,8 +472,9 @@ rewritten by the first change that adds an event.
   lets a failed one be deleted. Any worktree-hook failure hits it now. R6 and
   R11 bind what *this* feature adds and do not claim to repair that, because a
   scoped change stops being reviewable the moment it also becomes the place a
-  pre-existing data-loss bug is fixed. It belongs in its own issue at bug
-  priority, and this PRD does not depend on that issue being resolved first.
+  pre-existing data-loss bug is fixed. It is tracked as #285, and this PRD does
+  not depend on #285 being resolved first — D2's dependency direction is what
+  keeps this feature clear of it.
 - Persisting a record that setup ran, per repo or per worktree. R16 bounds the
   work per invocation; it does not introduce state.
 
