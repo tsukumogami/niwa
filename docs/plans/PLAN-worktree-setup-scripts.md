@@ -154,9 +154,14 @@ path that copies config.
       no linter or field-count guard in this repo catches it. This is not a
       hypothetical: `deepCopyRepos` already lists eleven of `RepoOverride`'s
       twelve fields, and the omitted one, `Codex`, is dropped to nil on that
-      path today. Fixing that is out of scope here, but it is the reason this
-      criterion is worded against the vault-resolved path rather than against
-      the copy.
+      path today.
+- [ ] A test enumerates `RepoOverride`'s fields, enumerates the literal's keys,
+      and asserts they agree — the same both-sides instrument the design uses for
+      the redactor walk. The pre-existing `Codex` omission is fixed as part of
+      this, because the guard cannot be added without fixing it: the test fails
+      against the tree as it stands. Leaving the bug and skipping the guard
+      would ship this feature's own field into a copy function with a known
+      silent-drop defect and no protection.
 - [ ] An opt-in on repo A does not cause setup to run for repo B. (R3)
 - [ ] With no opt-in anywhere, nothing about the clone path changes. (R15)
 
