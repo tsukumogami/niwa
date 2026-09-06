@@ -42,7 +42,16 @@ func TestPipeline_CloneSetupRunsBeforeWorktreeFanOut(t *testing.T) {
 		t.Skip("git not available")
 	}
 
-	tmpDir := t.TempDir()
+	// Resolve symlinks in the temp root. On macOS t.TempDir() sits under
+	// /var/folders, which is a symlink to /private/var/folders, and
+	// `git worktree list --porcelain` reports the RESOLVED path. The fan-out's
+	// registration check compares that against the path it was given, so an
+	// unresolved path here makes it treat a perfectly good worktree as detached
+	// and skip it -- and the test then has nothing to order.
+	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolving temp dir: %v", err)
+	}
 	niwaDir := filepath.Join(tmpDir, ".niwa")
 	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -51,9 +60,9 @@ func TestPipeline_CloneSetupRunsBeforeWorktreeFanOut(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
-	if err != nil {
-		t.Fatalf("loading config: %v", err)
+	loaded, cfgErr := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if cfgErr != nil {
+		t.Fatalf("loading config: %v", cfgErr)
 	}
 
 	// The fan-out's inline observable: a worktree hook that streams a marker

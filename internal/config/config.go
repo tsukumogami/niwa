@@ -345,6 +345,16 @@ type WorkspaceMeta struct {
 	// all repos in the workspace. nil means enabled (opt-out default).
 	// Per-repo overrides in RepoOverride.ReadEnvExample take precedence.
 	ReadEnvExample *bool `toml:"read_env_example,omitempty"`
+	// WorktreeSetup opts the workspace's repos into running their own
+	// scripts/setup/ against each worktree, not just against the clone.
+	// nil means OFF -- the opposite default from ReadEnvExample above, and
+	// deliberately so: every setup script that exists was written before
+	// worktrees ever ran one, and at least one first-party example computes
+	// its target by walking up two directories, which lands somewhere valid
+	// and wrong from a worktree and exits 0. A repo opts in after its author
+	// has read what a script may assume. Per-repo overrides in
+	// RepoOverride.WorktreeSetup take precedence.
+	WorktreeSetup *bool `toml:"worktree_setup,omitempty"`
 	// EnvExamplePolicy is the workspace-level .env.example failure policy.
 	// nil means inherit (from the global override, then the warn default).
 	// This is a project-scope position: its Vars sub-table is honored.
@@ -474,6 +484,13 @@ type RepoOverride struct {
 	// ReadEnvExample overrides the workspace-level read_env_example setting
 	// for this repo. nil means inherit from WorkspaceMeta.ReadEnvExample.
 	ReadEnvExample *bool `toml:"read_env_example,omitempty"`
+	// WorktreeSetup overrides the workspace-level worktree_setup setting for
+	// this repo. nil means inherit from WorkspaceMeta.WorktreeSetup, which
+	// itself defaults to off. This is the operator-facing half of the opt-in;
+	// the script-facing half is the NIWA_WORKTREE_* environment a script reads
+	// to gate itself, which is what lets one scripts/setup/ directory hold both
+	// a per-tree dependency install and a shared-state git-hooks installer.
+	WorktreeSetup *bool `toml:"worktree_setup,omitempty"`
 	// EnvExamplePolicy is the per-repo .env.example failure policy. nil means
 	// inherit from the workspace policy. This is a project-scope position: its
 	// Vars sub-table is honored.

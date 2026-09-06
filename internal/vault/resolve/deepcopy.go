@@ -64,6 +64,32 @@ func deepCopyClaudeOverride(in *config.ClaudeOverride) *config.ClaudeOverride {
 	return &out
 }
 
+// deepCopyCodexOverride copies a repo's [repos.<name>.codex] block.
+//
+// This was missing from deepCopyRepos entirely until niwa#291: the literal
+// there rebuilds RepoOverride field by field and listed eleven of its twelve
+// fields, with Codex absent while its immediate neighbour Claude was copied two
+// lines above. The consequence was silent and fail-open -- AgentEnabled falls
+// back to the workspace gate when the repo override is nil, and to true when
+// that is unset, so a repo that explicitly set `enabled = false` had that
+// opt-out dropped on the vault-resolved path and Codex content delivered into a
+// repo whose owner had said not to.
+//
+// The field is a *bool inside a pointer struct, so the copy has to allocate a
+// new struct rather than share the pointer, or a later mutation through one
+// config would be visible through the other.
+func deepCopyCodexOverride(in *config.CodexOverride) *config.CodexOverride {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.Enabled != nil {
+		v := *in.Enabled
+		out.Enabled = &v
+	}
+	return &out
+}
+
 func deepCopyEnv(in config.EnvConfig) config.EnvConfig {
 	return config.EnvConfig{
 		Files:   slices.Clone(in.Files),
@@ -92,10 +118,12 @@ func deepCopyRepos(in map[string]config.RepoOverride) map[string]config.RepoOver
 			Branch:           ov.Branch,
 			Scope:            ov.Scope,
 			Claude:           deepCopyClaudeOverride(ov.Claude),
+			Codex:            deepCopyCodexOverride(ov.Codex),
 			Env:              deepCopyEnv(ov.Env),
 			Files:            cloneStringMap(ov.Files),
 			SetupDir:         ov.SetupDir,
 			ReadEnvExample:   ov.ReadEnvExample,
+			WorktreeSetup:    ov.WorktreeSetup,
 			EnvExamplePolicy: deepCopyEnvExamplePolicy(ov.EnvExamplePolicy),
 			EnvOutput:        deepCopyEnvOutput(ov.EnvOutput),
 		}
