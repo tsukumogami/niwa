@@ -140,17 +140,37 @@ func resolvedTempDir(t *testing.T) string {
 // stub `niwa` on PATH, invokes `niwa <args...>`, and reports the shell's
 // working directory afterwards along with the wrapper's exit code.
 //
-// The stub writes landingPath to $NIWA_RESPONSE_FILE when that variable is set
-// (mimicking writeLandingPath) and exits with exitCode. Running the wrapper for
-// real is the point: a missing arm in the case dispatcher is invisible to any
-// assertion made against the template as a string, because every token a
-// substring check looks for also occurs inside some other arm.
+// It returns the shell's cwd, the wrapper's exit code, and the directory the
+// shell started in -- the last so negative cases can assert where the shell is
+// rather than merely where it isn't.
+//
+// The stub writes landingPath to $NIWA_RESPONSE_FILE when that variable is set,
+// mimicking writeLandingPath. It mimics rather than shares: the real file format
+// is pinned by TestWriteLandingPath_ResponseFileSet_WritesFile, and the wrapper
+// is insensitive to the trailing newline because $(cat) strips it. A change to
+// that format is caught there, not here.
+//
+// Running the wrapper for real is the point: a missing arm in the case
+// dispatcher is invisible to any assertion made against the template as a
+// string, because every token a substring check looks for also occurs inside
+// some other arm.
+// Exit codes the stub niwa returns. stubExitFail is arbitrary and non-zero; the
+// tests assert the wrapper propagates it verbatim rather than collapsing it.
+const (
+	stubExitOK   = 0
+	stubExitFail = 3
+)
+
 func runWrapperWithStubNiwa(t *testing.T, landingPath string, exitCode int, args ...string) (cwd string, rc int, startDir string) {
 	t.Helper()
 
+	// Not t.Skip: these are the only tests that exercise the wrapper, and a
+	// skip would let the package report ok with none of that coverage. CI runs
+	// ubuntu and macos, so bash is always present; its absence is a broken
+	// environment, not a platform to degrade for.
 	bash, err := exec.LookPath("bash")
 	if err != nil {
-		t.Skip("bash not available")
+		t.Fatalf("bash is required to exercise the shell wrapper: %v", err)
 	}
 
 	stubDir := t.TempDir()
@@ -178,7 +198,13 @@ printf 'RC=%s\n' "$__rc"
 `
 	cmd := exec.Command(bash, append([]string{"-c", script, "bash"}, args...)...)
 	cmd.Dir = startDir
-	cmd.Env = append(os.Environ(), "PATH="+stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// Clear both protocol variables so an ambient value from the developer's
+	// own shell integration cannot reach the stub or the wrapper.
+	cmd.Env = append(os.Environ(),
+		"PATH="+stubDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"NIWA_RESPONSE_FILE=",
+		"_NIWA_SHELL_INIT=",
+	)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -207,16 +233,12 @@ printf 'RC=%s\n' "$__rc"
 	return cwd, rc, startDir
 }
 
-// TestShellWrapper_CdEligibleCommands runs the wrapper against a stub niwa and
-// asserts the shell actually changes directory for every cd-eligible command,
-// and does not for anything else.
+// TestShellWrapper_CdEligibleCommands asserts the shell actually changes
+// directory for every cd-eligible command. The negative direction lives in
+// TestShellWrapper_NonCdCommandsDoNotNavigate.
 //
-// This replaces a test that asserted strings.Contains(shellWrapperTemplate,
-// "create"). That check passed while `niwa worktree create` was broken (issue
-// #281), because "create" also occurs inside the nested `session create` arm --
-// it would have passed against a template with no case statement at all. A
-// substring assertion cannot detect a missing case arm, which is precisely the
-// defect class here, so the wrapper is exercised rather than pattern-matched.
+// The wrapper is exercised rather than pattern-matched because a substring
+// assertion cannot detect a missing case arm, which is the defect class of #281.
 func TestShellWrapper_CdEligibleCommands(t *testing.T) {
 	landing := resolvedTempDir(t)
 
@@ -233,7 +255,7 @@ func TestShellWrapper_CdEligibleCommands(t *testing.T) {
 	}
 	for _, args := range cdEligible {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
-			cwd, rc, _ := runWrapperWithStubNiwa(t, landing, 0, args...)
+			cwd, rc, _ := runWrapperWithStubNiwa(t, landing, stubExitOK, args...)
 			if cwd != landing {
 				t.Errorf("niwa %s did not cd: cwd = %q, want %q",
 					strings.Join(args, " "), cwd, landing)
@@ -263,7 +285,7 @@ func TestShellWrapper_NonCdCommandsDoNotNavigate(t *testing.T) {
 			// The stub still offers a valid landing path. A command that is
 			// not cd-eligible never sets NIWA_RESPONSE_FILE, so the path is
 			// never written and the shell must stay put.
-			cwd, rc, startDir := runWrapperWithStubNiwa(t, landing, 0, args...)
+			cwd, rc, startDir := runWrapperWithStubNiwa(t, landing, stubExitOK, args...)
 			// Assert where the shell IS, not merely where it isn't: a bare
 			// `cwd != landing` would also be satisfied by the shell ending up
 			// somewhere else entirely.
@@ -298,27 +320,24 @@ func TestShellWrapper_NoCdOnFailure(t *testing.T) {
 		{"go"},
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
-			cwd, rc, startDir := runWrapperWithStubNiwa(t, landing, 3, args...)
+			cwd, rc, startDir := runWrapperWithStubNiwa(t, landing, stubExitFail, args...)
 			if cwd != startDir {
 				t.Errorf("niwa %s cd'd to %q on a non-zero exit; the shell must stay at %q",
 					strings.Join(args, " "), cwd, startDir)
 			}
-			if rc != 3 {
-				t.Errorf("niwa %s: exit code = %d, want 3 (wrapper must propagate it)",
-					strings.Join(args, " "), rc)
+			if rc != stubExitFail {
+				t.Errorf("niwa %s: exit code = %d, want %d (the wrapper must propagate it)",
+					strings.Join(args, " "), rc, stubExitFail)
 			}
 		})
 	}
 }
 
-// TestShellWrapperTemplate_AllCdPathsRouteThroughWrap keeps the structural
-// invariant the behavioral tests above rely on: every cd happens inside
-// __niwa_cd_wrap, so the exit-code gate cannot be bypassed by a case arm that
-// calls builtin cd directly.
+// TestShellWrapperTemplate_AllCdPathsRouteThroughWrap holds the one invariant
+// the behavioral tests cannot see. They prove the commands they name navigate;
+// they cannot prove some other arm does not cd on its own, bypassing the
+// exit-code gate. Only a structural check covers that.
 func TestShellWrapperTemplate_AllCdPathsRouteThroughWrap(t *testing.T) {
-	if !strings.Contains(shellWrapperTemplate, `__niwa_cd_wrap "$@"`) {
-		t.Error("wrapper template missing __niwa_cd_wrap dispatch")
-	}
 	if got := strings.Count(shellWrapperTemplate, "builtin cd"); got != 1 {
 		t.Errorf("wrapper has %d `builtin cd` calls, want exactly 1 (inside __niwa_cd_wrap); "+
 			"a cd outside the wrapper would skip the exit-code gate", got)

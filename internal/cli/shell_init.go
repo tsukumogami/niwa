@@ -34,23 +34,22 @@ Add this to your shell profile:
   eval "$(niwa shell-init auto)"`,
 }
 
-// shellWrapperTemplate is the shell function the wrapper installs. It is
-// regenerated from this binary every time it is loaded -- niwa's own ~/.niwa/env
-// evals `niwa shell-init auto` at shell startup, and .tsuku-recipes/niwa.toml
-// builds its share/shell.d fragment from `{install_dir}/bin/niwa shell-init
-// {shell}` at post-install -- so a change here reaches a user on their next new
-// shell after upgrading, with nothing to re-run by hand.
+// shellWrapperTemplate is the shell function the wrapper installs. Editing it
+// needs no migration step: it never reaches disk as text. Both delivery paths
+// regenerate it from this binary -- ~/.niwa/env evals `niwa shell-init auto` at
+// shell startup, and .tsuku-recipes/niwa.toml builds its share/shell.d fragment
+// from `niwa shell-init {shell}` at post-install -- so a change here lands on a
+// user's next new shell after upgrading.
 //
 // A command belongs in the case dispatcher only if it calls writeLandingPath;
 // that call is what puts a directory in NIWA_RESPONSE_FILE for __niwa_cd_wrap to
-// read. Under `worktree`, only `create` does (runSessionCreate), which is also
-// the only worktree subcommand docs/guides/worktree.md promises navigation for.
-// `worktree destroy` removes the directory you may be standing in but writes no
-// landing path, so wrapping it would add a case arm that can never fire; that
-// gap is tracked separately in issue #283.
+// read. Under `worktree`, only `create` does (runSessionCreate). `worktree
+// destroy` removes the directory you may be standing in but writes no landing
+// path, so an arm for it today could never fire; that gap is issue #283.
 //
-// The nested case matches `worktree` and its deprecated `session` alias
-// together, so both spellings land in the new worktree.
+// The dispatcher matches on "$1", so a persistent flag before the command
+// (`niwa --no-progress worktree create`) falls through to the default arm and
+// does not navigate. Pre-existing and true of every wrapped command.
 const shellWrapperTemplate = `export _NIWA_SHELL_INIT=1
 
 __niwa_cd_wrap() {

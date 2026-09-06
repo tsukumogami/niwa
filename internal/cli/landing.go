@@ -40,6 +40,14 @@ func captureNiwaResponseFile() error {
 //
 // Must be called after the root command's PersistentPreRunE; reads from the
 // cache populated by captureNiwaResponseFile.
+//
+// Calling this from a new command is only half the work. The shell wrapper
+// dispatches on the command name, so the command must also be added to the case
+// statement in shellWrapperTemplate (shell_init.go); without that arm the
+// wrapper never sets NIWA_RESPONSE_FILE, this call writes to nothing, and the
+// shell does not move. The omission is silent -- the wrapper tests enumerate
+// commands by hand, so a new caller with no arm fails nothing. That is how #281
+// happened, and #283 is the same shape waiting to be added.
 func writeLandingPath(path string) error {
 	if f := niwaResponseFile; f != "" {
 		if err := validateResponseFilePath(f); err != nil {

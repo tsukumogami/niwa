@@ -22,6 +22,10 @@ const deprecatedSessionAlias = "session"
 // sessionCmd is the canonical `worktree` parent command. It keeps the
 // historical "session" name as an alias so existing scripts keep working;
 // the variable name is retained to minimize churn across the package.
+//
+// The shell wrapper mirrors these Aliases by hand -- shellWrapperTemplate
+// (shell_init.go) matches `worktree|session`. A spelling added here without a
+// matching token there silently loses the auto-cd for that spelling.
 var sessionCmd = &cobra.Command{
 	Use:     "worktree",
 	Aliases: []string{deprecatedSessionAlias},
