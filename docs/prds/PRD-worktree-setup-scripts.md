@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: In Progress
 problem: |
   A niwa worktree receives every accessory a repo checkout gets except the one
   produced by the repo's own setup scripts, so it arrives with tracked source
@@ -28,7 +28,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+In Progress
 
 ## Problem Statement
 
@@ -154,11 +154,13 @@ distinguishably from that repo's clone and from other worktrees of the same
 repo, everywhere niwa reports it — both where a script's output is streamed and
 where failed repos are counted.
 
-**R9.** Setup-script output produced in a worktree is scrubbed to the same
-standard as clone-path output. Where the provenance needed to register fragments
-precisely is unavailable on a surface, the fallback is the existing
-minimum-fragment-length guard, and the DESIGN states that it took it. Declining
-to run setup on a surface is not an acceptable way to satisfy this requirement —
+**R9.** Setup-script output produced in a worktree is scrubbed. The target is the
+clone path's standard — a redactor holding the values actually present in that
+tree. Where the provenance needed to register those values precisely is
+unavailable on a surface, the floor is the existing minimum-fragment-length
+guard, which is weaker than the target and is named as a floor rather than as
+equivalent; the DESIGN states which of the two it reached and why. Declining to
+run setup on a surface is not an acceptable way to satisfy this requirement —
 see D6.
 
 **R10.** Worktree-hook event names are validated against the set of events niwa
