@@ -169,8 +169,8 @@ where it says it shouldn't".
   posture, script environment contract, and whether to publish the idempotency
   contract. Settling any one without the others produces a defensible-looking wrong
   answer.
-- `ApplyToWorktree` is referenced 92 times across 8 test files, including
-  `internal/workspace/characterization_test.go` and
+- `ApplyToWorktree` has 25 call sites in tests and 2 in production code, across 8
+  test files including `internal/workspace/characterization_test.go` and
   `test/functional/worktree_delegation_steps_test.go`.
 - Three existing failure postures on the worktree path already disagree with each
   other (create retains, `from-hook` rolls back, Step 6.6 warns and continues), and

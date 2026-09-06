@@ -79,7 +79,10 @@ already do. It is "the worktree runs the workspace's scripts; give it the repo's
 
 ## Architecture: one insertion reaches every surface
 
-`ApplyToWorktree` has five call sites, not two:
+`ApplyToWorktree` has two direct callers -- `applyContentToWorktree`
+(`internal/cli/session_lifecycle_cmd.go:366`) and Step 6.6's fan-out
+(`internal/workspace/apply.go:2433`). Reaching it there are five distinct entry
+paths, because `applyContentToWorktree` is itself called from four places:
 
 | Call site | Surface |
 |---|---|
@@ -87,7 +90,12 @@ already do. It is "the worktree runs the workspace's scripts; give it the repo's
 | `internal/cli/session_lifecycle_cmd.go:274` | `niwa worktree apply` |
 | `internal/cli/session_from_hook_cmd.go:144` | agent-facing `WorktreeCreate` hook |
 | `internal/cli/apply.go:306` | `niwa apply` with worktree scope |
-| `internal/workspace/apply.go:2433` | **Step 6.6's per-apply fan-out** |
+| `internal/workspace/apply.go:2433` | **Step 6.6's per-apply fan-out** (direct) |
+
+The distinction matters for anything inserted *inside* `ApplyToWorktree`: all four
+CLI paths share one invocation, so the inserted code cannot tell which entry path
+it is on -- and their failure postures are opposite (interactive create retains,
+the delegated create tears down).
 
 Step 6.6 does not need extracting: its fan-out already routes through
 `ApplyToWorktree`. So a single step inside `ApplyToWorktree`, beside the existing
@@ -270,9 +278,12 @@ event, or gate the setup run on a create-time flag in `WorktreeApplyOptions`.
 
 ## Blast radius
 
-- `ApplyToWorktree` is referenced 92 times across 8 test files, including
-  `internal/workspace/characterization_test.go` and
-  `test/functional/worktree_delegation_steps_test.go`.
+- `ApplyToWorktree` has 25 call sites in tests and 2 in production code, across 8
+  test files including `internal/workspace/characterization_test.go` and
+  `test/functional/worktree_delegation_steps_test.go`. (An earlier draft said 92,
+  which is the raw string count -- 18 of those are `func TestApplyToWorktree*`
+  names and the rest are doc comments. Corrected because the figure was being
+  used as a blast-radius signal, where it overstated the work fourfold.)
 - Step 6.6 runs *before* Step 6.75, so a worktree refresh currently reads clone env
   written before that same apply's clone setup scripts run. Ordering worth revisiting.
 - `runWorktreeHooks` already re-runs on every apply for every live worktree, so
