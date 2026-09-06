@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: In Progress
+status: Done
 problem: |
   A niwa worktree receives every accessory a repo checkout gets except the one
   produced by the repo's own setup scripts, so it arrives with tracked source

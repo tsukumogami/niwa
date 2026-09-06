@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   A niwa worktree never runs its repo's setup scripts, so it arrives with the
   repo's tracked source and none of its dependency tree while receiving every
