@@ -25,15 +25,31 @@ var shellInitCmd = &cobra.Command{
 	Short: "Generate shell integration (wrapper function and completions)",
 	Long: `Generate shell wrapper function and completions for niwa.
 
-The wrapper intercepts cd-eligible commands (create, go) so that niwa can
-change the shell's working directory after creating or switching to a
-workspace instance.
+The wrapper intercepts cd-eligible commands (create, destroy, go, init, and
+worktree create) so that niwa can change the shell's working directory after
+creating or switching to a workspace instance or a worktree.
 
 Add this to your shell profile:
 
   eval "$(niwa shell-init auto)"`,
 }
 
+// shellWrapperTemplate is the shell function the wrapper installs. Editing it
+// needs no migration step: it never reaches disk as text. Both delivery paths
+// regenerate it from this binary -- ~/.niwa/env evals `niwa shell-init auto` at
+// shell startup, and .tsuku-recipes/niwa.toml builds its share/shell.d fragment
+// from `niwa shell-init {shell}` at post-install -- so a change here lands on a
+// user's next new shell after upgrading.
+//
+// A command belongs in the case dispatcher only if it calls writeLandingPath;
+// that call is what puts a directory in NIWA_RESPONSE_FILE for __niwa_cd_wrap to
+// read. Under `worktree`, only `create` does (runSessionCreate). `worktree
+// destroy` removes the directory you may be standing in but writes no landing
+// path, so an arm for it today could never fire; that gap is issue #283.
+//
+// The dispatcher matches on "$1", so a persistent flag before the command
+// (`niwa --no-progress worktree create`) falls through to the default arm and
+// does not navigate. Pre-existing and true of every wrapped command.
 const shellWrapperTemplate = `export _NIWA_SHELL_INIT=1
 
 __niwa_cd_wrap() {
@@ -54,7 +70,7 @@ niwa() {
         create|destroy|go|init)
             __niwa_cd_wrap "$@"
             ;;
-        session)
+        worktree|session)
             case "$2" in
                 create)
                     __niwa_cd_wrap "$@"

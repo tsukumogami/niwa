@@ -22,6 +22,10 @@ const deprecatedSessionAlias = "session"
 // sessionCmd is the canonical `worktree` parent command. It keeps the
 // historical "session" name as an alias so existing scripts keep working;
 // the variable name is retained to minimize churn across the package.
+//
+// The shell wrapper mirrors these Aliases by hand -- shellWrapperTemplate
+// (shell_init.go) matches `worktree|session`. A spelling added here without a
+// matching token there silently loses the auto-cd for that spelling.
 var sessionCmd = &cobra.Command{
 	Use:     "worktree",
 	Aliases: []string{deprecatedSessionAlias},
@@ -39,11 +43,25 @@ Subcommands:
 	// command was reached via the legacy "session" token on the command
 	// line, emit a deprecation notice to stderr. Behavior and exit code are
 	// unchanged; this is informational only.
-	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+	//
+	// rootPersistentPreRun must be called explicitly. Cobra runs only the
+	// nearest persistent pre-run in the parent chain -- it stops at the first
+	// hook it finds unless EnableTraverseRunHooks is set, which niwa does not
+	// set -- so declaring a hook here shadows the root's rather than adding to
+	// it. Dropping it silently disabled NIWA_RESPONSE_FILE capture for every
+	// worktree subcommand, which meant `niwa worktree create` wrote its landing
+	// path nowhere and the shell never moved (#281). It also left the variable
+	// exported to every child process, the inheritance the root hook exists to
+	// prevent.
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if err := rootPersistentPreRun(cmd, args); err != nil {
+			return err
+		}
 		if invokedViaSessionAlias() {
 			fmt.Fprintln(cmd.ErrOrStderr(),
 				`"niwa session" is deprecated; use "niwa worktree"`)
 		}
+		return nil
 	},
 }
 

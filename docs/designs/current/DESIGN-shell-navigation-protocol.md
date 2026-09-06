@@ -30,7 +30,7 @@ Current
 
 ## Context and Problem Statement
 
-`niwa create`, `niwa destroy`, `niwa go`, `niwa init`, and `niwa session create`
+`niwa create`, `niwa destroy`, `niwa go`, `niwa init`, and `niwa worktree create`
 are "cd-eligible" commands: after they run, the shell should change directory
 to the workspace, repo, or safe-ancestor they operated on. (Note: this list
 has grown past the original scope of this document — `init <name>`,
@@ -107,7 +107,7 @@ wrapper reads the file after the command exits, calls `cd`, and removes the
 file. Stdout and stderr flow unmodified to the terminal throughout.
 
 The wrapper structure (illustrative; the implementation has since grown to
-include `init`, `session create`, and `destroy` — see `internal/cli/shell_init.go`
+include `init`, `worktree create`, and `destroy` — see `internal/cli/shell_init.go`
 for the source of truth):
 
 ```sh
@@ -188,7 +188,7 @@ control characters varies across POSIX implementations.
 The shell wrapper and niwa binary communicate the landing path through a temp
 file whose path is passed via the `NIWA_RESPONSE_FILE` environment variable.
 Before running a cd-eligible command (`create`, `destroy`, `go`, `init`,
-`session create`), the wrapper calls
+`worktree create`), the wrapper calls
 `mktemp`, exports the path in `NIWA_RESPONSE_FILE`, runs the binary, reads the
 temp file, removes it, and calls `cd` if the file contains a valid directory.
 Stdout and stderr from the binary and all its subprocesses flow unmodified to
