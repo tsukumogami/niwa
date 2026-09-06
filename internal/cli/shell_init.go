@@ -36,10 +36,10 @@ Add this to your shell profile:
 
 // shellWrapperTemplate is the shell function the wrapper installs. It is
 // regenerated from this binary every time it is loaded -- niwa's own ~/.niwa/env
-// evals `niwa shell-init auto` at shell startup, and the tsuku recipe produces
-// its share/shell.d fragment by running `niwa shell-init <shell>` at
-// post-install -- so a change here reaches a user on their next new shell after
-// upgrading, with nothing to re-run by hand.
+// evals `niwa shell-init auto` at shell startup, and .tsuku-recipes/niwa.toml
+// builds its share/shell.d fragment from `{install_dir}/bin/niwa shell-init
+// {shell}` at post-install -- so a change here reaches a user on their next new
+// shell after upgrading, with nothing to re-run by hand.
 //
 // A command belongs in the case dispatcher only if it calls writeLandingPath;
 // that call is what puts a directory in NIWA_RESPONSE_FILE for __niwa_cd_wrap to

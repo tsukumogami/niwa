@@ -118,6 +118,24 @@ func TestGuardZshCompdef(t *testing.T) {
 	}
 }
 
+// resolvedTempDir returns a temp directory with symlinks resolved.
+//
+// t.TempDir can hand back a path that traverses a symlink (/tmp -> /private/tmp
+// on macOS), and bash reports the resolved form in $PWD. Comparing a resolved
+// cwd against an unresolved path silently inverts the negative assertions: a
+// wrapper that wrongly cd'd would report the resolved path, fail to string-match
+// the unresolved one, and the test would pass while reading "did not navigate".
+// Every path compared against a wrapper's cwd must come from here.
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("resolving temp dir %q: %v", dir, err)
+	}
+	return resolved
+}
+
 // runWrapperWithStubNiwa sources the wrapper in a real bash shell against a
 // stub `niwa` on PATH, invokes `niwa <args...>`, and reports the shell's
 // working directory afterwards along with the wrapper's exit code.
@@ -127,7 +145,7 @@ func TestGuardZshCompdef(t *testing.T) {
 // real is the point: a missing arm in the case dispatcher is invisible to any
 // assertion made against the template as a string, because every token a
 // substring check looks for also occurs inside some other arm.
-func runWrapperWithStubNiwa(t *testing.T, landingPath string, exitCode int, args ...string) (cwd string, rc int) {
+func runWrapperWithStubNiwa(t *testing.T, landingPath string, exitCode int, args ...string) (cwd string, rc int, startDir string) {
 	t.Helper()
 
 	bash, err := exec.LookPath("bash")
@@ -147,7 +165,7 @@ exit %d
 		t.Fatalf("writing stub niwa: %v", err)
 	}
 
-	startDir := t.TempDir()
+	startDir = resolvedTempDir(t)
 
 	// Print the cwd and the wrapper's exit code on separate lines so the test
 	// can assert on both. `command niwa` inside the wrapper resolves through
@@ -186,7 +204,7 @@ printf 'RC=%s\n' "$__rc"
 	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
 		cwd = resolved
 	}
-	return cwd, rc
+	return cwd, rc, startDir
 }
 
 // TestShellWrapper_CdEligibleCommands runs the wrapper against a stub niwa and
@@ -200,10 +218,7 @@ printf 'RC=%s\n' "$__rc"
 // substring assertion cannot detect a missing case arm, which is precisely the
 // defect class here, so the wrapper is exercised rather than pattern-matched.
 func TestShellWrapper_CdEligibleCommands(t *testing.T) {
-	landing := t.TempDir()
-	if resolved, err := filepath.EvalSymlinks(landing); err == nil {
-		landing = resolved
-	}
+	landing := resolvedTempDir(t)
 
 	cdEligible := [][]string{
 		{"create"},
@@ -218,7 +233,7 @@ func TestShellWrapper_CdEligibleCommands(t *testing.T) {
 	}
 	for _, args := range cdEligible {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
-			cwd, rc := runWrapperWithStubNiwa(t, landing, 0, args...)
+			cwd, rc, _ := runWrapperWithStubNiwa(t, landing, 0, args...)
 			if cwd != landing {
 				t.Errorf("niwa %s did not cd: cwd = %q, want %q",
 					strings.Join(args, " "), cwd, landing)
@@ -235,7 +250,7 @@ func TestShellWrapper_CdEligibleCommands(t *testing.T) {
 // `worktree` other than `create` write no landing path, so they must fall
 // through to the default arm rather than being swept in by the group.
 func TestShellWrapper_NonCdCommandsDoNotNavigate(t *testing.T) {
-	landing := t.TempDir()
+	landing := resolvedTempDir(t)
 
 	for _, args := range [][]string{
 		{"worktree", "list"},
@@ -248,10 +263,13 @@ func TestShellWrapper_NonCdCommandsDoNotNavigate(t *testing.T) {
 			// The stub still offers a valid landing path. A command that is
 			// not cd-eligible never sets NIWA_RESPONSE_FILE, so the path is
 			// never written and the shell must stay put.
-			cwd, rc := runWrapperWithStubNiwa(t, landing, 0, args...)
-			if cwd == landing {
-				t.Errorf("niwa %s navigated to the landing path but is not cd-eligible",
-					strings.Join(args, " "))
+			cwd, rc, startDir := runWrapperWithStubNiwa(t, landing, 0, args...)
+			// Assert where the shell IS, not merely where it isn't: a bare
+			// `cwd != landing` would also be satisfied by the shell ending up
+			// somewhere else entirely.
+			if cwd != startDir {
+				t.Errorf("niwa %s moved the shell to %q; it is not cd-eligible and must stay at %q",
+					strings.Join(args, " "), cwd, startDir)
 			}
 			if rc != 0 {
 				t.Errorf("niwa %s: exit code = %d, want 0", strings.Join(args, " "), rc)
@@ -271,7 +289,7 @@ func TestShellWrapper_NonCdCommandsDoNotNavigate(t *testing.T) {
 // directory they need to enter in order to fix what failed. Issue #280 depends
 // on it. Do not relax this without revisiting that design.
 func TestShellWrapper_NoCdOnFailure(t *testing.T) {
-	landing := t.TempDir()
+	landing := resolvedTempDir(t)
 
 	for _, args := range [][]string{
 		{"worktree", "create"},
@@ -280,10 +298,10 @@ func TestShellWrapper_NoCdOnFailure(t *testing.T) {
 		{"go"},
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
-			cwd, rc := runWrapperWithStubNiwa(t, landing, 3, args...)
-			if cwd == landing {
-				t.Errorf("niwa %s cd'd on a non-zero exit; the shell must stay put",
-					strings.Join(args, " "))
+			cwd, rc, startDir := runWrapperWithStubNiwa(t, landing, 3, args...)
+			if cwd != startDir {
+				t.Errorf("niwa %s cd'd to %q on a non-zero exit; the shell must stay at %q",
+					strings.Join(args, " "), cwd, startDir)
 			}
 			if rc != 3 {
 				t.Errorf("niwa %s: exit code = %d, want 3 (wrapper must propagate it)",
