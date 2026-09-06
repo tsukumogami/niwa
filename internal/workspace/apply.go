@@ -1918,8 +1918,63 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		procErr = pluginErr
 	}
 
+	// Step 6.75: Run repo-provided setup scripts. A script failure is
+	// carried out as data (setupIncomplete) and never returned as an error:
+	// every repo gets its turn, and the pipeline's error path must not be
+	// reached, since on create it deletes the instance root.
+	//
+	// ORDER: this step deliberately runs BEFORE Step 6.6's worktree fan-out
+	// below, despite the numbering, which is historical -- 6.6 was inserted
+	// above an existing 6.75 because its own constraint (after the materializer
+	// loop) was already satisfied there, not because anything required it to
+	// precede setup.
+	//
+	// The order matters once a worktree can run setup of its own: with the
+	// fan-out first, every worktree is provisioned against the state the
+	// PREVIOUS apply's clone setup left behind, so a per-tree step that
+	// consumes something clone setup produces consumes a stale copy. Running
+	// the clone's setup first makes a worktree see this apply's output.
+	//
+	// Nothing in Step 6.6's inputs comes from here: they are produced at or
+	// before Step 6.5, and the load-bearing one -- the clone's materialized env
+	// output that the worktree inherits -- is written by Step 6.5's
+	// EnvMaterializer. Its []ManagedFile result is read once, in Step 7 below,
+	// and exemptPaths has no read between the two steps and is flattened into a
+	// map by its consumer, so the append order is irrelevant.
+	//
+	// TestPipeline_CloneSetupRunsBeforeWorktreeFanOut pins this. Without it the
+	// ordering is established by analysis and held in place by nothing.
+	var setupIncomplete []string
+	for _, cr := range classified {
+		setupDir := ResolveSetupDir(effectiveCfg, cr.Repo.Name)
+		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
+		result := RunSetupScripts(repoDir, setupDir, a.Reporter, redactor)
+
+		if result.Disabled || result.Skipped {
+			continue
+		}
+
+		repoFailed := false
+		for _, sr := range result.Scripts {
+			if sr.Error != nil {
+				repoFailed = true
+				a.Reporter.DeferWarn("setup script %s/%s failed for %s: %v",
+					setupDir, sr.Name, cr.Repo.Name, sr.Error)
+			}
+		}
+		// Count the repo once however many of its scripts errored. A
+		// non-executable script is skipped rather than stopping the
+		// repo, so a repo with several errors is a real case.
+		if repoFailed {
+			setupIncomplete = append(setupIncomplete, cr.Repo.Name)
+		}
+	}
 	// Step 6.6: Refresh the env of the instance's existing worktrees, sourcing
-	// from the clones just materialized above. This is the apply-side fan-out of
+	// from the clones just materialized above -- and, now, from the clone setup
+	// that Step 6.75 ran immediately before this. See the ORDER note there for
+	// why this step follows it despite the lower number.
+	//
+	// This is the apply-side fan-out of
 	// the inherit primitive (DESIGN decision B2): after an apply no live worktree
 	// holds a value different from its clone (R6). Locked/detached/missing
 	// worktrees are skipped with a warning (R7); a skipped-but-live worktree's
@@ -1946,36 +2001,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	})
 	if err != nil {
 		return nil, err
-	}
-
-	// Step 6.75: Run repo-provided setup scripts. A script failure is
-	// carried out as data (setupIncomplete) and never returned as an error:
-	// every repo gets its turn, and the pipeline's error path must not be
-	// reached, since on create it deletes the instance root.
-	var setupIncomplete []string
-	for _, cr := range classified {
-		setupDir := ResolveSetupDir(effectiveCfg, cr.Repo.Name)
-		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
-		result := RunSetupScripts(repoDir, setupDir, a.Reporter, redactor)
-
-		if result.Disabled || result.Skipped {
-			continue
-		}
-
-		repoFailed := false
-		for _, sr := range result.Scripts {
-			if sr.Error != nil {
-				repoFailed = true
-				a.Reporter.DeferWarn("setup script %s/%s failed for %s: %v",
-					setupDir, sr.Name, cr.Repo.Name, sr.Error)
-			}
-		}
-		// Count the repo once however many of its scripts errored. A
-		// non-executable script is skipped rather than stopping the
-		// repo, so a repo with several errors is a real case.
-		if repoFailed {
-			setupIncomplete = append(setupIncomplete, cr.Repo.Name)
-		}
 	}
 
 	// Plan warnings: what the applied plans said the user needs to hear.

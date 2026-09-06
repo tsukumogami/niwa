@@ -292,20 +292,34 @@ document got it wrong and the wrong version was used to justify a security
 claim.** It is a lexical check — `filepath.Abs`, `Clean`, and a prefix compare —
 and it never resolves symlinks, so it does not detect a symlinked script pointing
 outside `configDir`. Its own tests only ever call it directly with a hand-built
-`..` path; nothing exercises it against a symlink. And within
-`DiscoverWorktreeHooks` it cannot fail at all, because every path it guards is
-built by `filepath.Join` from a bare `os.ReadDir` entry name, which contains no
-separator. All three of its calls there are unreachable, and the function's doc
-comment claiming scripts are "validated to stay within `configDir` (no symlink
-escape)" is false.
+`..` path; nothing exercises it against a symlink. And it cannot currently fail
+anywhere: **all ten of its call sites**, across `DiscoverHooks`,
+`DiscoverWorktreeHooks` and `DiscoverEnvFiles`, pass either
+`filepath.Join(dir, "<literal>")` or `filepath.Join(dir, entry.Name())` from an
+`os.ReadDir` walk, and neither shape can produce a separator or a `..`. Two doc
+comments said otherwise — the function's own, claiming containment "after
+symlink resolution", and `DiscoverWorktreeHooks`', claiming scripts are
+"validated to stay within `configDir` (no symlink escape)".
 
-That is a pre-existing gap and this design does not close it: deciding whether
-these paths should resolve symlinks is its own call, with its own blast radius on
-a config repo the operator already trusts. The defensive calls stay, the rule
-above still binds them, and the reachable fatal path — an unreadable event
-subdirectory — is what the test uses. The stale doc comment is corrected as part
-of this work, because a comment that contradicts its own function is what misled
-two readers here and is cheap to fix.
+**How a false security claim survived three checks.** Each reviewer verified
+against the layer below: one confirmed the function and its test existed, the
+next confirmed that report, and this document was written on that approval.
+Every step was a real check; the chain still carried the claim, because the
+bottom layer was a doc comment and nobody read the body. The replacement
+comments therefore describe what the function *does* rather than what it guards
+against — otherwise the next reader verifies against a new comment and stops at
+the same depth.
+
+Closing the gap is out of scope and tracked as niwa#290. It is a real question
+rather than an oversight, and the precedent cuts toward permissive:
+`DESIGN-post-clone-scripts.md`'s 2026-08-08 amendment *retracted* a claimed
+containment check for `RunSetupScripts` rather than implementing one, and a
+symlink inside a config repo the operator cloned deliberately is a plausible way
+to share a hook between event directories rather than obviously an attack. The
+defensive calls stay, the rule above still binds them, and the reachable fatal
+path — an unreadable event subdirectory — is what the test uses. The two stale
+comments are corrected here, because a file that contradicts itself is worse
+than either state alone and #288 is already editing that file.
 
 Collecting and short-circuiting have to coexist precisely, because they pull
 against each other. On a containment or `ReadDir` failure the walk returns

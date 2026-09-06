@@ -84,13 +84,13 @@ func DiscoverHooks(configDir string) (config.HooksConfig, error) {
 // empty HooksConfig without error.
 //
 // Script paths go through validateWithinDir, which is a LEXICAL containment
-// check: filepath.Abs, Clean, and a prefix compare. It does not resolve
-// symlinks, so it does not detect a script symlinked outside configDir. And
-// every path it guards here is built by filepath.Join from a bare os.ReadDir
-// entry name, which carries no separator, so in this function it cannot fail.
-// The calls are kept as a defensive floor; they are not a symlink-escape
-// control, and an earlier version of this comment claiming otherwise was used
-// to justify a security argument it could not support.
+// check against ".." traversal -- see its own comment. It does not resolve
+// symlinks, so it does not detect a script symlinked outside configDir, and
+// every path it guards here is filepath.Joined from a bare os.ReadDir entry
+// name, so in this function it cannot fail. An earlier version of this comment
+// claimed scripts were "validated to stay within configDir (no symlink
+// escape)"; that sentence was used to justify a security argument it could not
+// support. Whether these paths should resolve symlinks is niwa#290.
 //
 // Event names are validated against worktreeHookEvents. A hook registered under
 // a name niwa does not consume is reported through an error wrapping
@@ -228,8 +228,27 @@ func DiscoverEnvFiles(configDir string) (workspaceFile string, repoFiles map[str
 	return workspaceFile, repoFiles, nil
 }
 
-// validateWithinDir ensures that resolvedPath stays within baseDir after
-// symlink resolution and cleaning.
+// validateWithinDir reports whether targetPath is lexically inside baseDir.
+//
+// It makes both paths absolute, cleans them, and compares prefixes. It does NOT
+// resolve symlinks -- filepath.Clean removes ".." textually and never touches
+// the filesystem -- so a symlink inside baseDir pointing outside it passes.
+// The check this actually provides is against ".." traversal in a
+// caller-supplied path.
+//
+// This comment previously claimed the containment held "after symlink
+// resolution", and that sentence was read by three reviewers in sequence and
+// restated as a symlink-escape control in a design document, a requirements
+// document and an acceptance criterion. Nobody read the body. So it is worded
+// here as what the function does rather than what it guards against, because
+// the next reader will verify against this comment and stop at the same depth.
+//
+// Note also that every current call site passes either
+// filepath.Join(dir, "<literal>") or filepath.Join(dir, entry.Name()) from an
+// os.ReadDir walk, and neither can produce a separator or a "..", so no call
+// site can currently fail. The calls are a defensive floor against a future
+// caller that passes something less constrained. Whether these paths should
+// resolve symlinks at all is niwa#290.
 func validateWithinDir(baseDir, targetPath string) error {
 	absBase, err := filepath.Abs(baseDir)
 	if err != nil {

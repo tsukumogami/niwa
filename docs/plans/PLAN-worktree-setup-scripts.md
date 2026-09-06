@@ -86,8 +86,8 @@ control that shares the same error return.
       implementation that joins fatal errors with unknown-event diagnostics and
       then matches the sentinel would pass it and still swallow the fatal one.
       The fatal fault is an unreadable event subdirectory, not a symlink
-      escape: `validateWithinDir` is a lexical check that never resolves
-      symlinks, and within this walk it guards only `filepath.Join`ed
+      escape. `validateWithinDir` is a lexical ".."-traversal check that never resolves
+      symlinks, and all ten of its call sites guard only `filepath.Join`ed
       `os.ReadDir` entry names, so it cannot fail. The original wording of this
       criterion was unsatisfiable for that reason.
 - [ ] The assertion above is checked at the level the downgrade lives, through
