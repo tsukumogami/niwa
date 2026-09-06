@@ -66,7 +66,7 @@ func deepCopyClaudeOverride(in *config.ClaudeOverride) *config.ClaudeOverride {
 
 // deepCopyCodexOverride copies a repo's [repos.<name>.codex] block.
 //
-// This was missing from deepCopyRepos entirely until niwa#291: the literal
+// This was missing from deepCopyRepos entirely until niwa#289: the literal
 // there rebuilds RepoOverride field by field and listed eleven of its twelve
 // fields, with Codex absent while its immediate neighbour Claude was copied two
 // lines above. The consequence was silent and fail-open -- AgentEnabled falls

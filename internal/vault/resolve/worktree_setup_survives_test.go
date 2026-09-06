@@ -63,7 +63,7 @@ func TestResolveWorkspace_WorktreeSetupSurvives(t *testing.T) {
 // to the workspace gate when a repo's Codex override is nil, and to true when
 // that is unset. So a repo that explicitly set `enabled = false` had its opt-out
 // dropped on the vault-resolved path and Codex content delivered into a repo
-// whose owner had said not to. See niwa#291.
+// whose owner had said not to. See niwa#289.
 func TestResolveWorkspace_CodexOverrideSurvives(t *testing.T) {
 	disabled := false
 	cfg := &config.WorkspaceConfig{

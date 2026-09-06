@@ -23,7 +23,7 @@ import (
 // immediate neighbour Claude was copied two lines above, and because
 // AgentEnabled falls back to the workspace gate on a nil repo override and to
 // true when that is unset, a repo's explicit `enabled = false` was silently
-// reversed to enabled. See niwa#291.
+// reversed to enabled. See niwa#289.
 //
 // The mechanism is deliberately reflective rather than a list of field names.
 // A list is a third thing to keep in sync, and it would go stale the same way
