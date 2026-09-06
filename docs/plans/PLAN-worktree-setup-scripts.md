@@ -81,11 +81,21 @@ control that shares the same error return.
       `stderr` and returns nil. The match is `errors.Is` against a dedicated
       sentinel — not "discovery returned an error".
 - [ ] A fixture holding **both** a stale `worktree-hooks/create/` directory and
-      a `worktree-hooks/` symlink escaping `configDir` still fails
-      `ApplyToWorktree`. A fixture with only the escape does not discriminate:
-      an implementation that joins containment failures with unknown-event
-      diagnostics and then matches the sentinel would pass it and still swallow
-      the escape.
+      a fatal fault under a consumed event still fails `ApplyToWorktree`. A
+      fixture with only the fatal fault does not discriminate: an
+      implementation that joins fatal errors with unknown-event diagnostics and
+      then matches the sentinel would pass it and still swallow the fatal one.
+      The fatal fault is an unreadable event subdirectory, not a symlink
+      escape: `validateWithinDir` is a lexical check that never resolves
+      symlinks, and within this walk it guards only `filepath.Join`ed
+      `os.ReadDir` entry names, so it cannot fail. The original wording of this
+      criterion was unsatisfiable for that reason.
+- [ ] The assertion above is checked at the level the downgrade lives, through
+      `ApplyToWorktree`, not against `DiscoverWorktreeHooks` alone. A test on
+      discovery in isolation passes an implementation that warns on every
+      discovery error, because the downgrade is in the runner.
+- [ ] `DiscoverWorktreeHooks`' doc comment no longer claims scripts are
+      "validated to stay within configDir (no symlink escape)".
 - [ ] With a config repo containing `worktree-hooks/create/01-x.sh`, the
       delegated `WorktreeCreate` path completes, the worktree it created is
       still present on disk, and no session is moved to a terminal state.

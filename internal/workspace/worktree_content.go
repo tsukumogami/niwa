@@ -16,6 +16,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/gitexclude"
 	"github.com/tsukumogami/niwa/internal/keyreport"
+	"github.com/tsukumogami/niwa/internal/secret"
 )
 
 // worktreeApplyEvent is the worktree-lifecycle event run by ApplyToWorktree on
@@ -46,6 +47,41 @@ var worktreeHookEvents = []string{worktreeApplyEvent}
 // returned an error" would turn the containment check into best-effort logging.
 // Match it with errors.Is and nothing broader.
 var ErrUnknownWorktreeHookEvent = errors.New("unknown worktree-hook event")
+
+// reporterFor resolves the Reporter setup-script output goes to, implementing
+// the precedence documented on WorktreeApplyOptions.Reporter: an explicit
+// Reporter wins, then a Reporter wrapping the caller's Stderr, then one
+// wrapping os.Stderr.
+//
+// The two overlapping output channels are deliberate rather than accidental.
+// The apply pipeline holds a real *Reporter whose deferred warnings and verdict
+// line are where a worktree setup failure belongs; the two interactive commands
+// hold only an io.Writer. Rather than force one shape on both, the struct takes
+// either and states which wins.
+func reporterFor(opts WorktreeApplyOptions) *Reporter {
+	if opts.Reporter != nil {
+		return opts.Reporter
+	}
+	if opts.Stderr != nil {
+		return NewReporter(opts.Stderr)
+	}
+	return NewReporter(os.Stderr)
+}
+
+// recordSetupOutcome copies a setup outcome into the caller's sink when one was
+// supplied, and does nothing when it was not.
+//
+// This is the same shape as collectExempt: a nil sink is the caller saying it
+// does not want the data, not an error. Keeping the outcome on a sink rather
+// than on the return value is what lets the five entry paths into
+// ApplyToWorktree disagree about what a setup failure means without the
+// function having to know which one it is on.
+func recordSetupOutcome(sink *SetupResult, result *SetupResult) {
+	if sink == nil || result == nil {
+		return
+	}
+	*sink = *result
+}
 
 // isKnownWorktreeHookEvent reports whether event is one niwa consumes.
 func isKnownWorktreeHookEvent(event string) bool {
@@ -536,6 +572,45 @@ type WorktreeApplyOptions struct {
 	// behavior, so a caller that does not set it is unaffected.
 	// See DESIGN-niwa-default-worktree.md Decision 9.
 	WorktreeDelegation *WorktreeDelegation
+	// Setup, when non-nil, receives the outcome of the repo's setup-script run
+	// against this worktree. It is an output sink in the same shape as Exempt
+	// above: a caller that wants the outcome passes a pointer, a caller that
+	// does not gets a silent no-op.
+	//
+	// The sink is what keeps a setup failure from travelling as an error, and
+	// that is a constraint on this code rather than a preference. Five entry
+	// paths funnel through ApplyToWorktree and they want opposite things from a
+	// failure: `worktree create` retains the worktree and says to re-sync, the
+	// apply fan-out warns and continues, and the delegated WorktreeCreate path
+	// runs a guarded teardown that DELETES the worktree. That teardown retains
+	// only a tree git reports as dirty, and every file niwa writes is
+	// git-excluded a few steps above -- so a script that fails after writing
+	// only into an ignored path (node_modules, say) leaves the tree reading
+	// clean and its work is destroyed, while a script that fails after writing
+	// an unignored log file survives. Retention tracks what the script happened
+	// to touch rather than whether anything was lost.
+	//
+	// Carrying the outcome as data is what lets each caller decide. A later
+	// change that makes any of this fatal puts that teardown back in reach
+	// immediately; see niwa#285.
+	Setup *SetupResult
+	// Reporter, when non-nil, is where setup-script output is announced and
+	// streamed. It takes precedence over Stderr: a caller that supplies one
+	// gets it, a caller that supplies only Stderr gets a Reporter wrapping
+	// that, and a caller that supplies neither gets one wrapping os.Stderr.
+	//
+	// It exists because RunSetupScripts takes a *Reporter rather than a bare
+	// writer, and because the apply pipeline already holds one whose deferred
+	// warnings and verdict line are where a worktree failure belongs. The two
+	// interactive commands hold only a writer, which is why Stderr remains the
+	// fallback rather than being replaced.
+	Reporter *Reporter
+	// Redactor, when non-nil, scrubs setup-script output through the same choke
+	// point the clone path uses. nil means no scrubbing, which is only
+	// appropriate where no secret has been resolved into the tree -- and a
+	// worktree does hold the clone's byte-copied env output, so the standalone
+	// paths build one rather than passing nil.
+	Redactor *secret.Redactor
 }
 
 // ApplyToWorktree installs, into worktreePath, the same class of CLAUDE

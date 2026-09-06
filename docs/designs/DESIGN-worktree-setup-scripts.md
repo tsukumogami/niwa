@@ -278,15 +278,34 @@ that silently does not run — which is the thing the decision exists to remove.
 
 **The downgrade is an exact match on that one error, and nothing else.**
 `DiscoverWorktreeHooks` already returns errors from two other sources:
-`validateWithinDir`, which is the symlink-escape containment check and is
-covered by a live test, and `os.ReadDir` on a hooks subdirectory. Those must
-keep propagating as fatal errors exactly as they do now. The unknown-event case
+`validateWithinDir` and `os.ReadDir` on a hooks subdirectory. Those must keep
+propagating as fatal errors exactly as they do now. The unknown-event case
 carries its own sentinel, and the downgrade matches on that sentinel with
 `errors.Is`, never on "discovery returned an error". A broader downgrade would
-turn an enforced containment control into best-effort logging on all four CLI
-paths, and the code being edited already has the mixed-error shape that makes
-the broad version the easy one to write. A test asserts that a `worktree-hooks/`
-symlink escape still fails `ApplyToWorktree` after this change.
+turn every fatal error on this path into best-effort logging on all four CLI
+surfaces, and the code being edited already has the mixed-error shape that makes
+the broad version the easy one to write. A test asserts that a fatal discovery
+error still fails `ApplyToWorktree` after this change.
+
+**A correction to what `validateWithinDir` is, because an earlier draft of this
+document got it wrong and the wrong version was used to justify a security
+claim.** It is a lexical check — `filepath.Abs`, `Clean`, and a prefix compare —
+and it never resolves symlinks, so it does not detect a symlinked script pointing
+outside `configDir`. Its own tests only ever call it directly with a hand-built
+`..` path; nothing exercises it against a symlink. And within
+`DiscoverWorktreeHooks` it cannot fail at all, because every path it guards is
+built by `filepath.Join` from a bare `os.ReadDir` entry name, which contains no
+separator. All three of its calls there are unreachable, and the function's doc
+comment claiming scripts are "validated to stay within `configDir` (no symlink
+escape)" is false.
+
+That is a pre-existing gap and this design does not close it: deciding whether
+these paths should resolve symlinks is its own call, with its own blast radius on
+a config repo the operator already trusts. The defensive calls stay, the rule
+above still binds them, and the reachable fatal path — an unreadable event
+subdirectory — is what the test uses. The stale doc comment is corrected as part
+of this work, because a comment that contradicts its own function is what misled
+two readers here and is cheap to fix.
 
 Collecting and short-circuiting have to coexist precisely, because they pull
 against each other. On a containment or `ReadDir` failure the walk returns
@@ -294,10 +313,9 @@ immediately with **that error alone**, never joined with unknown-event
 diagnostics already collected in the same pass. This matters more than it looks:
 `errors.Is` returns true against a joined error containing the sentinel
 anywhere inside it, so an implementation that aggregated both kinds into one
-return before checking would let a containment failure ride along inside what
-the runner treats as the non-fatal case and be swallowed silently — turning the
-symlink-escape control off through the very mechanism added to make the design
-safe.
+return before checking would let a fatal failure ride along inside what the
+runner treats as the non-fatal case and be swallowed silently — turning a fatal
+error into a warning through the very mechanism added to make the design safe.
 
 **The consumer reads the event set, not the constant.** `runWorktreeHooks`
 currently reads exactly `hooks[worktreeApplyEvent]`
@@ -641,9 +659,10 @@ collect-then-report validation in discovery, the sentinel and the `errors.Is`
 downgrade in the hook runner, the runner switched from reading the constant to
 iterating the set, the rewritten discovery test asserting the new rule, a test
 pinning that the unknown-event error does not propagate out of
-`ApplyToWorktree`, a test pinning that a `worktree-hooks/` symlink escape still
-does, and a test that a stale `create/` alongside a live `apply/` still runs the
-`apply/` hooks. This lands first because it is what makes adding an event a
+`ApplyToWorktree`, a test pinning that a fatal discovery error still does, and a
+test that a stale `create/` alongside a live `apply/` still runs the `apply/`
+hooks. The fatal-error test uses an unreadable event subdirectory rather than a
+symlink escape, for the reason given in Decision 3. This lands first because it is what makes adding an event a
 one-entry change, and because doing it second would mean writing the setup step
 against a single-event vocabulary and then reworking it.
 

@@ -81,8 +81,16 @@ func DiscoverHooks(configDir string) (config.HooksConfig, error) {
 //   - worktree-hooks/{event}/*.sh -> each file maps to that event
 //
 // Non-.sh files are ignored. A missing worktree-hooks/ directory returns an
-// empty HooksConfig without error. Scripts are validated to stay within
-// configDir (no symlink escape).
+// empty HooksConfig without error.
+//
+// Script paths go through validateWithinDir, which is a LEXICAL containment
+// check: filepath.Abs, Clean, and a prefix compare. It does not resolve
+// symlinks, so it does not detect a script symlinked outside configDir. And
+// every path it guards here is built by filepath.Join from a bare os.ReadDir
+// entry name, which carries no separator, so in this function it cannot fail.
+// The calls are kept as a defensive floor; they are not a symlink-escape
+// control, and an earlier version of this comment claiming otherwise was used
+// to justify a security argument it could not support.
 //
 // Event names are validated against worktreeHookEvents. A hook registered under
 // a name niwa does not consume is reported through an error wrapping
