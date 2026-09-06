@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/config"
@@ -82,6 +83,22 @@ func DiscoverHooks(configDir string) (config.HooksConfig, error) {
 // Non-.sh files are ignored. A missing worktree-hooks/ directory returns an
 // empty HooksConfig without error. Scripts are validated to stay within
 // configDir (no symlink escape).
+//
+// Event names are validated against worktreeHookEvents. A hook registered under
+// a name niwa does not consume is reported through an error wrapping
+// ErrUnknownWorktreeHookEvent -- and the hooks that ARE valid come back
+// alongside it. That pairing is deliberate and load-bearing: every other error
+// path here returns a nil map, so reporting an unknown event the same way would
+// let one stale worktree-hooks/create/ directory silently disable a live
+// worktree-hooks/apply/ one. A configuration that works today would stop
+// working, which is the exact silent-provisioning failure this validation was
+// added to remove.
+//
+// A containment or directory-read failure returns immediately with that error
+// ALONE, never joined with unknown-event diagnostics collected earlier in the
+// same walk. errors.Is matches a sentinel anywhere inside a joined error, so a
+// combined return would let a symlink escape ride inside what the caller treats
+// as the non-fatal case and be swallowed.
 func DiscoverWorktreeHooks(configDir string) (config.HooksConfig, error) {
 	hooksDir := filepath.Join(configDir, "worktree-hooks")
 
@@ -98,12 +115,17 @@ func DiscoverWorktreeHooks(configDir string) (config.HooksConfig, error) {
 	}
 
 	hooks := config.HooksConfig{}
+	var unknown []string
 
 	for _, entry := range entries {
 		entryPath := filepath.Join(hooksDir, entry.Name())
 
 		if entry.IsDir() {
 			event := entry.Name()
+			if !isKnownWorktreeHookEvent(event) {
+				unknown = append(unknown, entryPath+string(filepath.Separator))
+				continue
+			}
 			subEntries, err := os.ReadDir(entryPath)
 			if err != nil {
 				return nil, fmt.Errorf("reading worktree-hooks subdirectory %q: %w", event, err)
@@ -120,11 +142,23 @@ func DiscoverWorktreeHooks(configDir string) (config.HooksConfig, error) {
 			}
 		} else if strings.HasSuffix(entry.Name(), ".sh") {
 			event := strings.TrimSuffix(entry.Name(), ".sh")
+			if !isKnownWorktreeHookEvent(event) {
+				unknown = append(unknown, entryPath)
+				continue
+			}
 			if err := validateWithinDir(configDir, entryPath); err != nil {
 				return nil, err
 			}
 			hooks[event] = append(hooks[event], config.HookEntry{Scripts: []string{entryPath}})
 		}
+	}
+
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return hooks, fmt.Errorf("%w: %s (niwa consumes only: %s)",
+			ErrUnknownWorktreeHookEvent,
+			strings.Join(unknown, ", "),
+			strings.Join(worktreeHookEvents, ", "))
 	}
 
 	return hooks, nil

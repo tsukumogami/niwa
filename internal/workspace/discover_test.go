@@ -1,9 +1,11 @@
 package workspace
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/config"
@@ -22,13 +24,20 @@ func TestDiscoverWorktreeHooks_MissingDir(t *testing.T) {
 	}
 }
 
+// TestDiscoverWorktreeHooks_TopLevelAndSubdir pins both accepted layouts for an
+// event niwa actually consumes: worktree-hooks/{event}.sh and
+// worktree-hooks/{event}/*.sh.
+//
+// It used to use "create" as its per-event-directory example and assert that
+// discovery returned that directory's two scripts. Nothing consumed "create",
+// so the suite certified the silent no-op rather than catching it. The layout
+// assertion is the part worth keeping, so it moved to an event that runs.
 func TestDiscoverWorktreeHooks_TopLevelAndSubdir(t *testing.T) {
 	dir := t.TempDir()
 	hooksDir := filepath.Join(dir, "worktree-hooks")
 	mustMkdir(t, hooksDir)
-	mustWriteFile(t, filepath.Join(hooksDir, "apply.sh"), "#!/bin/sh")
 
-	eventDir := filepath.Join(hooksDir, "create")
+	eventDir := filepath.Join(hooksDir, worktreeApplyEvent)
 	mustMkdir(t, eventDir)
 	mustWriteFile(t, filepath.Join(eventDir, "a.sh"), "#!/bin/sh")
 	mustWriteFile(t, filepath.Join(eventDir, "b.sh"), "#!/bin/sh")
@@ -38,9 +47,230 @@ func TestDiscoverWorktreeHooks_TopLevelAndSubdir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assertHookScripts(t, hooks, "apply", []string{filepath.Join(hooksDir, "apply.sh")})
-	if len(hooks["create"]) != 2 {
-		t.Errorf("expected 2 create entries, got %d: %v", len(hooks["create"]), hooks["create"])
+	assertHookScripts(t, hooks, worktreeApplyEvent, []string{
+		filepath.Join(eventDir, "a.sh"),
+		filepath.Join(eventDir, "b.sh"),
+	})
+}
+
+// TestDiscoverWorktreeHooks_UnknownEventReported is the assertion the old
+// version of the test above should have carried: a hook registered under an
+// event niwa does not consume is REPORTED, not silently indexed.
+func TestDiscoverWorktreeHooks_UnknownEventReported(t *testing.T) {
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, "worktree-hooks")
+	mustMkdir(t, hooksDir)
+
+	eventDir := filepath.Join(hooksDir, "create")
+	mustMkdir(t, eventDir)
+	mustWriteFile(t, filepath.Join(eventDir, "a.sh"), "#!/bin/sh")
+
+	_, err := DiscoverWorktreeHooks(dir)
+	if err == nil {
+		t.Fatal("expected an error for a worktree-hooks/create/ directory, got nil")
+	}
+	if !errors.Is(err, ErrUnknownWorktreeHookEvent) {
+		t.Fatalf("error does not wrap ErrUnknownWorktreeHookEvent: %v", err)
+	}
+	if !strings.Contains(err.Error(), eventDir) {
+		t.Errorf("diagnostic does not name the offending path %q: %v", eventDir, err)
+	}
+	if !strings.Contains(err.Error(), worktreeApplyEvent) {
+		t.Errorf("diagnostic does not name the valid event set: %v", err)
+	}
+}
+
+// TestDiscoverWorktreeHooks_TypoInFilenameReported covers the other shape the
+// originating issue named: a typo in a top-level script filename, which is the
+// same silent no-op as a wrong directory name and is caught the same way.
+func TestDiscoverWorktreeHooks_TypoInFilenameReported(t *testing.T) {
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, "worktree-hooks")
+	mustMkdir(t, hooksDir)
+	typo := filepath.Join(hooksDir, "aply.sh")
+	mustWriteFile(t, typo, "#!/bin/sh")
+
+	_, err := DiscoverWorktreeHooks(dir)
+	if !errors.Is(err, ErrUnknownWorktreeHookEvent) {
+		t.Fatalf("expected ErrUnknownWorktreeHookEvent for %q, got %v", typo, err)
+	}
+	if !strings.Contains(err.Error(), typo) {
+		t.Errorf("diagnostic does not name the offending path %q: %v", typo, err)
+	}
+}
+
+// TestDiscoverWorktreeHooks_UnknownEventDoesNotDiscardValidHooks is the
+// regression this validation could most easily have introduced.
+//
+// Every other error path in DiscoverWorktreeHooks returns a nil map. Reporting
+// an unknown event the same way would mean one stale worktree-hooks/create/
+// directory silently disables a live worktree-hooks/apply/ one -- a
+// configuration that works today, broken by the change meant to stop hooks
+// failing silently.
+func TestDiscoverWorktreeHooks_UnknownEventDoesNotDiscardValidHooks(t *testing.T) {
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, "worktree-hooks")
+	mustMkdir(t, hooksDir)
+
+	stale := filepath.Join(hooksDir, "create")
+	mustMkdir(t, stale)
+	mustWriteFile(t, filepath.Join(stale, "bootstrap.sh"), "#!/bin/sh")
+
+	live := filepath.Join(hooksDir, worktreeApplyEvent+".sh")
+	mustWriteFile(t, live, "#!/bin/sh")
+
+	hooks, err := DiscoverWorktreeHooks(dir)
+	if !errors.Is(err, ErrUnknownWorktreeHookEvent) {
+		t.Fatalf("expected the unknown-event diagnostic, got %v", err)
+	}
+	assertHookScripts(t, hooks, worktreeApplyEvent, []string{live})
+}
+
+// TestDiscoverWorktreeHooks_ContainmentErrorReturnsAlone holds the line the
+// non-fatal downgrade depends on.
+//
+// errors.Is matches a sentinel anywhere inside a joined error, so a walk that
+// collected an unknown-event diagnostic AND a containment failure and returned
+// them together would let the symlink escape ride inside the case
+// runWorktreeHooks treats as non-fatal -- disabling the containment control
+// through the very mechanism added to make this design safe.
+//
+// The fixture therefore holds BOTH faults. A fixture with only the fatal one
+// does not discriminate: the joining implementation returns a non-sentinel
+// error there and looks correct.
+//
+// The fatal fault used here is an unreadable event subdirectory rather than a
+// symlink escape. That is deliberate, and the reason is worth recording:
+// validateWithinDir is a LEXICAL check (filepath.Abs, Clean, prefix compare --
+// it never resolves symlinks), and every path it guards in this walk is built
+// with filepath.Join from a bare os.ReadDir entry name, which cannot escape.
+// So all three of its calls here are unreachable, and the doc comment's claim
+// that scripts are "validated to stay within configDir (no symlink escape)" does
+// not hold. That gap is pre-existing and out of scope for this change; the
+// defensive calls are left in place, and this test pins the property they exist
+// to protect using the fatal path that IS reachable.
+func TestDiscoverWorktreeHooks_FatalErrorReturnsAlone(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: an unreadable directory is still readable")
+	}
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, "worktree-hooks")
+	mustMkdir(t, hooksDir)
+
+	// Fault 1: an unknown event, which the walk collects and would report
+	// through the sentinel.
+	stale := filepath.Join(hooksDir, "create")
+	mustMkdir(t, stale)
+	mustWriteFile(t, filepath.Join(stale, "bootstrap.sh"), "#!/bin/sh")
+
+	// Fault 2: a consumed event whose directory cannot be read. Sorted after
+	// "create", so the walk meets it with a diagnostic already collected --
+	// which is the ordering that makes joining tempting.
+	applyDir := filepath.Join(hooksDir, worktreeApplyEvent)
+	mustMkdir(t, applyDir)
+	if err := os.Chmod(applyDir, 0o000); err != nil {
+		t.Skipf("cannot make directory unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(applyDir, 0o755) })
+
+	_, err := DiscoverWorktreeHooks(dir)
+	if err == nil {
+		t.Fatal("expected the unreadable-directory failure to be reported")
+	}
+	if errors.Is(err, ErrUnknownWorktreeHookEvent) {
+		t.Fatalf("a fatal error was returned joined with the unknown-event sentinel, "+
+			"so runWorktreeHooks would downgrade it to a warning: %v", err)
+	}
+}
+
+// TestApplyToWorktree_UnknownEventIsNonFatal pins the downgrade at the level it
+// actually matters: a stale worktree-hooks/create/ directory must not fail
+// ApplyToWorktree, because on the delegated WorktreeCreate path a failed
+// content install runs a guarded teardown that deletes the worktree.
+func TestApplyToWorktree_UnknownEventIsNonFatal(t *testing.T) {
+	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
+
+	stale := filepath.Join(configDir, "worktree-hooks", "create")
+	if err := os.MkdirAll(stale, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "bootstrap.sh"), []byte("#!/bin/sh\ntrue\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr strings.Builder
+	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app",
+		"purpose", "branch", WorktreeApplyOptions{Stderr: &stderr}); err != nil {
+		t.Fatalf("a stale worktree-hooks/create/ directory must not fail ApplyToWorktree: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "create") {
+		t.Errorf("expected a warning naming the unknown event, got: %q", stderr.String())
+	}
+}
+
+// TestApplyToWorktree_FatalDiscoveryErrorStillFails is the other half, and it is
+// the one the isolated discovery test cannot cover: the downgrade lives in
+// runWorktreeHooks, so only a test through ApplyToWorktree can catch a
+// downgrade written as "discovery returned an error" rather than as a match on
+// the one sentinel.
+//
+// Without this, an implementation that warns on EVERY discovery failure passes
+// the whole rest of this file while silently swallowing unreadable-directory
+// and containment failures.
+func TestApplyToWorktree_FatalDiscoveryErrorStillFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: an unreadable directory is still readable")
+	}
+	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
+
+	applyDir := filepath.Join(configDir, "worktree-hooks", worktreeApplyEvent)
+	if err := os.MkdirAll(applyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(applyDir, 0o000); err != nil {
+		t.Skipf("cannot make directory unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(applyDir, 0o755) })
+
+	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app",
+		"purpose", "branch", WorktreeApplyOptions{}); err == nil {
+		t.Fatal("a fatal discovery error must still fail ApplyToWorktree; " +
+			"the downgrade is scoped to ErrUnknownWorktreeHookEvent alone")
+	}
+}
+
+// TestWorktreeHookEvents_ConsumedFromTheSet is the both-sides check for the
+// event vocabulary: it adds an event to the set and asserts the runner executes
+// its scripts WITHOUT any edit to runWorktreeHooks.
+//
+// Without this, an implementation that validates against the set while the
+// runner still reads worktreeApplyEvent passes every other assertion in this
+// file -- and adding an event would make it valid and still never run, which is
+// the original bug with a validation step in front of it.
+func TestWorktreeHookEvents_ConsumedFromTheSet(t *testing.T) {
+	original := worktreeHookEvents
+	worktreeHookEvents = append(append([]string{}, original...), "destroy")
+	t.Cleanup(func() { worktreeHookEvents = original })
+
+	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
+
+	hooksDir := filepath.Join(configDir, "worktree-hooks", "destroy")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf ran > \"$NIWA_WORKTREE_PATH/destroy-ran.txt\"\n"
+	if err := os.WriteFile(filepath.Join(hooksDir, "a.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app",
+		"purpose", "branch", WorktreeApplyOptions{}); err != nil {
+		t.Fatalf("ApplyToWorktree: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(worktreePath, "destroy-ran.txt")); err != nil {
+		t.Fatalf("a script registered under a newly-added event did not run, so the "+
+			"runner is not reading worktreeHookEvents: %v", err)
 	}
 }
 

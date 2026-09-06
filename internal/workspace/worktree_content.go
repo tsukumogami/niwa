@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,6 +23,39 @@ import (
 // the apply path, so a single event covers both (mirroring how instance create
 // runs the apply pipeline).
 const worktreeApplyEvent = "apply"
+
+// worktreeHookEvents is the closed set of worktree-lifecycle events niwa
+// consumes, in the order they run. It has exactly one consumer on each side:
+// DiscoverWorktreeHooks validates discovered names against it, and
+// runWorktreeHooks iterates it to decide which scripts to run. Neither reads
+// worktreeApplyEvent directly any more.
+//
+// Adding an event is adding one entry here. That is the whole point of the
+// indirection: validating against a set while the runner still read the bare
+// constant would make a newly-valid event name *valid and still never run* --
+// the original silent no-op with a validation step in front of it.
+var worktreeHookEvents = []string{worktreeApplyEvent}
+
+// ErrUnknownWorktreeHookEvent is the sentinel DiscoverWorktreeHooks wraps when
+// it finds a hook registered under an event name outside worktreeHookEvents.
+//
+// It exists so runWorktreeHooks can downgrade exactly this case to a warning
+// while every other error from discovery stays fatal. That distinction is
+// load-bearing: DiscoverWorktreeHooks also reports symlink-escape containment
+// failures and directory-read failures, and a downgrade written as "discovery
+// returned an error" would turn the containment check into best-effort logging.
+// Match it with errors.Is and nothing broader.
+var ErrUnknownWorktreeHookEvent = errors.New("unknown worktree-hook event")
+
+// isKnownWorktreeHookEvent reports whether event is one niwa consumes.
+func isKnownWorktreeHookEvent(event string) bool {
+	for _, known := range worktreeHookEvents {
+		if event == known {
+			return true
+		}
+	}
+	return false
+}
 
 // worktreeRulesFile is the per-worktree rules import file. A worktree, when
 // launched as its own Claude Code project root, does not inherit the instance
@@ -1065,20 +1099,47 @@ func runWorktreeHooks(configDir, worktreePath, repo, purpose, branch string, std
 
 	hooks, err := DiscoverWorktreeHooks(configDir)
 	if err != nil {
-		return fmt.Errorf("discovering worktree hooks: %w", err)
+		// An event name niwa does not consume is a config-repo mistake, not a
+		// reason to fail the worktree. It is reported here and the run
+		// continues with the hooks that ARE valid, which discovery returns
+		// alongside the diagnostic.
+		//
+		// The match is on this one sentinel and nothing broader. Discovery also
+		// reports symlink-escape containment failures and directory-read
+		// failures; those must stay fatal. Downgrading on "err != nil" would
+		// turn the containment check into best-effort logging on every caller
+		// of this function.
+		//
+		// Why non-fatal at all: this error would otherwise propagate out of
+		// ApplyToWorktree, and on the delegated WorktreeCreate path a failed
+		// content install runs a guarded teardown that deletes the worktree.
+		// Nothing has been written into the tree at this point except niwa's
+		// own files, all of which are git-excluded a few steps above, so the
+		// teardown's dirty guard would pass and the deletion would succeed --
+		// every time, for every agent worktree in the workspace, from one
+		// stale directory name in a different repository.
+		if !errors.Is(err, ErrUnknownWorktreeHookEvent) {
+			return fmt.Errorf("discovering worktree hooks: %w", err)
+		}
+		fmt.Fprintf(stderr, "niwa: warning: %v\n", err)
 	}
 
-	entries := hooks[worktreeApplyEvent]
-	if len(entries) == 0 {
+	// Iterate the event set rather than reading worktreeApplyEvent, so adding
+	// an event to worktreeHookEvents is enough to make it run. Scripts are
+	// sorted within each event for a deterministic run order; events run in
+	// the order they are declared.
+	var scripts []string
+	for _, event := range worktreeHookEvents {
+		var forEvent []string
+		for _, entry := range hooks[event] {
+			forEvent = append(forEvent, entry.Scripts...)
+		}
+		sort.Strings(forEvent)
+		scripts = append(scripts, forEvent...)
+	}
+	if len(scripts) == 0 {
 		return nil
 	}
-
-	// Collect script paths in lexical order for a deterministic run order.
-	var scripts []string
-	for _, entry := range entries {
-		scripts = append(scripts, entry.Scripts...)
-	}
-	sort.Strings(scripts)
 
 	for _, scriptPath := range scripts {
 		info, err := os.Stat(scriptPath)
