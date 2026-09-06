@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Proposed
+status: Planned
 upstream: docs/prds/PRD-worktree-setup-scripts.md
 problem: |
   A worktree receives every accessory a repo checkout gets except the one its
@@ -32,7 +32,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Planned
 
 ## Context and Problem Statement
 
