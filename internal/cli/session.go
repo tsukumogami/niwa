@@ -43,11 +43,25 @@ Subcommands:
 	// command was reached via the legacy "session" token on the command
 	// line, emit a deprecation notice to stderr. Behavior and exit code are
 	// unchanged; this is informational only.
-	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+	//
+	// rootPersistentPreRun must be called explicitly. Cobra runs only the
+	// nearest persistent pre-run in the parent chain -- it stops at the first
+	// hook it finds unless EnableTraverseRunHooks is set, which niwa does not
+	// set -- so declaring a hook here shadows the root's rather than adding to
+	// it. Dropping it silently disabled NIWA_RESPONSE_FILE capture for every
+	// worktree subcommand, which meant `niwa worktree create` wrote its landing
+	// path nowhere and the shell never moved (#281). It also left the variable
+	// exported to every child process, the inheritance the root hook exists to
+	// prevent.
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if err := rootPersistentPreRun(cmd, args); err != nil {
+			return err
+		}
 		if invokedViaSessionAlias() {
 			fmt.Fprintln(cmd.ErrOrStderr(),
 				`"niwa session" is deprecated; use "niwa worktree"`)
 		}
+		return nil
 	},
 }
 

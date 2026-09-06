@@ -39,21 +39,32 @@ in sync when configuration changes.`,
 	// single source of truth for error output. Commands that *do* want
 	// the usage banner on user-input errors can set SilenceUsage:false
 	// on themselves.
-	SilenceErrors: true,
-	SilenceUsage:  true,
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// NIWA_RESPONSE_FILE is the shell-wrapper/CLI protocol channel for
-		// landing-path delivery. Capture its value into a package-level cache
-		// and unset the environment variable so subprocesses (git, gh, hook
-		// scripts, etc.) don't inherit it -- a buggy or malicious child that
-		// writes to the response file would redirect the shell wrapper's cd
-		// target. See docs/designs/current/DESIGN-shell-navigation-protocol.md.
-		if err := captureNiwaResponseFile(); err != nil {
-			return err
-		}
-		noColor = os.Getenv("NO_COLOR") != ""
-		return nil
-	},
+	SilenceErrors:     true,
+	SilenceUsage:      true,
+	PersistentPreRunE: rootPersistentPreRun,
+}
+
+// rootPersistentPreRun is the process-wide setup every command needs.
+//
+// It is a named function rather than a closure because any command that
+// declares its own persistent pre-run shadows this one: cobra walks up the
+// parent chain and stops at the first hook it finds unless
+// EnableTraverseRunHooks is set, which niwa does not set. A command with its
+// own hook must therefore call this explicitly -- see sessionCmd, where
+// forgetting to do so silently disabled the shell navigation protocol for the
+// whole worktree command group (#281).
+func rootPersistentPreRun(cmd *cobra.Command, args []string) error {
+	// NIWA_RESPONSE_FILE is the shell-wrapper/CLI protocol channel for
+	// landing-path delivery. Capture its value into a package-level cache
+	// and unset the environment variable so subprocesses (git, gh, hook
+	// scripts, etc.) don't inherit it -- a buggy or malicious child that
+	// writes to the response file would redirect the shell wrapper's cd
+	// target. See docs/designs/current/DESIGN-shell-navigation-protocol.md.
+	if err := captureNiwaResponseFile(); err != nil {
+		return err
+	}
+	noColor = os.Getenv("NO_COLOR") != ""
+	return nil
 }
 
 func init() {
