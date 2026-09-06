@@ -58,9 +58,17 @@ func TestApplyToWorktree_RunsRepoSetupWhenOptedIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the repo's setup script did not run against the worktree: %v", err)
 	}
-	if strings.TrimSpace(string(got)) != worktreePath {
-		t.Errorf("setup ran with cwd %q, want the worktree %q",
-			strings.TrimSpace(string(got)), worktreePath)
+
+	// Compare resolved paths. `pwd` in the script reports the symlink-resolved
+	// directory, and on macOS t.TempDir() sits under /var/folders, which is a
+	// symlink to /private/var/folders. Comparing the raw strings fails there
+	// while the script ran in exactly the right place.
+	wantResolved, err := filepath.EvalSymlinks(worktreePath)
+	if err != nil {
+		t.Fatalf("resolving the worktree path: %v", err)
+	}
+	if ranIn := strings.TrimSpace(string(got)); ranIn != wantResolved {
+		t.Errorf("setup ran with cwd %q, want the worktree %q", ranIn, wantResolved)
 	}
 }
 
