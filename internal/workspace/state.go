@@ -378,8 +378,10 @@ type InstanceRecord struct {
 	// in at the CLI layer, from the newest mapping for the instance and only
 	// when the recorded value has the forwarded-name shape. It is empty when
 	// no name was recorded (an unnamed dispatch, an agent with no display-name
-	// flag, or a mapping written before names were recorded). omitempty keeps
-	// the --json shape unchanged for those instances.
+	// flag, or a mapping written before names were recorded), and also when the
+	// newest mapping recorded none or a malformed one, even if an older mapping
+	// for the same instance recorded a valid name. omitempty keeps the --json
+	// shape unchanged for those instances.
 	SessionName string `json:"session_name,omitempty"`
 }
 

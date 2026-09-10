@@ -252,9 +252,11 @@ func TestList_UnmappedInstanceStaysAPlainLine(t *testing.T) {
 // TestList_JSONShapeIsUnchanged holds the machine-readable contract. The resume
 // command is human output only; --json consumers iterate the documented keys.
 // The only key added to the documented record shape is the optional
-// session_name, present only when a dispatch recorded a name, and this test's
-// mapping records none (TestList_JSONShapeCarriesNoSessionNameWhenNoneRecorded
-// checks that).
+// session_name, present only when a dispatch recorded a name. This test's
+// assertions are kept as they were; the absence of session_name for a mapping
+// like this one is asserted by
+// TestList_JSONShapeCarriesNoSessionNameWhenNoneRecorded, which seeds its own
+// copy of the same fixture. Keep the two fixtures in step.
 func TestList_JSONShapeIsUnchanged(t *testing.T) {
 	useInventedSpecs(t)
 	t.Setenv("HOME", t.TempDir())
@@ -375,7 +377,8 @@ func writeMapping(t *testing.T, root string, m workspace.SessionMapping) {
 // TestList_SessionNameFromNewestMapping pins which mapping supplies the name
 // when several point at one instance: the one created last, chosen before its
 // name is checked, whichever order the store lists them in. The resume command
-// keeps its own selection, the last mapping in session-id order.
+// keeps its own selection: the last mapping, in session-id order, that yields a
+// non-empty resume command.
 func TestList_SessionNameFromNewestMapping(t *testing.T) {
 	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	t1 := t0.Add(time.Hour)

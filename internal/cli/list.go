@@ -131,9 +131,13 @@ func runList(cmd *cobra.Command, args []string) error {
 // Created time for that instance. The value is checked against
 // dispatchSessionNamePattern before it is used, because mapping files are
 // writable by any same-user process and the name reaches a terminal; a value
-// that fails the check counts as absent. The resume command keeps its own
-// selection (the last mapping in session-id order), so an instance with
-// several mappings can show a name and a resume command from different ones.
+// that fails the check counts as absent. There is no fallback to an older
+// mapping's name: the newest mapping is the session currently backing the
+// instance, and an older name belongs to a session it replaced. The resume
+// command deliberately keeps its own, pre-existing selection (the last
+// mapping, in session-id order, that yields a non-empty resume command), so an
+// instance with several mappings can show a name and a resume command from
+// different ones; changing resume is out of scope for the name.
 func annotateFromSessionMappings(records []workspace.InstanceRecord, workspaceRoot, jobsDir string, now time.Time) map[string]string {
 	mappings, err := workspace.ListSessionMappings(workspaceRoot)
 	if err != nil || len(mappings) == 0 {
