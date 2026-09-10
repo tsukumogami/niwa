@@ -62,7 +62,9 @@ type GlobalSettings struct {
 	// repository settings source is read for it at all: whether a worker takes
 	// messages from other sessions is meant to be the developer's call, not a
 	// cloned repo's. nil means off unless the flag turns it on for one
-	// dispatch.
+	// dispatch. Off launches the worker without the setting, which keeps
+	// Claude Code's default holds on inbound messages; it does not isolate the
+	// worker from other sessions (see CrossSessionInboundKey).
 	AcceptSessionMessagesOnDispatch *bool `toml:"accept_session_messages_on_dispatch,omitempty"`
 	// DispatchModel is the default model for a `niwa dispatch` worker's main
 	// chat loop when the command is run without --model. It accepts the same

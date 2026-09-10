@@ -64,8 +64,11 @@ func TestParseGlobalConfig_AcceptSessionMessagesOnDispatch_NonBoolean(t *testing
 	}
 }
 
-// TestLoadGlobalConfigFrom_AcceptSessionMessagesOnDispatch_NonBoolean pins the
-// file-level error the dispatch resolver sees for a malformed value.
+// TestLoadGlobalConfigFrom_AcceptSessionMessagesOnDispatch_NonBoolean asserts
+// that a malformed value fails the file-level load with no config. The dispatch
+// resolver treats any load error as "setting absent", so a malformed value
+// leaves the behavior off rather than half-applied; the test deliberately
+// accepts any error, since the resolver does not distinguish them.
 func TestLoadGlobalConfigFrom_AcceptSessionMessagesOnDispatch_NonBoolean(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	body := "[global]\naccept_session_messages_on_dispatch = \"yes\"\n"
@@ -118,6 +121,10 @@ func TestGlobalSettings_AcceptSessionMessagesOnDispatch_RoundTrip(t *testing.T) 
 	})
 }
 
+// TestCrossSessionInboundKey pins the spelling Claude Code reads. The constant
+// is the only place the key is written, and Claude Code ignores unknown settings
+// keys, so a typo or rename would silently stop the dispatch setting from taking
+// effect with nothing else failing.
 func TestCrossSessionInboundKey(t *testing.T) {
 	if CrossSessionInboundKey != "crossSessionInbound" {
 		t.Fatalf("CrossSessionInboundKey = %q, want %q", CrossSessionInboundKey, "crossSessionInbound")
