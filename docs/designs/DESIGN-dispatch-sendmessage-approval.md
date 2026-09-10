@@ -20,8 +20,9 @@ decision: |
   the session mapping and shown by `niwa list`, and a one-time explanation is
   suppressed by a marker file beside `config.toml` that is created only once a
   terminal has shown it and the developer has the terminal back. `niwa watch`
-  review sessions gain a hook denying cross-session messaging, so a contained
-  reviewer can't hand instructions to a worker that now accepts them.
+  review sessions gain a hook denying the tools that reach other sessions, and
+  Claude dispatches put `--` before the prompt so a prompt can't replace niwa's
+  settings document.
 rationale: |
   The merged document is the only channel Claude Code honors for this setting
   that niwa can reach, and merging is forced by the measured last-wins behavior
@@ -29,8 +30,9 @@ rationale: |
   byte-identical while letting each contributor keep its own conditions. A
   capability row, not a flag-spelling check, keeps the dispatch path agent-neutral
   under the dispatch-path AST scan and gives Codex's gap list a reason. Denying
-  messaging in review sessions closes the one new path the feature opens into
-  review containment. A marker file beside
+  the session-reaching tools in review sessions closes the path the feature
+  opens out of review containment, and the prompt separator keeps niwa the only
+  writer of the launch settings the audit line and the record describe. A marker file beside
   `config.toml` avoids rewriting that file and survives fresh dispatch
   instances, and recording on the mapping reuses the durable per-session record
   keep-alive already relies on.
@@ -134,14 +136,26 @@ explanation was seen.
   writing a session mapping, so the new resolution must live in `runDispatch`
   only (R14).
 - **D12. Review containment holds.** `niwa watch` review sessions read
-  untrusted changes. Today, when they run in a prompting mode, the class
-  mismatch holds their messages to bypass workers. A worker that accepts
-  would remove that hold, so the feature must not give a contained reviewer a
-  channel to an uncontained worker. Review containment's egress hook matches
-  only `WebFetch|WebSearch|mcp__` (`internal/watch/containment.go:18`), so it
-  doesn't cover messaging today.
+  untrusted changes. Watch passes no `--permission-mode`, so on current Claude
+  Code they most likely run in a prompting mode in both containment postures,
+  and the class mismatch holds their messages to bypass workers. A worker that
+  accepts removes that hold, so the feature must not give a contained reviewer
+  a channel to an uncontained worker. Four Claude Code tools reach other
+  sessions: `SendMessage`, `SendFile` (files onto another session's
+  filesystem), `RemoteTrigger` (remote routines, whose deliveries count as
+  cross-session inbound), and `ListAgents` (session discovery). Review
+  containment's egress hook matches only `WebFetch|WebSearch|mcp__`
+  (`internal/watch/containment.go:18`), so it covers none of them.
 - **D13. One pull request.** All changes are in this repository, and nothing
   has to reach the default branch before another piece can work.
+- **D14. niwa alone writes the launch settings.** The audit line and the
+  `niwa list` record describe the `--settings` document niwa rendered. Claude
+  Code reads a prompt element that begins with a dash as a flag. Measured on
+  2.1.267, `claude -p "--version"` prints the version, while
+  `claude -p -- "--version"` treats the same text as the prompt. So a prompt
+  beginning with `--settings=` would replace niwa's document by the last-wins
+  rule, and both surfaces would misreport. Only the Codex launch spec sets
+  `PromptSeparator` today (`internal/agentplan/dispatch.go:408`).
 
 ## Considered Options
 
@@ -389,46 +403,114 @@ the reaper removes with the instance.
 
 ### Decision 5: Keeping review sessions from reaching accepting workers
 
-A review session launched by `niwa watch` could message a worker that accepts,
-and its containment doesn't cover messaging (D12). The PRD excludes review
-sessions as receivers but doesn't consider them as senders. Nothing in the repo
-has a review session message another session.
+A review session launched by `niwa watch` could reach a worker that accepts, and
+its containment covers none of the tools that reach other sessions (D12). The
+PRD excludes review sessions as receivers but doesn't consider them as senders.
+Nothing in the repo has a review session message, send files to, list, or
+schedule work for another session.
 
 Key assumptions:
 - A PreToolUse hook that exits 2 blocks the tool call under every permission
   mode, including `bypassPermissions`, as the existing containment hooks rely on.
+- A matcher made only of letters, digits, underscores, and `|` is compared as an
+  exact list of tool names, aliases included (so `ListPeers` resolves to
+  `ListAgents`), not as a substring or a regex. This was read from the 2.1.267
+  bundle.
+- Hooks apply to tool calls from subagents a session starts. The manual check
+  confirms it.
 
-#### Chosen: A messaging-deny hook in every containment mode
+#### Chosen: A session-reach deny hook in every containment mode
 
-`internal/watch/containment.go` gains `messagingDenyMatcher = "SendMessage"` and
-a `messagingDenyHook()` that exits 2 with
-`niwa watch: review sessions don't message other sessions`.
-`ApplyReviewSettings` appends it in every mode, deduped by matcher like the
-posting guard, and `VerifyReviewSettings` requires it in every mode, so a
-dropped hook stops the review launch.
+`internal/watch/containment.go` gains
+`sessionReachDenyMatcher = "SendMessage|SendFile|RemoteTrigger|ListAgents"` and a
+`sessionReachDenyHook()` that exits 2 with
+`niwa watch: review sessions don't reach other sessions`. `ApplyReviewSettings`
+appends it in every mode unless an entry with the same matcher and the same
+command is already present, and `VerifyReviewSettings` requires an entry with
+that matcher and that command in every mode. Checking the command as well as the
+matcher means a workspace or overlay hook that reuses the matcher with a no-op
+command can't stand in for niwa's. A dropped hook stops the review launch.
+
+Denying `RemoteTrigger` also closes a gap that predates this feature: a
+sandboxed review could create and run remote routines, because that call uses
+the Claude Code process's own connection, which neither the OS sandbox nor the
+egress hook cages.
+
+Two routes stay outside the hook:
+- Local delivery runs over a unix-socket inbox. In sandbox mode, the no-egress
+  stanza niwa owns leaves unix sockets disallowed, which is what closes this
+  route for Bash, and the stanza must keep doing so.
+- With `watch_sandbox = off`, Bash has full access, and the hook is accident
+  prevention only, like the posting guard.
+
+Whether a process that isn't Claude Code can send over the inbox is unverified,
+and the manual delivery check tests it.
 
 #### Alternatives Considered
 
-**Extend the egress-deny matcher**: add `SendMessage` to
-`WebFetch|WebSearch|mcp__`. It's a one-word change, but that hook is applied
-only in sandbox mode, so a review session run without the sandbox would keep the
-channel.
+**Deny `SendMessage` alone**: the tool the feature is about. Rejected because
+`SendFile` delivers files through the same peer path and `RemoteTrigger`
+deliveries are cross-session inbound too, so an accepting worker takes all
+three.
 
-**Deny it only in the operator-approval posture**: that's the posture where the
-class mismatch used to hold review messages. But a hard-deny review session
-runs in bypass mode and could already reach bypass workers unattended, and a
-rule scoped to one posture is one more condition to keep in step with the
-posture list.
+**Extend the egress-deny matcher**: add the tools to
+`WebFetch|WebSearch|mcp__`. It's a one-line change, but that hook is applied
+only in sandbox mode, so a review session run without the sandbox would keep the
+channel, and the dedupe identity of an existing hook would change.
+
+**Deny them only in the operator-approval posture**: a rule scoped to one
+posture is one more condition to keep in step with the posture list, and on
+current Claude Code the hard-deny posture most likely prompts too.
+
+**Also refuse inbound messages into review sessions**: write
+`crossSessionInbound: "refuse"` into review settings, which a project file may
+do because it tightens the setting. It would stop a steered session from
+messaging a reviewer, but this feature doesn't open that direction, so it's left
+to review-containment follow-up work.
 
 **Leave it to the dispatch-containment follow-up**: document the gap and close
 it later. Rejected because this feature is what removes the hold, so the fix
 belongs with it.
 
+### Decision 6: Keeping the prompt out of the settings slot
+
+The prompt is the last argv element, after niwa's `--settings`. A Claude prompt
+that begins with a dash is read as a flag (D14), so a prompt beginning with
+`--settings=` would silently replace niwa's document. The worker could then
+accept messages with no audit line and a `false` record, or lose remote control.
+
+Key assumptions:
+- `claude --bg` parses the separator the same way `claude -p` does. The manual
+  check confirms a detached launch.
+
+#### Chosen: Set `PromptSeparator` on the Claude launch spec
+
+`internal/agentplan/dispatch.go` sets `PromptSeparator: true` on Claude's
+launch spec, so `buildLaunchArgs` inserts a bare `--` before the prompt, as it
+already does for Codex. The measurement in D14 shows Claude Code then reads the
+next element as the prompt. The change applies to every Claude launch niwa
+builds, detached and foreground, and it also stops a prompt from smuggling in
+any other flag, such as a permission mode. Tests pin the separator in the argv
+and show that a prompt beginning with `--settings=` leaves niwa's document in
+force.
+
+#### Alternatives Considered
+
+**Refuse prompts that begin with a dash**: no dependency on Claude Code's
+parser, but it rejects ordinary prompts, such as a brief that opens with a
+Markdown list item (`- fix the build`), which the separator handles.
+
+**Leave it and document it**: the direct caller already has the flag's
+authority, but agents compose prompts, and the audit line and the `niwa list`
+record are the feature's only durable controls. A gap that makes both
+misreport can't stay open.
+
 ## Decision Outcome
 
 **Chosen: 1 (one rendered map) + 2 (capability row) + 3 (marker beside
 `config.toml`, after the terminal is back) + 4 (mapping and instance fields) +
-5 (review-session messaging deny)**
+5 (review-session deny of the session-reaching tools) + 6 (prompt separator for
+Claude)**
 
 ### Summary
 
@@ -473,14 +555,18 @@ after `dispatchAttach` returns at step 14. A launch that fails returns before
 step 11, so no audit line, marker, or `true` record can precede a failed launch.
 
 Independently of dispatch, every `niwa watch` review session gets the
-messaging-deny hook, so turning the behavior on never opens a channel from a
-contained reviewer to an uncontained worker.
+session-reach deny hook, so turning the behavior on never opens a channel from a
+contained reviewer to an uncontained worker. Every Claude launch niwa builds puts
+`--` before the prompt, so the `--settings` document niwa rendered is the one
+Claude Code reads.
 
 ### Rationale
 
 The first four decisions meet at one seam, step 9c, and one record, the session
-mapping; the fifth stands apart, in review-session settings, and exists because
-the first four remove a hold review sessions used to be subject to. Rendering one map is what lets inbound acceptance join the one
+mapping. The fifth stands apart, in review-session settings, and exists because
+the first four remove a hold review sessions used to be subject to. The sixth is
+what makes the first and fourth hold: the audit line and the record describe a
+document that, with the separator, only niwa can write. Rendering one map is what lets inbound acceptance join the one
 `--settings` element without inheriting remote control's conditions. The
 capability row is what keeps that seam agent-neutral, so the same line of code
 serves Claude and gives Codex a reason in its gap list. Deriving the audit line,
@@ -540,12 +626,14 @@ nothing moves into `dispatchLaunch`, which `niwa watch` also calls.
 - `internal/workspace/state.go`: `InstanceRecord.AcceptsSessionMessages`.
 - `internal/cli/list.go`: the annotation, the human marker, the `--json` help,
   and the `Long` text.
-- `internal/watch/containment.go`: a `messagingDenyMatcher = "SendMessage"`
-  constant and a `messagingDenyHook()` PreToolUse hook that exits 2 with
-  `niwa watch: review sessions don't message other sessions`. `ApplyReviewSettings`
-  appends it in every mode, deduped by matcher like the posting guard, and
-  `VerifyReviewSettings` requires it in every mode, so a dropped hook stops the
-  launch.
+- `internal/watch/containment.go`: the `sessionReachDenyMatcher` constant and
+  `sessionReachDenyHook()` from Decision 5. `ApplyReviewSettings` appends the hook
+  and `VerifyReviewSettings` requires it, in every mode, both keyed on matcher
+  and command. A comment on the no-egress stanza says it must keep unix sockets
+  disallowed.
+- `internal/agentplan/dispatch.go`: `PromptSeparator: true` on Claude's launch
+  spec. The `buildLaunchArgs` tests in `internal/cli` pin the separator, and the
+  existing tests that assert Claude's argv are updated.
 - `test/functional/features/` and step definitions: the scenarios in Phase 6.
 - `docs/guides/session-message-acceptance.md` (new) and the contributor-guide
   index in `CLAUDE.md`.
@@ -582,6 +670,10 @@ nothing moves into `dispatchLaunch`, which `niwa watch` also calls.
   directory mode `0o755` when niwa creates it.
 - **Records:** `SessionMapping.accepts_session_messages` (omitempty) and
   `InstanceRecord.accepts_session_messages` (always present).
+- **Review-session deny:** the matcher `SendMessage|SendFile|RemoteTrigger|ListAgents`,
+  taken from Claude Code 2.1.267's tool list. The guide records the list and
+  the version it came from.
+- **Claude launch argv tail:** `... --settings <document> -- <prompt>`.
 
 ### Data Flow
 
@@ -623,17 +715,22 @@ Deliverables:
 - `internal/config/registry.go`, `internal/config/config.go`
 - `internal/config/registry_inbound_test.go`
 
-### Phase 2: Launch settings rendering
+### Phase 2: Launch settings rendering and the prompt separator
 
 Introduce `renderLaunchSettings` and route remote control's injection through
 the map, producing byte-identical output. The existing remote-control tests and
 a new test pinning the helper's remote-control-alone output to
-`remoteControlSettingsJSON` are the regression guard.
+`remoteControlSettingsJSON` are the regression guard. Set `PromptSeparator` on
+Claude's launch spec. Update the tests that assert Claude's argv, and add a test
+that a prompt beginning with `--settings=` leaves the rendered document in
+force. The functional fake `claude` must accept the separator.
 
 Deliverables:
 - `internal/cli/dispatch_settings.go` and tests
 - `internal/cli/dispatch.go` step 9c
 - `internal/cli/dispatch_layout_test.go`
+- `internal/agentplan/dispatch.go`, and the launcher and wiring tests in
+  `internal/cli`
 
 ### Phase 3: Capability row, flag, resolver, delivery, and the audit, override, and warning lines
 
@@ -705,8 +802,19 @@ The watch exclusion is covered by the Phase 3 unit test at both watch launch
 sites rather than a functional scenario, because no functional harness runs
 `niwa watch`; the PRD's R18 is amended to match.
 
+A scenario also dispatches a prompt beginning with `--settings=` and shows the
+recorded document is niwa's.
+
 Run the PRD's manual delivery check and record the Claude Code version it
-passed on as the guide's version line.
+passed on as the guide's version line. The same session also checks the
+following:
+- A detached `claude --bg ... -- <prompt>` launch starts normally.
+- The permission class a hard-deny review session actually runs in.
+- Whether a review session's subagents are blocked by the deny hook.
+- Whether a process that isn't Claude Code can send over the local inbox. The
+  guide's description of the sender set follows that result.
+- Claude Code's tool list, taken from the init event of
+  `claude -p --output-format stream-json`, compared against the denied list.
 
 Deliverables:
 - `docs/guides/session-message-acceptance.md`, `CLAUDE.md`
@@ -716,9 +824,11 @@ Deliverables:
 
 ### Phase 7: Review-session messaging deny
 
-Add the messaging-deny hook to review-session settings and to their
-verification. It depends on nothing else here; it's in this pull request
-because the feature is what makes the channel matter.
+Add the session-reach deny hook to review-session settings and to their
+verification, keyed on matcher and command. Tests cover both postures, sandbox
+on and off, and a pre-existing hook with the same matcher and a different
+command. It depends on nothing else here; it's in this pull request because the
+feature is what makes the channel matter.
 
 Deliverables:
 - `internal/watch/containment.go` and its tests
@@ -728,8 +838,14 @@ Deliverables:
 This feature gives a dispatched worker no new permission. What it removes is a
 checkpoint. Claude Code normally holds a message from a session in a different
 permission-mode class until a person approves it, and dispatched workers often
-run with `bypassPermissions` and no containment. With the behavior on, text
-from another session reaches such a worker and is acted on without a prompt.
+run with `bypassPermissions` and no containment. With the behavior on, text and
+files from another session reach such a worker and are acted on without a
+prompt. For a bypass-mode worker, `accept` lifts four holds, not one:
+- the hold on a sender in a different permission-mode class;
+- the hold on a sender that doesn't attest its permission mode;
+- the default hold a bypass receiver applies;
+- the hold on remote-routine deliveries.
+
 Everything below follows from that.
 
 **Who can send.** A worker that accepts takes messages from any session able to
@@ -743,36 +859,59 @@ and the worker carries out the instruction with its full authority. That
 authority includes shell access, write access outside its instance, the
 credentials resolved into its environment, git push rights, and unrestricted
 network access. Keep-alive can wake an idle worker to act on such a message.
-The same exposure already exists between two bypass-mode sessions, which Claude
-Code delivers between without a hold whether or not this feature is on, so
-switching the behavior off doesn't isolate a worker from them.
+The same exposure already exists between two bypass-mode sessions when the
+sender attests its mode, which Claude Code delivers without a hold whether or
+not this feature is on, so switching the behavior off doesn't isolate a worker
+from them. Local delivery runs over a unix-socket inbox. If a process that
+isn't Claude Code can send over it, the sender set is wider than sessions on
+the account. That's unverified, and the manual delivery check tests it before
+the guide describes the sender set.
 
 **Review sessions.** Sessions that `niwa watch` launches review untrusted changes
 and never receive this behavior, but they could still send. Their network
-sandbox doesn't cover cross-session messaging, which goes through the local
-Claude Code process rather than the network, and in the operator-approval
-posture they run in a prompting mode, so the class mismatch was what held their
-messages to bypass workers. To keep this feature from becoming a way around
-review containment, review sessions get a PreToolUse hook that denies the
-cross-session messaging tool in every containment mode, the same way the
-posting guard applies in every mode. Nothing in a review session's job needs to
-message another session.
+sandbox doesn't cover the tools that reach other sessions, which run on the
+Claude Code process's own connection or its local inbox. Watch passes no
+permission mode, so they most likely prompt in both containment postures, and
+the class mismatch was what held their messages to bypass workers.
+
+Review sessions therefore get a PreToolUse hook denying `SendMessage`,
+`SendFile`, `RemoteTrigger`, and `ListAgents` in every containment mode. It's
+verified by matcher and command, so a same-matcher hook from a workspace or
+overlay can't stand in for it. The hook has limits:
+- In sandbox mode, Bash can't reach the local inbox, because the no-egress
+  stanza niwa owns leaves unix sockets disallowed.
+- With `watch_sandbox = off`, Bash has full access, and the hook is accident
+  prevention only.
+- Hooks load when a session starts, so a review staged before the upgrade runs
+  without the hook until watch re-stages it. The guide says to let in-flight
+  reviews re-stage before turning the behavior on.
+- A `disableAllHooks` setting in any source turns this hook off along with every
+  other review hook. That's true of review containment generally, and the guide
+  notes it.
+
+Messages into review sessions aren't refused, because this feature doesn't
+change that direction.
 
 **Who can turn it on.** Only the `[global] accept_session_messages_on_dispatch`
 key in niwa's machine configuration and the `--accept-session-messages` flag
 decide the behavior. No workspace config key, instance setting, or settings file
 a repository carries is read for it, and the overlay repository registered under
-`[global_config]` can't set it because its schema has no `[global]` table. That
-guarantee covers configuration sources. It doesn't cover two indirect routes:
+`[global_config]` has no `[global]` table to set it in. That guarantee covers
+configuration sources. It doesn't cover two indirect routes:
 
 - niwa finds its machine configuration through `XDG_CONFIG_HOME` and `HOME`. A
-  workspace that sets either in its `[claude.env]` or `[session.env]` tables
-  changes which `config.toml` a `niwa dispatch` run from inside its sessions
-  reads. That affects every machine-level dispatch preference, not only this
-  one, and a workspace config able to do it can already install hooks that run
-  in the session, so it isn't a new capability. Rejecting those two variable
-  names in the session environment tables is follow-up work covering all
-  machine-level keys.
+  workspace can set either in its `[claude.env]` or `[session.env]` tables, and
+  an overlay can if its `[env]` reaches the session. Either one changes which
+  `config.toml` a `niwa dispatch` run from inside those sessions reads.
+  - That affects every machine-level dispatch preference, not only this one, and
+    a workspace config able to do it can already install hooks that run in the
+    session, so it isn't a new capability.
+  - Relocating `HOME` also moves the Claude Code user settings a nested session
+    reads. That can grant acceptance with no niwa involvement, so no audit line
+    or record shows it.
+
+  Rejecting those two variable names in the session environment tables is
+  follow-up work covering all machine-level keys.
 - Any agent can pass the flag. A worker steered by an injected message can
   dispatch more workers with the behavior on, and with the machine key on it
   doesn't need the flag. A bypass worker can also edit the machine
@@ -782,8 +921,10 @@ guarantee covers configuration sources. It doesn't cover two indirect routes:
 constant keys and values only, marshals it with `encoding/json`, and passes it
 as one argv element with no shell involved. Nothing from a workspace,
 repository, or prompt reaches it. `niwa dispatch` accepts no extra agent
-arguments, so a caller can't add a second `--settings` that would replace it. A
-comment on the rendering helper records that contributors pass constants.
+arguments, and every Claude launch puts `--` before the prompt. A prompt that
+begins with `--settings=` is therefore read as prompt text, not as a second
+`--settings` that would replace niwa's. A comment on the rendering helper
+records that contributors pass constants.
 
 **The marker file.** The explanation marker is an empty file created with
 exclusive-create semantics and mode `0600`, in a directory niwa creates only
@@ -801,9 +942,10 @@ stderr lines carry no paths, identifiers, or secrets, and niwa doesn't read or
 write the developer's Claude Code user or managed settings. The recorded value
 means niwa launched the worker with the setting, not that Claude Code confirmed
 it: a managed policy or a stricter project setting can still hold messages,
-which makes the record err toward reporting more acceptance than there is. It
-also doesn't reflect acceptance a developer turned on in their own user
-settings.
+which makes the record err toward reporting more acceptance than there is, now
+that the prompt can't replace niwa's document. It doesn't reflect acceptance a
+developer turned on in their own user settings, or acceptance a relocated
+`HOME` brings in.
 
 **Audit surfaces.** Default off, the per-dispatch audit line, and the
 `niwa list` field are detective controls, not preventive ones. When an agent
@@ -844,9 +986,14 @@ untrusted inputs, and it's separate work.
   from same-class peers.
 - It removes a human checkpoint on text arriving from sessions in a different
   class, for workers that often run with prompts off and without containment.
-- It depends on Claude Code behavior niwa doesn't control: the meaning of
-  `crossSessionInbound`, deep-merged `--settings`, and saved `respawnFlags`. niwa
-  doesn't gate on the Claude Code version.
+- It depends on Claude Code behavior niwa doesn't control, and niwa doesn't gate
+  on the Claude Code version. The dependencies are:
+  - the meaning of `crossSessionInbound`;
+  - deep-merged `--settings`;
+  - saved `respawnFlags`;
+  - the `--` prompt separator;
+  - the tool list;
+  - hook matcher semantics.
 - A developer who only dispatches through agents, or who closes the window
   instead of returning from the attach, sees the explanation again.
 - The capability table grows a row that every future agent has to declare, and
@@ -854,8 +1001,10 @@ untrusted inputs, and it's separate work.
 - A worker steered by an injected message can dispatch more accepting workers,
   and a workspace that relocates `XDG_CONFIG_HOME` or `HOME` in its session
   environment changes which machine configuration a nested dispatch reads.
-- Review sessions lose the ability to message other sessions, which nothing
-  uses today.
+- Review sessions lose `SendMessage`, `SendFile`, `RemoteTrigger`, and
+  `ListAgents`, which nothing uses today.
+- Every Claude launch gains a `--` before the prompt, which changes the argv
+  shape that existing tests expect.
 - The watch exclusion is covered by a unit test rather than a functional
   scenario.
 
@@ -875,7 +1024,8 @@ In the order of the negatives above:
   contained reviewer can't hand instructions to an uncontained worker.
 - **Claude Code dependency:** the guide records the Claude Code version the
   manual delivery check last passed on, and a semantics change there would err
-  toward holding messages rather than accepting more.
+  toward holding messages rather than accepting more. The manual check also
+  compares Claude Code's tool list against the denied list.
 - **Repeated explanation:** the developer can create the marker by hand, and the
   guide says so.
 - **Capability counts:** the count changes land in one commit with the row, and
@@ -885,8 +1035,10 @@ In the order of the negatives above:
   Every nested grant still prints its audit line and lands in `niwa list`, and
   rejecting `XDG_CONFIG_HOME` and `HOME` in session environment tables is
   follow-up work covering all machine-level keys.
-- **Review sessions lose messaging:** accepted. Nothing uses it, and the hook's
-  message says why the call was refused.
+- **Review sessions lose the session-reaching tools:** accepted. Nothing uses
+  them, and the hook's message says why the call was refused.
+- **Argv shape:** the separator is the form Codex launches already use, and the
+  tests that pin Claude's argv change in the same commit.
 - **Unit coverage for the watch exclusion:** the test drives both real launch
   sites, and watch writes no session mapping, so the exclusion holds by
   construction as well as by test.

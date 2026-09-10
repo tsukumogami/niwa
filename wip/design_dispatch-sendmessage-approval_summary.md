@@ -26,7 +26,12 @@ PRD R18 amended (assumed, high priority).
 Structural-format review: added Decision 5, trimmed PRD retelling in Context,
 refocused Decision 3/4 alternatives on open questions, paired every negative
 consequence with a mitigation, dropped an unchoosable alternative.
-Security review (Phase 6): pending at time of writing.
+Security review (Phase 6): found the prompt-as-flag route into `--settings`
+(confirmed by measurement; fixed with Claude `PromptSeparator`, Decision 6),
+widened the review deny to four session-reaching tools verified by matcher and
+command, corrected the posture claim, and documented the four holds `accept`
+lifts, the inbox socket, and overlay/HOME relocation. Out-of-scope items and
+three unmeasured behaviors recorded as decisions.
 
 ## Current Status
 **Phase:** 6 - Final review
