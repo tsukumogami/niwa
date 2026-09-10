@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 problem: |
   `buildSettingsDoc` maps a declared `permissions` posture to Claude Code
   modes Claude Code no longer honors from project scope (`bypassPermissions`)
@@ -32,7 +32,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
