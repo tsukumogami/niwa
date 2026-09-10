@@ -420,6 +420,9 @@ to arrive.
   equivalent.
 - **Keeping a dispatched background session warm** doesn't apply to Codex.
   There is no Codex background-session bridge to keep warm.
+- **Accepting messages from other sessions without an approval prompt**
+  doesn't apply to Codex. Codex has no setting for accepting messages from
+  other sessions.
 
 <!-- END GENERATED: codex gap list -->
 

@@ -9,8 +9,8 @@ import (
 
 func TestAllIsTheClosedSet(t *testing.T) {
 	all := All()
-	if len(all) != 24 {
-		t.Fatalf("All() returned %d capabilities, want the matrix's 24", len(all))
+	if len(all) != 25 {
+		t.Fatalf("All() returned %d capabilities, want the matrix's 25", len(all))
 	}
 	seen := map[Capability]bool{}
 	for _, c := range all {
@@ -105,12 +105,12 @@ func TestLookupAnswersEachDeclaredPair(t *testing.T) {
 	}
 }
 
-// codexFinalGaps is the Codex column at its target, unavailable half: the nine
+// codexFinalGaps is the Codex column at its target, unavailable half: the ten
 // rows that stay unavailable once every Codex delivery has landed, each with
 // the reason kind the PRD's matrix gives it.
 //
 // Every one of them is now inherent to the agent -- five its own mechanics put
-// out of reach, four naming surface that exists only in the other harness. The
+// out of reach, five naming surface that exists only in the other harness. The
 // not-built kind, the one category a developer could act on, is empty for this
 // column: niwa owes Codex nothing that a route exists for. That is a fact about
 // today rather than a rule, which is why the kind survives in the checks below
@@ -143,10 +143,13 @@ var codexFinalGaps = map[Capability]ReasonKind{
 	EphemeralSessions:       ReasonAgentCannotReceive,
 	RemoteControl:           ReasonNoSuchConcept,
 	DispatchKeepAlive:       ReasonNoSuchConcept,
+	// Row 25 joined the closed set as a gap, not a pending delivery: Codex has
+	// no setting for accepting messages from other sessions to deliver.
+	DispatchInboundAcceptance: ReasonNoSuchConcept,
 }
 
 // codexDelivered is what niwa delivers to Codex today: fifteen rows against the
-// nine final gaps in codexFinalGaps, which is the whole column with nothing
+// ten final gaps in codexFinalGaps, which is the whole column with nothing
 // pending between them. Directory trust is the first, and deliberately so --
 // every trust-gated row downstream names it in Requires, and the closure test
 // refuses such an edge while it is unavailable. The list grew one entry per
@@ -188,7 +191,7 @@ var codexDelivered = []Capability{
 // per-row check by moving a name from one list to the other -- still has to
 // face a number somebody wrote down on purpose.
 func TestCodexColumnTotals(t *testing.T) {
-	const wantImplemented, wantUnavailable = 15, 9
+	const wantImplemented, wantUnavailable = 15, 10
 
 	implemented, unavailable := 0, 0
 	for _, c := range All() {

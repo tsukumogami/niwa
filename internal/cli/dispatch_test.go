@@ -97,6 +97,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 	prevHarness := dispatchHarness
 	prevDetach := dispatchDetach
 	prevKeepAlive := dispatchKeepAlive
+	prevAcceptSessionMessages := dispatchAcceptSessionMessages
 
 	dispatchLabel = ""
 	dispatchName = ""
@@ -106,6 +107,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 	dispatchHarness = ""
 	dispatchDetach = false
 	dispatchKeepAlive = nil
+	dispatchAcceptSessionMessages = nil
 
 	lookAgentBinary = func(string) (string, error) { return "/usr/bin/claude", nil }
 
@@ -157,6 +159,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 		dispatchHarness = prevHarness
 		dispatchDetach = prevDetach
 		dispatchKeepAlive = prevKeepAlive
+		dispatchAcceptSessionMessages = prevAcceptSessionMessages
 	})
 
 	return f

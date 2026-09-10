@@ -37,6 +37,11 @@ func init() {
 	// NoOptDefVal makes the bare `--keep-alive` form mean explicit true.
 	dispatchCmd.Flags().Var(triBoolValue{&dispatchKeepAlive}, "keep-alive", "arm a keep-alive self-wake on the dispatched worker so its remote-control session stays reachable across long idle (only applies when remote control is on; --keep-alive=false forces it off)")
 	dispatchCmd.Flags().Lookup("keep-alive").NoOptDefVal = "true"
+	// --accept-session-messages is tri-state for the same reason: it overrides
+	// the [global] accept_session_messages_on_dispatch machine setting in both
+	// directions, and the bare form means explicit true.
+	dispatchCmd.Flags().Var(triBoolValue{&dispatchAcceptSessionMessages}, acceptSessionMessagesFlagName, acceptSessionMessagesFlagUsage)
+	dispatchCmd.Flags().Lookup(acceptSessionMessagesFlagName).NoOptDefVal = "true"
 	rootCmd.AddCommand(dispatchCmd)
 }
 
@@ -563,6 +568,15 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// at.
 	passthrough := buildDispatchPassthrough(spec.Flags, slug, resolvedModel)
 
+	// (9b-host) The host [global] settings as a value, zero when the config
+	// could not be loaded. Both the inbound resolution in (9c) and keep-alive in
+	// (9d) read it, so an unreadable or malformed config.toml counts as "no
+	// machine setting" for each of them while their flags still apply.
+	var hostGlobal config.GlobalSettings
+	if gcErr == nil && gc != nil {
+		hostGlobal = gc.Global
+	}
+
 	// (9c) Remote-control-on-dispatch default-fill. When the host preference
 	// (~/.config/niwa/config.toml [global].remote_control_on_dispatch) is on and
 	// the dispatched instance left remoteControlAtStartup unset, add the Claude
@@ -611,6 +625,30 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			rcInjected = true
 		}
 	}
+	// Accepting messages from other sessions is the second contributor. The
+	// --accept-session-messages flag is resolved over the machine setting, and
+	// the declaration then says whether this agent can receive the behavior at
+	// all, in the shape remote control's gate uses. inboundApplied is the one
+	// record that the key went in: the session mapping, the line printed after
+	// step (12), and the one-time explanation all read it, so none of them can
+	// describe a worker launched differently. Only the flag earns a warning
+	// when the agent cannot receive it; a machine setting asks for every
+	// dispatch, so it stays quiet on the ones it cannot reach.
+	inbound := resolveDispatchInboundAcceptance(dispatchAcceptSessionMessages, hostGlobal)
+	inboundDecl, inboundErr := agentplan.Lookup(agentplan.DispatchInboundAcceptance, dispatchedAgent)
+	inboundDeliverable := inboundErr == nil && inboundDecl.State == agentplan.StateImplemented && spec.Flags.Settings != ""
+	inboundApplied := false
+	switch {
+	case !inbound.on:
+		// Not asked for, or turned off. Nothing goes in the document.
+	case !inboundDeliverable:
+		if inbound.source == inboundSourceFlag {
+			fmt.Fprintf(cmd.ErrOrStderr(), inboundUndeliverableFormat+"\n", dispatchedAgent, inboundDecl.Reason)
+		}
+	default:
+		launchSettings[config.CrossSessionInboundKey] = crossSessionInboundAccept
+		inboundApplied = true
+	}
 	// Two discrete argv elements, and none at all when no contributor added a
 	// key. An agent with no settings flag has nowhere for the document to go,
 	// so every contributor must check spec.Flags.Settings itself before adding
@@ -629,8 +667,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 	// (9d) Keep-alive arming. The opt-in resolves flag > downstream > host
 	// default (resolveDispatchKeepAlive); an unreadable host config degrades to
-	// "host default unset" through the zero GlobalSettings, so keep-alive --
-	// like remote-control -- can never fail the dispatch. When it resolves on
+	// "host default unset" through the zero GlobalSettings built at (9b-host),
+	// so keep-alive -- like remote-control -- can never fail the dispatch. When
+	// it resolves on
 	// AND the worker starts with remote control (either injected above or
 	// decided downstream), prepend the fixed self-arm instruction to the task
 	// prompt (channel B2; see dispatch_keepalive.go for why the SessionStart
@@ -644,10 +683,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// Requesting keep-alive without remote control warns and arms nothing --
 	// the dispatch itself always proceeds. Without the opt-in this block
 	// changes nothing: the launch stays byte-identical.
-	var hostGlobal config.GlobalSettings
-	if gcErr == nil && gc != nil {
-		hostGlobal = gc.Global
-	}
+	//
 	// keepAliveArmed records that the arming actually happened (resolved on AND
 	// remote control on); it is what the durable mapping carries in step (11),
 	// so `niwa list` reports sessions genuinely kept alive, not mere requests.
@@ -822,6 +858,15 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// rollback.
 	removeDispatchMarker(instancePath)
 	success = true
+
+	// (12a) Say what this worker accepts from other sessions, and only now.
+	// Every failure above -- the launch, the capture, the mapping write --
+	// returns before this line, so it never describes a worker that is not
+	// running under a durable mapping. It goes to stderr, ahead of step (13)'s
+	// stdout hints, which stay the same whether or not the behavior is on.
+	if line := inboundOutcomeLine(inbound, inboundApplied, inboundDeliverable); line != "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), line)
+	}
 
 	// (13) Print the session id and the launched agent's own management hints.
 	// The headline prints the session id, which is the durable mapping key a
