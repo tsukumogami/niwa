@@ -286,7 +286,7 @@ checks each file's `permissions.defaultMode` value or its absence.
 
 Go tests cover the rest. Where a test needs a materialized instance, it runs a
 real `Applier.Create` in a temporary workspace, as
-`internal/workspace/allow_missing_secrets_test.go` already does, rather than
+`internal/cli/allow_missing_secrets_test.go` already does, rather than
 hand-writing a settings or state file. The Go tests cover:
 - the derivation against a real materialization, then tampered
 - watch's fresh-review and continuation argv, built on a real `bypass`
