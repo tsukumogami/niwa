@@ -187,44 +187,198 @@ that would normally come from the author is taken from the dispatch brief's
 own stated priorities: verify the claims, decide the shape, name the smallest
 change, and say what the `--settings` constraint means for a merged builder.
 
+
+## Round 2
+
+Round 2 was scoped to measurement rather than new territory: three questions
+round 1 had inferred rather than tested.
+
+### Key Insights
+
+**Only `bypassPermissions` and `auto` are dead. Everything else works.**
+Measured on Claude Code 2.1.267, project-scope `permissions.defaultMode` is
+honored for `default`, `acceptEdits`, `plan`, and `dontAsk` -- confirmed both
+from the headless init event's `permissionMode` field and behaviorally,
+including the decisive case where a project-scope `"default"` pulled a
+user-scope `acceptEdits` back down to prompting and the write was actually
+denied. (lead-restrictive-mode-probe)
+
+**So `niwa watch`'s operator-approval posture is sound, and the fix narrows.**
+`ApplyReviewSettings` writes `defaultMode: "default"` so a PreToolUse hook's
+`ask` decision is honored rather than silently allowed, and
+`VerifyReviewSettings` hard-checks it. That value governs the session for real.
+The key has a legitimate resident; removing it wholesale would break a posture
+that currently works. The framing is therefore "stop writing the values that
+cannot work", not "stop writing the key". (lead-restrictive-mode-probe,
+correcting round 1's open question)
+
+**The inert value is not merely inert -- it is actively harmful.** This is the
+round's most consequential finding and it inverts a round 1 assumption. A
+project-scope `bypassPermissions` does not fall through to the next layer down.
+It wins the scope merge and is *then* downgraded to `default`, so a developer
+whose own user settings say `acceptEdits` or `plan` gets `default` instead.
+Writing `bypassPermissions` into an instance leaves the session **more
+restrictive than writing nothing at all**, by destroying whatever the
+operator's personal settings would have contributed. That is a real,
+user-visible behavior change, not a documentation problem.
+(lead-restrictive-mode-probe)
+
+**"Is this permissive" is not the criterion that selected the blocked set.**
+`dontAsk` is honored from project scope despite reading as permissive and
+sitting next to `auto` in the flag's choice list. Whatever rule picked the
+blocked pair, it is not the one round 1 inferred.
+(lead-restrictive-mode-probe)
+
+**niwa can vacate the `--settings` slot entirely.** `--remote-control` composes
+with `--bg`: a backgrounded session with no terminal attached connected for
+real, it throws the same internal switch `remoteControlAtStartup` throws, and
+its optional name is expressiveness the boolean setting does not have. The slot
+is not "already taken and therefore contested" -- it is taken by something that
+has a first-class flag. (lead-settings-slot-probe)
+
+**`--settings` merges rather than replaces.** It is a distinct settings source
+(`flagSettings`) sitting between managed policy and user settings, composing
+the way the layered system composes anything else: arrays concatenate, objects
+merge key-wise, scalar collisions go to the higher-precedence source. The worry
+that a merged builder might silently nuke a repo's settings does not
+materialize. The correction to that mental model is that merge is per-key --
+several keys have their own composition rules, and several are only read from a
+subset of sources. (lead-settings-slot-probe)
+
+**A dedicated flag silently beats the settings document for the same concept.**
+`--permission-mode` overrode `permissions.defaultMode` with no warning. The
+rule for any future builder is own both channels or own neither: writing a mode
+into the document while something else passes the flag produces a value that
+never takes effect and never complains. (lead-settings-slot-probe)
+
+**The producer/consumer graph is closed inside niwa.** Nothing in koto,
+shirabe, tsuku, the workspace config repos, or the private repos reads
+`permissions.defaultMode`, parses a materialized settings document, or acts on
+the value -- verified across code, hook scripts, skill and command markdown, CI
+config, and prose. A rename or relocation breaks nothing externally.
+(lead-external-readers)
+
+**But the input surface is not closed, and it is a separate decision.**
+`[claude.settings] permissions = "bypass"` in the public workspace config is
+the live declaration for a real workspace, reproduced verbatim in a draft
+headed for a public channel, and a legacy installer in another repo
+independently writes the same dead key with the same rationale. Changing the
+TOML surface is a compatibility break; changing the JSON key it materializes
+into is not. (lead-external-readers)
+
+**One relocation option is fenced off from outside the repo.** A sibling public
+repo's acceptance criteria state that the committed `.claude/settings.json`
+carries no `permissions` key. Whatever shape wins must not land there.
+(lead-external-readers)
+
+### Tensions
+
+**The round 1 "smallest change" framing no longer fits the problem.** Round 1
+weighed a one-line rename against a larger structural fix on grounds of size.
+The clobbering finding changes what is being fixed: this is not a misleading
+document, it is a live regression that makes dispatched sessions more
+restrictive than doing nothing would. A fix scoped to honesty leaves the
+regression in place.
+
+**What to say about the merged builder cuts both ways.** The single-slot
+constraint is real -- a second `--settings` silently discards the first -- but
+niwa's occupancy of the slot is an artifact of using a setting where a flag
+exists. That weakens the urgency for a merged builder while strengthening the
+case that whoever wants the slot next can simply have it.
+
+### Gaps
+
+- The version boundary was not bisected. 2.1.257 and 2.1.142 come from release
+  notes; only 2.1.267 was measured. The repo's own design doc says 2.1.258 in
+  four places and is wrong on the release-note reading either way.
+- Whether managed or enterprise scope behaves like project scope was untestable
+  on this account. Not load-bearing: niwa writes instance-local files.
+- The mechanism behind the downgrade -- merged then sanitized, versus sanitized
+  at parse time -- was not distinguished. The observable outcome is identical.
+
+### Decisions
+
+Recorded in `wip/explore_inert-defaultmode-key_decisions.md` (D8-D11).
+
+### User Focus
+
+No interactive author; auto mode per the scope file. The brief's stated
+priorities continue to stand in for the author's narrowing.
+
+## Decision: Crystallize
+
 ## Accumulated Understanding
 
-The brief was right about the shape of the problem and understated its extent.
-The materialized `permissions.defaultMode` is not one inert key with one
-internal reader; it is one builder writing to three documents, two of which
-have no reader at all, with a second subsystem (`niwa watch`) writing a fifth
-value into the same file for a different purpose, and half the accepted input
-vocabulary mapping to a value Claude Code has never recognized. Three separate
-leads independently confirmed that `WorkerPermissionMode` is dead code the
-design doc already declared dead and then left in place.
+The brief asked what shape a niwa-internal signal should take. Two rounds of
+research turned that into a different and larger question, because the key the
+signal rides on is not merely inert.
 
-The blast radius of changing it is small and well-fenced. Nothing in apply,
-drift, or verification cares. The `@critical` scenarios assert the derived
-argv rather than the file, which makes them the right net for a rename or a
-relocation, provided producer and reader move together. The real hazard is the
-unit tests, which fabricate their own fixtures and would go quietly green.
+**What is actually true.** Claude Code stopped honoring `bypassPermissions`
+from project and local scope at 2.1.257, and `auto` at 2.1.142; `default`,
+`acceptEdits`, `plan`, and `dontAsk` are all still honored from those scopes,
+measured on 2.1.267. The ignored values do not fall through to the layer below
+-- they win the scope merge and are then downgraded to `default`. So the
+`bypassPermissions` niwa writes into every instance does not just fail to grant
+bypass; it suppresses whatever posture the developer's own user settings would
+have contributed, leaving the session more restrictive than if niwa had written
+nothing. The false signal a reader sees in the document is the visible half of
+a live regression.
 
-Four shapes were on the table and the field has narrowed to two. Annotating in
-place is out: it is schema-illegal in the only place it would go, and no
-project has been found that did it. Moving into the `--settings` payload is
-feasible and was measured to work, but it spends a contested single slot on a
-signal `--permission-mode` already carries for free -- so it is the right
-answer to a different question, and the finding that the channel works is worth
-recording for whoever asks that question later. What remains is renaming the
-key into niwa's existing `keepAliveOnDispatch` family, which is one line and
-matches in-repo precedent, versus stopping the round trip entirely by reading
-the effective config the provisioning call already computed and discards, which
-is larger but deletes a read rather than adding a key and matches every
-external precedent found.
+**What niwa does today.** One builder, `buildSettingsDoc`, fans the key out to
+three documents -- the instance-root `settings.json`, each repo's
+`settings.local.json`, and the workspace-root `settings.json`. Exactly one has
+a niwa reader: the `--permission-mode` derivation, which reads the materialized
+output to recover an input the same function computed and discarded a few
+hundred lines earlier. The other two copies exist only to speak to Claude Code,
+which is the audience that stopped listening. Half the accepted input
+vocabulary has never worked at all -- `"ask"` maps to `askPermissions`, which
+is not a Claude Code mode -- and that has been pinned by a unit test and
+enshrined in a PRD since before the deprecation. A second subsystem,
+`niwa watch`, writes a fifth value into the same file for a genuinely
+functioning purpose. And `WorkerPermissionMode` is dead code that a shipped
+design doc already declared dead and then left in place with its test.
 
-The strongest single finding is that the round trip is unnecessary on its own
-terms: the derivation reads a materialized output to recover an input that is
-still in memory a few hundred lines up the same function. Whichever shape wins,
-that is the fact a design has to answer to.
+**What it would cost to change.** Little, and the fence posts are known.
+Nothing in apply, drift, or verification depends on the key -- drift is an
+advisory whole-file hash checked before the overwrite. Nothing outside the niwa
+repo reads it. The two `@critical` scenarios assert the derived argv rather
+than the file, which makes them the right regression net for a rename or a
+relocation provided producer and reader move together; the hazard is the unit
+tests, which fabricate their own fixtures and would go quietly green. Two
+golden manifests need regenerating under any option. One option is fenced off
+from outside the repo: the signal must not land in the committed per-repo
+`settings.json`.
 
-What is still open is mostly measurement, and cheap: whether restrictive
-`defaultMode` values survive from project scope (which decides whether
-`niwa watch`'s ask posture is live or is a second instance of the same bug),
-whether `--remote-control` composes with `--bg` (which decides whether the
-single-slot constraint persists at all), and whether anything outside this repo
-reads the key.
+**Where the shape question landed.** Four candidates went in and one survives.
+Annotating in place is schema-illegal in the only spot it would go, since the
+published schema makes the `permissions` object `additionalProperties: false`,
+and no project was found that annotated a dead key it kept writing. Moving into
+the `--settings` payload works -- measured -- but spends a slot on a signal
+`--permission-mode` already carries for free. Renaming into niwa's existing
+`keepAliveOnDispatch` family is one line and matches in-repo precedent twice
+over, but it preserves the round trip and answers only the honesty complaint,
+not the regression. What is left is to stop writing the values that cannot
+work, and to feed the derivation from the effective config the provisioning
+call already computes and throws away -- which deletes a file read rather than
+adding a key, matches every external precedent found, and disposes of the
+`askPermissions` nonsense in the same motion.
+
+**What this says about the merged settings-document builder.** The brief asked
+whether this problem strengthens that case, and the answer is no, in a way that
+should be useful to the sibling session. The single-slot constraint is real --
+a repeated `--settings` silently discards the first document without parsing it
+-- but niwa is holding the slot for remote control, and `--remote-control`
+composes with `--bg` and does the same job better. The slot has a phantom
+occupant; whoever wants it next can have a clean one. What is worth adding
+regardless is a single-owner guard, so the constraint stops being tribal
+knowledge, and the rule that a dedicated flag silently beats the settings
+document for the same concept, so a future builder owns both channels for a
+given key or neither.
+
+**What is left open, and it is not the shape.** The work spans a materializer
+change, a dispatch-input change, a dead-code deletion, and a set of committed
+documents asserting a mechanism that no longer exists -- four inside niwa and
+three outside it. The requirements for that set are not written down anywhere,
+and the ordering matters, because producer and reader have to move in one
+commit for the `@critical` scenarios to hold. That is a feature to be worked
+out, not a decision to be recorded.

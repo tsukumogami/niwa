@@ -123,3 +123,92 @@ whether anything outside this repo reads the key (bounds the blast radius).
 
 **Decision.** One more round, scoped to measurement rather than to new
 territory.
+
+## Round 2
+
+### D8 -- The problem is a regression, not a documentation defect (tier 3, confirmed)
+
+**Question.** Round 1 framed this as a false signal: a document making a claim
+it cannot keep. Is that the right characterisation?
+
+**Evidence.** A project-scope `bypassPermissions` does not fall through to the
+layer below. It wins the scope merge and is then downgraded to `default`,
+measured on 2.1.267 across a matrix of user-scope values
+(lead-restrictive-mode-probe). A developer whose own settings say `acceptEdits`
+gets `default` in every niwa instance. The written value therefore changes
+behavior -- in the restrictive direction -- rather than doing nothing.
+
+**Decision.** Reframe. The misleading document is the visible half; the
+suppressed user posture is the half that costs something. Any fix scoped to
+honesty alone is insufficient, and this raises the priority of the work.
+
+### D9 -- `niwa watch`'s posture is sound and stays untouched (tier 2, confirmed)
+
+**Question.** Round 1 flagged `niwa watch` as a possible second instance of the
+same bug, since it writes `defaultMode: "default"` into the same file.
+
+**Evidence.** Restrictive values are honored from project scope, measured both
+from the headless init event and behaviorally, including a project-scope
+`"default"` pulling a user-scope `acceptEdits` down to prompting with the write
+actually denied (lead-restrictive-mode-probe). `VerifyReviewSettings` guards
+something live.
+
+**Decision.** Watch's ask posture is correct and out of scope. Its hard-deny
+posture's *comment* is still wrong -- it claims to inherit a bypass that never
+arrives -- but the resulting session is more restrictive than the comment
+assumes, so this is a documentation defect rather than a security one. Record
+it; do not fix it here.
+
+### D10 -- The `--settings` slot has a phantom occupant (tier 3, confirmed)
+
+**Question.** The brief presented the single `--settings` slot as a constraint
+to design around, with remote control holding it and two recorded declines
+against passing the flag twice.
+
+**Evidence.** `--remote-control` composes with `--bg`, connects for real in a
+backgrounded session with no terminal attached, throws the same internal switch
+`remoteControlAtStartup` throws, and adds an optional session name the boolean
+setting cannot express (lead-settings-slot-probe). The repeated-flag hazard is
+real and worse than recorded -- last-wins, total, silent -- but the reason niwa
+is in the slot dissolves.
+
+**Decision.** Say so plainly rather than designing around scarcity. The slot is
+available to whoever needs it next, once niwa switches to the flag. That
+switch is a separate piece of work this exploration does not own, but the
+finding belongs in whatever artifact lands.
+
+### D11 -- Recommend stopping the round trip, not renaming the key (tier 3, confirmed)
+
+**Question.** Round 1 left two live candidates: rename the key into niwa's
+existing `keepAliveOnDispatch` family, or stop reading the materialized output
+and feed the derivation from the effective config directly.
+
+**Evidence.** The rename is one line plus a JSON tag and has in-repo precedent
+twice over, but it preserves the round trip and answers only the honesty
+complaint -- which D8 established is the smaller half of the problem. The
+effective, vault-resolved config is already computed inside the same
+`provisionInstanceFunc` call and discarded, so surfacing it through
+`provisionResult` needs no re-resolve and follows the pattern `pipelineResult`
+already uses for five other outputs (lead-instance-metadata-home). Every
+external precedent found resolves this class of problem by recomputing from the
+generator's own inputs rather than round-tripping through a foreign schema
+(lead-prior-art-inert-keys). It also disposes of the `"ask"` -> `askPermissions`
+defect without a separate fix.
+
+**Decision.** Recommend the structural fix. Note that the two are not exclusive
+-- the materializer must stop writing the permissive value regardless, and that
+half is the one-line change -- so a plan can sequence the write-side fix first
+and the read-side fix second.
+
+### D12 -- Crystallize rather than run a third round (tier 2, confirmed)
+
+**Question.** The scope file allows three rounds. Is a third warranted?
+
+**Evidence.** Every gap remaining is either not load-bearing (managed-scope
+behavior, which niwa never writes), not answerable without installing old
+releases (the exact version boundary, where release notes already give a
+citable answer), or a mechanism question whose observable outcome is already
+settled (merged-then-sanitized versus sanitized-at-parse). No remaining gap
+changes the recommendation.
+
+**Decision.** Crystallize.
