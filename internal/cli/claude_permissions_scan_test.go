@@ -25,7 +25,7 @@ import (
 // resolution) or a copy from earlier state fails it.
 func TestClaudePermissionsHasOneReader(t *testing.T) {
 	type site struct{ file, fn, detail string }
-	var reads, writes []site
+	var reads, writes, derives []site
 
 	internalRoot := ".."
 	err := filepath.WalkDir(internalRoot, func(path string, d fs.DirEntry, err error) error {
@@ -57,6 +57,10 @@ func TestClaudePermissionsHasOneReader(t *testing.T) {
 					if x.Sel.Name == "ClaudePermissions" {
 						reads = append(reads, site{rel, fn, types.ExprString(x)})
 					}
+				case *ast.Ident:
+					if x.Name == "derivePermissionMode" {
+						derives = append(derives, site{rel, fn, x.Name})
+					}
 				case *ast.KeyValueExpr:
 					if k, ok := x.Key.(*ast.Ident); ok && k.Name == "ClaudePermissions" {
 						writes = append(writes, site{rel, fn, types.ExprString(x.Value)})
@@ -87,6 +91,15 @@ func TestClaudePermissionsHasOneReader(t *testing.T) {
 	for _, r := range reads {
 		if strings.HasPrefix(r.file, "watch/") || r.file == "cli/watch.go" {
 			t.Errorf("niwa watch must never read ClaudePermissions; found %s in %s (%s)", r.detail, r.file, r.fn)
+		}
+	}
+
+	// A watch launch must never get a derived mode, whether by reading the
+	// recorded posture or by calling the derivation on something it read
+	// elsewhere and appending the result after a watch launch helper returns.
+	for _, d := range derives {
+		if d.file != "cli/dispatch.go" {
+			t.Errorf("derivePermissionMode may only be used by dispatch; found it in %s (%s)", d.file, d.fn)
 		}
 	}
 

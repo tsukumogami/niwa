@@ -173,9 +173,8 @@ func writeMinimalInstanceState(dir string) error {
 		SchemaVersion: workspace.SchemaVersion,
 		InstanceName:  filepath.Base(dir),
 		Root:          dir,
-		// Stamped as Create stamps them: a zero time reads as an instance
-		// created long ago, which the opportunistic reaper a concurrent
-		// dispatch runs would reclaim before its mapping lands.
+		// Stamped as Create stamps them, so the fake reads like a real
+		// instance's state to anything that reports on it.
 		Created:     time.Now(),
 		LastApplied: time.Now(),
 	})

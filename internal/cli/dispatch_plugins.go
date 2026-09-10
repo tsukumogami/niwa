@@ -215,8 +215,9 @@ type marketplaceSource struct {
 // readInstanceSettings reads the dispatched instance's Claude settings from
 // <instancePath>/.claude/settings.json. The instance root receives settings.json
 // (RootSettingsMaterializer writes it there) -- the settings.local.json variant
-// is for per-repo dirs, never the root, so it is not consulted here. Returns an error when the file is absent or not valid JSON;
-// callers treat any error as "nothing to pre-warm."
+// is for per-repo dirs, never the root, so it is not consulted here. Returns an
+// error when the file is absent or not valid JSON; callers treat any error as
+// "nothing to pre-warm."
 func readInstanceSettings(instancePath string) (*instanceSettings, error) {
 	data, err := os.ReadFile(filepath.Join(instancePath, ".claude", "settings.json"))
 	if err != nil {
