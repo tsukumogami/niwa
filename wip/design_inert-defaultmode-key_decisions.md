@@ -24,3 +24,39 @@ the options for one don't constrain the options for the other.
 
 **Decision.** Three questions (1 critical, 2 standard), within the 1-5 band,
 proceeding normally.
+
+| G3.1 | wip/design_inert-defaultmode-key_coordination.json | 2 | confirmed | Do any decision's assumptions conflict with a peer's choice? |
+
+## G3.1 -- Cross-validation passed with no conflicts
+
+**Evidence.** Decision 1 assumes the instance-root posture is available as a
+resolved value during materialization, and that `InstanceState` takes an
+additive `omitempty` field without migration. Both hold:
+`RootSettingsMaterializer.Materialize` resolves it through
+`MergeInstanceOverrides(cfg)`, and Create/Apply already persist
+`pipelineResult` fields (`shadows`, `trustKeys`) into `InstanceState`.
+Decision 2 assumes one builder covers all four documents, and
+`writeRootSettings` does use `buildSettingsDoc`. Decision 3's tamper test
+reads the posture through `LoadState` on a real materialization, which is
+Decision 1's read path. No choice contradicts a peer's assumption.
+
+**Decision.** `cross_validation: passed`, no restarts. One constraint carried
+into the architecture: the value persisted for Decision 1 and the value
+`buildSettingsDoc` writes at the instance root come from one shared resolver
+over `MergeInstanceOverrides(effectiveCfg)`, so the two can't diverge.
+
+| G4.1 | docs/designs/DESIGN-inert-defaultmode-key.md | 2 | confirmed | Implicit: keep the derived mode in a package global, or pass it to the builder? |
+
+## G4.1 -- Implicit decision surfaced in Phase 4: the builder takes the permission mode as a parameter
+
+**Evidence.** Writing the Solution Architecture exposed a choice the prose
+would otherwise have asserted. `runDispatch` writes the derived value into
+the package-level `dispatchPermissionMode`, and `buildDispatchPassthrough`
+reads it implicitly. `niwa watch` calls the same builder and gets an empty
+value only because nothing in a watch process sets the variable. The PRD
+requires that watch never carry a derived flag.
+
+**Decision.** Pass the mode as an explicit parameter; both watch call sites
+pass `""`. Recorded as Decision 4 in Considered Options. Under `--auto` this
+is recorded rather than asked; it costs three call-site edits and turns
+watch's safety into a property a test can pin.

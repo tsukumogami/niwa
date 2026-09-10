@@ -4,22 +4,28 @@
     {
       "id": 1,
       "question": "Where does the dispatch derivation get the instance's effective permission posture from, so that no generated settings document can grant or withhold bypass, every dispatch form carries the flag, and niwa watch's launches never do?",
-      "status": "pending",
-      "complexity": "critical"
+      "status": "complete",
+      "complexity": "critical",
+      "chosen": "Persist the resolved instance posture in InstanceState at materialization; dispatch reads it from there",
+      "report": "wip/design_inert-defaultmode-key_decision_1_report.md"
     },
     {
       "id": 2,
       "question": "How does the materializer express bypass as no permissions.defaultMode and ask as \"default\", and where is an invalid declared value rejected so every level, including the personal overlay, fails with an error naming the accepted values?",
-      "status": "pending",
-      "complexity": "standard"
+      "status": "complete",
+      "complexity": "standard",
+      "chosen": "Replace the mapping table with an explicit function returning (mode, write, error); keep materialize-time validation with an error naming the accepted values",
+      "report": "wip/design_inert-defaultmode-key_decision_2_report.md"
     },
     {
       "id": 3,
       "question": "How are the S1-S9 document matrix and the declaration-driven dispatch tests divided between unit and functional layers so each requirement has a test that can fail?",
-      "status": "pending",
-      "complexity": "standard"
+      "status": "complete",
+      "complexity": "standard",
+      "chosen": "Divide by observable: argv and the document matrix functionally, byte-level and single-function checks as Go tests",
+      "report": "wip/design_inert-defaultmode-key_decision_3_report.md"
     }
   ],
-  "cross_validation": "pending",
+  "cross_validation": "passed",
   "round": 0
 }
