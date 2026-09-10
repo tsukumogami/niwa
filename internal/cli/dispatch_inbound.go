@@ -15,15 +15,16 @@ import (
 var dispatchAcceptSessionMessages *bool
 
 // acceptSessionMessagesFlagName and acceptSessionMessagesFlagUsage register the
-// flag. The usage text is quoted by the guide, so change it there too.
+// flag. The usage text is the design's wording and a test pins it, so a change
+// to it is a change to the command's documented interface.
 const (
 	acceptSessionMessagesFlagName  = "accept-session-messages"
 	acceptSessionMessagesFlagUsage = "accept messages from other Claude Code sessions without an approval prompt; overrides the [global] accept_session_messages_on_dispatch machine setting in either direction"
 )
 
-// inboundGuideURL is the guide the audit line and the one-time explanation
-// point at. It uses the blob/main form niwa already prints for its other
-// guides.
+// inboundGuideURL is the guide the audit line points at, in the blob/main form
+// niwa already prints for its other guides. It is package-level so any other
+// message about this behavior can point at the same page.
 const inboundGuideURL = "https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md"
 
 // crossSessionInboundAccept is the value config.CrossSessionInboundKey takes in
@@ -38,8 +39,10 @@ const (
 	inboundSourceMachine = "machine setting"
 )
 
-// The stderr lines this behavior prints. Functional scenarios and the guide
-// quote them verbatim.
+// The stderr lines this behavior prints. Each is a whole line including its
+// "niwa dispatch: " prefix and without a trailing newline, which the caller
+// adds. The wording is the design's and TestInboundLinesExactText pins it, so a
+// rewording is a change to the command's output, not a refactor.
 const (
 	// inboundAuditFormat is printed once the session mapping is durable, when
 	// the behavior took effect. The first verb is the source detail
@@ -99,22 +102,15 @@ func resolveDispatchInboundAcceptance(flag *bool, global config.GlobalSettings) 
 	return inboundResolution{}
 }
 
-// inboundOutcomeLine returns the line runDispatch prints once the session
-// mapping is durable: the audit line when the behavior took effect
-// (applied), the override line when the flag turned off a machine setting
-// for an agent that could have received it, and "" otherwise. A dispatch the
-// agent could not receive the behavior for gets no override line, because
-// nothing was overridden there.
-func inboundOutcomeLine(r inboundResolution, applied, deliverable bool) string {
-	switch {
-	case applied:
-		detail := inboundSourceFlag
-		if r.source == inboundSourceMachine {
-			detail = inboundMachineSourceDetail
-		}
-		return fmt.Sprintf(inboundAuditFormat, detail, inboundGuideURL)
-	case r.overrodeMachineOn && deliverable:
-		return inboundOverrideLine
+// inboundAuditLine renders the audit line for the input that turned the
+// behavior on. source is an inboundResolution.source value; the machine
+// setting is spelled out by its key so a developer who passed no flag can find
+// what turned it on. Whether to print it is runDispatch's decision, made from
+// inboundApplied alone.
+func inboundAuditLine(source string) string {
+	detail := inboundSourceFlag
+	if source == inboundSourceMachine {
+		detail = inboundMachineSourceDetail
 	}
-	return ""
+	return fmt.Sprintf(inboundAuditFormat, detail, inboundGuideURL)
 }

@@ -117,8 +117,8 @@ func TestResolveDispatchInboundAcceptance(t *testing.T) {
 }
 
 // TestDispatchCmd_HasAcceptSessionMessagesFlag pins the registration: the flag
-// exists, its bare form means true, and its help text is the one the guide
-// quotes.
+// exists, its bare form means true, its help text is the design's wording, and
+// it writes the variable runDispatch reads.
 func TestDispatchCmd_HasAcceptSessionMessagesFlag(t *testing.T) {
 	flag := dispatchCmd.Flags().Lookup("accept-session-messages")
 	if flag == nil {
@@ -164,8 +164,10 @@ func TestAcceptSessionMessagesFlagParsing(t *testing.T) {
 			switch {
 			case tt.want == nil && got != nil:
 				t.Errorf("parse %v = %v, want unset", tt.args, *got)
-			case tt.want != nil && (got == nil || *got != *tt.want):
-				t.Errorf("parse %v = %v, want %v", tt.args, got, *tt.want)
+			case tt.want != nil && got == nil:
+				t.Errorf("parse %v left the flag unset, want %v", tt.args, *tt.want)
+			case tt.want != nil && *got != *tt.want:
+				t.Errorf("parse %v = %v, want %v", tt.args, *got, *tt.want)
 			}
 		})
 	}
@@ -179,37 +181,20 @@ func TestInboundLinesExactText(t *testing.T) {
 	if inboundGuideURL != url {
 		t.Errorf("inboundGuideURL = %q, want %q", inboundGuideURL, url)
 	}
-	machine := inboundOutcomeLine(inboundResolution{on: true, source: inboundSourceMachine}, true, true)
+	machine := inboundAuditLine(inboundSourceMachine)
 	if want := "niwa dispatch: this worker accepts messages from other sessions without asking (source: machine setting accept_session_messages_on_dispatch); see " + url; machine != want {
 		t.Errorf("machine audit line = %q, want %q", machine, want)
 	}
-	flag := inboundOutcomeLine(inboundResolution{on: true, source: inboundSourceFlag}, true, true)
+	flag := inboundAuditLine(inboundSourceFlag)
 	if want := "niwa dispatch: this worker accepts messages from other sessions without asking (source: --accept-session-messages); see " + url; flag != want {
 		t.Errorf("flag audit line = %q, want %q", flag, want)
 	}
-	override := inboundOutcomeLine(inboundResolution{source: inboundSourceFlag, overrodeMachineOn: true}, false, true)
-	if want := "niwa dispatch: this worker keeps Claude Code's default for messages from other sessions (--accept-session-messages=false overrides the machine setting)"; override != want {
-		t.Errorf("override line = %q, want %q", override, want)
+	if want := "niwa dispatch: this worker keeps Claude Code's default for messages from other sessions (--accept-session-messages=false overrides the machine setting)"; inboundOverrideLine != want {
+		t.Errorf("override line = %q, want %q", inboundOverrideLine, want)
 	}
 	warning := fmt.Sprintf(inboundUndeliverableFormat, "some-agent", "Some reason.")
 	if want := `niwa dispatch: --accept-session-messages does not apply to the "some-agent" agent and was ignored. Some reason.`; warning != want {
 		t.Errorf("warning = %q, want %q", warning, want)
-	}
-}
-
-func TestInboundOutcomeLine_NoOverrideWhereNothingWasOverridden(t *testing.T) {
-	// Overrode a machine setting, but the agent could not have received the
-	// behavior anyway: no override line.
-	if got := inboundOutcomeLine(inboundResolution{source: inboundSourceFlag, overrodeMachineOn: true}, false, false); got != "" {
-		t.Errorf("non-deliverable override printed %q, want nothing", got)
-	}
-	// Explicit false with no machine setting: nothing was overridden.
-	if got := inboundOutcomeLine(inboundResolution{source: inboundSourceFlag}, false, true); got != "" {
-		t.Errorf("=false with no machine setting printed %q, want nothing", got)
-	}
-	// Off with no source at all.
-	if got := inboundOutcomeLine(inboundResolution{}, false, true); got != "" {
-		t.Errorf("unset printed %q, want nothing", got)
 	}
 }
 
@@ -228,8 +213,9 @@ func TestDispatch_Inbound_PrecedenceMatrix(t *testing.T) {
 		{"key absent, no flag", "", nil, false, "", false},
 		{"key false, no flag", hostInboundOff, nil, false, "", false},
 		{"key true, no flag", hostInboundOn, nil, true, auditLineFor(inboundMachineSourceDetail), false},
-		{"key absent, bare flag", "", inboundFlag(true), true, auditLineFor(inboundSourceFlag), false},
-		{"key absent, =true", "", inboundFlag(true), true, auditLineFor(inboundSourceFlag), false},
+		// The bare flag and =true both parse to true; TestAcceptSessionMessagesFlagParsing
+		// pins that, so one row covers both spellings here.
+		{"key absent, flag true", "", inboundFlag(true), true, auditLineFor(inboundSourceFlag), false},
 		{"key false, flag", hostInboundOff, inboundFlag(true), true, auditLineFor(inboundSourceFlag), false},
 		{"key true, =true", hostInboundOn, inboundFlag(true), true, auditLineFor(inboundSourceFlag), false},
 		{"key true, =false", hostInboundOn, inboundFlag(false), false, "", true},
@@ -262,15 +248,14 @@ func TestDispatch_Inbound_PrecedenceMatrix(t *testing.T) {
 				t.Fatalf("an argv element mentions %s although the behavior is off: %v", config.CrossSessionInboundKey, pass)
 			}
 
-			if tt.wantAudit != "" {
-				if n := strings.Count(stderr, tt.wantAudit+"\n"); n != 1 {
-					t.Fatalf("audit line %q appears %d times, want exactly once; stderr:\n%s", tt.wantAudit, n, stderr)
+			// Counting the marker rather than the full line also catches a second
+			// audit line printed with the other source.
+			if n := strings.Count(stderr, auditMarker); tt.wantAudit != "" {
+				if n != 1 || !strings.Contains(stderr, tt.wantAudit+"\n") {
+					t.Fatalf("want exactly one audit line %q, found %d; stderr:\n%s", tt.wantAudit, n, stderr)
 				}
-			} else if strings.Contains(stderr, auditMarker) {
+			} else if n != 0 {
 				t.Fatalf("no audit line expected; stderr:\n%s", stderr)
-			}
-			if n := strings.Count(stderr, auditMarker); tt.wantAudit != "" && n != 1 {
-				t.Fatalf("audit text appears %d times, want once; stderr:\n%s", n, stderr)
 			}
 
 			if tt.wantOverride {
@@ -398,10 +383,10 @@ func TestDispatch_Inbound_UnreadableHostConfig(t *testing.T) {
 			}
 		}},
 		{"invalid TOML", func(t *testing.T, niwaDir string) {
-			writeFile(t, filepath.Join(niwaDir, "config.toml"), "[global\nremote_control_on_dispatch = true\naccept_session_messages_on_dispatch = true\n")
+			writeInboundFixture(t, filepath.Join(niwaDir, "config.toml"), "[global\nremote_control_on_dispatch = true\naccept_session_messages_on_dispatch = true\n")
 		}},
 		{"non-boolean value", func(t *testing.T, niwaDir string) {
-			writeFile(t, filepath.Join(niwaDir, "config.toml"), "[global]\nremote_control_on_dispatch = true\naccept_session_messages_on_dispatch = \"yes\"\n")
+			writeInboundFixture(t, filepath.Join(niwaDir, "config.toml"), "[global]\nremote_control_on_dispatch = true\naccept_session_messages_on_dispatch = \"yes\"\n")
 		}},
 	}
 	for _, fx := range fixtures {
@@ -449,7 +434,8 @@ func TestDispatch_Inbound_UnreadableHostConfig(t *testing.T) {
 	}
 }
 
-func writeFile(t *testing.T, path, body string) {
+// writeInboundFixture writes a fixture file for the tests in this file.
+func writeInboundFixture(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -659,7 +645,7 @@ func TestDispatch_Inbound_MappingWriteFailurePrintsNoLine(t *testing.T) {
 				if err := os.MkdirAll(filepath.Dir(store), 0o755); err != nil {
 					t.Fatal(err)
 				}
-				writeFile(t, store, "")
+				writeInboundFixture(t, store, "")
 			},
 			check: func(t *testing.T, root string) {
 				info, err := os.Stat(filepath.Join(root, workspace.StateDir, "sessions"))

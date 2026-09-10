@@ -305,11 +305,12 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	workspaceRoot := class.WorkspaceRoot
 
 	// (2a) Load the host global config ONCE, best-effort, and reuse it below.
-	// It carries two things this command reads: the machine-wide dispatch
-	// harness (broadest rung of the agent resolution just below) and the
-	// dispatch_model and remote-control defaults consumed after provisioning. A missing or
-	// unreadable config degrades to "none of those set", which is today's
-	// behavior for every one of them -- they are all opt-in defaults.
+	// This command reads the machine-wide dispatch harness from it (the
+	// broadest rung of the agent resolution just below) and, after
+	// provisioning, the dispatch defaults: dispatch_model, remote control,
+	// keep-alive, and accepting messages from other sessions. A missing or
+	// unreadable config degrades to "none of those set", which is the default
+	// for every one of them -- they are all opt-in.
 	gc, gcErr := config.LoadGlobalConfig()
 
 	// (2b) Resolve which agent this dispatch launches, from --harness,
@@ -571,13 +572,19 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// (9b-host) The host [global] settings as a value, zero when the config
 	// could not be loaded. Both the inbound resolution in (9c) and keep-alive in
 	// (9d) read it, so an unreadable or malformed config.toml counts as "no
-	// machine setting" for each of them while their flags still apply.
+	// machine setting" for each of them while their flags still apply. Remote
+	// control's block below still reads gc and gcErr directly; it has no flag,
+	// and an unreadable config means no injection whichever value it reads.
 	var hostGlobal config.GlobalSettings
 	if gcErr == nil && gc != nil {
 		hostGlobal = gc.Global
 	}
 
-	// (9c) Remote-control-on-dispatch default-fill. When the host preference
+	// (9c) The launch settings document, built from its contributors: remote
+	// control's default-fill first, then accepting messages from other
+	// sessions (below).
+	//
+	// Remote-control-on-dispatch default-fill: when the host preference
 	// (~/.config/niwa/config.toml [global].remote_control_on_dispatch) is on and
 	// the dispatched instance left remoteControlAtStartup unset, add the Claude
 	// Code Remote key to the launch settings document so the worker starts
@@ -629,10 +636,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// --accept-session-messages flag is resolved over the machine setting, and
 	// the declaration then says whether this agent can receive the behavior at
 	// all, in the shape remote control's gate uses. inboundApplied is the one
-	// record that the key went in, and anything that reports the outcome --
-	// the audit line after step (12) -- reads it rather than re-deriving it
-	// from the flag or the machine setting, so it cannot describe a worker
-	// launched differently. Only the flag earns a warning
+	// record that the key went in. The audit line after step (12) prints
+	// exactly when it is true, so it cannot claim a worker accepts messages
+	// when the document did not say so. Only the flag earns a warning
 	// when the agent cannot receive it; a machine setting asks for every
 	// dispatch, so it stays quiet on the ones it cannot reach.
 	inbound := resolveDispatchInboundAcceptance(dispatchAcceptSessionMessages, hostGlobal)
@@ -864,8 +870,14 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// returns before this line, so it never describes a worker that is not
 	// running under a durable mapping. It goes to stderr, ahead of step (13)'s
 	// stdout hints, which stay the same whether or not the behavior is on.
-	if line := inboundOutcomeLine(inbound, inboundApplied, inboundDeliverable); line != "" {
-		fmt.Fprintln(cmd.ErrOrStderr(), line)
+	// The override line is for a developer whose machine setting would have
+	// applied: an agent that could not receive the behavior gets none, because
+	// nothing was overridden there.
+	switch {
+	case inboundApplied:
+		fmt.Fprintln(cmd.ErrOrStderr(), inboundAuditLine(inbound.source))
+	case inbound.overrodeMachineOn && inboundDeliverable:
+		fmt.Fprintln(cmd.ErrOrStderr(), inboundOverrideLine)
 	}
 
 	// (13) Print the session id and the launched agent's own management hints.
