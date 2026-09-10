@@ -9,6 +9,7 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/secret"
 )
 
 func plainSetting(v string) config.MaybeSecret { return config.MaybeSecret{Plain: v} }
@@ -57,6 +58,35 @@ func TestInstancePermissionsPosture(t *testing.T) {
 			}
 			if tc.instance != nil {
 				cfg.Instance.Claude = &config.ClaudeOverride{Settings: tc.instance}
+			}
+			if got := instancePermissionsPosture(cfg); got != tc.want {
+				t.Errorf("instancePermissionsPosture() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestInstancePermissionsPostureSecretBacked checks that a vault-backed value
+// resolves by its revealed plaintext and that only a canonical literal comes
+// back, never the revealed string itself.
+func TestInstancePermissionsPostureSecretBacked(t *testing.T) {
+	tests := []struct {
+		plaintext string
+		want      string
+	}{
+		{plaintext: "bypass", want: "bypass"},
+		{plaintext: "ask", want: "ask"},
+		{plaintext: "bypassPermissions", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.plaintext, func(t *testing.T) {
+			cfg := &config.WorkspaceConfig{
+				Workspace: config.WorkspaceMeta{Name: "test"},
+				Claude: config.ClaudeConfig{Settings: config.SettingsConfig{
+					"permissions": config.MaybeSecret{
+						Secret: secret.New([]byte(tc.plaintext), secret.Origin{Key: "permissions"}),
+					},
+				}},
 			}
 			if got := instancePermissionsPosture(cfg); got != tc.want {
 				t.Errorf("instancePermissionsPosture() = %q, want %q", got, tc.want)

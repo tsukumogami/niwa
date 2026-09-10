@@ -152,10 +152,13 @@ type InstanceState struct {
 	//
 	// The instance pipeline recomputes it on every Create and Apply; it is
 	// never carried over from an earlier state file. Only `niwa dispatch`
-	// reads it, for the instance it just provisioned. A multi-instance
-	// workspace root's state file, written outside the pipeline, leaves it
-	// empty. omitempty keeps the field invisible to old binaries reading
-	// new state files.
+	// reads it, for the instance it just provisioned. niwa init and
+	// saveWorkspaceRootDisclosures write a multi-instance workspace root's
+	// state file outside the pipeline and never set it; a root that was
+	// applied as a single-instance layout before gaining child instances may
+	// still carry the value that apply recorded, and nothing reads it there.
+	// omitempty keeps the field invisible to old binaries reading new state
+	// files.
 	ClaudePermissions string `json:"claude_permissions,omitempty"`
 }
 
