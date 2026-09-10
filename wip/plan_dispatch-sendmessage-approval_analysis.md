@@ -4,7 +4,7 @@
 Path: docs/designs/DESIGN-dispatch-sendmessage-approval.md
 Status: Planned (auto-transitioned from Accepted under the /scope parent sentinel)
 Input Type: design
-review_rounds: 0
+review_rounds: 1
 
 ## Scope Summary
 Let `niwa dispatch` launch Claude workers that accept messages from other Claude

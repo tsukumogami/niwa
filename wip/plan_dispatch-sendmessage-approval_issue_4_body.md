@@ -1,11 +1,11 @@
 ---
 complexity: critical
-complexity_rationale: This is the change that makes dispatched workers accept messages from other sessions without an approval prompt, so a wrong precedence, eligibility, or rendering decision silently removes a human checkpoint on bypass-mode workers.
+complexity_rationale: This is the change that makes dispatched workers accept messages from other sessions without an approval prompt, so a wrong precedence, eligibility, ordering, or rendering decision silently removes a human checkpoint on bypass-mode workers, or claims that checkpoint is gone for a dispatch that rolled back.
 ---
 
 ## Goal
 
-Add the tri-state `--accept-session-messages` flag and the `DispatchInboundAcceptance` capability row. Resolve the flag over the `[global] accept_session_messages_on_dispatch` machine key into one `inboundApplied` boolean, add `crossSessionInbound: "accept"` to the single launch `--settings` document when that boolean is true, and print the audit, override, and warning lines on stderr.
+Add the tri-state `--accept-session-messages` flag and the `DispatchInboundAcceptance` capability row. Resolve the flag over the `[global] accept_session_messages_on_dispatch` machine key into one `inboundApplied` boolean, add `crossSessionInbound: "accept"` to the single launch `--settings` document when that boolean is true, and print the audit, override, and warning lines on stderr. The audit and override lines print only once the session mapping is durable.
 
 ## Context
 
@@ -15,7 +15,9 @@ Claude Code holds a message from another session whenever the two sessions run i
 
 Resolution order is the flag, then the machine setting, then off (PRD R1-R3). Eligibility goes through a new capability row rather than an agent name, because `internal/cli/dispatch_layout_test.go` fails on any agent constant or whole-literal agent name in the dispatch path. Claude declares the row implemented. Codex declares it unavailable, because it has no setting for accepting messages from other sessions, and its generated gap list gains that entry. Adding a row moves fixed counts in several tests and documents, and `internal/agentplan/declaration.go` requires a row to flip in the same change that delivers it ("never before"). So the row, the count updates, the regenerated gap list, and the capability-contract PRD amendment all land in the same commit as the delivery.
 
-The resolution lives only in `runDispatch`. `niwa watch` calls `dispatchLaunch` directly and must never receive the behavior (R14), so nothing moves into `dispatchLaunch`.
+Ordering matters as much as the launch document does (design D6). `runDispatch` can fail after a successful launch: at step 10 when capture can't find the worker's session record, and at step 11 when `workspace.WriteSessionMapping` fails. Either way, the deferred rollback destroys the instance. Claude's runner backgrounds itself, so both failures return an error for a Claude dispatch. The audit and override lines belong after step 12, so none of these failure paths may print them.
+
+The resolution lives only in `runDispatch`. `niwa watch` calls `dispatchLaunch` directly from `internal/cli/watch.go` (the resume launch and the fresh review launch) without writing a mapping, and it must never receive the behavior (R14, D11). The hazard is an implementation that adds the key inside `realDispatchLaunch` or `buildLaunchArgs` (`internal/cli/dispatch_launcher.go`), for example by reading the package-level flag variable. That would give every watch launch the key, while any test that stubs `dispatchLaunch` still passes. This issue must not add that read. <<ISSUE:7>> owns the test that observes the argv Claude actually receives at both watch sites.
 
 ## Acceptance Criteria
 
@@ -45,12 +47,20 @@ Delivery and the launch document:
 
 Stderr lines:
 
-- [ ] When `inboundApplied` is true, the line written after step 12 (mapping written, rollback disarmed) and before step 13's stdout hints is exactly `niwa dispatch: this worker accepts messages from other sessions without asking (source: machine setting accept_session_messages_on_dispatch); see <inboundGuideURL>` for the machine source. With the flag as the source, the parenthetical reads `(source: --accept-session-messages)`. It appears exactly once, and never when `inboundApplied` is false (R7).
+- [ ] When `inboundApplied` is true, the line written after step 12 (mapping written, rollback disarmed) and before step 13's stdout hints is exactly `niwa dispatch: this worker accepts messages from other sessions without asking (source: machine setting accept_session_messages_on_dispatch); see <inboundGuideURL>` for the machine source. With the flag as the source, the parenthetical reads `(source: --accept-session-messages)`. It appears exactly once, and never when `inboundApplied` is false (R7). The failure-path cases below are what pin it after step 12.
 - [ ] When the resolution's `overrodeMachineOn` is true and the behavior was deliverable, the line at that same point is exactly `niwa dispatch: this worker keeps Claude Code's default for messages from other sessions (--accept-session-messages=false overrides the machine setting)`. No override line prints for the key absent with `=false`, for the key `true` with `=true` (which prints the audit line only), or for a non-deliverable agent (R8).
 - [ ] When the flag asked for the behavior (flag true) and it isn't deliverable, step 9c prints `niwa dispatch: --accept-session-messages does not apply to the %q agent and was ignored. %s` with the agent name and the declaration's reason. For a Codex dispatch that line names `"codex"`, the launch carries no `crossSessionInbound`, and no audit line prints. When only the machine key asked for a Codex dispatch, nothing prints, with or without `--accept-session-messages=false` (R13).
-- [ ] When the stubbed `dispatchLaunch` returns an error with the behavior on, `runDispatch` returns before step 11, and stderr carries no audit line and no override line.
+
+Failure paths print neither line (D6). Each case below runs a Claude dispatch through `runDispatch` with `installDispatchFakes`, once with the behavior on (machine key `true` and no flag, and again with `--accept-session-messages`), and once with the machine key `true` and `--accept-session-messages=false` (the override case):
+
+- [ ] Launch failure: the stubbed `dispatchLaunch` returns an error. `runDispatch` returns an error, the capture stub is never called, and stderr contains neither `this worker accepts messages from other sessions` nor `this worker keeps Claude Code's default`.
+- [ ] Capture failure: `dispatchLaunch` succeeds and the `dispatchCapture` stub returns an error. `runDispatch` returns an error wrapping `capturing dispatch session id`, stderr contains neither the audit line nor the override line, the rollback's `destroyInstanceFunc` fake is called, and no file exists under the workspace's `.niwa/sessions/` directory.
+- [ ] Mapping-write failure: `dispatchLaunch` and capture succeed, but `workspace.WriteSessionMapping` fails. Trigger it by having the capture stub return a session id that isn't a lowercase UUID, which `WriteSessionMapping` rejects before writing anything. As a second fixture, create `.niwa/sessions` as a regular file. `runDispatch` returns an error wrapping `writing dispatch session mapping`, stderr contains neither the audit line nor the override line, the rollback's destroy fake is called, and no session mapping file exists, so nothing records that the worker accepts messages from other sessions.
+
+Output and scope:
+
 - [ ] Stdout is byte-identical between a dispatch with the behavior on and the same dispatch with it off, apart from the instance path and session id (R16). The printed resume commands stay `claude attach <id>`.
-- [ ] Nothing the resolution adds reaches `dispatchLaunch`'s own logic or any `niwa watch` launch path: the new code is confined to `runDispatch` and `dispatch_inbound.go`.
+- [ ] The `niwa watch` launches never carry the key (R14, D11). This issue adds no read of the new flag variable, of `AcceptSessionMessagesOnDispatch`, or of `config.CrossSessionInboundKey` anywhere `realDispatchLaunch`, `buildLaunchArgs`, or `internal/cli/watch.go` would reach it. The launch document still comes from the settings map handed to `dispatchLaunch` in `launchRequest`, and no package-level state feeds it. The test that checks this outcome belongs to <<ISSUE:7>>. It keeps the real `dispatchLaunch`, and with the machine key `true` and the dispatch flag variable set on, it observes the argv Claude would actually receive at both watch launch sites, below `buildLaunchArgs`, and finds no element containing `crossSessionInbound`. This issue's implementation must be shaped so that test passes without changes to it.
 
 Downstream deliverables:
 
@@ -69,4 +79,4 @@ Blocked by <<ISSUE:2>>, <<ISSUE:3>>
 
 ## Downstream Dependencies
 
-<<ISSUE:5>> writes `AcceptsSessionMessages: inboundApplied` into the step 11 mapping literal and reports it in `niwa list`, so it needs the boolean computed before the mapping write and not recomputed later. <<ISSUE:6>> adds `showInboundExplanation` and calls it either right after the audit line (when no attach follows) or after `dispatchAttach` returns. It needs a clear call site next to the audit line, `inboundApplied` available at step 14, and `inboundGuideURL` defined once in `dispatch_inbound.go`. <<ISSUE:7>> drives the flag and the machine key end to end through the fake `claude` and asserts the recorded argv and the stderr strings verbatim, so the strings must be the exact Key Interfaces text. <<ISSUE:8>> quotes the flag help and the audit, override, and warning lines in the user guide, and checks `niwa dispatch --help` and completion for the flag.
+<<ISSUE:5>> writes `AcceptsSessionMessages: inboundApplied` into the step 11 mapping literal and reports it in `niwa list`, so it needs the boolean computed before the mapping write and not recomputed later. The failure-path tests here, which find no mapping after a capture or mapping-write failure, are what keep a `true` record from outliving a rolled-back dispatch. <<ISSUE:6>> adds `showInboundExplanation` and calls it either right after the audit line (when no attach follows) or after `dispatchAttach` returns. It needs a clear call site next to the audit line, `inboundApplied` available at step 14, and `inboundGuideURL` defined once in `dispatch_inbound.go`. <<ISSUE:7>> drives the flag and the machine key end to end through the fake `claude` and asserts the recorded argv and the stderr strings verbatim, so the strings must be the exact Key Interfaces text. It also owns the watch-site test that confirms this issue kept the key out of `dispatchLaunch` and `buildLaunchArgs`. <<ISSUE:8>> quotes the flag help and the audit, override, and warning lines in the user guide, and checks `niwa dispatch --help` and completion for the flag.

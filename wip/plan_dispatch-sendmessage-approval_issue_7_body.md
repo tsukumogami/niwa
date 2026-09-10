@@ -1,11 +1,11 @@
 ---
 complexity: testable
-complexity_rationale: The change is test code plus at most small behavior-preserving seams in the watch launch path, but it's the end-to-end guard for a security-relevant launch setting and has to assert exact argv, stderr, record, and marker outcomes across terminal and non-terminal runs.
+complexity_rationale: The change is test code plus at most small behavior-preserving seams in the watch launch path, but it's the end-to-end guard for a security-relevant launch setting. It has to assert exact argv, stderr, record, and marker outcomes across terminal, non-terminal, and parallel runs, and observe the argv Claude actually receives from both watch launch sites.
 ---
 
 ## Goal
 
-Cover `niwa dispatch --accept-session-messages` and the `[global] accept_session_messages_on_dispatch` machine setting end to end. That means `@critical` functional scenarios for every case in the PRD's functional-coverage requirement, scenarios for the configuration sources that must not turn the behavior on, for the Codex warning, and for a prompt beginning with `--settings=`, plus a unit test that shows neither `niwa watch` launch site ever carries `crossSessionInbound`.
+Cover `niwa dispatch --accept-session-messages` and the `[global] accept_session_messages_on_dispatch` machine setting end to end. That means `@critical` functional scenarios for every case in the PRD's functional-coverage requirement, including four parallel dispatches from a terminal. It also means scenarios for the configuration sources that must not turn the behavior on, for the Codex warning, and for a prompt beginning with `--settings=`, plus a unit test that shows the argv Claude receives from either `niwa watch` launch site never carries `crossSessionInbound`.
 
 ## Context
 
@@ -14,14 +14,15 @@ Earlier issues in this plan add the behavior. <<ISSUE:4>> adds the flag, the res
 Facts about the existing harness that the scenarios build on:
 
 - The dispatch suite's fake `claude` (`dispatchFakeClaudeScript` in `test/functional/dispatch_steps_test.go`) records its `--bg` argv as one space-joined line to `$HOME/dispatch-launch-argv`, which `launchedClaudeArgv` in `keepalive_steps_test.go` and the `the launched claude was invoked with "..."` step read. A space-joined line can't tell the `--settings` element apart from a prompt that also begins with `--settings=`, so the new steps need an element-preserving record.
+- The fake's session id comes from `FAKE_CLAUDE_SESSION_ID` or a fixed default, and it writes the job state to `$HOME/.claude/jobs/<short id>/state.json`. Dispatch finds its session by correlating job-state `cwd` with the instance directory (`captureSessionID` in `internal/cli/dispatch_capture.go`). Four concurrent fakes sharing one id would overwrite one job-state file, and all but one capture would miss, so a parallel scenario needs a distinct id per invocation.
 - The fake `codex` records to `$HOME/dispatch-codex-argv`, read by the `the codex launch argv (does not) contain "..."` steps.
 - `buildEnv` in `steps_test.go` sets `HOME` to the scenario home and `XDG_CONFIG_HOME` to `$HOME/.config`, so niwa's machine configuration is `$HOME/.config/niwa/config.toml` and the marker lands at `$HOME/.config/niwa/accept-session-messages-notice`. `niwa init` writes the registry into that same `config.toml`.
-- The `I run "..." under a pty with input "..."` step (`iRunUnderPTYWithInput` in `steps_init_bootstrap_test.go`) runs the command under util-linux `script`, which merges stderr into stdout, and copies the merged transcript into both `s.stdout` and `s.stderr`. Terminal scenarios therefore run dispatch with `--detach`, so no `claude attach` takes the terminal, and assert on the merged transcript.
+- The `I run "..." under a pty with input "..."` step (`iRunUnderPTYWithInput` in `steps_init_bootstrap_test.go`) runs one command under util-linux `script`, which merges stderr into stdout, and copies the merged transcript into both `s.stdout` and `s.stderr`. It runs one command at a time and keeps one transcript. Terminal scenarios therefore run dispatch with `--detach`, so no `claude attach` takes the terminal, and assert on the merged transcript.
 - The existing `the output contains "..."` and `the error output contains "..."` steps take a pattern that can't contain a double quote. The explanation and the warning contain double quotes (`"Messages from your other sessions"`, `"crossSessionInbound": "accept"`, `the "codex" agent`), so verbatim assertions need a docstring step.
 - No functional step skips a scenario when tests run as root today. godog v0.15.1 supports `godog.ErrSkip`.
-- No unit test drives `stageReview` or `continueReview` in `internal/cli/watch.go` today. Both call `dispatchLaunch` (the package variable in `dispatch_launcher.go`) with a passthrough from `buildDispatchPassthrough`, at about lines 844 and 581.
+- No functional harness runs `niwa watch`, and no unit test drives `stageReview` or `continueReview` in `internal/cli/watch.go` today. Both call `dispatchLaunch` (the package variable in `dispatch_launcher.go`) with a passthrough from `buildDispatchPassthrough`, at about lines 844 and 581. The argv Claude finally receives isn't the passthrough: `realDispatchLaunch` resolves the binary with `exec.LookPath`, builds the argv with `buildLaunchArgs` (about line 134), and, for Claude's backgrounded launch mode, runs it with `exec.CommandContext(...).Run()`. A test that replaces `dispatchLaunch` never sees what `realDispatchLaunch` or `buildLaunchArgs` add, so the watch test observes the argv at the process boundary instead. Existing package seams around the sites are `provisionInstanceFunc`, `destroyInstanceFunc`, `stopSessionFunc`, `watchCapture`, `ensureInstanceTrustedFunc`, and `removeInstanceTrustFunc`. `github.APIClient` takes a `BaseURL`, and `dispatch_promptsize_test.go` already calls `realDispatchLaunch` directly with a controlled `PATH`.
 
-Design: `docs/designs/DESIGN-dispatch-sendmessage-approval.md` (Implementation Approach > Phase 6, the scenario part; Solution Architecture > Components, the watch-site unit test; Key Interfaces for the fixed strings). Upstream requirements: `docs/prds/PRD-dispatch-sendmessage-approval.md` (R3, R13, R14, R18 as amended, and the Automated Acceptance Criteria).
+Design: `docs/designs/DESIGN-dispatch-sendmessage-approval.md` (Implementation Approach > Phase 6, the scenario part; Solution Architecture > Components, the watch-site unit test; Key Interfaces for the fixed strings). The design's component note says to stub `dispatchLaunch`. This issue's test goes one level lower, keeping the real launcher, for the reason above. Upstream requirements: `docs/prds/PRD-dispatch-sendmessage-approval.md` (R3, R13, R14, R18 as amended, and the Automated Acceptance Criteria).
 
 The fixed strings the scenarios assert come from the design's Key Interfaces section. The guide URL is `https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md`.
 
@@ -30,6 +31,7 @@ The fixed strings the scenarios assert come from the design's Key Interfaces sec
 ### Harness and step definitions
 
 - [ ] The fake `claude`'s `--bg` branch also writes each argv element NUL-separated (for example `printf '%s\0' "$@"`) to a new file `$HOME/dispatch-launch-argv-elements`. The existing `$HOME/dispatch-launch-argv` line and every step that reads it keep working unchanged.
+- [ ] The fake `claude` gains an opt-in mode, selected by a new step such as `a fake claude for dispatch that mints a new session per launch`, in which each `--bg` invocation generates its own valid UUID (for example from `/proc/sys/kernel/random/uuid`) instead of using `FAKE_CLAUDE_SESSION_ID` or the fixed default, and writes its job state under that id's short form. Four concurrent invocations produce four distinct session ids and four job-state files. Scenarios that don't select the mode behave as before.
 - [ ] New step definitions live in a new file `test/functional/session_message_steps_test.go`, registered from `initializeScenario` through a `registerSessionMessageSteps` function, the way `registerKeepAliveSteps` is. At least these steps exist, with these patterns or ones that differ only in wording:
   - `the niwa machine config global table contains:` (docstring). It adds the given lines to the `[global]` table of `$XDG_CONFIG_HOME/niwa/config.toml` as the scenario environment resolves it, creating the table if it's missing and keeping the registry entries `niwa init` wrote. It never produces a second `[global]` header.
   - `the niwa machine config is replaced with:` (docstring), which writes the file verbatim (for the invalid-TOML fixture), and `the niwa machine config is not readable`, which sets mode 000.
@@ -44,6 +46,11 @@ The fixed strings the scenarios assert come from the design's Key Interfaces sec
   - `the error output contains the text:` and `the error output does not contain the text:` (docstring), for strings that contain double quotes.
   - `I remember the dispatch standard output` and `the dispatch standard output matches the remembered one apart from instance names and session identifiers`. Before comparing, the second step replaces dispatch instance names (the `dispatchInstanceNameRe` shape) and UUIDs or short session ids with placeholders.
   - `the scenario is skipped when tests run as root`, which returns `godog.ErrSkip` when `os.Geteuid() == 0`.
+- [ ] A parallel pty step, for example `I run "..." (\d+) times in parallel under a pty`, starts the given number of copies of the command at once, each under its own `script` pty the same way `iRunUnderPTYWithInput` does it, and waits for all of them within the pty step timeout. The single-run pty step and the parallel step share one extracted helper for building and running the `script` command, not two copies of it. The parallel step keeps each run's exit code and merged transcript separately. It's paired with at least these steps:
+  - `all parallel runs exit 0`, which fails naming each run that exited non-zero, with its transcript;
+  - `at least one parallel transcript contains the text:` (docstring);
+  - `every parallel transcript has exactly (\d+) lines? containing "..."`;
+  - `there are (\d+) dispatch mappings that record session-message acceptance`, which counts `.niwa/sessions/*.json` files across the workspace's instances with `accepts_session_messages: true` and distinct session ids.
 - [ ] The scenarios live in a new feature file, `test/functional/features/session-message-acceptance.feature`. Its description names the design doc and explains that real delivery between live sessions is covered by the PRD's manual delivery check, not here. Every dispatch in it passes `--detach`.
 
 ### `@critical` scenarios (one per functional-coverage case)
@@ -63,6 +70,13 @@ The fixed strings the scenarios assert come from the design's Key Interfaces sec
   - After the first dispatch the marker exists and the niwa machine config is byte-for-byte unchanged.
   - A second pty dispatch, which provisions a fresh instance, exits 0, still has exactly 1 audit line, and its transcript doesn't contain `accepting messages without asking is inbound only`.
 - [ ] **Explanation without a terminal.** In a companion `@critical` scenario, a non-terminal dispatch (`I run "..." from the workspace root`) with the flag on prints the explanation with `niwa will show this again until it's been shown at a terminal; it's also at <guide URL>`, and the marker doesn't exist afterwards. A following pty dispatch prints the explanation with the "won't show this again" sentence and creates the marker.
+- [ ] **Four parallel dispatches from a terminal.** With the fake claude minting a new session per launch, the flag on, and no marker (asserted with `the session-message notice marker does not exist` before the runs), the scenario records the niwa machine config and then runs `niwa dispatch <task> --accept-session-messages --detach` 4 times in parallel under a pty, against the one scenario configuration directory. Afterwards:
+  - all four runs exit 0;
+  - the marker exists;
+  - at least one transcript contains the inbound-only sentence of the explanation verbatim;
+  - every transcript has exactly 1 line containing `accepts messages from other sessions without asking`;
+  - there are 4 dispatch mappings that record session-message acceptance, with 4 distinct session ids;
+  - the niwa machine config is byte-for-byte unchanged.
 - [ ] **Agent that can't receive it.** A Codex dispatch (`niwa dispatch <task> --harness codex --accept-session-messages --detach`, with the fake codex) exits 0. The error output contains the text `niwa dispatch: --accept-session-messages does not apply to the "codex" agent and was ignored.` The codex launch argv doesn't contain `crossSessionInbound`. There are 0 audit lines, and the output doesn't contain `accepting messages without asking is inbound only`. The marker doesn't exist. The mapping doesn't record session-message acceptance.
   - A second scenario or example sets only `accept_session_messages_on_dispatch = true` and adds no flag. It prints no `does not apply to the` warning, no audit line, and no explanation, creates no marker, and doesn't carry the setting.
   - With `--accept-session-messages=false` added to that machine-setting case, it also prints no override line.
@@ -89,17 +103,18 @@ The fixed strings the scenarios assert come from the design's Key Interfaces sec
 
 ### Watch-site unit test
 
-- [ ] A unit test in `internal/cli` (in `watch_test.go` or a new `watch_inbound_test.go`) covers both `niwa watch` launch sites:
-  - Setup: point `XDG_CONFIG_HOME` at a `t.TempDir()` whose `niwa/config.toml` sets `[global] accept_session_messages_on_dispatch = true`, and also set the dispatch flag variable to on and restore it afterwards.
-  - It replaces `dispatchLaunch` with a stub that captures each `launchRequest` and restores it in `t.Cleanup`.
-  - It drives both real launch sites: the fresh-stage launch in `stageReview` (near `watch.go:844`) and the resume launch in `continueReview` (near `watch.go:581`).
-  - It asserts that the stub was called once per site, and that no element of either captured `Passthrough` and nothing in either `Body` contains `crossSessionInbound`.
-- [ ] If either function can't be driven in a unit test as it stands, the change adds only behavior-preserving seams: package-level function variables for the GitHub, capture, stop, or settings calls around the launch, following `stopSessionFunc` and `dispatchLaunch`. It doesn't copy the passthrough-building code into the test, so the test fails if either real site starts adding the key. Existing watch tests pass unchanged.
+- [ ] A unit test in `internal/cli` (in `watch_test.go` or a new `watch_inbound_test.go`) observes the argv Claude receives at both `niwa watch` launch sites. It leaves `dispatchLaunch` set to `realDispatchLaunch` and doesn't replace `realDispatchLaunch` or `buildLaunchArgs`:
+  - Setup: `XDG_CONFIG_HOME` points at a `t.TempDir()` whose `niwa/config.toml` sets `[global] accept_session_messages_on_dispatch = true`. The variable behind `--accept-session-messages` is set to on and restored afterwards, through the shared flag-reset helper in `dispatch_test.go`. `HOME` points at a `t.TempDir()`.
+  - A fake `claude` script in a `t.TempDir()` bin directory is placed first on `PATH` with `t.Setenv`. It writes every argv element NUL-separated to a per-invocation file, and for `--bg` also writes a job state for the instance directory under `$HOME/.claude/jobs/`, the way the functional fake does. Any other invocation exits non-zero.
+  - It drives both real launch sites. The fresh-stage launch is `stageReview` (near `watch.go:844`). The resume launch is `continueReview` (near `watch.go:581`), with a staged record and a live job state seeded so its liveness check passes. GitHub calls go to an `httptest` server through `github.APIClient.BaseURL`, and the PR-head fetch goes to a local bare repository or through a seam described below. `provisionInstanceFunc`, `stopSessionFunc`, and `watchCapture` may be replaced, because they sit outside the launch.
+  - It asserts the fake `claude` recorded exactly one `--bg` invocation per site. The continue site's recorded argv contains `--resume` followed by the seeded session id, and each site's last element is the site's prompt, which shows the recording is the real launch. No recorded argv element at either site contains `crossSessionInbound`.
+- [ ] If recording at the process boundary isn't workable, the test may instead replace a new package-level seam at the exec/start point inside `realDispatchLaunch`, below `buildLaunchArgs`, that receives the final binary path and argv. The seam must preserve behavior: production code calls the same `exec` path with the same arguments, the existing `dispatch_promptsize_test.go` and launcher tests pass unchanged, and the seam's default is the real exec.
+- [ ] If either watch function can't be driven in a unit test as it stands, the change adds only behavior-preserving seams: package-level function variables for the GitHub, PR-head fetch, or settings calls around the launch, following `stopSessionFunc` and `provisionInstanceFunc`. It doesn't copy the passthrough-building or argv-building code into the test. The test fails if `stageReview`, `continueReview`, `realDispatchLaunch`, or `buildLaunchArgs` starts adding the key. Existing watch tests pass unchanged.
 
 ### Suite health
 
 - [ ] Existing scenarios in `dispatch.feature`, `keep-alive.feature`, and `codex-agent.feature` pass. Any argv expectation that changes because Claude's prompt now follows `--` was already updated by the issue that introduced the separator and isn't reworked here.
-- [ ] `make test-functional-critical` passes with the new `@critical` scenarios included. `make test-functional`, `go test ./...`, and `go vet ./...` pass, and every changed Go file is gofmt-clean.
+- [ ] `make test-functional-critical` passes with the new `@critical` scenarios included, and the parallel scenario passes in 5 consecutive runs. `make test-functional`, `go test ./...`, and `go vet ./...` pass, and every changed Go file is gofmt-clean.
 
 ## Dependencies
 
