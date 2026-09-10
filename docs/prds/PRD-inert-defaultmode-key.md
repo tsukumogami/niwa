@@ -129,9 +129,12 @@ winning:
 | Repo `settings.local.json` | workspace overlay, workspace, personal overlay, then `[repos.<name>.claude.settings]` | every instance create and apply |
 | Worktree `settings.local.json` | the same inputs as its repo; a worktree created by `niwa worktree create`, `niwa worktree apply`, or the WorktreeCreate hook omits the personal overlay until the next instance apply | the worktree paths named, and every instance apply |
 
-A personal-overlay value can be declared only at workspace level, and it wins
-over the team's workspace-level value but loses to any instance or repo
-override in the team config.
+The personal overlay is the developer's own `niwa.toml` in their personal
+niwa config directory (`~/.config/niwa/global` by default), declared under
+`[global.claude.settings]` or `[workspaces.<name>.claude.settings]`. It can
+declare a posture only at workspace level, and it wins over the team's
+workspace-level value but loses to any instance or repo override in the team
+config.
 
 The **instance's effective posture**, used by the dispatch derivation, is the
 posture the instance-root document resolves from.
@@ -141,6 +144,8 @@ posture the instance-root document resolves from.
 - **R1. Bypass reaches dispatched workers.** When the instance's effective
   posture is `bypass` and the operator supplied no `--permission-mode`, the
   Claude worker's launch command carries `--permission-mode bypassPermissions`.
+  This holds for every form of `niwa dispatch`: detached, attached, and with
+  remote control enabled.
 - **R2. An explicit flag wins.** When the operator supplies
   `--permission-mode`, the launch command carries that value and no other
   `--permission-mode`, whatever the declared posture.
@@ -190,11 +195,11 @@ posture the instance-root document resolves from.
   required to carry a flag of its own.
 - **R12. Launch paths are accounted for.** `niwa dispatch` is the only niwa
   command that derives a posture for a Claude session it starts. A
-  `niwa watch` review launch carries no derived `--permission-mode`, because a
-  command-line flag outranks the `"default"` the review writes. A Codex
-  dispatch carries no `--permission-mode`, and its `--sandbox` handling is
-  unchanged. The SessionStart hook runs after a session starts and carries no
-  posture.
+  `niwa watch` review launch, both a fresh review and a continuation, carries
+  no derived `--permission-mode`, because a command-line flag outranks the
+  `"default"` the review writes. A Codex dispatch carries no
+  `--permission-mode`, and its `--sandbox` handling is unchanged. The
+  SessionStart hook runs after a session starts and carries no posture.
 - **R13. The supervised review is untouched.** `niwa watch`'s operator-approval
   posture still writes `permissions.defaultMode: "default"` into the instance
   root, and its verification still passes, on top of an instance materialized
@@ -271,7 +276,10 @@ Dispatch:
 
 - [ ] **AC1 (R1).** A `@critical` functional scenario for S1: `niwa dispatch
   <task> --detach` with no permission flag, and the recorded launch argv
-  contains `--permission-mode bypassPermissions`.
+  contains `--permission-mode bypassPermissions`. A second scenario for S1 with
+  `[global].remote_control_on_dispatch = true` asserts the argv contains both
+  `--permission-mode bypassPermissions` and the remote-control `--settings`
+  argument.
 - [ ] **AC2 (R2).** A `@critical` functional scenario for S1 with
   `--permission-mode acceptEdits`: the argv contains `--permission-mode
   acceptEdits`, contains exactly one `--permission-mode`, and doesn't contain
@@ -295,10 +303,10 @@ Dispatch:
   deletes the instance-root document, and asserts it forwards
   `--permission-mode bypassPermissions`.
 - [ ] **AC8 (R12).** A functional scenario for S1 dispatched with `--harness
-  codex` using the existing fake codex: the argv contains no
-  `--permission-mode`, and its `--sandbox` handling matches today's.
-- [ ] **AC9 (R12).** A test asserts that a `niwa watch` review launch built
-  for S1 carries no `--permission-mode`.
+  codex`, no permission flag, and the existing fake codex: the argv contains
+  neither `--permission-mode` nor `--sandbox`.
+- [ ] **AC9 (R12).** Tests assert that a `niwa watch` fresh-review launch and
+  a continuation launch, each built for S1, carry no `--permission-mode`.
 
 Documents:
 
@@ -330,8 +338,8 @@ Resume, review, and cleanup:
 
 - [ ] **AC15 (R11).** Tests assert that dispatch's final attach, the printed
   attach hint, the attach-failure fallback, and the `niwa list` resume column
-  each emit exactly `claude attach <handle>`, with `<handle>` equal to the
-  handle recorded for the dispatched session.
+  each contain the command `claude attach <handle>` with no further arguments,
+  with `<handle>` equal to the handle recorded for the dispatched session.
 - [ ] **AC16 (R13).** A test materializes an instance under S1, S2, and S3,
   applies `niwa watch`'s review settings in both its operator-approval and
   hard-deny postures, and asserts that verification passes in each. The
@@ -350,7 +358,7 @@ Docs and compatibility:
     **every** session launched at the root" and does contain
     `--permission-mode`.
   - `docs/designs/current/DESIGN-workspace-root-claude.md` contains
-    "superseded" beside its `bypassPermissions` finding.
+    "superseded" within the same section as its `bypassPermissions` finding.
   - `docs/designs/current/DESIGN-mcp-root-instance-distribution.md` contains
     "2.1.257".
   - `docs/designs/current/DESIGN-agent-capability-contract.md` contains
