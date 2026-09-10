@@ -14,6 +14,74 @@
 | arch-capability-phase | docs/designs/DESIGN-dispatch-sendmessage-approval.md | 2 | confirmed | Where does the capability row land, and at which row number? |
 | arch-watch-coverage | docs/prds/PRD-dispatch-sendmessage-approval.md | 2 | assumed (high) | Functional harness for the watch exclusion, or unit coverage with an R18 amendment? |
 | arch-small-fixes | docs/designs/DESIGN-dispatch-sendmessage-approval.md | 1 | confirmed | Map vs builder type, directory mode, config-path error, resolver shape, hostGlobal hoist |
+| sec6-prompt-separator | docs/designs/DESIGN-dispatch-sendmessage-approval.md | 2 | confirmed | Fix the prompt-as-flag route into the `--settings` slot in this PR? |
+| sec6-tool-list | docs/designs/DESIGN-dispatch-sendmessage-approval.md | 2 | confirmed | Which tools does the review-session deny cover, and how is it verified? |
+| sec6-out-of-scope | docs/designs/DESIGN-dispatch-sendmessage-approval.md | 1 | confirmed | Inbound refusal into review sessions, `disableAllHooks`, and existing matcher bugs |
+| sec6-broader-holds | docs/designs/DESIGN-dispatch-sendmessage-approval.md | 2 | assumed (high) | Accept that `accept` lifts four holds, not only the class mismatch? |
+| sec6-unmeasured | docs/designs/DESIGN-dispatch-sendmessage-approval.md | 2 | assumed (high) | Proceed with three Claude Code behaviors unmeasured until the manual check? |
+| design-approval | docs/designs/DESIGN-dispatch-sendmessage-approval.md | 3 | assumed (high) | Approve the design (Proposed -> Accepted) and route to /plan? |
+
+<!-- decision:start id="design-approval" status="assumed" priority="high" -->
+**Decision:** Approved the design and transitioned it Proposed -> Accepted;
+routed to `/plan` (complexity: Complex -- 4+ files, new test infrastructure for
+the marker and watch-site tests, a new CLI flag and config key, and changes
+across `internal/cli`, `internal/config`, `internal/agentplan`,
+`internal/workspace`, and `internal/watch`). **Why assumed:** approval gates are
+always assumed under `--auto`; the parent `/scope` owns the approval
+(parent-delegated-approval). Basis: architecture, structural-format, and both
+security reviews were applied; `shirabe validate` is clean. Residual concerns
+for the author are the high-priority assumptions above: the review-session deny
+beyond the PRD, unit coverage for the watch exclusion with R18 amended, the four
+holds `accept` lifts, and three behaviors left to the manual check.
+<!-- decision:end -->
+
+<!-- decision:start id="sec6-prompt-separator" status="confirmed" -->
+**Decision:** Set `PromptSeparator: true` on Claude's launch spec in this PR.
+Evidence, measured on 2.1.267 with a nonexistent model so no API call ran:
+`claude -p --model <bogus> "--version"` printed `2.1.267 (Claude Code)`, so the
+prompt element was parsed as a flag; `claude -p --model <bogus> -- "--version"`
+reached model resolution with the text as the prompt. `buildLaunchArgs` already
+inserts `--` when the spec asks (`dispatch_launcher.go:372`); only Codex asks.
+Alternative, refusing prompts that start with `-`, would reject Markdown-list
+briefs.
+<!-- decision:end -->
+
+<!-- decision:start id="sec6-tool-list" status="confirmed" -->
+**Decision:** Deny `SendMessage|SendFile|RemoteTrigger|ListAgents`, verified by
+matcher and command. Evidence: all four names (and the `ListPeers` alias) are in
+the 2.1.267 binary; `SendFile` delivers through the same peer path;
+`RemoteTrigger` deliveries are cross-session inbound and the tool also escapes
+review egress containment today. `SendUserFile`, `SendUserMessage`, and
+`PushNotification` address the user, not peers, and are left alone.
+<!-- decision:end -->
+
+<!-- decision:start id="sec6-out-of-scope" status="confirmed" -->
+**Decision:** Leave out of this PR, as review-containment follow-up: refusing
+inbound messages into review sessions (not a direction this feature opens),
+rejecting `disableAllHooks` in review settings, matcher-and-command verification
+for the existing egress and filesystem hooks, the `mcp__` entry in
+`egressDenyMatcher` that matches no MCP tool on 2.1.267, and the incorrect
+substring-matching comment in `containment.go`. All predate this feature.
+<!-- decision:end -->
+
+<!-- decision:start id="sec6-broader-holds" status="assumed" priority="high" -->
+**Decision:** Proceed with `accept` as the mechanism, documenting that for a
+bypass receiver it lifts the class-mismatch, unattested-sender, bypass-default,
+and routine-delivery holds. **Why assumed:** the PRD's acceptance of the risk was
+framed around the class mismatch alone; there is no finer-grained receive-side
+setting, so the alternative is not shipping the feature. The author should
+confirm the broader removal is acceptable.
+<!-- decision:end -->
+
+<!-- decision:start id="sec6-unmeasured" status="assumed" priority="high" -->
+**Decision:** Proceed with three behaviors unmeasured, each assigned to the
+manual delivery check: the permission class of a hard-deny review session on
+2.1.258+, whether a non-Claude process can send over the local inbox socket, and
+whether review-session subagents are blocked by the hook. **Why assumed:** each
+needs a live Claude Code session; the design is correct under either outcome for
+the first and third, and the second changes only how the guide describes the
+sender set.
+<!-- decision:end -->
 
 <!-- decision:start id="arch-attach-timing" status="confirmed" -->
 **Decision:** Print the explanation, and create the marker, after
