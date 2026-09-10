@@ -10,6 +10,48 @@
 | cross-validation | wip/design_dispatch-sendmessage-approval_coordination.json | 2 | confirmed | Do the four decisions' assumptions conflict? |
 | security-review-deny | docs/designs/DESIGN-dispatch-sendmessage-approval.md | 2 | assumed (high) | Deny cross-session messaging in `niwa watch` review sessions in this PR? |
 | security-review-env | docs/designs/DESIGN-dispatch-sendmessage-approval.md | 2 | confirmed | Fix or document the `XDG_CONFIG_HOME`/`HOME` relocation route? |
+| arch-attach-timing | docs/designs/DESIGN-dispatch-sendmessage-approval.md | 3 | confirmed | When does the explanation print when `claude attach` follows? |
+| arch-capability-phase | docs/designs/DESIGN-dispatch-sendmessage-approval.md | 2 | confirmed | Where does the capability row land, and at which row number? |
+| arch-watch-coverage | docs/prds/PRD-dispatch-sendmessage-approval.md | 2 | assumed (high) | Functional harness for the watch exclusion, or unit coverage with an R18 amendment? |
+| arch-small-fixes | docs/designs/DESIGN-dispatch-sendmessage-approval.md | 1 | confirmed | Map vs builder type, directory mode, config-path error, resolver shape, hostGlobal hoist |
+
+<!-- decision:start id="arch-attach-timing" status="confirmed" -->
+**Decision:** Print the explanation, and create the marker, after
+`dispatchAttach` returns when an attach follows; otherwise right after the audit
+line. Evidence: Claude's `ResumeDuringTurn` is true, and step 14 attaches unless
+`--detach` (`dispatch.go:852-858`), so output at the post-mapping point is
+covered by the attached TUI. The audit and override lines stay before step 13,
+since they're short and `niwa list` also carries the grant.
+<!-- decision:end -->
+
+<!-- decision:start id="arch-capability-phase" status="confirmed" -->
+**Decision:** Land the capability row in Phase 3 with the delivery, appended as
+row 25, together with the count-test updates, gap-list regeneration, and the
+capability-contract PRD amendment. Evidence: `declaration.go:73-75` forbids
+declaring an implemented row before it's delivered; `TestAllIsTheClosedSet` and
+`TestCodexColumnTotals` pin counts; inserting mid-block renumbers cited rows.
+<!-- decision:end -->
+
+<!-- decision:start id="arch-watch-coverage" status="assumed" priority="high" -->
+**Decision:** Cover the watch exclusion with a unit test that stubs
+`dispatchLaunch` and drives both watch launch sites with the machine key on, and
+amend R18 to accept unit coverage for that one case. **Why assumed:** it changes
+an accepted PRD requirement. Evidence: no functional feature or step file runs
+`niwa watch`; building a `watch --once` harness (PR fake, fake claude, sandbox
+off) is a separate project; watch never goes through `runDispatch` and writes no
+mapping, so the exclusion also holds by construction.
+<!-- decision:end -->
+
+<!-- decision:start id="arch-small-fixes" status="confirmed" -->
+**Decision:** Adopted the review's smaller corrections: a plain map plus
+`renderLaunchSettings` instead of a builder type; directory mode `0o755` to match
+`writeGlobalConfigFile` (`registry.go:344`); on a `GlobalConfigPath()` error,
+print the explanation's non-terminal form and skip the marker; the resolver
+returns `inboundResolution{on, source, overrodeMachineOn}`; hoist `hostGlobal`
+above step 9c; one `inboundApplied` boolean feeds the mapping, audit line, and
+explanation; `rcInjected` stays tied to remote control's own decision; set the
+mapping field in the literal before `WriteSessionMapping`.
+<!-- decision:end -->
 
 <!-- decision:start id="security-review-deny" status="assumed" priority="high" -->
 **Decision:** Add a PreToolUse hook denying `SendMessage` to `niwa watch` review

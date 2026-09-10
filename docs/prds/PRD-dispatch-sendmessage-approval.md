@@ -303,8 +303,10 @@ which defeats the reason for dispatching work into the background.
 - **R18. Functional coverage.** `@critical` functional scenarios cover the
   behavior off by default, on by flag, on by machine setting, on by machine
   setting and off by flag with its override line, the one-time explanation and
-  its marker, the warning for an agent that can't receive it, and the exclusion
-  of watch review sessions.
+  its marker, and the warning for an agent that can't receive it. The exclusion
+  of watch review sessions is covered by a unit test that drives both places
+  `niwa watch` launches a review session, because no functional harness runs
+  `niwa watch`.
 
 ## Acceptance Criteria
 

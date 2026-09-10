@@ -16,6 +16,18 @@ marker that gates nothing). Added a review-session messaging deny, qualified the
 config-source guarantee for `XDG_CONFIG_HOME`/`HOME` relocation, and adopted
 `os.Lstat` for the marker check.
 
+## Final Review (Phase 6)
+Architecture review: applied attach-aware explanation timing, capability row
+moved into the delivering phase as row 25 with count/gap-list/contract updates,
+map-plus-helper rendering, hostGlobal hoist, inboundApplied boolean, resolver
+result struct, config-path error handling, 0o755 directory mode, named test and
+doc deliverables, explicit phase order. Watch exclusion moved to unit coverage;
+PRD R18 amended (assumed, high priority).
+Structural-format review: added Decision 5, trimmed PRD retelling in Context,
+refocused Decision 3/4 alternatives on open questions, paired every negative
+consequence with a mitigation, dropped an unchoosable alternative.
+Security review (Phase 6): pending at time of writing.
+
 ## Current Status
-**Phase:** 5 - Security complete; Phase 6 review in progress
+**Phase:** 6 - Final review
 **Last Updated:** 2026-09-10
