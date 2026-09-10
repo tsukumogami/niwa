@@ -60,3 +60,22 @@ requires that watch never carry a derived flag.
 pass `""`. Recorded as Decision 4 in Considered Options. Under `--auto` this
 is recorded rather than asked; it costs three call-site edits and turns
 watch's safety into a property a test can pin.
+
+| G6.1 | docs/designs/DESIGN-inert-defaultmode-key.md | 2 | confirmed | Strawman check on rejected alternatives |
+
+## G6.1 -- Strawman check passed
+
+Every rejected alternative in Considered Options describes a viable approach
+and fails on a named, checkable weakness, not on "less good":
+
+- D1 provisioning-result threading fails R17 at the fake-provisioner seam.
+- D1 re-resolve at dispatch duplicates precedence and vault resolution.
+- D1 niwa-owned settings key fails both of R3's tamper cases.
+- D2 empty-string sentinel keeps the retired "Claude mode" claim in the table.
+- D2 load-time validation can't see `vault://` plaintext.
+- D3 all-functional can't reach the tamper window.
+- D3 all-Go skips the real `niwa worktree create` config path.
+- D4 package global leaves watch's safety unguardable by a test.
+
+Each is taken from the corresponding decision report and was a real
+contender. None needs strengthening.

@@ -8,5 +8,5 @@ permission modes Claude Code ignores (`bypassPermissions`) or rejects whole
 out of that dead value instead of the resolved declaration.
 
 ## Current Status
-**Phase:** 1 - Decision Decomposition
+**Phase:** 5 - Security (in progress); Phases 2-4 complete
 **Last Updated:** 2026-09-10
