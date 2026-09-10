@@ -18,7 +18,7 @@ motivating_context: |
   Peer-message holds between niwa-dispatched sessions first appeared on
   2026-09-02, when a Claude Code release stopped honoring a permission value niwa
   wrote into instance settings. niwa's fix forwarded the permission mode on the
-  launch command instead, and the holds came back late on 2026-09-09 between a
+  launch command instead, and the holds came back on 2026-09-10 (UTC) between a
   session dispatched before that fix and one dispatched after it. A live
   experiment on Claude Code 2.1.267 reproduced the hold and confirmed the
   setting that removes it.
@@ -45,7 +45,7 @@ stopped honoring the permission value niwa writes into instance settings, so
 dispatched workers fell into a different class from the sessions they talked to.
 niwa's fix forwarded the permission mode on the launch command, which Claude Code
 honors and saves with the session, so it survives restarts. The holds still came
-back late on 2026-09-09, this time between a coordinator dispatched before that
+back on 2026-09-10 (UTC), this time between a coordinator dispatched before that
 fix, which runs with prompts on, and workers dispatched after it, which run with
 them off. The same mismatch arises whenever a worker talks to the developer's own
 session, to a session another tool started, or to a worker from a workspace that
@@ -56,24 +56,24 @@ Keeping every session in the same class isn't something niwa can do: the classes
 are fixed when each session is launched, and some of those sessions aren't
 niwa's. Claude Code does let a receiving session accept messages from other
 sessions whatever class they're in, but niwa gives a developer no way to ask for
-that for the sessions it dispatches, or to make an exception for one dispatch
-that will read untrusted text. The only workaround today is to watch every
-session and approve prompts by hand, which defeats the reason for dispatching
-work into the background.
+that for the sessions it dispatches, or to switch it off for one dispatch. The
+only workaround today is to watch every session and approve prompts by hand,
+which defeats the reason for dispatching work into the background.
 
 ## Goals
 
-- A developer who opts in never has a peer message to a niwa-dispatched session
-  held for approval, whatever class the sender is in, including after the
-  session is restarted or reopened, and never needs to know which permission
-  mode any session runs in.
+- A peer message sent to a session niwa dispatched with the behavior in effect is
+  never held for approval, whatever class the sender is in, including after that
+  session is restarted or reopened, and the developer never needs to know which
+  permission mode any session runs in.
 - The choice is explicit, off by default, made once per machine, and reversible
   for a single dispatch in either direction.
 - The developer can tell, both at dispatch time and afterwards, which sessions
   accept peer messages unattended.
 - The developer learns once, when the behavior first takes effect on their
-  machine, what extending unattended delivery to their own interactive session
-  takes and what it costs, and niwa never makes that change for them.
+  machine, what the behavior doesn't cover and what extending unattended
+  delivery to their own interactive session takes and costs, and niwa never
+  makes that change for them.
 
 ## User Stories
 
@@ -86,9 +86,9 @@ work into the background.
    it, so that I stop approving messages by hand and know which sessions it
    covers.
 3. As a developer with the machine default on, I want to switch the behavior off
-   for one dispatch that triages issues filed by strangers, and see the dispatch
-   confirm it, so that messages into that one session still need my approval
-   while every other session keeps the default.
+   for one dispatch I intend to steer myself, and see the dispatch confirm it, so
+   that the session keeps Claude Code's default handling of messages from other
+   sessions while every other session keeps the machine default.
 4. As a developer mixing sessions launched at different times or with different
    postures, I want workers dispatched with the behavior to receive messages
    from any of them, so that a coordinator from before an upgrade can still hand
@@ -103,6 +103,10 @@ work into the background.
    niwa's output goes to an agent rather than to me, I want the one-time
    explanation to still reach me the first time I dispatch from a terminal, so
    that an agent can't consume it unseen.
+8. As a developer whose new workers report to a coordinator dispatched before I
+   turned the behavior on, I want to know why those reports wait inside the
+   coordinator and how to clear it, so that I don't mistake a working feature for
+   a broken one.
 
 ## Requirements
 
@@ -111,15 +115,18 @@ work into the background.
 - **Permission-mode class.** Claude Code sorts sessions into those running with
   permission prompts off (`bypassPermissions`) and those running with them on,
   and holds a message between sessions of different classes unless the
-  receiving session accepts inbound messages.
+  receiving session accepts inbound messages. Messages between sessions of the
+  same class are delivered either way.
 - **Inbound-acceptance setting.** Claude Code's `crossSessionInbound` setting
   with the value `accept`, carried in the `--settings` document niwa passes when
   it launches a worker.
+- **Successful launch.** The worker's process started and niwa recorded the
+  dispatched session.
 - **The behavior takes effect** for a dispatch when it resolves on under R3, the
-  dispatched agent can receive it (R13), and niwa launches the worker with the
-  inbound-acceptance setting. niwa doesn't check the Claude Code version. The
-  audit line, the session record, and the one-time explanation follow a
-  successful launch and never precede it.
+  dispatched agent can receive it (R13), and niwa successfully launches the
+  worker with the inbound-acceptance setting. niwa doesn't check the Claude Code
+  version. The audit line, the session record, and the one-time explanation
+  follow a successful launch and never precede it.
 
 ### Functional
 
@@ -142,10 +149,11 @@ work into the background.
   prompt, whatever permission-mode class the sender is in.
 - **R5. Restarts and reopening keep it.** A worker for which the behavior took
   effect still accepts inbound messages without a prompt after Claude Code
-  restarts or reopens it, including through `claude respawn` and
-  `claude attach`, and a worker for which it didn't take effect doesn't gain it.
-  niwa's resume commands and its handling of the permission mode are unchanged
-  by this feature.
+  restarts or reopens it, whether through `claude respawn`, through
+  `claude attach` after its process has stopped, or by being woken by an
+  incoming message; and a worker for which it didn't take effect doesn't gain
+  it. niwa's resume commands and its handling of the permission mode are
+  unchanged by this feature.
 - **R6. Coexistence with other launch configuration.** Turning the behavior on
   doesn't remove or change any other configuration niwa applies at launch.
   Remote control on dispatch, keep-alive, and the forwarded permission mode all
@@ -157,39 +165,52 @@ work into the background.
   user guide R17 requires. It writes no such line for a dispatch where the
   behavior doesn't take effect.
 - **R8. Override line.** When `--accept-session-messages=false` turns the
-  behavior off while the machine setting is `true`, `niwa dispatch` writes
-  exactly one line to stderr, prefixed `niwa dispatch: `, stating that this
-  worker will ask before accepting messages from other sessions because the flag
-  turned the machine setting off for this dispatch. It writes no such line
-  otherwise.
+  behavior off while the machine setting is `true`, and the dispatched agent
+  could have received the behavior, `niwa dispatch` writes exactly one line to
+  stderr, prefixed `niwa dispatch: `, containing the text
+  `keeps Claude Code's default for messages from other sessions` and
+  `--accept-session-messages=false`. It writes no such line otherwise. The line
+  doesn't claim that messages into the worker will all ask: Claude Code's
+  default delivers messages between sessions of the same class.
 - **R9. Durable record.** niwa's session record for a dispatched session stores
-  whether the behavior took effect for it. `niwa list` marks such sessions with
-  `(accepts session messages)` in its human output and reports an
-  `accepts_session_messages` boolean for every session in its `--json` output,
-  for as long as the session record exists, whether or not the session is still
-  running. A record written before this feature, or for a `niwa watch` session,
-  reports `false`.
+  whether the behavior took effect for it. `niwa list` emits one record per
+  instance; its `--json` output includes an `accepts_session_messages` boolean on
+  every instance record, always present, `true` when a dispatched session
+  recorded for that instance had the behavior take effect and `false` otherwise,
+  including instances with no dispatched session record (such as `niwa watch`
+  review instances) and records written before this feature. Its human output
+  marks the `true` instances with `(accepts session messages)`. Both hold for as
+  long as the record exists, whether or not the session is still running.
 - **R10. One-time explanation.** On the first dispatch where the behavior takes
   effect, whatever turned it on, `niwa dispatch` writes an explanation to stderr
-  stating: that the developer's own interactive Claude Code sessions still ask
-  before delivering a message a worker sends them; that this is governed by the
-  developer's Claude Code user settings, which niwa doesn't change; how to change
-  it (the "Messages from your other sessions" row in Claude Code's `/config`, or
-  `"crossSessionInbound": "accept"` in `~/.claude/settings.json`); that the
-  change applies to every Claude Code session the developer runs and to messages
-  from any session able to reach theirs, on this machine or elsewhere; that niwa
-  won't show it again; and the URL of the user guide, where it can be read
-  again.
+  stating:
+  - that the behavior is inbound only: a message a worker sends into a session
+    launched without it, such as a coordinator dispatched earlier, one
+    dispatched with the behavior off, or one another tool started, still waits
+    for approval there when the two are in different classes, and dispatching
+    that session again with the behavior on clears it;
+  - that the developer's own interactive Claude Code sessions are one such case,
+    governed by the developer's Claude Code user settings, which niwa doesn't
+    change;
+  - how to change them: the "Messages from your other sessions" row in Claude
+    Code's `/config`, or `"crossSessionInbound": "accept"` in
+    `~/.claude/settings.json`;
+  - that the change applies to every Claude Code session the developer runs and
+    to messages from any session able to reach theirs, on this machine or
+    elsewhere;
+  - when it's written to a terminal, that niwa won't show it again; otherwise,
+    that niwa will show it again until it's been shown at a terminal;
+  - and the URL of the user guide, where it can be read again.
 - **R11. One-time suppression.** R10's explanation is suppressed on later
-  dispatches by a marker file niwa creates in its configuration directory. The
-  marker is created only when the explanation was written to an interactive
-  terminal; when stderr isn't a terminal, the explanation is written and no
-  marker is created. niwa creates its configuration directory if it doesn't
-  exist. The marker isn't `config.toml`, printing the explanation never rewrites
-  `config.toml`, and the marker is separate from the per-instance one-time
-  notices niwa records during `create` and `apply`. Concurrent first dispatches
-  may each print the explanation. Failing to create the marker never fails the
-  dispatch.
+  dispatches by a marker file named `accept-session-messages-notice` in niwa's
+  configuration directory. The marker is created only when the explanation was
+  written to an interactive terminal; when stderr isn't a terminal, the
+  explanation is written and no marker is created. niwa creates its
+  configuration directory if it doesn't exist. The marker isn't `config.toml`,
+  printing the explanation never rewrites `config.toml`, and the marker is
+  separate from the per-instance one-time notices niwa records during `create`
+  and `apply`. Concurrent first dispatches may each print the explanation.
+  Failing to create the marker never fails the dispatch.
 - **R12. Personal settings are out of reach.** niwa doesn't read or write the
   developer's Claude Code user or managed settings to implement any of R1-R11.
 - **R13. Agents that can't receive it.** When the flag asks for the behavior on
@@ -201,24 +222,33 @@ work into the background.
 - **R14. Watch review sessions are excluded.** Sessions `niwa watch` launches or
   resumes never receive the behavior, whatever the machine setting says.
 - **R15. Unreadable machine configuration.** When niwa's machine configuration
-  can't be read, including when the key holds a value that isn't a boolean, the
-  machine setting counts as absent. The flag still applies.
+  can't be read, the machine setting counts as absent and the flag still
+  applies. That covers a file niwa can't open, a file that isn't valid TOML, and
+  a `accept_session_messages_on_dispatch` value that isn't a boolean, which makes
+  the whole file unreadable as any type error in it does.
 - **R16. Dispatch standard output is unchanged.** Everything this feature adds to
   `niwa dispatch` output goes to stderr, and what `niwa dispatch` writes to
   stdout, including the resume commands it prints, is the same whether or not
-  the behavior takes effect.
+  the behavior takes effect, apart from values that differ between any two
+  dispatches, such as instance names and session identifiers.
 
 ### Non-functional
 
-- **R17. Documentation.** A user guide, reachable at a stable URL, documents the
-  machine setting, the flag, their precedence, the audit and override lines, the
-  `niwa list` marker and field, the exclusion of watch review sessions, the
-  behavior for agents that can't receive it, that the behavior is inbound-only,
-  that turning the machine setting off doesn't reach sessions already
-  dispatched, and the step for the developer's own interactive session with
-  every cost R10 names. It follows the section structure of the existing
-  keep-alive guide and is listed in the repository's contributor-guide index.
-  `niwa dispatch --help` describes the flag, and shell completion offers it.
+- **R17. Documentation.** A user guide, reachable at a stable URL, documents: the
+  machine setting and the flag and their precedence; the audit and override
+  lines; the `niwa list` marker and field; that the behavior is inbound only;
+  that switching it off keeps Claude Code's default, which delivers messages
+  between sessions of the same class and so doesn't isolate a worker; the
+  exclusion of watch review sessions; the behavior for agents that can't receive
+  it; that turning the machine setting off doesn't reach sessions already
+  dispatched; that a foreground `claude --resume` of a dispatched conversation
+  doesn't carry the behavior; the marker file's path, that deleting it shows the
+  explanation again and creating it suppresses it; the step for the developer's
+  own interactive session with every cost R10 names; and the Claude Code version
+  the manual delivery check last passed on. It uses the same top-level section
+  headings as the existing keep-alive guide and is listed in the repository's
+  contributor-guide index. `niwa dispatch --help` describes the flag, and shell
+  completion offers it.
 - **R18. Functional coverage.** `@critical` functional scenarios cover the
   behavior off by default, on by flag, on by machine setting, on by machine
   setting and off by flag with its override line, the one-time explanation and
@@ -229,21 +259,27 @@ work into the background.
 
 ### Automated
 
-- [ ] With no `accept_session_messages_on_dispatch` key and no flag, the
-  `--settings` document on the launch command niwa builds for a Claude worker
-  has no `crossSessionInbound` key, and stderr contains no line with
-  `accepts messages from other sessions without asking`.
+- [ ] With no `accept_session_messages_on_dispatch` key, and again with the key
+  set to `false`, and no flag, the `--settings` document on the launch command
+  niwa builds for a Claude worker has no `crossSessionInbound` key, and stderr
+  contains no line with `accepts messages from other sessions without asking`.
 - [ ] With `accept_session_messages_on_dispatch = true` and no flag, the launch
-  command's `--settings` document has `crossSessionInbound` set to `accept`, and
+  command's `--settings` document has `crossSessionInbound` set to `accept`;
   stderr contains exactly one line starting `niwa dispatch: ` that contains
   `accepts messages from other sessions without asking`, `machine setting`, and
-  the guide URL.
+  the guide URL; and stderr contains no override line.
 - [ ] With the key absent and `--accept-session-messages` given, and again with
   `--accept-session-messages=true`, the launch command carries the setting, and
-  the audit line names `--accept-session-messages` as its source.
+  stderr contains exactly one line starting `niwa dispatch: ` that contains
+  `accepts messages from other sessions without asking`,
+  `--accept-session-messages`, and the guide URL.
+- [ ] With the key `true` and `--accept-session-messages=true`, stderr contains
+  one audit line and no override line.
 - [ ] With the key `true` and `--accept-session-messages=false`, the launch
   command doesn't carry the setting, stderr contains no audit line, and stderr
-  contains exactly one override line.
+  contains exactly one line starting `niwa dispatch: ` that contains
+  `keeps Claude Code's default for messages from other sessions` and
+  `--accept-session-messages=false`.
 - [ ] With the key absent and `--accept-session-messages=false`, stderr contains
   neither an audit line nor an override line.
 - [ ] With remote control on dispatch, keep-alive, a declared bypass posture, and
@@ -253,32 +289,45 @@ work into the background.
   without the behavior.
 - [ ] With the machine key absent and no flag, each of these fixtures leaves the
   launch command without the setting and leaves every settings file niwa writes
-  into the instance without a `crossSessionInbound` key: the key in the
-  workspace's `workspace.toml`, in its global and per-repository tables;
-  `"crossSessionInbound": "accept"` in the workspace's `.claude/settings.json`;
-  and the same in a cloned repository's `.claude/settings.json` and
-  `.claude/settings.local.json`.
+  into the instance without a `crossSessionInbound` key: the key
+  `accept_session_messages_on_dispatch` in the workspace's `workspace.toml`, in
+  its global and per-repository tables; `crossSessionInbound = "accept"` under
+  `[claude.settings]` in `workspace.toml`; `"crossSessionInbound": "accept"` in
+  the `.claude/settings.json` at the workspace root; and the same in a cloned
+  repository's `.claude/settings.json` and `.claude/settings.local.json`.
+- [ ] When the fake `claude` exits non-zero at launch with the behavior on,
+  stderr contains no audit line and no explanation, no marker is created, and no
+  record reports `accepts_session_messages: true`.
 - [ ] The resume commands `niwa dispatch` prints after a dispatch and when an
   attach fails, and the one `niwa list` prints for a session, are identical for
-  a session dispatched with the behavior on and one dispatched with it off.
-- [ ] A session dispatched with the behavior in effect shows
-  `(accepts session messages)` in `niwa list` and `"accepts_session_messages":
-  true` in `niwa list --json`, including after the session has finished; a
-  session dispatched without it shows no marker and reports `false`.
-- [ ] A session record written before this feature makes `niwa list` succeed
-  and report `"accepts_session_messages": false` for it.
+  a session dispatched with the behavior on and one dispatched with it off,
+  apart from instance names and session identifiers.
+- [ ] An instance whose dispatched session had the behavior take effect shows
+  `(accepts session messages)` in `niwa list` and
+  `"accepts_session_messages": true` in `niwa list --json`, including after the
+  session has finished; an instance dispatched without it shows no marker and
+  reports `false`.
+- [ ] `niwa list --json` reports `"accepts_session_messages": false`, and doesn't
+  fail, for an instance whose session record was written before this feature and
+  for an instance with no dispatched session record; with the machine key
+  `true`, a `niwa watch` review instance that appears in the list reports
+  `false`.
 - [ ] With stderr attached to a terminal and no marker file, the first dispatch
-  where the behavior takes effect prints the one-time explanation and creates
-  the marker; a second such dispatch doesn't print it.
+  where the behavior takes effect prints the one-time explanation, including the
+  sentence saying niwa won't show it again, and creates
+  `accept-session-messages-notice`; a second such dispatch, which runs in a
+  fresh instance, doesn't print it.
 - [ ] With stderr not attached to a terminal, a dispatch where the behavior takes
-  effect prints the explanation and creates no marker; a later dispatch with
-  stderr on a terminal prints it and creates the marker.
-- [ ] The one-time explanation contains each item R10 lists: that the
-  developer's interactive sessions still ask; that this is governed by their
-  Claude Code user settings, which niwa doesn't change; the `/config` row name;
-  the `crossSessionInbound` key; that the change applies to every Claude Code
-  session they run; that it applies to messages from any session able to reach
-  theirs; that niwa won't show it again; and the guide URL.
+  effect prints the explanation, including the sentence saying niwa will show it
+  again until it's been shown at a terminal, and creates no marker; a later
+  dispatch with stderr on a terminal prints it and creates the marker.
+- [ ] The one-time explanation's text, which the design fixes, contains a
+  sentence for each item R10 lists, and the scenario asserts each of those
+  sentences verbatim: inbound only, with re-dispatching as the fix; the
+  developer's interactive sessions as a governed case; the `/config` row name and
+  the `crossSessionInbound` key; every Claude Code session they run and any
+  session able to reach theirs; the terminal-dependent repeat sentence; and the
+  guide URL.
 - [ ] When niwa's configuration directory isn't writable, a dispatch where the
   behavior takes effect still succeeds and prints the explanation, and the next
   such dispatch prints it again. The scenario is skipped when tests run as root.
@@ -294,7 +343,10 @@ work into the background.
 - [ ] A dispatch with the behavior on, run with `HOME` pointed at a directory
   whose `.claude/settings.json` is unreadable (mode 000), succeeds and prints
   nothing about that file; with the file readable, its contents and modification
-  time are unchanged afterwards.
+  time are unchanged afterwards. The unreadable case is skipped when tests run as
+  root.
+- [ ] A code review confirms that no path the feature adds opens a file under
+  `~/.claude/` or a Claude Code managed-settings location.
 - [ ] Dispatching a Codex worker with `--accept-session-messages` prints a
   warning naming the `codex` agent and stating the flag doesn't apply and was
   ignored, launches without the setting, prints no audit line and no
@@ -302,20 +354,22 @@ work into the background.
 - [ ] Dispatching a Codex worker with only
   `accept_session_messages_on_dispatch = true` prints no warning, no audit line
   and no explanation, creates no marker, launches without the setting, and
-  records `false`.
+  records `false`; with `--accept-session-messages=false` added, it also prints
+  no override line.
 - [ ] A review session `niwa watch` launches or resumes on a machine where
   `accept_session_messages_on_dispatch = true` doesn't carry
   `crossSessionInbound` in its launch settings.
-- [ ] With an unreadable `config.toml` and no flag, a dispatch proceeds with the
-  behavior off and prints no audit line; with an unreadable `config.toml` and
-  `--accept-session-messages`, the behavior takes effect and the audit line
-  names the flag; `accept_session_messages_on_dispatch = "yes"` behaves as an
-  unreadable file.
-- [ ] The stdout of a dispatch with the behavior on is identical to the stdout of
-  the same dispatch with it off.
-- [ ] The user guide covers every item R17 lists, the contributor-guide index
-  links to it, `niwa dispatch --help` describes the flag, and shell completion
-  offers it.
+- [ ] Each of these fixtures, run without the flag, leaves the behavior off with
+  no audit line, and run with `--accept-session-messages`, makes it take effect
+  with the audit line naming the flag: a `config.toml` niwa can't open (mode 000,
+  skipped as root), a `config.toml` that isn't valid TOML, and
+  `accept_session_messages_on_dispatch = "yes"`.
+- [ ] In a scenario whose stderr isn't a terminal, the stdout of a dispatch with
+  the behavior on is identical to the stdout of the same dispatch with it off,
+  apart from instance names and session identifiers.
+- [ ] The user guide covers every item R17 lists and uses the same top-level
+  section headings as the keep-alive guide, the contributor-guide index links to
+  it, `niwa dispatch --help` describes the flag, and shell completion offers it.
 - [ ] `@critical` functional scenarios exist for each case R18 lists.
 
 ### Manual delivery check
@@ -324,25 +378,39 @@ Real delivery between two live Claude Code sessions can't be reproduced by the
 fake `claude` binary the functional tests use, so R4 and R5 are verified by this
 procedure, which a person other than the author can repeat.
 
-Preconditions: record the Claude Code version; the tester's
-`~/.claude/settings.json` sets no `crossSessionInbound`, and no managed settings
-file exists; the workspace declares a bypass posture, so dispatched workers run
-with `bypassPermissions`. The sender S is a session started with `claude --bg`
-and no permission-mode flag, so it runs with prompts on. Messages are sent with
-Claude Code's cross-session messaging, addressed to the receiver's name. A
-message is **delivered** when its text appears in the receiver's output
-(`claude logs <id>`) as an incoming message within 60 seconds with no approval
-dialog; it is **held** when the receiver shows the "Held message from another
-session" dialog instead.
+Preconditions:
+- Record the Claude Code version.
+- The tester's `~/.claude/settings.json` sets no `crossSessionInbound` and no
+  bypass default permission mode, and no managed settings file exists.
+- The workspace declares `permissions = "bypass"` under `[claude.settings]` in
+  `workspace.toml`, so dispatched workers run with `bypassPermissions`.
+- Workers are addressed by the `--name` given to `niwa dispatch`.
+- The sender S is a session started with `claude --bg` and no permission-mode
+  flag, so it runs with prompts on. The tester makes S send by telling it, in its
+  own conversation, which session to message and what to say; if S's own tool
+  asks for permission to send, the tester approves it, because that prompt isn't
+  the hold under test.
 
-- [ ] Case 0, control: dispatch worker W with the behavior off. A message from S
-  to W is held.
-- [ ] Case 1: dispatch W with the behavior on. A message from S to W is
+A message is **delivered** when its text appears in the receiver's output
+(`claude logs <id>`) as an incoming message within 60 seconds with no approval
+dialog. It is **held** when the receiver shows an approval dialog stating that
+the sending session's permission mode class doesn't match its own. A case in
+which neither appears within 60 seconds fails.
+
+- [ ] Case 0, control: dispatch worker W0 with the behavior off. A message from
+  S to W0 is held.
+- [ ] Case 0b, control after a restart: run `claude respawn <W0>`. A message from
+  S to W0 is still held.
+- [ ] Case 1: dispatch worker W with the behavior on. A message from S to W is
   delivered.
-- [ ] Case 2: with W from case 1, run `claude respawn <W>` and confirm it
-  reports the session respawned. A message from S to W is delivered.
-- [ ] Case 3: with W from case 1, a message from W to S is held in S, which
-  documents that the behavior is inbound-only.
+- [ ] Case 2: run `claude respawn <W>` and confirm it reports the session
+  respawned. A message from S to W is delivered.
+- [ ] Case 2b: run `claude stop <W>`, then reopen W with the `claude attach` line
+  `niwa list` prints for it and detach. A message from S to W is delivered.
+- [ ] Case 2c: run `claude stop <W>` again, and send S's message to W without
+  reopening it first. The message wakes W and is delivered.
+- [ ] Case 3: a message from W to S is held in S, which documents that the
+  behavior is inbound only.
 - [ ] Case 4, control: dispatch two workers with the behavior off. A message
   from one to the other is delivered, because both run in the same class.
 
@@ -356,6 +424,10 @@ session" dialog instead.
   are addressed by session name across a developer's whole account, niwa sits
   nowhere in that delivery path, and so it can't enforce such a boundary.
   Offering one would promise protection that doesn't exist.
+- **Isolating a dispatched session so every inbound message waits for
+  approval.** Switching the behavior off keeps Claude Code's default, which only
+  holds messages from sessions in a different class. A mode that holds
+  everything would be a separate feature.
 - **Granting a session anything beyond receipt of a message.** Whatever a
   message asks a session to do still goes through that session's own
   permissions.
@@ -387,11 +459,20 @@ session" dialog instead.
   the developer's own session or a coordinator dispatched before this feature,
   still wait for approval there when the two are in different classes. The
   experiment behind this PRD observed exactly that.
+- **Switching it off isn't isolation.** A worker dispatched with
+  `--accept-session-messages=false` keeps Claude Code's default, which delivers
+  messages between sessions of the same class. In a workspace whose workers run
+  with prompts off, other such workers still reach it without a prompt.
 - **It relies on Claude Code keeping launch settings across restarts.** Claude
   Code 2.1.267 saves a background session's launch flags and reapplies them when
   it restarts or reopens the session, which is what R5 depends on. A release that
-  stopped would make restarted workers ask again; the manual check's case 2 is
-  what would catch it.
+  stopped would make restarted workers ask again; the manual check's cases 2, 2b
+  and 2c are what would catch it.
+- **A foreground `claude --resume` doesn't carry it.** Resuming a dispatched
+  worker's conversation in a new foreground process, by hand or through a tool
+  that runs `claude --resume`, starts a session without the worker's launch
+  settings. The ways back niwa itself offers into a dispatched session all reopen
+  the saved background session instead.
 - **Turning the machine setting off doesn't reach sessions already dispatched.**
   A session launched with the behavior keeps it across restarts. To drop it,
   stop the session and dispatch a new one.
@@ -400,33 +481,38 @@ session" dialog instead.
   the developer's whole account: sessions on other machines and in the cloud,
   including ones unrelated to the workspace. A single account was observed with
   116 addressable sessions across unrelated projects.
-- **It removes the one human checkpoint on incoming peer text.** Pre-approving
-  delivery grants no authority by itself, but for workspaces that run dispatched
-  sessions with permission prompts off, nothing downstream asks again before the
-  receiving session acts on what the message says. That's why the behavior is
-  off by default, and why dispatch containment is the natural follow-up.
+- **It removes the human checkpoint on incoming peer text from other classes.**
+  Pre-approving delivery grants no authority by itself, but for workspaces that
+  run dispatched sessions with permission prompts off, nothing downstream asks
+  again before the receiving session acts on what a message from a different
+  class says. That's why the behavior is off by default, and why dispatch
+  containment is the natural follow-up.
 - **The developer's own interactive session stays governed by their personal
   settings.** niwa can describe the step for that direction; it can't take it or
   confirm it was taken.
-- **"Once" means once per niwa configuration directory, not once per opt-in.** A
-  developer who turns the behavior off and back on later won't see the
-  explanation again, and a configuration directory shared across machines shares
-  the marker. The audit line on every dispatch where the behavior takes effect
-  carries the guide URL, and deleting the marker shows the explanation again.
+- **"Once" means once per niwa configuration directory, and only at a
+  terminal.** A developer who turns the behavior off and back on later won't see
+  the explanation again, and a configuration directory shared across machines
+  shares the marker. A developer who only ever dispatches through an agent, with
+  no terminal on stderr, sees the explanation in the agent's output on every
+  qualifying dispatch until they dispatch once from a terminal or create the
+  marker by hand. The audit line on every dispatch where the behavior takes
+  effect carries the guide URL, and deleting the marker shows the explanation
+  again.
 
 ## Decisions and Trade-offs
 
 - **No change to how niwa brings sessions back.** An earlier diagnosis blamed
-  the 2026-09-09 holds on niwa's resume commands not carrying the permission
+  the 2026-09-10 holds on niwa's resume commands not carrying the permission
   mode, and proposed adding launch flags to them. A live experiment on Claude
-  Code 2.1.267 refuted it: every way niwa builds or prints back into a Claude
-  session is `claude attach <id>`, which takes no launch flags, and Claude Code
-  saves a background session's launch flags with the session and reapplies them
-  on restart, as the experiment confirmed for both the permission mode and the
-  inbound-acceptance setting. The 2026-09-09 holds paired a session dispatched
-  before niwa's permission-mode fix with one dispatched after it. The re-entry
-  change would have altered nothing, so R5 states the outcome and the manual
-  check verifies it.
+  Code 2.1.267 refuted it. Every way niwa builds or prints back into a dispatched
+  Claude session is `claude attach <id>`, which takes no launch flags, and Claude
+  Code saves a background session's launch flags with the session and reapplies
+  them on restart, as the experiment confirmed for both the permission mode and
+  the inbound-acceptance setting. The holds paired a session dispatched before
+  niwa's permission-mode fix with one dispatched after it. The re-entry change
+  would have altered nothing, so R5 states the outcome and the manual check
+  verifies it across each way a session comes back.
 - **The fix is the receiving session's inbound setting, not class agreement.**
   Alternative: keep every session in the same permission-mode class. Rejected
   because classes are fixed at launch, some of the sessions involved aren't
@@ -466,11 +552,15 @@ session" dialog instead.
   agent it can't reach, which trains developers to ignore the line. Never warning
   would leave a developer who explicitly asked for the behavior believing it
   applied. This closes the BRIEF's question about such agents.
-- **An override line confirms the exclusion.** Alternative: say nothing when the
-  flag turns the machine setting off, leaving `niwa list` as the only trace.
-  Rejected because the exclusion is the security-relevant direction, the BRIEF's
-  third journey promises the developer sees which choice applied, and a silent
-  exclusion looks the same as a mistyped flag.
+- **Switching it off keeps Claude Code's default, and the override line says
+  exactly that.** Alternatives: make `--accept-session-messages=false` hold every
+  inbound message, whatever the sender's class; or say nothing when the flag
+  turns the machine setting off. Holding everything was rejected as a different
+  feature with its own design questions, recorded under Out of Scope. Silence was
+  rejected because the BRIEF's third journey promises the developer sees which
+  choice applied. The line names Claude Code's default rather than promising that
+  every message will ask, because messages between sessions of the same class
+  don't.
 - **"Once" is per niwa configuration directory, marked only when a terminal saw
   it.** Alternatives: print on every dispatch where the behavior takes effect,
   rejected because a multi-sentence explanation repeated through a fan-out stops
@@ -479,11 +569,16 @@ session" dialog instead.
   print when a setter command runs, rejected because the sibling keys have no
   setter; record "seen" inside `config.toml`, rejected because rewriting that
   file strips the developer's comments and parallel dispatches would race on it.
+  The cost, accepted and documented, is that a developer who only dispatches
+  through agents sees it repeatedly until they dispatch once from a terminal or
+  create the marker.
 - **The audit record lives in the session record and `niwa list`, not only on
   stderr.** Alternative: the stderr line alone. Rejected because detached and
   scripted dispatches routinely discard stderr, and the stated need is to tell
   afterwards which sessions accepted messages unattended. niwa already records
-  keep-alive this way.
+  keep-alive this way. Because `niwa list` has one record per instance, the field
+  is keyed to the instance, and it's always present, unlike `keep_alive`, so
+  scripts can rely on it.
 - **niwa doesn't gate on the Claude Code version.** Alternative: check the
   version and treat an older Claude Code as unable to receive the behavior.
   Rejected because it would make niwa a second source of truth for Claude Code's
