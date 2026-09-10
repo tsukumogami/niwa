@@ -8,6 +8,33 @@
 | d3-marker-location | docs/designs/DESIGN-dispatch-sendmessage-approval.md | 3 | confirmed | Where is the one-time explanation remembered? |
 | d4-record-fields | docs/designs/DESIGN-dispatch-sendmessage-approval.md | 3 | confirmed | How does `niwa list` learn the outcome? |
 | cross-validation | wip/design_dispatch-sendmessage-approval_coordination.json | 2 | confirmed | Do the four decisions' assumptions conflict? |
+| security-review-deny | docs/designs/DESIGN-dispatch-sendmessage-approval.md | 2 | assumed (high) | Deny cross-session messaging in `niwa watch` review sessions in this PR? |
+| security-review-env | docs/designs/DESIGN-dispatch-sendmessage-approval.md | 2 | confirmed | Fix or document the `XDG_CONFIG_HOME`/`HOME` relocation route? |
+
+<!-- decision:start id="security-review-deny" status="assumed" priority="high" -->
+**Decision:** Add a PreToolUse hook denying `SendMessage` to `niwa watch` review
+sessions in every containment mode, in this PR. **Why assumed:** it extends the
+PRD, which excluded review sessions as receivers but didn't consider them as
+senders. Evidence: the egress-deny matcher is `WebFetch|WebSearch|mcp__`
+(`internal/watch/containment.go:18`), so messaging isn't contained; the
+operator-approval posture runs review sessions in `default` mode, so today the
+class mismatch holds their messages to bypass workers, and this feature would
+remove that hold. No code or prompt in the repo uses cross-session messaging from
+a review session. The change is one matcher constant, one hook, and one
+verification line, following the existing always-on post-guard pattern.
+Alternative: name it as a follow-up and document the gap; rejected because the
+feature itself opens the path.
+<!-- decision:end -->
+
+<!-- decision:start id="security-review-env" status="confirmed" -->
+**Decision:** Document the `XDG_CONFIG_HOME`/`HOME` relocation route and qualify
+the "no other source" guarantee as covering configuration sources, with
+rejecting those names in `[claude.env]`/`[session.env]` as follow-up. Evidence:
+the route already affects every existing machine-level dispatch key, and a
+workspace config able to set the session environment can already install hooks
+that run in the session, so it grants nothing new; fixing it belongs to all
+machine keys at once.
+<!-- decision:end -->
 
 <!-- decision:start id="inline-resolution" status="confirmed" -->
 **Decision:** Resolved the four decisions inline rather than spawning decider

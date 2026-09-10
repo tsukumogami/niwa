@@ -19,7 +19,9 @@ decision: |
   capability row decides which agents can receive it. The outcome is recorded on
   the session mapping and shown by `niwa list`, and a one-time explanation is
   suppressed by a marker file beside `config.toml` that is created only when a
-  terminal saw it.
+  terminal saw it. `niwa watch` review sessions gain a hook denying
+  cross-session messaging, so a contained reviewer can't hand instructions to a
+  worker that now accepts them.
 rationale: |
   The merged document is the only channel Claude Code honors for this setting
   that niwa can reach, and merging is forced by the measured last-wins behavior
@@ -134,6 +136,13 @@ explanation was seen.
   new resolution must live in `runDispatch` only (R14).
 - **D11. One pull request.** All changes are in this repository, and no piece
   needs another merged first.
+- **D12. Review containment holds.** `niwa watch` review sessions read
+  untrusted changes. Today, when they run in a prompting mode, the class
+  mismatch holds their messages to bypass workers. A worker that accepts
+  would remove that hold, so the feature must not give a contained reviewer a
+  channel to an uncontained worker. Review containment's egress hook matches
+  only `WebFetch|WebSearch|mcp__` (`internal/watch/containment.go:18`), so it
+  doesn't cover messaging today.
 
 ## Considered Options
 
@@ -256,7 +265,9 @@ The marker is `accept-session-messages-notice` in the directory that holds
 `config.toml`, computed as `filepath.Dir(config.GlobalConfigPath())`, so it is
 `$XDG_CONFIG_HOME/niwa/` or `~/.config/niwa/`. `config.GlobalConfigDir()` isn't
 used, because it returns the overlay clone directory `.../niwa/global`. When the
-behavior takes effect, niwa checks whether the marker exists. If it doesn't,
+behavior takes effect, niwa checks whether the marker exists with `os.Lstat`, so
+a dangling symlink counts as present, matching what the exclusive create will
+find. If it doesn't,
 niwa prints the explanation; then, only if `IsStderrTTY()` reports a terminal,
 it runs `os.MkdirAll(dir, 0o700)` and opens the marker with
 `O_CREATE|O_EXCL|O_WRONLY` and mode `0o600`. An "already exists" error means a
@@ -408,6 +419,12 @@ delivery, and stderr output all live in `runDispatch`; nothing moves into
 - `internal/workspace` instance records and `internal/cli/list.go`:
   `InstanceRecord.AcceptsSessionMessages`, the annotation, the human marker, and
   the `--json` help text.
+- `internal/watch/containment.go`: a `messagingDenyMatcher = "SendMessage"`
+  constant and a `messagingDenyHook()` PreToolUse hook that exits 2 with
+  `niwa watch: review sessions don't message other sessions`, appended by
+  `ApplyReviewSettings` in every mode (deduped by matcher, like the posting
+  guard) and required by `VerifyReviewSettings` in every mode, so a dropped
+  hook stops the launch.
 - `docs/guides/session-message-acceptance.md` (new) and the contributor-guide
   index in `CLAUDE.md`.
 
@@ -524,9 +541,113 @@ Deliverables:
 - `docs/guides/session-message-acceptance.md`, `CLAUDE.md`
 - `test/functional/features/` scenarios and step definitions
 
+### Phase 7: Review-session messaging deny
+
+Add the messaging-deny hook to review-session settings and to their
+verification. It depends on nothing else here and can land first; it's in this
+pull request because the feature is what makes the channel matter.
+
+Deliverables:
+- `internal/watch/containment.go` and its tests
+
 ## Security Considerations
 
-<!-- PENDING-PHASE-5: security review -->
+This feature gives a dispatched worker no new permission. What it removes is a
+checkpoint. Claude Code normally holds a message from a session in a different
+permission-mode class until a person approves it, and dispatched workers often
+run with `bypassPermissions` and no containment. With the behavior on, text
+from another session reaches such a worker and is acted on without a prompt.
+Everything below follows from that.
+
+**Who can send.** A worker that accepts takes messages from any session able to
+address it by name. That set covers the developer's whole Claude Code account,
+including sessions on other machines and in the cloud, and niwa sits nowhere in
+the delivery path, so it can't narrow it. Worker names are predictable, because
+niwa uses the dispatch name as the session's display name. The realistic threat
+is prompt-injection laundering: a session that reads untrusted content, such as
+a web page, an issue, or a third-party repository, is told to message a worker,
+and the worker carries out the instruction with its full authority. That
+authority includes shell access, write access outside its instance, the
+credentials resolved into its environment, git push rights, and unrestricted
+network access. Keep-alive can wake an idle worker to act on such a message.
+The same exposure already exists between two bypass-mode sessions, which Claude
+Code delivers between without a hold whether or not this feature is on, so
+switching the behavior off doesn't isolate a worker from them.
+
+**Review sessions.** Sessions that `niwa watch` launches review untrusted changes
+and never receive this behavior, but they could still send. Their network
+sandbox doesn't cover cross-session messaging, which goes through the local
+Claude Code process rather than the network, and in the operator-approval
+posture they run in a prompting mode, so the class mismatch was what held their
+messages to bypass workers. To keep this feature from becoming a way around
+review containment, review sessions get a PreToolUse hook that denies the
+cross-session messaging tool in every containment mode, the same way the
+posting guard applies in every mode. Nothing in a review session's job needs to
+message another session.
+
+**Who can turn it on.** Only the `[global] accept_session_messages_on_dispatch`
+key in niwa's machine configuration and the `--accept-session-messages` flag
+decide the behavior. No workspace config key, instance setting, or settings file
+a repository carries is read for it, and the overlay repository registered under
+`[global_config]` can't set it because its schema has no `[global]` table. That
+guarantee covers configuration sources. It doesn't cover two indirect routes:
+
+- niwa finds its machine configuration through `XDG_CONFIG_HOME` and `HOME`. A
+  workspace that sets either in its `[claude.env]` or `[session.env]` tables
+  changes which `config.toml` a `niwa dispatch` run from inside its sessions
+  reads. That affects every machine-level dispatch preference, not only this
+  one, and a workspace config able to do it can already install hooks that run
+  in the session, so it isn't a new capability. Rejecting those two variable
+  names in the session environment tables is follow-up work covering all
+  machine-level keys.
+- Any agent can pass the flag. A worker steered by an injected message can
+  dispatch more workers with the behavior on, and with the machine key on it
+  doesn't need the flag. A bypass worker can also edit the machine
+  configuration, since it can write anything the user can.
+
+**The settings document.** niwa builds the launch settings document from
+constant keys and values only, marshals it with `encoding/json`, and passes it
+as one argv element with no shell involved. Nothing from a workspace,
+repository, or prompt reaches it. `niwa dispatch` accepts no extra agent
+arguments, so a caller can't add a second `--settings` that would replace it. A
+comment on the builder records that contributors pass constants.
+
+**The marker file.** The explanation marker is an empty file created with
+exclusive-create semantics and mode `0600`, in a directory niwa creates with
+mode `0700` only when it's missing. Exclusive create doesn't follow a symlink at
+that path, so a planted link can't redirect the write, and the existence check
+uses `os.Lstat` so it agrees with the create. The marker gates no authority: it
+only suppresses the one-time explanation, and the audit line prints on every
+dispatch where the behavior takes effect whether or not the marker exists.
+
+**What's recorded.** The session mapping gains one boolean, stored with the same
+`0600` file and `0700` directory protection mappings already have, and
+`niwa list` reports it for every instance, including finished sessions. The
+stderr lines carry no paths, identifiers, or secrets, and niwa doesn't read or
+write the developer's Claude Code user or managed settings. The recorded value
+means niwa launched the worker with the setting, not that Claude Code confirmed
+it: a managed policy or a stricter project setting can still hold messages,
+which makes the record err toward reporting more acceptance than there is. It
+also doesn't reflect acceptance a developer turned on in their own user
+settings.
+
+**Audit surfaces.** Default off, the per-dispatch audit line, and the
+`niwa list` field are detective controls, not preventive ones. When an agent
+dispatches workers, the audit line lands in that agent's output rather than in
+front of a person, so `niwa list --json` is the reliable way to see which
+instances accept unattended messages; the field is on every record for that
+reason. Turning the machine key off doesn't reach sessions already launched,
+because Claude Code reapplies their launch settings when it restarts or reopens
+them. To withdraw the grant, list the instances reporting
+`accepts_session_messages: true` and stop their sessions.
+
+**Recommended posture.** The guide recommends turning the behavior on only on
+machines where every session sharing the Claude Code account is one the
+developer would let direct a bypass-mode worker, and preferring the
+per-dispatch flag to the machine key when only some fan-outs need it. Dispatch
+containment, a sandbox and outbound network limits comparable to review
+sessions, is the control that would make unattended delivery safe for
+untrusted inputs, and it's separate work.
 
 ## Consequences
 
@@ -555,11 +676,18 @@ Deliverables:
 - A developer who only dispatches through agents sees the explanation on every
   qualifying dispatch.
 - The capability table grows a row that every future agent has to declare.
+- A worker steered by an injected message can dispatch more accepting workers,
+  and a workspace that relocates `XDG_CONFIG_HOME` or `HOME` in its session
+  environment changes which machine configuration a nested dispatch reads.
+- Review sessions lose the ability to message other sessions, which nothing
+  uses today.
 
 ### Mitigations
 
 - Off by default, with an audit line on every dispatch where it takes effect and a
   marker in `niwa list`.
+- Review sessions deny cross-session messaging in every containment mode, so a
+  contained reviewer can't hand instructions to an uncontained worker.
 - The guide states what the behavior doesn't cover, how to extend it to the
   developer's own sessions and at what cost, and the Claude Code version the
   manual delivery check last passed on, which catches a change in Claude Code's
