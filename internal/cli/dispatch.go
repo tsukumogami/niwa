@@ -554,10 +554,11 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		recordedPermissions = state.ClaudePermissions
 	}
 	permissionMode, derived := derivePermissionMode(dispatchPermissionMode, recordedPermissions, spec.Flags)
-	// The warning is for a launch the unreadable state could have changed. An
-	// explicit --permission-mode sets the mode regardless of the posture, so a
-	// warning then would describe a decision that changed nothing. The path is
-	// named separately because a parse error does not carry it.
+	// An explicit --permission-mode sets the mode regardless of the posture, so
+	// the warning is skipped then: it would describe a decision that changed
+	// nothing. It still prints for an agent whose permission flag the
+	// derivation never uses, which is noise rather than harm. The path is named
+	// separately because a parse error does not carry it.
 	if stateErr != nil && permissionMode == "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: warning: could not read %s (%v); treating the workspace's permissions posture as undeclared\n",
 			filepath.Join(instancePath, workspace.StateDir, workspace.StateFile), stateErr)

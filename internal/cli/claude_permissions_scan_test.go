@@ -101,8 +101,8 @@ func TestClaudePermissionsHasOneReader(t *testing.T) {
 	// recorded posture or by calling the derivation on something it read
 	// elsewhere and appending the result after a watch launch helper returns.
 	for _, d := range derives {
-		if d.file != "cli/dispatch.go" {
-			t.Errorf("derivePermissionMode may only be used by dispatch; found it in %s (%s)", d.file, d.fn)
+		if d.file != "cli/dispatch.go" || (d.fn != "runDispatch" && d.fn != "derivePermissionMode") {
+			t.Errorf("derivePermissionMode may only be called from runDispatch; found it in %s (%s)", d.file, d.fn)
 		}
 	}
 

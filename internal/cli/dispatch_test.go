@@ -173,10 +173,6 @@ func writeMinimalInstanceState(dir string) error {
 		SchemaVersion: workspace.SchemaVersion,
 		InstanceName:  filepath.Base(dir),
 		Root:          dir,
-		// Stamped as Create stamps them, so the fake reads like a real
-		// instance's state to anything that reports on it.
-		Created:     time.Now(),
-		LastApplied: time.Now(),
 	})
 }
 
@@ -490,9 +486,8 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 	// Every dispatch runs the opportunistic reaper before it provisions, so a
 	// later goroutine sweeps the instances earlier ones already mapped -- they
 	// are instances the sweep can enumerate because the fake provisioner
-	// writes their .niwa/instance.json. A
-	// mapped session whose job entry is absent is gone by the reaper's rule and
-	// is reclaimed, mapping and all. A real dispatched worker has a job entry;
+	// writes their .niwa/instance.json. A mapped session whose job entry is
+	// absent is gone by the reaper's rule and is reclaimed, mapping and all. A real dispatched worker has a job entry;
 	// the fake capture below writes one for each session it hands out, under a
 	// HOME of the test's own so the sweep reads this test's jobs directory.
 	home := t.TempDir()
