@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: In Progress
 problem: |
   Developers who launch several background workers with `niwa dispatch` under a reused
   `--name` get workers that share one Claude Code session name, and that name is the
@@ -23,7 +23,7 @@ absorbed:
 
 ## Status
 
-Accepted
+In Progress
 
 This PRD owns the requirements for making the session names `niwa dispatch` forwards
 unique. It closes its brief's two open questions, how short the distinguishing part can
