@@ -94,8 +94,8 @@ stalled run.
 A developer who has turned the behavior on for their machine runs a coordinator
 session, dispatched with niwa, that dispatches four workers to investigate
 separate parts of a problem. The workers finish at different times and send
-their findings to the coordinator, which the developer closed overnight and
-reopened in the morning. Every report is waiting in the coordinator's
+their findings to the coordinator, which the developer left idle overnight and
+came back to in the morning. Every report is waiting in the coordinator's
 conversation, none of them behind an approval prompt, and the developer spends
 the morning reading results instead of approving them.
 
