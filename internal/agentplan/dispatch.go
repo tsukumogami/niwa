@@ -349,6 +349,12 @@ var launchSpecs = map[agent.Agent]LaunchSpec{
 		Binary:      "claude",
 		Runner:      RunnerSelfBackgrounding,
 		LeadingArgs: []string{"--bg"},
+		// Claude Code reads a prompt that begins with a dash as a flag. The
+		// prompt is the last element, after niwa's --settings document, so a
+		// prompt beginning with "--settings=" would silently replace that
+		// document. The separator makes the next element the prompt, whatever
+		// it starts with, on every launch.
+		PromptSeparator: true,
 		Flags: LaunchFlags{
 			Model:          "--model",
 			PermissionMode: "--permission-mode",

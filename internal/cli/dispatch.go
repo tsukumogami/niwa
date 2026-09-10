@@ -582,6 +582,15 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// settings document the agent reads. An agent that has no such flag has
 	// nowhere for the document to go, so the injection is gated on the
 	// declaration rather than attempted and dropped.
+	//
+	// The launch has one settings slot, so remote control does not append its
+	// own document. It adds its key to launchSettings, and the map is rendered
+	// once below into a single --settings element (see renderLaunchSettings).
+	// rcInjected is set from remote control's own inject decision, never from
+	// whether a document was rendered: keep-alive reads it in (9d), and a
+	// document carrying some other contributor's key must not arm keep-alive on
+	// a worker that starts without remote control.
+	launchSettings := map[string]any{}
 	rcInjected := false
 	rcDecl, rcErr := agentplan.Lookup(agentplan.RemoteControl, dispatchedAgent)
 	rcDeliverable := rcErr == nil && rcDecl.State == agentplan.StateImplemented && spec.Flags.Settings != ""
@@ -595,9 +604,16 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", warning)
 		}
 		if inject {
-			passthrough = append(passthrough, spec.Flags.Settings, remoteControlSettingsJSON)
+			launchSettings[config.RemoteControlAtStartupKey] = true
 			rcInjected = true
 		}
+	}
+	// Two discrete argv elements, and none at all when no contributor added a
+	// key. An agent with no settings flag has nowhere for the document to go;
+	// every contributor already gates on that, and this check keeps a future
+	// one that forgets from emitting an empty flag spelling.
+	if doc, ok := renderLaunchSettings(launchSettings); ok && spec.Flags.Settings != "" {
+		passthrough = append(passthrough, spec.Flags.Settings, doc)
 	}
 
 	// (9d) Keep-alive arming. The opt-in resolves flag > downstream > host

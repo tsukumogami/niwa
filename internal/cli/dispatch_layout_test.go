@@ -45,6 +45,7 @@ var dispatchPathFiles = []string{
 	"dispatch_launcher.go",
 	"dispatch_model.go",
 	"dispatch_remotecontrol.go",
+	"dispatch_settings.go",
 	"dispatch_spill.go",
 	"session_records.go",
 }
