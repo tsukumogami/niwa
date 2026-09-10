@@ -585,7 +585,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		OverlayCommit:  result.overlayCommit,
 		AuthSources:    result.authSources,
 		TrustKeys:      result.trustKeys,
-		// Recomputed by this run's pipeline, like Shadows and TrustKeys.
+		// Recomputed from this run's config alone, like Shadows.
 		ClaudePermissions: result.claudePermissions,
 	}
 

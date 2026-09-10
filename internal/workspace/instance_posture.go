@@ -16,13 +16,15 @@ const (
 //
 // It reads the same input the instance-root settings materializer reads,
 // MergeInstanceOverrides(cfg), so the recorded posture follows the same
-// precedence: workspace overlay, then workspace, then personal overlay, then
-// [instance.claude.settings]. Per-repo overrides never reach it.
+// precedence, from lowest to highest: workspace overlay, workspace, personal
+// overlay, [instance.claude.settings]. Per-repo overrides never reach it.
 //
 // It deliberately does not validate. RootSettingsMaterializer reads the same
-// map and rejects an unrecognized value before the pipeline saves state, so an
-// invalid value never reaches InstanceState. Returning a canonical literal
-// rather than the revealed string also means a secret-backed value's
+// map and fails the pipeline on an unrecognized value before state is saved.
+// That rejection is what lets a reader of InstanceState treat an empty posture
+// as "undeclared" rather than "declared something invalid"; this function's
+// fallback to "" would otherwise hide the difference. Returning a canonical
+// literal rather than the revealed string also means a secret-backed value's
 // plaintext is never retained past this call.
 func instancePermissionsPosture(cfg *config.WorkspaceConfig) string {
 	perm, ok := MergeInstanceOverrides(cfg).Claude.Settings["permissions"]
