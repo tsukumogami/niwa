@@ -283,7 +283,7 @@ naming or the success block today, so none needs a new section.
 ### Key Interfaces
 
 - Forwarded value: one argv element after the agent's display-name flag, matching
-  `^[a-z0-9_]+-[0-9a-f]{8}$` (the token is exactly 8 hex; the PRD's `{8,}` allows longer).
+  `dispatchSessionNamePattern` (the token is exactly 8 hex; the PRD's `{8,}` allows longer).
 - Dispatch stdout, named Claude dispatch:
 
   ```
