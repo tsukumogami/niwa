@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Draft
 problem: |
   Since Claude Code 2.1.257, the `bypassPermissions` value niwa writes into
