@@ -1,0 +1,25 @@
+{
+  "topic": "inert-defaultmode-key",
+  "decisions": [
+    {
+      "id": 1,
+      "question": "Where does the dispatch derivation get the instance's effective permission posture from, so that no generated settings document can grant or withhold bypass, every dispatch form carries the flag, and niwa watch's launches never do?",
+      "status": "pending",
+      "complexity": "critical"
+    },
+    {
+      "id": 2,
+      "question": "How does the materializer express bypass as no permissions.defaultMode and ask as \"default\", and where is an invalid declared value rejected so every level, including the personal overlay, fails with an error naming the accepted values?",
+      "status": "pending",
+      "complexity": "standard"
+    },
+    {
+      "id": 3,
+      "question": "How are the S1-S9 document matrix and the declaration-driven dispatch tests divided between unit and functional layers so each requirement has a test that can fail?",
+      "status": "pending",
+      "complexity": "standard"
+    }
+  ],
+  "cross_validation": "pending",
+  "round": 0
+}
