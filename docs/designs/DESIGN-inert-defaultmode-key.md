@@ -368,10 +368,9 @@ posture to a pure derivation. The operator's flag wins. Otherwise the
 derivation returns `bypassPermissions` when the recorded posture is `bypass`
 and the agent's flag spelling is `--permission-mode`, and empty otherwise.
 That value is passed to `buildDispatchPassthrough` as an argument, and both
-watch launch sites pass `""`. A state file that exists but can't be read or
-parsed degrades to "nothing derived" with a stderr warning. A missing state
-file degrades silently, which happens only under test fakes that provision no
-real instance. Codex is gated out by its flag spelling, as it is today.
+watch launch sites pass `""`. A state file that is missing, unreadable, or
+unparseable degrades to "nothing derived" with a stderr warning naming the
+file. Codex is gated out by its flag spelling, as it is today.
 
 The `Permissions` field on `instanceSettings` goes away. `readInstanceSettings`
 keeps serving remote control and keep-alive. The dead `WorkerPermissionMode`
@@ -418,14 +417,21 @@ behaves as follows:
 - Any other value returns an error stating that the permissions value isn't
   one of `"bypass"` or `"ask"`.
 
-The error includes the offending value only when it wasn't resolved from a
-`vault://` reference. For a vault-backed value, it names the reference and the
-config key, never the resolved plaintext, because the pipeline's secret
-redactor doesn't scrub plain `fmt.Errorf` text. `buildSettingsDoc` calls the
-function on the `maybeSecretString`-resolved value and adds `defaultMode` to
-the permissions map only when `write` is true. The worktree-delegation `deny`
-block is built as today, into the same map, and `permissions` is emitted only
-when the map is non-empty.
+The error branches on whether the configured value was secret-backed
+(`IsSecret()` on the `maybeSecretString` input). For a plain value, it quotes
+the value, so a typo is easy to spot. For a vault-backed value, it names the
+config key and the secret's origin (`Secret.Origin()`) and never the resolved
+plaintext, because the resolved `vault://` URI isn't retained and the
+pipeline's secret redactor doesn't scrub plain `fmt.Errorf` text. The two
+sibling boolean keys that `buildSettingsDoc` parses from the same settings
+map, `remoteControlAtStartup` and `keepAliveOnDispatch`, echo their resolved
+value in the same way today. They move to the same secret-safe form, since the
+change sits in the same function and the same helper covers all three.
+
+`buildSettingsDoc` calls `claudeDefaultMode` on the `maybeSecretString`-resolved
+value and adds `defaultMode` to the permissions map only when `write` is true.
+The worktree-delegation `deny` block is built as today, into the same map, and
+`permissions` is emitted only when the map is non-empty.
 
 **Instance posture resolver (`internal/workspace`).**
 `instancePermissionsPosture(cfg *config.WorkspaceConfig) string` reads
@@ -452,10 +458,11 @@ reads a posture from it.
 
 **Dispatch derivation (`internal/cli/dispatch.go`).** The derivation block
 that today reads `inst.Permissions` is replaced. `runDispatch` loads the state
-with `workspace.LoadState(instancePath)`:
-- If the file exists but can't be read or parsed, it prints a warning naming
-  the state file and treats the recorded posture as empty.
-- If the file doesn't exist, it treats the posture as empty silently.
+with `workspace.LoadState(instancePath)`. If the file is missing, unreadable,
+or unparseable, it prints a warning naming the state file and treats the
+recorded posture as empty. In production `Create` always saves state before
+returning, so a missing file means something removed it, and that deserves
+the same warning as a corrupt one.
 
 It then calls the pure
 `derivePermissionMode(explicit, recorded string, flags agentplan.LaunchFlags)
@@ -495,7 +502,8 @@ type InstanceState struct {
     // ...existing fields...
     // ClaudePermissions is the declared permission posture the instance-root
     // settings document resolved from ("bypass", "ask", or empty). niwa's own
-    // record, read by niwa dispatch; never a Claude Code mode string.
+    // record, read only by niwa dispatch for the instance it just
+    // provisioned; never a Claude Code mode string.
     ClaudePermissions string `json:"claude_permissions,omitempty"`
 }
 
@@ -563,8 +571,16 @@ both watch call sites, and the test caller. Remove the `Permissions`
 projection and its stale doc comments, and delete `WorkerPermissionMode`.
 
 Replace the seven fixture-based permission-mode tests with declaration-driven
-ones built on a real `Create`. Add the tamper test (both cases), the watch argv
-tests on a real `bypass` materialization, and the re-entry string tests.
+ones built on a real `Create`. Add these tests:
+- The tamper test, both cases.
+- The watch argv tests on a real `bypass` materialization.
+- The re-entry string tests.
+- A static check that `ClaudePermissions` is read only at `runDispatch`'s load
+  site and is never copied from the workspace-root state.
+
+The dispatch unit tests' fake provisioners gain a minimal `instance.json`, so
+the new missing-state warning doesn't fire in tests that aren't about the
+posture.
 
 The materializer still writes the old values, so behavior is unchanged, but
 the derivation no longer reads them.
@@ -573,11 +589,13 @@ Deliverables:
 - `internal/cli/dispatch.go`, `dispatch_plugins.go`, and `watch.go`.
 - Deletion of `internal/workspace/permissions.go`.
 - A rewritten `internal/cli/dispatch_permissionmode_test.go`.
+- Fake-provisioner updates in the dispatch tests.
 
 ### Phase 3: Change what the materializer writes
 
 Replace `permissionsMapping` with `claudeDefaultMode` and update the
-unknown-value error, including the vault-safe form.
+unknown-value error. Move the permissions error and the two sibling boolean
+keys' errors to the secret-safe form.
 
 Flip the materializer, root-materializer, apply, worktree, and secret-ref
 tests that asserted `bypassPermissions` or `askPermissions`. Keep each test's
@@ -587,8 +605,8 @@ New tests in this phase:
 - The `ask`-versus-undeclared differential at each of the four locations.
 - The re-apply repair test.
 - The recorded-posture-matches-document test across S1-S9.
-- Invalid-value tests at each level, including a vault-backed invalid value
-  whose plaintext must not appear in the error.
+- Invalid-value tests at each level. For all three keys, include a
+  vault-backed invalid value whose plaintext must not appear in the error.
 - A test that parses `permissions = "bypass"` and `"ask"` at the workspace,
   instance, repo, and personal-overlay levels.
 - `niwa watch`'s review settings applied in both postures on top of a real
@@ -649,6 +667,13 @@ changes is where dispatch reads the resolved answer. It used to read
 `.niwa/instance.json` while materializing, from the same config map the
 settings document is built from.
 
+That declaration is only as trustworthy as its sources. The widest group able
+to set it is anyone who can push to the workspace's overlay repo, which niwa
+discovers by naming convention and clones without asking, or to the
+developer's personal overlay repo. This design doesn't widen that group, but
+it's the group that actually controls whether a dispatched worker runs
+without prompts.
+
 **A settings file can no longer grant bypass.** Before this change, a session
 able to edit the instance-root `.claude/settings.json` could turn a later
 dispatch into a bypass launch. After it, dispatch reads no permission value
@@ -665,15 +690,23 @@ reasons:
 - Creating the instance writes the state file whole, so a value planted in
   advance is overwritten.
 
+Code that runs inside provisioning is the exception to the first two. A
+repo's setup scripts and the plugin prewarm run before `Create` saves state.
+A detached child they start could rewrite `instance.json` after the save and
+before dispatch reads it. That is accepted, because it's no wider than today.
+The same scripts can already rewrite `.claude/settings.json` synchronously,
+without needing the race, and they run code the workspace chose to run.
+
 The recorded value is trusted only for an instance the calling process just
-provisioned. Any future feature that needs the posture of an existing
+provisioned. A static check pins `ClaudePermissions` to its one reader in
+`runDispatch`. Any future feature that needs the posture of an existing
 instance should re-resolve it from configuration rather than trust this
 field.
 
-**Failure withholds the flag.** If the state file exists but can't be read or
-parsed, dispatch forwards no permission mode and prints a warning naming the
-file. The worker then prompts instead of running unattended. An operator's
-explicit `--permission-mode` still wins, and is still the only
+**Failure withholds the flag.** If the state file is missing, unreadable, or
+unparseable, dispatch forwards no permission mode and prints a warning naming
+the file. The worker then prompts instead of running unattended. An
+operator's explicit `--permission-mode` still wins, and is still the only
 `--permission-mode` on the command line.
 
 **`niwa watch` never gets a derived flag.** The permission mode is an explicit
@@ -684,17 +717,29 @@ review posture relies on `permissions.defaultMode: "default"`, and a
 command-line mode would outrank it, so tests pin watch's empty value against
 an instance whose state records `bypass`.
 
-**Side effects on watch reviews.** The hard-deny review posture sets no
-permission mode of its own, so it runs in whatever the instance-root
-document resolves to. In a `bypass` workspace that document no longer
-carries a mode, so hard-deny and sandbox-off reviews run in the developer's
-own mode rather than the `default` that Claude Code's downgrade used to
-produce. The sandboxed boundary doesn't depend on the mode. The no-egress
-sandbox, the egress-deny hook, and the filesystem-guard hook all apply under
-any mode. In an `ask` workspace, the instance-root document used to carry a
-mode Claude Code rejects, which made it discard the whole file, including the
-containment settings watch merges into it. That file is now valid, so
-hard-deny reviews in `ask` workspaces get their containment back.
+**This change closes a live containment hole in `ask` workspaces.** Today, an
+`ask` workspace's instance-root document carries `askPermissions`, which Claude
+Code rejects by discarding the whole file. That discards the containment
+settings `niwa watch` merges into it as well: the no-egress sandbox and the
+egress and filesystem guard hooks. A hard-deny review in an `ask` workspace
+therefore reads untrusted code uncontained, while watch's own verification
+still passes, because it checks the file's bytes and not whether Claude Code
+accepts them. Phase 3 closes this by writing `default` instead, which makes
+the file valid and restores the containment.
+
+Hardening watch's verification to reject any mode Claude Code doesn't
+recognize, in every posture, would stop a future bad value from reopening the
+hole silently. That changes watch's behavior, which the PRD keeps out of this
+feature's scope, so it's recorded as a follow-up to take up promptly.
+
+**Side effects on watch reviews in `bypass` workspaces.** The hard-deny review
+posture sets no permission mode of its own, so it runs in whatever the
+instance-root document resolves to. In a `bypass` workspace that document no
+longer carries a mode, so hard-deny and sandbox-off reviews run in the
+developer's own mode rather than the `default` that Claude Code's downgrade
+used to produce. The sandboxed boundary doesn't depend on the mode: the
+no-egress sandbox, the egress-deny hook, and the filesystem-guard hook all
+apply under any mode.
 
 **`ask` overrides every personal mode in its scope.** An `ask` scope writes
 `defaultMode: "default"`. That replaces the developer's own default mode
@@ -707,8 +752,10 @@ invalid value silently disabled, take effect again.
 reference. niwa validates the resolved value against `bypass` and `ask`
 before writing anything, and records only one of those two literals, so no
 secret material reaches `instance.json`. An invalid vault-backed value fails
-the operation with an error that names the reference, not the resolved
-value.
+the operation with an error naming the config key and the secret's origin,
+never the resolved value. The same holds for the two sibling boolean keys
+parsed in the same function, which currently echo a resolved value on a parse
+error.
 
 **Per-repo `ask` doesn't restrain dispatched workers.** A dispatched worker
 starts at the instance root. The derivation follows the instance's posture,
@@ -730,25 +777,26 @@ Containment for dispatched workers remains a separate follow-up.
   being forced to `default`, and dispatched workers still run unattended.
 - `ask` scopes get the prompting they declared, and the hooks, deny rules, and
   plugins that the invalid value was silently voiding take effect again. That
-  includes the containment settings `niwa watch` merges into the instance
-  root for hard-deny reviews.
+  closes a live hole in which hard-deny `niwa watch` reviews in `ask`
+  workspaces ran without their sandbox and guard hooks.
 - No settings file can change what dispatch forwards, and the file no longer
   shows a setting that governs nothing.
 - Watch's empty permission mode is explicit at its call sites and pinned by a
   test.
+- Three settings-parse errors stop echoing vault-resolved values.
 - Existing instances repair themselves on the next apply, with no migration.
 
 ### Negative
 
 - One more field on persisted instance state, and a second place, after the
   instance-root document, where the resolved posture is visible.
-- A state file that can't be read withholds the derived flag, as a settings
-  read failure did before, so a corrupted `instance.json` costs a worker its
-  bypass.
+- A state file that is missing or can't be read withholds the derived flag,
+  as a settings read failure did before, so a damaged `instance.json` costs a
+  worker its bypass.
 - Hard-deny and sandbox-off `niwa watch` reviews in a `bypass` workspace run in
   the developer's own mode instead of the `default` they got by accident.
 - The functional suite grows by a nine-scenario Outline and several dispatch
-  scenarios.
+  scenarios, and the dispatch unit tests' fakes now write a state file.
 - Sessions a developer starts on Claude Code older than 2.1.257 lose the
   file-borne bypass they had.
 
@@ -756,13 +804,14 @@ Containment for dispatched workers remains a separate follow-up.
 
 - The recorded posture and the instance-root document read the same config
   map, and a test across S1-S9 pins their agreement. The field records niwa's
-  vocabulary rather than a Claude mode.
-- A read or parse failure prints a stderr warning naming the state file, so a
+  vocabulary rather than a Claude mode, and a static check pins it to its one
+  reader.
+- Any failure to load the state prints a stderr warning naming the file, so a
   lost bypass is visible rather than silent.
 - Watch's sandboxed boundary (the no-egress sandbox and the egress and
-  filesystem guard hooks) applies under any mode. A follow-up can make watch's
-  settings verification reject any mode Claude Code doesn't recognize, so a
-  future bad value fails the launch instead of silently dropping containment.
+  filesystem guard hooks) applies under any mode. Hardening watch's settings
+  verification to reject any mode Claude Code doesn't recognize is recorded as
+  a prompt follow-up.
 - Only S1 of the matrix is `@critical`, so the critical lane's runtime barely
   moves.
 - The ephemeral-sessions guide names `--permission-mode` as the route for

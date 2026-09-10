@@ -124,3 +124,23 @@ Phase 6 reviewers run next against the revised document.
 
 The rewrite leaves the Security Considerations section's substance unchanged,
 so the in-flight security reviewer's read is still current.
+
+| G6.4 | docs/designs/DESIGN-inert-defaultmode-key.md | 3 | confirmed | Security review (Phase 6): findings, one escalation, one reviewer disagreement |
+
+## G6.4 -- Security review PASS; findings applied, one escalation kept in follow-up
+
+| Source | Finding | Action | Applied |
+|--------|---------|--------|---------|
+| Security | In-pipeline writers (setup scripts, plugin prewarm) can race `instance.json` after save | Named in Security Considerations and accepted: no wider than today, when the same scripts rewrite `settings.json` synchronously | [x] |
+| Security | Vault-safe error can't "name the reference" (URI not retained) | Branch on `IsSecret()`; name the config key and `Secret.Origin()` | [x] |
+| Security | Sibling keys `remoteControlAtStartup` / `keepAliveOnDispatch` leak resolved vault values the same way | Moved to the same secret-safe form in Phase 3; same function and helper | [x] |
+| Security | Escalate: `ask` workspaces' hard-deny watch reviews run uncontained today | Documented as a live hole this change closes in Phase 3. The recommended verifier hardening changes watch's behavior, which the PRD scopes out, so it's a prompt follow-up, not part of this change | [x] (documented) |
+| Security | A missing state file shouldn't be silent | **Disagreement** with the architecture review, which asked for silence to keep test fakes quiet. Security's reasoning wins for production behavior: `Create` always saves before returning, so a missing file means something removed it. Resolved by warning on missing and giving the dispatch test fakes a minimal `instance.json` | [x] |
+| Security | "Trusted only right after provisioning" enforced by comment alone | A static check pins `ClaudePermissions` to its one reader and forbids copying from workspace-root state (Phase 2) | [x] |
+| Security | Name who actually controls bypass | Overlay-repo and personal-overlay-repo pushers named | [x] |
+
+**Scope note on the escalation.** Pulling the watch verifier change into this
+feature would contradict the PRD's R13 (watch untouched) and its Out of Scope
+entry for watch. The live hole itself closes inside scope, because Phase 3
+stops writing the invalid value. The hardening is flagged to the author for a
+separate, prompt fix.
