@@ -295,3 +295,52 @@ func TestDispatchDoesNotApologizeForATurnTheDeveloperWatched(t *testing.T) {
 		t.Errorf("a detached worker its agent will not hand over left the developer nothing to explain a resume that refuses:\n%s", stderr)
 	}
 }
+
+// TestDispatchSessionName_ForegroundSuccessPrintsLine covers the success exit
+// of an agent that runs its turn in the foreground and declares a display-name
+// flag.
+func TestDispatchSessionName_ForegroundSuccessPrintsLine(t *testing.T) {
+	base, ok := agentplan.For(agent.AgentClaude).LaunchSpec()
+	if !ok {
+		t.Fatal("no launch spec for the default agent")
+	}
+	spec := base
+	spec.Runner = agentplan.RunnerForeground
+
+	_, _ = namedDispatchEnv(t, constByteReader(0xab))
+	substituteLaunchSpec(t, spec)
+	dispatchDetach = false
+
+	stdout, stderr, err := runDispatchCmd(t, "do a thing")
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if !strings.Contains(stderr, "turn ended") {
+		t.Fatalf("this did not take the foreground exit:\n%s", stderr)
+	}
+	assertSessionNameLineAfterInstance(t, stdout, "review-abababab")
+}
+
+// TestDispatchSessionName_NoResumeDuringTurnPrintsLine covers the exit of an
+// agent that will not hand over a session mid-turn.
+func TestDispatchSessionName_NoResumeDuringTurnPrintsLine(t *testing.T) {
+	base, ok := agentplan.For(agent.AgentClaude).LaunchSpec()
+	if !ok {
+		t.Fatal("no launch spec for the default agent")
+	}
+	spec := base
+	spec.ResumeDuringTurn = false
+
+	_, _ = namedDispatchEnv(t, constByteReader(0xab))
+	substituteLaunchSpec(t, spec)
+	dispatchDetach = true
+
+	stdout, stderr, err := runDispatchCmd(t, "do a thing")
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if !strings.Contains(stderr, unopenableSessionNotice(spec.Binary)) {
+		t.Fatalf("this did not take the ResumeDuringTurn=false exit:\n%s", stderr)
+	}
+	assertSessionNameLineAfterInstance(t, stdout, "review-abababab")
+}

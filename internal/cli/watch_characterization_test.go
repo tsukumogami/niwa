@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -190,8 +189,6 @@ func assertSingleNameValue(t *testing.T, passthrough []string, want string) {
 	}
 }
 
-var watchCharInstancePrefix = regexp.MustCompile(`^watch_acme_widget_7-[0-9a-f]{8}$`)
-
 func TestWatchCharacterization_StageReview(t *testing.T) {
 	cases := []struct {
 		name            string
@@ -232,6 +229,10 @@ func TestWatchCharacterization_StageReview(t *testing.T) {
 			client := newPullHeadServer(t)
 			cmd, stdout, _ := newWatchCharCmd()
 
+			// Watch mints its instance token through the same source as
+			// dispatch, so a fixed source pins the whole instance name.
+			stubDispatchRand(t, constByteReader(0xab))
+
 			if err := stageReview(cmd, root, root, "", client, watchCharPR, tc.plan); err != nil {
 				t.Fatalf("stageReview: %v", err)
 			}
@@ -252,8 +253,8 @@ func TestWatchCharacterization_StageReview(t *testing.T) {
 			if fakes.provisioned.sep != "+" {
 				t.Errorf("provision sep = %q, want %q", fakes.provisioned.sep, "+")
 			}
-			if !watchCharInstancePrefix.MatchString(fakes.provisioned.namePrefix) {
-				t.Errorf("provision namePrefix = %q, want watch_acme_widget_7-<8hex>", fakes.provisioned.namePrefix)
+			if fakes.provisioned.namePrefix != "watch_acme_widget_7-abababab" {
+				t.Errorf("provision namePrefix = %q, want %q", fakes.provisioned.namePrefix, "watch_acme_widget_7-abababab")
 			}
 			instancePath := fakes.provisioned.path
 			if launch.InstanceDir != instancePath {

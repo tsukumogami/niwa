@@ -19,8 +19,9 @@ import (
 // looks like to every reader: niwa list (text and JSON), niwa status (summary
 // and detail), niwa reap (live and dead), and the re-entry hints. The mapping is
 // checked in as raw bytes under testdata/legacy_session/mapping.json and copied
-// onto disk as-is, never built through workspace.WriteSessionMapping, so a field
-// added to the struct later cannot change the fixture.
+// onto disk with one substitution, its single {{INSTANCE_PATH}} token, and is
+// never built through workspace.WriteSessionMapping, so a field added to the
+// struct later cannot change the fixture.
 //
 // Regenerate the goldens after a deliberate behavior change with:
 //
@@ -251,7 +252,9 @@ func TestLegacySessionCharacterization(t *testing.T) {
 		var b strings.Builder
 
 		// Live: the session's job entry is present, so the instance is kept
-		// and nothing is reported.
+		// and nothing is reported. The empty live sections in reap.txt are the
+		// intended baseline, not a capture that failed: the not-destroyed and
+		// mapping-kept assertions below carry this case.
 		{
 			ws := buildLegacySessionWorkspace(t, dir)
 			writeJobEntry(t, filepath.Join(ws.home, ".claude", "jobs"), legacySessionID)
@@ -321,4 +324,30 @@ func TestLegacySessionCharacterization(t *testing.T) {
 		assertNoSessionNameText(t, got)
 		compareLegacyGolden(t, dir, "hints.txt", got)
 	})
+}
+
+// TestLegacySessionFixtureMatchesConstants cross-checks the constants this
+// file's assertions use against the checked-in fixture, so the two cannot
+// drift apart unnoticed.
+func TestLegacySessionFixtureMatchesConstants(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(legacySessionTestdata(t), "mapping.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m workspace.SessionMapping
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("decoding the fixture: %v", err)
+	}
+	if m.SessionID != legacySessionID {
+		t.Errorf("fixture session_id = %q, legacySessionID = %q", m.SessionID, legacySessionID)
+	}
+	if m.InstanceName != legacyInstanceName {
+		t.Errorf("fixture instance_name = %q, legacyInstanceName = %q", m.InstanceName, legacyInstanceName)
+	}
+	if m.Handle != legacyHandle {
+		t.Errorf("fixture handle = %q, legacyHandle = %q", m.Handle, legacyHandle)
+	}
+	if m.InstancePath != legacyInstancePathToken {
+		t.Errorf("fixture instance_path = %q, want the %s token", m.InstancePath, legacyInstancePathToken)
+	}
 }
