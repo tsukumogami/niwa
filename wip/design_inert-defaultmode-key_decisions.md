@@ -79,3 +79,30 @@ and fails on a named, checkable weakness, not on "less good":
 
 Each is taken from the corresponding decision report and was a real
 contender. None needs strengthening.
+
+| G6.2 | docs/designs/DESIGN-inert-defaultmode-key.md | 2 | confirmed | Architecture review FAIL: apply fixes or rework? |
+
+## G6.2 -- Architecture review findings applied in place
+
+The architecture reviewer returned FAIL on two blocking findings, both small.
+It confirmed the phase ordering keeps the `@critical` scenarios green and found
+no simpler architecture.
+
+| Source | Finding | Action | Applied |
+|--------|---------|--------|---------|
+| Architecture (blocking) | Phase 3 can't observe the `workspace-config-sources` `@critical` scenario without editing its `workspace.toml` body, which AC19 forbids | The assertion step checks `.niwa/instance.json` records `claude_permissions: "bypass"` | [x] |
+| Architecture (blocking) | Phase 1 won't compile: the resolver validates through a Phase 3 function | The resolver maps to literals and doesn't validate; the root materializer already rejects invalid values before state is saved | [x] |
+| Architecture | `derivePermissionMode` promises a warning but takes no writer | Made pure over the recorded value; `runDispatch` loads and warns | [x] |
+| Architecture | Test fakes write no `instance.json`, so the warning would fire suite-wide | A missing state file is silent; only a read/parse error warns | [x] |
+| Architecture | "Declaration-driven" tests don't name their seam | Real `Applier.Create`, per `allow_missing_secrets_test.go` | [x] |
+| Architecture | Fourth `buildDispatchPassthrough` caller (a test) unmentioned | Named in Phase 2 | [x] |
+| Architecture | The "shared helper" claim doesn't match the code | Restated as a shared input, with an S1-S9 agreement test | [x] |
+| Architecture | Goldens are hashes; "review the diff" shows nothing | Review the live bytes printed on mismatch | [x] |
+| Architecture | S9 needs an instance apply; AC12 should run per location | Both added | [x] |
+| Architecture | AC16 and AC19's parse test not in any phase | Added to Phase 3 | [x] |
+| Architecture | Stale doc comments in `dispatch_plugins.go`; explicit-flag scenario lacks "exactly one" | Phase 2 and Phase 4 | [x] |
+| Security (Phase 5) | Vault-safe error; same-process property; watch tests on a real materialization; watch side effects | Folded in earlier this phase | [x] |
+
+**Decision.** Apply in place; the fixes are local and don't reopen a decision,
+so the architecture review is not re-run. The structural-format and security
+Phase 6 reviewers run next against the revised document.
