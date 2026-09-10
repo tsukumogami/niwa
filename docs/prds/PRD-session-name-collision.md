@@ -15,7 +15,8 @@ goals: |
   developer chose. The developer reads the name in the dispatch output and can recover it
   later from `niwa list`. niwa's documentation stops claiming a collision-safety that
   session names didn't have.
-upstream: docs/briefs/BRIEF-session-name-collision.md
+absorbed:
+  - docs/briefs/BRIEF-session-name-collision.md
 ---
 
 # PRD: Unique session names for dispatched workers
@@ -23,6 +24,43 @@ upstream: docs/briefs/BRIEF-session-name-collision.md
 ## Status
 
 Accepted
+
+This PRD owns the requirements for making the session names `niwa dispatch` forwards
+unique. It closes its brief's two open questions, how short the distinguishing part can
+be and how the developer learns the name, and leaves the mechanism to the design.
+
+Absorbed [BRIEF-session-name-collision](docs/briefs/BRIEF-session-name-collision.md); carried in Absorbed Brief.
+
+## Absorbed Brief
+
+This PRD absorbed the feature's brief, which framed why the work matters before any
+requirement was written.
+
+**The problem.** A developer who dispatches several background workers under a reused
+role name, such as two `--name review` dispatches for two pull requests, gets workers
+that share one Claude Code session name. The session name is how other sessions reach a
+worker, and the namespace spans every local, remote and cloud session on the account.
+A message sent to a shared name has no documented destination, and nobody is told. The
+collision lives in the session name, the one identifier niwa hands a worker and never
+shows back. It is already happening: in a September 2026 peer listing, seven names were
+shared by fifteen of 115 peers, and a developer had renamed a session by hand to tell two
+apart.
+
+**The outcome.** A developer reuses role names freely, niwa never hands a worker a name
+another niwa worker already holds, and the developer can find the one name that reaches a
+specific worker without renaming anything. A message sent to that name reaches that
+worker and no other, so choosing a name goes back to being about readability.
+
+**Who it serves.** A developer telling two live look-alike workers apart an hour after
+dispatching them. A coordinating session handing work to a peer it picked by name, on
+behalf of the developer who trusts its handoffs. A developer capturing a new worker's
+name at launch, before switching to other work.
+
+**Where it stops.** The feature makes sure niwa isn't the source of a collision it
+created. It does not reach for uniqueness across sessions niwa didn't launch, and it
+leaves `niwa watch` naming, unnamed dispatches, the `/dispatch` skill's brief files, how
+Claude Code resolves an ambiguous name, the pre-approval of inbound peer messages, and
+Codex workers to their own framing.
 
 ## Problem Statement
 
@@ -50,8 +88,8 @@ instance directories, and false of session names.
 This is observed, not hypothetical. A peer listing taken in September 2026 from inside a
 dispatched session showed 115 peers, seven names shared by fifteen of them, and one name
 held by three sessions at once. On the same machine, a developer had renamed one of two
-same-named dispatched sessions by hand to tell them apart. The framing is in
-`docs/briefs/BRIEF-session-name-collision.md`.
+same-named dispatched sessions by hand to tell them apart. The framing this PRD was
+written from is carried in the Absorbed Brief section above.
 
 ## Goals
 
