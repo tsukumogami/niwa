@@ -498,8 +498,8 @@ settled, appended so rows 23 and 24 keep the numbers cited above and in code:
 
 The Claude delivery is one key in the launch settings document `niwa dispatch`
 already builds, which is why it rests on row 22. It is off by default and turned
-on per machine or per dispatch; see
-`docs/designs/DESIGN-dispatch-sendmessage-approval.md`. The row landed in the
+on per machine by `[global] accept_session_messages_on_dispatch` or per dispatch
+by `--accept-session-messages`. The row landed in the
 same change as that delivery. The settled Codex column is now 15 implemented and
 10 unavailable, asserted by `TestCodexColumnTotals`, and the generated gap list
 in `docs/guides/codex-agent.md` names the new gap.

@@ -588,8 +588,8 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// missing/unreadable global config degrades to "no injection" (the preference
 	// is treated as unset), and an unreadable instance settings file is treated as
 	// "downstream unset" -- so the host default-fill still applies. Neither read
-	// stops the launch. The global config is loaded once in step (9) and
-	// reused here. The instance settings were read once too, ahead of (9b) at
+	// stops the launch. The global config is loaded once at (2a) and reused
+	// here. The instance settings were read once too, ahead of (9b) at
 	// (9a-derive) -- the keep-alive resolution in (9d) consults the same
 	// projection.
 	//
@@ -629,9 +629,10 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// --accept-session-messages flag is resolved over the machine setting, and
 	// the declaration then says whether this agent can receive the behavior at
 	// all, in the shape remote control's gate uses. inboundApplied is the one
-	// record that the key went in: the session mapping, the line printed after
-	// step (12), and the one-time explanation all read it, so none of them can
-	// describe a worker launched differently. Only the flag earns a warning
+	// record that the key went in, and anything that reports the outcome --
+	// the audit line after step (12) -- reads it rather than re-deriving it
+	// from the flag or the machine setting, so it cannot describe a worker
+	// launched differently. Only the flag earns a warning
 	// when the agent cannot receive it; a machine setting asks for every
 	// dispatch, so it stays quiet on the ones it cannot reach.
 	inbound := resolveDispatchInboundAcceptance(dispatchAcceptSessionMessages, hostGlobal)
@@ -669,10 +670,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// default (resolveDispatchKeepAlive); an unreadable host config degrades to
 	// "host default unset" through the zero GlobalSettings built at (9b-host),
 	// so keep-alive -- like remote-control -- can never fail the dispatch. When
-	// it resolves on
-	// AND the worker starts with remote control (either injected above or
-	// decided downstream), prepend the fixed self-arm instruction to the task
-	// prompt (channel B2; see dispatch_keepalive.go for why the SessionStart
+	// it resolves on AND the worker starts with remote control (either injected
+	// above or decided downstream), prepend the fixed self-arm instruction to
+	// the task prompt (channel B2; see dispatch_keepalive.go for why the SessionStart
 	// channel does not reach a dispatched worker). The instruction rides the
 	// same single argv element as the prompt, so the D8 no-shell-interpolation
 	// guard is preserved, and its fixed size was already reserved by step (1):

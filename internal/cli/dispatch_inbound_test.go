@@ -131,8 +131,12 @@ func TestDispatchCmd_HasAcceptSessionMessagesFlag(t *testing.T) {
 	if flag.Usage != wantUsage {
 		t.Errorf("usage = %q, want %q", flag.Usage, wantUsage)
 	}
-	if _, ok := flag.Value.(triBoolValue); !ok {
-		t.Errorf("flag value is %T, want triBoolValue so unset and false stay distinct", flag.Value)
+	v, ok := flag.Value.(triBoolValue)
+	if !ok {
+		t.Fatalf("flag value is %T, want triBoolValue so unset and false stay distinct", flag.Value)
+	}
+	if v.target != &dispatchAcceptSessionMessages {
+		t.Error("the registered flag does not write dispatchAcceptSessionMessages, the variable runDispatch reads")
 	}
 }
 
