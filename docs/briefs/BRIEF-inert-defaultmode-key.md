@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   A developer's declared posture doesn't reliably reach niwa's sessions: the
   generated settings override the developer's own posture with a stricter one,
@@ -17,7 +17,7 @@ outcome: |
 
 ## Status
 
-Draft
+Accepted
 
 ## Problem Statement
 
@@ -163,23 +163,6 @@ the feature leaves the posture that arrangement relies on untouched.
 - **The posture niwa generates for other agent harnesses.** Those use separate
   keys, a separate vocabulary, and a separate trust mechanism, and none of them
   is affected by the change described here.
-
-## Open Questions
-
-- **What the asking declaration should produce.** The options include the
-  explicit default mode, which is honored from project scope, or writing
-  nothing and letting the developer's own settings apply. The PRD decides which
-  one matches what a maintainer who chose "ask" meant.
-- **Whether sessions launched at the workspace root are owed the posture.**
-  niwa has no launch step for those sessions that could pass the posture along.
-  The PRD decides whether they're owed the declared posture, or owed accurate
-  documentation that stops promising it.
-- **Whether a resumed session should get the posture again.** A dispatched
-  worker that is resumed later re-enters through a different command. The
-  outcome above promises the posture in sessions niwa starts; the PRD decides
-  whether a resume counts as one.
-
-None of these block the brief.
 
 ## References
 
