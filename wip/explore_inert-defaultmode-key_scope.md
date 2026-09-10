@@ -116,3 +116,33 @@ session is working the same constraint from a different direction.
    its contract. Worth knowing whether the common resolution is annotation, a
    separate sidecar, or a hard removal with the signal recomputed from source
    -- and whether any of those has a failure mode niwa would inherit.
+
+## Research Leads -- Round 2
+
+Round 1 narrowed the shape question to two candidates and left three cheap
+measurements that could each move the answer. Round 2 is scoped to
+measurement, not to new territory.
+
+7. **Is project-scope `permissions.defaultMode` honored for the restrictive
+   values, or only dead for the permissive ones?** (lead-restrictive-mode-probe)
+   Round 1 inferred this from the absence of a documented restriction rather
+   than measuring it. `niwa watch`'s entire operator-approval posture is
+   `defaultMode: "default"` written into the instance-root file and
+   hard-verified. If restrictive values are also inert from that scope, watch's
+   ask posture is a second live instance of this bug and the exploration's
+   framing has to widen again.
+
+8. **Does Claude Code's `--remote-control` flag compose with `--bg`, and does a
+   `--settings` document merge with the project settings layer or replace
+   it?** (lead-settings-slot-probe)
+   If `--remote-control` composes, niwa's sole occupant of the `--settings`
+   slot can vacate it and the single-slot constraint dissolves -- which changes
+   what this exploration should say about the merged builder. The merge-vs-
+   replace question decides whether a future second contributor to that
+   document can assume the project file's other keys survive.
+
+9. **Does anything outside the niwa repo read `permissions.defaultMode` out of
+   a niwa-materialized settings file?** (lead-external-readers)
+   Round 1 searched only the niwa tree. The workspace also holds `shirabe`,
+   `koto`, the plugin source, and the workspace configuration repos. A reader
+   outside niwa would bound every candidate shape differently.
