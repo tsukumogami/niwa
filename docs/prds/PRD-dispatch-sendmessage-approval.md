@@ -13,7 +13,7 @@ goals: |
   posture the sender runs in and across restarts. They can see in dispatch
   output and in `niwa list` when that applies, and are told once what extending
   it to their own interactive session takes and costs.
-upstream: docs/briefs/BRIEF-dispatch-sendmessage-approval.md
+absorbed: docs/briefs/BRIEF-dispatch-sendmessage-approval.md
 motivating_context: |
   Peer-message holds between niwa-dispatched sessions first appeared on
   2026-09-02, when a Claude Code release stopped honoring a permission value niwa
@@ -29,6 +29,57 @@ motivating_context: |
 ## Status
 
 Accepted
+
+Absorbed [BRIEF: Unattended peer messages for dispatched sessions](docs/briefs/BRIEF-dispatch-sendmessage-approval.md); carried in Absorbed Brief.
+
+## Absorbed Brief
+
+Carried from the brief this PRD was written from, which framed the feature
+before its requirements existed.
+
+**Problem.** A developer who dispatches background Claude Code sessions with
+niwa and has them message each other can't count on those messages arriving
+unattended. Whether one is delivered or held for a human depends on whether the
+two sessions run in the same permission posture, which they often don't, so
+unattended fan-outs stall. The developer also has no way to tell niwa that the
+sessions it dispatches should take messages from their peers, or to switch that
+off for one dispatch.
+
+**Outcome.** A developer who opts in on their machine gets every peer message to
+the sessions niwa dispatched delivered without a prompt, whatever posture the
+sender runs in and across restarts, and never has to think about permission
+modes. One who doesn't opt in sees no change. A developer who also wants
+workers' messages to reach their own interactive session learns once what that
+takes and what it costs.
+
+**Journeys.** Four journeys framed the feature, and User Stories 1 to 4 carry
+them: a coordinator collecting reports while it sits idle overnight; opting in
+once per machine and seeing each dispatch confirm it; switching the behavior off
+for one dispatch and seeing the override confirmed, knowing that Claude Code's
+default doesn't isolate a session from peers in the same posture; and new
+workers alongside a coordinator dispatched before an upgrade, where the
+coordinator's hand-offs arrive but the workers' reports wait inside it until
+it's dispatched again.
+
+**Scope boundary.** Requirements R1 to R16 are the in-list, and Out of Scope is
+the out-list, unchanged from the brief. The brief left three framing questions
+open: what the setting and the flag are called, whether a workspace can set a
+default, and what happens for agents that can't receive the behavior.
+Decisions and Trade-offs closes all three.
+
+**History.** The brief was first written blaming the way niwa brings sessions
+back after a resume. A live experiment refuted that before this PRD was
+accepted: Claude Code restores a session's launch settings itself, and the holds
+come from sessions in different permission postures messaging each other.
+
+**References.** [DESIGN: dispatch permission mode](../designs/current/DESIGN-dispatch-permission-mode.md)
+records the earlier regression and the fix that restored the permission posture
+for freshly dispatched sessions. [Remote control on dispatch](../guides/remote-control-on-dispatch.md)
+and [session keep-alive](../guides/session-keep-alive.md) are the existing
+guides for a host-level, off-by-default, per-dispatch-overridable behavior of
+this kind. [DESIGN: niwa mesh removal](../designs/current/DESIGN-niwa-mesh-removal.md)
+explains why niwa removed its own agent-messaging layer, which this feature
+doesn't reintroduce.
 
 ## Problem Statement
 
@@ -548,30 +599,29 @@ outcome is that the send itself fails.
   jargon a reader has to look up; any name containing `workspace`, `instance`,
   `peer`, or `local`, rejected because each suggests a boundary that doesn't
   exist where messages are delivered, and people plan around names. This closes
-  the BRIEF's naming question.
+  the naming question the brief left open.
 - **No workspace-level default.** Alternative: a workspace-level rung between
   the flag and the machine setting, as keep-alive has. Rejected because a file a
   repository carries can be carried onto machines and into sessions the developer
   never chose to grant, and because Claude Code ignores this particular setting
   when it comes from a project's own settings file anyway. Only the developer's
   machine configuration and the dispatch command can turn it on or off. This
-  closes the BRIEF's question about who can turn the behavior on.
+  closes the brief's question about who can turn the behavior on.
 - **Agents that can't receive it: warn only when the flag asked.** Alternatives:
   always warn, as keep-alive does, or never warn, as remote control does.
   Keep-alive's warning names its flag even when the machine setting turned it
   on, so a machine-wide preference produces a warning on every dispatch of an
   agent it can't reach, which trains developers to ignore the line. Never warning
   would leave a developer who explicitly asked for the behavior believing it
-  applied. This closes the BRIEF's question about such agents.
+  applied. This closes the brief's question about such agents.
 - **Switching it off keeps Claude Code's default, and the override line says
   exactly that.** Alternatives: make `--accept-session-messages=false` hold every
   inbound message, whatever the sender's class; or say nothing when the flag
   turns the machine setting off. Holding everything was rejected as a different
   feature with its own design questions, recorded under Out of Scope. Silence was
-  rejected because the BRIEF's third journey promises the developer sees which
-  choice applied. The line names Claude Code's default rather than promising that
-  every message will ask, because messages between sessions of the same class
-  don't.
+  rejected because the third journey promises the developer sees which choice
+  applied. The line names Claude Code's default rather than promising that every
+  message will ask, because messages between sessions of the same class don't.
 - **"Once" is per niwa configuration directory, marked only when a terminal saw
   it.** Alternatives: print on every dispatch where the behavior takes effect,
   rejected because a multi-sentence explanation repeated through a fan-out stops
