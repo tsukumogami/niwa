@@ -573,16 +573,16 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// `niwa apply` sessions. Neither read can fail the dispatch: a
 	// missing/unreadable global config degrades to "no injection" (the preference
 	// is treated as unset), and an unreadable instance settings file is treated as
-	// "downstream unset" -- so the host default-fill still applies. Either way the
-	// dispatch always launches. The global config is loaded once in step (9) and
+	// "downstream unset" -- so the host default-fill still applies. Neither read
+	// stops the launch. The global config is loaded once in step (9) and
 	// reused here. The instance settings were read once too, ahead of (9b) at
 	// (9a-derive) -- the keep-alive resolution in (9d) consults the same
 	// projection.
 	//
 	// Remote control is its own capability row, and it reaches a session as a
-	// settings document the agent reads. An agent that has no such flag has
-	// nowhere for the document to go, so the injection is gated on the
-	// declaration rather than attempted and dropped.
+	// settings document the agent reads. Its key goes in only when the
+	// declaration says it's implemented and the agent has a settings flag
+	// (rcDeliverable).
 	//
 	// The launch has one settings slot, so remote control does not append its
 	// own document. It adds its key to launchSettings, and the map is rendered

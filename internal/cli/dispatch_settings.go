@@ -35,10 +35,9 @@ func renderLaunchSettings(settings map[string]any) (string, bool) {
 	doc, err := json.Marshal(settings)
 	if err != nil {
 		// The string, boolean, and number constants contributors pass always
-		// encode, so reaching this is a programming error in a contributor. It panics rather than returning
-		// no document: a contributor records its own decision (rcInjected, for
-		// one), and a silent drop would leave that record saying its key was
-		// sent when it wasn't.
+		// encode, so this is a contributor's programming error. Returning no
+		// document would leave that contributor's record (rcInjected, for one)
+		// saying its key was sent, so it panics instead.
 		panic(fmt.Sprintf("renderLaunchSettings: encoding launch settings: %v", err))
 	}
 	return string(doc), true
