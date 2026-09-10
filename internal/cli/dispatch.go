@@ -678,8 +678,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// so keep-alive -- like remote-control -- can never fail the dispatch. When
 	// it resolves on AND the worker starts with remote control (either injected
 	// above or decided downstream), prepend the fixed self-arm instruction to
-	// the task prompt (channel B2; see dispatch_keepalive.go for why the SessionStart
-	// channel does not reach a dispatched worker). The instruction rides the
+	// the task prompt (channel B2; see dispatch_keepalive.go for why the
+	// SessionStart channel does not reach a dispatched worker). The instruction
+	// rides the
 	// same single argv element as the prompt, so the D8 no-shell-interpolation
 	// guard is preserved, and its fixed size was already reserved by step (1):
 	// maxPromptBytes is the exec ceiling minus dispatchPromptReserve, which is
@@ -867,8 +868,8 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 	// (12a) Say what this worker accepts from other sessions, and only now.
 	// Every failure above -- the launch, the capture, the mapping write --
-	// returns before this line, so it never describes a worker that is not
-	// running under a durable mapping. It goes to stderr, ahead of step (13)'s
+	// returns before this line, so it never describes a session that has no
+	// durable mapping. It goes to stderr, ahead of step (13)'s
 	// stdout hints, which stay the same whether or not the behavior is on.
 	// The override line is for a developer whose machine setting would have
 	// applied: an agent that could not receive the behavior gets none, because

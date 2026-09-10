@@ -375,7 +375,7 @@ func TestDispatch_Inbound_UnreadableHostConfig(t *testing.T) {
 		name  string
 		setup func(t *testing.T, niwaDir string)
 	}{
-		{"unopenable", func(t *testing.T, niwaDir string) {
+		{"unreadable", func(t *testing.T, niwaDir string) {
 			// A directory where the file should be fails the read for every
 			// user, root included, on Linux and macOS alike.
 			if err := os.MkdirAll(filepath.Join(niwaDir, "config.toml"), 0o755); err != nil {
@@ -680,7 +680,7 @@ func TestDispatch_Inbound_MappingWriteFailurePrintsNoLine(t *testing.T) {
 // and off, apart from the instance path, and the resume command stays the
 // agent's plain attach verb.
 func TestDispatch_Inbound_StdoutUnchanged(t *testing.T) {
-	run := func(t *testing.T, flag *bool) string {
+	run := func(t *testing.T, flag *bool) (stdout, stderr string) {
 		t.Helper()
 		root := setupDispatchWorkspace(t)
 		chdir(t, root)
@@ -688,14 +688,22 @@ func TestDispatch_Inbound_StdoutUnchanged(t *testing.T) {
 		f := installDispatchFakes(t, root)
 		dispatchDetach = true
 		dispatchAcceptSessionMessages = flag
-		stdout, _, err := runDispatchCmd(t, "do a thing")
+		stdout, stderr, err := runDispatchCmd(t, "do a thing")
 		if err != nil {
 			t.Fatalf("dispatch: %v", err)
 		}
-		return strings.ReplaceAll(stdout, f.instancePath, "<instance>")
+		return strings.ReplaceAll(stdout, f.instancePath, "<instance>"), stderr
 	}
-	off := run(t, nil)
-	on := run(t, inboundFlag(true))
+	off, offErr := run(t, nil)
+	on, onErr := run(t, inboundFlag(true))
+	// Without these two checks the comparison could pass between two runs
+	// that both left the behavior off.
+	if !strings.Contains(onErr, auditLineFor(inboundSourceFlag)) {
+		t.Fatalf("the 'on' run did not apply the behavior; stderr:\n%s", onErr)
+	}
+	if strings.Contains(offErr, auditMarker) {
+		t.Fatalf("the 'off' run printed an audit line; stderr:\n%s", offErr)
+	}
 	if on != off {
 		t.Fatalf("stdout differs with the behavior on.\noff:\n%s\non:\n%s", off, on)
 	}
