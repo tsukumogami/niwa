@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Draft
+status: Accepted
 problem: |
   Since Claude Code 2.1.257, the `bypassPermissions` value niwa writes into
   generated project settings for a `permissions = "bypass"` workspace doesn't
@@ -22,7 +22,7 @@ upstream: docs/briefs/BRIEF-inert-defaultmode-key.md
 
 ## Status
 
-Draft
+Accepted
 
 ## Problem Statement
 
