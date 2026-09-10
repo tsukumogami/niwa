@@ -74,12 +74,13 @@ moment they opt in, rather than discovering it from a stalled run.
 
 ### Journey 1: A coordinator collecting reports across a resume
 
-A developer runs a coordinator session that dispatches four workers to
-investigate separate parts of a problem. The workers finish at different times
-and send their findings to the coordinator, which the developer closed overnight
-and resumed in the morning. Every report is waiting in the coordinator's
-conversation, none of them behind an approval prompt, and the developer spends
-the morning reading results instead of approving them.
+A developer who has turned the behavior on for their machine runs a coordinator
+session that dispatches four workers to investigate separate parts of a
+problem. The workers finish at different times and send their findings to the
+coordinator, which the developer closed overnight and resumed in the morning.
+Every report is waiting in the coordinator's conversation, none of them behind
+an approval prompt, and the developer spends the morning reading results
+instead of approving them.
 
 ### Journey 2: Opting in on a machine
 
@@ -101,10 +102,11 @@ the dispatch output shows which choice applied.
 
 ### Journey 4: A developer who never opts in
 
-A developer who has never changed a setting resumes a dispatched session that a
-sibling session then messages. The message behaves the way it would have if both
-sessions had been launched fresh: resuming no longer changes the outcome. They
-get this without making any decision at all.
+A developer who has never changed a setting dispatches two workers that
+coordinate with each other, then resumes one of them after it goes idle. When
+the other worker sends it a message, the message appears in the resumed
+session's conversation straight away, with no approval prompt, just as it would
+have before the resume. They get this without making any decision at all.
 
 ## Scope Boundary
 
@@ -138,9 +140,9 @@ get this without making any decision at all.
   review sessions, such as a sandbox and outbound network limits. It's closely
   related and matters more once this lands, but it's separate work.
 - Making dispatched session names unique, even though a duplicate name can route
-  a message to the wrong session. That's tracked as its own piece of work.
+  a message to the wrong session. That's separate work.
 - Removing the permission value niwa writes into instance settings that current
-  Claude Code versions no longer honor. Also tracked separately.
+  Claude Code versions no longer honor. That's separate work too.
 - Changing which permission mode dispatched sessions run in.
 - Anything that needs a change to Claude Code itself.
 
