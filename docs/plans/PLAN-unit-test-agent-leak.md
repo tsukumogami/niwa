@@ -1,6 +1,6 @@
 ---
 schema: plan/v1
-status: Draft
+status: Active
 execution_mode: single-pr
 tracking_level: none
 milestone: "Unit tests never launch a real agent"
@@ -11,7 +11,7 @@ issue_count: 1
 
 ## Status
 
-Draft
+Active
 
 ## Scope Summary
 

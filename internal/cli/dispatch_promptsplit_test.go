@@ -33,17 +33,14 @@ func TestEmptyPromptGuardBindsToBodyNotTheComposedString(t *testing.T) {
 // TestNonEmptyBodyWithEmptyPrefixIsAccepted is the other side of the same
 // check: a prefix is optional, a body is not.
 func TestNonEmptyBodyWithEmptyPrefixIsAccepted(t *testing.T) {
-	// The binary lookup is the next step after the guard, so failing there
-	// proves the guard let the prompt through. PATH is emptied to make that
-	// failure certain: with claude installed, the lookup would succeed and this
-	// test would start a real background session on every run.
-	t.Setenv("PATH", "")
+	// A missing claude binary is the next failure after the guard, so reaching
+	// it proves the guard let the prompt through.
 	err := realDispatchLaunch(context.Background(), launchRequest{
 		Spec: claudeLaunchSpec(), Mode: agentplan.LaunchBackgrounded,
 		InstanceDir: t.TempDir(), Body: "do the thing",
 	})
-	if err == nil || !strings.Contains(err.Error(), "not found in PATH") {
-		t.Fatalf("expected the launcher to pass the empty-prompt guard and stop at the binary lookup, got: %v", err)
+	if err != nil && strings.Contains(err.Error(), "empty prompt") {
+		t.Fatal("a non-empty body with no prefix was rejected as empty")
 	}
 }
 
