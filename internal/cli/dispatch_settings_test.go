@@ -22,21 +22,20 @@ func TestRenderLaunchSettings_RemoteControlAloneIsByteIdentical(t *testing.T) {
 	}
 }
 
-// TestRenderLaunchSettings_SortsKeys checks that two contributors share one
-// document in a fixed order, whichever of them added its key first.
+// TestRenderLaunchSettings_SortsKeys checks that contributors share one
+// document in sorted key order. Go randomizes map iteration, so with five keys
+// an encoder that followed iteration order instead of sorting would fail this
+// on almost every run.
 func TestRenderLaunchSettings_SortsKeys(t *testing.T) {
-	const want = `{"alphaKey":"accept","zetaKey":true}`
-	for _, m := range []map[string]any{
-		{"zetaKey": true, "alphaKey": "accept"},
-		{"alphaKey": "accept", "zetaKey": true},
-	} {
-		got, ok := renderLaunchSettings(m)
-		if !ok {
-			t.Fatalf("renderLaunchSettings(%v) reported no document", m)
-		}
-		if got != want {
-			t.Errorf("renderLaunchSettings(%v) = %q, want %q", m, got, want)
-		}
+	const want = `{"aKey":"accept","bKey":true,"cKey":1,"dKey":false,"eKey":"x"}`
+	got, ok := renderLaunchSettings(map[string]any{
+		"eKey": "x", "cKey": 1, "aKey": "accept", "dKey": false, "bKey": true,
+	})
+	if !ok {
+		t.Fatal("renderLaunchSettings reported no document for a map with five keys")
+	}
+	if got != want {
+		t.Errorf("renderLaunchSettings = %q, want keys in sorted order: %q", got, want)
 	}
 }
 
@@ -92,7 +91,7 @@ func TestBuildLaunchArgs_PromptCannotReplaceTheSettingsDocument(t *testing.T) {
 
 			sep := slices.Index(got, "--")
 			if sep < 0 {
-				t.Fatalf("no -- separator in %#v", got)
+				t.Fatalf("no -- separator in %#v; Claude's launch spec in internal/agentplan must set PromptSeparator", got)
 			}
 			if after := got[sep+1:]; !slices.Equal(after, []string{prompt}) {
 				t.Errorf("elements after -- = %#v, want only the prompt", after)

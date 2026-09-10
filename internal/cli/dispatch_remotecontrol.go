@@ -7,12 +7,14 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
-// remoteControlSettingsJSON is the inline Claude Code settings document niwa
-// injects via `claude --settings` to start a dispatched worker with the Remote
-// Control bridge on. It is built from config.RemoteControlAtStartupKey -- never
-// from user input -- so the injected flag, the materializer, and the read-back
-// share one spelling. It is appended to the dispatch argv as a single discrete
-// element.
+// remoteControlSettingsJSON is the launch settings document with remote
+// control's key alone: the exact bytes niwa passes via `claude --settings` to
+// start a dispatched worker with the Remote Control bridge on, when no other
+// contributor adds a key. Dispatch no longer appends it directly -- step (9c)
+// of runDispatch renders one map with renderLaunchSettings -- and this value
+// stays as the pinned rendering that output is checked against byte for byte.
+// It is built from config.RemoteControlAtStartupKey, never from user input, so
+// the injected flag, the materializer, and the read-back share one spelling.
 var remoteControlSettingsJSON = fmt.Sprintf("{%q:true}", config.RemoteControlAtStartupKey)
 
 // apiKeyForcedWarning is the one-line reason printed when the host wants
@@ -20,8 +22,8 @@ var remoteControlSettingsJSON = fmt.Sprintf("{%q:true}", config.RemoteControlAtS
 // forces API-key auth and definitively precludes Claude Code Remote.
 const apiKeyForcedWarning = "remote-control on dispatch is enabled, but ANTHROPIC_API_KEY is set, which forces API-key auth; Claude Code Remote requires a claude.ai login, so the worker will start without remote-control"
 
-// resolveDispatchRemoteControl decides whether `niwa dispatch` should inject the
-// Claude Code Remote settings flag for a worker, and returns a one-line warning
+// resolveDispatchRemoteControl decides whether `niwa dispatch` should add the
+// Claude Code Remote key to a worker's launch settings, and returns a one-line warning
 // when the host default wants remote-control on but the launch environment
 // definitively precludes it.
 //

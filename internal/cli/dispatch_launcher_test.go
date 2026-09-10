@@ -73,7 +73,7 @@ func TestBuildLaunchArgs_ClaudeSeparatesThePrompt(t *testing.T) {
 			got := buildLaunchArgs(claudeLaunchSpec(), tc.mode, "/inst", "do the thing", []string{"--name", "w", "--settings", remoteControlSettingsJSON})
 			n := len(got)
 			if n < 2 || got[n-1] != "do the thing" || got[n-2] != "--" {
-				t.Fatalf("want ... \"--\", prompt at the end, got %#v", got)
+				t.Fatalf("want ... \"--\", prompt at the end (is PromptSeparator still set on Claude's launch spec in internal/agentplan?), got %#v", got)
 			}
 			want := []string{"--bg", "--name", "w", "--settings", remoteControlSettingsJSON, "--", "do the thing"}
 			if !reflect.DeepEqual(got, want) {

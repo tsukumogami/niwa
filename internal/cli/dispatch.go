@@ -568,9 +568,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// the dispatched instance left remoteControlAtStartup unset, add the Claude
 	// Code Remote key to the launch settings document so the worker starts
 	// steerable. The document rides the settings flag as two discrete argv
-	// elements (no shell interpolation). This is the only
-	// dispatch-exclusive seam, so the default never leaks to interactive,
-	// ephemeral, or `niwa apply` sessions. Neither read can fail the dispatch: a
+	// elements (no shell interpolation). This is the only dispatch-exclusive
+	// seam, so the default never leaks to interactive, ephemeral, or
+	// `niwa apply` sessions. Neither read can fail the dispatch: a
 	// missing/unreadable global config degrades to "no injection" (the preference
 	// is treated as unset), and an unreadable instance settings file is treated as
 	// "downstream unset" -- so the host default-fill still applies. Either way the
@@ -590,7 +590,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// rcInjected is set from remote control's own inject decision, never from
 	// whether a document was rendered: keep-alive reads it in (9d), and a
 	// document carrying some other contributor's key must not arm keep-alive on
-	// a worker that starts without remote control.
+	// a worker that starts without remote control. A new contributor adds its
+	// own block between remote control's and the render call, deciding and
+	// recording for itself whether its key went in.
 	launchSettings := map[string]any{}
 	rcInjected := false
 	rcDecl, rcErr := agentplan.Lookup(agentplan.RemoteControl, dispatchedAgent)
@@ -612,10 +614,11 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// Two discrete argv elements, and none at all when no contributor added a
 	// key. An agent with no settings flag has nowhere for the document to go,
 	// so every contributor must check spec.Flags.Settings itself before adding
-	// a key and recording that it did. The check here only stops a launch with
-	// an empty flag spelling; it drops the document silently, so it can't catch
-	// a contributor that forgot its own check.
-	if doc, ok := renderLaunchSettings(launchSettings); ok && spec.Flags.Settings != "" {
+	// a key and recording that it did, as remote control does through
+	// rcDeliverable. There is deliberately no second check here: it could only
+	// drop the document silently while that contributor's record said it was
+	// sent.
+	if doc, ok := renderLaunchSettings(launchSettings); ok {
 		passthrough = append(passthrough, spec.Flags.Settings, doc)
 	}
 
