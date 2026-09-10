@@ -65,10 +65,12 @@ func TestParseGlobalConfig_AcceptSessionMessagesOnDispatch_NonBoolean(t *testing
 }
 
 // TestLoadGlobalConfigFrom_AcceptSessionMessagesOnDispatch_NonBoolean asserts
-// that a malformed value fails the file-level load with no config. The dispatch
-// resolver treats any load error as "setting absent", so a malformed value
-// leaves the behavior off rather than half-applied; the test deliberately
-// accepts any error, since the resolver does not distinguish them.
+// that a malformed value fails the file-level load with no config. niwa
+// dispatch falls back to a zero GlobalSettings when the global config fails to
+// load, so a malformed value counts as an absent machine setting: the
+// --accept-session-messages flag still decides for that dispatch. The test
+// deliberately accepts any error, since that fallback does not distinguish
+// them.
 func TestLoadGlobalConfigFrom_AcceptSessionMessagesOnDispatch_NonBoolean(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	body := "[global]\naccept_session_messages_on_dispatch = \"yes\"\n"
@@ -122,9 +124,8 @@ func TestGlobalSettings_AcceptSessionMessagesOnDispatch_RoundTrip(t *testing.T) 
 }
 
 // TestCrossSessionInboundKey pins the spelling Claude Code reads. The constant
-// is the only place the key is written, and Claude Code ignores unknown settings
-// keys, so a typo or rename would silently stop the dispatch setting from taking
-// effect with nothing else failing.
+// is the only place niwa spells the key, so without this test a typo or rename
+// would change what dispatch sends Claude Code with nothing in niwa failing.
 func TestCrossSessionInboundKey(t *testing.T) {
 	if CrossSessionInboundKey != "crossSessionInbound" {
 		t.Fatalf("CrossSessionInboundKey = %q, want %q", CrossSessionInboundKey, "crossSessionInbound")

@@ -459,7 +459,11 @@ const RemoteControlAtStartupKey = "remoteControlAtStartup"
 // address this one by name across the developer's Claude Code account,
 // including sessions on other machines and in the cloud. It is the single
 // source of truth for the key's spelling; the dispatch argv that injects it via
-// `claude --settings` must use this constant rather than a literal.
+// `claude --settings` must use this constant rather than a literal. Unlike
+// RemoteControlAtStartupKey, it must not be emitted into a materialized
+// settings.json: Claude Code honors "accept" only from managed settings, user
+// settings, or `--settings`, and silently ignores it in project or local
+// settings.
 const CrossSessionInboundKey = "crossSessionInbound"
 
 // KeepAliveOnDispatchKey is the settings key a downstream [claude.settings]
