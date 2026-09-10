@@ -186,9 +186,10 @@ func postGuardHook() map[string]any {
 // sandbox is true):
 //
 //   - ask == false (hard-deny posture, the shipped floor): the emitted settings are
-//     the PR #198 shape. permissions.defaultMode is NOT set (the session inherits the
-//     bypassPermissions the dispatch applies), no auto-allow hook is added, and the
-//     filesystem guard uses its exit-code wrapper (out-of-instance = hard deny).
+//     the PR #198 shape. permissions.defaultMode is NOT set, and niwa watch launches
+//     the session with no --permission-mode, so it gets no permission mode from
+//     niwa. No auto-allow hook is added, and the filesystem guard uses its
+//     exit-code wrapper (out-of-instance = hard deny).
 //   - ask == true (operator-approval posture): niwa fully owns
 //     permissions.defaultMode = "default" (so a hook ask is honored instead of
 //     silently allowed), appends the Bash/Read/Glob/Grep auto-allow hook (so the

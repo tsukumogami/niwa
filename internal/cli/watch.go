@@ -866,10 +866,13 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 // (continueReview). Each is the only place its launch's argv is assembled, so a
 // test can build it exactly as production does.
 //
-// Neither launch carries a permission mode. A review session's posture is the
-// one watch.ApplyReviewSettings writes for it, and it must not inherit a mode
-// derived from the instance's recorded permissions posture the way a dispatched
-// worker does. The literal "" handed to buildDispatchPassthrough is that rule.
+// Neither launch carries a permission mode. A review session's out-of-instance
+// posture is set by watch.ApplyReviewSettings: under the operator-approval
+// posture it writes permissions.defaultMode itself, and under the hard-deny
+// posture it leaves the key alone, so the session gets no mode from niwa at
+// all. Either way it must not inherit the mode dispatch derives from the
+// instance's recorded permissions posture. The literal "" handed to
+// buildDispatchPassthrough is that rule.
 func watchReviewLaunch(instancePath, slug, prompt string, sandbox bool) launchRequest {
 	passthrough := buildDispatchPassthrough(claudeLaunchSpec().Flags, slug, "", "")
 	if sandbox {

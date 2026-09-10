@@ -549,13 +549,19 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// a warning naming the file -- the worker then prompts rather than running
 	// unattended -- and never fails the dispatch.
 	recordedPermissions := ""
-	if state, err := workspace.LoadState(instancePath); err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: warning: could not read %s (%v); treating the workspace's permissions posture as undeclared\n",
-			filepath.Join(instancePath, workspace.StateDir, workspace.StateFile), err)
-	} else {
+	state, stateErr := workspace.LoadState(instancePath)
+	if stateErr == nil {
 		recordedPermissions = state.ClaudePermissions
 	}
 	permissionMode, derived := derivePermissionMode(dispatchPermissionMode, recordedPermissions, spec.Flags)
+	// The warning is for a launch the unreadable state could have changed. An
+	// explicit --permission-mode sets the mode regardless of the posture, so a
+	// warning then would describe a decision that changed nothing. The path is
+	// named separately because a parse error does not carry it.
+	if stateErr != nil && permissionMode == "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: warning: could not read %s (%v); treating the workspace's permissions posture as undeclared\n",
+			filepath.Join(instancePath, workspace.StateDir, workspace.StateFile), stateErr)
+	}
 	if derived {
 		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: derived --permission-mode %s from the workspace's declared permissions posture\n", permissionMode)
 	}
@@ -1005,8 +1011,9 @@ func derivePermissionMode(explicit, recorded string, flags agentplan.LaunchFlags
 // to forward none. It is a parameter rather than a read of the --permission-mode
 // flag variable so every caller states what it passes: dispatch passes what
 // derivePermissionMode returned, and `niwa watch` passes "" at both of its
-// launch sites, so no shared variable can leak a mode into a launch that
-// never asked for one.
+// launch sites, so no shared variable can leak a permission mode into a
+// launch that never asked for one. The subagent type is still read from its
+// flag variable, which only `niwa dispatch` sets.
 func buildDispatchPassthrough(flags agentplan.LaunchFlags, slug, model, permissionMode string) []string {
 	var pass []string
 	// Each pair is appended only when niwa has something to say AND the agent

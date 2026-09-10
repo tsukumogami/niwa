@@ -16,18 +16,21 @@ import (
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
-// Every test in this file gets its permissions posture from a workspace.toml
-// declaration run through a real Applier.Create, never from a hand-written
-// settings document or state file. The tamper tests are the one exception, and
-// they hand-edit the generated settings file only to prove dispatch ignores it.
+// Every dispatch test in this file gets its permissions posture from a
+// workspace.toml declaration run through a real Applier.Create, never from a
+// hand-written settings document or state file. The tamper tests hand-edit the
+// generated settings file only to prove dispatch ignores it, and the
+// broken-state tests damage the state Create wrote only after checking what it
+// recorded. TestDerivePermissionMode is a pure table over the derivation.
 
 // derivedNoticePrefix is the stderr notice dispatch prints when it derives
 // --permission-mode from the workspace's declared posture rather than an
 // explicit flag.
 const derivedNoticePrefix = "niwa dispatch: derived --permission-mode bypassPermissions"
 
-// The declarations the PRD's document matrix names. S1 is the workspace
-// declaring bypass, S2 the workspace declaring ask, S3 no declaration at all.
+// The declarations named S1-S3 in the document matrix of
+// docs/prds/PRD-inert-defaultmode-key.md. S1 is the workspace declaring
+// bypass, S2 the workspace declaring ask, S3 no declaration at all.
 const (
 	postureS1 = "\n[claude.settings]\npermissions = \"bypass\"\n"
 	postureS2 = "\n[claude.settings]\npermissions = \"ask\"\n"
@@ -88,8 +91,8 @@ func createDeclaredInstance(ctx context.Context, root, name string) (string, err
 // provisionThroughCreate replaces the provision seam with a real Create of the
 // workspace's declaration. afterCreate, when non-nil, runs on the new instance
 // before dispatch sees it -- the point at which a test breaks or tampers with
-// what Create wrote. Must be called AFTER installDispatchFakes so its restore
-// wins.
+// what Create wrote. Call it after installDispatchFakes, which would otherwise
+// overwrite the seam; installDispatchFakes' cleanup restores the original.
 func provisionThroughCreate(t *testing.T, f *dispatchFakes, afterCreate func(t *testing.T, instancePath string)) {
 	t.Helper()
 	provisionInstanceFunc = func(ctx context.Context, root, _, namePrefix, sep string, _ int) (provisionResult, error) {
@@ -124,9 +127,12 @@ func requireRecordedPosture(t *testing.T, instancePath, want string) {
 	}
 }
 
-// derivedArgv runs the derivation path runDispatch uses -- state load,
-// derivePermissionMode, buildDispatchPassthrough -- for a Claude launch with no
-// explicit flag.
+// derivedArgv rebuilds, test-side, the steps runDispatch takes to turn an
+// instance's state into argv -- state load, derivePermissionMode,
+// buildDispatchPassthrough -- for a Claude launch with no explicit flag. It
+// shows what a fixture's state derives to. It is not runDispatch: that
+// runDispatch forwards a derived flag is pinned by
+// TestDispatch_PermissionMode_S1_Derived.
 func derivedArgv(t *testing.T, instancePath string) []string {
 	t.Helper()
 	state, err := workspace.LoadState(instancePath)
@@ -335,9 +341,11 @@ func TestDispatch_PermissionMode_S1_RemoteControlAndKeepAlive(t *testing.T) {
 }
 
 // TestDispatch_PermissionMode_BrokenState_WithholdsFlag breaks a bypass
-// instance's state file three ways. Each case first proves the unbroken
-// instance would get the flag, so a derivation that never forwards it cannot
-// pass.
+// instance's state file three ways. Before each break it checks that the
+// instance recorded bypass and that its state derives the flag, so an argv
+// without the flag afterwards comes from the break, not from a fixture that
+// never asked for bypass. That runDispatch forwards a derived flag at all is
+// pinned by TestDispatch_PermissionMode_S1_Derived.
 func TestDispatch_PermissionMode_BrokenState_WithholdsFlag(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -406,10 +414,16 @@ func TestDispatch_PermissionMode_BrokenState_ExplicitFlagStillWins(t *testing.T)
 	var pass []string
 	captureLaunchPassthrough(f, &pass)
 
-	if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
+	_, stderr, err := runDispatchCmd(t, "do a thing")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	requirePermissionMode(t, pass, "acceptEdits")
+	// The explicit flag set the mode, so the unreadable posture changed nothing
+	// and there is nothing to warn about.
+	if strings.Contains(stderr, "warning") {
+		t.Fatalf("no posture warning expected alongside an explicit flag; got %q", stderr)
+	}
 }
 
 // TestDispatch_PermissionMode_IgnoresGeneratedSettings is the tamper test: the
