@@ -149,11 +149,10 @@ which defeats the reason for dispatching work into the background.
   prompt, whatever permission-mode class the sender is in.
 - **R5. Restarts and reopening keep it.** A worker for which the behavior took
   effect still accepts inbound messages without a prompt after Claude Code
-  restarts or reopens it, whether through `claude respawn`, through
-  `claude attach` after its process has stopped, or by being woken by an
-  incoming message; and a worker for which it didn't take effect doesn't gain
-  it. niwa's resume commands and its handling of the permission mode are
-  unchanged by this feature.
+  restarts or reopens it, whether through `claude respawn` or through
+  `claude attach` after its process has stopped, and a worker for which it didn't
+  take effect doesn't gain it. niwa's resume commands and its handling of the
+  permission mode are unchanged by this feature.
 - **R6. Coexistence with other launch configuration.** Turning the behavior on
   doesn't remove or change any other configuration niwa applies at launch.
   Remote control on dispatch, keep-alive, and the forwarded permission mode all
@@ -241,12 +240,13 @@ which defeats the reason for dispatching work into the background.
   between sessions of the same class and so doesn't isolate a worker; the
   exclusion of watch review sessions; the behavior for agents that can't receive
   it; that turning the machine setting off doesn't reach sessions already
-  dispatched; that a foreground `claude --resume` of a dispatched conversation
-  doesn't carry the behavior; the marker file's path, that deleting it shows the
-  explanation again and creating it suppresses it; the step for the developer's
-  own interactive session with every cost R10 names; and the Claude Code version
-  the manual delivery check last passed on. It uses the same top-level section
-  headings as the existing keep-alive guide and is listed in the repository's
+  dispatched; that a stopped worker receives nothing until it's reopened; that a
+  foreground `claude --resume` of a dispatched conversation doesn't carry the
+  behavior; the marker file's path, that deleting it shows the explanation again
+  and creating it suppresses it; the step for the developer's own interactive
+  session with every cost R10 names; and the Claude Code version the manual
+  delivery check last passed on. It uses the same top-level section headings as
+  the existing keep-alive guide and is listed in the repository's
   contributor-guide index. `niwa dispatch --help` describes the flag, and shell
   completion offers it.
 - **R18. Functional coverage.** `@critical` functional scenarios cover the
@@ -395,7 +395,8 @@ A message is **delivered** when its text appears in the receiver's output
 (`claude logs <id>`) as an incoming message within 60 seconds with no approval
 dialog. It is **held** when the receiver shows an approval dialog stating that
 the sending session's permission mode class doesn't match its own. A case in
-which neither appears within 60 seconds fails.
+which neither appears within 60 seconds fails, except case 2c, whose expected
+outcome is that the send itself fails.
 
 - [ ] Case 0, control: dispatch worker W0 with the behavior off. A message from
   S to W0 is held.
@@ -407,10 +408,11 @@ which neither appears within 60 seconds fails.
   respawned. A message from S to W is delivered.
 - [ ] Case 2b: run `claude stop <W>`, then reopen W with the `claude attach` line
   `niwa list` prints for it and detach. A message from S to W is delivered.
-- [ ] Case 2c: run `claude stop <W>` again, and send S's message to W without
-  reopening it first. The message wakes W and is delivered.
-- [ ] Case 3: a message from W to S is held in S, which documents that the
-  behavior is inbound only.
+- [ ] Case 2c, documenting a limitation: run `claude stop <W>` again and, without
+  reopening W, have S message it. The send fails because a stopped background
+  session isn't reachable by name; the message is neither held nor delivered.
+- [ ] Case 3: with W running, a message from W to S is held in S, which
+  documents that the behavior is inbound only.
 - [ ] Case 4, control: dispatch two workers with the behavior off. A message
   from one to the other is delivered, because both run in the same class.
 
@@ -463,11 +465,15 @@ which neither appears within 60 seconds fails.
   `--accept-session-messages=false` keeps Claude Code's default, which delivers
   messages between sessions of the same class. In a workspace whose workers run
   with prompts off, other such workers still reach it without a prompt.
+- **A stopped worker receives nothing.** A background session stopped with
+  `claude stop` isn't reachable by name, so a message sent to it fails to send
+  until something reopens it, such as `claude attach`. That isn't a hold, and the
+  behavior doesn't change it.
 - **It relies on Claude Code keeping launch settings across restarts.** Claude
   Code 2.1.267 saves a background session's launch flags and reapplies them when
   it restarts or reopens the session, which is what R5 depends on. A release that
-  stopped would make restarted workers ask again; the manual check's cases 2, 2b
-  and 2c are what would catch it.
+  stopped would make restarted workers ask again; the manual check's cases 2 and
+  2b are what would catch it.
 - **A foreground `claude --resume` doesn't carry it.** Resuming a dispatched
   worker's conversation in a new foreground process, by hand or through a tool
   that runs `claude --resume`, starts a session without the worker's launch
@@ -508,11 +514,13 @@ which neither appears within 60 seconds fails.
   Code 2.1.267 refuted it. Every way niwa builds or prints back into a dispatched
   Claude session is `claude attach <id>`, which takes no launch flags, and Claude
   Code saves a background session's launch flags with the session and reapplies
-  them on restart, as the experiment confirmed for both the permission mode and
-  the inbound-acceptance setting. The holds paired a session dispatched before
-  niwa's permission-mode fix with one dispatched after it. The re-entry change
-  would have altered nothing, so R5 states the outcome and the manual check
-  verifies it across each way a session comes back.
+  them when it brings the session back. The experiment confirmed that for both
+  the permission mode and the inbound-acceptance setting, after `claude respawn`
+  of a running session and after `claude attach` reopened a stopped one. The
+  holds paired a session dispatched before niwa's permission-mode fix with one
+  dispatched after it. The re-entry change would have altered nothing, so R5
+  states the outcome and the manual check verifies it across each way a session
+  comes back.
 - **The fix is the receiving session's inbound setting, not class agreement.**
   Alternative: keep every session in the same permission-mode class. Rejected
   because classes are fixed at launch, some of the sessions involved aren't
