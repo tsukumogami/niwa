@@ -417,12 +417,18 @@ behaves as follows:
 - Any other value returns an error stating that the permissions value isn't
   one of `"bypass"` or `"ask"`.
 
-The error branches on whether the configured value was secret-backed
-(`IsSecret()` on the `maybeSecretString` input). For a plain value, it quotes
-the value, so a typo is easy to spot. For a vault-backed value, it names the
-config key and the secret's origin (`Secret.Origin()`) and never the resolved
-plaintext, because the resolved `vault://` URI isn't retained and the
-pipeline's secret redactor doesn't scrub plain `fmt.Errorf` text. The two
+`claudeDefaultMode` takes a plain string, so it can't tell whether the value was
+secret-backed. It reports only that the value isn't accepted, and
+`buildSettingsDoc`, which holds the original `MaybeSecret`, builds the error
+message. That message branches on `IsSecret()`:
+- For a plain value, it quotes the value, so a typo is easy to spot.
+- For a vault-backed value, it names the config key and the secret's origin
+  (`Secret.Origin()`) and never the resolved plaintext, because the resolved
+  `vault://` URI isn't retained and the pipeline's secret redactor doesn't
+  scrub plain `fmt.Errorf` text.
+
+Tests for the secret-safe form therefore go through `buildSettingsDoc` or a
+materializer, never through `claudeDefaultMode` alone. The two
 sibling boolean keys that `buildSettingsDoc` parses from the same settings
 map, `remoteControlAtStartup` and `keepAliveOnDispatch`, echo their resolved
 value in the same way today. They move to the same secret-safe form, since the
@@ -452,9 +458,13 @@ json:"claude_permissions,omitempty"`. The instance pipeline sets
 `pipelineResult.claudePermissions` from the resolver, using the `effectiveCfg`
 it already holds after `ResolveAndMergeEffectiveConfig`. `Create` and `Apply`
 build their state fresh and copy the value into it, at the same sites that
-copy `result.shadows` and `result.trustKeys`. The workspace-root state file
-carries no value: it's written outside the instance pipeline, and nothing
-reads a posture from it.
+copy `result.shadows` and `result.trustKeys`. A multi-instance workspace
+root's state file carries no value: `niwa init` and
+`saveWorkspaceRootDisclosures` write it outside the instance pipeline, and
+nothing reads a posture from it. The single-instance layout is different.
+When a workspace has no child instances, `niwa apply` treats the root as the
+sole instance and runs the instance pipeline on it. The root's state file is
+then the instance's, and it records the posture like any other.
 
 **Dispatch derivation (`internal/cli/dispatch.go`).** The derivation block
 that today reads `inst.Permissions` is replaced. `runDispatch` loads the state
@@ -620,9 +630,21 @@ Give the `@critical` scenario in `workspace-config-sources.feature` a new
 observable. Its body pushes `permissions = "bypass"` and asserts that the
 workspace-root `settings.json` contains `bypassPermissions`. After this phase
 that file is identical before and after the push, and the PRD forbids editing
-the scenario's `workspace.toml` body. So the assertion step changes instead: it
-checks that the instance's `.niwa/instance.json` records
-`claude_permissions: "bypass"` after the same apply.
+the scenario's `workspace.toml` body. The scenario creates no child instance.
+`niwa apply` finds none, falls back to the single-instance layout, and runs the
+instance pipeline on the workspace root. So the root's `.niwa/instance.json` is
+the instance's state file (see Persisted posture). Only the assertion steps
+change. There are no body edits and no added `niwa create`, which would change
+what the regression guard covers:
+- before the force-push, the workspace root's `.niwa/instance.json` has no
+  `claude_permissions` key
+- after the same single `niwa apply`, it records `"bypass"`
+- after that apply, the workspace root's `settings.json` carries no
+  `permissions.defaultMode`
+
+The before/after pair keeps the guard meaningful. If the reconcile ran after
+materialization, the posture would land only on a second apply, and the
+after-push assertion would fail.
 
 Deliverables:
 - `internal/workspace/materialize.go` and its tests.
