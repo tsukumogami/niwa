@@ -2,16 +2,15 @@
 schema: brief/v1
 status: Draft
 problem: |
-  A developer who declares how much a workspace's sessions may do without
-  asking can't rely on that declaration reaching the sessions niwa launches,
-  and the settings niwa generates quietly replace the developer's own
-  permission posture with a more restrictive one while displaying a setting
-  that looks like it governs the session and doesn't.
+  A developer's declared posture doesn't reliably reach niwa's sessions: the
+  generated settings override the developer's own posture with a stricter one,
+  the asking value was never one Claude Code recognizes, and the file shows a
+  permissions setting that governs nothing.
 outcome: |
-  The posture a developer declares reaches every session niwa launches for
-  them, their own personal permission settings keep working inside
-  niwa-managed sessions, and anything a developer or an agent reads in a
-  generated settings file about permissions is true.
+  The posture a developer declares reaches the sessions niwa starts for them,
+  their own personal permission settings keep working in sessions they open
+  inside niwa-managed instances, and anything a developer or an agent reads in
+  a generated settings file about permissions is true.
 ---
 
 # BRIEF: inert-defaultmode-key
@@ -22,11 +21,13 @@ Draft
 
 ## Problem Statement
 
-A workspace can declare how much its sessions may do before stopping to ask
-the developer. The common reason to declare it is unattended work: a developer
-dispatches a worker to run in its own instance and doesn't want it halting on
-every tool call with nobody there to approve. niwa turns that declaration into
-a permission setting inside each instance's generated settings files.
+A developer who tells niwa a workspace's sessions should run unattended gets
+sessions that stop and ask anyway, and more often than if niwa had done nothing
+at all. The common reason to declare an unattended posture is background work:
+a developer dispatches a worker to run in its own instance and doesn't want it
+halting on every tool call with nobody there to approve. niwa turns that
+declaration into a permission setting inside each instance's generated settings
+files.
 
 Claude Code stopped honoring the most permissive values of that setting when
 they come from a project's own settings files. From 2.1.257 onward, the value
@@ -37,9 +38,9 @@ What makes this worse than a no-op is how the ignored value behaves. It isn't
 skipped over in favor of the next settings layer down. It takes precedence over
 the developer's own user-level settings and is then reset to the most
 restrictive default. A developer who has configured their own sessions to
-accept edits without prompting finds that every niwa-managed session prompts
-anyway. The workspace asked for fewer prompts, and the developer gets more of
-them than they would if niwa had written nothing at all.
+accept edits without prompting finds that every session they open in a
+niwa-managed instance prompts anyway. The workspace asked for fewer prompts,
+and the developer gets more of them.
 
 The generated file hides all of this. It shows a permissions block that reads
 as the thing deciding the session's posture. Someone trying to understand why a
@@ -55,15 +56,15 @@ have been getting defaults the whole time.
 
 ## User Outcome
 
-A developer who declares an unattended posture for a workspace gets it in every
-session niwa launches for them, by a route that takes effect. They don't have
-to know which launch path was used, and they don't have to add a flag by hand
-to get what the workspace already says.
+A developer who declares an unattended posture for a workspace gets it in the
+sessions niwa starts for them, by a route that takes effect. They don't have to
+add a flag by hand to get what the workspace already says.
 
-A developer who has their own permission preferences keeps them inside
-niwa-managed sessions. Opening a session in an instance behaves the way opening
-one anywhere else does, and the workspace's declaration no longer quietly
-overrides a posture the developer set up for themselves.
+A developer who has their own permission preferences keeps them in sessions
+they open themselves inside a niwa-managed instance. The workspace's
+declaration governs the sessions niwa starts on the developer's behalf; it
+doesn't reach into an interactive session the developer opened, and it no
+longer quietly overrides a posture the developer set up for themselves.
 
 When a developer or an agent opens an instance's generated settings to work out
 why a session did or didn't prompt, what they find is accurate. No setting in
@@ -90,10 +91,10 @@ didn't.
 A developer's own user-level settings put their sessions in a mode that accepts
 edits without prompting. They open an ordinary interactive session inside a
 niwa instance of a workspace that declared the unattended posture. They aren't
-dispatching anything, so no worker flag is involved. Today the session prompts
-on every edit, more restrictive than their own setup. After this feature the
-session behaves the way their own settings say, the same as it would outside
-niwa.
+dispatching anything, so niwa isn't starting this session on their behalf.
+Today the session prompts on every edit, more restrictive than their own setup.
+After this feature the session behaves the way their own settings say, the same
+as it would outside niwa.
 
 ### Journey 3: Investigating an unexpected prompt
 
@@ -109,9 +110,10 @@ setting that explains nothing.
 A maintainer declared the asking posture for a workspace that handles
 sensitive operations, meaning to keep a person in the loop. They expect their
 sessions to ask before acting. Today that declaration produces a value Claude
-Code doesn't recognize, so sessions run on whatever defaults apply. After this
-feature the declaration means what its name says, and the maintainer can
-confirm that from the generated file.
+Code doesn't recognize, so sessions run on whatever defaults apply and the
+generated file suggests otherwise. After this feature the declaration no longer
+produces a value Claude Code ignores, and the generated file no longer claims a
+posture it doesn't deliver.
 
 ### Journey 5: Operator running a supervised review
 
@@ -132,8 +134,6 @@ the feature leaves the posture that arrangement relies on untouched.
   decides how a worker should run.
 - What the existing asking declaration produces, since the value it produces
   today has never been one Claude Code recognizes.
-- The unused internal reader of the same generated setting, which predates the
-  current dispatch flow and has no remaining callers.
 - The committed niwa documentation that describes the generated setting as the
   mechanism that sets a session's posture.
 
@@ -143,17 +143,21 @@ the feature leaves the posture that arrangement relies on untouched.
   them.** The declaration key and its accepted names stay as they are.
   Renaming or extending them is a compatibility change for every existing
   workspace and a separate decision.
+- **Applying the declared posture to interactive sessions a developer opens
+  themselves.** The declaration governs sessions niwa starts. A developer who
+  opens their own session gets their own settings, as Journey 2 describes.
 - **The supervised review's own posture.** It writes a restrictive value that
   Claude Code honors from the same file, and it works today. This feature must
   not change it, so its correctness isn't this feature's to redesign.
-- **Moving remote control off the single inline-settings argument.** Freeing
-  that argument slot is possible and useful for other work, but this feature
-  doesn't need it and it carries its own risks.
+- **Moving remote control off the single inline-settings argument.** This
+  feature doesn't need that argument slot freed.
 - **A shared builder for the inline settings document niwa passes to a
   worker.** This feature puts nothing new in that document.
 - **Containment for unattended workers**, meaning limits on file writes and
-  network access for a worker that doesn't ask. That gap exists today with or
-  without this feature and is tracked on its own.
+  network access for a worker that doesn't ask. That gap exists with or
+  without this feature, and
+  `docs/designs/current/DESIGN-dispatch-permission-mode.md` already names it as
+  a separate follow-up.
 - **Other tools that independently write the same permission setting into a
   repo's local settings.** niwa can only change what niwa writes.
 - **The posture niwa generates for other agent harnesses.** Those use separate
@@ -171,11 +175,11 @@ the feature leaves the posture that arrangement relies on untouched.
   The PRD decides whether they're owed the declared posture, or owed accurate
   documentation that stops promising it.
 - **Whether a resumed session should get the posture again.** A dispatched
-  worker that is resumed later re-enters through a different command. The PRD
-  decides whether the declared posture must survive that re-entry.
+  worker that is resumed later re-enters through a different command. The
+  outcome above promises the posture in sessions niwa starts; the PRD decides
+  whether a resume counts as one.
 
-None of these block the brief. Each is a question about what the feature must
-do, which is the PRD's to settle.
+None of these block the brief.
 
 ## References
 
@@ -184,3 +188,6 @@ do, which is the PRD's to settle.
   builds on.
 - `docs/prds/PRD-config-distribution.md`: where the mapping from a workspace's
   declared posture to a generated setting was first specified.
+- Claude Code 2.1.257 release notes
+  (https://github.com/anthropics/claude-code/releases/tag/v2.1.257): the change
+  that stopped project-scope settings from setting the bypass permission mode.
