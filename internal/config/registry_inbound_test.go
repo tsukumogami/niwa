@@ -72,8 +72,12 @@ func TestLoadGlobalConfigFrom_AcceptSessionMessagesOnDispatch_NonBoolean(t *test
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("writing config: %v", err)
 	}
-	if _, err := LoadGlobalConfigFrom(path); err == nil {
+	cfg, err := LoadGlobalConfigFrom(path)
+	if err == nil {
 		t.Fatalf("LoadGlobalConfigFrom succeeded, want an error")
+	}
+	if cfg != nil {
+		t.Fatalf("LoadGlobalConfigFrom returned a config alongside the error: %+v", cfg)
 	}
 }
 

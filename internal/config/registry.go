@@ -51,14 +51,18 @@ type GlobalSettings struct {
 	KeepAliveOnDispatch *bool `toml:"keep_alive_on_dispatch,omitempty"`
 	// AcceptSessionMessagesOnDispatch, when non-nil and true, makes `niwa
 	// dispatch` start workers that accept inbound messages from other Claude
-	// Code sessions on this machine (the worker is launched with the
-	// crossSessionInbound setting). It is a host-level default scoped to
-	// dispatched workers only; the per-dispatch --accept-session-messages flag
-	// overrides it in both directions. Unlike RemoteControlOnDispatch and
-	// KeepAliveOnDispatch, no workspace or instance source can set it: whether
-	// a worker takes messages from other sessions is the developer's call, not
-	// a cloned repo's. nil means off (the worker is launched without the
-	// setting).
+	// Code sessions without asking (the worker is launched with the
+	// crossSessionInbound setting). The senders are any session able to
+	// address the worker, including sessions on other machines and in the
+	// cloud. It only applies to agents that support the setting; for others it
+	// does nothing. It is a host-level default scoped to dispatched workers
+	// only; the per-dispatch --accept-session-messages flag overrides it in
+	// both directions. Unlike RemoteControlOnDispatch and KeepAliveOnDispatch,
+	// which a downstream setting can outrank, no workspace, instance, or
+	// repository settings source is read for it at all: whether a worker takes
+	// messages from other sessions is meant to be the developer's call, not a
+	// cloned repo's. nil means off unless the flag turns it on for one
+	// dispatch.
 	AcceptSessionMessagesOnDispatch *bool `toml:"accept_session_messages_on_dispatch,omitempty"`
 	// DispatchModel is the default model for a `niwa dispatch` worker's main
 	// chat loop when the command is run without --model. It accepts the same
