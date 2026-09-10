@@ -680,9 +680,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// above or decided downstream), prepend the fixed self-arm instruction to
 	// the task prompt (channel B2; see dispatch_keepalive.go for why the
 	// SessionStart channel does not reach a dispatched worker). The instruction
-	// rides the
-	// same single argv element as the prompt, so the D8 no-shell-interpolation
-	// guard is preserved, and its fixed size was already reserved by step (1):
+	// rides the same single argv element as the prompt, so the D8
+	// no-shell-interpolation guard is preserved, and its fixed size was already
+	// reserved by step (1):
 	// maxPromptBytes is the exec ceiling minus dispatchPromptReserve, which is
 	// this constant's length, so a prompt that got here can absorb the prepend
 	// and still fit in one argv element. This is a reservation, not a margin:

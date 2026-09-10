@@ -32,11 +32,6 @@ const (
 
 func inboundFlag(b bool) *bool { return &b }
 
-// auditLineFor is the full audit line for a source detail.
-func auditLineFor(detail string) string {
-	return fmt.Sprintf(inboundAuditFormat, detail, inboundGuideURL)
-}
-
 // launchSettingsDocs returns every document that follows a settings flag in
 // the passthrough, parsed. Tests that build both keys parse the document rather
 // than comparing strings: key order and spacing are the renderer's business.
@@ -212,12 +207,12 @@ func TestDispatch_Inbound_PrecedenceMatrix(t *testing.T) {
 	}{
 		{"key absent, no flag", "", nil, false, "", false},
 		{"key false, no flag", hostInboundOff, nil, false, "", false},
-		{"key true, no flag", hostInboundOn, nil, true, auditLineFor(inboundMachineSourceDetail), false},
+		{"key true, no flag", hostInboundOn, nil, true, inboundAuditLine(inboundSourceMachine), false},
 		// The bare flag and =true both parse to true; TestAcceptSessionMessagesFlagParsing
 		// pins that, so one row covers both spellings here.
-		{"key absent, flag true", "", inboundFlag(true), true, auditLineFor(inboundSourceFlag), false},
-		{"key false, flag", hostInboundOff, inboundFlag(true), true, auditLineFor(inboundSourceFlag), false},
-		{"key true, =true", hostInboundOn, inboundFlag(true), true, auditLineFor(inboundSourceFlag), false},
+		{"key absent, flag true", "", inboundFlag(true), true, inboundAuditLine(inboundSourceFlag), false},
+		{"key false, flag", hostInboundOff, inboundFlag(true), true, inboundAuditLine(inboundSourceFlag), false},
+		{"key true, =true", hostInboundOn, inboundFlag(true), true, inboundAuditLine(inboundSourceFlag), false},
 		{"key true, =false", hostInboundOn, inboundFlag(false), false, "", true},
 		{"key absent, =false", "", inboundFlag(false), false, "", false},
 		{"key false, =false", hostInboundOff, inboundFlag(false), false, "", false},
@@ -418,7 +413,7 @@ func TestDispatch_Inbound_UnreadableHostConfig(t *testing.T) {
 					t.Fatalf("crossSessionInbound present = %v, want %v (only the flag can turn it on here); passthrough %v", ok, withFlag, pass)
 				}
 				if withFlag {
-					if !strings.Contains(stderr, auditLineFor(inboundSourceFlag)+"\n") {
+					if !strings.Contains(stderr, inboundAuditLine(inboundSourceFlag)+"\n") {
 						t.Fatalf("expected the audit line naming the flag; stderr:\n%s", stderr)
 					}
 				} else if strings.Contains(stderr, auditMarker) {
@@ -698,7 +693,7 @@ func TestDispatch_Inbound_StdoutUnchanged(t *testing.T) {
 	on, onErr := run(t, inboundFlag(true))
 	// Without these two checks the comparison could pass between two runs
 	// that both left the behavior off.
-	if !strings.Contains(onErr, auditLineFor(inboundSourceFlag)) {
+	if !strings.Contains(onErr, inboundAuditLine(inboundSourceFlag)) {
 		t.Fatalf("the 'on' run did not apply the behavior; stderr:\n%s", onErr)
 	}
 	if strings.Contains(offErr, auditMarker) {
@@ -738,7 +733,7 @@ func TestDispatch_Inbound_AuditLinePrecedesTheHints(t *testing.T) {
 		t.Fatalf("dispatch: %v", err)
 	}
 	out := combined.String()
-	audit := strings.Index(out, auditLineFor(inboundMachineSourceDetail))
+	audit := strings.Index(out, inboundAuditLine(inboundSourceMachine))
 	hints := strings.Index(out, "Dispatched session ")
 	if audit < 0 || hints < 0 {
 		t.Fatalf("expected both the audit line and the headline; output:\n%s", out)
