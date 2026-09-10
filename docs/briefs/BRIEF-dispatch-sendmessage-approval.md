@@ -16,9 +16,9 @@ motivating_context: |
   From 2026-09-02, peer messages between niwa-dispatched sessions began arriving
   as approval prompts instead of being delivered, after a Claude Code release
   changed which settings decide a session's permission posture. A niwa fix
-  restored the posture for new dispatches, and the prompts came back late on
-  2026-09-09 between a session dispatched before that fix and one dispatched
-  after it.
+  restored the posture for new dispatches, and the prompts came back on
+  2026-09-10 (UTC) between a session dispatched before that fix and one
+  dispatched after it.
 ---
 
 # BRIEF: Unattended peer messages for dispatched sessions
@@ -37,7 +37,10 @@ receive the behavior: warn and continue, or stay silent.
 Revised on 2026-09-10 after a live experiment. The earlier text blamed the way
 niwa brings sessions back after a resume. Claude Code in fact restores a
 session's launch settings when it restarts or reopens it, and the holds come
-from sessions in different permission postures messaging each other.
+from sessions in different permission postures messaging each other. A later
+review also corrected Journey 3: switching the behavior off returns a session to
+Claude Code's default, which doesn't hold messages from sessions in the same
+posture.
 
 ## Problem Statement
 
@@ -60,7 +63,7 @@ stopped making progress.
 
 The developer also can't tell niwa what they want here. They might be happy for
 every session they dispatch to take messages from its peers. They might want
-that for most dispatches but not for one that reads text written by strangers.
+that for most dispatches but not for one they intend to steer themselves.
 Either way the result is left to chance, and the only workaround is to watch
 every session and approve prompts by hand, which defeats the point of
 dispatching the work to run in the background.
@@ -76,9 +79,8 @@ hinges on it. When the behavior is on, the dispatch output says so, so they can
 tell afterwards which sessions were accepting messages unattended.
 
 The choice is theirs and it's cheap to change. They make it once for their
-machine, and they can reverse it for a single dispatch, such as a session that
-will read untrusted content, without touching the machine setting. A developer
-who never opts in sees nothing new.
+machine, and they can switch it off for a single dispatch without touching the
+machine setting. A developer who never opts in sees nothing new.
 
 A developer who also wants workers' messages to reach their own interactive
 session unattended learns what that takes, and what it costs, once, when the
@@ -107,13 +109,17 @@ told, once, how to extend the behavior to their own interactive session, and
 that doing so applies to every Claude Code session they run, so they decide
 knowing the cost.
 
-### Journey 3: Excluding one sensitive dispatch
+### Journey 3: Switching it off for one dispatch
 
-The same developer, with the machine default on, dispatches a session to triage
-issues filed by strangers, whose text may try to steer whatever reads it. They
-switch the behavior off for that one dispatch. That session's incoming messages
-go back to needing approval, every other session keeps the machine default, and
-the dispatch output shows which choice applied.
+The same developer, with the machine default on, dispatches a session they
+intend to steer themselves and switches the behavior off for that one dispatch.
+The session keeps Claude Code's default handling of messages from other
+sessions: a message from a session in a different posture waits for their
+approval, and the dispatch output shows the machine setting was overridden.
+Every other session keeps the machine default. The guide tells them what the
+default doesn't do: sessions in the same posture as this one can still reach it
+without a prompt, so switching the behavior off isn't a way to isolate a
+session.
 
 ### Journey 4: Workers alongside a coordinator from before an upgrade
 
@@ -151,6 +157,9 @@ dispatching a fresh coordinator clears it.
   reader might expect that boundary, but messages are addressed by session name
   across a developer's whole account and niwa sits nowhere in that path, so it
   can't enforce one. Offering it would promise protection that doesn't exist.
+- Isolating a dispatched session so that every message into it waits for
+  approval. Switching the behavior off returns a session to Claude Code's
+  default, which only holds messages from sessions in a different posture.
 - Granting a session anything beyond receiving a message. Whatever a message
   asks a session to do still goes through that session's own permissions.
 - Making sessions niwa didn't launch accept messages, including sessions niwa
