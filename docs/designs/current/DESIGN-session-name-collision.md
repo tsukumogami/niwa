@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Planned
+status: Current
 problem: |
   `runDispatch` sanitizes `--name` into a slug, spends the dispatch's 32 random bits on the
   instance directory name, and passes the bare slug to `buildDispatchPassthrough` as the
@@ -33,7 +33,7 @@ user_visible_surface: true
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 
