@@ -75,8 +75,112 @@ they happen, keeps that arrangement exactly as it works today.
 
 ## User Journeys
 
-<Phase 3 will name the concrete journeys that exercise the feature.>
+### Journey 1: Maintainer dispatching an unattended worker
+
+A workspace maintainer has declared the unattended posture because the
+workspace's work is routinely handed to background workers. They run
+`niwa dispatch` with a task and walk away, typing no permission flag of their
+own. The worker runs to completion without stopping to ask for approval,
+because the workspace already said it shouldn't. If the maintainer later opens
+the worker's instance, nothing in it claims the posture came from somewhere it
+didn't.
+
+### Journey 2: Developer opening a session in an instance
+
+A developer's own user-level settings put their sessions in a mode that accepts
+edits without prompting. They open an ordinary interactive session inside a
+niwa instance of a workspace that declared the unattended posture. They aren't
+dispatching anything, so no worker flag is involved. Today the session prompts
+on every edit, more restrictive than their own setup. After this feature the
+session behaves the way their own settings say, the same as it would outside
+niwa.
+
+### Journey 3: Investigating an unexpected prompt
+
+A developer, or an agent working on their behalf, notices a session asked for
+approval when they expected it not to, or didn't ask when they expected it to.
+They open the instance's generated settings to find out why. Every
+permission-related value they find there actually takes effect, so the
+investigation leads to the real cause instead of stopping at a confident-looking
+setting that explains nothing.
+
+### Journey 4: Workspace that declared it wants sessions to ask
+
+A maintainer declared the asking posture for a workspace that handles
+sensitive operations, meaning to keep a person in the loop. They expect their
+sessions to ask before acting. Today that declaration produces a value Claude
+Code doesn't recognize, so sessions run on whatever defaults apply. After this
+feature the declaration means what its name says, and the maintainer can
+confirm that from the generated file.
+
+### Journey 5: Operator running a supervised review
+
+An operator runs niwa's supervised review, where a person approves each
+consequential action as it happens and the review writes its own
+approval-gated posture into the instance. They start a review after this
+feature ships. The review asks for approval exactly as it did before, because
+the feature leaves the posture that arrangement relies on untouched.
 
 ## Scope Boundary
 
-<Phase 3 will record what this feature holds in and pushes out.>
+### In scope
+
+- What niwa writes about permission posture into each settings document it
+  generates: the instance root, each repo inside an instance, and the
+  workspace root. This covers every value a workspace can declare today.
+- Where niwa's dispatch flow reads a workspace's declared posture from when it
+  decides how a worker should run.
+- What the existing asking declaration produces, since the value it produces
+  today has never been one Claude Code recognizes.
+- The unused internal reader of the same generated setting, which predates the
+  current dispatch flow and has no remaining callers.
+- The committed niwa documentation that describes the generated setting as the
+  mechanism that sets a session's posture.
+
+### Out of scope
+
+- **Changing which postures a workspace may declare, or how it declares
+  them.** The declaration key and its accepted names stay as they are.
+  Renaming or extending them is a compatibility change for every existing
+  workspace and a separate decision.
+- **The supervised review's own posture.** It writes a restrictive value that
+  Claude Code honors from the same file, and it works today. This feature must
+  not change it, so its correctness isn't this feature's to redesign.
+- **Moving remote control off the single inline-settings argument.** Freeing
+  that argument slot is possible and useful for other work, but this feature
+  doesn't need it and it carries its own risks.
+- **A shared builder for the inline settings document niwa passes to a
+  worker.** This feature puts nothing new in that document.
+- **Containment for unattended workers**, meaning limits on file writes and
+  network access for a worker that doesn't ask. That gap exists today with or
+  without this feature and is tracked on its own.
+- **Other tools that independently write the same permission setting into a
+  repo's local settings.** niwa can only change what niwa writes.
+- **The posture niwa generates for other agent harnesses.** Those use separate
+  keys, a separate vocabulary, and a separate trust mechanism, and none of them
+  is affected by the change described here.
+
+## Open Questions
+
+- **What the asking declaration should produce.** The options include the
+  explicit default mode, which is honored from project scope, or writing
+  nothing and letting the developer's own settings apply. The PRD decides which
+  one matches what a maintainer who chose "ask" meant.
+- **Whether sessions launched at the workspace root are owed the posture.**
+  niwa has no launch step for those sessions that could pass the posture along.
+  The PRD decides whether they're owed the declared posture, or owed accurate
+  documentation that stops promising it.
+- **Whether a resumed session should get the posture again.** A dispatched
+  worker that is resumed later re-enters through a different command. The PRD
+  decides whether the declared posture must survive that re-entry.
+
+None of these block the brief. Each is a question about what the feature must
+do, which is the PRD's to settle.
+
+## References
+
+- `docs/designs/current/DESIGN-dispatch-permission-mode.md`: the design that
+  added the dispatch-time route for the unattended posture, which this feature
+  builds on.
+- `docs/prds/PRD-config-distribution.md`: where the mapping from a workspace's
+  declared posture to a generated setting was first specified.
