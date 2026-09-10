@@ -36,7 +36,7 @@ func provisionWithInstanceSettings(t *testing.T, f *dispatchFakes, settingsBody 
 		f.provisionCalled++
 		name := "test-ws" + sep + namePrefix
 		dir := filepath.Join(root, name)
-		if err := os.MkdirAll(filepath.Join(dir, ".niwa"), 0o755); err != nil {
+		if err := writeMinimalInstanceState(dir); err != nil {
 			return provisionResult{}, err
 		}
 		if settingsBody != "" {
@@ -124,7 +124,7 @@ func TestDispatch_RemoteControl_HostUnset_NoChange(t *testing.T) {
 	// AC4: with the preference unset, the passthrough must be byte-for-byte the
 	// baseline buildDispatchPassthrough produces -- not merely "--settings absent".
 	// dispatchName is "" here, so the baseline carries no flags at all.
-	if want := buildDispatchPassthrough(claudeLaunchSpec().Flags, "", ""); !slices.Equal(pass, want) {
+	if want := buildDispatchPassthrough(claudeLaunchSpec().Flags, "", "", ""); !slices.Equal(pass, want) {
 		t.Fatalf("preference unset must not alter argv; got %v, want %v", pass, want)
 	}
 }
