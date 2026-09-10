@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   Developers who dispatch background Claude Code sessions with niwa and have
   them message each other can't count on those messages arriving unattended.
@@ -22,7 +22,14 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
+
+Three framing questions are left to the PRD. What the machine setting and the
+per-dispatch control are called, where the name mustn't suggest a boundary niwa
+can't enforce. Whether a workspace can set a default for its dispatches, between
+the machine setting and the per-dispatch control, which changes who can turn the
+behavior on. And what happens when a dispatch launches an agent that can't
+receive the behavior: warn and continue, or stay silent.
 
 ## Problem Statement
 
@@ -145,18 +152,6 @@ have before the resume. They get this without making any decision at all.
   Claude Code versions no longer honor. That's separate work too.
 - Changing which permission mode dispatched sessions run in.
 - Anything that needs a change to Claude Code itself.
-
-## Open Questions
-
-- What the machine setting and the per-dispatch control are called. Whatever the
-  name is, it mustn't suggest a boundary niwa can't enforce. The PRD settles it.
-- Whether a workspace should be able to set a default for its dispatches,
-  between the machine setting and the per-dispatch control. That changes who can
-  turn the behavior on, so the PRD decides.
-- What happens when a dispatch launches an agent that can't receive the
-  behavior: warn and continue, or stay silent. The PRD decides.
-
-None of these questions block the brief.
 
 ## References
 
