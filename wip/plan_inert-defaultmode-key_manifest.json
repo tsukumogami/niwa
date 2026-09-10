@@ -1,0 +1,42 @@
+[
+  {
+    "issue_id": "1",
+    "title": "feat(workspace): record the resolved permission posture in instance state",
+    "complexity": "testable",
+    "file": "wip/plan_inert-defaultmode-key_issue_1_body.md",
+    "status": "PASS",
+    "dependencies": []
+  },
+  {
+    "issue_id": "2",
+    "title": "refactor(dispatch): derive --permission-mode from instance state and pass it explicitly to the argv builder",
+    "complexity": "critical",
+    "file": "wip/plan_inert-defaultmode-key_issue_2_body.md",
+    "status": "PASS",
+    "dependencies": ["1"]
+  },
+  {
+    "issue_id": "3",
+    "title": "fix(workspace): stop writing permission modes Claude Code ignores or rejects",
+    "complexity": "critical",
+    "file": "wip/plan_inert-defaultmode-key_issue_3_body.md",
+    "status": "PASS",
+    "dependencies": ["2"]
+  },
+  {
+    "issue_id": "4",
+    "title": "test(functional): cover dispatch argv and the S1-S9 document matrix end to end",
+    "complexity": "testable",
+    "file": "wip/plan_inert-defaultmode-key_issue_4_body.md",
+    "status": "PASS",
+    "dependencies": ["3"]
+  },
+  {
+    "issue_id": "5",
+    "title": "docs: correct the documents that describe the retired permission mechanism",
+    "complexity": "simple",
+    "file": "wip/plan_inert-defaultmode-key_issue_5_body.md",
+    "status": "PASS",
+    "dependencies": ["3"]
+  }
+]
