@@ -1,6 +1,9 @@
 package cli
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // renderLaunchSettings renders the inline settings document a dispatch passes
 // to the launched agent's settings flag, and reports whether there is one.
@@ -23,17 +26,20 @@ import "encoding/json"
 // caller rewrite the worker's configuration.
 //
 // An empty or nil map returns ("", false), and the caller then appends no
-// settings flag at all.
+// settings flag at all. A value encoding/json can't encode panics, since only
+// a contributor breaking the constants rule can cause one.
 func renderLaunchSettings(settings map[string]any) (string, bool) {
 	if len(settings) == 0 {
 		return "", false
 	}
 	doc, err := json.Marshal(settings)
 	if err != nil {
-		// Constant keys and values always encode. A value that doesn't is a
-		// programming error in a contributor, and the safe outcome is to send
-		// no document rather than a partial one.
-		return "", false
+		// Constant keys and values always encode, so reaching this is a
+		// programming error in a contributor. It panics rather than returning
+		// no document: a contributor records its own decision (rcInjected, for
+		// one), and a silent drop would leave that record saying its key was
+		// sent when it wasn't.
+		panic(fmt.Sprintf("renderLaunchSettings: encoding launch settings: %v", err))
 	}
 	return string(doc), true
 }

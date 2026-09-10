@@ -565,9 +565,10 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 	// (9c) Remote-control-on-dispatch default-fill. When the host preference
 	// (~/.config/niwa/config.toml [global].remote_control_on_dispatch) is on and
-	// the dispatched instance left remoteControlAtStartup unset, append the
-	// Claude Code Remote settings flag so the worker starts steerable. The flag
-	// is two discrete argv elements (no shell interpolation). This is the only
+	// the dispatched instance left remoteControlAtStartup unset, add the Claude
+	// Code Remote key to the launch settings document so the worker starts
+	// steerable. The document rides the settings flag as two discrete argv
+	// elements (no shell interpolation). This is the only
 	// dispatch-exclusive seam, so the default never leaks to interactive,
 	// ephemeral, or `niwa apply` sessions. Neither read can fail the dispatch: a
 	// missing/unreadable global config degrades to "no injection" (the preference
@@ -609,9 +610,11 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		}
 	}
 	// Two discrete argv elements, and none at all when no contributor added a
-	// key. An agent with no settings flag has nowhere for the document to go;
-	// every contributor already gates on that, and this check keeps a future
-	// one that forgets from emitting an empty flag spelling.
+	// key. An agent with no settings flag has nowhere for the document to go,
+	// so every contributor must check spec.Flags.Settings itself before adding
+	// a key and recording that it did. The check here only stops a launch with
+	// an empty flag spelling; it drops the document silently, so it can't catch
+	// a contributor that forgot its own check.
 	if doc, ok := renderLaunchSettings(launchSettings); ok && spec.Flags.Settings != "" {
 		passthrough = append(passthrough, spec.Flags.Settings, doc)
 	}

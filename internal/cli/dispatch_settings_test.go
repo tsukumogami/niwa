@@ -54,6 +54,19 @@ func TestRenderLaunchSettings_EmptyMapRendersNothing(t *testing.T) {
 	}
 }
 
+// TestRenderLaunchSettings_UnencodableValuePanics pins that a contributor
+// passing a value encoding/json can't encode fails loudly. Returning no
+// document instead would leave that contributor's own record saying its key
+// was sent when it wasn't.
+func TestRenderLaunchSettings_UnencodableValuePanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("renderLaunchSettings did not panic on an unencodable value")
+		}
+	}()
+	renderLaunchSettings(map[string]any{"badKey": func() {}})
+}
+
 // TestBuildLaunchArgs_PromptCannotReplaceTheSettingsDocument is the reason
 // Claude's launch spec declares a prompt separator. Claude Code reads a prompt
 // that begins with a dash as a flag, and a repeated --settings is last-wins, so
