@@ -1,7 +1,6 @@
 ---
 schema: design/v1
 status: Proposed
-upstream: docs/prds/PRD-inert-defaultmode-key.md
 problem: |
   `buildSettingsDoc` maps a declared `permissions` posture to Claude Code
   modes Claude Code no longer honors from project scope (`bypassPermissions`)
@@ -24,6 +23,8 @@ rationale: |
   parameter makes watch's empty value visible rather than an accident of a
   package global. Ordering the reader's move ahead of the producer's change
   keeps every step green.
+upstream: docs/prds/PRD-inert-defaultmode-key.md
+user_visible_surface: true
 decision_provenance: inline-resolved
 ---
 
@@ -50,17 +51,20 @@ There are three coupled technical defects.
 
 **The mapping writes values Claude Code ignores or rejects.** From Claude
 Code 2.1.257, `bypassPermissions` no longer takes effect from a project or
-local settings file, and `auto` stopped at 2.1.142. Measured on 2.1.267, the
-ignored value wins the settings merge and is downgraded to `default`, which
-overrides a developer's own `acceptEdits` or `plan`. `askPermissions` was
-never a valid mode, and a file carrying it is discarded whole, so every other
-key niwa writes into an `ask` scope's document (hooks, worktree-delegation
-deny rules, plugins) silently stops taking effect. The PRD requires that no
-generated document ever carries `bypassPermissions`, `auto`, or
-`askPermissions`, and that every value written is one Claude Code honors from
-project scope (`default`, `acceptEdits`, `plan`, `dontAsk`). A `bypass`
-document must carry no `permissions.defaultMode`. An `ask` document must
-carry `default`, with every other key identical to the undeclared case.
+local settings file, and `auto` stopped at 2.1.142 (the 2.1.257 release notes,
+https://github.com/anthropics/claude-code/releases/tag/v2.1.257, record the
+first). The upstream PRD records the behavior measured on 2.1.267: the ignored
+value wins the settings merge and is downgraded to `default`, which overrides
+a developer's own `acceptEdits` or `plan`. `askPermissions` was never a valid
+mode, and a file carrying it is discarded whole, so every other key niwa
+writes into an `ask` scope's document (hooks, worktree-delegation deny rules,
+plugins) silently stops taking effect.
+
+The PRD requires that no generated document ever carries `bypassPermissions`,
+`auto`, or `askPermissions`, and that every value written is one Claude Code
+honors from project scope (`default`, `acceptEdits`, `plan`, `dontAsk`). A
+`bypass` document must carry no `permissions.defaultMode`. An `ask` document
+must carry `default`, with every other key identical to the undeclared case.
 Undeclared carries nothing.
 
 **The only working route reads its input from the dead value.** `niwa
@@ -71,17 +75,18 @@ reading the instance-root `settings.json` back through `readInstanceSettings`
 and the `Permissions` field of the `instanceSettings` projection
 (`internal/cli/dispatch_plugins.go`), then comparing it to
 `"bypassPermissions"`. So the value this change must stop writing is the
-derivation's only input. The PRD requires the decision to come from the
-instance's effective declared posture: the workspace overlay, the workspace,
-the personal overlay, then `[instance.claude.settings]`, highest winning.
-Per-repo overrides don't affect it. A stale or hand-edited instance-root
-document must not grant bypass, and a deleted one must not withhold it. The
-flag must reach every form of dispatch (detached, attached, with remote
-control). An operator's explicit `--permission-mode` must win and be the
-only one on the argv. The effective config that decision needs is already
-computed during provisioning: the instance pipeline resolves it with
-`ResolveAndMergeEffectiveConfig` and hands it to the materializers, but
-nothing carries the resolved posture out.
+derivation's only input.
+
+The PRD requires the decision to come from the instance's effective declared
+posture: the workspace overlay, the workspace, the personal overlay, then
+`[instance.claude.settings]`, highest winning. Per-repo overrides don't
+affect it. A stale or hand-edited instance-root document must not grant
+bypass, and a deleted one must not withhold it. The flag must reach every
+form of dispatch (detached, attached, with remote control). An operator's
+explicit `--permission-mode` must win and be the only one on the argv. The
+effective config that decision needs is already computed during provisioning:
+the instance pipeline resolves it with `ResolveAndMergeEffectiveConfig` and
+hands it to the materializers, but nothing carries the resolved posture out.
 
 **The tests pin the wrong bytes and fixture the reader.** Six materializer
 tests assert the values that must change, and the `ask` test has asserted
@@ -92,16 +97,18 @@ reader didn't. Per-location equality checks can't show that a value is
 absent everywhere, and today's golden manifests don't cover the workspace
 root.
 
-The system boundaries are `internal/workspace`, which holds the materializer,
-the root materializer, the dead `WorkerPermissionMode` reader in
-`permissions.go`, and the override resolution. They also include
-`internal/cli`: the dispatch derivation, the shared argv builder
-`buildDispatchPassthrough`, the provisioning result, and the re-entry
-surfaces. `internal/watch` is a boundary that must not move. Its
-operator-approval posture writes `default` into the same instance-root file,
-and its review launches share the argv builder with an always-empty
-permission value. The workspace docs are the last boundary: seven committed
-documents still describe the retired mechanism.
+The system boundaries:
+- `internal/workspace` holds the materializer, the root materializer, the
+  dead `WorkerPermissionMode` reader in `permissions.go`, and the override
+  resolution.
+- `internal/cli` holds the dispatch derivation, the shared argv builder
+  `buildDispatchPassthrough`, the provisioning result, and the re-entry
+  surfaces.
+- `internal/watch` must not move. Its operator-approval posture writes
+  `default` into the same instance-root file, and its review launches share
+  the argv builder with an always-empty permission value.
+- The workspace docs: seven committed documents still describe the retired
+  mechanism.
 
 ## Decision Drivers
 
@@ -254,20 +261,23 @@ and doing both would put one rule behind two error paths.
 
 ### Decision 3: How tests divide across layers
 
-Each acceptance criterion observes something at a particular layer. The
-dispatch argv exists only end to end, recorded through the functional suite's
-fake `claude`. The document matrix's worktree has to come through
-`niwa worktree create`, the entry point that skips the personal overlay. The
-tamper window sits between materialization and derivation, which nothing
-outside the process can reach, because dispatch provisions its own instance.
+Each acceptance criterion observes something at a particular layer. The PRD
+tabulates nine scenarios, S1-S9, each a combination of workspace, instance,
+repo, and personal-overlay declarations with the expected value at every
+document location and on the dispatch argv. The dispatch argv exists only end
+to end, recorded through the functional suite's fake `claude`. The document
+matrix's worktree has to come through `niwa worktree create`, the entry point
+that skips the personal overlay. The tamper window sits between
+materialization and derivation, which nothing outside the process can reach,
+because dispatch provisions its own instance.
 
 Key assumptions:
-- The nine-example matrix can run in the full functional suite with only S1
+- The nine-scenario matrix can run in the full functional suite with only S1
   tagged `@critical`, keeping the critical lane fast.
 
 #### Chosen: Divide by observable
 
-Functional scenarios cover the dispatch argv: S1-S9 posture sources, the
+Functional scenarios cover the dispatch argv: every S1-S9 posture source, the
 explicit-flag cases, remote control, Codex, and the personal overlay using
 the existing `a personal overlay exists with body` step. A Scenario Outline
 over S1-S9 runs `niwa init` and `niwa worktree create`, plus an instance apply
@@ -354,28 +364,18 @@ built into the same map, unchanged. Because apply overwrites each document
 whole, the next apply repairs every existing instance and workspace root.
 
 In `runDispatch`, dispatch loads the instance's state and hands the recorded
-posture to a pure derivation, which returns the operator's flag if set.
-Otherwise it returns `bypassPermissions` when the recorded posture is `bypass`
+posture to a pure derivation. The operator's flag wins. Otherwise the
+derivation returns `bypassPermissions` when the recorded posture is `bypass`
 and the agent's flag spelling is `--permission-mode`, and empty otherwise.
 That value is passed to `buildDispatchPassthrough` as an argument, and both
-watch launch sites pass `""`. The derivation is valid only for an instance
-the calling process just provisioned. A state file that exists but can't be
-read or parsed degrades to "nothing derived" with a stderr warning. A missing
-state file degrades silently, which happens only under test fakes that
-provision no real instance. Codex is gated out by its flag spelling, as it is
-today.
+watch launch sites pass `""`. A state file that exists but can't be read or
+parsed degrades to "nothing derived" with a stderr warning. A missing state
+file degrades silently, which happens only under test fakes that provision no
+real instance. Codex is gated out by its flag spelling, as it is today.
 
 The `Permissions` field on `instanceSettings` goes away. `readInstanceSettings`
 keeps serving remote control and keep-alive. The dead `WorkerPermissionMode`
-reader is deleted with its test.
-
-Tests follow the observable. Functional scenarios pin the argv for every
-posture source and dispatch form, plus the four-location document matrix over
-S1-S9, with a real `niwa worktree create`. Go tests, built on real
-`Applier.Create` runs, pin the derivation against a tampered materialization,
-the mapping differential per location, re-apply repair, invalid values,
-watch's argv and review settings, the re-entry strings, and the agreement
-between the recorded posture and the written document. Seven committed
+reader is deleted with its test. Tests follow Decision 3, and seven committed
 documents are corrected to describe the dispatch flag as the posture's route.
 
 ### Rationale
@@ -450,9 +450,9 @@ copy `result.shadows` and `result.trustKeys`. The workspace-root state file
 carries no value: it's written outside the instance pipeline, and nothing
 reads a posture from it.
 
-**Dispatch derivation (`internal/cli/dispatch.go`).** The block at step 9a
-that reads `inst.Permissions` is replaced. `runDispatch` loads the state with
-`workspace.LoadState(instancePath)`:
+**Dispatch derivation (`internal/cli/dispatch.go`).** The derivation block
+that today reads `inst.Permissions` is replaced. `runDispatch` loads the state
+with `workspace.LoadState(instancePath)`:
 - If the file exists but can't be read or parsed, it prints a warning naming
   the state file and treats the recorded posture as empty.
 - If the file doesn't exist, it treats the posture as empty silently.
@@ -465,11 +465,10 @@ one was given. Otherwise it returns `("bypassPermissions", true)` when
 `("", false)` in every other case. When `derived` is true, `runDispatch` keeps
 the existing stderr notice saying the flag was derived.
 
-The load site's comment states the same-process property. The recorded value
-is trusted only for an instance the calling process just provisioned. A future
-caller that needs the posture of an existing instance must re-resolve it from
-configuration. The single `readInstanceSettings` call stays where it is for
-the remote-control (9c) and keep-alive (9d) consumers.
+A comment at the load site points to the same-process trust rule stated in
+Security Considerations. The single `readInstanceSettings` call stays where it
+is, serving the remote-control default-fill and the keep-alive resolver that
+follow the argv build.
 
 **Argv builder (`internal/cli/dispatch.go`, `watch.go`).**
 `buildDispatchPassthrough(flags, slug, model, permissionMode string)` takes the
@@ -508,8 +507,10 @@ func buildDispatchPassthrough(flags agentplan.LaunchFlags, slug, model, permissi
 ### Data Flow
 
 1. `niwa dispatch` provisions a fresh instance through `provisionInstanceFunc`.
-   The instance pipeline resolves the effective config: workspace overlay,
-   workspace, personal overlay.
+   The instance pipeline resolves the effective config from the workspace
+   overlay, the workspace, and the personal overlay. Every instance-root
+   reader then applies `[instance.claude.settings]` on top through
+   `MergeInstanceOverrides`.
 2. The materializers write the four documents through `buildSettingsDoc`,
    which asks `claudeDefaultMode` what each document's own posture produces:
    nothing for `bypass`, `default` for `ask`. An invalid value fails
@@ -543,7 +544,9 @@ green at every step, and each phase compiles on its own.
 Add `instancePermissionsPosture`, the `ClaudePermissions` field, the
 `pipelineResult` carry, and the copies in Create and Apply. The resolver
 doesn't depend on the new mapping function, so this phase builds against
-today's materializer. Nothing reads the field yet, and no output changes.
+today's materializer. Nothing reads the field yet. No generated settings
+document changes: `instance.json` gains a field, and the characterization
+goldens don't hash that file.
 
 Deliverables:
 - `internal/workspace/state.go`, `apply.go`, and a new resolver beside
@@ -744,8 +747,8 @@ Containment for dispatched workers remains a separate follow-up.
   bypass.
 - Hard-deny and sandbox-off `niwa watch` reviews in a `bypass` workspace run in
   the developer's own mode instead of the `default` they got by accident.
-- The functional suite grows by a nine-example Scenario Outline and several
-  dispatch scenarios.
+- The functional suite grows by a nine-scenario Outline and several dispatch
+  scenarios.
 - Sessions a developer starts on Claude Code older than 2.1.257 lose the
   file-borne bypass they had.
 

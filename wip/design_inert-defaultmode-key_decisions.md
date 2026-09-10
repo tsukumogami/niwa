@@ -106,3 +106,21 @@ no simpler architecture.
 **Decision.** Apply in place; the fixes are local and don't reopen a decision,
 so the architecture review is not re-run. The structural-format and security
 Phase 6 reviewers run next against the revised document.
+
+| G6.3 | docs/designs/DESIGN-inert-defaultmode-key.md | 2 | confirmed | Structural-format review: which of eleven minor findings to apply |
+
+## G6.3 -- Structural-format review PASS; ten of eleven minor findings applied
+
+| Source | Finding | Action | Applied |
+|--------|---------|--------|---------|
+| Structural-Format | Optional frontmatter order; `user_visible_surface` missing | `upstream` moved after `rationale`; `user_visible_surface: true` added (the design changes dispatch argv, error text, a stderr warning, and two guides). `decision_provenance` kept: the dispatch fallback reference requires it for inline-resolved decisions | [x] |
+| Structural-Format | Claude Code version facts uncited | Cited the public 2.1.257 release notes and the PRD's recorded measurement | [x] |
+| Structural-Format | Context restates PRD requirements R1-R11 in prose | **Not applied.** `/design` Phase 0 step 0.3 directs the design to carry the PRD's requirements in its own body rather than cite numbers only, because `/scope`'s consolidation judgment reads whether the design holds what the PRD was for. The reviewer's suggestion conflicts with the skill's own instruction; the instruction wins | [ ] |
+| Structural-Format | `S1-S9` undefined at first use; step numbers `9a`/`9c`/`9d` | S1-S9 defined in Decision 3; steps described by function | [x] |
+| Structural-Format | Same-process statement repeated three times; Summary repeats Architecture | One full statement in Security Considerations; Components points to it; Summary shortened | [x] |
+| Structural-Format | Phase 1 says "no output changes" | Reworded: no settings document changes; `instance.json` gains a field the goldens don't hash (verified: no characterization file references `instance.json`) | [x] |
+| Structural-Format | Data Flow step 1 omits `[instance.claude.settings]` | Added | [x] |
+| Structural-Format | Decision Drivers not numbered | Not applied: optional in the reference | [ ] |
+
+The rewrite leaves the Security Considerations section's substance unchanged,
+so the in-flight security reviewer's read is still current.
