@@ -372,6 +372,15 @@ type InstanceRecord struct {
 	// lives at the CLI layer, so the list command fills this in. omitempty
 	// keeps the --json shape unchanged for every non-participating instance.
 	KeepAlive bool `json:"keep_alive,omitempty"`
+	// SessionName is the display name the instance's dispatch forwarded to
+	// the agent and recorded on its session mapping. Like KeepAlive,
+	// EnumerateInstanceRecords leaves it empty and the list command fills it
+	// in at the CLI layer, from the newest mapping for the instance and only
+	// when the recorded value has the forwarded-name shape. It is empty when
+	// no name was recorded (an unnamed dispatch, an agent with no display-name
+	// flag, or a mapping written before names were recorded). omitempty keeps
+	// the --json shape unchanged for those instances.
+	SessionName string `json:"session_name,omitempty"`
 }
 
 // EnumerateInstanceRecords enumerates the instances under workspaceRoot as

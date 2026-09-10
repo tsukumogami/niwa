@@ -738,10 +738,11 @@ func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 
 	token := gotName[len(gotName)-8:]
 	wantForwarded := "my_thing-" + token
-	if !passthroughHasNameSlug(gotPass, wantForwarded) {
+	forwarded, _ := forwardedDisplayName(gotPass, "--name")
+	if forwarded != wantForwarded {
 		t.Errorf("launcher passthrough %v should contain \"--name %s\" (the instance's token)", gotPass, wantForwarded)
 	}
-	if forwarded, _ := forwardedDisplayName(gotPass, "--name"); !dispatchSessionNameRe.MatchString(forwarded) {
+	if !dispatchSessionNameRe.MatchString(forwarded) {
 		t.Errorf("forwarded name %q does not match %s", forwarded, dispatchSessionNamePattern)
 	}
 }
@@ -825,15 +826,4 @@ func TestDispatch_NameSanitizesEmpty_FallsBack(t *testing.T) {
 			t.Errorf("an empty-sanitizing --name must forward no --name; passthrough[%d] = %q (full %v)", i, a, gotPass)
 		}
 	}
-}
-
-// passthroughHasNameSlug reports whether pass contains the discrete pair
-// "--name" immediately followed by slug.
-func passthroughHasNameSlug(pass []string, slug string) bool {
-	for i := 0; i+1 < len(pass); i++ {
-		if pass[i] == "--name" && pass[i+1] == slug {
-			return true
-		}
-	}
-	return false
 }

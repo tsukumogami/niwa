@@ -393,6 +393,19 @@ func TestDispatchSessionName_AbsentOnFailure(t *testing.T) {
 		return "not-a-uuid", dispatchTestShortID, nil
 	}
 
+	// Each failure exit is told apart by what it reports, so a run that failed
+	// earlier for an unrelated reason, or did not fail at all, cannot pass for
+	// it. A foreground capture failure keeps the finished turn's work and exits
+	// cleanly: no error, a stderr notice instead.
+	wantFailure := map[string]struct{ err, stderr string }{
+		"detached/launch":    {err: "launching dispatch worker"},
+		"detached/capture":   {err: "capturing dispatch session id"},
+		"detached/mapping":   {err: "writing dispatch session mapping"},
+		"foreground/launch":  {err: "launching dispatch worker"},
+		"foreground/capture": {stderr: "no session record was found"},
+		"foreground/mapping": {err: "writing dispatch session mapping"},
+	}
+
 	for _, mode := range []struct {
 		name       string
 		foreground bool
@@ -401,6 +414,7 @@ func TestDispatchSessionName_AbsentOnFailure(t *testing.T) {
 		{"foreground", true},
 	} {
 		for _, fail := range []string{"launch", "capture", "mapping"} {
+			want := wantFailure[mode.name+"/"+fail]
 			t.Run(mode.name+"/"+fail, func(t *testing.T) {
 				_, _ = namedDispatchEnv(t, constByteReader(0xab))
 				if mode.foreground {
@@ -420,7 +434,17 @@ func TestDispatchSessionName_AbsentOnFailure(t *testing.T) {
 					dispatchCapture = failMapping
 				}
 
-				stdout, _, _ := runDispatchCmd(t, "do a thing")
+				stdout, stderr, err := runDispatchCmd(t, "do a thing")
+				if want.err != "" {
+					if err == nil || !strings.Contains(err.Error(), want.err) {
+						t.Fatalf("error = %v, want the %q failure", err, want.err)
+					}
+				} else if err != nil {
+					t.Fatalf("error = %v, want none from this exit", err)
+				}
+				if want.stderr != "" && !strings.Contains(stderr, want.stderr) {
+					t.Fatalf("stderr does not carry %q, so another exit ran:\n%s", want.stderr, stderr)
+				}
 				if strings.Contains(stdout, "session name:") {
 					t.Errorf("a failed dispatch printed a session name line:\n%s", stdout)
 				}

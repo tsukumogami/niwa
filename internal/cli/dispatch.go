@@ -24,7 +24,7 @@ import (
 
 func init() {
 	dispatchCmd.Flags().StringVar(&dispatchLabel, "label", "", "optional human-friendly alias recorded on the session mapping")
-	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session, sanitized into a slug. The session name is the slug plus the instance's random suffix (<slug>-<id>), and the instance is <config>+<slug>-<id>; with no name the instance is <config>+-<id> and no session name is forwarded -- '+' always marks the end of the config name")
+	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session, sanitized into a slug. The session name is the slug plus the instance's random suffix (<slug>-<id>), and the instance is <config>+<slug>-<id>; with no name the instance is <config>+-<id> and no session name is forwarded -- '+' always marks the end of the config name. An agent with no display-name flag gets no session name, though the slug still names the instance")
 	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", dispatchModelFlagHelp())
 	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker; dropped for an agent that has no such flag")
 	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "subagent type to forward to the background worker; this selects a role within the launched agent, not which agent is launched (that is --harness). Dropped for an agent that has no such flag")
@@ -467,7 +467,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// The session name shares the instance's token, so it is unique for the
 	// same reason the directory is. It is forwarded only to an agent that
 	// declares a display-name flag; the gate reads a declared flag spelling,
-	// never an agent's name.
+	// never an agent's name. Left empty, it also keeps the mapping's
+	// session_name and the report's session name line empty, so neither
+	// claims a name the agent was never given.
 	forwardedName := ""
 	if spec.Flags.DisplayName != "" {
 		forwardedName = dispatchSessionName(slug, token)
@@ -921,8 +923,11 @@ func dispatchSessionName(slug, token string) string {
 // dispatchSessionNamePattern is the one definition of the forwarded session
 // name's shape: a 1-40 character slug (maxDispatchSlugRunes; sanitizeInstanceSlug
 // guarantees [a-z0-9_] with no leading or trailing underscore), a "-", and the
-// 8-hex token, which is the same token the instance name ends in. niwa list
-// validates recorded names against it.
+// 8-hex token, which is the same token the instance name ends in. The first and
+// last slug characters are matched on their own, so the middle's {0,38} is
+// maxDispatchSlugRunes minus 2. niwa list shows a name recorded on a session
+// mapping only when it matches, because those files are writable by any
+// same-user process.
 const dispatchSessionNamePattern = "^[a-z0-9](?:[a-z0-9_]{0,38}[a-z0-9])?-[0-9a-f]{8}$"
 
 // dispatchSessionNameRe is dispatchSessionNamePattern compiled.
@@ -1029,7 +1034,7 @@ func isDispatchInstanceName(name string) bool {
 // elements (flag, value pairs). Each value stays its own element so a crafted
 // value cannot smuggle in an extra claude flag (DESIGN Decision 8).
 //
-// The display-name value is forwarded as "<flag> <value>" only when the agent
+// displayName is forwarded as "<flag> <displayName>" only when the agent
 // declares a display-name flag and the value is non-empty. Dispatch passes its
 // session name ("<slug>-<token>", see dispatchSessionName); `niwa watch` passes
 // its own review handle. An empty value forwards nothing.
@@ -1037,7 +1042,7 @@ func isDispatchInstanceName(name string) bool {
 // model is the already-resolved main-loop model (see resolveDispatchModel): a
 // concrete versionless name, forwarded as "--model <model>", or "" to forward
 // nothing. Resolution happens in the caller so this stays a pure argv builder.
-func buildDispatchPassthrough(flags agentplan.LaunchFlags, slug, model string) []string {
+func buildDispatchPassthrough(flags agentplan.LaunchFlags, displayName, model string) []string {
 	var pass []string
 	// Each pair is appended only when niwa has something to say AND the agent
 	// has a flag to say it with. An intent an agent has no flag for is dropped
@@ -1048,7 +1053,7 @@ func buildDispatchPassthrough(flags agentplan.LaunchFlags, slug, model string) [
 		{flags.Model, model},
 		{flags.PermissionMode, dispatchPermissionMode},
 		{flags.SubagentType, dispatchAgent},
-		{flags.DisplayName, slug},
+		{flags.DisplayName, displayName},
 	} {
 		if pair.flag != "" && pair.value != "" {
 			pass = append(pass, pair.flag, pair.value)
