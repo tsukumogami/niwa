@@ -10,6 +10,17 @@
 | loopback-round-1 | wip/plan_dispatch-sendmessage-approval_review_loopback.md | 2 | confirmed | How to act on the round 1 loop-back verdict? |
 | selective-regeneration | wip/plan_dispatch-sendmessage-approval_review_loopback.md | 2 | assumed | Regenerate every outline, or only the affected ones? |
 | round2-scope | wip/research/review-plan_dispatch-sendmessage-approval_round2_catC.md | 2 | assumed | Re-run all four review categories in round 2, or only Category C? |
+| plan-status | docs/plans/PLAN-dispatch-sendmessage-approval.md | 2 | confirmed | Author the single-pr PLAN at Draft or Active? |
+
+<!-- decision:start id="plan-status" status="confirmed" -->
+**Decision:** Author the PLAN at `status: Active` with `tracking_level: none`.
+The scope exit-finalization reference says a single-pr PLAN is Draft, but the
+`/plan` skill, which owns the PLAN lifecycle, says an activation that files no
+GitHub issues auto-fires as authoring completes, and that a committed PLAN at
+`Draft` is a violation the chain-aware `--lifecycle` check fails (L01). The
+tracking level resolves to `none`: niwa's CLAUDE.md has no `## Tracking Level:`
+header, and the single-pr default is `none`.
+<!-- decision:end -->
 
 <!-- decision:start id="round2-scope" status="assumed" -->
 **Decision:** Round 2 re-runs only Category C (AC discriminability), carrying

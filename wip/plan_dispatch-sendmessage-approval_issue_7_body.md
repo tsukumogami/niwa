@@ -50,7 +50,7 @@ The fixed strings the scenarios assert come from the design's Key Interfaces sec
   - `all parallel runs exit 0`, which fails naming each run that exited non-zero, with its transcript;
   - `at least one parallel transcript contains the text:` (docstring);
   - `every parallel transcript has exactly (\d+) lines? containing "..."`;
-  - `there are (\d+) dispatch mappings that record session-message acceptance`, which counts `.niwa/sessions/*.json` files across the workspace's instances with `accepts_session_messages: true` and distinct session ids.
+  - `there are (\d+) dispatch mappings that record session-message acceptance`, which counts the `*.json` mapping files in the workspace root's `.niwa/sessions/` directory (where `WriteSessionMapping` writes every dispatch mapping, not per instance) that have `accepts_session_messages: true`, and checks their session ids are distinct.
 - [ ] The scenarios live in a new feature file, `test/functional/features/session-message-acceptance.feature`. Its description names the design doc and explains that real delivery between live sessions is covered by the PRD's manual delivery check, not here. Every dispatch in it passes `--detach`.
 
 ### `@critical` scenarios (one per functional-coverage case)
