@@ -1037,7 +1037,9 @@ source = "workspace.md"
 
 	// Verify settings.local.json was generated with permissions and hooks.
 	settingsPath := filepath.Join(repoDir, ".claude", "settings.local.json")
-	assertFileContains(t, settingsPath, `"defaultMode": "bypassPermissions"`)
+	// bypass writes no permission mode; the posture travels on dispatch's
+	// --permission-mode flag instead.
+	assertFileNotContains(t, settingsPath, `"defaultMode"`)
 	assertFileContains(t, settingsPath, `"PreToolUse"`)
 	assertFileContains(t, settingsPath, "lint.local.sh")
 

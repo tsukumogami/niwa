@@ -2,6 +2,7 @@ package functional
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -150,6 +151,69 @@ func theMaterializedFileAtWorkspaceRootContains(ctx context.Context, relPath, wa
 	}
 	if !strings.Contains(string(data), want) {
 		return ctx, fmt.Errorf("expected %s to contain %q, got:\n%s", path, want, string(data))
+	}
+	return ctx, nil
+}
+
+// lookupJSONKeyAtWorkspaceRoot parses the JSON file at relPath under the
+// workspace root and walks a dotted key path ("permissions.defaultMode"). It
+// returns the value and whether every segment was present. A file that is
+// missing or doesn't parse is an error, so a "no key" assertion can't pass on
+// an unreadable document.
+func lookupJSONKeyAtWorkspaceRoot(ctx context.Context, relPath, dottedKey string) (value any, found bool, path string, err error) {
+	s := getState(ctx)
+	if s == nil {
+		return nil, false, "", fmt.Errorf("no test state")
+	}
+	path = filepath.Join(s.workspaceRoot, relPath)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false, path, fmt.Errorf("reading %s: %w", path, err)
+	}
+	var doc any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, false, path, fmt.Errorf("parsing %s as JSON: %w\n%s", path, err, data)
+	}
+	cur := doc
+	for _, seg := range strings.Split(dottedKey, ".") {
+		obj, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false, path, nil
+		}
+		cur, ok = obj[seg]
+		if !ok {
+			return nil, false, path, nil
+		}
+	}
+	return cur, true, path, nil
+}
+
+// theJSONFileAtWorkspaceRootHasNoKey asserts the JSON file at relPath under
+// the workspace root parses and carries no value at the dotted key path.
+func theJSONFileAtWorkspaceRootHasNoKey(ctx context.Context, relPath, dottedKey string) (context.Context, error) {
+	value, found, path, err := lookupJSONKeyAtWorkspaceRoot(ctx, relPath, dottedKey)
+	if err != nil {
+		return ctx, err
+	}
+	if found {
+		return ctx, fmt.Errorf("expected %s to have no %q, got %v", path, dottedKey, value)
+	}
+	return ctx, nil
+}
+
+// theJSONFileAtWorkspaceRootHasKeyEqualTo asserts the JSON file at relPath
+// under the workspace root parses and carries the string want at the dotted
+// key path.
+func theJSONFileAtWorkspaceRootHasKeyEqualTo(ctx context.Context, relPath, dottedKey, want string) (context.Context, error) {
+	value, found, path, err := lookupJSONKeyAtWorkspaceRoot(ctx, relPath, dottedKey)
+	if err != nil {
+		return ctx, err
+	}
+	if !found {
+		return ctx, fmt.Errorf("expected %s to have %q, but it is absent", path, dottedKey)
+	}
+	if got, ok := value.(string); !ok || got != want {
+		return ctx, fmt.Errorf("expected %s %q = %q, got %v", path, dottedKey, want, value)
 	}
 	return ctx, nil
 }

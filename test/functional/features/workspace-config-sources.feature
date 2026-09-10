@@ -150,6 +150,9 @@ Feature: workspace config sources (snapshot model)
     And the provenance marker exists
     When I run "niwa apply recon"
     Then the exit code is 0
+    # No child instance exists, so apply treats the workspace root as the sole
+    # instance and the root's .niwa/instance.json is that instance's state.
+    And the JSON file ".niwa/instance.json" under the workspace root has no key "claude_permissions"
     # Upstream adds a permission posture to the config.
     When the config repo "recon" is force-pushed to:
       """
@@ -161,8 +164,11 @@ Feature: workspace config sources (snapshot model)
       """
     And I run "niwa apply recon"
     Then the exit code is 0
-    # A single apply must materialize the new posture -- not require a second run.
-    And the file ".claude/settings.json" under the workspace root contains "bypassPermissions"
+    # A single apply must record the new posture -- not require a second run.
+    And the JSON file ".niwa/instance.json" under the workspace root has key "claude_permissions" equal to "bypass"
+    # bypass reaches workers on dispatch's --permission-mode flag, so the
+    # settings document carries no permission mode.
+    And the JSON file ".claude/settings.json" under the workspace root has no key "permissions.defaultMode"
 
   # --- issue #227: a newly declared env key reaches .local.env on the SAME apply ---
   # The #214 scenario above asserts the workspace-ROOT settings posture, which is

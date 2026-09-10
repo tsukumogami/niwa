@@ -3,6 +3,7 @@ package workspace
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -309,11 +310,50 @@ func (h *HooksMaterializer) Materialize(ctx *MaterializeContext) ([]string, erro
 	return written, nil
 }
 
-// permissionsMapping translates niwa permission values to Claude Code
-// settings.local.json permission mode strings.
-var permissionsMapping = map[string]string{
-	"bypass": "bypassPermissions",
-	"ask":    "askPermissions",
+// errUnknownPosture reports a permissions value that is neither "bypass" nor
+// "ask". It carries no copy of the rejected value on purpose: the caller may
+// hold a secret-backed value, and only buildSettingsDoc, which still has the
+// MaybeSecret, can tell whether quoting it is safe.
+var errUnknownPosture = errors.New(`want "` + postureBypass + `" or "` + postureAsk + `"`)
+
+// claudeDefaultMode translates a niwa permission posture into the
+// permissions.defaultMode value written into a generated Claude Code settings
+// document. write reports whether the key is written at all.
+//
+// "bypass" writes nothing. Claude Code 2.1.257 and later ignores
+// bypassPermissions from project scope and falls back to "default", which
+// overrides the developer's own mode, so writing it grants nothing and costs
+// the developer their setting. The posture still reaches dispatched workers:
+// niwa dispatch reads it from the instance state and passes
+// --permission-mode bypassPermissions on the worker's command line.
+//
+// "ask" writes "default", a mode Claude Code honors from project scope. The
+// old "askPermissions" was never a valid mode, and Claude Code threw out the
+// whole file over it, taking the hooks, deny rules, and plugins with it.
+//
+// Any other value is an error, and the error never contains the value.
+func claudeDefaultMode(posture string) (mode string, write bool, err error) {
+	switch posture {
+	case postureBypass:
+		return "", false, nil
+	case postureAsk:
+		return "default", true, nil
+	default:
+		return "", false, errUnknownPosture
+	}
+}
+
+// settingValueError formats a rejected [claude.settings] value without
+// leaking secret material. A plain value is quoted so a typo is easy to spot.
+// A vault-backed value is described by its config key and the secret's origin
+// instead: the resolved plaintext must never reach an error string, because
+// the pipeline's secret redactor doesn't scrub plain fmt.Errorf text.
+func settingValueError(problem, key string, v config.MaybeSecret, want string) error {
+	if v.IsSecret() {
+		o := v.Secret.Origin()
+		return fmt.Errorf("%s in [claude.settings] %s (secret-backed: provider %q, key %q): %s", problem, key, o.ProviderName, o.Key, want)
+	}
+	return fmt.Errorf("%s %q in [claude.settings] %s: %s", problem, v.Plain, key, want)
 }
 
 // hookEventMapping translates snake_case hook event names used in niwa config
@@ -680,15 +720,14 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 	// the user's settings) and deny (from the worktree-delegation fallback). They
 	// are emitted into the SAME permissions map so a deny fallback never clobbers
 	// a configured defaultMode and vice versa.
-	var permissions map[string]any
+	permissions := make(map[string]any)
 	if perm, ok := cfg.Settings["permissions"]; ok {
-		permStr := maybeSecretString(perm)
-		mapped, known := permissionsMapping[permStr]
-		if !known {
-			return nil, fmt.Errorf("unknown permissions value %q", permStr)
+		mode, write, err := claudeDefaultMode(maybeSecretString(perm))
+		if err != nil {
+			return nil, settingValueError("unknown permissions value", "permissions", perm, err.Error())
 		}
-		permissions = map[string]any{
-			"defaultMode": mapped,
+		if write {
+			permissions["defaultMode"] = mode
 		}
 	}
 
@@ -698,13 +737,12 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 	// block built below; the deny entries are merged into the permissions map
 	// here so they coexist with any configured defaultMode.
 	if wd := cfg.WorktreeDelegation; wd != nil && !wd.Supported {
-		if permissions == nil {
-			permissions = make(map[string]any)
-		}
 		permissions["deny"] = []any{denyEnterWorktree, denyExitWorktree}
 	}
 
-	if permissions != nil {
+	// A bypass posture with no deny fallback leaves the map empty. Leaving the
+	// block out then keeps the document identical to an undeclared posture's.
+	if len(permissions) > 0 {
 		doc["permissions"] = permissions
 	}
 
@@ -719,7 +757,7 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 		raw := maybeSecretString(rc)
 		b, err := strconv.ParseBool(strings.TrimSpace(raw))
 		if err != nil {
-			return nil, fmt.Errorf("invalid [claude.settings] %s value %q: want \"true\" or \"false\"", config.RemoteControlAtStartupKey, raw)
+			return nil, settingValueError("invalid value", config.RemoteControlAtStartupKey, rc, `want "true" or "false"`)
 		}
 		doc[config.RemoteControlAtStartupKey] = b
 	}
@@ -735,7 +773,7 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 		raw := maybeSecretString(ka)
 		b, err := strconv.ParseBool(strings.TrimSpace(raw))
 		if err != nil {
-			return nil, fmt.Errorf("invalid [claude.settings] %s value %q: want \"true\" or \"false\"", config.KeepAliveOnDispatchKey, raw)
+			return nil, settingValueError("invalid value", config.KeepAliveOnDispatchKey, ka, `want "true" or "false"`)
 		}
 		doc[config.KeepAliveOnDispatchKey] = b
 	}

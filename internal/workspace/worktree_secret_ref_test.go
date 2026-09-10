@@ -53,7 +53,7 @@ func TestApplyToWorktreeWritesNoUnresolvedVaultRef(t *testing.T) {
 	// A valid, non-secret settings value so the SettingsMaterializer writes a
 	// real settings.local.json this run.
 	cfg.Claude.Settings = config.SettingsConfig{
-		"permissions": config.MaybeSecret{Plain: "bypass"},
+		"permissions": config.MaybeSecret{Plain: "ask"},
 	}
 
 	// A [files] mapping whose copied content is plain. [files] is
@@ -101,7 +101,7 @@ func TestApplyToWorktreeWritesNoUnresolvedVaultRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading settings.local.json: %v", err)
 	}
-	if !strings.Contains(string(data), "bypassPermissions") {
+	if !strings.Contains(string(data), `"defaultMode": "default"`) {
 		t.Errorf("settings.local.json missing resolved permission mode:\n%s", data)
 	}
 }
