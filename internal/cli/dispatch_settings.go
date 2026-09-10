@@ -34,8 +34,8 @@ func renderLaunchSettings(settings map[string]any) (string, bool) {
 	}
 	doc, err := json.Marshal(settings)
 	if err != nil {
-		// Constant keys and values always encode, so reaching this is a
-		// programming error in a contributor. It panics rather than returning
+		// The string, boolean, and number constants contributors pass always
+		// encode, so reaching this is a programming error in a contributor. It panics rather than returning
 		// no document: a contributor records its own decision (rcInjected, for
 		// one), and a silent drop would leave that record saying its key was
 		// sent when it wasn't.

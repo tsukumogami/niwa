@@ -14,7 +14,8 @@ import (
 // of runDispatch renders one map with renderLaunchSettings -- and this value
 // stays as the pinned rendering that output is checked against byte for byte.
 // It is built from config.RemoteControlAtStartupKey, never from user input, so
-// the injected flag, the materializer, and the read-back share one spelling.
+// this pinned value, the key step (9c) adds, the materializer, and the
+// read-back share one spelling.
 var remoteControlSettingsJSON = fmt.Sprintf("{%q:true}", config.RemoteControlAtStartupKey)
 
 // apiKeyForcedWarning is the one-line reason printed when the host wants

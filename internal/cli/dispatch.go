@@ -615,10 +615,15 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// key. An agent with no settings flag has nowhere for the document to go,
 	// so every contributor must check spec.Flags.Settings itself before adding
 	// a key and recording that it did, as remote control does through
-	// rcDeliverable. There is deliberately no second check here: it could only
-	// drop the document silently while that contributor's record said it was
-	// sent.
+	// rcDeliverable. A contributor that skipped its check is a niwa bug, and
+	// the dispatch fails on it (the rollback armed at (7) removes the
+	// instance). Dropping the document instead would leave that contributor's
+	// record saying its key was sent, and appending it would launch with an
+	// empty flag element and a stray document.
 	if doc, ok := renderLaunchSettings(launchSettings); ok {
+		if spec.Flags.Settings == "" {
+			return fmt.Errorf("niwa: error: internal: a launch setting was added for the %q agent, which has no settings flag", dispatchedAgent)
+		}
 		passthrough = append(passthrough, spec.Flags.Settings, doc)
 	}
 
