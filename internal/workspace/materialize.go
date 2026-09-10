@@ -31,12 +31,14 @@ const secretFileMode os.FileMode = 0o600
 // maybeSecretString returns the plaintext string of m, revealing
 // the secret bytes when m carries a resolved Secret. This is the
 // materializer counterpart to MaybeSecret.String (which redacts
-// secrets to "***"); it is used only inside the write path where
-// the plaintext must reach the destination file.
+// secrets to "***"); it is used inside the write path where the
+// plaintext must reach the destination file, and by
+// instancePermissionsPosture, which compares the value against fixed
+// literals and returns only those.
 //
 // Callers must not retain the returned string past the short-lived
-// write operation that needs plaintext: it carries a copy of the
-// underlying buffer from reveal.UnsafeReveal.
+// operation that needs plaintext: it carries a copy of the underlying
+// buffer from reveal.UnsafeReveal.
 func maybeSecretString(m config.MaybeSecret) string {
 	if m.IsSecret() {
 		return string(reveal.UnsafeReveal(m.Secret))
