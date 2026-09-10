@@ -23,7 +23,7 @@ import (
 // mention in a comment is not a violation. A field read anywhere else (`niwa
 // watch`, `niwa list`, the workspace-root state `niwa init` saves,
 // effective-name resolution), a field-level copy from earlier state, or any use
-// of derivePermissionMode outside dispatch fails it. It matches syntax only: a
+// of derivePermissionMode outside runDispatch fails it. It matches syntax only: a
 // whole-struct copy of loaded state, or a load-modify-save round trip, carries
 // the field forward without naming it and is not caught here.
 func TestClaudePermissionsHasOneReader(t *testing.T) {

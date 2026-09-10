@@ -868,11 +868,12 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 //
 // Neither launch carries a permission mode. A review session's mode comes from
 // its instance's settings: under the operator-approval posture
-// watch.ApplyReviewSettings writes permissions.defaultMode itself, and under
-// the hard-deny posture it leaves whatever the materializer wrote there. Either
-// way the session must not get the mode dispatch derives from the instance's
-// recorded permissions posture. The literal "" handed to
-// buildDispatchPassthrough is that rule.
+// watch.ApplyReviewSettings writes permissions.defaultMode itself, and
+// otherwise it writes none, so the session runs in whatever those settings
+// resolve to, which may be no mode at all. Either way the session must not get
+// the mode dispatch derives from the instance's recorded permissions posture.
+// The final "" (the permission mode) handed to buildDispatchPassthrough is
+// that rule.
 func watchReviewLaunch(instancePath, slug, prompt string, sandbox bool) launchRequest {
 	passthrough := buildDispatchPassthrough(claudeLaunchSpec().Flags, slug, "", "")
 	if sandbox {

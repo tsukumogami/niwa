@@ -186,10 +186,10 @@ func postGuardHook() map[string]any {
 // sandbox is true):
 //
 //   - ask == false (hard-deny posture, the shipped floor): the emitted settings are
-//     the PR #198 shape. permissions.defaultMode is NOT set here: the session keeps
-//     whatever mode the instance's materialized settings already hold, and this
-//     function does not choose one. No auto-allow hook is added, and the
-//     filesystem guard uses its exit-code wrapper (out-of-instance = hard deny).
+//     the PR #198 shape. permissions.defaultMode is NOT set here: this function
+//     does not choose a mode and leaves any the instance's settings already hold.
+//     No auto-allow hook is added, and the filesystem guard uses its exit-code
+//     wrapper (out-of-instance = hard deny).
 //   - ask == true (operator-approval posture): niwa fully owns
 //     permissions.defaultMode = "default" (so a hook ask is honored instead of
 //     silently allowed), appends the Bash/Read/Glob/Grep auto-allow hook (so the

@@ -421,7 +421,7 @@ func TestDispatch_PermissionMode_BrokenState_ExplicitFlagStillWins(t *testing.T)
 	requirePermissionMode(t, pass, "acceptEdits")
 	// The explicit flag set the mode, so the unreadable posture changed nothing
 	// and there is nothing to warn about.
-	if strings.Contains(stderr, "could not read "+statePathOf(f.instancePath)) {
+	if strings.Contains(stderr, statePathOf(f.instancePath)) {
 		t.Fatalf("no posture warning expected alongside an explicit flag; got %q", stderr)
 	}
 }
