@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Draft
+status: Accepted
 problem: |
   Developers who dispatch background Claude Code sessions with niwa can't count
   on those sessions' messages to each other arriving unattended. Claude Code
@@ -28,7 +28,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 ## Problem Statement
 
@@ -79,8 +79,8 @@ which defeats the reason for dispatching work into the background.
 
 1. As a developer running a coordinator I dispatched with niwa, which in turn
    dispatched several workers, I want the workers' reports to reach the
-   coordinator after I reopen it the next morning, so that I spend the morning
-   reading results rather than approving prompts.
+   coordinator while it sits idle overnight, so that I spend the morning reading
+   results rather than approving prompts.
 2. As a developer who dispatches background work every day, I want to turn
    unattended peer delivery on once for my machine and see each dispatch confirm
    it, so that I stop approving messages by hand and know which sessions it
@@ -400,8 +400,10 @@ outcome is that the send itself fails.
 
 - [ ] Case 0, control: dispatch worker W0 with the behavior off. A message from
   S to W0 is held.
-- [ ] Case 0b, control after a restart: run `claude respawn <W0>`. A message from
-  S to W0 is still held.
+- [ ] Case 0b, control after a restart or reopen: run `claude respawn <W0>`, and
+  a message from S to W0 is still held. Then run `claude stop <W0>`, reopen W0
+  with the `claude attach` line `niwa list` prints for it, and detach; a message
+  from S to W0 is still held.
 - [ ] Case 1: dispatch worker W with the behavior on. A message from S to W is
   delivered.
 - [ ] Case 2: run `claude respawn <W>` and confirm it reports the session
@@ -411,8 +413,9 @@ outcome is that the send itself fails.
 - [ ] Case 2c, documenting a limitation: run `claude stop <W>` again and, without
   reopening W, have S message it. The send fails because a stopped background
   session isn't reachable by name; the message is neither held nor delivered.
-- [ ] Case 3: with W running, a message from W to S is held in S, which
-  documents that the behavior is inbound only.
+- [ ] Case 3: reopen W with its `claude attach` line, since case 2c left it
+  stopped, then have W message S. The message is held in S, which documents
+  that the behavior is inbound only.
 - [ ] Case 4, control: dispatch two workers with the behavior off. A message
   from one to the other is delivered, because both run in the same class.
 
@@ -532,9 +535,9 @@ outcome is that the send itself fails.
   gains little from the prompt. Rejected because the population this applies to
   is the one where every other gate is already open: unattended sessions, often
   running with prompts off, with no dispatch containment, where a message can
-  also wake a finished session in an instance still holding its credentials. The
-  prompt is friction for an attended interactive session and a real checkpoint
-  for these.
+  also resume an idle session that finished its task, in an instance still
+  holding its credentials. The prompt is friction for an attended interactive
+  session and a real checkpoint for these.
 - **Names: `accept_session_messages_on_dispatch` and
   `--accept-session-messages`.** They follow the shape of niwa's sibling
   machine-level dispatch keys, `keep_alive_on_dispatch` and
