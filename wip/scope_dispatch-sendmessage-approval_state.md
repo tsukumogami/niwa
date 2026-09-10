@@ -20,6 +20,8 @@ chain_ran:
     started_at: 2026-09-10T11:55:16Z
   - name: design
     started_at: 2026-09-10T12:50:44Z
+  - name: plan
+    started_at: 2026-09-10T13:25:37Z
 child_snapshots:
   brief:
     status: Accepted

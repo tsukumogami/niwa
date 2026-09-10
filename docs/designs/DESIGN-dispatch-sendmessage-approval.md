@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 problem: |
   `niwa dispatch` has no way to launch a Claude worker that accepts messages from
   other Claude Code sessions without an approval prompt. The one setting that
@@ -45,7 +45,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
