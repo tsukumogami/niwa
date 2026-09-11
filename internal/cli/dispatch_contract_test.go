@@ -742,3 +742,111 @@ func TestSessionResumeCommandFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+// TestDispatchSessionName_HeadlineUnchanged pins that the session name line
+// leaves the headline and the instance line where readers of this output
+// expect them.
+func TestDispatchSessionName_HeadlineUnchanged(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, "")
+	f := installDispatchFakes(t, root)
+	stubDispatchRand(t, constByteReader(0xab))
+	dispatchName = "review"
+	dispatchDetach = true
+
+	stdout, _, err := runDispatchCmd(t, "do a thing")
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if first := strings.Split(stdout, "\n")[0]; first != "Dispatched session "+dispatchTestSessionID {
+		t.Errorf("headline = %q, want %q", first, "Dispatched session "+dispatchTestSessionID)
+	}
+	if got := dispatchedInstancePath(t, stdout); got != f.instancePath {
+		t.Errorf("dispatchedInstancePath = %q, want %q", got, f.instancePath)
+	}
+}
+
+// TestDispatchSessionName_NoClaudeSubstringForOtherBinary runs a named
+// dispatch for an agent niwa does not ship, whose display-name flag has its
+// own spelling, and checks nothing in the report names claude.
+func TestDispatchSessionName_NoClaudeSubstringForOtherBinary(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	setHostConfig(t, "")
+	f := installDispatchFakes(t, root)
+	stubDispatchRand(t, constByteReader(0xab))
+	dispatchName = "review"
+	dispatchDetach = true
+
+	spec := grantingSpec()
+	spec.Flags.DisplayName = "--title"
+	substituteLaunchSpec(t, spec)
+	lookAgentBinary = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	pass := recordPassthrough(f)
+
+	stdout, _, err := runDispatchCmd(t, "do a thing")
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if got, _ := forwardedDisplayName(*pass, "--title"); got != "review-abababab" {
+		t.Errorf("forwarded %q under the declared flag, want %q", got, "review-abababab")
+	}
+	if strings.Contains(stdout, "claude ") {
+		t.Errorf("the report for another agent names claude:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "  session name: review-abababab\n") {
+		t.Errorf("the report carries no session name line:\n%s", stdout)
+	}
+}
+
+// TestDispatchSessionName_ReentryForwardsNoDisplayName pins that stepping back
+// into a session never renames it: the real attach exec and the resume command
+// niwa list prints carry no display-name flag, even for a mapping that records
+// a session name.
+func TestDispatchSessionName_ReentryForwardsNoDisplayName(t *testing.T) {
+	spec, ok := agentplan.For(agent.AgentClaude).LaunchSpec()
+	if !ok {
+		t.Fatal("no launch spec for the default agent")
+	}
+	if spec.Flags.DisplayName == "" {
+		t.Fatal("the default agent declares no display-name flag; this test's premise is gone")
+	}
+
+	dir := t.TempDir()
+	argvFile := filepath.Join(dir, "argv")
+	stub := filepath.Join(dir, spec.Binary)
+	script := "#!/bin/sh\n: > " + argvFile + "\nfor a in \"$@\"; do printf '%s\\0' \"$a\" >> " + argvFile + "; done\n"
+	if err := os.WriteFile(stub, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prevLook := lookAgentBinary
+	lookAgentBinary = func(name string) (string, error) { return filepath.Join(dir, name), nil }
+	t.Cleanup(func() { lookAgentBinary = prevLook })
+
+	if err := dispatchAttach(spec, dispatchTestShortID, t.TempDir()); err != nil {
+		t.Fatalf("dispatchAttach: %v", err)
+	}
+	raw, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00") {
+		if a == spec.Flags.DisplayName {
+			t.Errorf("the attach exec carried the display-name flag: %q", raw)
+		}
+	}
+
+	cmd := sessionResumeCommand(workspace.SessionMapping{
+		Agent:        string(agent.AgentClaude),
+		Handle:       "h1",
+		InstancePath: "/i",
+		SessionName:  "review-abababab",
+	})
+	if cmd == "" {
+		t.Fatal("sessionResumeCommand returned nothing for a mapping with a handle")
+	}
+	if strings.Contains(cmd, spec.Flags.DisplayName+" ") || strings.Contains(cmd, "review-abababab") {
+		t.Errorf("the resume command renames the session: %q", cmd)
+	}
+}

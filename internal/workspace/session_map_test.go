@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -202,5 +203,59 @@ func TestSessionMapping_LegacyDecodesEmptyOrigin(t *testing.T) {
 	}
 	if strings.Contains(string(data), "origin") {
 		t.Errorf("rewritten legacy mapping should omit the origin key, got:\n%s", data)
+	}
+}
+
+// TestSessionMapping_SessionNameRoundTrip pins both halves of the session_name
+// field: a mapping written before it existed decodes to "" and re-encodes
+// without the key, and a recorded name survives a write and a read.
+func TestSessionMapping_SessionNameRoundTrip(t *testing.T) {
+	legacy := []byte(`{
+  "session_id": "` + testSessionID + `",
+  "instance_name": "test-ws+review-4e33acfa",
+  "instance_path": "/tmp/test-ws+review-4e33acfa",
+  "ephemeral": true,
+  "origin": "dispatch"
+}`)
+	var old SessionMapping
+	if err := json.Unmarshal(legacy, &old); err != nil {
+		t.Fatalf("decode legacy: %v", err)
+	}
+	if old.SessionName != "" {
+		t.Errorf("legacy SessionName = %q, want empty", old.SessionName)
+	}
+	reencoded, err := json.Marshal(old)
+	if err != nil {
+		t.Fatalf("re-encode legacy: %v", err)
+	}
+	if strings.Contains(string(reencoded), "session_name") {
+		t.Errorf("a mapping with no session name re-encoded with the key: %s", reencoded)
+	}
+
+	root := t.TempDir()
+	m := SessionMapping{
+		SessionID:    testSessionID,
+		InstanceName: "test-ws+review-abababab",
+		InstancePath: filepath.Join(root, "test-ws+review-abababab"),
+		Ephemeral:    true,
+		Origin:       "dispatch",
+		SessionName:  "review-abababab",
+	}
+	if err := WriteSessionMapping(root, m); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := ReadSessionMapping(root, testSessionID)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got.SessionName != "review-abababab" {
+		t.Errorf("SessionName = %q, want %q", got.SessionName, "review-abababab")
+	}
+	raw, err := os.ReadFile(filepath.Join(root, ".niwa", "sessions", testSessionID+".json"))
+	if err != nil {
+		t.Fatalf("read raw: %v", err)
+	}
+	if !strings.Contains(string(raw), `"session_name": "review-abababab"`) {
+		t.Errorf("mapping file does not carry the session name:\n%s", raw)
 	}
 }

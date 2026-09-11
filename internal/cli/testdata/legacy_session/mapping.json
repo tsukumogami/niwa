@@ -1,0 +1,11 @@
+{
+  "session_id": "6a7b8c9d-0e1f-4a2b-8c3d-4e5f6a7b8c9d",
+  "instance_name": "test-ws+review-4e33acfa",
+  "instance_path": "{{INSTANCE_PATH}}",
+  "transcript_path": "",
+  "created": "2026-01-02T03:04:05Z",
+  "ephemeral": true,
+  "agent": "claude",
+  "handle": "6a7b8c9d",
+  "origin": "dispatch"
+}

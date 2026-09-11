@@ -248,6 +248,63 @@ func TestMaterializeWorkspaceRoot_DispatchSkill(t *testing.T) {
 	}
 }
 
+// TestMaterializeWorkspaceRoot_DispatchSkillReportsSessionName pins the
+// installed /dispatch skill's report-back step to the session name. A named
+// dispatch forwards "<slug>-<suffix>" and prints it on a "session name:" line,
+// so the coordinating agent has to relay that line rather than the --name it
+// passed. The check reads only the report-back step, so a mention elsewhere in
+// the skill can't satisfy it.
+func TestMaterializeWorkspaceRoot_DispatchSkillReportsSessionName(t *testing.T) {
+	cfg := &config.WorkspaceConfig{Workspace: config.WorkspaceMeta{Name: "ws"}}
+	root := t.TempDir()
+	if _, err := MaterializeWorkspaceRoot(cfg, root, RootMaterializeOptions{
+		NiwaPath:             "/abs/niwa",
+		EphemeralSessionMode: true,
+	}); err != nil {
+		t.Fatalf("MaterializeWorkspaceRoot: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, rootClaudeDir, "skills", "dispatch", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("reading dispatch SKILL.md: %v", err)
+	}
+	content := string(data)
+
+	report := markdownSection(t, content, "### 4. Report back")
+	if !strings.Contains(report, "session name:") {
+		t.Errorf("report-back step does not tell the agent to relay the session name line; got:\n%s", report)
+	}
+
+	launch := markdownSection(t, content, "### 3. Launch the worker")
+	bullet := launch
+	if i := strings.Index(bullet, "- **`--name`**"); i >= 0 {
+		bullet = bullet[i:]
+		if j := strings.Index(bullet[1:], "\n- **"); j >= 0 {
+			bullet = bullet[:j+1]
+		}
+	} else {
+		t.Fatalf("launch step has no --name bullet; got:\n%s", launch)
+	}
+	if !strings.Contains(bullet, "suffix") {
+		t.Errorf("--name bullet does not say the session name carries a suffix; got:\n%s", bullet)
+	}
+}
+
+// markdownSection returns the text after heading up to the next line that
+// starts a heading. A missing heading fails the test, so a renamed step can't
+// pass silently.
+func markdownSection(t *testing.T, content, heading string) string {
+	t.Helper()
+	start := strings.Index(content, heading)
+	if start < 0 {
+		t.Fatalf("heading %q not found", heading)
+	}
+	body := content[start+len(heading):]
+	if end := strings.Index(body, "\n#"); end >= 0 {
+		body = body[:end]
+	}
+	return body
+}
+
 func TestMaterializeWorkspaceRoot_NoPermissionsConfigured(t *testing.T) {
 	// No [claude.settings] permissions key: the doc carries no permissions
 	// block but still installs the session hooks.

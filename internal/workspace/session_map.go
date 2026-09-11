@@ -92,6 +92,12 @@ type SessionMapping struct {
 	// must not defer or suppress reclamation, which keys purely on the job
 	// entry. omitempty keeps non-opted and legacy mappings byte-identical.
 	KeepAlive bool `json:"keep_alive,omitempty"`
+	// SessionName holds the display name the dispatch forwarded to the agent
+	// ("<slug>-<token>", sharing the instance name's random token), empty when
+	// none was: an unnamed dispatch, or an agent that declares no display-name
+	// flag. It is display-only and never used to find or reclaim the session.
+	// omitempty keeps unnamed and legacy mappings byte-identical.
+	SessionName string `json:"session_name,omitempty"`
 }
 
 // sessionsDirName is the directory under the config dir that holds the session
