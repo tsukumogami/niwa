@@ -328,7 +328,10 @@ func theLaunchedClaudeSettingsHasRemoteControlAtStartup(ctx context.Context) err
 		// one that has already cost a debugging session -- and it says so on
 		// stderr. A failure naming only the missing key sends the reader to the
 		// wrong half of the system.
-		doc, _, _ := launchedClaudeSettingsDocument(s)
+		doc, hasDoc, _ := launchedClaudeSettingsDocument(s)
+		if !hasDoc {
+			return fmt.Errorf("the launch carried no --settings document at all; want remoteControlAtStartup true\nstderr:\n%s", s.stderr)
+		}
 		return fmt.Errorf("the launch settings document has no remoteControlAtStartup\ndocument: %s\nstderr:\n%s", doc, s.stderr)
 	}
 	if b, ok := v.(bool); !ok || !b {
@@ -821,7 +824,9 @@ func noSettingsFileNiwaWroteIntoTheDispatchInstanceContains(ctx context.Context,
 	}
 	inst := s.lastDispatchInstancePath
 	if inst == "" {
-		inst = findDispatchInstance(s.workspaceRoot)
+		// The newest rather than the first: this step is about one dispatch's
+		// instance, and a scenario that dispatched twice has two.
+		inst = newestDispatchInstance(s.workspaceRoot)
 	}
 	if inst == "" {
 		return fmt.Errorf("no dispatch instance found under %s\nstdout:\n%s\nstderr:\n%s", s.workspaceRoot, s.stdout, s.stderr)
@@ -931,17 +936,16 @@ func aFileExistsUnderTheWorkspaceRootWithBody(ctx context.Context, relPath strin
 // feature that depends on a terminal -- the closing sentence of the explanation
 // and whether the marker is written -- needs one.
 //
-// Like its non-pty sibling `I run "..." from the workspace root`, a dispatch
-// records the instance it created. Two steps that read the same way in a
-// feature file should leave the same state behind, or a later assertion quietly
-// reads whichever instance an earlier step happened to find.
+// It records the dispatch instance through the same helper its non-pty sibling
+// `I run "..." from the workspace root` uses, so the two leave the same state
+// behind; see recordDispatchInstance for why that matters.
 func iRunUnderAPTY(ctx context.Context, command string) (context.Context, error) {
 	ctx, err := iRunUnderPTYWithInput(ctx, command, "")
 	if err != nil {
 		return ctx, err
 	}
-	if s := getState(ctx); s != nil && strings.Contains(command, "dispatch") {
-		s.lastDispatchInstancePath = findDispatchInstance(s.workspaceRoot)
+	if s := getState(ctx); s != nil {
+		recordDispatchInstance(s, command)
 	}
 	return ctx, nil
 }

@@ -15,14 +15,25 @@ import (
 //
 // They live here rather than beside the first steps that needed them because
 // they are not specific to any feature. Anything that has to look like a
-// terminal to the binary -- an interactive prompt, an isTTY check, a one-time
-// notice shown only where someone can read it -- goes through runUnderPTY, and
-// a step author looking for that capability should find it under its own name.
+// terminal to the NIWA binary -- an interactive prompt, an isTTY check, a
+// one-time notice shown only where someone can read it -- goes through
+// runUnderPTY, and a step author looking for that capability should find it
+// under its own name.
+//
+// The exception is iStartInteractiveCodexAt, which builds its own `script`
+// invocation. Almost nothing it needs matches: it runs the real codex binary
+// rather than the niwa one, from a resolved location rather than the workspace
+// root, on its own dwell timeout that is EXPECTED to expire because the
+// interface never exits, and it keeps the transcript in its own field instead
+// of the shared stdout/stderr/exit-code slots. It borrows shellQuote from here
+// and nothing else.
 
-// ptyStepTimeout bounds every step that hands the binary a standard input the
-// step controls. Without it a command that waits on input the scenario never
-// sends burns the suite's global deadline and takes every other scenario with
-// it; with it, the failure is a step failure naming the command.
+// ptyStepTimeout bounds every step that runs a command under a pty, whether or
+// not it supplies any input. Without it a command that waits on input the
+// scenario never sends -- including a scenario that sends none, since a pty
+// hands the child a terminal rather than an immediate end-of-input -- burns the
+// suite's global deadline and takes every other scenario with it; with it, the
+// failure is a step failure naming the command.
 const ptyStepTimeout = 60 * time.Second
 
 // iRunUnderPTYWithInput drives the niwa binary under util-linux

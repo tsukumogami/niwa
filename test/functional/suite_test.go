@@ -113,9 +113,11 @@ type testState struct {
 	// re-apply produced no spurious change. Keyed by worktree-relative path.
 	worktreeFileSnapshots map[string]string
 
-	// lastDispatchInstancePath records the disp-<hex> instance directory
-	// discovered after a `niwa dispatch` run, so later steps can assert its
-	// presence/absence without hardcoding the random name suffix.
+	// lastDispatchInstancePath records the instance directory the last `niwa
+	// dispatch` run created, so later steps can assert on it without
+	// hardcoding the random name suffix. The name is "<config>+-<8 hex>" or
+	// "<config>+<slug>-<8 hex>"; see dispatchInstanceNameRe, and
+	// recordDispatchInstance for why "last" is decided by modification time.
 	lastDispatchInstancePath string
 
 	// Session-message acceptance state. See session_message_steps_test.go.
@@ -529,8 +531,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the GitHub fake returns HTTP (\d+) for "([^"]*)" repo metadata$`, theGitHubFakeReturnsStatusForRepoMetadata)
 	ctx.Step(`^the GitHub fake serves "([^"]*)" repo metadata with body:$`, theGitHubFakeServesRepoMetadataWithBody)
 
-	// TTY simulation: drive niwa init under util-linux `script -q` so
-	// stdin is a real pty. The supplied input is fed line-by-line.
+	// TTY simulation: run the command under util-linux `script -q` so stdin
+	// and stdout are a real pty, and feed it the supplied input. Defined in
+	// steps_pty_test.go, which holds the harness's terminal primitives; the
+	// session-message steps register two more of them against the same runner.
 	ctx.Step(`^I run "([^"]*)" under a pty with input "([^"]*)"$`, iRunUnderPTYWithInput)
 	ctx.Step(`^I run "([^"]*)" with stdin held open$`, iRunWithStdinHeldOpen)
 }

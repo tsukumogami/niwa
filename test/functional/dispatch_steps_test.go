@@ -70,14 +70,18 @@ var dispatchInstanceNameRe = regexp.MustCompile(`\+[a-z0-9_]*-[0-9a-f]{8}$`)
 func dispatchFakeClaudeScript(behaviour string) string {
 	pickSession := `  sid="${FAKE_CLAUDE_SESSION_ID:-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}"`
 	if behaviour == dispatchFakeClaudeMintedSession {
-		// A fresh id per invocation so concurrent launches cannot collide on
-		// one job-state directory. The kernel's generator is the first choice
-		// and uuidgen the fallback: this suite mostly runs on Linux but is not
-		// pinned to it, and a fake that only worked there would fail on macOS
-		// as a missing session mapping, naming nothing about the fake.
-		// uuidgen prints uppercase on macOS; niwa validates the id as
-		// lowercase hex, so it is folded.
-		pickSession = `  sid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr 'A-F' 'a-f')`
+		// A fresh id per invocation, from the kernel's own generator, so
+		// concurrent launches cannot collide on one job-state directory.
+		//
+		// /proc is Linux-only and so is this suite: CI runs the functional
+		// tests on ubuntu-latest alone, because the harness fakes a TTY with
+		// GNU-only `script -c` syntax and several scenarios assume an
+		// unresolved /tmp path (tsukumogami/niwa#243). A portable generator
+		// here would buy nothing while that holds -- the scenario that needs
+		// this fake goes through the pty helper, so it fails at `script`
+		// before it ever reaches the id. Whoever closes #243 should revisit
+		// this line with the rest of them.
+		pickSession = `  sid=$(cat /proc/sys/kernel/random/uuid)`
 	}
 	bg := pickSession + `
   short=$(printf '%s' "$sid" | cut -c1-8)
@@ -194,16 +198,70 @@ func iRunCommandFromTheWorkspaceRoot(ctx context.Context, command string) (conte
 	if err := runNiwa(s, s.workspaceRoot, command); err != nil {
 		return ctx, err
 	}
-	if strings.Contains(command, "dispatch") {
-		s.lastDispatchInstancePath = findDispatchInstance(s.workspaceRoot)
-	}
+	recordDispatchInstance(s, command)
 	return ctx, nil
 }
 
-// findDispatchInstance returns the absolute path of the single dispatch instance
-// under workspaceRoot, or "" when none exists. The dispatch instance name is
+// recordDispatchInstance notes the instance a dispatch just created, so later
+// steps can assert on it without hardcoding the random name suffix. It is a
+// no-op for any other command.
+//
+// Every step that can run a dispatch calls this, and they have to agree: two
+// steps that read the same way in a feature file but leave different state
+// behind mean a later assertion quietly reads whichever instance some earlier
+// step happened to find.
+//
+// It takes the NEWEST instance, not the first one on disk. Several scenarios
+// dispatch twice into one workspace root, and the instance names end in a
+// random hex suffix, so "the first directory that matches" is a coin flip
+// between the two -- and one that reads as working, because a scenario with a
+// single dispatch always agrees with it.
+func recordDispatchInstance(s *testState, command string) {
+	if strings.Contains(command, "dispatch") {
+		s.lastDispatchInstancePath = newestDispatchInstance(s.workspaceRoot)
+	}
+}
+
+// newestDispatchInstance returns the most recently modified dispatch instance
+// under workspaceRoot, or "" when there is none.
+//
+// Modification time is the ordering because provisioning writes the instance's
+// contents, so the directory a dispatch just finished creating is the one
+// touched last. It is the same signal theDispatchInstanceIsAgedPastTheBackstopTTL
+// manipulates. Ties keep the earlier entry, which only arises when two
+// instances land within one filesystem timestamp tick; no scenario dispatches
+// twice that fast, since each run clones and launches in between.
+func newestDispatchInstance(workspaceRoot string) string {
+	entries, err := os.ReadDir(workspaceRoot)
+	if err != nil {
+		return ""
+	}
+	newest, newestPath := time.Time{}, ""
+	for _, e := range entries {
+		if !e.IsDir() || !dispatchInstanceNameRe.MatchString(e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if newestPath == "" || info.ModTime().After(newest) {
+			newest, newestPath = info.ModTime(), filepath.Join(workspaceRoot, e.Name())
+		}
+	}
+	return newestPath
+}
+
+// findDispatchInstance returns the absolute path of a dispatch instance under
+// workspaceRoot, or "" when none exists. The dispatch instance name is
 // "<config>+-<8 hex>" (no-name) or "<config>+<slug>-<8 hex>" (named), which the
 // structural dispatchInstanceNameRe uniquely identifies.
+//
+// It answers "is there one", not "which one": the entry it returns is whichever
+// os.ReadDir lists first, and the names end in a random hex suffix, so with two
+// instances present the answer is arbitrary. Every caller here is an existence
+// or absence check, where that is fine. A caller that means the instance a
+// particular dispatch just created wants newestDispatchInstance.
 func findDispatchInstance(workspaceRoot string) string {
 	entries, err := os.ReadDir(workspaceRoot)
 	if err != nil {
