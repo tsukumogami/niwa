@@ -62,7 +62,7 @@ func TestDispatch_Inbound_RecordedOnMapping(t *testing.T) {
 			if !mode.wantKey && ok {
 				t.Errorf("mapping carries accepts_session_messages = %v; a dispatch without the behavior writes no key", v)
 			}
-			if printed := strings.Contains(stderr, auditMarker); printed != mode.wantKey {
+			if printed := strings.Contains(stderr, auditNeedle); printed != mode.wantKey {
 				t.Errorf("audit line printed = %v but recorded = %v; they must agree. stderr:\n%s", printed, mode.wantKey, stderr)
 			}
 		})
@@ -86,7 +86,7 @@ func TestDispatch_Inbound_CodexNotRecordedOnMapping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	if strings.Contains(stderr, auditMarker) {
+	if strings.Contains(stderr, auditNeedle) {
 		t.Errorf("a Codex dispatch printed the audit line; stderr:\n%s", stderr)
 	}
 	raw := readSingleMappingJSON(t, root)

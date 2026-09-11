@@ -19,11 +19,9 @@ import (
 )
 
 // The explanation, written out here rather than rebuilt from the constants,
-// the way TestInboundLinesExactText pins the other three stderr lines. This is
-// the whole point of the duplication: an expectation derived from
-// inboundExplanationLine rewords itself along with a reworded constant. That is
-// how the two closing sentences came to be unpinned when this file first landed
-// -- swapping them for each other passed the whole suite.
+// the way TestInboundLinesExactText pins the other three stderr lines. An
+// expectation derived from inboundExplanationLine rewords itself along with a
+// reworded constant, which leaves the wording pinned by nothing.
 const (
 	explanationGuideURL = "https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md"
 
@@ -36,18 +34,15 @@ const (
 	explanationNonTerminalLine = explanationBodyText + " " + nonTerminalClose
 )
 
-// explanationNeedle is a substring no other niwa output carries. It is a needle
-// to search stderr with, not a file: the marker on disk is inboundNoticeMarker,
-// reached through markerIn and checked by requireMarker below. The assertions
-// about WHETHER and WHERE the paragraph appeared match on it, or on one closing
-// sentence, rather than on a whole line: what they are about is the position
-// and the presence, and an absence assertion in particular has to keep counting
-// a reworded explanation as printed. Reworded text is not something this file
-// lets through quietly -- TestInboundExplanationExactText compares the whole
-// rendering, TestInboundExplanationText pins seven body fragments, and
-// TestDispatch_Notice_WaitsForTheAttach pins the whole terminal line -- so a
-// rewording is a deliberate change across several tests rather than a silent
-// one.
+// explanationNeedle is a substring no other niwa output carries: a needle to
+// search stderr with, not a file. The marker on disk is inboundNoticeMarker,
+// reached through markerIn below.
+//
+// Assertions about WHETHER and WHERE the paragraph appeared match on this, or
+// on one closing sentence, rather than on a whole line, because what they are
+// about is the position and the presence; an absence assertion in particular
+// has to keep counting a reworded explanation as printed. The wording is held
+// still separately, against the literals above.
 const explanationNeedle = "accepting messages without asking is inbound only"
 
 // TestInboundExplanationExactText pins the paragraph and the marker file name.
@@ -117,6 +112,8 @@ func requireMarker(t *testing.T, dir string) {
 	if !info.Mode().IsRegular() {
 		t.Errorf("marker mode = %v, want a regular file", info.Mode())
 	}
+	// Exactly 0o600, not a floor like the directory check further down: a umask
+	// only takes bits away, and none in use takes the owner's.
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Errorf("marker permissions = %#o, want 0600", perm)
 	}
@@ -417,6 +414,34 @@ func TestShowInboundExplanation_UnresolvableDirectory(t *testing.T) {
 	}
 }
 
+// TestShowInboundExplanation_EmptyDirectory: an empty dir is treated the same as
+// an unresolved one, and the helper enforces that itself rather than trusting a
+// caller to pair it with an error. Left to the caller, a slip would make the
+// marker path relative, so the presence check would run against the process
+// working directory -- where an unrelated file of that name would silence the
+// notice for good, in a directory that has nothing to do with the developer's
+// configuration.
+func TestShowInboundExplanation_EmptyDirectory(t *testing.T) {
+	// The working directory is where a relative marker path would land, so
+	// planting the name there is what a wrong implementation would trip over.
+	cwd := t.TempDir()
+	chdir(t, cwd)
+	if err := os.WriteFile(filepath.Join(cwd, inboundNoticeMarker), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	consulted := false
+	var buf bytes.Buffer
+	showInboundExplanation(&buf, "", nil, func() bool { consulted = true; return true })
+
+	if consulted {
+		t.Error("the terminal check was consulted for an empty directory; there is nothing to remember either way")
+	}
+	if !strings.Contains(buf.String(), nonTerminalClose) {
+		t.Errorf("printed %q, want the non-terminal explanation: an empty directory is no directory", buf.String())
+	}
+}
+
 // TestShowInboundExplanation_ConcurrentFirstCalls: parallel dispatches race for
 // the same marker and all of them come out whole -- every caller returns,
 // exactly one file exists afterwards, and at least one developer-facing stream
@@ -534,7 +559,7 @@ func TestDispatch_Notice_DetachedFollowsTheAuditLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	requireAdjacentLines(t, stderr, auditMarker, explanationNeedle)
+	requireAdjacentLines(t, stderr, auditNeedle, explanationNeedle)
 	if !strings.Contains(stderr, terminalClose) {
 		t.Errorf("stderr does not carry the terminal closing sentence:\n%s", stderr)
 	}
@@ -586,7 +611,7 @@ func TestDispatch_Notice_ForegroundFollowsTheAuditLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	requireAdjacentLines(t, stderr, auditMarker, explanationNeedle)
+	requireAdjacentLines(t, stderr, auditNeedle, explanationNeedle)
 
 	const turnEnded = "niwa: the turn ended."
 	endedAt := strings.Index(stderr, turnEnded)
@@ -647,7 +672,7 @@ func TestDispatch_Notice_WaitsForTheAttach(t *testing.T) {
 			if atAttach == "" {
 				t.Fatal("the attach stub was never called; this test is not driving the attach path")
 			}
-			if !strings.Contains(atAttach, auditMarker) {
+			if !strings.Contains(atAttach, auditNeedle) {
 				t.Errorf("stderr at the attach is missing the audit line:\n%s", atAttach)
 			}
 			if strings.Contains(atAttach, explanationNeedle) {

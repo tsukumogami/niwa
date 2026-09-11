@@ -26,8 +26,8 @@ const (
 	// Substrings of the audit and override lines. Tests that assert a line is
 	// absent look for these rather than for a full line, so a line printed with
 	// either source, or any variant of it, still counts as printed.
-	auditMarker    = "this worker accepts messages from other sessions"
-	overrideMarker = "this worker keeps Claude Code's default"
+	auditNeedle    = "this worker accepts messages from other sessions"
+	overrideNeedle = "this worker keeps Claude Code's default"
 )
 
 func inboundFlag(b bool) *bool { return &b }
@@ -245,7 +245,7 @@ func TestDispatch_Inbound_PrecedenceMatrix(t *testing.T) {
 
 			// Counting the marker rather than the full line also catches a second
 			// audit line printed with the other source.
-			if n := strings.Count(stderr, auditMarker); tt.wantAudit != "" {
+			if n := strings.Count(stderr, auditNeedle); tt.wantAudit != "" {
 				if n != 1 || !strings.Contains(stderr, tt.wantAudit+"\n") {
 					t.Fatalf("want exactly one audit line %q, found %d; stderr:\n%s", tt.wantAudit, n, stderr)
 				}
@@ -257,7 +257,7 @@ func TestDispatch_Inbound_PrecedenceMatrix(t *testing.T) {
 				if n := strings.Count(stderr, inboundOverrideLine+"\n"); n != 1 {
 					t.Fatalf("override line appears %d times, want once; stderr:\n%s", n, stderr)
 				}
-			} else if strings.Contains(stderr, overrideMarker) {
+			} else if strings.Contains(stderr, overrideNeedle) {
 				t.Fatalf("no override line expected; stderr:\n%s", stderr)
 			}
 			if strings.Contains(stderr, "does not apply") {
@@ -416,7 +416,7 @@ func TestDispatch_Inbound_UnreadableHostConfig(t *testing.T) {
 					if !strings.Contains(stderr, inboundAuditLine(inboundSourceFlag)+"\n") {
 						t.Fatalf("expected the audit line naming the flag; stderr:\n%s", stderr)
 					}
-				} else if strings.Contains(stderr, auditMarker) {
+				} else if strings.Contains(stderr, auditNeedle) {
 					t.Fatalf("no audit line expected without the flag; stderr:\n%s", stderr)
 				}
 				for _, doc := range launchSettingsDocs(t, pass) {
@@ -489,7 +489,7 @@ func TestDispatch_Inbound_CodexWarnsOnlyWhenTheFlagAsked(t *testing.T) {
 			if !tt.wantWarn && strings.Contains(stderr, "--accept-session-messages") {
 				t.Fatalf("the machine setting alone must say nothing for Codex; stderr:\n%s", stderr)
 			}
-			if strings.Contains(stderr, auditMarker) || strings.Contains(stderr, overrideMarker) {
+			if strings.Contains(stderr, auditNeedle) || strings.Contains(stderr, overrideNeedle) {
 				t.Fatalf("no audit or override line for an agent that cannot receive the behavior; stderr:\n%s", stderr)
 			}
 		})
@@ -536,10 +536,10 @@ func sessionMappingFiles(t *testing.T, root string) []string {
 // override line.
 func assertNoInboundLine(t *testing.T, stderr string) {
 	t.Helper()
-	if strings.Contains(stderr, auditMarker) {
+	if strings.Contains(stderr, auditNeedle) {
 		t.Errorf("a failed dispatch printed the audit line; stderr:\n%s", stderr)
 	}
-	if strings.Contains(stderr, overrideMarker) {
+	if strings.Contains(stderr, overrideNeedle) {
 		t.Errorf("a failed dispatch printed the override line; stderr:\n%s", stderr)
 	}
 }
@@ -698,7 +698,7 @@ func TestDispatch_Inbound_StdoutUnchanged(t *testing.T) {
 	if !strings.Contains(onErr, inboundAuditLine(inboundSourceFlag)) {
 		t.Fatalf("the 'on' run did not apply the behavior; stderr:\n%s", onErr)
 	}
-	if strings.Contains(offErr, auditMarker) {
+	if strings.Contains(offErr, auditNeedle) {
 		t.Fatalf("the 'off' run printed an audit line; stderr:\n%s", offErr)
 	}
 	if on != off {
@@ -707,7 +707,7 @@ func TestDispatch_Inbound_StdoutUnchanged(t *testing.T) {
 	if !strings.Contains(on, "claude attach "+dispatchTestShortID) {
 		t.Errorf("the resume command should stay `claude attach <id>`; stdout:\n%s", on)
 	}
-	if strings.Contains(on, auditMarker) {
+	if strings.Contains(on, auditNeedle) {
 		t.Errorf("the audit line belongs on stderr, not stdout:\n%s", on)
 	}
 }
@@ -743,7 +743,7 @@ func TestDispatch_Inbound_AuditLinePrecedesTheHints(t *testing.T) {
 	if audit > hints {
 		t.Fatalf("the audit line must precede step 13's stdout; output:\n%s", out)
 	}
-	if !strings.Contains(atAttach, auditMarker) || !strings.Contains(atAttach, "Dispatched session ") {
+	if !strings.Contains(atAttach, auditNeedle) || !strings.Contains(atAttach, "Dispatched session ") {
 		t.Fatalf("by the time attach runs, the audit line and hints should both be out; had:\n%s", atAttach)
 	}
 }

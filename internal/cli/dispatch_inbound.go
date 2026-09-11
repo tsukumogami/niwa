@@ -44,10 +44,11 @@ const (
 	inboundSourceMachine = "machine setting"
 )
 
-// The stderr lines this behavior prints. Each is a whole line including its
-// "niwa dispatch: " prefix and without a trailing newline, which the caller
-// adds. The wording is the design's and TestInboundLinesExactText pins it, so a
-// rewording is a change to the command's output, not a refactor.
+// The stderr lines this behavior prints. Three of the four are whole lines,
+// each including its "niwa dispatch: " prefix and without a trailing newline,
+// which the caller adds; inboundMachineSourceDetail is a fragment spliced into
+// the first. The wording is the design's and TestInboundLinesExactText pins it,
+// so a rewording is a change to the command's output, not a refactor.
 const (
 	// inboundAuditFormat is printed once the session mapping is durable, when
 	// the behavior took effect. The first verb is the source detail
@@ -148,14 +149,13 @@ const (
 	// a caller joins it to a closing sentence with a single space.
 	//
 	// It names an agent, its /config screen and its settings file, in a file
-	// the dispatch-path layout scan covers. The scan does not fire, because it
-	// compares whole literal values and this is a paragraph rather than the
-	// agent's name; and it should not, because this is advice to a reader about
-	// where their OWN sessions get the setting, not a delivery decision taken
-	// at a call site. Nothing branches on it. It is honest only while the agent
-	// it names is the one agent declaring DispatchInboundAcceptance, which
-	// TestInboundExplanationNamesTheOnlyImplementedAgent holds still. A second
-	// such agent needs the wording generalized.
+	// the dispatch-path layout scan covers. The scan compares whole literal
+	// values, so a paragraph does not trip it -- and should not, because this
+	// is advice to a reader about their OWN sessions, not a delivery decision:
+	// nothing branches on it. It is honest only while that agent is the only
+	// one declaring DispatchInboundAcceptance IMPLEMENTED (another declares it
+	// unavailable), which TestInboundExplanationNamesTheOnlyImplementedAgent
+	// holds still. A second implemented agent needs the wording generalized.
 	inboundExplanationBody = `niwa dispatch: note: accepting messages without asking is inbound only. A message this worker sends into a session launched without it, such as a coordinator dispatched earlier, one dispatched with the behavior off, or one another tool started, still waits for approval there when the two run in different permission modes; dispatching that session again with the behavior on clears it. Your own interactive Claude Code sessions are one such case, and they are governed by your Claude Code user settings, which niwa doesn't change. To accept there too, set "Messages from your other sessions" to accept in Claude Code's /config, or add "crossSessionInbound": "accept" to ~/.claude/settings.json. That change applies to every Claude Code session you run and to messages from any session able to reach yours, on this machine or elsewhere.`
 
 	// inboundExplanationTerminalClose closes the line when stderr is a
@@ -200,11 +200,13 @@ func inboundExplanationLine(terminal bool) string {
 // direction to err in.
 //
 // dir is the directory holding config.toml and dirErr is the error from
-// resolving it; a nil dirErr must come with a non-empty dir, since an empty one
-// would put the marker in the process working directory. A non-nil dirErr means
-// there is no directory to remember anything in, so the explanation prints with
-// its non-terminal closing sentence and isTTY is never consulted -- asking would
-// only produce a promise niwa cannot keep.
+// resolving it. Either a non-nil dirErr or an empty dir means there is no
+// directory to remember anything in, so the explanation prints with its
+// non-terminal closing sentence and isTTY is never consulted -- asking would
+// only produce a promise niwa cannot keep. An empty dir is folded in here
+// rather than left to the caller because a relative marker path would make the
+// presence check below resolve against the process working directory, where an
+// unrelated file of that name would silence the notice for good.
 //
 // Presence is os.Lstat rather than os.Stat: a dangling symlink at the marker
 // path counts as present, which is what the exclusive create below would find
@@ -213,7 +215,7 @@ func inboundExplanationLine(terminal bool) string {
 // so the explanation shows rather than being swallowed by a directory niwa
 // cannot read.
 func showInboundExplanation(w io.Writer, dir string, dirErr error, isTTY func() bool) {
-	if dirErr != nil {
+	if dirErr != nil || dir == "" {
 		fmt.Fprintln(w, inboundExplanationLine(false))
 		return
 	}
@@ -253,14 +255,11 @@ func showInboundExplanation(w io.Writer, dir string, dirErr error, isTTY func() 
 	_ = f.Close()
 }
 
-// showInboundExplanationBesideConfig is the production call: it resolves the
-// directory holding config.toml, pairs it with IsStderrTTY -- the check that
-// reports on the stream runDispatch passes as w -- and hands both to
-// showInboundExplanation. It exists as its own function because runDispatch
-// calls it from two sites, behind the audit line and after the attach, and
-// splitting a path from its error at both would be the same three lines twice.
-// showInboundExplanation itself takes the directory and the check as arguments
-// rather than resolving them, so its tests can point it anywhere.
+// showInboundExplanationBesideConfig is the production call, used at both of
+// runDispatch's sites: it resolves the directory holding config.toml and pairs
+// it with IsStderrTTY, the check that reports on the stream runDispatch passes
+// as w. w must be that stream; see showInboundExplanation for what goes wrong
+// otherwise.
 //
 // config.GlobalConfigPath() is the source, not config.GlobalConfigDir(): the
 // latter returns the overlay clone directory, which a [global_config] clone
