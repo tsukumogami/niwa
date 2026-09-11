@@ -118,6 +118,33 @@ type testState struct {
 	// presence/absence without hardcoding the random name suffix.
 	lastDispatchInstancePath string
 
+	// Session-message acceptance state. See session_message_steps_test.go.
+
+	// rememberedMachineConfig is the machine config.toml exactly as a scenario
+	// recorded it, so a later step can prove a dispatch that printed the
+	// one-time explanation left the file alone (the notice is remembered in a
+	// marker file beside it, never by rewriting it).
+	rememberedMachineConfig []byte
+
+	// rememberedStdout is a dispatch's standard output, kept so a second
+	// dispatch's can be compared against it.
+	rememberedStdout string
+
+	// personalClaudeSettingsBytes and personalClaudeSettingsModTime snapshot
+	// the developer's own Claude Code user settings at seed time. A dispatch
+	// must leave both alone: the accept-messages decision travels as a launch
+	// flag exactly so one dispatch cannot change what every other session on
+	// the machine does.
+	personalClaudeSettingsBytes   []byte
+	personalClaudeSettingsModTime time.Time
+
+	// parallelRuns holds one entry per command started by the parallel pty
+	// step, in launch order. Each run's transcript and exit code are kept
+	// apart, because the assertions are about individual runs -- "every
+	// transcript has exactly one audit line" is not a statement about their
+	// concatenation.
+	parallelRuns []ptyRun
+
 	// heldLocks are advisory locks a scenario is holding to stand in for a live
 	// worker, kept open because a flock lives on the open file description:
 	// closing the file releases the lock, so the handle has to outlive the step
@@ -477,6 +504,11 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	registerDispatchSteps(ctx)
 	registerDispatchSpillSteps(ctx)
 	registerKeepAliveSteps(ctx)
+
+	// --- session-message acceptance: the --accept-session-messages flag, the
+	// accept_session_messages_on_dispatch machine key, and what each one puts
+	// in front of the launched worker ---
+	registerSessionMessageSteps(ctx)
 
 	// --- the Codex acceptance bar: what a session in a prepared instance gets
 	// from the capability contract, and what the table says it does not ---

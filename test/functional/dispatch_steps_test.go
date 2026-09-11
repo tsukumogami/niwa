@@ -37,8 +37,18 @@ var dispatchInstanceNameRe = regexp.MustCompile(`\+[a-z0-9_]*-[0-9a-f]{8}$`)
 // PATH. behaviour selects the --bg outcome:
 //   - "ok": --bg writes a live job state for $FAKE_CLAUDE_SESSION_ID and exits 0
 //     (the success path);
+//   - "mint": as "ok", except each invocation generates its own session id
+//     instead of using the pinned one, so several concurrent launches produce
+//     several distinct sessions (see dispatchFakeClaudeMintedSession);
 //   - "launch-fail": --bg exits non-zero, writing nothing (the induced launch
 //     failure that must roll the instance back).
+//
+// Every --bg also records the launch argv twice: the joined line at
+// $HOME/dispatch-launch-argv, which the substring steps read, and the same
+// elements NUL-separated at $HOME/dispatch-launch-argv-elements, which the
+// steps that have to tell one argv element from another read. A joined line
+// cannot answer "which element follows --settings", because a settings document
+// and a prompt can both contain spaces.
 //
 // attach/logs exit 0 (dispatch only calls attach without --detach; the scenarios
 // pass --detach, so attach is never reached, but the fake handles it for
@@ -48,11 +58,19 @@ var dispatchInstanceNameRe = regexp.MustCompile(`\+[a-z0-9_]*-[0-9a-f]{8}$`)
 // makes a later reap reclaim it. Any other invocation exits non-zero so a stray
 // real code path fails loudly rather than silently hitting the network.
 func dispatchFakeClaudeScript(behaviour string) string {
-	bg := `  sid="${FAKE_CLAUDE_SESSION_ID:-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}"
+	pickSession := `  sid="${FAKE_CLAUDE_SESSION_ID:-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}"`
+	if behaviour == dispatchFakeClaudeMintedSession {
+		// A fresh id per invocation, from the kernel's own generator, so
+		// concurrent launches cannot collide on one job-state directory. The
+		// functional suite is Linux-only, so /proc is always there.
+		pickSession = `  sid=$(cat /proc/sys/kernel/random/uuid)`
+	}
+	bg := pickSession + `
   short=$(printf '%s' "$sid" | cut -c1-8)
   jobdir="$HOME/.claude/jobs/$short"
   mkdir -p "$jobdir"
   printf '%s\n' "$*" > "$HOME/dispatch-launch-argv"
+  printf '%s\0' "$@" > "$HOME/dispatch-launch-argv-elements"
   # If the prompt is a spill pointer, resolve it from / rather than from the
   # instance dir. An instance-relative path would resolve here and must not.
   spill=$(printf '%s' "$*" | sed -n 's/^file: \(.*\)$/\1/p' | head -1)
@@ -92,6 +110,11 @@ esac
 `, bg)
 }
 
+// dispatchFakeClaudeMintedSession is the behaviour name for the fake claude
+// that mints its own session id per launch. It is a constant because the step
+// that selects it and the script that branches on it have to agree.
+const dispatchFakeClaudeMintedSession = "mint"
+
 // installDispatchFakeClaude writes the fake claude with the given behaviour into
 // a scenario-local bin dir and prepends it to PATH for every subsequent niwa
 // subprocess via testState.pathPrefix.
@@ -121,6 +144,19 @@ func aFakeClaudeForDispatchWithSession(ctx context.Context, sessionID string) (c
 	}
 	s.envOverrides["FAKE_CLAUDE_SESSION_ID"] = sessionID
 	return ctx, nil
+}
+
+// aFakeClaudeForDispatchThatMintsASessionPerLaunch installs the success-path
+// fake claude in its minting mode, where every launch generates its own session
+// id. It is what the parallel-dispatch scenario needs: with the pinned id, four
+// concurrent launches would write four job states into one directory and the
+// capture would correlate every dispatch to the same session.
+func aFakeClaudeForDispatchThatMintsASessionPerLaunch(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	return ctx, installDispatchFakeClaude(s, dispatchFakeClaudeMintedSession)
 }
 
 // aFakeClaudeForDispatchThatFailsToLaunch installs the launch-fail fake claude,
@@ -464,6 +500,7 @@ func registerDispatchSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the launched claude was not invoked with "([^"]*)"$`, theLaunchedClaudeWasNotInvokedWith)
 	ctx.Step(`^a fake claude for dispatch with session "([^"]*)"$`, aFakeClaudeForDispatchWithSession)
 	ctx.Step(`^a fake claude for dispatch that fails to launch$`, aFakeClaudeForDispatchThatFailsToLaunch)
+	ctx.Step(`^a fake claude for dispatch that mints a new session per launch$`, aFakeClaudeForDispatchThatMintsASessionPerLaunch)
 	ctx.Step(`^I run "([^"]*)" from the workspace root$`, iRunCommandFromTheWorkspaceRoot)
 	ctx.Step(`^a dispatch instance was created with a well-formed instance file$`, aDispatchInstanceWasCreatedWithAWellFormedInstanceFile)
 	ctx.Step(`^the dispatch instance still exists$`, theDispatchInstanceStillExists)

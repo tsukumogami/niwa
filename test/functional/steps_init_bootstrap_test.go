@@ -154,8 +154,44 @@ func iRunUnderPTYWithInput(ctx context.Context, command, input string) (context.
 	if s == nil {
 		return ctx, fmt.Errorf("no test state")
 	}
+	run, err := runUnderPTY(ctx, s, command, input)
+	if err != nil {
+		return ctx, err
+	}
+	s.stdout = run.stdout
+	s.stderr = run.stderr
+	s.exitCode = run.exitCode
+	s.shellPwd = ""
+	return ctx, nil
+}
+
+// ptyRun is one command's outcome under `script`: what the terminal showed and
+// what the command exited with. The parallel step keeps one of these per run,
+// which is why this is a value rather than fields written straight into
+// testState.
+type ptyRun struct {
+	// stdout is what the pty surface carried.
+	stdout string
+	// stderr is the same bytes as stdout plus anything `script` itself wrote
+	// off-pty; see runUnderPTY for why the two are not separable here.
+	stderr string
+	// exitCode is the command's own exit status, which `script` propagates.
+	exitCode int
+}
+
+// runUnderPTY builds and runs one `script -q -c <cmd> /dev/null` invocation and
+// returns its transcript and exit code without touching testState. Both the
+// single-run step above and the parallel step in session_message_steps_test.go
+// go through it, so the pty construction -- the cd-and-exec inner command, the
+// chunked stdin feed, the timeout, and the stdout/stderr merge -- exists once.
+//
+// A non-nil error is a harness failure (no `script` on PATH, a pipe that could
+// not be created, a run that outlived the deadline), never a non-zero exit from
+// the command, which is reported in the returned run.
+func runUnderPTY(ctx context.Context, s *testState, command, input string) (ptyRun, error) {
+	var run ptyRun
 	if _, err := exec.LookPath("script"); err != nil {
-		return ctx, fmt.Errorf("util-linux `script` not on PATH; cannot drive PTY scenario: %w", err)
+		return run, fmt.Errorf("util-linux `script` not on PATH; cannot drive PTY scenario: %w", err)
 	}
 
 	// Substitute {repo:<name>} placeholders for symmetry with iRunFromWorkspaceRoot.
@@ -205,7 +241,7 @@ func iRunUnderPTYWithInput(ctx context.Context, command, input string) (context.
 	// harness, not of any reader under test.
 	pr, pw, err := os.Pipe()
 	if err != nil {
-		return ctx, fmt.Errorf("creating pty input pipe: %w", err)
+		return run, fmt.Errorf("creating pty input pipe: %w", err)
 	}
 	cmd.Stdin = pr
 	go func() {
@@ -230,25 +266,23 @@ func iRunUnderPTYWithInput(ctx context.Context, command, input string) (context.
 	runErr := cmd.Run()
 	pr.Close()
 	if ptyCtx.Err() == context.DeadlineExceeded {
-		return ctx, fmt.Errorf("pty step did not terminate within %s; the command is waiting on input that never arrives", ptyStepTimeout)
+		return run, fmt.Errorf("pty step did not terminate within %s; the command is waiting on input that never arrives", ptyStepTimeout)
 	}
-	s.stdout = stdout.String()
+	run.stdout = stdout.String()
 	// util-linux `script` interleaves stdout and stderr on its single
 	// PTY surface; the child's stderr is mirrored on stdout under PTY.
 	// Treat the combined output as both for assertion purposes — both
 	// fields contain the same bytes so any "error output contains"
 	// step sees the prompt + Detail+Suggestion text.
-	s.stderr = stdout.String() + stderr.String()
-	s.shellPwd = ""
+	run.stderr = stdout.String() + stderr.String()
 	if runErr != nil {
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
-			s.exitCode = exitErr.ExitCode()
-			return ctx, nil
+			run.exitCode = exitErr.ExitCode()
+			return run, nil
 		}
-		return ctx, fmt.Errorf("pty run failed: %w; stderr: %s", runErr, s.stderr)
+		return run, fmt.Errorf("pty run failed: %w; stderr: %s", runErr, run.stderr)
 	}
-	s.exitCode = 0
-	return ctx, nil
+	return run, nil
 }
 
 // splitOwnerRepo parses an owner/repo slug into its two components.
