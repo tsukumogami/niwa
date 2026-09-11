@@ -37,13 +37,25 @@ Current
 Absorbed [BRIEF-dispatch-permission-mode](docs/briefs/BRIEF-dispatch-permission-mode.md); carried in Absorbed Brief.
 Absorbed [PRD-dispatch-permission-mode](docs/prds/PRD-dispatch-permission-mode.md); carried in Absorbed PRD.
 
+**Later change.** `docs/prds/PRD-inert-defaultmode-key.md` reworked the
+derivation after this design shipped, and its R3 supersedes R5 below.
+Dispatch no longer reads a permission value from `.claude/settings.json`.
+niwa records the workspace's declared posture in `.niwa/instance.json`
+(`claude_permissions`) when it creates or applies an instance, and dispatch
+derives `--permission-mode bypassPermissions` from that recorded value, so a
+stale or hand-edited settings file neither grants nor withholds the flag. If
+the state file is missing or unreadable, dispatch forwards no mode and never
+fails; it prints a warning naming the file, but only when no explicit
+`--permission-mode` was given. The settings read and code sketches below
+describe the original implementation.
+
 ## Absorbed Brief
 
 The framing this design was ultimately written from, carried forward
 because the brief that held it — then the PRD that absorbed the brief —
 were both folded in here. A workspace's `permissions = "bypass"`
 declaration is a trust decision: dispatched workers should act without a
-human approving each tool call. Claude Code 2.1.258 broke the channel that
+human approving each tool call. Claude Code 2.1.257 broke the channel that
 decision used to reach a worker automatically, so operators need it to keep
 working through no action of their own — the same `workspace.toml`
 declaration and the same `niwa dispatch` invocation, an explicit
@@ -71,7 +83,9 @@ today.
 Claude's spelling; it never touches Codex's `--sandbox`.
 
 **R5.** The derivation reads the already-materialized `.claude/settings.json`,
-never `workspace.toml` directly.
+never `workspace.toml` directly. *(This requirement is superseded by R3 of
+`docs/prds/PRD-inert-defaultmode-key.md`: the derivation now reads the
+posture niwa records in instance state, not the settings file.)*
 
 **R6.** The settings read must precede the passthrough build, without
 regressing the remote-control or keep-alive behaviors that already consume
@@ -89,7 +103,7 @@ from the operator's own `--permission-mode` CLI flag
 only when it is non-empty — nothing else ever populates it. When it's empty,
 the worker starts with whatever permission mode its own materialized
 `.claude/settings.json` and the launching user's global Claude Code settings
-resolve to, which since Claude Code 2.1.258 no longer includes the project
+resolve to, which since Claude Code 2.1.257 no longer includes the project
 `.claude/settings.json`'s `permissions.defaultMode` value.
 
 Two structural facts about the current code shape this design has to work
@@ -293,8 +307,8 @@ just these two) has `""` in that field where not implemented.
 
 ## Security Considerations
 
-**This restores parity with pre-2.1.258 behavior; it does not grant a
-workspace anything it could not already grant itself.** Before 2.1.258, a
+**This restores parity with pre-2.1.257 behavior; it does not grant a
+workspace anything it could not already grant itself.** Before 2.1.257, a
 workspace's `permissions = "bypass"` declaration reached a dispatched
 worker automatically through the materialized `.claude/settings.json`
 channel. This design's whole purpose is to carry the *same* operator
@@ -303,7 +317,7 @@ decision through a *different* channel Claude Code still honors
 worker is unchanged by this feature; only the mechanism that delivers the
 already-declared posture changes.
 
-**Why 2.1.258 likely stopped honoring project-level settings, and why
+**Why 2.1.257 likely stopped honoring project-level settings, and why
 that reasoning does not indict this design.** The most plausible reason
 to stop trusting a project's `.claude/settings.json` for
 `defaultMode: "bypassPermissions"` is that a project settings file can
@@ -335,7 +349,7 @@ with PreToolUse hooks that fire even under `bypassPermissions`.
 design does not add any — a `niwa dispatch` worker already ran without
 that containment whenever its workspace declared `bypass` and the
 materialized-settings channel still worked, i.e. on every Claude Code
-release before 2.1.258. This design restores that pre-existing posture;
+release before 2.1.257. This design restores that pre-existing posture;
 it does not add containment `niwa dispatch` never had, and doing so is
 out of scope for a fix scoped to compatibility restoration (see this
 design's own Absorbed PRD section, R1-R7, none of which touch
@@ -348,7 +362,7 @@ new here and is not fully mitigated anywhere in `niwa dispatch` today.
 **The trust-boundary claim, stated precisely.** The boundary that matters
 is the approval gate, not file provenance. Before this design: an
 operator had to either declare `bypass` in `workspace.toml` (which,
-before 2.1.258, silently reached the worker) or type `--permission-mode`
+before 2.1.257, silently reached the worker) or type `--permission-mode`
 by hand on the invocation. After this design: the same `workspace.toml`
 declaration reaches the worker again, through a different flag. No
 workspace gains standing bypass access it did not already have the means
@@ -367,12 +381,14 @@ No new file is read that wasn't already read by this same function a few
 lines later; no new write path is introduced.
 
 **Considered and rejected: reusing `internal/workspace/permissions.go`'s
-`WorkerPermissionMode`.** It reads the identical `permissions.defaultMode`
-path and looks, at a glance, like it does this derivation already. It is
+`WorkerPermissionMode`.** It read the identical `permissions.defaultMode`
+path and looked, at a glance, like it did this derivation already. It was
 dead code (its only caller, the removed mesh daemon, is gone), and its
 fallback semantics — mapping every non-bypass case to `"acceptEdits"` —
 would grant a stronger-than-today posture to every workspace with no
-declared `bypass` posture, which R3 explicitly forbids.
+declared `bypass` posture, which R3 explicitly forbids. The function has
+since been removed, and dispatch now reads the recorded posture from
+instance state (`.niwa/instance.json`) rather than from any settings file.
 
 **Audit signal.** Because the derived flag changes a worker's behavior
 based on config rather than an explicit per-invocation choice, the
