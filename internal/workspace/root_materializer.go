@@ -224,10 +224,13 @@ func writeRootSkills(workspaceRoot string) ([]string, error) {
 
 // writeRootSettings builds and writes <workspaceRoot>/.claude/settings.json via
 // the shared buildSettingsDoc. The permission posture is sourced from the
-// effective [claude.settings] block (MergeInstanceOverrides) -- the same input
-// the instance-root materializer feeds to buildSettingsDoc -- so the
-// permissions.defaultMode cell matches what an instance would get: none for
-// bypass or undeclared, "default" for ask. The
+// workspace [claude.settings] block with [instance.claude.settings] merged over
+// it (MergeInstanceOverrides), but without the workspace overlay or the
+// personal overlay, which reach only instances. So the root's posture matches
+// the instance root's unless an overlay declares one; a personal-overlay ask
+// over a workspace bypass gives the instance root "default" and the root no
+// mode. As everywhere, bypass or undeclared writes no permissions.defaultMode
+// and ask writes "default". The
 // effective plugins and marketplaces are forwarded too, filtered to the subset
 // that resolves at the workspace root (see rootHoistableConfig), so a
 // root-launched session loads the workspace's plugins/skills. The

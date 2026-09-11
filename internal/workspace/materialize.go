@@ -313,7 +313,9 @@ func (h *HooksMaterializer) Materialize(ctx *MaterializeContext) ([]string, erro
 // errUnknownPosture reports a permissions value that is neither "bypass" nor
 // "ask". It carries no copy of the rejected value on purpose: the caller may
 // hold a secret-backed value, and only buildSettingsDoc, which still has the
-// MaybeSecret, can tell whether quoting it is safe.
+// MaybeSecret, can tell whether quoting it is safe. buildSettingsDoc splices
+// this text into its own message as the list of accepted values, so keep it
+// phrased that way.
 var errUnknownPosture = errors.New(`want "` + postureBypass + `" or "` + postureAsk + `"`)
 
 // claudeDefaultMode translates a niwa permission posture into the
@@ -323,15 +325,20 @@ var errUnknownPosture = errors.New(`want "` + postureBypass + `" or "` + posture
 // "bypass" writes nothing. Claude Code 2.1.257 and later ignores
 // bypassPermissions from project scope and falls back to "default", which
 // overrides the developer's own mode, so writing it grants nothing and costs
-// the developer their setting. The posture still reaches dispatched workers:
-// niwa dispatch reads it from the instance state and passes
-// --permission-mode bypassPermissions on the worker's command line.
+// the developer their setting. The posture still reaches Claude workers that
+// niwa dispatch launches: derivePermissionMode in internal/cli reads it from
+// the instance state and passes --permission-mode bypassPermissions unless the
+// operator gave a mode of their own.
 //
 // "ask" writes "default", a mode Claude Code honors from project scope. The
 // old "askPermissions" was never a valid mode, and Claude Code threw out the
 // whole file over it, taking the hooks, deny rules, and plugins with it.
 //
 // Any other value is an error, and the error never contains the value.
+// instancePermissionsPosture relies on this rejection: because an invalid
+// value fails the pipeline here, an empty recorded posture means undeclared.
+// Both switch on the same postureBypass/postureAsk constants; a new posture
+// needs a case in each.
 func claudeDefaultMode(posture string) (mode string, write bool, err error) {
 	switch posture {
 	case postureBypass:
@@ -721,7 +728,8 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 	// returns the literal plaintext otherwise.
 	//
 	// The permissions block may carry two independent keys: defaultMode (from
-	// the user's settings) and deny (from the worktree-delegation fallback). They
+	// the declared permissions posture) and deny (from the worktree-delegation
+	// fallback). They
 	// are emitted into the SAME permissions map so a deny fallback never clobbers
 	// a configured defaultMode and vice versa.
 	permissions := make(map[string]any)

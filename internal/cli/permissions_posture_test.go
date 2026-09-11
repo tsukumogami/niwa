@@ -17,7 +17,10 @@ import (
 
 // readPostureDoc parses the JSON document at path. A non-empty root is
 // replaced by a placeholder first, so documents from workspaces in different
-// temp directories compare equal when only their location differs.
+// temp directories compare equal when only their location differs. It and
+// postureDefaultMode mirror readNormalizedDoc and defaultModeOf in
+// internal/workspace/posture_documents_test.go; test helpers can't cross
+// packages, so a fix to one belongs in the other.
 func readPostureDoc(t *testing.T, path, root string) map[string]any {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -218,9 +221,11 @@ func TestReviewSettingsOverMaterializedPostures(t *testing.T) {
 		{name: "S3", decl: postureS3},
 	}
 	for _, sc := range scenarios {
-		for _, ask := range []bool{true, false} {
+		// operatorApproval is watch's review posture flag, not niwa's ask
+		// posture (that's S2).
+		for _, operatorApproval := range []bool{true, false} {
 			posture := "hard-deny"
-			if ask {
+			if operatorApproval {
 				posture = "operator-approval"
 			}
 			t.Run(sc.name+"/"+posture, func(t *testing.T) {
@@ -229,15 +234,15 @@ func TestReviewSettingsOverMaterializedPostures(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Create: %v", err)
 				}
-				if err := watch.ApplyReviewSettings(instance, true, ask); err != nil {
+				if err := watch.ApplyReviewSettings(instance, true, operatorApproval); err != nil {
 					t.Fatalf("ApplyReviewSettings: %v", err)
 				}
 				merged := readPostureDoc(t, filepath.Join(instance, ".claude", "settings.json"), "")
-				if err := watch.VerifyReviewSettings(merged, true, ask); err != nil {
+				if err := watch.VerifyReviewSettings(merged, true, operatorApproval); err != nil {
 					t.Fatalf("VerifyReviewSettings: %v", err)
 				}
 				want := sc.hardDenyMode
-				if ask {
+				if operatorApproval {
 					want = "default"
 				}
 				mode, present := postureDefaultMode(merged)

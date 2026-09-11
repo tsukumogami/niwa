@@ -159,7 +159,8 @@ func theMaterializedFileAtWorkspaceRootContains(ctx context.Context, relPath, wa
 // workspace root and walks a dotted key path ("permissions.defaultMode"). It
 // returns the value and whether every segment was present. A file that is
 // missing or doesn't parse is an error, so a "no key" assertion can't pass on
-// an unreadable document.
+// an unreadable document. The path splits on ".", so a key that itself
+// contains a dot can't be addressed.
 func lookupJSONKeyAtWorkspaceRoot(ctx context.Context, relPath, dottedKey string) (value any, found bool, path string, err error) {
 	s := getState(ctx)
 	if s == nil {

@@ -15,7 +15,10 @@ import (
 
 // readNormalizedDoc reads the JSON document at path with every occurrence of
 // root replaced by a placeholder, so documents materialized under different
-// temp directories compare equal when only their location differs.
+// temp directories compare equal when only their location differs. It and
+// defaultModeOf are mirrored by readPostureDoc and postureDefaultMode in
+// internal/cli/permissions_posture_test.go; test helpers can't cross
+// packages, so a fix to one belongs in the other.
 func readNormalizedDoc(t *testing.T, path, root string) map[string]any {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -153,7 +156,8 @@ func TestRecordedPostureMatchesInstanceRootDocument(t *testing.T) {
 // assertAskIsUndeclaredPlusDefault checks that the ask document equals the
 // undeclared document plus permissions.defaultMode "default", every other key
 // identical. The undeclared document must carry real content, so two empty
-// documents can't pass.
+// documents can't pass. It strips defaultMode (and an emptied permissions
+// block) from ask in place, so callers shouldn't inspect ask afterward.
 func assertAskIsUndeclaredPlusDefault(t *testing.T, ask, undeclared map[string]any) {
 	t.Helper()
 	if len(undeclared) == 0 {

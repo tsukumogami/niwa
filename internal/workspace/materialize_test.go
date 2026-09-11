@@ -342,7 +342,11 @@ func TestSettingsMaterializerNoopWhenEmpty(t *testing.T) {
 	}
 }
 
-func TestSettingsMaterializerPermissionsOnly(t *testing.T) {
+// TestSettingsMaterializerBypassOnlyWritesNoPermissions declares only a bypass
+// posture. The document is still written, just without a permissions block:
+// rewriting it on every apply is what clears a permissions.defaultMode an
+// earlier niwa left in the file.
+func TestSettingsMaterializerBypassOnlyWritesNoPermissions(t *testing.T) {
 	tmpDir := t.TempDir()
 	repoDir := filepath.Join(tmpDir, "repo")
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {

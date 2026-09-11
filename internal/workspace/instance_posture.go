@@ -20,7 +20,9 @@ const (
 // overlay, [instance.claude.settings]. Per-repo overrides never reach it.
 //
 // It deliberately does not validate. RootSettingsMaterializer reads the same
-// map and fails the pipeline on an unrecognized value before state is saved.
+// map and fails the pipeline on an unrecognized value before state is saved
+// (buildSettingsDoc rejects it through claudeDefaultMode, which switches on
+// the same constants; a new posture needs a case there too).
 // That rejection is what lets a reader of InstanceState treat an empty posture
 // as "undeclared" rather than "declared something invalid"; this function's
 // fallback to "" would otherwise hide the difference. Returning a canonical

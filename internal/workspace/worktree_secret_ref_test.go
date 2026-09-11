@@ -51,7 +51,9 @@ func TestApplyToWorktreeWritesNoUnresolvedVaultRef(t *testing.T) {
 	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
 
 	// A valid, non-secret settings value so the SettingsMaterializer writes a
-	// real settings.local.json this run.
+	// real settings.local.json this run. ask rather than bypass: bypass writes
+	// no permission mode, which would leave the sanity check below nothing to
+	// find.
 	cfg.Claude.Settings = config.SettingsConfig{
 		"permissions": config.MaybeSecret{Plain: "ask"},
 	}

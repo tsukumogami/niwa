@@ -142,7 +142,9 @@ func fsGuardHook(instancePath string, ask bool) map[string]any {
 // (Bash/Read/Glob/Grep) in the operator-approval posture. Under a non-bypass permission
 // mode these tools would otherwise prompt and hang the --bg session; the hook emits an
 // explicit allow decision on stdout so the review runs autonomously. It is applied only
-// in the ask posture (bypassPermissions already allows these in the hard-deny posture).
+// in the ask posture. The hard-deny posture neither adds it nor sets a permission mode:
+// that session launches with no --permission-mode and runs in whatever mode its merged
+// settings resolve to, which niwa leaves unset for a bypass or undeclared workspace.
 func autoAllowHook() map[string]any {
 	const decision = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"niwa watch review: in-instance tool auto-approved"}}`
 	return map[string]any{
