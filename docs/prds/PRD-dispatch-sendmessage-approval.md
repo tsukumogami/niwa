@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: In Progress
+status: Done
 problem: |
   Developers who dispatch background Claude Code sessions with niwa can't count
   on those sessions' messages to each other arriving unattended. Claude Code
@@ -28,7 +28,7 @@ motivating_context: |
 
 ## Status
 
-In Progress
+Done
 
 Absorbed [BRIEF: Unattended peer messages for dispatched sessions](docs/briefs/BRIEF-dispatch-sendmessage-approval.md); carried in Absorbed Brief.
 
