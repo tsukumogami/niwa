@@ -15,7 +15,7 @@ import (
 )
 
 // Session ids and instance names for the accepts_session_messages list
-// fixture. The ids are distinct from the reap and keep-alive fixtures' ids.
+// fixture.
 const (
 	inboundListAcceptID = "44444444-4444-4444-4444-444444444444"
 	inboundListBothID   = "55555555-5555-5555-5555-555555555555"
@@ -195,10 +195,16 @@ func TestAnnotateAcceptsSessionMessages(t *testing.T) {
 
 // TestAnnotateAcceptsSessionMessages_AnyMappingWins: when two mappings point
 // at one instance and only one recorded the behavior, the instance reports
-// true whether that mapping is listed first or last.
+// true whether that mapping is read first or last. The store lists mappings
+// in session-id order, so inboundListAcceptID is read before
+// inboundListPlainID.
 func TestAnnotateAcceptsSessionMessages_AnyMappingWins(t *testing.T) {
-	for _, acceptingID := range []string{inboundListAcceptID, inboundListPlainID} {
-		t.Run(acceptingID, func(t *testing.T) {
+	for _, tc := range []struct{ name, acceptingID string }{
+		{"accepting mapping read first", inboundListAcceptID},
+		{"accepting mapping read last", inboundListPlainID},
+	} {
+		acceptingID := tc.acceptingID
+		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			path := seedInstance(t, root, inboundAcceptName, 1)
 			for _, id := range []string{inboundListAcceptID, inboundListPlainID} {
@@ -245,9 +251,7 @@ func TestRunList_AcceptsSessionMessages_JSONShape(t *testing.T) {
 		name, _ := rec["name"].(string)
 		want, known := inboundListWant[name]
 		if !known {
-			if v != false {
-				t.Errorf("record %s reports accepts_session_messages %v with no mapping, want false", name, v)
-			}
+			t.Errorf("unexpected record %q in list output", name)
 			continue
 		}
 		seen++

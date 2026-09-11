@@ -11,11 +11,11 @@ import (
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
-// readOnlyMappingJSON decodes the single session mapping a dispatch wrote as a
+// readSingleMappingJSON decodes the single session mapping a dispatch wrote as a
 // plain JSON object, so a test can tell an absent key from a false one. It
 // finds the file by listing the store rather than by session id, because the
 // id a dispatch records depends on the agent.
-func readOnlyMappingJSON(t *testing.T, root string) map[string]any {
+func readSingleMappingJSON(t *testing.T, root string) map[string]any {
 	t.Helper()
 	files := sessionMappingFiles(t, root)
 	if len(files) != 1 {
@@ -47,7 +47,6 @@ func TestDispatch_Inbound_RecordedOnMapping(t *testing.T) {
 	}
 	for _, mode := range modes {
 		t.Run(mode.name, func(t *testing.T) {
-			t.Setenv("ANTHROPIC_API_KEY", "")
 			root, _, pass := setupInboundMode(t, mode)
 
 			_, stderr, err := runDispatchCmd(t, "do a thing")
@@ -56,7 +55,7 @@ func TestDispatch_Inbound_RecordedOnMapping(t *testing.T) {
 			}
 			checkLaunchedKey(t, mode, *pass)
 
-			v, ok := readOnlyMappingJSON(t, root)["accepts_session_messages"]
+			v, ok := readSingleMappingJSON(t, root)["accepts_session_messages"]
 			if mode.wantKey && (!ok || v != true) {
 				t.Errorf("mapping accepts_session_messages = %v (present %v), want true", v, ok)
 			}
@@ -90,7 +89,7 @@ func TestDispatch_Inbound_CodexNotRecordedOnMapping(t *testing.T) {
 	if strings.Contains(stderr, auditMarker) {
 		t.Errorf("a Codex dispatch printed the audit line; stderr:\n%s", stderr)
 	}
-	raw := readOnlyMappingJSON(t, root)
+	raw := readSingleMappingJSON(t, root)
 	if raw["agent"] != string(agent.AgentCodex) {
 		t.Fatalf("mapping agent = %v, want %q; the test would not be exercising Codex", raw["agent"], agent.AgentCodex)
 	}

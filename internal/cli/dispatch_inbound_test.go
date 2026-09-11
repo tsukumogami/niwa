@@ -558,8 +558,8 @@ func setupInboundMode(t *testing.T, mode inboundMode) (string, *dispatchFakes, *
 	return root, f, pass
 }
 
-// checkLaunchedKey guards the tests built on inboundMode against passing vacuously: in
-// the on modes the key really was handed to the launch.
+// checkLaunchedKey guards the tests built on inboundMode against passing
+// vacuously: in the on modes the key really was handed to the launch.
 func checkLaunchedKey(t *testing.T, mode inboundMode, pass []string) {
 	t.Helper()
 	if _, ok := inboundKeyValue(t, pass); ok != mode.wantKey {

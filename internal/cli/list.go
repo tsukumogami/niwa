@@ -20,8 +20,9 @@ func init() {
 
 var listJSON bool
 
-// The markers the human output appends to an instance's name, in this order
-// when both apply.
+// The markers the human output appends to an instance's name. Keep-alive
+// comes first when both apply, so the "<name> (keep-alive)" prefix that
+// existing readers match stays unchanged.
 const (
 	keepAliveMarker              = " (keep-alive)"
 	acceptsSessionMessagesMarker = " (accepts session messages)"
@@ -130,8 +131,8 @@ func runList(cmd *cobra.Command, args []string) error {
 // since been deleted reports nothing -- its self-wake died with the session,
 // so the report reflects sessions being kept alive NOW, not past opt-ins.
 //
-// It fills each record's AcceptsSessionMessages flag from any mapping pointing
-// at the instance that recorded it, with NO liveness check. The grant was made
+// It sets each record's AcceptsSessionMessages flag when any mapping pointing
+// at the instance recorded the behavior, with NO liveness check. The grant was made
 // when the session launched, so it is reported for as long as the instance
 // exists, including after the session has finished or been deleted.
 //
