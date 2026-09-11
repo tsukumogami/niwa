@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,7 +24,7 @@ import (
 
 func init() {
 	dispatchCmd.Flags().StringVar(&dispatchLabel, "label", "", "optional human-friendly alias recorded on the session mapping")
-	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session (sanitized into a slug; also names the niwa instance: <config>+-<id> with no name, <config>+<slug>-<id> with one -- '+' always marks the end of the config name)")
+	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session, sanitized into a slug. The session name is the slug plus the instance's random suffix (<slug>-<id>), and the instance is <config>+<slug>-<id>; with no name the instance is <config>+-<id> and no session name is forwarded -- '+' always marks the end of the config name. An agent with no display-name flag gets no session name, though the slug still names the instance")
 	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", dispatchModelFlagHelp())
 	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker; dropped for an agent that has no such flag")
 	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "subagent type to forward to the background worker; this selects a role within the launched agent, not which agent is launched (that is --harness). Dropped for an agent that has no such flag")
@@ -447,18 +448,31 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		prompt = captured
 	}
 
-	// (4) Generate a unique "-<8 hex>" name suffix via crypto/rand and pass it
-	// as the customName branch of the existing provision path, sidestepping the
-	// racy numbered scan (DESIGN Decision 2). When --name sanitizes to a usable
-	// slug it is prepended, so the suffix is "<slug>-<8hex>" and the name becomes
-	// "<config>+<slug>-<8hex>"; with no slug the suffix is "-<8hex>" and the name
-	// is "<config>+-<8hex>". The random hex is always kept, and the mandatory
-	// "-<8hex>" is the structural signature isDispatchInstanceName (and thus the
-	// reaper backstop) keys on -- there is no "disp" literal.
+	// (4) Mint one random 8-hex token for this dispatch and derive both names
+	// from it. The instance suffix is passed as the customName branch of the
+	// existing provision path, sidestepping the racy numbered scan (DESIGN
+	// Decision 2). When --name sanitizes to a usable slug it is prepended, so
+	// the suffix is "<slug>-<8hex>" and the name becomes "<config>+<slug>-<8hex>";
+	// with no slug the suffix is "-<8hex>" and the name is "<config>+-<8hex>".
+	// The random hex is always kept, and the mandatory "-<8hex>" is the
+	// structural signature isDispatchInstanceName (and thus the reaper
+	// backstop) keys on -- there is no "disp" literal. A failed read returns
+	// here, before anything is reaped or provisioned.
 	slug := sanitizeInstanceSlug(dispatchName)
-	namePrefix, err := dispatchNameSuffix(slug)
+	token, err := newDispatchToken()
 	if err != nil {
 		return fmt.Errorf("niwa: error: generating instance name: %w", err)
+	}
+	namePrefix := dispatchInstancePrefix(slug, token)
+	// The session name shares the instance's token, so it is unique for the
+	// same reason the directory is. It is forwarded only to an agent that
+	// declares a display-name flag; the gate reads a declared flag spelling,
+	// never an agent's name. Left empty, it also keeps the mapping's
+	// session_name and the report's session name line empty, so neither
+	// claims a name the agent was never given.
+	forwardedName := ""
+	if spec.Flags.DisplayName != "" {
+		forwardedName = dispatchSessionName(slug, token)
 	}
 	// "+" is the end-of-config marker for dispatch instances, present for every
 	// dispatch whether or not a slug is supplied: no-name dispatch is
@@ -577,7 +591,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// (DESIGN Decision 8). The spelling of each flag is the launched agent's,
 	// and an intent that agent has no flag for is dropped rather than guessed
 	// at.
-	passthrough := buildDispatchPassthrough(spec.Flags, slug, resolvedModel, permissionMode)
+	passthrough := buildDispatchPassthrough(spec.Flags, forwardedName, resolvedModel, permissionMode)
 
 	// (9c) Remote-control-on-dispatch default-fill. When the host preference
 	// (~/.config/niwa/config.toml [global].remote_control_on_dispatch) is on and
@@ -783,6 +797,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		Origin:       "dispatch",
 		Label:        dispatchLabel,
 		KeepAlive:    keepAliveArmed,
+		SessionName:  forwardedName,
 		Created:      time.Now().UTC(),
 	}
 	if err := workspace.WriteSessionMapping(workspaceRoot, mapping); err != nil {
@@ -820,6 +835,12 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Dispatched session %s\n", sessionID)
 	fmt.Fprintf(out, "  instance: %s\n", instancePath)
+	// The session name goes right under the instance, which shares its token.
+	// It is printed only when one was forwarded, so an unnamed dispatch and an
+	// agent with no display-name flag report exactly what they did before.
+	if forwardedName != "" {
+		fmt.Fprintf(out, "  session name: %s\n", forwardedName)
+	}
 
 	for _, line := range reentryHints(spec, handle, instancePath) {
 		fmt.Fprintf(out, "  %s\n", line)
@@ -876,10 +897,64 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// dispatchRandReader is the random source for the dispatch token. It is a
+// package variable so tests can swap it the way they swap dispatchLaunch and
+// provisionInstanceFunc; production reads crypto/rand.
+var dispatchRandReader io.Reader = rand.Reader
+
+// newDispatchToken returns 8 lowercase hex digits built from exactly 4 bytes
+// read from dispatchRandReader. io.ReadFull turns a short read into an error
+// rather than a token with zeroed bytes.
+func newDispatchToken() (string, error) {
+	var b [4]byte
+	if _, err := io.ReadFull(dispatchRandReader, b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// dispatchInstancePrefix is the instance name suffix for a token: "<slug>-<token>",
+// or "-<token>" with no slug. The provision path joins it to the config name
+// with "+", so the "+" is NOT added here.
+func dispatchInstancePrefix(slug, token string) string {
+	if slug == "" {
+		return "-" + token
+	}
+	return slug + "-" + token
+}
+
+// dispatchSessionName is the display name a named dispatch forwards to the
+// agent: "<slug>-<token>", sharing the token with the instance name so the two
+// are unique together. With no slug there is no name, and it returns "". It
+// spells the join out rather than calling dispatchInstancePrefix, because the
+// two answer different questions and only agree while a slug is present.
+func dispatchSessionName(slug, token string) string {
+	if slug == "" {
+		return ""
+	}
+	return slug + "-" + token
+}
+
+// dispatchSessionNamePattern is the one definition of the forwarded session
+// name's shape: a 1-40 character slug (maxDispatchSlugRunes; sanitizeInstanceSlug
+// guarantees [a-z0-9_] with no leading or trailing underscore), a "-", and the
+// 8-hex token, which is the same token the instance name ends in. The first and
+// last slug characters are matched on their own, so the middle's {0,38} is
+// maxDispatchSlugRunes minus 2. niwa list shows a name recorded on a session
+// mapping only when it matches, because those files are writable by any
+// same-user process.
+const dispatchSessionNamePattern = "^[a-z0-9](?:[a-z0-9_]{0,38}[a-z0-9])?-[0-9a-f]{8}$"
+
+// dispatchSessionNameRe is dispatchSessionNamePattern compiled.
+var dispatchSessionNameRe = regexp.MustCompile(dispatchSessionNamePattern)
+
 // dispatchNameSuffix returns a unique name suffix ending in a mandatory "-" plus
-// 8 lowercase hex digits, using crypto/rand for collision safety under
-// concurrency without a lock (DESIGN Decision 2). The provision path joins this
-// to the config name with "+" (the end-of-config marker for dispatch instances).
+// 8 lowercase hex digits, read from dispatchRandReader (crypto/rand in
+// production) for collision safety under concurrency without a lock (DESIGN
+// Decision 2). The provision path joins this to the config name with "+" (the
+// end-of-config marker for dispatch instances). runDispatch mints its token
+// directly so it can share it with the session name; this wrapper serves
+// `niwa watch`'s stageReview, which needs only the instance suffix.
 //
 // With no slug the suffix is "-<8hex>", so the instance dir is "<config>+-<8hex>"
 // (the "+" then "-" sit adjacent). With a slug the suffix is "<slug>-<8hex>", so
@@ -892,15 +967,11 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 // trailing "-<8hex>"); it relies on slugs being dash-free (sanitizeInstanceSlug)
 // so the only "-" after the "+" is the one this suffix adds.
 func dispatchNameSuffix(slug string) (string, error) {
-	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
+	token, err := newDispatchToken()
+	if err != nil {
 		return "", err
 	}
-	suffix := "-" + hex.EncodeToString(b[:])
-	if slug != "" {
-		return slug + suffix, nil
-	}
-	return suffix, nil
+	return dispatchInstancePrefix(slug, token), nil
 }
 
 // sanitizeInstanceSlug normalizes a raw --name value into a filesystem- and
@@ -999,10 +1070,10 @@ func derivePermissionMode(explicit, recorded string, flags agentplan.LaunchFlags
 // elements (flag, value pairs). Each value stays its own element so a crafted
 // value cannot smuggle in an extra claude flag (DESIGN Decision 8).
 //
-// A non-empty slug (the sanitized --name) is forwarded to the worker as
-// "--name <slug>" so the launched claude session carries the same display name
-// embedded in the instance directory. An empty slug forwards nothing, preserving
-// the original slug-less behavior.
+// displayName is forwarded as "<flag> <displayName>" only when the agent
+// declares a display-name flag and the value is non-empty. Dispatch passes its
+// session name ("<slug>-<token>", see dispatchSessionName); `niwa watch` passes
+// its own review handle. An empty value forwards nothing.
 //
 // model is the already-resolved main-loop model (see resolveDispatchModel): a
 // concrete versionless name, forwarded as "--model <model>", or "" to forward
@@ -1015,7 +1086,7 @@ func derivePermissionMode(explicit, recorded string, flags agentplan.LaunchFlags
 // launch sites, so no shared variable can leak a permission mode into a
 // launch that never asked for one. The subagent type is still read from its
 // flag variable, which only `niwa dispatch` sets.
-func buildDispatchPassthrough(flags agentplan.LaunchFlags, slug, model, permissionMode string) []string {
+func buildDispatchPassthrough(flags agentplan.LaunchFlags, displayName, model, permissionMode string) []string {
 	var pass []string
 	// Each pair is appended only when niwa has something to say AND the agent
 	// has a flag to say it with. An intent an agent has no flag for is dropped
@@ -1026,7 +1097,7 @@ func buildDispatchPassthrough(flags agentplan.LaunchFlags, slug, model, permissi
 		{flags.Model, model},
 		{flags.PermissionMode, permissionMode},
 		{flags.SubagentType, dispatchAgent},
-		{flags.DisplayName, slug},
+		{flags.DisplayName, displayName},
 	} {
 		if pair.flag != "" && pair.value != "" {
 			pass = append(pass, pair.flag, pair.value)

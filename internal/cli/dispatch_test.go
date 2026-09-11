@@ -708,7 +708,9 @@ func assertSlugShape(t *testing.T, slug string) {
 // (1) produces an instance name that contains the underscore slug AND still ends
 // with the structural "-<8hex>" signature isDispatchInstanceName recognizes (the
 // end-anchored regex is unaffected by underscores inside the slug), and (2)
-// forwards "--name my_thing" to the launched worker.
+// forwards "--name my_thing-<token>" to the launched worker, where <token> is
+// the instance name's trailing 8 hex. It runs on the real random source, so a
+// session name minted from a second token would not match the instance's.
 func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
@@ -772,8 +774,14 @@ func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 		}
 	}
 
-	if !passthroughHasNameSlug(gotPass, "my_thing") {
-		t.Errorf("launcher passthrough %v should contain \"--name my_thing\"", gotPass)
+	token := gotName[len(gotName)-8:]
+	wantForwarded := "my_thing-" + token
+	forwarded, _ := forwardedDisplayName(gotPass, "--name")
+	if forwarded != wantForwarded {
+		t.Errorf("launcher passthrough %v should contain \"--name %s\" (the instance's token)", gotPass, wantForwarded)
+	}
+	if !dispatchSessionNameRe.MatchString(forwarded) {
+		t.Errorf("forwarded name %q does not match %s", forwarded, dispatchSessionNamePattern)
 	}
 }
 
@@ -856,15 +864,4 @@ func TestDispatch_NameSanitizesEmpty_FallsBack(t *testing.T) {
 			t.Errorf("an empty-sanitizing --name must forward no --name; passthrough[%d] = %q (full %v)", i, a, gotPass)
 		}
 	}
-}
-
-// passthroughHasNameSlug reports whether pass contains the discrete pair
-// "--name" immediately followed by slug.
-func passthroughHasNameSlug(pass []string, slug string) bool {
-	for i := 0; i+1 < len(pass); i++ {
-		if pass[i] == "--name" && pass[i+1] == slug {
-			return true
-		}
-	}
-	return false
 }

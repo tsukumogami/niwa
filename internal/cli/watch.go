@@ -464,6 +464,11 @@ func captureReviewSession(instancePath string) (sessionID, shortID string) {
 // realStopSession.
 var stopSessionFunc = realStopSession
 
+// fetchPRHeadFunc is the seam over watch.FetchPRHead so the watch
+// characterization tests can drive stageReview/continueReview without a
+// network fetch. Production wires it to watch.FetchPRHead.
+var fetchPRHeadFunc = watch.FetchPRHead
+
 // realStopSession stops a background review session by its short id (the id
 // `claude stop` accepts; the full UUID is rejected). The short id is charset-
 // validated before it becomes an argument -- defense in depth over the capture-
@@ -546,7 +551,7 @@ func continueReview(cmd *cobra.Command, root, cwd, token string, client *github.
 		cloneURL = fmt.Sprintf("https://github.com/%s/%s.git", pr.Owner, pr.Repo)
 	}
 	cloneDir := filepath.Join(instancePath, watch.DefaultCloneRelDir)
-	if err := watch.FetchPRHead(ctx, cloneURL, head.SHA, cloneDir, token); err != nil {
+	if err := fetchPRHeadFunc(ctx, cloneURL, head.SHA, cloneDir, token); err != nil {
 		return fmt.Errorf("fetching PR head: %w", err)
 	}
 
@@ -798,7 +803,7 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 
 	// Fetch the PR head as inert data (hardened) into the clone subdir.
 	cloneDir := filepath.Join(instancePath, watch.DefaultCloneRelDir)
-	if err := watch.FetchPRHead(ctx, cloneURL, head.SHA, cloneDir, token); err != nil {
+	if err := fetchPRHeadFunc(ctx, cloneURL, head.SHA, cloneDir, token); err != nil {
 		return fmt.Errorf("fetching PR head: %w", err)
 	}
 
