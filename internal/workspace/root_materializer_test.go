@@ -55,13 +55,10 @@ func TestMaterializeWorkspaceRoot_SessionHooks(t *testing.T) {
 	})
 
 	// Permission posture: sourced exactly as the instance materializer sources
-	// it -> permissions.defaultMode.
-	perms, ok := doc["permissions"].(map[string]any)
-	if !ok {
-		t.Fatalf("permissions block missing or wrong type: %#v", doc["permissions"])
-	}
-	if perms["defaultMode"] != "bypassPermissions" {
-		t.Errorf("permissions.defaultMode = %v, want bypassPermissions", perms["defaultMode"])
+	// it. bypass writes no permissions.defaultMode, and the root has no deny
+	// fallback, so the whole block is absent.
+	if perms, ok := doc["permissions"]; ok {
+		t.Errorf("permissions = %#v, want the block absent for bypass", perms)
 	}
 
 	// Ephemeral-session-mode flag.

@@ -374,6 +374,10 @@ type pipelineResult struct {
 	// one. Persisted into InstanceState.TrustKeys by Create/Apply; it is the
 	// sole authority for what a later apply may retract.
 	trustKeys []string
+	// claudePermissions is the instance's resolved permission posture
+	// ("bypass", "ask", or ""), computed from this run's effective config.
+	// Persisted into InstanceState.ClaudePermissions by Create/Apply.
+	claudePermissions string
 	// procedureErr is a procedure-routed delivery's failure carried out as
 	// data rather than as the pipeline's error return. The record above has to
 	// reach the state file before the failure reaches the user: a run that
@@ -581,6 +585,8 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		OverlayCommit:  result.overlayCommit,
 		AuthSources:    result.authSources,
 		TrustKeys:      result.trustKeys,
+		// Recomputed from this run's config alone, like Shadows.
+		ClaudePermissions: result.claudePermissions,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -778,6 +784,9 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		Shadows:              result.shadows,
 		AuthSources:          result.authSources,
 		TrustKeys:            result.trustKeys,
+		// Taken from this run's result, never from existingState: a posture
+		// removed from the config must stop being recorded on the next apply.
+		ClaudePermissions: result.claudePermissions,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -2092,19 +2101,20 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	a.reconcileMarketplaceRegistry(effectiveCfg, repoIndex)
 
 	return &pipelineResult{
-		classified:       classified,
-		repoStates:       repoStates,
-		managedFiles:     managedFiles,
-		warnings:         allWarnings,
-		setupIncomplete:  setupIncomplete,
-		shadows:          pipelineShadows,
-		authSources:      credentialPool.AuditLog().AsMap(),
-		overlayURL:       pipelineOverlayURL,
-		overlayCommit:    pipelineOverlayCommit,
-		disclosedNotices: newDisclosures,
-		trustKeys:        trustKeys,
-		procedureErr:     procErr,
-		exemptPaths:      exemptPaths,
+		classified:        classified,
+		repoStates:        repoStates,
+		managedFiles:      managedFiles,
+		warnings:          allWarnings,
+		setupIncomplete:   setupIncomplete,
+		shadows:           pipelineShadows,
+		authSources:       credentialPool.AuditLog().AsMap(),
+		overlayURL:        pipelineOverlayURL,
+		overlayCommit:     pipelineOverlayCommit,
+		disclosedNotices:  newDisclosures,
+		trustKeys:         trustKeys,
+		claudePermissions: instancePermissionsPosture(effectiveCfg),
+		procedureErr:      procErr,
+		exemptPaths:       exemptPaths,
 	}, nil
 }
 

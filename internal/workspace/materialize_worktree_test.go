@@ -162,10 +162,11 @@ func TestSettingsMaterializerWorktreeUnsupportedWritesDeny(t *testing.T) {
 	}
 }
 
-// TestSettingsMaterializerWorktreeUnsupportedPreservesDefaultMode asserts the
-// deny fallback coexists with a configured permissions.defaultMode rather than
-// clobbering it.
-func TestSettingsMaterializerWorktreeUnsupportedPreservesDefaultMode(t *testing.T) {
+// unsupportedDelegationPerms materializes a repo document for the given
+// posture with the worktree-delegation deny fallback active and returns its
+// permissions block.
+func unsupportedDelegationPerms(t *testing.T, posture string) map[string]any {
+	t.Helper()
 	repoDir := filepath.Join(t.TempDir(), "repo")
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -175,7 +176,7 @@ func TestSettingsMaterializerWorktreeUnsupportedPreservesDefaultMode(t *testing.
 		RepoDir: repoDir,
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
-				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
+				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: posture}},
 			},
 		},
 		WorktreeDelegation: &WorktreeDelegation{Supported: false},
@@ -187,11 +188,28 @@ func TestSettingsMaterializerWorktreeUnsupportedPreservesDefaultMode(t *testing.
 	if !ok {
 		t.Fatal("expected permissions key")
 	}
-	if perms["defaultMode"] != "bypassPermissions" {
-		t.Errorf("defaultMode = %v, want bypassPermissions (must be preserved)", perms["defaultMode"])
-	}
 	if _, ok := perms["deny"].([]any); !ok {
-		t.Errorf("expected permissions.deny alongside defaultMode, got %v", perms)
+		t.Errorf("expected permissions.deny, got %v", perms)
+	}
+	return perms
+}
+
+// TestSettingsMaterializerWorktreeUnsupportedPreservesDefaultMode asserts the
+// deny fallback coexists with a configured permissions.defaultMode rather than
+// clobbering it.
+func TestSettingsMaterializerWorktreeUnsupportedPreservesDefaultMode(t *testing.T) {
+	perms := unsupportedDelegationPerms(t, "ask")
+	if perms["defaultMode"] != "default" {
+		t.Errorf("defaultMode = %v, want default (must be preserved)", perms["defaultMode"])
+	}
+}
+
+// TestSettingsMaterializerWorktreeUnsupportedBypassDenyOnly asserts that a
+// bypass posture adds nothing to the deny fallback's permissions block.
+func TestSettingsMaterializerWorktreeUnsupportedBypassDenyOnly(t *testing.T) {
+	perms := unsupportedDelegationPerms(t, "bypass")
+	if len(perms) != 1 {
+		t.Errorf("permissions = %v, want only the deny key", perms)
 	}
 }
 

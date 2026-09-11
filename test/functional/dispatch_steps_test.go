@@ -457,11 +457,31 @@ func theLaunchedClaudeWasNotInvokedWith(ctx context.Context, notWant string) err
 	return nil
 }
 
+// theLaunchedClaudeWasInvokedWithExactlyTimes counts how often a fragment
+// appears in the argv the fake claude recorded on its --bg launch. It is what
+// tells "the explicit flag won" apart from "both flags were passed": a worker
+// handed --permission-mode twice gets whichever one Claude Code parses last.
+func theLaunchedClaudeWasInvokedWithExactlyTimes(ctx context.Context, fragment string, want int) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	argv, err := launchedClaudeArgv(s)
+	if err != nil {
+		return err
+	}
+	if got := strings.Count(argv, fragment); got != want {
+		return fmt.Errorf("launched claude argv contains %q %d times, want %d:\n%s", fragment, got, want, strings.TrimSpace(argv))
+	}
+	return nil
+}
+
 // registerDispatchSteps wires the dispatch-lifecycle steps into the scenario
 // context. Called from initializeScenario.
 func registerDispatchSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the launched claude was invoked with "([^"]*)"$`, theLaunchedClaudeWasInvokedWith)
 	ctx.Step(`^the launched claude was not invoked with "([^"]*)"$`, theLaunchedClaudeWasNotInvokedWith)
+	ctx.Step(`^the launched claude was invoked with "([^"]*)" exactly (\d+) times?$`, theLaunchedClaudeWasInvokedWithExactlyTimes)
 	ctx.Step(`^a fake claude for dispatch with session "([^"]*)"$`, aFakeClaudeForDispatchWithSession)
 	ctx.Step(`^a fake claude for dispatch that fails to launch$`, aFakeClaudeForDispatchThatFailsToLaunch)
 	ctx.Step(`^I run "([^"]*)" from the workspace root$`, iRunCommandFromTheWorkspaceRoot)

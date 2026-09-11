@@ -144,6 +144,22 @@ type InstanceState struct {
 	// not tell its own entry from the developer's answer. omitempty keeps the
 	// field invisible to old binaries reading new state files.
 	TrustKeys []string `json:"trust_keys,omitempty"`
+	// ClaudePermissions records the declared permission posture the
+	// instance-root settings document resolved from: "bypass", "ask", or
+	// empty when nothing is declared. It is niwa's own record of the
+	// declaration, not a Claude Code mode string, so it stays meaningful
+	// whatever the materializer writes into permissions.defaultMode.
+	//
+	// The instance pipeline recomputes it on every Create and Apply; it is
+	// never carried over from an earlier state file. Only `niwa dispatch`
+	// reads it, for the instance it just provisioned. niwa init and
+	// saveWorkspaceRootDisclosures write a multi-instance workspace root's
+	// state file outside the pipeline and never set it; a root that was
+	// applied as a single-instance layout before gaining child instances may
+	// still carry the value that apply recorded, and nothing reads it there.
+	// omitempty keeps the field invisible to old binaries reading new state
+	// files.
+	ClaudePermissions string `json:"claude_permissions,omitempty"`
 }
 
 // AuthSourceRecord is one row of the credential-source audit map

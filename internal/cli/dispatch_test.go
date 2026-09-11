@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -113,7 +114,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 		f.provisionCalled++
 		name := "test-ws" + sep + namePrefix
 		dir := filepath.Join(root, name)
-		if err := os.MkdirAll(filepath.Join(dir, ".niwa"), 0o755); err != nil {
+		if err := writeMinimalInstanceState(dir); err != nil {
 			return provisionResult{}, err
 		}
 		f.instancePath = dir
@@ -160,6 +161,19 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 	})
 
 	return f
+}
+
+// writeMinimalInstanceState gives a fake-provisioned instance directory the
+// .niwa/instance.json a real Create always saves, with no recorded permissions
+// posture. Dispatch reads that file to derive --permission-mode and warns when
+// it is missing, so a fake provisioner that skipped it would make every test
+// that isn't about the posture exercise the broken-state path instead.
+func writeMinimalInstanceState(dir string) error {
+	return workspace.SaveState(dir, &workspace.InstanceState{
+		SchemaVersion: workspace.SchemaVersion,
+		InstanceName:  filepath.Base(dir),
+		Root:          dir,
+	})
 }
 
 // runDispatchCmd invokes runDispatch with the given prompt, capturing stdout
@@ -469,6 +483,18 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 	installDispatchFakes(t, root)
 	dispatchDetach = true // no attach in the fan-out path
 
+	// Every dispatch runs the opportunistic reaper before it provisions, so a
+	// later goroutine sweeps the instances earlier ones already mapped -- they
+	// are instances the sweep can enumerate because the fake provisioner
+	// writes their .niwa/instance.json. A mapped session whose job entry is
+	// absent is gone by the reaper's rule and is reclaimed, mapping and all. A
+	// real dispatched worker has a job entry; the fake capture below writes one
+	// for each session it hands out, under a HOME of the test's own so the
+	// sweep reads this test's jobs directory.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	jobsDir := filepath.Join(home, ".claude", "jobs")
+
 	// Override the launch seam with a goroutine-safe no-op. The default fake from
 	// installDispatchFakes mutates shared dispatchFakes counters without
 	// synchronization, which would be a data race under concurrent dispatch; this
@@ -485,7 +511,7 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 		atomic.AddInt64(&provisionCount, 1)
 		name := "test-ws" + sep + namePrefix
 		dir := filepath.Join(r, name)
-		if err := os.MkdirAll(filepath.Join(dir, ".niwa"), 0o755); err != nil {
+		if err := writeMinimalInstanceState(dir); err != nil {
 			return provisionResult{}, err
 		}
 		return provisionResult{Name: name, Path: dir}, nil
@@ -499,7 +525,19 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 		// hex digit (i is 1..n, single hex digit covers n <= 15). A distinct
 		// short id accompanies each so the mapping key (full UUID) and the
 		// user-facing handle (short id) stay separable.
-		return fmt.Sprintf("00000000-0000-0000-0000-00000000000%x", i), fmt.Sprintf("short%x", i), nil
+		sid := fmt.Sprintf("00000000-0000-0000-0000-00000000000%x", i)
+		dir := filepath.Join(jobsDir, sid)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", "", err
+		}
+		body, err := json.Marshal(jobState{SessionID: sid, Template: bgJobTemplate})
+		if err != nil {
+			return "", "", err
+		}
+		if err := os.WriteFile(filepath.Join(dir, "state.json"), body, 0o644); err != nil {
+			return "", "", err
+		}
+		return sid, fmt.Sprintf("short%x", i), nil
 	}
 
 	var wg sync.WaitGroup

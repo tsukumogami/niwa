@@ -540,42 +540,58 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", modelWarning)
 	}
 
-	// (9a-derive) Read the instance's materialized settings once, ahead of the
-	// passthrough build so a derived --permission-mode can be assigned to
-	// dispatchPermissionMode before (9b) reads that variable. The 9c/9d
-	// consumers below reuse this same `inst` value instead of reading the
-	// file again -- this is the "read once" the (9c) comment below already
-	// promised, moved one step earlier so this derivation can share it too.
-	//
-	// A workspace's own declared `permissions = "bypass"` posture is carried
-	// through the materialized `.claude/settings.json` (RootSettingsMaterializer
-	// writes it there from workspace.toml). Since Claude Code 2.1.258 that
-	// posture no longer reaches a worker through the settings-file channel; the
-	// only channel still honored is this CLI flag. Deriving it here restores
-	// parity with pre-2.1.258 behavior for a workspace that already declared
-	// the posture -- it does not grant anything new. The derivation is scoped
-	// to the agent whose permission flag is Claude's own spelling
+	// (9a-derive) Derive the permission mode the worker launches with. An
+	// operator's explicit --permission-mode always wins and is the only one on
+	// the argv. Otherwise a workspace that declared `permissions = "bypass"`
+	// gets --permission-mode bypassPermissions, because the CLI flag is the
+	// channel Claude Code honors for a launched worker. The derivation is
+	// scoped to the agent whose permission flag is Claude's own spelling
 	// (`--permission-mode`): Codex's equivalent (`--sandbox`) takes an
 	// unrelated value vocabulary and Codex workers already get full trust
 	// through WorkdirGrantArgs, so forwarding "bypassPermissions" there would
-	// be wrong rather than merely unhelpful. A missing, unreadable, or
-	// malformed settings file degrades to "nothing derived", consistent with
-	// every other reader of readInstanceSettings, and never fails the dispatch.
-	inst, _ := readInstanceSettings(instancePath)
-	if dispatchPermissionMode == "" &&
-		spec.Flags.PermissionMode == "--permission-mode" &&
-		inst != nil && inst.Permissions != nil &&
-		inst.Permissions.DefaultMode == "bypassPermissions" {
-		dispatchPermissionMode = "bypassPermissions"
-		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: derived --permission-mode bypassPermissions from the workspace's declared permissions posture\n")
+	// be wrong rather than merely unhelpful.
+	//
+	// The posture comes from the instance state Create just saved, never from
+	// a generated settings document: what niwa writes into .claude/settings.json
+	// is free to change, and a hand-edited or deleted settings file must not
+	// grant or withhold the flag. The recorded value is trusted only because
+	// this process provisioned the instance moments ago. Code that needs the
+	// posture of an instance it did not just provision must re-resolve it from
+	// configuration rather than read ClaudePermissions from existing state.
+	//
+	// A missing, unreadable, or unparseable state file withholds the flag with
+	// a warning naming the file -- the worker then prompts rather than running
+	// unattended -- and never fails the dispatch.
+	recordedPermissions := ""
+	state, stateErr := workspace.LoadState(instancePath)
+	if stateErr == nil {
+		recordedPermissions = state.ClaudePermissions
 	}
+	permissionMode, derived := derivePermissionMode(dispatchPermissionMode, recordedPermissions, spec.Flags)
+	// An explicit --permission-mode sets the mode regardless of the posture, so
+	// the warning is skipped then: it would describe a decision that changed
+	// nothing. It still prints for an agent whose permission flag the
+	// derivation never uses, which is noise rather than harm. The path is named
+	// separately because a parse error does not carry it.
+	if stateErr != nil && permissionMode == "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: warning: could not read %s (%v); treating the workspace's permissions posture as undeclared\n",
+			filepath.Join(instancePath, workspace.StateDir, workspace.StateFile), stateErr)
+	}
+	if derived {
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: derived --permission-mode %s from the workspace's declared permissions posture\n", permissionMode)
+	}
+
+	// Read the instance's materialized settings once, for the remote-control
+	// default-fill in (9c) and the keep-alive resolution in (9d). A missing,
+	// unreadable, or malformed file degrades to "downstream unset" for both.
+	inst, _ := readInstanceSettings(instancePath)
 
 	// (9b) Build the pass-through argv. Flags become discrete argv elements --
 	// never string-concatenated -- so a crafted value cannot inject a flag
 	// (DESIGN Decision 8). The spelling of each flag is the launched agent's,
 	// and an intent that agent has no flag for is dropped rather than guessed
 	// at.
-	passthrough := buildDispatchPassthrough(spec.Flags, forwardedName, resolvedModel)
+	passthrough := buildDispatchPassthrough(spec.Flags, forwardedName, resolvedModel, permissionMode)
 
 	// (9c) Remote-control-on-dispatch default-fill. When the host preference
 	// (~/.config/niwa/config.toml [global].remote_control_on_dispatch) is on and
@@ -588,9 +604,8 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// is treated as unset), and an unreadable instance settings file is treated as
 	// "downstream unset" -- so the host default-fill still applies. Either way the
 	// dispatch always launches. The global config is loaded once in step (9) and
-	// reused here. The instance settings were read once too, ahead of (9b) at
-	// (9a-derive) -- the keep-alive resolution in (9d) consults the same
-	// projection.
+	// reused here. The instance settings were read once too, ahead of (9b) --
+	// the keep-alive resolution in (9d) consults the same projection.
 	//
 	// Remote control is its own capability row, and it reaches a session as a
 	// settings document the agent reads. An agent that has no such flag has
@@ -1030,6 +1045,27 @@ func isDispatchInstanceName(name string) bool {
 	return dispatchInstanceNameRe.MatchString(name)
 }
 
+// derivePermissionMode decides the permission mode a dispatched worker is
+// launched with. explicit is the operator's --permission-mode value, recorded
+// is the instance's recorded posture (InstanceState.ClaudePermissions), and
+// flags is the launched agent's flag spelling.
+//
+// An explicit value always wins and is returned unchanged, with derived false.
+// Otherwise the mode is "bypassPermissions", with derived true, exactly when the
+// agent's permission flag is Claude's own --permission-mode and the recorded
+// posture is "bypass". Every other case -- "ask", an empty or unrecognized
+// posture, or an agent with a different permission flag -- yields ("", false),
+// so nothing is forwarded.
+func derivePermissionMode(explicit, recorded string, flags agentplan.LaunchFlags) (mode string, derived bool) {
+	if explicit != "" {
+		return explicit, false
+	}
+	if flags.PermissionMode == "--permission-mode" && recorded == "bypass" {
+		return "bypassPermissions", true
+	}
+	return "", false
+}
+
 // buildDispatchPassthrough turns the set pass-through flags into discrete argv
 // elements (flag, value pairs). Each value stays its own element so a crafted
 // value cannot smuggle in an extra claude flag (DESIGN Decision 8).
@@ -1042,7 +1078,15 @@ func isDispatchInstanceName(name string) bool {
 // model is the already-resolved main-loop model (see resolveDispatchModel): a
 // concrete versionless name, forwarded as "--model <model>", or "" to forward
 // nothing. Resolution happens in the caller so this stays a pure argv builder.
-func buildDispatchPassthrough(flags agentplan.LaunchFlags, displayName, model string) []string {
+//
+// permissionMode is the mode to forward as the agent's permission flag, or ""
+// to forward none. It is a parameter rather than a read of the --permission-mode
+// flag variable so every caller states what it passes: dispatch passes what
+// derivePermissionMode returned, and `niwa watch` passes "" at both of its
+// launch sites, so no shared variable can leak a permission mode into a
+// launch that never asked for one. The subagent type is still read from its
+// flag variable, which only `niwa dispatch` sets.
+func buildDispatchPassthrough(flags agentplan.LaunchFlags, displayName, model, permissionMode string) []string {
 	var pass []string
 	// Each pair is appended only when niwa has something to say AND the agent
 	// has a flag to say it with. An intent an agent has no flag for is dropped
@@ -1051,7 +1095,7 @@ func buildDispatchPassthrough(flags agentplan.LaunchFlags, displayName, model st
 	// developer something they did not ask for.
 	for _, pair := range []struct{ flag, value string }{
 		{flags.Model, model},
-		{flags.PermissionMode, dispatchPermissionMode},
+		{flags.PermissionMode, permissionMode},
 		{flags.SubagentType, dispatchAgent},
 		{flags.DisplayName, displayName},
 	} {

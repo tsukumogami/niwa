@@ -100,8 +100,9 @@ type RootMaterializeOptions struct {
 //     buildSettingsDoc, carrying the SessionStart hook entry
 //     (piping stdin to "niwa instance from-hook" with a generous timeout; no
 //     SessionEnd entry -- teardown is reaper-driven, DESIGN Decision 6),
-//     the permission posture (permissions.defaultMode, sourced the same way
-//     instance materialization sources it), and the ephemeral-session-mode flag.
+//     the permission posture (sourced the same way instance materialization
+//     sources it; only ask writes a permissions.defaultMode, "default"), and
+//     the ephemeral-session-mode flag.
 //   - one context document per agent, under that agent's own root filename,
 //     carrying workspace-context content at root altitude.
 //
@@ -223,9 +224,13 @@ func writeRootSkills(workspaceRoot string) ([]string, error) {
 
 // writeRootSettings builds and writes <workspaceRoot>/.claude/settings.json via
 // the shared buildSettingsDoc. The permission posture is sourced from the
-// effective [claude.settings] block (MergeInstanceOverrides) -- the same input
-// the instance-root materializer feeds to buildSettingsDoc -- so the
-// permissions.defaultMode value matches what an instance would get. The
+// workspace [claude.settings] block with [instance.claude.settings] merged over
+// it (MergeInstanceOverrides), but without the workspace overlay or the
+// personal overlay, which reach only instances. So the root's posture matches
+// the instance root's unless an overlay declares one; a personal-overlay ask
+// over a workspace bypass gives the instance root "default" and the root no
+// mode. As everywhere, bypass or undeclared writes no permissions.defaultMode
+// and ask writes "default". The
 // effective plugins and marketplaces are forwarded too, filtered to the subset
 // that resolves at the workspace root (see rootHoistableConfig), so a
 // root-launched session loads the workspace's plugins/skills. The
@@ -249,7 +254,8 @@ func writeRootSettings(cfg *config.WorkspaceConfig, workspaceRoot, niwaPath stri
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
 		// Permission posture: sourced exactly as the instance root sources it,
 		// from the effective [claude.settings] map. buildSettingsDoc maps the
-		// "permissions" key to permissions.defaultMode.
+		// "permissions" key through claudeDefaultMode, which writes a
+		// permissions.defaultMode only for ask.
 		Settings: effective.Claude.Settings,
 		// Plugins/marketplaces: the root-hoistable subset, so the workspace's
 		// plugins (and the skills they carry) load for a session launched at the
