@@ -49,6 +49,23 @@ type GlobalSettings struct {
 	// outranks it too. nil preserves today's behavior (no keep-alive arming).
 	// It mirrors RemoteControlOnDispatch, plus the flag layer RC does not have.
 	KeepAliveOnDispatch *bool `toml:"keep_alive_on_dispatch,omitempty"`
+	// AcceptSessionMessagesOnDispatch, when non-nil and true, makes `niwa
+	// dispatch` start workers that accept inbound messages from other Claude
+	// Code sessions without asking (the worker is launched with the
+	// crossSessionInbound setting). The senders are any session able to
+	// address the worker, including sessions on other machines and in the
+	// cloud. It only applies to agents that support the setting; for others it
+	// does nothing. It is a host-level default scoped to dispatched workers
+	// only; the per-dispatch --accept-session-messages flag overrides it in
+	// both directions. Unlike RemoteControlOnDispatch and KeepAliveOnDispatch,
+	// which a downstream setting can outrank, no workspace, instance, or
+	// repository settings source is read for it at all: whether a worker takes
+	// messages from other sessions is meant to be the developer's call, not a
+	// cloned repo's. nil means off unless the flag turns it on for one
+	// dispatch. Off launches the worker without the setting, which keeps
+	// Claude Code's default holds on inbound messages; it does not isolate the
+	// worker from other sessions (see CrossSessionInboundKey).
+	AcceptSessionMessagesOnDispatch *bool `toml:"accept_session_messages_on_dispatch,omitempty"`
 	// DispatchModel is the default model for a `niwa dispatch` worker's main
 	// chat loop when the command is run without --model. It accepts the same
 	// vocabulary as the flag: a capability category (fast/balanced/powerful) or
@@ -301,9 +318,10 @@ func SaveGlobalConfig(cfg *GlobalConfig) error {
 // drops the file's comments and any key this build does not know about --
 // a key written by a newer niwa, or one of the [global] settings that has no
 // setter at all (dispatch_model, remote_control_on_dispatch,
-// keep_alive_on_dispatch, watch_sandbox, watch_max_staged), whose documented
-// way to use them is to hand-edit this file. A developer who hand-edits with a
-// comment explaining why loses it to an unrelated `niwa config set`.
+// keep_alive_on_dispatch, accept_session_messages_on_dispatch, watch_sandbox,
+// watch_max_staged), whose documented way to use them is to hand-edit this
+// file. A developer who hand-edits with a comment explaining why loses it to an
+// unrelated `niwa config set`.
 //
 // It predates any one caller and affects all of them, and fixing it means
 // editing the TOML tree in place rather than round-tripping a struct -- a

@@ -15,10 +15,18 @@ import (
 func init() {
 	rootCmd.AddCommand(listCmd)
 	listCmd.Flags().BoolVar(&listJSON, "json", false,
-		"emit a JSON array of {name, path, ephemeral[, keep_alive][, session_name]} records, one per instance")
+		"emit a JSON array of {name, path, ephemeral, accepts_session_messages[, keep_alive][, session_name]} records, one per instance")
 }
 
 var listJSON bool
+
+// The markers the human output appends to an instance's name. Keep-alive
+// comes first when both apply, so the "<name> (keep-alive)" prefix that
+// existing readers match stays unchanged.
+const (
+	keepAliveMarker              = " (keep-alive)"
+	acceptsSessionMessagesMarker = " (accepts session messages)"
+)
 
 var listCmd = &cobra.Command{
 	Use:   "list",
@@ -37,13 +45,22 @@ An instance backed by a dispatched session is followed by the command that
 steps back into that session, so the handle survives the terminal that
 printed it.
 
-With --json, emits a JSON array of {name, path, ephemeral} records, where
-ephemeral marks instances backed by an ephemeral session mapping. An
-instance whose session was dispatched with keep-alive armed and is still
+With --json, emits a JSON array of {name, path, ephemeral,
+accepts_session_messages} records, where ephemeral marks instances backed by
+an ephemeral session mapping.
+
+accepts_session_messages is on every record. It is true when niwa launched
+the instance's dispatched session set to accept messages from other sessions
+without an approval prompt, and false otherwise. It is reported whether or
+not that session is still running, for as long as the instance exists;
+turning the machine setting off later does not change it. A true record
+shows an "(accepts session messages)" marker in the human output.
+
+An instance whose session was dispatched with keep-alive armed and is still
 live additionally carries keep_alive:true (and a "(keep-alive)" marker in
-the human output). An instance whose dispatch recorded a session name
-additionally carries session_name, the same value the session name: line
-shows.`,
+the human output, placed before the "(accepts session messages)" marker when
+both apply). An instance whose dispatch recorded a session name additionally
+carries session_name, the same value the session name: line shows.`,
 	Args: cobra.NoArgs,
 	RunE: runList,
 }
@@ -86,11 +103,14 @@ func runList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	for _, r := range records {
+		line := r.Name
 		if r.KeepAlive {
-			fmt.Fprintf(cmd.OutOrStdout(), "%s (keep-alive)\n", r.Name)
-		} else {
-			fmt.Fprintln(cmd.OutOrStdout(), r.Name)
+			line += keepAliveMarker
 		}
+		if r.AcceptsSessionMessages {
+			line += acceptsSessionMessagesMarker
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), line)
 		// The name the session answers to, as the dispatch recorded it. It
 		// was validated against the forwarded-name shape when the join filled
 		// it, so what prints here is never raw mapping content.
@@ -122,10 +142,16 @@ func runList(cmd *cobra.Command, args []string) error {
 // since been deleted reports nothing -- its self-wake died with the session,
 // so the report reflects sessions being kept alive NOW, not past opt-ins.
 //
+// It sets each record's AcceptsSessionMessages flag when any mapping pointing
+// at the instance recorded the behavior, with NO liveness check. The grant was made
+// when the session launched, so it is reported for as long as the instance
+// exists, including after the session has finished or been deleted.
+//
 // It returns, keyed by instance path, the command that steps back into the
 // session an instance is backed by, for the instances niwa can name one for.
-// A store read failure degrades to no annotation and no commands; list must
-// stay usable with a partially written store.
+// A store read failure degrades to no annotation and no commands, which leaves
+// both flags false and the name empty; list must stay usable with a partially
+// written store.
 //
 // It also fills each record's SessionName from the mapping with the latest
 // Created time for that instance. The value is checked against
@@ -144,6 +170,7 @@ func annotateFromSessionMappings(records []workspace.InstanceRecord, workspaceRo
 		return nil
 	}
 	keptAlive := make(map[string]bool)
+	accepting := make(map[string]bool)
 	resume := make(map[string]string)
 	// newest is the latest-Created mapping per instance path. It is chosen
 	// before its name is checked: a newer mapping whose name is empty or fails
@@ -153,6 +180,9 @@ func annotateFromSessionMappings(records []workspace.InstanceRecord, workspaceRo
 	for _, m := range mappings {
 		if m.KeepAlive && sessionLive(jobsDir, m.SessionID, now) {
 			keptAlive[m.InstancePath] = true
+		}
+		if m.AcceptsSessionMessages {
+			accepting[m.InstancePath] = true
 		}
 		if cmdline := sessionResumeCommand(m); cmdline != "" {
 			resume[m.InstancePath] = cmdline
@@ -164,6 +194,9 @@ func annotateFromSessionMappings(records []workspace.InstanceRecord, workspaceRo
 	for i := range records {
 		if keptAlive[records[i].Path] {
 			records[i].KeepAlive = true
+		}
+		if accepting[records[i].Path] {
+			records[i].AcceptsSessionMessages = true
 		}
 		if m, ok := newest[records[i].Path]; ok && dispatchSessionNameRe.MatchString(m.SessionName) {
 			records[i].SessionName = m.SessionName

@@ -84,29 +84,14 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 	t.Helper()
 	f := &dispatchFakes{}
 
+	resetDispatchFlags(t)
+
 	prevLook := lookAgentBinary
 	prevProvision := provisionInstanceFunc
 	prevLaunch := dispatchLaunch
 	prevCapture := dispatchCapture
 	prevAttach := dispatchAttach
 	prevDestroy := destroyInstanceFunc
-	prevLabel := dispatchLabel
-	prevName := dispatchName
-	prevModel := dispatchModel
-	prevPerm := dispatchPermissionMode
-	prevAgent := dispatchAgent
-	prevHarness := dispatchHarness
-	prevDetach := dispatchDetach
-	prevKeepAlive := dispatchKeepAlive
-
-	dispatchLabel = ""
-	dispatchName = ""
-	dispatchModel = ""
-	dispatchPermissionMode = ""
-	dispatchAgent = ""
-	dispatchHarness = ""
-	dispatchDetach = false
-	dispatchKeepAlive = nil
 
 	lookAgentBinary = func(string) (string, error) { return "/usr/bin/claude", nil }
 
@@ -150,6 +135,43 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 		dispatchCapture = prevCapture
 		dispatchAttach = prevAttach
 		destroyInstanceFunc = prevDestroy
+	})
+
+	return f
+}
+
+// resetDispatchFlags zeroes every `niwa dispatch` flag variable and restores
+// what was there on cleanup. The flag variables are package-level, so a test
+// that sets one would otherwise decide the next test's dispatch.
+//
+// It is separate from installDispatchFakes because not every test that needs
+// the flags reset wants the seams faked: a test exercising the REAL launcher
+// still has to pin the flags, and installing a fake dispatchLaunch would defeat
+// the point of the exercise.
+func resetDispatchFlags(t *testing.T) {
+	t.Helper()
+
+	prevLabel := dispatchLabel
+	prevName := dispatchName
+	prevModel := dispatchModel
+	prevPerm := dispatchPermissionMode
+	prevAgent := dispatchAgent
+	prevHarness := dispatchHarness
+	prevDetach := dispatchDetach
+	prevKeepAlive := dispatchKeepAlive
+	prevAcceptSessionMessages := dispatchAcceptSessionMessages
+
+	dispatchLabel = ""
+	dispatchName = ""
+	dispatchModel = ""
+	dispatchPermissionMode = ""
+	dispatchAgent = ""
+	dispatchHarness = ""
+	dispatchDetach = false
+	dispatchKeepAlive = nil
+	dispatchAcceptSessionMessages = nil
+
+	t.Cleanup(func() {
 		dispatchLabel = prevLabel
 		dispatchName = prevName
 		dispatchModel = prevModel
@@ -158,9 +180,8 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 		dispatchHarness = prevHarness
 		dispatchDetach = prevDetach
 		dispatchKeepAlive = prevKeepAlive
+		dispatchAcceptSessionMessages = prevAcceptSessionMessages
 	})
-
-	return f
 }
 
 // writeMinimalInstanceState gives a fake-provisioned instance directory the

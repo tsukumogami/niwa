@@ -105,8 +105,8 @@ func resolveDispatchKeepAlive(flag *bool, global config.GlobalSettings, inst *in
 }
 
 // remoteControlEnabled reports whether the dispatched worker will start with
-// the Remote Control bridge on: either niwa injected the RC settings flag for
-// this dispatch (rcInjected), or the instance's own materialized
+// the Remote Control bridge on: either niwa added remote control's key to the
+// launch settings for this dispatch (rcInjected), or the instance's own materialized
 // settings.json set remoteControlAtStartup true (the downstream opt-in the
 // worker honors by itself, which is exactly the case where the RC resolver
 // injects nothing). Keep-alive arms only when this holds -- the self-wake

@@ -143,7 +143,7 @@ func TestListJSONShape(t *testing.T) {
 		t.Fatalf("expected 2 records, got %d", len(got))
 	}
 	for _, rec := range got {
-		for _, k := range []string{"name", "path", "ephemeral"} {
+		for _, k := range []string{"name", "path", "ephemeral", "accepts_session_messages"} {
 			if _, ok := rec[k]; !ok {
 				t.Errorf("missing key %q in %v", k, rec)
 			}

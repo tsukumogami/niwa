@@ -37,7 +37,7 @@ package agentplan
 import "fmt"
 
 // Capability names one thing a workspace preparation can deliver to an agent
-// session. The set is closed: the constants below are the 24 rows of the
+// session. The set is closed: the constants below are the 25 rows of the
 // capability matrix in docs/prds/PRD-agent-capability-contract.md, in matrix
 // order, and adding a member is a product decision rather than an
 // implementation detail.
@@ -134,6 +134,12 @@ const (
 	// GitExcludeBookkeeping is git-exclude coverage for the files niwa writes
 	// into a repository (row 24).
 	GitExcludeBookkeeping
+
+	// DispatchInboundAcceptance is a dispatched background worker accepting
+	// messages from other sessions without an approval prompt (row 25). It is
+	// appended rather than placed beside the other dispatch rows so rows 23 and
+	// 24 keep the numbers comments and the capability-contract PRD cite.
+	DispatchInboundAcceptance
 )
 
 // Route names how a capability's delivery reaches a session. It is a property
@@ -194,6 +200,7 @@ var catalog = []capabilityRow{
 	{DispatchLaunch, "dispatch-launch", RouteLaunch},
 	{DirectoryTrust, "directory-trust", RouteProcedure},
 	{GitExcludeBookkeeping, "git-exclude-bookkeeping", RouteProcedure},
+	{DispatchInboundAcceptance, "dispatch-inbound-acceptance", RouteLaunch},
 }
 
 // All returns every capability in matrix order. The result is a fresh slice, so
@@ -226,7 +233,7 @@ func (c Capability) Route() Route {
 	return 0
 }
 
-// row finds the catalog entry for c. The scan is linear over 24 entries, which
+// row finds the catalog entry for c. The scan is linear over 25 entries, which
 // costs less than the map plus init needed to avoid it.
 func (c Capability) row() (capabilityRow, bool) {
 	for _, row := range catalog {

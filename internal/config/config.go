@@ -448,6 +448,24 @@ type SettingsConfig map[string]MaybeSecret
 // so a test pins that tag to this value.
 const RemoteControlAtStartupKey = "remoteControlAtStartup"
 
+// CrossSessionInboundKey is the Claude Code settings key that governs the holds
+// Claude Code puts on inbound messages from other Claude Code sessions. By
+// default Claude Code holds some of them for a person's approval, such as a
+// message from a session in a different permission-mode class; set to "accept",
+// the key lifts those holds and the session acts on the messages without asking.
+// Leaving it unset keeps Claude Code's default, which does not isolate a
+// session: a bypass-mode sender that attests its mode already reaches a
+// bypass-mode receiver without a hold. The senders are any session able to
+// address this one by name across the developer's Claude Code account,
+// including sessions on other machines and in the cloud. It is the single
+// source of truth for the key's spelling; the dispatch argv that injects it via
+// `claude --settings` must use this constant rather than a literal. Unlike
+// RemoteControlAtStartupKey, it must not be emitted into a materialized
+// settings.json: Claude Code honors "accept" only from managed settings, user
+// settings, or `--settings`, and silently ignores it in project or local
+// settings.
+const CrossSessionInboundKey = "crossSessionInbound"
+
 // KeepAliveOnDispatchKey is the settings key a downstream [claude.settings]
 // uses to decide dispatch keep-alive for its own instances. Unlike
 // RemoteControlAtStartupKey it is a niwa-defined key, not a Claude Code one --

@@ -113,10 +113,40 @@ type testState struct {
 	// re-apply produced no spurious change. Keyed by worktree-relative path.
 	worktreeFileSnapshots map[string]string
 
-	// lastDispatchInstancePath records the disp-<hex> instance directory
-	// discovered after a `niwa dispatch` run, so later steps can assert its
-	// presence/absence without hardcoding the random name suffix.
+	// lastDispatchInstancePath records the instance directory the last `niwa
+	// dispatch` run created, so later steps can assert on it without
+	// hardcoding the random name suffix. The name is "<config>+-<8 hex>" or
+	// "<config>+<slug>-<8 hex>"; see dispatchInstanceNameRe, recordDispatchInstance
+	// for which steps fill it in, and findDispatchInstance for why "last" is
+	// decided by modification time.
 	lastDispatchInstancePath string
+
+	// Session-message acceptance state. See session_message_steps_test.go.
+
+	// rememberedMachineConfig is the machine config.toml exactly as a scenario
+	// recorded it, so a later step can prove a dispatch that printed the
+	// one-time explanation left the file alone (the notice is remembered in a
+	// marker file beside it, never by rewriting it).
+	rememberedMachineConfig []byte
+
+	// rememberedStdout is a dispatch's standard output, kept so a second
+	// dispatch's can be compared against it.
+	rememberedStdout string
+
+	// personalClaudeSettingsBytes and personalClaudeSettingsModTime snapshot
+	// the developer's own Claude Code user settings at seed time. A dispatch
+	// must leave both alone: the accept-messages decision travels as a launch
+	// flag exactly so one dispatch cannot change what every other session on
+	// the machine does.
+	personalClaudeSettingsBytes   []byte
+	personalClaudeSettingsModTime time.Time
+
+	// parallelRuns holds one entry per command started by the parallel pty
+	// step, in launch order. Each run's transcript and exit code are kept
+	// apart, because the assertions are about individual runs -- "every
+	// transcript has exactly one audit line" is not a statement about their
+	// concatenation.
+	parallelRuns []ptyRun
 
 	// heldLocks are advisory locks a scenario is holding to stand in for a live
 	// worker, kept open because a flock lives on the open file description:
@@ -480,6 +510,11 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	registerDispatchSpillSteps(ctx)
 	registerKeepAliveSteps(ctx)
 
+	// --- session-message acceptance: the --accept-session-messages flag, the
+	// accept_session_messages_on_dispatch machine key, and what each one puts
+	// in front of the launched worker ---
+	registerSessionMessageSteps(ctx)
+
 	// --- permission posture: the host config a posture scenario needs and the
 	// settings documents a declared posture reaches ---
 	registerPostureSteps(ctx)
@@ -503,8 +538,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the GitHub fake returns HTTP (\d+) for "([^"]*)" repo metadata$`, theGitHubFakeReturnsStatusForRepoMetadata)
 	ctx.Step(`^the GitHub fake serves "([^"]*)" repo metadata with body:$`, theGitHubFakeServesRepoMetadataWithBody)
 
-	// TTY simulation: drive niwa init under util-linux `script -q` so
-	// stdin is a real pty. The supplied input is fed line-by-line.
+	// TTY simulation: run the command under util-linux `script -q` so stdin
+	// and stdout are a real pty, and feed it the supplied input. Defined in
+	// steps_pty_test.go, which holds the harness's terminal primitives; the
+	// session-message steps register two more of them against the same runner.
 	ctx.Step(`^I run "([^"]*)" under a pty with input "([^"]*)"$`, iRunUnderPTYWithInput)
 	ctx.Step(`^I run "([^"]*)" with stdin held open$`, iRunWithStdinHeldOpen)
 }

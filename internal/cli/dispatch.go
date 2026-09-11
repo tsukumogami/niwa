@@ -38,6 +38,11 @@ func init() {
 	// NoOptDefVal makes the bare `--keep-alive` form mean explicit true.
 	dispatchCmd.Flags().Var(triBoolValue{&dispatchKeepAlive}, "keep-alive", "arm a keep-alive self-wake on the dispatched worker so its remote-control session stays reachable across long idle (only applies when remote control is on; --keep-alive=false forces it off)")
 	dispatchCmd.Flags().Lookup("keep-alive").NoOptDefVal = "true"
+	// --accept-session-messages is tri-state for the same reason: it overrides
+	// the [global] accept_session_messages_on_dispatch machine setting in both
+	// directions, and the bare form means explicit true.
+	dispatchCmd.Flags().Var(triBoolValue{&dispatchAcceptSessionMessages}, acceptSessionMessagesFlagName, acceptSessionMessagesFlagUsage)
+	dispatchCmd.Flags().Lookup(acceptSessionMessagesFlagName).NoOptDefVal = "true"
 	rootCmd.AddCommand(dispatchCmd)
 }
 
@@ -301,11 +306,12 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	workspaceRoot := class.WorkspaceRoot
 
 	// (2a) Load the host global config ONCE, best-effort, and reuse it below.
-	// It carries two things this command reads: the machine-wide dispatch
-	// harness (broadest rung of the agent resolution just below) and the
-	// dispatch_model and remote-control defaults consumed after provisioning. A missing or
-	// unreadable config degrades to "none of those set", which is today's
-	// behavior for every one of them -- they are all opt-in defaults.
+	// This command reads the machine-wide dispatch harness from it (the
+	// broadest rung of the agent resolution just below) and, after
+	// provisioning, the dispatch defaults: dispatch_model, remote control,
+	// keep-alive, and accepting messages from other sessions. A missing or
+	// unreadable config degrades to "none of those set", which is the default
+	// for every one of them -- they are all opt-in.
 	gc, gcErr := config.LoadGlobalConfig()
 
 	// (2b) Resolve which agent this dispatch launches, from --harness,
@@ -593,24 +599,52 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// at.
 	passthrough := buildDispatchPassthrough(spec.Flags, forwardedName, resolvedModel, permissionMode)
 
-	// (9c) Remote-control-on-dispatch default-fill. When the host preference
+	// (9b-host) The host [global] settings as a value, zero when the config
+	// could not be loaded. Both the inbound resolution in (9c) and keep-alive in
+	// (9d) read it, so an unreadable or malformed config.toml counts as "no
+	// machine setting" for each of them while their flags still apply. Remote
+	// control's block below still reads gc and gcErr directly; it has no flag,
+	// and an unreadable config means no injection whichever value it reads.
+	var hostGlobal config.GlobalSettings
+	if gcErr == nil && gc != nil {
+		hostGlobal = gc.Global
+	}
+
+	// (9c) The launch settings document, built from its contributors: remote
+	// control's default-fill first, then accepting messages from other
+	// sessions (below).
+	//
+	// Remote-control-on-dispatch default-fill: when the host preference
 	// (~/.config/niwa/config.toml [global].remote_control_on_dispatch) is on and
-	// the dispatched instance left remoteControlAtStartup unset, append the
-	// Claude Code Remote settings flag so the worker starts steerable. The flag
-	// is two discrete argv elements (no shell interpolation). This is the only
-	// dispatch-exclusive seam, so the default never leaks to interactive,
-	// ephemeral, or `niwa apply` sessions. Neither read can fail the dispatch: a
+	// the dispatched instance left remoteControlAtStartup unset, add the Claude
+	// Code Remote key to the launch settings document so the worker starts
+	// steerable. The document rides the settings flag as two discrete argv
+	// elements (no shell interpolation). This is the only dispatch-exclusive
+	// seam, so the default never leaks to interactive, ephemeral, or
+	// `niwa apply` sessions. Neither read can fail the dispatch: a
 	// missing/unreadable global config degrades to "no injection" (the preference
 	// is treated as unset), and an unreadable instance settings file is treated as
-	// "downstream unset" -- so the host default-fill still applies. Either way the
-	// dispatch always launches. The global config is loaded once in step (9) and
-	// reused here. The instance settings were read once too, ahead of (9b) --
-	// the keep-alive resolution in (9d) consults the same projection.
+	// "downstream unset" -- so the host default-fill still applies. Either way
+	// the dispatch always launches. The global config is loaded once at (2a) and
+	// reused here. The instance settings were read once too, ahead of (9b) at
+	// (9a-derive) -- the keep-alive resolution in (9d) consults the same
+	// projection.
 	//
 	// Remote control is its own capability row, and it reaches a session as a
-	// settings document the agent reads. An agent that has no such flag has
-	// nowhere for the document to go, so the injection is gated on the
-	// declaration rather than attempted and dropped.
+	// settings document the agent reads. Its key goes in only when the
+	// declaration says it's implemented and the agent has a settings flag
+	// (rcDeliverable).
+	//
+	// The launch has one settings slot, so remote control does not append its
+	// own document. It adds its key to launchSettings, and the map is rendered
+	// once below into a single --settings element (see renderLaunchSettings).
+	// rcInjected is set from remote control's own inject decision, never from
+	// whether a document was rendered: keep-alive reads it in (9d), and a
+	// document carrying some other contributor's key must not arm keep-alive on
+	// a worker that starts without remote control. A new contributor adds its
+	// own block between remote control's and the render call, deciding and
+	// recording for itself whether its key went in.
+	launchSettings := map[string]any{}
 	rcInjected := false
 	rcDecl, rcErr := agentplan.Lookup(agentplan.RemoteControl, dispatchedAgent)
 	rcDeliverable := rcErr == nil && rcDecl.State == agentplan.StateImplemented && spec.Flags.Settings != ""
@@ -624,21 +658,61 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", warning)
 		}
 		if inject {
-			passthrough = append(passthrough, spec.Flags.Settings, remoteControlSettingsJSON)
+			launchSettings[config.RemoteControlAtStartupKey] = true
 			rcInjected = true
 		}
+	}
+	// Accepting messages from other sessions is the second contributor. The
+	// --accept-session-messages flag is resolved over the machine setting, and
+	// the declaration then says whether this agent can receive the behavior at
+	// all, in the shape remote control's gate uses. inboundApplied is the one
+	// record that the key went in. The audit line after step (12) prints
+	// exactly when it is true, so it cannot claim a worker accepts messages
+	// when the document did not say so. Only the flag earns a warning
+	// when the agent cannot receive it; a machine setting asks for every
+	// dispatch, so it stays quiet on the ones it cannot reach.
+	inbound := resolveDispatchInboundAcceptance(dispatchAcceptSessionMessages, hostGlobal)
+	inboundDecl, inboundErr := agentplan.Lookup(agentplan.DispatchInboundAcceptance, dispatchedAgent)
+	inboundDeliverable := inboundErr == nil && inboundDecl.State == agentplan.StateImplemented && spec.Flags.Settings != ""
+	inboundApplied := false
+	switch {
+	case !inbound.on:
+		// Not asked for, or turned off. Nothing goes in the document.
+	case !inboundDeliverable:
+		if inbound.source == inboundSourceFlag {
+			fmt.Fprintf(cmd.ErrOrStderr(), inboundUndeliverableFormat+"\n", dispatchedAgent, inboundDecl.Reason)
+		}
+	default:
+		launchSettings[config.CrossSessionInboundKey] = crossSessionInboundAccept
+		inboundApplied = true
+	}
+	// Two discrete argv elements, and none at all when no contributor added a
+	// key. An agent with no settings flag has nowhere for the document to go,
+	// so every contributor must check spec.Flags.Settings itself before adding
+	// a key and recording that it did, as remote control does through
+	// rcDeliverable. A contributor that skipped its check is a niwa bug, and
+	// the dispatch fails on it (the rollback armed at (7) removes the
+	// instance). Dropping the document instead would leave that contributor's
+	// record saying its key was sent, and appending it would launch with an
+	// empty flag element and a stray document.
+	if doc, ok := renderLaunchSettings(launchSettings); ok {
+		if spec.Flags.Settings == "" {
+			return fmt.Errorf("niwa: error: internal: a launch setting was added for the %q agent, which has no settings flag", dispatchedAgent)
+		}
+		passthrough = append(passthrough, spec.Flags.Settings, doc)
 	}
 
 	// (9d) Keep-alive arming. The opt-in resolves flag > downstream > host
 	// default (resolveDispatchKeepAlive); an unreadable host config degrades to
-	// "host default unset" through the zero GlobalSettings, so keep-alive --
-	// like remote-control -- can never fail the dispatch. When it resolves on
-	// AND the worker starts with remote control (either injected above or
-	// decided downstream), prepend the fixed self-arm instruction to the task
-	// prompt (channel B2; see dispatch_keepalive.go for why the SessionStart
-	// channel does not reach a dispatched worker). The instruction rides the
-	// same single argv element as the prompt, so the D8 no-shell-interpolation
-	// guard is preserved, and its fixed size was already reserved by step (1):
+	// "host default unset" through the zero GlobalSettings built at (9b-host),
+	// so keep-alive -- like remote-control -- can never fail the dispatch. When
+	// it resolves on AND the worker starts with remote control (either injected
+	// above or decided downstream), prepend the fixed self-arm instruction to
+	// the task prompt (channel B2; see dispatch_keepalive.go for why the
+	// SessionStart channel does not reach a dispatched worker). The instruction
+	// rides the same single argv element as the prompt, so the D8
+	// no-shell-interpolation guard is preserved, and its fixed size was already
+	// reserved by step (1):
 	// maxPromptBytes is the exec ceiling minus dispatchPromptReserve, which is
 	// this constant's length, so a prompt that got here can absorb the prepend
 	// and still fit in one argv element. This is a reservation, not a margin:
@@ -646,10 +720,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// Requesting keep-alive without remote control warns and arms nothing --
 	// the dispatch itself always proceeds. Without the opt-in this block
 	// changes nothing: the launch stays byte-identical.
-	var hostGlobal config.GlobalSettings
-	if gcErr == nil && gc != nil {
-		hostGlobal = gc.Global
-	}
+	//
 	// keepAliveArmed records that the arming actually happened (resolved on AND
 	// remote control on); it is what the durable mapping carries in step (11),
 	// so `niwa list` reports sessions genuinely kept alive, not mere requests.
@@ -798,7 +869,10 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		Label:        dispatchLabel,
 		KeepAlive:    keepAliveArmed,
 		SessionName:  forwardedName,
-		Created:      time.Now().UTC(),
+		// The same boolean that gates the audit line at (12a), so the record
+		// and the line can never disagree about this session.
+		AcceptsSessionMessages: inboundApplied,
+		Created:                time.Now().UTC(),
 	}
 	if err := workspace.WriteSessionMapping(workspaceRoot, mapping); err != nil {
 		// The same hazard as the capture-failure branch, on a narrower path.
@@ -825,6 +899,32 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// rollback.
 	removeDispatchMarker(instancePath)
 	success = true
+
+	// (12a) Say what this worker accepts from other sessions, and only now.
+	// Every failure above -- the launch, the capture, the mapping write --
+	// returns before this line, so it never describes a session that has no
+	// durable mapping. It goes to stderr, ahead of step (13)'s
+	// stdout hints, which stay the same whether or not the behavior is on.
+	// The override line is for a developer whose machine setting would have
+	// applied: an agent that could not receive the behavior gets none, because
+	// nothing was overridden there.
+	//
+	// attachFollows is the one place step (14)'s third outcome is decided, and
+	// it is decided here because the one-time explanation needs it too: a
+	// paragraph printed just before the agent's resume verb takes the terminal
+	// is a paragraph the developer never reads, and niwa would then remember
+	// having shown it. So when an attach follows, the explanation waits for it
+	// to return; when none does, it goes out right behind the audit line.
+	attachFollows := launchMode != agentplan.LaunchForeground && spec.ResumeDuringTurn && !dispatchDetach
+	switch {
+	case inboundApplied:
+		fmt.Fprintln(cmd.ErrOrStderr(), inboundAuditLine(inbound.source))
+		if !attachFollows {
+			showInboundExplanationBesideConfig(cmd.ErrOrStderr())
+		}
+	case inbound.overrodeMachineOn && inboundDeliverable:
+		fmt.Fprintln(cmd.ErrOrStderr(), inboundOverrideLine)
+	}
 
 	// (13) Print the session id and the launched agent's own management hints.
 	// The headline prints the session id, which is the durable mapping key a
@@ -885,12 +985,24 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// developer asked to be left where they are. A failure here is NON-fatal:
 	// the session and instance survive, so degrade to a warning and never roll
 	// back or delete the mapping (success is already true; DESIGN Decision 1).
-	if !dispatchDetach {
+	//
+	// attachFollows, hoisted at (12a), is this branch's own condition: the two
+	// returns above have already ruled out the other launch shapes, so all it
+	// adds here is --detach. Reading it rather than repeating the flag check
+	// keeps the explanation's "is an attach coming?" question and the attach
+	// itself answering from one expression.
+	if attachFollows {
 		if err := dispatchAttach(spec, handle, instancePath); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: warning: could not attach to session %s: %v\n", sessionID, err)
 			if again := reentryCommand(spec, handle, instancePath); again != "" {
 				fmt.Fprintf(cmd.ErrOrStderr(), "niwa: the session is running; attach later with: %s\n", again)
 			}
+		}
+		// The terminal is the developer's again, whether the attach handed it
+		// back or never took it, so this is the first moment the explanation
+		// can be read -- and the first moment it is honest to remember it.
+		if inboundApplied {
+			showInboundExplanationBesideConfig(cmd.ErrOrStderr())
 		}
 	}
 

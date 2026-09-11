@@ -489,6 +489,21 @@ marketplace was absent from Claude Code's own registry and no `niwa:*` skill
 resolved. That is a single observation, recorded rather than generalized;
 repairing the registration is separate work and out of this row's scope.
 
+**Amendment adding row 25.** The closed set gains a row after this PRD was
+settled, appended so rows 23 and 24 keep the numbers cited above and in code:
+
+| # | Capability | Claude | Codex | Codex reason / notes |
+|---|---|---|---|---|
+| 25 | A dispatched worker accepts messages from other sessions without an approval prompt | Implemented (requires row 22) | Unavailable (no-such-concept) | Codex has no setting for accepting messages from other sessions |
+
+The Claude delivery is one key in the launch settings document `niwa dispatch`
+already builds, which is why it rests on row 22. It is off by default and turned
+on per machine by `[global] accept_session_messages_on_dispatch` or per dispatch
+by `--accept-session-messages`. The row landed in the same change as that
+delivery. The settled Codex column is now 15 implemented and 10 unavailable,
+asserted by `TestCodexColumnTotals`, and the generated gap list in
+`docs/guides/codex-agent.md` names the new gap.
+
 **Row 17 is scoped to the trigger, not to provisioning.** niwa learns that a
 session it did not launch has started only from the agent's own session-start
 event, so the row stands or falls with row 13, and Codex hooks are

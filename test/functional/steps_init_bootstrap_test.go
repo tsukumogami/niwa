@@ -3,21 +3,11 @@ package functional
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/cucumber/godog"
 )
-
-// ptyStepTimeout bounds every step that hands the binary a standard input the
-// step controls. Without it a command that waits on input the scenario never
-// sends burns the suite's global deadline and takes every other scenario with
-// it; with it, the failure is a step failure naming the command.
-const ptyStepTimeout = 60 * time.Second
 
 // aGitHubFakeIsConfigured spins up the per-scenario tarballFakeServer
 // and points the niwa binary at it via NIWA_GITHUB_API_URL. The fake
@@ -138,119 +128,6 @@ func theGitHubFakeServesRepoMetadataWithBody(ctx context.Context, slug string, b
 	return ctx, nil
 }
 
-// iRunUnderPTYWithInput drives the niwa binary under util-linux
-// `script -q -c <cmd> /dev/null`, which allocates a real pty and
-// connects it to the child's stdin/stdout. This is the test seam for
-// R13 TTY-Y / TTY-N scenarios that need the binary's IsStdinTTY()
-// check to return true. Input lines are joined with "\n" and fed via
-// a temp file the wrapper redirects in.
-//
-// `script` is the POSIX util-linux command; it ships on every Linux
-// CI image and on macOS via Homebrew. Adding a Go pty library
-// (github.com/creack/pty) was considered and rejected to avoid a new
-// dependency.
-func iRunUnderPTYWithInput(ctx context.Context, command, input string) (context.Context, error) {
-	s := getState(ctx)
-	if s == nil {
-		return ctx, fmt.Errorf("no test state")
-	}
-	if _, err := exec.LookPath("script"); err != nil {
-		return ctx, fmt.Errorf("util-linux `script` not on PATH; cannot drive PTY scenario: %w", err)
-	}
-
-	// Substitute {repo:<name>} placeholders for symmetry with iRunFromWorkspaceRoot.
-	for repoName, repoURL := range s.repoURLs {
-		command = strings.ReplaceAll(command, "{repo:"+repoName+"}", repoURL)
-	}
-
-	args := strings.Fields(command)
-	if len(args) > 0 && args[0] == "niwa" {
-		args[0] = s.binPath
-	}
-
-	// Build the inner command. We change directory to workspaceRoot
-	// then exec the binary so it inherits the pty `script` allocated.
-	// Without `exec`, an intermediate bash would steal the pty and the
-	// child's IsStdinTTY check would observe a pipe.
-	quoted := make([]string, len(args))
-	for i, a := range args {
-		quoted[i] = shellQuote(a)
-	}
-	innerCmd := "cd " + shellQuote(s.workspaceRoot) + " && exec " + strings.Join(quoted, " ")
-
-	// `script -q -c <cmd> /dev/null` runs cmd under a pty and writes
-	// the terminal-output transcript to /dev/null. We capture the
-	// child's output via the script process's stdout (which mirrors
-	// the pty master side). The child's stdin is fed by writing to
-	// script's own stdin via cmd.Stdin — script forwards stdin bytes
-	// to the pty so the child sees them as terminal input.
-	// A scenario whose input never terminates must fail as a step rather than
-	// run out the suite's global deadline. godog's context carries no deadline
-	// of its own, so one is imposed here.
-	ptyCtx, cancel := context.WithTimeout(ctx, ptyStepTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ptyCtx, "script", "-q", "-c", innerCmd, "/dev/null")
-	cmd.Env = s.buildEnv()
-	// Convert escapes so feature files can write `y\n` and paste markers.
-	rawInput := strings.ReplaceAll(input, `\n`, "\n")
-	rawInput = strings.ReplaceAll(rawInput, `\r`, "\r")
-	rawInput = strings.ReplaceAll(rawInput, `\e`, "\x1b")
-
-	// Feed the pty in chunks rather than one burst. `script` performs a short
-	// write to the pty master and does not retry the remainder, so a large
-	// single write silently loses everything past the first few kilobytes and
-	// the child waits forever for input that was never delivered. Chunking
-	// keeps each write inside the pty buffer. This is a property of the
-	// harness, not of any reader under test.
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		return ctx, fmt.Errorf("creating pty input pipe: %w", err)
-	}
-	cmd.Stdin = pr
-	go func() {
-		defer pw.Close()
-		const chunk = 2048
-		for i := 0; i < len(rawInput); i += chunk {
-			end := i + chunk
-			if end > len(rawInput) {
-				end = len(rawInput)
-			}
-			if _, err := io.WriteString(pw, rawInput[i:end]); err != nil {
-				return
-			}
-			if end < len(rawInput) {
-				time.Sleep(20 * time.Millisecond)
-			}
-		}
-	}()
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	runErr := cmd.Run()
-	pr.Close()
-	if ptyCtx.Err() == context.DeadlineExceeded {
-		return ctx, fmt.Errorf("pty step did not terminate within %s; the command is waiting on input that never arrives", ptyStepTimeout)
-	}
-	s.stdout = stdout.String()
-	// util-linux `script` interleaves stdout and stderr on its single
-	// PTY surface; the child's stderr is mirrored on stdout under PTY.
-	// Treat the combined output as both for assertion purposes — both
-	// fields contain the same bytes so any "error output contains"
-	// step sees the prompt + Detail+Suggestion text.
-	s.stderr = stdout.String() + stderr.String()
-	s.shellPwd = ""
-	if runErr != nil {
-		if exitErr, ok := runErr.(*exec.ExitError); ok {
-			s.exitCode = exitErr.ExitCode()
-			return ctx, nil
-		}
-		return ctx, fmt.Errorf("pty run failed: %w; stderr: %s", runErr, s.stderr)
-	}
-	s.exitCode = 0
-	return ctx, nil
-}
-
 // splitOwnerRepo parses an owner/repo slug into its two components.
 // Returns an error when the slug does not have exactly one slash. Used
 // internally by every GitHub-fake step so feature files can use the
@@ -261,13 +138,6 @@ func splitOwnerRepo(slug string) (string, string, error) {
 		return "", "", fmt.Errorf("invalid owner/repo slug %q", slug)
 	}
 	return parts[0], parts[1], nil
-}
-
-// shellQuote escapes s for use inside a `bash -c` string. Single-quotes
-// are doubled with the standard `'\”` trick. Used by iRunUnderPTYWithInput
-// to thread arbitrary command strings through `script -c` safely.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // itoaSafe stays exported only to silence the "unused import" complaint

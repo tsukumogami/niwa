@@ -37,8 +37,28 @@ var dispatchInstanceNameRe = regexp.MustCompile(`\+[a-z0-9_]*-[0-9a-f]{8}$`)
 // PATH. behaviour selects the --bg outcome:
 //   - "ok": --bg writes a live job state for $FAKE_CLAUDE_SESSION_ID and exits 0
 //     (the success path);
+//   - "mint": as "ok", except each invocation generates its own session id
+//     instead of using the pinned one, so several concurrent launches produce
+//     several distinct sessions (see dispatchFakeClaudeMintedSession);
 //   - "launch-fail": --bg exits non-zero, writing nothing (the induced launch
 //     failure that must roll the instance back).
+//
+// Every --bg also records the launch argv twice: the joined line at
+// $HOME/dispatch-launch-argv, which the substring steps read, and the same
+// elements NUL-separated at $HOME/dispatch-launch-argv-elements, which the
+// steps that have to tell one argv element from another read. A joined line
+// cannot answer "which element follows --settings", because a settings document
+// and a prompt can both contain spaces.
+//
+// Both are fixed paths that every launch overwrites, so they hold the LAST
+// launch only. Two consequences for scenario authors. A scenario that
+// dispatches twice must assert between the dispatches, not after both, or it
+// asserts the second launch twice and the reordering is a silent pass. And
+// concurrent launches race for the same two files, so nothing may read them
+// after a parallel step -- that is why the parallel scenario asserts on
+// transcripts and mappings instead. The fake in internal/cli/watch_inbound_test.go
+// mints a file per invocation for exactly this reason; it has two launch sites
+// to tell apart within one test, which no scenario here does.
 //
 // attach/logs exit 0 (dispatch only calls attach without --detach; the scenarios
 // pass --detach, so attach is never reached, but the fake handles it for
@@ -48,11 +68,36 @@ var dispatchInstanceNameRe = regexp.MustCompile(`\+[a-z0-9_]*-[0-9a-f]{8}$`)
 // makes a later reap reclaim it. Any other invocation exits non-zero so a stray
 // real code path fails loudly rather than silently hitting the network.
 func dispatchFakeClaudeScript(behaviour string) string {
-	bg := `  sid="${FAKE_CLAUDE_SESSION_ID:-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}"
+	pickSession := `  sid="${FAKE_CLAUDE_SESSION_ID:-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}"`
+	if behaviour == dispatchFakeClaudeMintedSession {
+		// A fresh id per invocation, from the kernel's own generator, so
+		// concurrent launches cannot collide on one job-state directory.
+		//
+		// /proc is Linux-only and so is this suite: CI runs the functional
+		// tests on ubuntu-latest alone, because the harness fakes a TTY with
+		// GNU-only `script -c` syntax and several scenarios assume an
+		// unresolved /tmp path (tsukumogami/niwa#243). A portable generator
+		// here would be the only portable thing in the harness, so this reads
+		// /proc directly and is one of the lines whoever closes #243 has to
+		// revisit.
+		//
+		// It refuses rather than minting an empty id, which would otherwise
+		// surface thirty seconds later as a capture timeout and read as a
+		// broken capture path in the product. The refusal is a non-zero exit,
+		// not the message: a backgrounded launch wires neither stream, so what
+		// a developer sees is the dispatch failing at the launch.
+		pickSession = `  sid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null)
+  if [ -z "$sid" ]; then
+    echo "fake claude: no session-id generator; this fake needs /proc (see the minting mode in dispatch_steps_test.go)" >&2
+    exit 1
+  fi`
+	}
+	bg := pickSession + `
   short=$(printf '%s' "$sid" | cut -c1-8)
   jobdir="$HOME/.claude/jobs/$short"
   mkdir -p "$jobdir"
   printf '%s\n' "$*" > "$HOME/dispatch-launch-argv"
+  printf '%s\0' "$@" > "$HOME/dispatch-launch-argv-elements"
   # If the prompt is a spill pointer, resolve it from / rather than from the
   # instance dir. An instance-relative path would resolve here and must not.
   spill=$(printf '%s' "$*" | sed -n 's/^file: \(.*\)$/\1/p' | head -1)
@@ -92,6 +137,11 @@ esac
 `, bg)
 }
 
+// dispatchFakeClaudeMintedSession is the behaviour name for the fake claude
+// that mints its own session id per launch. It is a constant because the step
+// that selects it and the script that branches on it have to agree.
+const dispatchFakeClaudeMintedSession = "mint"
+
 // installDispatchFakeClaude writes the fake claude with the given behaviour into
 // a scenario-local bin dir and prepends it to PATH for every subsequent niwa
 // subprocess via testState.pathPrefix.
@@ -123,6 +173,24 @@ func aFakeClaudeForDispatchWithSession(ctx context.Context, sessionID string) (c
 	return ctx, nil
 }
 
+// aFakeClaudeForDispatchThatMintsASessionPerLaunch installs the success-path
+// fake claude in its minting mode, where every launch generates its own session
+// id.
+//
+// Any scenario that dispatches more than once wants it, for one of two reasons.
+// Concurrently -- the parallel scenario -- a pinned id would have four launches
+// writing four job states into one directory, and the capture would correlate
+// every dispatch to the same session. Sequentially, a pinned id means the second
+// dispatch overwrites the first's job state, so the two dispatches share a
+// mapping and a scenario cannot tell them apart.
+func aFakeClaudeForDispatchThatMintsASessionPerLaunch(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	return ctx, installDispatchFakeClaude(s, dispatchFakeClaudeMintedSession)
+}
+
 // aFakeClaudeForDispatchThatFailsToLaunch installs the launch-fail fake claude,
 // whose --bg exits non-zero so dispatch's deferred self-rollback fires.
 func aFakeClaudeForDispatchThatFailsToLaunch(ctx context.Context) (context.Context, error) {
@@ -144,27 +212,60 @@ func iRunCommandFromTheWorkspaceRoot(ctx context.Context, command string) (conte
 	if err := runNiwa(s, s.workspaceRoot, command); err != nil {
 		return ctx, err
 	}
-	if strings.Contains(command, "dispatch") {
-		s.lastDispatchInstancePath = findDispatchInstance(s.workspaceRoot)
-	}
+	recordDispatchInstance(s, command)
 	return ctx, nil
 }
 
-// findDispatchInstance returns the absolute path of the single dispatch instance
-// under workspaceRoot, or "" when none exists. The dispatch instance name is
-// "<config>+-<8 hex>" (no-name) or "<config>+<slug>-<8 hex>" (named), which the
-// structural dispatchInstanceNameRe uniquely identifies.
+// recordDispatchInstance notes the instance a dispatch just created, so later
+// steps can assert on it without hardcoding the random name suffix. It is a
+// no-op for any other command.
+//
+// Two steps call it: `I run "..." from the workspace root` and its pty twin.
+// They have to agree, or a later assertion reads whichever instance some
+// earlier step happened to find. Every other step that can run a dispatch
+// records nothing -- the two stdin-driving ones, the spill step built on the
+// first, the parallel step, and `I run "..." from workspace root`, which
+// differs from the first of these by one word and runs from the same place --
+// so after one of those a scenario that wants the instance must find it itself.
+func recordDispatchInstance(s *testState, command string) {
+	if strings.Contains(command, "dispatch") {
+		s.lastDispatchInstancePath = findDispatchInstance(s.workspaceRoot)
+	}
+}
+
+// findDispatchInstance returns the absolute path of the most recently modified
+// dispatch instance under workspaceRoot, or "" when none exists. The dispatch
+// instance name is "<config>+-<8 hex>" (no-name) or "<config>+<slug>-<8 hex>"
+// (named), which the structural dispatchInstanceNameRe uniquely identifies.
+//
+// Newest rather than first on disk, because several scenarios dispatch twice
+// into one workspace root and the names end in a random hex suffix: "the first
+// directory that matches" is a coin flip between the two, and one that reads as
+// working, since a single-dispatch scenario always agrees with it. Modification
+// time picks the right one because provisioning writes the instance's contents,
+// so the directory a dispatch just finished creating is the one touched last --
+// the same signal theDispatchInstanceIsAgedPastTheBackstopTTL manipulates. Two
+// sequential dispatches measure about seventy milliseconds apart, so the tie
+// this cannot break does not arise.
 func findDispatchInstance(workspaceRoot string) string {
 	entries, err := os.ReadDir(workspaceRoot)
 	if err != nil {
 		return ""
 	}
+	newest, newestPath := time.Time{}, ""
 	for _, e := range entries {
-		if e.IsDir() && dispatchInstanceNameRe.MatchString(e.Name()) {
-			return filepath.Join(workspaceRoot, e.Name())
+		if !e.IsDir() || !dispatchInstanceNameRe.MatchString(e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if newestPath == "" || info.ModTime().After(newest) {
+			newest, newestPath = info.ModTime(), filepath.Join(workspaceRoot, e.Name())
 		}
 	}
-	return ""
+	return newestPath
 }
 
 // aDispatchInstanceWasCreatedWithAWellFormedInstanceFile asserts a dispatch
@@ -484,6 +585,7 @@ func registerDispatchSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the launched claude was invoked with "([^"]*)" exactly (\d+) times?$`, theLaunchedClaudeWasInvokedWithExactlyTimes)
 	ctx.Step(`^a fake claude for dispatch with session "([^"]*)"$`, aFakeClaudeForDispatchWithSession)
 	ctx.Step(`^a fake claude for dispatch that fails to launch$`, aFakeClaudeForDispatchThatFailsToLaunch)
+	ctx.Step(`^a fake claude for dispatch that mints a new session per launch$`, aFakeClaudeForDispatchThatMintsASessionPerLaunch)
 	ctx.Step(`^I run "([^"]*)" from the workspace root$`, iRunCommandFromTheWorkspaceRoot)
 	ctx.Step(`^a dispatch instance was created with a well-formed instance file$`, aDispatchInstanceWasCreatedWithAWellFormedInstanceFile)
 	ctx.Step(`^the dispatch instance still exists$`, theDispatchInstanceStillExists)

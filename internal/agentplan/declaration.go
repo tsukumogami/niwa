@@ -67,8 +67,8 @@ type Declaration struct {
 // The Codex column states what niwa delivers today and nothing more. Directory
 // trust is the first row it delivers: the entry that makes every later
 // trust-gated row possible arrives with the writer that produces it, in the
-// same change. Fifteen Codex rows are implemented and nine are unavailable, and
-// all nine are inherent to the agent -- no Codex row carries the not-built kind
+// same change. Fifteen Codex rows are implemented and ten are unavailable, and
+// all ten are inherent to the agent -- no Codex row carries the not-built kind
 // any more, which is to say niwa owes this column nothing a route exists for.
 // Every implemented row flipped in the change that delivered it, never before:
 // writing a future state down early would make the table a plan rather than a
@@ -372,6 +372,18 @@ var declarations = []Declaration{
 	// the name in one change and covering it in the next would ship that
 	// breakage as an intermediate state.
 	{Capability: GitExcludeBookkeeping, Agent: agent.AgentCodex, State: StateImplemented},
+
+	// Row 25: a dispatched worker accepting messages from other sessions
+	// without an approval prompt. The delivery is one key in the launch
+	// settings document niwa dispatch already builds, so it exists only where
+	// niwa launches the worker, which is the edge to row 22.
+	{Capability: DispatchInboundAcceptance, Agent: agent.AgentClaude, State: StateImplemented, Requires: []Capability{DispatchLaunch}},
+	{
+		Capability: DispatchInboundAcceptance, Agent: agent.AgentCodex,
+		State:  StateUnavailable,
+		Kind:   ReasonNoSuchConcept,
+		Reason: "Codex has no setting for accepting messages from other sessions.",
+	},
 }
 
 // Lookup returns the declaration for one (capability, agent) pair.

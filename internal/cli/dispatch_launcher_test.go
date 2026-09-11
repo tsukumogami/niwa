@@ -39,10 +39,10 @@ func syntheticLaunchSpec() agentplan.LaunchSpec {
 
 // TestBuildLaunchArgs_Order verifies the leading arguments come first,
 // pass-through values sit in the middle as separate elements, and the prompt is
-// the last single element.
+// the last single element, right after the separator.
 func TestBuildLaunchArgs_Order(t *testing.T) {
 	got := buildLaunchArgs(claudeLaunchSpec(), agentplan.LaunchBackgrounded, "/inst", "do the thing", []string{"--model", "opus", "--permission-mode", "acceptEdits"})
-	want := []string{"--bg", "--model", "opus", "--permission-mode", "acceptEdits", "do the thing"}
+	want := []string{"--bg", "--model", "opus", "--permission-mode", "acceptEdits", "--", "do the thing"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("buildLaunchArgs = %#v, want %#v", got, want)
 	}
@@ -51,9 +51,35 @@ func TestBuildLaunchArgs_Order(t *testing.T) {
 // TestBuildLaunchArgs_NoPassthrough verifies the minimal argv.
 func TestBuildLaunchArgs_NoPassthrough(t *testing.T) {
 	got := buildLaunchArgs(claudeLaunchSpec(), agentplan.LaunchBackgrounded, "/inst", "hi", nil)
-	want := []string{"--bg", "hi"}
+	want := []string{"--bg", "--", "hi"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("buildLaunchArgs = %#v, want %#v", got, want)
+	}
+}
+
+// TestBuildLaunchArgs_ClaudeSeparatesThePrompt pins the separator on every
+// Claude launch, detached and not, with a settings document in the
+// pass-through: "--" is the element immediately before the prompt, and the
+// prompt is the last element.
+func TestBuildLaunchArgs_ClaudeSeparatesThePrompt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode agentplan.LaunchMode
+	}{
+		{"detached", agentplan.LaunchDetached},
+		{"backgrounded", agentplan.LaunchBackgrounded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildLaunchArgs(claudeLaunchSpec(), tc.mode, "/inst", "do the thing", []string{"--name", "w", "--settings", remoteControlSettingsJSON})
+			n := len(got)
+			if n < 2 || got[n-1] != "do the thing" || got[n-2] != "--" {
+				t.Fatalf("want ... \"--\", prompt at the end (is PromptSeparator still set on Claude's launch spec in internal/agentplan?), got %#v", got)
+			}
+			want := []string{"--bg", "--name", "w", "--settings", remoteControlSettingsJSON, "--", "do the thing"}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("buildLaunchArgs = %#v, want %#v", got, want)
+			}
+		})
 	}
 }
 
@@ -88,8 +114,8 @@ func TestBuildLaunchArgs_PromptRemainsSingleElement(t *testing.T) {
 			name:        "claude",
 			spec:        claudeLaunchSpec(),
 			passthrough: []string{"--agent", "reviewer"},
-			wantLen:     4,
-			wantLead:    []string{"--bg", "--agent", "reviewer"},
+			wantLen:     5,
+			wantLead:    []string{"--bg", "--agent", "reviewer", "--"},
 		},
 		{
 			name:        "synthetic",
