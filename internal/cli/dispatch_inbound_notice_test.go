@@ -19,10 +19,10 @@ import (
 
 // The explanation, written out here rather than rebuilt from the constants,
 // the way TestInboundLinesExactText pins the other three stderr lines. This is
-// the whole point of the duplication: expectations derived from
-// inboundExplanationLine would reword themselves along with a reworded
-// constant, and every test in this file would keep passing while the paragraph
-// said something else.
+// the whole point of the duplication: an expectation derived from
+// inboundExplanationLine rewords itself along with a reworded constant, which
+// is how the two closing sentences and the guide URL came to be unpinned --
+// swapping the closings, or repointing the URL, passed the suite.
 const (
 	explanationGuideURL = "https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md"
 
@@ -35,15 +35,20 @@ const (
 	explanationNonTerminalLine = explanationBodyText + " " + nonTerminalClose
 )
 
-// explanationMarker is a substring no other niwa output carries. Tests asserting
-// the paragraph is ABSENT match on it rather than on a whole line, so that a
-// reworded explanation still counts as printed and the absence assertion stays
-// strict. Tests asserting it is present match on the whole line instead.
+// explanationMarker is a substring no other niwa output carries. Most
+// assertions in this file -- printed, not printed, printed in this position --
+// match on it rather than on a whole line, because what they are about is
+// WHETHER and WHERE the paragraph appeared, not what it says. A reworded
+// explanation still counts as printed for all of them, which is what keeps an
+// absence assertion strict. The text itself is pinned exactly in one place,
+// TestInboundExplanationExactText, so a rewording fails there and nowhere else.
 const explanationMarker = "accepting messages without asking is inbound only"
 
-// TestInboundExplanationExactText pins the paragraph and the marker file name,
-// both of which are contracts beyond this package: the guide quotes the text,
-// and the functional scenarios look the marker up by name.
+// TestInboundExplanationExactText pins the paragraph and the marker file name.
+// Both are contracts beyond this package: issue 8's guide quotes the sentences
+// and tells a developer to delete the marker by name, and issue 7's functional
+// scenarios look it up at a hardcoded path. Neither exists yet, which is the
+// reason to hold them still here rather than there.
 func TestInboundExplanationExactText(t *testing.T) {
 	if inboundNoticeMarker != "accept-session-messages-notice" {
 		t.Errorf("inboundNoticeMarker = %q, want %q; the name is what suppresses the notice and what the guide tells a developer to delete",
@@ -110,43 +115,51 @@ func showTo(t *testing.T, dir string, dirErr error, isTTY func() bool) string {
 // fragment is a promise about what a developer is told, so a rewording that
 // drops one is a change to the command's documented behavior, not a refactor.
 func TestInboundExplanationText(t *testing.T) {
-	for _, terminal := range []bool{true, false} {
-		line := showTo(t, t.TempDir(), nil, func() bool { return terminal })
+	for _, tc := range []struct {
+		name     string
+		terminal bool
+	}{
+		{"at a terminal", true},
+		{"not at a terminal", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line := showTo(t, t.TempDir(), nil, func() bool { return tc.terminal })
 
-		if !strings.HasPrefix(line, "niwa dispatch: note: ") {
-			t.Errorf("terminal=%v: line does not start with the note prefix:\n%s", terminal, line)
-		}
-		if !strings.HasSuffix(line, "\n") {
-			t.Errorf("terminal=%v: line does not end in a newline:\n%q", terminal, line)
-		}
-		if n := strings.Count(strings.TrimSuffix(line, "\n"), "\n"); n != 0 {
-			t.Errorf("terminal=%v: explanation spans %d extra lines, want one line:\n%s", terminal, n, line)
-		}
-
-		for _, want := range []string{
-			"accepting messages without asking is inbound only",
-			"dispatching that session again with the behavior on clears it",
-			"Your own interactive Claude Code sessions are one such case, and they are governed by your Claude Code user settings, which niwa doesn't change",
-			`"Messages from your other sessions"`,
-			`"crossSessionInbound": "accept"`,
-			"~/.claude/settings.json",
-			"That change applies to every Claude Code session you run and to messages from any session able to reach yours, on this machine or elsewhere",
-			explanationGuideURL,
-		} {
-			if !strings.Contains(line, want) {
-				t.Errorf("terminal=%v: explanation is missing %q:\n%s", terminal, want, line)
+			if !strings.HasPrefix(line, "niwa dispatch: note: ") {
+				t.Errorf("line does not start with the note prefix:\n%s", line)
 			}
-		}
+			if !strings.HasSuffix(line, "\n") {
+				t.Errorf("line does not end in a newline:\n%q", line)
+			}
+			if n := strings.Count(strings.TrimSuffix(line, "\n"), "\n"); n != 0 {
+				t.Errorf("explanation spans %d extra lines, want one line:\n%s", n, line)
+			}
 
-		hasTerminal := strings.Contains(line, terminalClose)
-		hasNonTerminal := strings.Contains(line, nonTerminalClose)
-		if hasTerminal == hasNonTerminal {
-			t.Errorf("terminal=%v: want exactly one closing sentence, got terminal=%v non-terminal=%v:\n%s",
-				terminal, hasTerminal, hasNonTerminal, line)
-		}
-		if hasTerminal != terminal {
-			t.Errorf("terminal=%v: closing sentence is the wrong one:\n%s", terminal, line)
-		}
+			for _, want := range []string{
+				"accepting messages without asking is inbound only",
+				"dispatching that session again with the behavior on clears it",
+				"Your own interactive Claude Code sessions are one such case, and they are governed by your Claude Code user settings, which niwa doesn't change",
+				`"Messages from your other sessions"`,
+				`"crossSessionInbound": "accept"`,
+				"~/.claude/settings.json",
+				"That change applies to every Claude Code session you run and to messages from any session able to reach yours, on this machine or elsewhere",
+				explanationGuideURL,
+			} {
+				if !strings.Contains(line, want) {
+					t.Errorf("explanation is missing %q:\n%s", want, line)
+				}
+			}
+
+			hasTerminal := strings.Contains(line, terminalClose)
+			hasNonTerminal := strings.Contains(line, nonTerminalClose)
+			if hasTerminal == hasNonTerminal {
+				t.Errorf("want exactly one closing sentence, got terminal=%v non-terminal=%v:\n%s",
+					hasTerminal, hasNonTerminal, line)
+			}
+			if hasTerminal != tc.terminal {
+				t.Errorf("closing sentence is the wrong one:\n%s", line)
+			}
+		})
 	}
 }
 
@@ -287,6 +300,13 @@ func TestShowInboundExplanation_MissingDirectory(t *testing.T) {
 	}
 	if !info.IsDir() {
 		t.Fatalf("%s is not a directory", dir)
+	}
+	// The mode the config writer uses for this same directory, so a marker
+	// written before the first `niwa config set` does not leave one the writer
+	// would have made differently. Masked by the process umask, so compare only
+	// the bits a default 022 umask leaves alone.
+	if perm := info.Mode().Perm(); perm&0o700 != 0o700 {
+		t.Errorf("directory permissions = %#o, want the owner bits of 0755", perm)
 	}
 	requireMarker(t, dir)
 }

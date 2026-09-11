@@ -152,9 +152,12 @@ const (
 	// scan's rule, which compares whole literal values: this is advice about
 	// where the developer's OWN sessions get their setting, addressed to a
 	// reader, not a delivery decision taken at a call site. Nothing branches on
-	// it and no other code reads it. It reaches only a dispatch that already
-	// resolved to an agent declaring the capability, so no agent that cannot
-	// receive the behavior is ever told to go and configure it.
+	// it and nothing but inboundExplanationLine reads it. It reaches only a
+	// dispatch that already resolved to an agent declaring the capability, so
+	// no agent that cannot receive the behavior is ever told to go and
+	// configure it -- which holds as long as the one agent declaring
+	// DispatchInboundAcceptance is the one this paragraph names. A second such
+	// agent would need the wording generalized, not the scan relaxed.
 	inboundExplanationBody = `niwa dispatch: note: accepting messages without asking is inbound only. A message this worker sends into a session launched without it, such as a coordinator dispatched earlier, one dispatched with the behavior off, or one another tool started, still waits for approval there when the two run in different permission modes; dispatching that session again with the behavior on clears it. Your own interactive Claude Code sessions are one such case, and they are governed by your Claude Code user settings, which niwa doesn't change. To accept there too, set "Messages from your other sessions" to accept in Claude Code's /config, or add "crossSessionInbound": "accept" to ~/.claude/settings.json. That change applies to every Claude Code session you run and to messages from any session able to reach yours, on this machine or elsewhere.`
 
 	// inboundExplanationTerminalClose closes the line when stderr is a
