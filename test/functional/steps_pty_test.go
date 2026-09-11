@@ -28,12 +28,17 @@ import (
 // of the shared stdout/stderr/exit-code slots. It borrows shellQuote from here
 // and nothing else.
 
-// ptyStepTimeout bounds every step that runs a command under a pty, whether or
-// not it supplies any input. Without it a command that waits on input the
-// scenario never sends -- including a scenario that sends none, since a pty
-// hands the child a terminal rather than an immediate end-of-input -- burns the
-// suite's global deadline and takes every other scenario with it; with it, the
-// failure is a step failure naming the command.
+// ptyStepTimeout bounds the steps that hand the binary a standard input this
+// harness controls: the three that go through runUnderPTY, whether or not they
+// supply any input, and iRunWithStdinHeldOpen, which holds a pipe open without
+// a pty at all. (The live-Codex interactive step is not among them; it runs on
+// its own dwell.)
+//
+// Supplying no input is not the safe case. A pty hands the child a terminal
+// rather than an immediate end-of-input, so a command that reads stdin waits
+// exactly as long as one waiting on input that never comes. Without a bound
+// either burns the suite's global deadline and takes every other scenario with
+// it; with it, the failure is a step failure naming the command.
 const ptyStepTimeout = 60 * time.Second
 
 // iRunUnderPTYWithInput drives the niwa binary under util-linux

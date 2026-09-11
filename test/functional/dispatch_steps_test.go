@@ -77,10 +77,11 @@ func dispatchFakeClaudeScript(behaviour string) string {
 		// tests on ubuntu-latest alone, because the harness fakes a TTY with
 		// GNU-only `script -c` syntax and several scenarios assume an
 		// unresolved /tmp path (tsukumogami/niwa#243). A portable generator
-		// here would buy nothing while that holds -- the scenario that needs
-		// this fake goes through the pty helper, so it fails at `script`
-		// before it ever reaches the id. Whoever closes #243 should revisit
-		// this line with the rest of them.
+		// here would be the only portable thing in the harness, so this reads
+		// /proc directly and is one of the lines whoever closes #243 has to
+		// revisit. Off Linux it leaves sid empty and the scenario fails at a
+		// mapping assertion, which names nothing about the fake -- the cost of
+		// not guarding it, accepted while the suite cannot run there anyway.
 		pickSession = `  sid=$(cat /proc/sys/kernel/random/uuid)`
 	}
 	bg := pickSession + `
@@ -166,9 +167,14 @@ func aFakeClaudeForDispatchWithSession(ctx context.Context, sessionID string) (c
 
 // aFakeClaudeForDispatchThatMintsASessionPerLaunch installs the success-path
 // fake claude in its minting mode, where every launch generates its own session
-// id. It is what the parallel-dispatch scenario needs: with the pinned id, four
-// concurrent launches would write four job states into one directory and the
-// capture would correlate every dispatch to the same session.
+// id.
+//
+// Any scenario that dispatches more than once wants it, for one of two reasons.
+// Concurrently -- the parallel scenario -- a pinned id would have four launches
+// writing four job states into one directory, and the capture would correlate
+// every dispatch to the same session. Sequentially, a pinned id means the second
+// dispatch overwrites the first's job state, so the two dispatches share a
+// mapping and a scenario cannot tell them apart.
 func aFakeClaudeForDispatchThatMintsASessionPerLaunch(ctx context.Context) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
@@ -206,10 +212,18 @@ func iRunCommandFromTheWorkspaceRoot(ctx context.Context, command string) (conte
 // steps can assert on it without hardcoding the random name suffix. It is a
 // no-op for any other command.
 //
-// Every step that can run a dispatch calls this, and they have to agree: two
-// steps that read the same way in a feature file but leave different state
-// behind mean a later assertion quietly reads whichever instance some earlier
-// step happened to find.
+// The two steps that dispatch and then let a scenario assert on the instance
+// both call it -- `I run "..." from the workspace root` and its pty twin -- and
+// they have to agree, or a later assertion quietly reads whichever instance
+// some earlier step happened to find.
+//
+// The other steps that can run a dispatch deliberately do not: the two
+// stdin-driving steps (`under a pty with input`, `with stdin held open`) are
+// used by scenarios that assert on the launch rather than the instance, and the
+// parallel step leaves several instances behind at once, where a single
+// "the instance" is the wrong idea rather than a missing feature. A scenario
+// that dispatches through one of those and then wants the instance should say
+// so by dispatching through this pair instead.
 //
 // It takes the NEWEST instance, not the first one on disk. Several scenarios
 // dispatch twice into one workspace root, and the instance names end in a
@@ -228,9 +242,11 @@ func recordDispatchInstance(s *testState, command string) {
 // Modification time is the ordering because provisioning writes the instance's
 // contents, so the directory a dispatch just finished creating is the one
 // touched last. It is the same signal theDispatchInstanceIsAgedPastTheBackstopTTL
-// manipulates. Ties keep the earlier entry, which only arises when two
-// instances land within one filesystem timestamp tick; no scenario dispatches
-// twice that fast, since each run clones and launches in between.
+// manipulates. On an exact tie the winner is whichever os.ReadDir listed first,
+// which is as arbitrary as the suffix -- the tie only arises when two instances
+// land inside one filesystem timestamp tick, and no scenario dispatches twice
+// that fast, since each run clones and launches in between. Measured, two
+// sequential dispatches sit about seventy milliseconds apart.
 func newestDispatchInstance(workspaceRoot string) string {
 	entries, err := os.ReadDir(workspaceRoot)
 	if err != nil {
@@ -259,9 +275,10 @@ func newestDispatchInstance(workspaceRoot string) string {
 //
 // It answers "is there one", not "which one": the entry it returns is whichever
 // os.ReadDir lists first, and the names end in a random hex suffix, so with two
-// instances present the answer is arbitrary. Every caller here is an existence
-// or absence check, where that is fine. A caller that means the instance a
-// particular dispatch just created wants newestDispatchInstance.
+// instances present the answer is arbitrary. That is fine for the callers that
+// only ask whether an instance exists, and fine for the rest only because every
+// scenario reaching them has dispatched exactly once. A caller that means the
+// instance a particular dispatch created wants newestDispatchInstance.
 func findDispatchInstance(workspaceRoot string) string {
 	entries, err := os.ReadDir(workspaceRoot)
 	if err != nil {
