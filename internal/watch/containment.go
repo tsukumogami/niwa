@@ -15,8 +15,10 @@ import (
 //
 // How Claude Code compares a matcher (read from the 2.1.267 and 2.1.268
 // bundles): a matcher made only of letters, digits, underscores, and "|" is split
-// on "|" into an exact list of tool names, with aliases resolved; any other
-// matcher is treated as a regular expression. Every matcher below is in the
+// on "|" into an exact list of tool names, with aliases resolved. For PreToolUse
+// it also accepts commas, spaces, and hyphens there, splitting on "|" or "," and
+// trimming each token. A matcher with any other character, such as ".", "*", or
+// "(", is treated as a regular expression. Every matcher below is in the
 // exact-list form, so each token names exactly one tool, never a prefix or a
 // substring.
 const (
@@ -54,9 +56,9 @@ const (
 	// discovery). The list comes from Claude Code 2.1.267's tool list. The matcher
 	// uses only letters and "|", so Claude Code compares it as an exact list of
 	// tool names, aliases included (ListPeers resolves to ListAgents), rather than
-	// as a substring or a regex. That exact-list form holds only while the matcher
-	// is made of letters, digits, underscores, and "|"; any other character (".",
-	// "*", "(", a space) makes Claude Code treat it as a pattern instead.
+	// as a substring or a regex. Keep it to letters and "|": a character such as
+	// ".", "*", or "(" would make Claude Code treat it as a regular expression
+	// instead (see the comparison rule above).
 	//
 	// sessionReachDenyHook is applied and required in every containment mode, and
 	// its identity is this matcher AND its command, so a workspace or overlay hook
@@ -124,8 +126,9 @@ func noEgressSandboxStanza() map[string]any {
 }
 
 // egressDenyHook returns the PreToolUse hook that denies the out-of-sandbox
-// egress channels (WebFetch, WebSearch, and all MCP tools). It is applied in
-// sandbox mode only. The hook fires even under bypassPermissions -- unlike
+// egress channels WebFetch and WebSearch; its "mcp__" token was meant to cover MCP
+// tools but does not on current Claude Code (see egressDenyMatcher). Its refusal
+// text still names MCP and is left unchanged. It is applied in sandbox mode only. The hook fires even under bypassPermissions -- unlike
 // permissions.ask/deny -- which is why it, not a permission rule, is the closure
 // for these channels. Exit 2 blocks the tool call.
 func egressDenyHook() map[string]any {
@@ -146,9 +149,10 @@ func egressDenyHook() map[string]any {
 // apostrophe in the message intact.
 //
 // The command reads stdin to the end before refusing. A hook that exits without
-// reading leaves Claude Code writing the payload into a closed pipe, and its hook
-// runner handles that write error on a separate path from a normal exit; draining
-// keeps the block on the normal path. Draining is safe because Claude Code closes
+// reading leaves Claude Code writing the payload into a closed pipe once the
+// payload outgrows the pipe buffer, and its hook runner reports that write error
+// as a non-blocking result, so a large enough tool_input would let the call
+// through. Draining keeps the exit-2 block. Draining is safe because Claude Code closes
 // the hook's stdin after writing the payload, which the post-guard's grep already
 // relies on; if stdin were ever held open, the hook would wait until its timeout
 // rather than block.
@@ -413,8 +417,9 @@ func VerifyReviewSettings(merged map[string]any, sandbox, ask bool) error {
 		if allow, _ := sb["allowUnsandboxedCommands"].(bool); allow {
 			return fmt.Errorf("review settings check: sandbox.allowUnsandboxedCommands must be false")
 		}
-		// The egress-deny hook closes the out-of-sandbox network channels (WebFetch,
-		// WebSearch, MCP) that the OS sandbox does not cage.
+		// The egress-deny hook closes the out-of-sandbox network channels WebFetch and
+		// WebSearch, which the OS sandbox does not cage (its MCP token covers no tool on
+		// current Claude Code; see egressDenyMatcher).
 		if !hasPreToolUseMatcher(merged, egressDenyMatcher) {
 			return fmt.Errorf("review settings check: egress-deny PreToolUse hook (matcher %q) missing", egressDenyMatcher)
 		}
