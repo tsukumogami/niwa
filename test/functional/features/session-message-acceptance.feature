@@ -7,8 +7,10 @@ Feature: niwa dispatch: accepting messages from other sessions
   When the behavior resolves on and the dispatched agent can receive it, niwa puts
   `crossSessionInbound: "accept"` in the single `--settings` document the worker is
   launched with, prints one audit line naming what turned it on, records the fact
-  in the durable session mapping, and shows a one-time explanation the first time a
-  terminal is there to read it. The flag overrides the machine setting in either
+  in the durable session mapping, and shows a one-time explanation. The
+  explanation prints wherever the behavior takes effect, terminal or not; what a
+  terminal decides is whether niwa remembers having shown it, so away from one it
+  says so and comes back. The flag overrides the machine setting in either
   direction; nothing else -- no workspace, instance, or repository settings source
   -- can turn it on.
 
@@ -330,7 +332,7 @@ Feature: niwa dispatch: accepting messages from other sessions
     # session mappings, tracked separately as issue #297. What this scenario is
     # about is four dispatches racing for one configuration directory: the
     # notice, its marker, and the four session records.
-    When I run "niwa init" from workspace root
+    When I run "niwa init" from the workspace root
     Then the exit code is 0
     # Scaffold mode writes no registry entry, so there is no config.toml yet and
     # the record step below would have nothing to read. An empty [global] table

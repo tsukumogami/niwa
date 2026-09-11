@@ -50,6 +50,16 @@ var dispatchInstanceNameRe = regexp.MustCompile(`\+[a-z0-9_]*-[0-9a-f]{8}$`)
 // cannot answer "which element follows --settings", because a settings document
 // and a prompt can both contain spaces.
 //
+// Both are fixed paths that every launch overwrites, so they hold the LAST
+// launch only. Two consequences for scenario authors. A scenario that
+// dispatches twice must assert between the dispatches, not after both, or it
+// asserts the second launch twice and the reordering is a silent pass. And
+// concurrent launches race for the same two files, so nothing may read them
+// after a parallel step -- that is why the parallel scenario asserts on
+// transcripts and mappings instead. The watch unit test's own fake mints a file
+// per invocation for exactly this reason; it has two launch sites to tell apart
+// within one test, which no scenario here does.
+//
 // attach/logs exit 0 (dispatch only calls attach without --detach; the scenarios
 // pass --detach, so attach is never reached, but the fake handles it for
 // completeness). stop rewrites the job state to a terminal "done" (the shape a
@@ -60,10 +70,14 @@ var dispatchInstanceNameRe = regexp.MustCompile(`\+[a-z0-9_]*-[0-9a-f]{8}$`)
 func dispatchFakeClaudeScript(behaviour string) string {
 	pickSession := `  sid="${FAKE_CLAUDE_SESSION_ID:-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}"`
 	if behaviour == dispatchFakeClaudeMintedSession {
-		// A fresh id per invocation, from the kernel's own generator, so
-		// concurrent launches cannot collide on one job-state directory. The
-		// functional suite is Linux-only, so /proc is always there.
-		pickSession = `  sid=$(cat /proc/sys/kernel/random/uuid)`
+		// A fresh id per invocation so concurrent launches cannot collide on
+		// one job-state directory. The kernel's generator is the first choice
+		// and uuidgen the fallback: this suite mostly runs on Linux but is not
+		// pinned to it, and a fake that only worked there would fail on macOS
+		// as a missing session mapping, naming nothing about the fake.
+		// uuidgen prints uppercase on macOS; niwa validates the id as
+		// lowercase hex, so it is folded.
+		pickSession = `  sid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr 'A-F' 'a-f')`
 	}
 	bg := pickSession + `
   short=$(printf '%s' "$sid" | cut -c1-8)

@@ -41,10 +41,15 @@ import (
 
 // watchFakeClaudeScript is the fake `claude` the test puts first on PATH. Every
 // invocation records its argv NUL-separated into a fresh file under a recording
-// directory beside the binary; a --bg invocation also writes the Claude Code job
-// state the capture path correlates by cwd, the way the functional fake does,
-// and exits 0. Anything else exits non-zero, so an unexpected invocation is
-// loud rather than silently recorded as a launch.
+// directory beside the binary, and exits 0 for --bg. Anything else exits
+// non-zero, so an unexpected invocation is loud rather than silently recorded
+// as a launch.
+//
+// The --bg branch also writes the Claude Code job state a real launch leaves
+// behind. Nothing in this test reads it -- the capture is stubbed at both sites
+// and the resume's liveness check is fed by seedLiveJob -- but a fake that
+// launched and left no trace would be a worse stand-in for the next test that
+// reaches for it, and writing it costs two lines.
 const watchFakeClaudeScript = `#!/bin/sh
 d=$(dirname "$0")
 recdir="$d/recorded"
@@ -120,6 +125,12 @@ func watchInboundSourceRepo(t *testing.T) (repoDir, sha string) {
 		cmd.Env = append(os.Environ(),
 			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e", "GIT_AUTHOR_DATE=2026-01-01T00:00:00Z",
 			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e", "GIT_COMMITTER_DATE=2026-01-01T00:00:00Z",
+			// The developer's own git config is shut out, the way gitRunInCLI
+			// does it. Without this a global commit.gpgsign, hooksPath, or
+			// signing key turns this fixture into a failure the developer sees
+			// and CI never does.
+			"GIT_CONFIG_GLOBAL=/dev/null",
+			"GIT_CONFIG_SYSTEM=/dev/null",
 		)
 		out, err := cmd.CombinedOutput()
 		if err != nil {

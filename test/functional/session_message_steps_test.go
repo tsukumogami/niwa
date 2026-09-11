@@ -28,9 +28,8 @@ import (
 // separator, and a joined line cannot answer it -- a settings document and a
 // prompt both contain spaces.
 //
-// What is NOT covered here, deliberately: whether a message from another live
-// Claude Code session actually arrives at the worker without an approval
-// prompt. That needs two live sessions and a real daemon, so it is the PRD's
+// features/session-message-acceptance.feature is where these steps are used,
+// and its description says what this coverage deliberately leaves to the PRD's
 // manual delivery check.
 
 // sessionMessageNoticeMarker is the file `niwa dispatch` creates beside
@@ -86,9 +85,11 @@ func theNiwaMachineConfigGlobalTableContains(ctx context.Context, body *godog.Do
 		merged = append(merged, lines[i+1:]...)
 		return writeMachineConfig(s, strings.Join(merged, "\n"))
 	}
-	// No [global] table yet. It goes at the very top: keys after a table
-	// header belong to that table until the next one, so prepending is the
-	// only placement that cannot capture keys the file already had.
+	// No [global] table yet, so one goes at the very top. That is safe only
+	// because niwa writes no root-level keys into config.toml -- every key it
+	// writes is inside [global], [global_config] or [registry.*]. A root-level
+	// key would be swallowed by the header prepended above it, since keys after
+	// a table header belong to that table.
 	return writeMachineConfig(s, "[global]\n"+added+"\n\n"+existing)
 }
 
@@ -321,7 +322,14 @@ func theLaunchedClaudeSettingsHasRemoteControlAtStartup(ctx context.Context) err
 		return err
 	}
 	if !present {
-		return fmt.Errorf("the launch settings document has no remoteControlAtStartup")
+		// The document and stderr both go in the message. Remote control
+		// declines to inject for reasons that have nothing to do with the
+		// settings document -- an ANTHROPIC_API_KEY forcing API-key auth is the
+		// one that has already cost a debugging session -- and it says so on
+		// stderr. A failure naming only the missing key sends the reader to the
+		// wrong half of the system.
+		doc, _, _ := launchedClaudeSettingsDocument(s)
+		return fmt.Errorf("the launch settings document has no remoteControlAtStartup\ndocument: %s\nstderr:\n%s", doc, s.stderr)
 	}
 	if b, ok := v.(bool); !ok || !b {
 		return fmt.Errorf("remoteControlAtStartup = %v; want true", v)
@@ -528,21 +536,17 @@ func thereAreNDispatchMappingsRecordingInbound(ctx context.Context, want int) er
 	return nil
 }
 
-// listRecordsFromStdout decodes the last command's stdout as `niwa list --json`
-// output, keeping every field so a step can tell an absent key from a false one.
-func listRecordsFromStdout(s *testState) ([]map[string]any, error) {
+// dispatchListRecord returns the dispatch instance's record from the last
+// command's stdout, parsed as `niwa list --json`.
+//
+// It decodes into a map rather than a struct so a step can tell an absent key
+// from one present and false. The distinction is the whole point for
+// accepts_session_messages, which is documented as being on every record: a
+// struct would decode a missing key to false and report the field as working.
+func dispatchListRecord(s *testState) (map[string]any, error) {
 	var records []map[string]any
 	if err := json.Unmarshal([]byte(s.stdout), &records); err != nil {
 		return nil, fmt.Errorf("parsing niwa list --json output: %w\nstdout:\n%s", err, s.stdout)
-	}
-	return records, nil
-}
-
-// dispatchListRecord returns the one record for the dispatch instance.
-func dispatchListRecord(s *testState) (map[string]any, error) {
-	records, err := listRecordsFromStdout(s)
-	if err != nil {
-		return nil, err
 	}
 	for _, r := range records {
 		name, _ := r["name"].(string)
@@ -670,6 +674,11 @@ var dispatchInstanceNameInTextRe = regexp.MustCompile(`[A-Za-z0-9_.-]*\+[a-z0-9_
 
 // sessionIdentifierRe matches a full UUID and the 8-hex short form a dispatch
 // prints, so both can be blanked before two runs' stdout are compared.
+//
+// The 8-hex half is deliberately broad: it blanks any bare eight hex digits,
+// not only a short session id. Over-blanking only weakens the comparison, while
+// a pattern narrow enough to miss one identifier would make two identical runs
+// look different and fail the scenario for the wrong reason.
 var sessionIdentifierRe = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\b[0-9a-f]{8}\b`)
 
 // normalizeDispatchStdout replaces the two things that legitimately differ
@@ -880,15 +889,16 @@ func noSettingsFileNiwaWroteIntoTheDispatchInstanceContains(ctx context.Context,
 	}
 
 	// Both floors exist so this step cannot quietly become an assertion about
-	// nothing. The first catches an instance niwa wrote no settings into at all.
-	// The second is the one that matters for the per-repository half: once an
-	// instance has repository directories at all, a scenario is relying on that
-	// half running, and if the materializer ever stopped writing
-	// settings.local.json the step would still pass on the instance-root file
-	// alone while the scenario went on claiming coverage it no longer had.
-	if !rootRead && repoRead == 0 {
-		return fmt.Errorf("niwa wrote no settings file into %s, so this assertion checked nothing; candidates were %v",
-			inst, append([]string{rootSettings}, repoSettings...))
+	// nothing. Every dispatch instance gets an instance-root settings.json, so
+	// its absence means the scan is looking in the wrong place rather than that
+	// there was nothing to find. The second floor is the one that matters for
+	// the per-repository half: once an instance has repository directories at
+	// all, a scenario is relying on that half running, and if the materializer
+	// ever stopped writing settings.local.json the step would still pass on the
+	// instance-root file alone while the scenario went on claiming coverage it
+	// no longer had.
+	if !rootRead {
+		return fmt.Errorf("no settings file at %s, which every dispatch instance has; this assertion is looking in the wrong place", rootSettings)
 	}
 	if len(repoSettings) > 0 && repoRead == 0 {
 		return fmt.Errorf("the dispatch instance %s has %d <group>/<repo> director(y/ies) but niwa wrote no settings.local.json into any of them, so the per-repository half of this assertion checked nothing; candidates were %v",
@@ -920,8 +930,20 @@ func aFileExistsUnderTheWorkspaceRootWithBody(ctx context.Context, relPath strin
 // single-run companion of the parallel step below: everything about this
 // feature that depends on a terminal -- the closing sentence of the explanation
 // and whether the marker is written -- needs one.
+//
+// Like its non-pty sibling `I run "..." from the workspace root`, a dispatch
+// records the instance it created. Two steps that read the same way in a
+// feature file should leave the same state behind, or a later assertion quietly
+// reads whichever instance an earlier step happened to find.
 func iRunUnderAPTY(ctx context.Context, command string) (context.Context, error) {
-	return iRunUnderPTYWithInput(ctx, command, "")
+	ctx, err := iRunUnderPTYWithInput(ctx, command, "")
+	if err != nil {
+		return ctx, err
+	}
+	if s := getState(ctx); s != nil && strings.Contains(command, "dispatch") {
+		s.lastDispatchInstancePath = findDispatchInstance(s.workspaceRoot)
+	}
+	return ctx, nil
 }
 
 // iRunNTimesInParallelUnderAPTY starts n copies of the command at once, each
@@ -973,7 +995,7 @@ func allParallelRunsExitZero(ctx context.Context) error {
 	var failures []string
 	for i, run := range s.parallelRuns {
 		if run.exitCode != 0 {
-			failures = append(failures, fmt.Sprintf("run %d exited %d; transcript:\n%s", i+1, run.exitCode, run.stdout))
+			failures = append(failures, fmt.Sprintf("run %d exited %d; transcript:\n%s", i+1, run.exitCode, run.stderr))
 		}
 	}
 	if len(failures) > 0 {
@@ -1017,7 +1039,7 @@ func everyParallelTranscriptHasExactlyNLinesContaining(ctx context.Context, want
 	}
 	for i, run := range s.parallelRuns {
 		if got := countLinesContaining(run.stderr, needle); got != want {
-			return fmt.Errorf("parallel run %d has %d lines containing %q; want %d\ntranscript:\n%s", i+1, got, needle, want, run.stdout)
+			return fmt.Errorf("parallel run %d has %d lines containing %q; want %d\ntranscript:\n%s", i+1, got, needle, want, run.stderr)
 		}
 	}
 	return nil
