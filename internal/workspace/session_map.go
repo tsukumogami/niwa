@@ -92,6 +92,15 @@ type SessionMapping struct {
 	// must not defer or suppress reclamation, which keys purely on the job
 	// entry. omitempty keeps non-opted and legacy mappings byte-identical.
 	KeepAlive bool `json:"keep_alive,omitempty"`
+	// AcceptsSessionMessages records that the dispatch launched this session
+	// accepting messages from other Claude Code sessions without an approval
+	// prompt: the flag or machine setting asked for it AND the agent could
+	// receive it, so the setting actually went into the launch. Like KeepAlive
+	// it is informational only: it powers `niwa list` and is NEVER read by the
+	// reaper. omitempty keeps mappings where the behavior did not take effect,
+	// and mappings written before this field existed, byte-identical; both
+	// decode as false.
+	AcceptsSessionMessages bool `json:"accepts_session_messages,omitempty"`
 }
 
 // sessionsDirName is the directory under the config dir that holds the session

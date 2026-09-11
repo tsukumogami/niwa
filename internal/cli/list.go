@@ -15,10 +15,17 @@ import (
 func init() {
 	rootCmd.AddCommand(listCmd)
 	listCmd.Flags().BoolVar(&listJSON, "json", false,
-		"emit a JSON array of {name, path, ephemeral[, keep_alive]} records, one per instance")
+		"emit a JSON array of {name, path, ephemeral, accepts_session_messages[, keep_alive]} records, one per instance")
 }
 
 var listJSON bool
+
+// The markers the human output appends to an instance's name, in this order
+// when both apply.
+const (
+	keepAliveMarker              = " (keep-alive)"
+	acceptsSessionMessagesMarker = " (accepts session messages)"
+)
 
 var listCmd = &cobra.Command{
 	Use:   "list",
@@ -33,11 +40,20 @@ An instance backed by a dispatched session is followed by the command that
 steps back into that session, so the handle survives the terminal that
 printed it.
 
-With --json, emits a JSON array of {name, path, ephemeral} records, where
-ephemeral marks instances backed by an ephemeral session mapping. An
-instance whose session was dispatched with keep-alive armed and is still
+With --json, emits a JSON array of {name, path, ephemeral,
+accepts_session_messages} records, where ephemeral marks instances backed by
+an ephemeral session mapping.
+
+accepts_session_messages is on every record. It is true when the instance's
+dispatched session was launched accepting messages from other sessions
+without an approval prompt, and false otherwise. It is reported whether or
+not that session is still running, and a true record shows an
+"(accepts session messages)" marker in the human output.
+
+An instance whose session was dispatched with keep-alive armed and is still
 live additionally carries keep_alive:true (and a "(keep-alive)" marker in
-the human output).`,
+the human output, placed before the "(accepts session messages)" marker when
+both apply).`,
 	Args: cobra.NoArgs,
 	RunE: runList,
 }
@@ -80,11 +96,14 @@ func runList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	for _, r := range records {
+		line := r.Name
 		if r.KeepAlive {
-			fmt.Fprintf(cmd.OutOrStdout(), "%s (keep-alive)\n", r.Name)
-		} else {
-			fmt.Fprintln(cmd.OutOrStdout(), r.Name)
+			line += keepAliveMarker
 		}
+		if r.AcceptsSessionMessages {
+			line += acceptsSessionMessagesMarker
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), line)
 		// A dispatched session's handle is printed once, by the dispatch that
 		// created it, and then lives in scrollback. For an agent that will not
 		// hand over a session mid-turn the terminal never attached in the first
@@ -110,20 +129,29 @@ func runList(cmd *cobra.Command, args []string) error {
 // since been deleted reports nothing -- its self-wake died with the session,
 // so the report reflects sessions being kept alive NOW, not past opt-ins.
 //
+// It fills each record's AcceptsSessionMessages flag from any mapping pointing
+// at the instance that recorded it, with NO liveness check. The grant was made
+// when the session launched, so it is reported for as long as the instance
+// exists, including after the session has finished or been deleted.
+//
 // It returns, keyed by instance path, the command that steps back into the
 // session an instance is backed by, for the instances niwa can name one for.
-// A store read failure degrades to no annotation and no commands; list must
-// stay usable with a partially written store.
+// A store read failure degrades to no annotation and no commands, which leaves
+// both flags false; list must stay usable with a partially written store.
 func annotateFromSessionMappings(records []workspace.InstanceRecord, workspaceRoot, jobsDir string, now time.Time) map[string]string {
 	mappings, err := workspace.ListSessionMappings(workspaceRoot)
 	if err != nil || len(mappings) == 0 {
 		return nil
 	}
 	keptAlive := make(map[string]bool)
+	accepting := make(map[string]bool)
 	resume := make(map[string]string)
 	for _, m := range mappings {
 		if m.KeepAlive && sessionLive(jobsDir, m.SessionID, now) {
 			keptAlive[m.InstancePath] = true
+		}
+		if m.AcceptsSessionMessages {
+			accepting[m.InstancePath] = true
 		}
 		if cmdline := sessionResumeCommand(m); cmdline != "" {
 			resume[m.InstancePath] = cmdline
@@ -132,6 +160,9 @@ func annotateFromSessionMappings(records []workspace.InstanceRecord, workspaceRo
 	for i := range records {
 		if keptAlive[records[i].Path] {
 			records[i].KeepAlive = true
+		}
+		if accepting[records[i].Path] {
+			records[i].AcceptsSessionMessages = true
 		}
 	}
 	return resume

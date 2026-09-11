@@ -838,7 +838,10 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		Origin:       "dispatch",
 		Label:        dispatchLabel,
 		KeepAlive:    keepAliveArmed,
-		Created:      time.Now().UTC(),
+		// The same boolean that gates the audit line at (12a), so the record
+		// and the line can never disagree about this session.
+		AcceptsSessionMessages: inboundApplied,
+		Created:                time.Now().UTC(),
 	}
 	if err := workspace.WriteSessionMapping(workspaceRoot, mapping); err != nil {
 		// The same hazard as the capture-failure branch, on a narrower path.

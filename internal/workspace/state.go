@@ -372,6 +372,13 @@ type InstanceRecord struct {
 	// lives at the CLI layer, so the list command fills this in. omitempty
 	// keeps the --json shape unchanged for every non-participating instance.
 	KeepAlive bool `json:"keep_alive,omitempty"`
+	// AcceptsSessionMessages marks an instance whose dispatched session was
+	// launched accepting messages from other sessions without an approval
+	// prompt, whether or not that session is still running.
+	// EnumerateInstanceRecords leaves it false; the list command fills it in
+	// from the session mappings. It has no omitempty, so every record carries
+	// the key and a consumer never has to treat a missing key as false.
+	AcceptsSessionMessages bool `json:"accepts_session_messages"`
 }
 
 // EnumerateInstanceRecords enumerates the instances under workspaceRoot as
