@@ -496,7 +496,9 @@ func TestDispatch_Inbound_CodexWarnsOnlyWhenTheFlagAsked(t *testing.T) {
 	}
 }
 
-// inboundMode is one way a failure-path test sets the behavior up.
+// inboundMode is one way a test sets the behavior up. wantKey says whether
+// the behavior takes effect for a Claude dispatch in this mode: the key
+// reaches the launch and, on success, the mapping records it.
 type inboundMode struct {
 	name    string
 	host    string
@@ -556,7 +558,7 @@ func setupInboundMode(t *testing.T, mode inboundMode) (string, *dispatchFakes, *
 	return root, f, pass
 }
 
-// checkLaunchedKey guards the failure-path tests against passing vacuously: in
+// checkLaunchedKey guards the tests built on inboundMode against passing vacuously: in
 // the on modes the key really was handed to the launch.
 func checkLaunchedKey(t *testing.T, mode inboundMode, pass []string) {
 	t.Helper()

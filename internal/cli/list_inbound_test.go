@@ -193,6 +193,39 @@ func TestAnnotateAcceptsSessionMessages(t *testing.T) {
 	}
 }
 
+// TestAnnotateAcceptsSessionMessages_AnyMappingWins: when two mappings point
+// at one instance and only one recorded the behavior, the instance reports
+// true whether that mapping is listed first or last.
+func TestAnnotateAcceptsSessionMessages_AnyMappingWins(t *testing.T) {
+	for _, acceptingID := range []string{inboundListAcceptID, inboundListPlainID} {
+		t.Run(acceptingID, func(t *testing.T) {
+			root := t.TempDir()
+			path := seedInstance(t, root, inboundAcceptName, 1)
+			for _, id := range []string{inboundListAcceptID, inboundListPlainID} {
+				m := workspace.SessionMapping{
+					SessionID:              id,
+					InstanceName:           inboundAcceptName,
+					InstancePath:           path,
+					Ephemeral:              true,
+					Origin:                 "dispatch",
+					AcceptsSessionMessages: id == acceptingID,
+				}
+				if err := workspace.WriteSessionMapping(root, m); err != nil {
+					t.Fatal(err)
+				}
+			}
+			records, err := workspace.EnumerateInstanceRecords(root)
+			if err != nil {
+				t.Fatalf("enumerate: %v", err)
+			}
+			annotateFromSessionMappings(records, root, t.TempDir(), time.Now())
+			if len(records) != 1 || !records[0].AcceptsSessionMessages {
+				t.Fatalf("want one record reporting true, got %+v", records)
+			}
+		})
+	}
+}
+
 // TestRunList_AcceptsSessionMessages_JSONShape pins the wire shape of the real
 // command: accepts_session_messages is on every record, true or false, while
 // keep_alive stays omitted when false.

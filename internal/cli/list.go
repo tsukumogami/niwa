@@ -44,11 +44,12 @@ With --json, emits a JSON array of {name, path, ephemeral,
 accepts_session_messages} records, where ephemeral marks instances backed by
 an ephemeral session mapping.
 
-accepts_session_messages is on every record. It is true when the instance's
-dispatched session was launched accepting messages from other sessions
+accepts_session_messages is on every record. It is true when niwa launched
+the instance's dispatched session set to accept messages from other sessions
 without an approval prompt, and false otherwise. It is reported whether or
-not that session is still running, and a true record shows an
-"(accepts session messages)" marker in the human output.
+not that session is still running, for as long as the instance exists;
+turning the machine setting off later does not change it. A true record
+shows an "(accepts session messages)" marker in the human output.
 
 An instance whose session was dispatched with keep-alive armed and is still
 live additionally carries keep_alive:true (and a "(keep-alive)" marker in

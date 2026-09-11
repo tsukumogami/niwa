@@ -83,8 +83,12 @@ func TestDispatch_Inbound_CodexNotRecordedOnMapping(t *testing.T) {
 	t.Setenv("NIWA_DISPATCH_HARNESS", string(agent.AgentCodex))
 	dispatchAcceptSessionMessages = inboundFlag(true)
 
-	if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
+	_, stderr, err := runDispatchCmd(t, "do a thing")
+	if err != nil {
 		t.Fatalf("dispatch: %v", err)
+	}
+	if strings.Contains(stderr, auditMarker) {
+		t.Errorf("a Codex dispatch printed the audit line; stderr:\n%s", stderr)
 	}
 	raw := readOnlyMappingJSON(t, root)
 	if raw["agent"] != string(agent.AgentCodex) {
