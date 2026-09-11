@@ -165,9 +165,9 @@ const (
 	// to be wrong in. Its verb is the guide URL.
 	inboundExplanationTerminalClose = "niwa won't show this again; it's also at %s"
 
-	// inboundExplanationNonTerminalClose closes the line when stderr is not a
-	// terminal, or when the configuration directory cannot be resolved. In
-	// both cases nothing is remembered, and saying so is more honest than
+	// inboundExplanationNonTerminalClose closes the line whenever nothing is
+	// about to be remembered: stderr is not a terminal, or there is no
+	// configuration directory to remember it in. Saying so is more honest than
 	// promising silence niwa cannot deliver. Its verb is the guide URL.
 	inboundExplanationNonTerminalClose = "niwa will show this again until it's been shown at a terminal; it's also at %s"
 )
@@ -204,9 +204,12 @@ func inboundExplanationLine(terminal bool) string {
 // directory to remember anything in, so the explanation prints with its
 // non-terminal closing sentence and isTTY is never consulted -- asking would
 // only produce a promise niwa cannot keep. An empty dir is folded in here
-// rather than left to the caller because a relative marker path would make the
-// presence check below resolve against the process working directory, where an
-// unrelated file of that name would silence the notice for good.
+// rather than left to the caller because it would make the marker path a bare
+// name, so the presence check below would resolve it against the process
+// working directory, where an unrelated file of that name would silence the
+// notice for good. That is the only shape this guards: a dir that is relative
+// but not empty still resolves against the working directory, as every other
+// path niwa builds from the configuration root does.
 //
 // Presence is os.Lstat rather than os.Stat: a dangling symlink at the marker
 // path counts as present, which is what the exclusive create below would find
