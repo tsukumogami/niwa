@@ -61,15 +61,22 @@ keep it a visible template; mapping `".mcp.json" = ".mcp.json"` works the same.
 ### Loading the server without a trust prompt
 
 Claude Code may show a per-session trust prompt the first time a project MCP
-server loads. A workspace that runs sessions in bypass mode suppresses it:
+server loads. A session running in bypass mode doesn't show it. To get that for
+dispatched workers, declare the posture in `workspace.toml`:
 
 ```toml
 [claude.settings]
 permissions = "bypass"
 ```
 
-This is the existing settings surface (it maps to Claude Code's
-`bypassPermissions` mode); it is independent of the file tables above.
+`bypass` reaches dispatched workers through `niwa dispatch`: niwa records the
+declared posture for each instance, and dispatch passes
+`--permission-mode bypassPermissions` to the workers it launches. niwa doesn't
+write a bypass mode into any `.claude/settings.json`, because Claude Code
+2.1.257 stopped honoring one set in a project's settings file. A session you
+start yourself at the workspace root or an instance root gets your own Claude
+Code settings; launch it with `claude --permission-mode bypassPermissions` if
+you want bypass there. This setting is independent of the file tables above.
 
 ## Tracking and cleanup
 
