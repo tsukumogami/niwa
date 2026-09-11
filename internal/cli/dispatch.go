@@ -880,16 +880,16 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	//
 	// attachFollows is the one place step (14)'s third outcome is decided, and
 	// it is decided here because the one-time explanation needs it too: a
-	// paragraph printed just before `claude attach` takes the terminal is a
-	// paragraph the developer never reads, and niwa would then remember having
-	// shown it. So when an attach follows, the explanation waits for it to
-	// return; when none does, it goes out right behind the audit line.
+	// paragraph printed just before the agent's resume verb takes the terminal
+	// is a paragraph the developer never reads, and niwa would then remember
+	// having shown it. So when an attach follows, the explanation waits for it
+	// to return; when none does, it goes out right behind the audit line.
 	attachFollows := launchMode != agentplan.LaunchForeground && spec.ResumeDuringTurn && !dispatchDetach
 	switch {
 	case inboundApplied:
 		fmt.Fprintln(cmd.ErrOrStderr(), inboundAuditLine(inbound.source))
 		if !attachFollows {
-			showInboundExplanationAt(cmd.ErrOrStderr(), IsStderrTTY)
+			showInboundExplanationBesideConfig(cmd.ErrOrStderr())
 		}
 	case inbound.overrodeMachineOn && inboundDeliverable:
 		fmt.Fprintln(cmd.ErrOrStderr(), inboundOverrideLine)
@@ -965,7 +965,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		// back or never took it, so this is the first moment the explanation
 		// can be read -- and the first moment it is honest to remember it.
 		if inboundApplied {
-			showInboundExplanationAt(cmd.ErrOrStderr(), IsStderrTTY)
+			showInboundExplanationBesideConfig(cmd.ErrOrStderr())
 		}
 	}
 

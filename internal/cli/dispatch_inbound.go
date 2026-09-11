@@ -148,16 +148,12 @@ const (
 	// a caller joins it to a closing sentence with a single space.
 	//
 	// It names an agent, its /config screen and its settings file, in a file
-	// the dispatch-path layout scan covers. That is deliberate and within the
-	// scan's rule, which compares whole literal values: this is advice about
-	// where the developer's OWN sessions get their setting, addressed to a
-	// reader, not a delivery decision taken at a call site. Nothing branches on
-	// it and nothing but inboundExplanationLine reads it. It reaches only a
-	// dispatch that already resolved to an agent declaring the capability, so
-	// no agent that cannot receive the behavior is ever told to go and
-	// configure it -- which holds as long as the one agent declaring
-	// DispatchInboundAcceptance is the one this paragraph names. A second such
-	// agent would need the wording generalized, not the scan relaxed.
+	// the dispatch-path layout scan covers. That is advice to a reader about
+	// where their OWN sessions get the setting, not a delivery decision taken
+	// at a call site: nothing branches on it. It is honest only while the agent
+	// it names is the one agent declaring DispatchInboundAcceptance, which
+	// TestInboundExplanationNamesTheOnlyImplementedAgent holds still. A second
+	// such agent needs the wording generalized.
 	inboundExplanationBody = `niwa dispatch: note: accepting messages without asking is inbound only. A message this worker sends into a session launched without it, such as a coordinator dispatched earlier, one dispatched with the behavior off, or one another tool started, still waits for approval there when the two run in different permission modes; dispatching that session again with the behavior on clears it. Your own interactive Claude Code sessions are one such case, and they are governed by your Claude Code user settings, which niwa doesn't change. To accept there too, set "Messages from your other sessions" to accept in Claude Code's /config, or add "crossSessionInbound": "accept" to ~/.claude/settings.json. That change applies to every Claude Code session you run and to messages from any session able to reach yours, on this machine or elsewhere.`
 
 	// inboundExplanationTerminalClose closes the line when stderr is a
@@ -186,7 +182,14 @@ func inboundExplanationLine(terminal bool) string {
 
 // showInboundExplanation prints the one-time explanation to w when the marker
 // in dir is absent, and then, only if isTTY reports a terminal, remembers it by
-// creating the marker.
+// creating the marker. It is the durable half of this feature as much as the
+// printed one, so a caller cannot treat it as output alone.
+//
+// isTTY must report on w, not on some other stream. The whole correctness of
+// the marker rests on that: a true answer is what authorizes writing down "the
+// developer has seen this", and a caller that passed a log file or a captured
+// buffer alongside the real terminal check would burn the one-time notice on
+// output nobody read.
 //
 // It returns nothing, deliberately. Every call site runs after the dispatch has
 // already succeeded and its mapping is durable, so there is no failure here
@@ -195,10 +198,11 @@ func inboundExplanationLine(terminal bool) string {
 // direction to err in.
 //
 // dir is the directory holding config.toml and dirErr is the error from
-// resolving it. A non-nil dirErr means there is no directory to remember
-// anything in, so the explanation prints with its non-terminal closing sentence
-// and isTTY is never consulted -- asking would only produce a promise niwa
-// cannot keep.
+// resolving it; a nil dirErr must come with a non-empty dir, since an empty one
+// would put the marker in the process working directory. A non-nil dirErr means
+// there is no directory to remember anything in, so the explanation prints with
+// its non-terminal closing sentence and isTTY is never consulted -- asking would
+// only produce a promise niwa cannot keep.
 //
 // Presence is os.Lstat rather than os.Stat: a dangling symlink at the marker
 // path counts as present, which is what the exclusive create below would find
@@ -230,10 +234,15 @@ func showInboundExplanation(w io.Writer, dir string, dirErr error, isTTY func() 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
 	}
-	// O_EXCL is what makes concurrent first dispatches safe: exactly one of
-	// them creates the file and the rest get an "exists" error, which is
+	// O_EXCL is what keeps this create from following a symlink planted at the
+	// marker path between the Lstat above and this open. The Lstat comment's
+	// "a symlink is never followed or written through" rests on it: without it
+	// a create through a link would write the link's target instead. The
+	// concurrent case needs no flag to come out right -- nothing is written,
+	// so parallel creates of an empty file agree either way -- but with O_EXCL
+	// exactly one caller creates it and the rest get an "exists" error,
 	// ignored along with every other error for the reason above. The file
-	// stays empty -- its name is the record.
+	// stays empty: its name is the record.
 	f, err := os.OpenFile(marker, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
@@ -241,22 +250,24 @@ func showInboundExplanation(w io.Writer, dir string, dirErr error, isTTY func() 
 	_ = f.Close()
 }
 
-// showInboundExplanationAt is the production call: it resolves the directory
-// holding config.toml and hands it to showInboundExplanation. It exists as its
-// own function because runDispatch calls it from two sites -- behind the audit
-// line and after the attach -- and splitting a path from its error at both
-// would be the same three lines twice. showInboundExplanation itself takes the
-// directory rather than resolving it, so its tests can point it anywhere.
+// showInboundExplanationBesideConfig is the production call: it resolves the
+// directory holding config.toml, pairs it with IsStderrTTY -- the check that
+// reports on the stream runDispatch passes as w -- and hands both to
+// showInboundExplanation. It exists as its own function because runDispatch
+// calls it from two sites, behind the audit line and after the attach, and
+// splitting a path from its error at both would be the same three lines twice.
+// showInboundExplanation itself takes the directory and the check as arguments
+// rather than resolving them, so its tests can point it anywhere.
 //
 // config.GlobalConfigPath() is the source, not config.GlobalConfigDir(): the
 // latter returns the overlay clone directory, which a [global_config] clone
 // owns and can replace wholesale, and a notice remembered there would be
 // forgotten by the next clone.
-func showInboundExplanationAt(w io.Writer, isTTY func() bool) {
+func showInboundExplanationBesideConfig(w io.Writer) {
 	path, err := config.GlobalConfigPath()
 	dir := ""
 	if err == nil {
 		dir = filepath.Dir(path)
 	}
-	showInboundExplanation(w, dir, err, isTTY)
+	showInboundExplanation(w, dir, err, IsStderrTTY)
 }

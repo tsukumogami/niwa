@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -35,7 +36,9 @@ const (
 	explanationNonTerminalLine = explanationBodyText + " " + nonTerminalClose
 )
 
-// explanationMarker is a substring no other niwa output carries. The assertions
+// explanationNeedle is a substring no other niwa output carries. It is a needle
+// to search stderr with, not a file: the marker on disk is inboundNoticeMarker,
+// reached through markerIn and checked by requireMarker below. The assertions
 // about WHETHER and WHERE the paragraph appeared match on it, or on one closing
 // sentence, rather than on a whole line: what they are about is the position
 // and the presence, and an absence assertion in particular has to keep counting
@@ -45,7 +48,7 @@ const (
 // TestDispatch_Notice_WaitsForTheAttach pins the whole terminal line -- so a
 // rewording is a deliberate change across several tests rather than a silent
 // one.
-const explanationMarker = "accepting messages without asking is inbound only"
+const explanationNeedle = "accepting messages without asking is inbound only"
 
 // TestInboundExplanationExactText pins the paragraph and the marker file name.
 // Both are contracts beyond this package: issue 8's guide quotes the sentences
@@ -62,6 +65,36 @@ func TestInboundExplanationExactText(t *testing.T) {
 	}
 	if got := inboundExplanationLine(false); got != explanationNonTerminalLine {
 		t.Errorf("non-terminal explanation =\n%q\nwant\n%q", got, explanationNonTerminalLine)
+	}
+}
+
+// TestInboundExplanationNamesTheOnlyImplementedAgent holds still the invariant
+// the explanation's wording depends on. The paragraph tells the developer to
+// change one named agent's own settings, which is the right advice only while
+// that agent is the only one niwa can deliver the behavior to. A second
+// implemented agent would make a dispatched worker of that other kind print
+// instructions for a product it is not, so the wording has to be generalized in
+// the same change -- this fails first and says so.
+func TestInboundExplanationNamesTheOnlyImplementedAgent(t *testing.T) {
+	var implemented []agent.Agent
+	for _, ag := range agent.All() {
+		decl, err := agentplan.Lookup(agentplan.DispatchInboundAcceptance, ag)
+		if err != nil {
+			t.Fatalf("looking up the capability for %s: %v", ag, err)
+		}
+		if decl.State == agentplan.StateImplemented {
+			implemented = append(implemented, ag)
+		}
+	}
+	if len(implemented) != 1 {
+		t.Fatalf("%d agents declare DispatchInboundAcceptance implemented (%v); the explanation in dispatch_inbound.go names one agent's settings and has to be generalized before a second one ships",
+			len(implemented), implemented)
+	}
+	// Case-insensitively, because the paragraph writes the agent's product name
+	// as a reader would see it rather than as the identifier is spelled.
+	if !strings.Contains(strings.ToLower(explanationBodyText), strings.ToLower(string(implemented[0]))) {
+		t.Errorf("the explanation does not name %s, the one agent that can receive the behavior:\n%s",
+			implemented[0], explanationBodyText)
 	}
 }
 
@@ -353,7 +386,7 @@ func TestShowInboundExplanation_UnsearchableDirectory(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
-	if out := showTo(t, dir, nil, alwaysTTY); !strings.Contains(out, explanationMarker) {
+	if out := showTo(t, dir, nil, alwaysTTY); !strings.Contains(out, explanationNeedle) {
 		t.Errorf("printed %q, want the explanation: an unreadable directory means the marker is unknown, not present", out)
 	}
 }
@@ -385,9 +418,11 @@ func TestShowInboundExplanation_UnresolvableDirectory(t *testing.T) {
 }
 
 // TestShowInboundExplanation_ConcurrentFirstCalls: parallel dispatches race for
-// the same marker, and O_EXCL is what makes that safe. Every caller returns,
+// the same marker and all of them come out whole -- every caller returns,
 // exactly one file exists afterwards, and at least one developer-facing stream
-// got the paragraph.
+// got the paragraph. What this pins is the outcome, not the mechanism: the
+// create's O_EXCL is there for the symlink window rather than for this race,
+// which an ordinary create of an empty file would also survive.
 func TestShowInboundExplanation_ConcurrentFirstCalls(t *testing.T) {
 	dir := t.TempDir()
 	const callers = 8
@@ -407,7 +442,7 @@ func TestShowInboundExplanation_ConcurrentFirstCalls(t *testing.T) {
 
 	printed := 0
 	for _, out := range outs {
-		if strings.Contains(out, explanationMarker) {
+		if strings.Contains(out, explanationNeedle) {
 			printed++
 		}
 	}
@@ -475,7 +510,7 @@ func TestDispatch_Notice_OnlyWhenTheBehaviorApplies(t *testing.T) {
 			if err != nil {
 				t.Fatalf("dispatch: %v", err)
 			}
-			if strings.Contains(stderr, explanationMarker) {
+			if strings.Contains(stderr, explanationNeedle) {
 				t.Errorf("the explanation printed for a dispatch the behavior never applied to; stderr:\n%s", stderr)
 			}
 			requireNoMarker(t, hostConfigDir(t))
@@ -499,7 +534,7 @@ func TestDispatch_Notice_DetachedFollowsTheAuditLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	requireAdjacentLines(t, stderr, auditMarker, explanationMarker)
+	requireAdjacentLines(t, stderr, auditMarker, explanationNeedle)
 	if !strings.Contains(stderr, terminalClose) {
 		t.Errorf("stderr does not carry the terminal closing sentence:\n%s", stderr)
 	}
@@ -551,14 +586,14 @@ func TestDispatch_Notice_ForegroundFollowsTheAuditLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	requireAdjacentLines(t, stderr, auditMarker, explanationMarker)
+	requireAdjacentLines(t, stderr, auditMarker, explanationNeedle)
 
 	const turnEnded = "niwa: the turn ended."
 	endedAt := strings.Index(stderr, turnEnded)
 	if endedAt < 0 {
 		t.Fatalf("the foreground closing line is missing; this test is not driving a foreground launch. stderr:\n%s", stderr)
 	}
-	if at := strings.Index(stderr, explanationMarker); at > endedAt {
+	if at := strings.Index(stderr, explanationNeedle); at > endedAt {
 		t.Errorf("the explanation printed after the closing line. stderr:\n%s", stderr)
 	}
 	requireMarker(t, hostConfigDir(t))
@@ -598,7 +633,13 @@ func TestDispatch_Notice_WaitsForTheAttach(t *testing.T) {
 				return tc.attachErr
 			}
 
-			cmd := newTestCommand(&bytes.Buffer{}, &errBuf)
+			// runDispatchCmd only hands its buffers back at the end, and this
+			// test has to read stderr while runDispatch is still inside the
+			// attach, so it builds the command itself.
+			cmd := &cobra.Command{}
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&errBuf)
+			cmd.SetContext(context.Background())
 			if err := runDispatch(cmd, []string{"do a thing"}); err != nil {
 				t.Fatalf("dispatch: %v", err)
 			}
@@ -609,7 +650,7 @@ func TestDispatch_Notice_WaitsForTheAttach(t *testing.T) {
 			if !strings.Contains(atAttach, auditMarker) {
 				t.Errorf("stderr at the attach is missing the audit line:\n%s", atAttach)
 			}
-			if strings.Contains(atAttach, explanationMarker) {
+			if strings.Contains(atAttach, explanationNeedle) {
 				t.Errorf("the explanation printed before the attach took the terminal:\n%s", atAttach)
 			}
 			if markerAtAttach {
@@ -636,18 +677,6 @@ func TestDispatch_Notice_WaitsForTheAttach(t *testing.T) {
 	}
 }
 
-// newTestCommand builds the cobra command runDispatch writes through, with both
-// streams pointed at the given buffers. Tests that need to read stderr while
-// runDispatch is still running use this rather than runDispatchCmd, which only
-// hands the buffers back at the end.
-func newTestCommand(out, err *bytes.Buffer) *cobra.Command {
-	cmd := &cobra.Command{}
-	cmd.SetOut(out)
-	cmd.SetErr(err)
-	cmd.SetContext(context.Background())
-	return cmd
-}
-
 // TestDispatch_Notice_NonTerminalDispatchRemembersNothing: a dispatch from a
 // script or a CI job prints the paragraph with the sentence that admits it will
 // print again, and writes nothing beside config.toml.
@@ -669,7 +698,7 @@ func TestDispatch_Notice_NonTerminalDispatchRemembersNothing(t *testing.T) {
 	if !strings.Contains(stderr, nonTerminalClose) {
 		t.Errorf("stderr does not carry the non-terminal closing sentence:\n%s", stderr)
 	}
-	if got := dirEntryNames(t, cfgDir); !slicesEqual(before, got) {
+	if got := dirEntryNames(t, cfgDir); !slices.Equal(before, got) {
 		t.Errorf("the configuration directory went from %v to %v; a non-terminal dispatch creates nothing", before, got)
 	}
 }
@@ -686,18 +715,6 @@ func dirEntryNames(t *testing.T, dir string) []string {
 		names = append(names, e.Name())
 	}
 	return names
-}
-
-func slicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // TestDispatch_Notice_FollowsTheConfigurationPath: the marker lives beside
@@ -774,7 +791,7 @@ func TestDispatch_Notice_CreatesTheConfigurationDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	if !strings.Contains(stderr, explanationMarker) {
+	if !strings.Contains(stderr, explanationNeedle) {
 		t.Fatalf("the explanation did not print:\n%s", stderr)
 	}
 	info, err := os.Stat(cfgDir)
@@ -832,7 +849,7 @@ func TestDispatch_Notice_FailedDispatchExplainsNothing(t *testing.T) {
 			if err == nil {
 				t.Fatalf("dispatch succeeded; this test needs it to fail. stderr:\n%s", stderr)
 			}
-			if strings.Contains(stderr, explanationMarker) {
+			if strings.Contains(stderr, explanationNeedle) {
 				t.Errorf("a failed dispatch printed the explanation:\n%s", stderr)
 			}
 			requireNoMarker(t, hostConfigDir(t))
@@ -865,7 +882,7 @@ func TestDispatch_Notice_UnwritableConfigDirDoesNotFailTheDispatch(t *testing.T)
 		if err != nil {
 			t.Fatalf("%s dispatch failed because the marker could not be written: %v", pass, err)
 		}
-		if !strings.Contains(stderr, explanationMarker) {
+		if !strings.Contains(stderr, explanationNeedle) {
 			t.Errorf("%s dispatch printed no explanation; with nothing remembered it shows every time:\n%s", pass, stderr)
 		}
 	}
@@ -895,7 +912,7 @@ func TestDispatch_Notice_LeavesConfigTomlAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	if !strings.Contains(stderr, explanationMarker) {
+	if !strings.Contains(stderr, explanationNeedle) {
 		t.Fatalf("the explanation did not print, so this test proves nothing:\n%s", stderr)
 	}
 	requireMarker(t, cfgDir)
@@ -940,10 +957,10 @@ func TestDispatch_Notice_StaysOffStdout(t *testing.T) {
 			if err != nil {
 				t.Fatalf("dispatch: %v", err)
 			}
-			if !strings.Contains(stderr, explanationMarker) {
+			if !strings.Contains(stderr, explanationNeedle) {
 				t.Fatalf("the explanation did not print at all:\n%s", stderr)
 			}
-			if strings.Contains(stdout, explanationMarker) || strings.Contains(stdout, explanationGuideURL) {
+			if strings.Contains(stdout, explanationNeedle) || strings.Contains(stdout, explanationGuideURL) {
 				t.Errorf("stdout carries the explanation:\n%s", stdout)
 			}
 		})
