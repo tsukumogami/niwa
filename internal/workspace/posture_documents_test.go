@@ -240,6 +240,15 @@ func TestAskDocumentIsUndeclaredPlusDefault(t *testing.T) {
 	t.Run("worktree", func(t *testing.T) {
 		worktreeDoc := func(settings config.SettingsConfig) map[string]any {
 			cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
+			// applyToWorktreeFixture declares no hooks, so a pre_tool_use
+			// script goes in the convention directory, as in the instance case.
+			hookDir := filepath.Join(configDir, "hooks", "pre_tool_use")
+			if err := os.MkdirAll(hookDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(hookDir, "lint.sh"), []byte("#!/bin/sh\necho lint\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
 			writeMarketplaceTree(t, filepath.Join(instanceRoot, ".niwa", "marketplaces", "tools"))
 			plugins := []string{"shirabe@tools"}
 			cfg.Claude.Plugins = &plugins
@@ -252,6 +261,20 @@ func TestAskDocumentIsUndeclaredPlusDefault(t *testing.T) {
 		}
 		ask := worktreeDoc(config.SettingsConfig{"permissions": plainSetting("ask")})
 		undeclared := worktreeDoc(nil)
+		// The shared check accepts hooks or plugins; the worktree fixture
+		// must carry both. The shirabe plugin alone already makes niwa inject
+		// its work-summary hooks, so a bare "hooks" key proves nothing: the
+		// discovered lint.sh must be registered (installed as lint.local.sh).
+		if _, ok := undeclared["enabledPlugins"]; !ok {
+			t.Fatalf("undeclared worktree document has no enabledPlugins: %v", undeclared)
+		}
+		hooks, err := json.Marshal(undeclared["hooks"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(hooks), "pre_tool_use/lint") {
+			t.Fatalf("undeclared worktree document does not register the fixture's lint.sh hook: %s", hooks)
+		}
 		assertAskIsUndeclaredPlusDefault(t, ask, undeclared)
 	})
 }
