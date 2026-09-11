@@ -64,6 +64,9 @@ func TestApplyReviewSettings_NoSandbox(t *testing.T) {
 	if n := countPreToolUseMatcher(t, got, postGuardMatcher); n != 1 {
 		t.Errorf("no-sandbox apply must add the Bash post-guard hook exactly once, got %d", n)
 	}
+	if n := countPreToolUseMatcher(t, got, sessionReachDenyMatcher); n != 1 {
+		t.Errorf("no-sandbox apply must add the session-reach deny hook exactly once, got %d", n)
+	}
 	if n := countPreToolUseMatcher(t, got, egressDenyMatcher); n != 0 {
 		t.Errorf("no-sandbox apply must not add the egress-deny hook, got %d", n)
 	}
@@ -121,6 +124,9 @@ func TestApplyReviewSettings_Sandbox(t *testing.T) {
 	}
 	if n := countPreToolUseMatcher(t, got, fsGuardMatcher); n != 1 {
 		t.Errorf("filesystem-guard hook must be present exactly once, got %d", n)
+	}
+	if n := countPreToolUseMatcher(t, got, sessionReachDenyMatcher); n != 1 {
+		t.Errorf("session-reach deny hook must be present exactly once, got %d", n)
 	}
 	// Pre-existing PreToolUse entry preserved alongside the appended hooks.
 	if n := countPreToolUseMatcher(t, got, "Read"); n != 1 {
@@ -192,6 +198,9 @@ func TestApplyReviewSettings_AskPosture(t *testing.T) {
 	if n := countPreToolUseMatcher(t, got, postGuardMatcher); n != 1 {
 		t.Errorf("post-guard hook must remain, got %d", n)
 	}
+	if n := countPreToolUseMatcher(t, got, sessionReachDenyMatcher); n != 1 {
+		t.Errorf("session-reach deny hook must be present exactly once, got %d", n)
+	}
 	// The fs-guard hook runs with --ask-outside (operator-approval form).
 	if cmd := preToolUseCommand(t, got, fsGuardMatcher); !strings.Contains(cmd, "--ask-outside") {
 		t.Errorf("ask-posture fs-guard hook must pass --ask-outside, got %q", cmd)
@@ -215,6 +224,9 @@ func TestApplyReviewSettings_HardDenyPostureUnchanged(t *testing.T) {
 	if n := countPreToolUseMatcher(t, got, autoAllowMatcher); n != 0 {
 		t.Errorf("hard-deny posture must not add the auto-allow hook, got %d", n)
 	}
+	if n := countPreToolUseMatcher(t, got, sessionReachDenyMatcher); n != 1 {
+		t.Errorf("hard-deny posture must add the session-reach deny hook exactly once, got %d", n)
+	}
 	cmd := preToolUseCommand(t, got, fsGuardMatcher)
 	if strings.Contains(cmd, "--ask-outside") {
 		t.Errorf("hard-deny fs-guard hook must not pass --ask-outside, got %q", cmd)
@@ -232,14 +244,14 @@ func TestVerifyReviewSettings_RequiresAskPostureBits(t *testing.T) {
 	base := map[string]any{
 		"sandbox": noEgressSandboxStanza(),
 		"hooks": map[string]any{
-			"PreToolUse": []any{postGuardHook(), egressDenyHook(), fsGuardHook("/inst", false)},
+			"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), egressDenyHook(), fsGuardHook("/inst", false)},
 		},
 	}
 	if err := VerifyReviewSettings(base, true, false); err != nil {
 		t.Fatalf("base doc must verify as hard-deny: %v", err)
 	}
-	if err := VerifyReviewSettings(base, true, true); err == nil {
-		t.Error("ask posture must reject a doc missing defaultMode + auto-allow")
+	if err := VerifyReviewSettings(base, true, true); err == nil || !strings.Contains(err.Error(), "permissions block missing") {
+		t.Errorf("ask posture must reject a doc missing defaultMode + auto-allow for the missing permissions block, got %v", err)
 	}
 
 	// Add defaultMode but still no auto-allow -> still rejected as ask.
@@ -247,11 +259,11 @@ func TestVerifyReviewSettings_RequiresAskPostureBits(t *testing.T) {
 		"sandbox":     noEgressSandboxStanza(),
 		"permissions": map[string]any{"defaultMode": "default"},
 		"hooks": map[string]any{
-			"PreToolUse": []any{postGuardHook(), egressDenyHook(), fsGuardHook("/inst", true)},
+			"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), egressDenyHook(), fsGuardHook("/inst", true)},
 		},
 	}
-	if err := VerifyReviewSettings(withMode, true, true); err == nil {
-		t.Error("ask posture must reject a doc missing the auto-allow hook")
+	if err := VerifyReviewSettings(withMode, true, true); err == nil || !strings.Contains(err.Error(), "auto-allow") {
+		t.Errorf("ask posture must reject a doc missing the auto-allow hook for that reason, got %v", err)
 	}
 
 	// Full ask-posture doc verifies.
@@ -259,7 +271,7 @@ func TestVerifyReviewSettings_RequiresAskPostureBits(t *testing.T) {
 		"sandbox":     noEgressSandboxStanza(),
 		"permissions": map[string]any{"defaultMode": "default"},
 		"hooks": map[string]any{
-			"PreToolUse": []any{postGuardHook(), egressDenyHook(), autoAllowHook(), fsGuardHook("/inst", true)},
+			"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), egressDenyHook(), autoAllowHook(), fsGuardHook("/inst", true)},
 		},
 	}
 	if err := VerifyReviewSettings(full, true, true); err != nil {
@@ -343,6 +355,9 @@ func TestApplyReviewSettings_DedupesHooks(t *testing.T) {
 	if n := countPreToolUseMatcher(t, got, fsGuardMatcher); n != 1 {
 		t.Errorf("re-apply must not duplicate the filesystem-guard hook, got %d", n)
 	}
+	if n := countPreToolUseMatcher(t, got, sessionReachDenyMatcher); n != 1 {
+		t.Errorf("re-apply must not duplicate the session-reach deny hook, got %d", n)
+	}
 }
 
 // TestVerifyReviewSettings_RequiresPostGuard rejects a doc without the Bash
@@ -352,15 +367,15 @@ func TestVerifyReviewSettings_RequiresPostGuard(t *testing.T) {
 	if err := VerifyReviewSettings(map[string]any{}, false, false); err == nil {
 		t.Error("missing post-guard hook must be rejected (non-sandbox)")
 	}
-	// A sandbox doc that has the egress-deny hook but not the post-guard -> reject.
+	// A sandbox doc that has every other hook but not the post-guard -> reject.
 	noGuard := map[string]any{
 		"sandbox": noEgressSandboxStanza(),
 		"hooks": map[string]any{
-			"PreToolUse": []any{egressDenyHook()},
+			"PreToolUse": []any{sessionReachDenyHook(), egressDenyHook(), fsGuardHook("/inst", false)},
 		},
 	}
-	if err := VerifyReviewSettings(noGuard, true, false); err == nil {
-		t.Error("missing post-guard hook must be rejected even with a valid sandbox + egress-deny")
+	if err := VerifyReviewSettings(noGuard, true, false); err == nil || !strings.Contains(err.Error(), "post-guard") {
+		t.Errorf("missing post-guard hook must be rejected even with a valid sandbox and the other hooks, got %v", err)
 	}
 }
 
@@ -370,11 +385,11 @@ func TestVerifyReviewSettings_RequiresEgressDeny(t *testing.T) {
 	noEgress := map[string]any{
 		"sandbox": noEgressSandboxStanza(),
 		"hooks": map[string]any{
-			"PreToolUse": []any{postGuardHook()},
+			"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), fsGuardHook("/inst", false)},
 		},
 	}
-	if err := VerifyReviewSettings(noEgress, true, false); err == nil {
-		t.Error("missing egress-deny hook must be rejected under sandbox mode")
+	if err := VerifyReviewSettings(noEgress, true, false); err == nil || !strings.Contains(err.Error(), "egress-deny") {
+		t.Errorf("missing egress-deny hook must be rejected under sandbox mode for that reason, got %v", err)
 	}
 	// The same doc is fine in non-sandbox mode (egress-deny not required there).
 	if err := VerifyReviewSettings(noEgress, false, false); err != nil {
@@ -388,12 +403,13 @@ func TestVerifyReviewSettings_RequiresFSGuard(t *testing.T) {
 	noFSGuard := map[string]any{
 		"sandbox": noEgressSandboxStanza(),
 		"hooks": map[string]any{
-			// Has the post-guard and egress-deny, but not the filesystem guard.
-			"PreToolUse": []any{postGuardHook(), egressDenyHook()},
+			// Has the post-guard, session-reach deny, and egress-deny hooks, but not
+			// the filesystem guard.
+			"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), egressDenyHook()},
 		},
 	}
-	if err := VerifyReviewSettings(noFSGuard, true, false); err == nil {
-		t.Error("missing filesystem-guard hook must be rejected under sandbox mode")
+	if err := VerifyReviewSettings(noFSGuard, true, false); err == nil || !strings.Contains(err.Error(), "filesystem-guard") {
+		t.Errorf("missing filesystem-guard hook must be rejected under sandbox mode for that reason, got %v", err)
 	}
 	// The same doc is fine in non-sandbox mode (filesystem guard not required there).
 	if err := VerifyReviewSettings(noFSGuard, false, false); err != nil {
@@ -409,7 +425,7 @@ func TestVerifyReviewSettings_RejectsRelaxations(t *testing.T) {
 		return map[string]any{
 			"sandbox": noEgressSandboxStanza(),
 			"hooks": map[string]any{
-				"PreToolUse": []any{postGuardHook(), egressDenyHook(), fsGuardHook("/review-instance", false)},
+				"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), egressDenyHook(), fsGuardHook("/review-instance", false)},
 			},
 		}
 	}
@@ -448,10 +464,10 @@ func TestVerifyReviewSettings_RejectsRelaxations(t *testing.T) {
 
 	// Missing sandbox stanza (a merge dropped it) -> reject.
 	noSandbox := map[string]any{
-		"hooks": map[string]any{"PreToolUse": []any{postGuardHook(), egressDenyHook()}},
+		"hooks": map[string]any{"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), egressDenyHook(), fsGuardHook("/review-instance", false)}},
 	}
-	if err := VerifyReviewSettings(noSandbox, true, false); err == nil {
-		t.Error("missing sandbox stanza must be rejected")
+	if err := VerifyReviewSettings(noSandbox, true, false); err == nil || !strings.Contains(err.Error(), "sandbox stanza missing") {
+		t.Errorf("missing sandbox stanza must be rejected for that reason, got %v", err)
 	}
 }
 
