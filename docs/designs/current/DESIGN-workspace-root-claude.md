@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 problem: |
   niwa needs to configure Claude Code at the workspace instance root (above all
@@ -25,7 +26,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Current
 
 ## Context and Problem Statement
 
