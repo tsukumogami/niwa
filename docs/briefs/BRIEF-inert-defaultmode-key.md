@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   A developer's declared posture doesn't reliably reach niwa's sessions: the
   generated settings override the developer's own posture with a stricter one,
@@ -17,7 +17,7 @@ outcome: |
 
 ## Status
 
-Accepted
+Done
 
 ## Problem Statement
 

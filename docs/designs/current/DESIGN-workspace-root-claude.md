@@ -116,7 +116,7 @@ non-git directories.
   `permissions.defaultMode: bypassPermissions` from a project settings file,
   and niwa no longer writes it. A workspace's `bypass` posture now reaches
   dispatched workers as the `--permission-mode bypassPermissions` flag
-  `niwa dispatch` passes (see `docs/designs/DESIGN-inert-defaultmode-key.md`).
+  `niwa dispatch` passes (see `docs/designs/current/DESIGN-inert-defaultmode-key.md`).
 - Hooks in `settings.json`: work in non-git
 - `claude plugin install --scope local`: works in non-git
 
