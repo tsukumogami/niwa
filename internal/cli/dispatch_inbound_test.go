@@ -23,9 +23,9 @@ const (
 	hostInboundOn  = "[global]\naccept_session_messages_on_dispatch = true\n"
 	hostInboundOff = "[global]\naccept_session_messages_on_dispatch = false\n"
 
-	// Substrings of the audit and override lines. The failure-path tests look
-	// for these rather than for a full line, so a line printed with either
-	// source, or any variant of it, still counts as printed.
+	// Substrings of the audit and override lines. Tests that assert a line is
+	// absent look for these rather than for a full line, so a line printed with
+	// either source, or any variant of it, still counts as printed.
 	auditMarker    = "this worker accepts messages from other sessions"
 	overrideMarker = "this worker keeps Claude Code's default"
 )

@@ -23,8 +23,10 @@ const (
 )
 
 // inboundGuideURL is the guide the audit line points at, in the blob/main form
-// niwa already prints for its other guides. It is package-level so any other
-// message about this behavior can point at the same page.
+// niwa already uses for guide links (see internal/workspace/scaffold.go). The
+// path is the design's and is fixed ahead of the guide itself, so keep it as is
+// rather than repointing it at an existing page. It is package-level so any
+// other message about this behavior can point at the same page.
 const inboundGuideURL = "https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md"
 
 // crossSessionInboundAccept is the value config.CrossSessionInboundKey takes in
@@ -103,9 +105,11 @@ func resolveDispatchInboundAcceptance(flag *bool, global config.GlobalSettings) 
 }
 
 // inboundAuditLine renders the audit line for the input that turned the
-// behavior on. source is an inboundResolution.source value; the machine
-// setting is spelled out by its key so a developer who passed no flag can find
-// what turned it on. Whether to print it is runDispatch's decision, made from
+// behavior on. source is inboundSourceFlag or inboundSourceMachine: runDispatch
+// calls this only when inboundApplied is true, which requires the resolution to
+// be on, and an on resolution always names its source. The machine setting is
+// spelled out by its key so a developer who passed no flag can find what turned
+// it on. Whether to print it is runDispatch's decision, made from
 // inboundApplied alone.
 func inboundAuditLine(source string) string {
 	detail := inboundSourceFlag
