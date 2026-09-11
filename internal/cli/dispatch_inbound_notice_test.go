@@ -72,9 +72,9 @@ func TestInboundExplanationExactText(t *testing.T) {
 // the explanation's wording depends on. The paragraph tells the developer to
 // change one named agent's own settings, which is the right advice only while
 // that agent is the only one niwa can deliver the behavior to. A second
-// implemented agent would make a dispatched worker of that other kind print
-// instructions for a product it is not, so the wording has to be generalized in
-// the same change -- this fails first and says so.
+// implemented agent would have niwa print, on a dispatch of that other kind,
+// instructions for a product the worker is not, so the wording has to be
+// generalized in the same change -- this fails first and says so.
 func TestInboundExplanationNamesTheOnlyImplementedAgent(t *testing.T) {
 	var implemented []agent.Agent
 	for _, ag := range agent.All() {

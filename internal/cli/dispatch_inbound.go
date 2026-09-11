@@ -148,9 +148,11 @@ const (
 	// a caller joins it to a closing sentence with a single space.
 	//
 	// It names an agent, its /config screen and its settings file, in a file
-	// the dispatch-path layout scan covers. That is advice to a reader about
+	// the dispatch-path layout scan covers. The scan does not fire, because it
+	// compares whole literal values and this is a paragraph rather than the
+	// agent's name; and it should not, because this is advice to a reader about
 	// where their OWN sessions get the setting, not a delivery decision taken
-	// at a call site: nothing branches on it. It is honest only while the agent
+	// at a call site. Nothing branches on it. It is honest only while the agent
 	// it names is the one agent declaring DispatchInboundAcceptance, which
 	// TestInboundExplanationNamesTheOnlyImplementedAgent holds still. A second
 	// such agent needs the wording generalized.
@@ -237,7 +239,8 @@ func showInboundExplanation(w io.Writer, dir string, dirErr error, isTTY func() 
 	// O_EXCL is what keeps this create from following a symlink planted at the
 	// marker path between the Lstat above and this open. The Lstat comment's
 	// "a symlink is never followed or written through" rests on it: without it
-	// a create through a link would write the link's target instead. The
+	// the create would resolve through the link and create or open its target
+	// instead, at a path niwa did not choose. The
 	// concurrent case needs no flag to come out right -- nothing is written,
 	// so parallel creates of an empty file agree either way -- but with O_EXCL
 	// exactly one caller creates it and the rest get an "exists" error,
