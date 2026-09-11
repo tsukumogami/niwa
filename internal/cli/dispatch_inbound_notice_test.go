@@ -20,9 +20,9 @@ import (
 // The explanation, written out here rather than rebuilt from the constants,
 // the way TestInboundLinesExactText pins the other three stderr lines. This is
 // the whole point of the duplication: an expectation derived from
-// inboundExplanationLine rewords itself along with a reworded constant, which
-// is how the two closing sentences and the guide URL came to be unpinned --
-// swapping the closings, or repointing the URL, passed the suite.
+// inboundExplanationLine rewords itself along with a reworded constant. That is
+// how the two closing sentences came to be unpinned when this file first landed
+// -- swapping them for each other passed the whole suite.
 const (
 	explanationGuideURL = "https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md"
 
@@ -35,13 +35,16 @@ const (
 	explanationNonTerminalLine = explanationBodyText + " " + nonTerminalClose
 )
 
-// explanationMarker is a substring no other niwa output carries. Most
-// assertions in this file -- printed, not printed, printed in this position --
-// match on it rather than on a whole line, because what they are about is
-// WHETHER and WHERE the paragraph appeared, not what it says. A reworded
-// explanation still counts as printed for all of them, which is what keeps an
-// absence assertion strict. The text itself is pinned exactly in one place,
-// TestInboundExplanationExactText, so a rewording fails there and nowhere else.
+// explanationMarker is a substring no other niwa output carries. The assertions
+// about WHETHER and WHERE the paragraph appeared match on it, or on one closing
+// sentence, rather than on a whole line: what they are about is the position
+// and the presence, and an absence assertion in particular has to keep counting
+// a reworded explanation as printed. Reworded text is not something this file
+// lets through quietly -- TestInboundExplanationExactText compares the whole
+// rendering, TestInboundExplanationText pins seven body fragments, and
+// TestDispatch_Notice_WaitsForTheAttach pins the whole terminal line -- so a
+// rewording is a deliberate change across several tests rather than a silent
+// one.
 const explanationMarker = "accepting messages without asking is inbound only"
 
 // TestInboundExplanationExactText pins the paragraph and the marker file name.
@@ -62,7 +65,9 @@ func TestInboundExplanationExactText(t *testing.T) {
 	}
 }
 
-// alwaysTTY and neverTTY are the two isTTY stubs the helper tests pass.
+// alwaysTTY and neverTTY are the isTTY stubs for the fixed answers, which is
+// most of the helper tests. The two that need to observe the call -- whether it
+// happened, or which answer this iteration wants -- pass a closure instead.
 func alwaysTTY() bool { return true }
 func neverTTY() bool  { return false }
 
@@ -301,12 +306,16 @@ func TestShowInboundExplanation_MissingDirectory(t *testing.T) {
 	if !info.IsDir() {
 		t.Fatalf("%s is not a directory", dir)
 	}
-	// The mode the config writer uses for this same directory, so a marker
-	// written before the first `niwa config set` does not leave one the writer
-	// would have made differently. Masked by the process umask, so compare only
-	// the bits a default 022 umask leaves alone.
+	// niwa asks for 0o755, the mode the config writer uses for this same
+	// directory, so a marker written before the first `niwa config set` does
+	// not leave one the writer would have made differently. What lands is that
+	// masked by whatever umask the test runner inherited -- 0o755 under the
+	// usual 022, less under a stricter one -- so the assertion is the floor
+	// every umask leaves intact: niwa can get back into the directory it just
+	// made. A directory created 0o700 still satisfies this and is fine; one
+	// created without the owner bits would be the bug.
 	if perm := info.Mode().Perm(); perm&0o700 != 0o700 {
-		t.Errorf("directory permissions = %#o, want the owner bits of 0755", perm)
+		t.Errorf("directory permissions = %#o, want at least the owner bits of 0755", perm)
 	}
 	requireMarker(t, dir)
 }
