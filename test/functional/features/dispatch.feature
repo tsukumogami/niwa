@@ -40,13 +40,16 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
 
   # --- Permission-mode derivation from the workspace's declared posture ---
   #
-  # Claude Code 2.1.258 stopped honoring permissions.defaultMode from a
-  # project's materialized .claude/settings.json; --permission-mode is one of
-  # the two channels still honored. This is niwa's regression fix: a workspace
-  # that declares permissions = "bypass" gets that posture forwarded to the
-  # launched worker via --permission-mode, restoring pre-2.1.258 behavior.
+  # Claude Code 2.1.257 stopped honoring permissions.defaultMode from a
+  # project's .claude/settings.json; --permission-mode is one of the two
+  # channels still honored. niwa records the posture a workspace declares
+  # (permissions = "bypass") in the instance state, and dispatch derives
+  # --permission-mode from that recorded declaration rather than from the
+  # materialized settings file, so the launched worker gets the posture the
+  # workspace declared.
   #
-  # Design: docs/designs/current/DESIGN-dispatch-permission-mode.md
+  # Designs: docs/designs/current/DESIGN-dispatch-permission-mode.md
+  #          docs/designs/DESIGN-inert-defaultmode-key.md
 
   @critical
   Scenario: dispatch derives --permission-mode from a bypass-declared workspace
