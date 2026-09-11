@@ -21,12 +21,10 @@ import (
 // the stderr audit and override lines, the one-time explanation and its marker,
 // the durable mapping, and what `niwa list` reports.
 //
-// They ride the dispatch suite's fake claude (dispatch_steps_test.go), whose
-// --bg records the launch argv twice: joined, and NUL-separated per element.
-// The steps here read the per-element file, because the question they answer is
-// which argv element follows `--settings` and which follows the `--` prompt
-// separator, and a joined line cannot answer it -- a settings document and a
-// prompt both contain spaces.
+// They ride the dispatch suite's fake claude and read the per-element argv file
+// it records, because the question they answer is which argv element follows
+// `--settings` and which follows the `--` prompt separator; see that fake in
+// dispatch_steps_test.go for both recordings and what they cost.
 //
 // features/session-message-acceptance.feature is where these steps are used,
 // and its description says what this coverage deliberately leaves to the PRD's
@@ -824,9 +822,7 @@ func noSettingsFileNiwaWroteIntoTheDispatchInstanceContains(ctx context.Context,
 	}
 	inst := s.lastDispatchInstancePath
 	if inst == "" {
-		// The newest rather than the first: this step is about one dispatch's
-		// instance, and a scenario that dispatched twice has two.
-		inst = newestDispatchInstance(s.workspaceRoot)
+		inst = findDispatchInstance(s.workspaceRoot)
 	}
 	if inst == "" {
 		return fmt.Errorf("no dispatch instance found under %s\nstdout:\n%s\nstderr:\n%s", s.workspaceRoot, s.stdout, s.stderr)
@@ -898,14 +894,9 @@ func noSettingsFileNiwaWroteIntoTheDispatchInstanceContains(ctx context.Context,
 	}
 
 	// Both floors exist so this step cannot quietly become an assertion about
-	// nothing. Every dispatch instance gets an instance-root settings.json, so
-	// its absence means the scan is looking in the wrong place rather than that
-	// there was nothing to find. The second floor is the one that matters for
-	// the per-repository half: once an instance has repository directories at
-	// all, a scenario is relying on that half running, and if the materializer
-	// ever stopped writing settings.local.json the step would still pass on the
-	// instance-root file alone while the scenario went on claiming coverage it
-	// no longer had.
+	// nothing: one for each half of what it claims to read. Without the second,
+	// a materializer that stopped writing settings.local.json would leave every
+	// scenario passing on the instance-root file alone.
 	if !rootRead {
 		return fmt.Errorf("no settings file at %s, which every dispatch instance has; this assertion is looking in the wrong place", rootSettings)
 	}

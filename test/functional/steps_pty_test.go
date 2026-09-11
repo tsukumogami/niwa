@@ -29,11 +29,10 @@ import (
 // and nothing else.
 
 // ptyStepTimeout bounds the steps that hand the binary a standard input this
-// harness controls: the four that go through runUnderPTY -- three registered
-// steps plus the spill step, which calls iRunUnderPTYWithInput directly --
-// whether or not they supply any input, and iRunWithStdinHeldOpen, which holds
-// a pipe open without a pty at all. (The live-Codex interactive step is not
-// among them; it runs on its own dwell.)
+// harness controls: the four that reach runUnderPTY, whether or not they supply
+// any input, and iRunWithStdinHeldOpen, which holds a pipe open without a pty
+// at all. (The live-Codex interactive step is not among them; it runs on its
+// own dwell.)
 //
 // Supplying no input is not the safe case. A pty hands the child a terminal
 // rather than an immediate end-of-input, so a command that reads stdin waits

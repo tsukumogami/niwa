@@ -516,10 +516,11 @@ Feature: niwa dispatch: accepting messages from other sessions
     Then the exit code is 0
     And the launched claude settings document has no crossSessionInbound
     And the error output has exactly 0 lines containing "accepts messages from other sessions without asking"
-    # [claude.settings] is the table that feeds the instance-root settings.json,
-    # so this fixture is where a key leaking from workspace config into a file
-    # niwa owns would show up. The workspace declares no repositories, so the
-    # scan below reads that one file.
+    # [claude.settings] feeds the files niwa materializes, so this fixture is
+    # where a key leaking from workspace config into a file niwa owns would show
+    # up. This workspace declares no repositories, so the scan below reads the
+    # instance-root settings.json alone; the repository fixtures above cover the
+    # per-repository half.
     And no settings file niwa wrote into the dispatch instance contains "crossSessionInbound"
 
   Scenario: crossSessionInbound in the workspace root settings file does not turn it on

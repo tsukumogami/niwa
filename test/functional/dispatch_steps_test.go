@@ -81,11 +81,11 @@ func dispatchFakeClaudeScript(behaviour string) string {
 		// /proc directly and is one of the lines whoever closes #243 has to
 		// revisit.
 		//
-		// It refuses rather than continuing with an empty id, because an empty
-		// id fails somewhere that names nothing about the fake: the launch
-		// still exits 0, the capture polls for a session id it never gets, and
-		// thirty seconds later the dispatch rolls the instance back over a
-		// capture timeout. That reads as a broken capture path in the product.
+		// It refuses rather than minting an empty id, which would otherwise
+		// surface thirty seconds later as a capture timeout and read as a
+		// broken capture path in the product. The refusal is a non-zero exit,
+		// not the message: a backgrounded launch wires neither stream, so what
+		// a developer sees is the dispatch failing at the launch.
 		pickSession = `  sid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null)
   if [ -z "$sid" ]; then
     echo "fake claude: no session-id generator; this fake needs /proc (see the minting mode in dispatch_steps_test.go)" >&2
@@ -220,43 +220,33 @@ func iRunCommandFromTheWorkspaceRoot(ctx context.Context, command string) (conte
 // steps can assert on it without hardcoding the random name suffix. It is a
 // no-op for any other command.
 //
-// The two steps that dispatch and then let a scenario assert on the instance
-// both call it -- `I run "..." from the workspace root` and its pty twin -- and
-// they have to agree, or a later assertion quietly reads whichever instance
-// some earlier step happened to find.
-//
-// The other steps that can run a dispatch deliberately do not: the two
-// stdin-driving steps (`under a pty with input`, `with stdin held open`) and
-// the spill step built on the first are used by scenarios that assert on the
-// launch rather than the instance, and the parallel step leaves several
-// instances behind at once, where a single "the instance" is the wrong idea
-// rather than a missing feature. A scenario that dispatches through one of
-// those and then wants the instance should say so by dispatching through this
-// pair instead.
-//
-// It takes the NEWEST instance, not the first one on disk. Several scenarios
-// dispatch twice into one workspace root, and the instance names end in a
-// random hex suffix, so "the first directory that matches" is a coin flip
-// between the two -- and one that reads as working, because a scenario with a
-// single dispatch always agrees with it.
+// Two steps call it: `I run "..." from the workspace root` and its pty twin.
+// They have to agree, or a later assertion reads whichever instance some
+// earlier step happened to find. The other steps that can run a dispatch --
+// the two stdin-driving ones, the spill step built on the first, and the
+// parallel step -- record nothing, so after one of those a scenario that wants
+// the instance must find it itself.
 func recordDispatchInstance(s *testState, command string) {
 	if strings.Contains(command, "dispatch") {
-		s.lastDispatchInstancePath = newestDispatchInstance(s.workspaceRoot)
+		s.lastDispatchInstancePath = findDispatchInstance(s.workspaceRoot)
 	}
 }
 
-// newestDispatchInstance returns the most recently modified dispatch instance
-// under workspaceRoot, or "" when there is none.
+// findDispatchInstance returns the absolute path of the most recently modified
+// dispatch instance under workspaceRoot, or "" when none exists. The dispatch
+// instance name is "<config>+-<8 hex>" (no-name) or "<config>+<slug>-<8 hex>"
+// (named), which the structural dispatchInstanceNameRe uniquely identifies.
 //
-// Modification time is the ordering because provisioning writes the instance's
-// contents, so the directory a dispatch just finished creating is the one
-// touched last. It is the same signal theDispatchInstanceIsAgedPastTheBackstopTTL
-// manipulates. On an exact tie the winner is whichever os.ReadDir listed first,
-// which is as arbitrary as the suffix -- the tie only arises when two instances
-// land inside one filesystem timestamp tick, and no scenario dispatches twice
-// that fast, since each run clones and launches in between. Measured, two
-// sequential dispatches sit about seventy milliseconds apart.
-func newestDispatchInstance(workspaceRoot string) string {
+// Newest rather than first on disk, because several scenarios dispatch twice
+// into one workspace root and the names end in a random hex suffix: "the first
+// directory that matches" is a coin flip between the two, and one that reads as
+// working, since a single-dispatch scenario always agrees with it. Modification
+// time picks the right one because provisioning writes the instance's contents,
+// so the directory a dispatch just finished creating is the one touched last --
+// the same signal theDispatchInstanceIsAgedPastTheBackstopTTL manipulates. Two
+// sequential dispatches measure about seventy milliseconds apart, so the tie
+// this cannot break does not arise.
+func findDispatchInstance(workspaceRoot string) string {
 	entries, err := os.ReadDir(workspaceRoot)
 	if err != nil {
 		return ""
@@ -275,30 +265,6 @@ func newestDispatchInstance(workspaceRoot string) string {
 		}
 	}
 	return newestPath
-}
-
-// findDispatchInstance returns the absolute path of a dispatch instance under
-// workspaceRoot, or "" when none exists. The dispatch instance name is
-// "<config>+-<8 hex>" (no-name) or "<config>+<slug>-<8 hex>" (named), which the
-// structural dispatchInstanceNameRe uniquely identifies.
-//
-// It answers "is there one", not "which one": the entry it returns is whichever
-// os.ReadDir lists first, and the names end in a random hex suffix, so with two
-// instances present the answer is arbitrary. That is fine for the callers that
-// only ask whether an instance exists, and fine for the rest only because every
-// scenario reaching them has dispatched exactly once. A caller that means the
-// instance a particular dispatch created wants newestDispatchInstance.
-func findDispatchInstance(workspaceRoot string) string {
-	entries, err := os.ReadDir(workspaceRoot)
-	if err != nil {
-		return ""
-	}
-	for _, e := range entries {
-		if e.IsDir() && dispatchInstanceNameRe.MatchString(e.Name()) {
-			return filepath.Join(workspaceRoot, e.Name())
-		}
-	}
-	return ""
 }
 
 // aDispatchInstanceWasCreatedWithAWellFormedInstanceFile asserts a dispatch
