@@ -12,20 +12,29 @@ import (
 // dedupe (an entry is "already present" iff some hook shares its matcher), with
 // one exception: the session-reach deny hook's identity is its matcher AND its
 // command (see sessionReachDenyMatcher).
+//
+// How Claude Code compares a matcher (read from the 2.1.267 and 2.1.268
+// bundles): a matcher made only of letters, digits, underscores, and "|" is split
+// on "|" into an exact list of tool names, with aliases resolved; any other
+// matcher is treated as a regular expression. Every matcher below is in the
+// exact-list form, so each token names exactly one tool, never a prefix or a
+// substring.
 const (
-	// egressDenyMatcher matches the out-of-sandbox egress channels: WebFetch,
-	// WebSearch, and every MCP tool (mcp__ prefix). These make network calls
-	// OUTSIDE the OS sandbox (which cages only Bash subprocesses), so in sandbox
-	// mode they must be denied by a hook that fires even under bypassPermissions.
+	// egressDenyMatcher matches the out-of-sandbox egress channels WebFetch and
+	// WebSearch, plus the "mcp__" token written to cover every MCP tool. These make
+	// network calls OUTSIDE the OS sandbox (which cages only Bash subprocesses), so
+	// in sandbox mode they must be denied by a hook that fires even under
+	// bypassPermissions. Under the exact-list comparison above, "mcp__" names only a
+	// tool literally called mcp__, so on current Claude Code this hook does not
+	// cover MCP tools (named mcp__<server>__<tool>). The matcher is deliberately
+	// left unchanged here; widening it is a separate review-containment change.
 	egressDenyMatcher = "WebFetch|WebSearch|mcp__"
 	// fsGuardMatcher matches the built-in file-writing tools. Like the egress
 	// channels these run OUTSIDE the OS sandbox (through the permission system,
 	// which a dispatched session's bypassPermissions skips), so in sandbox mode a
 	// write that resolves outside the instance must be denied by a hook. This is the
-	// filesystem-escape counterpart to egressDenyMatcher. MultiEdit is listed
-	// explicitly alongside Edit: the harness matches by substring (so "Edit" already
-	// covers "MultiEdit"), but naming it keeps the guard correct if a future harness
-	// anchors matcher comparison.
+	// filesystem-escape counterpart to egressDenyMatcher. MultiEdit must be listed
+	// alongside Edit: under exact-list comparison "Edit" does not cover "MultiEdit".
 	fsGuardMatcher = "Write|Edit|MultiEdit|NotebookEdit"
 	// postGuardMatcher matches Bash so the post-guard can inspect gh commands and
 	// refuse a review/comment post. Applied in every mode (accident prevention).
@@ -134,18 +143,28 @@ func egressDenyHook() map[string]any {
 // sessionReachDenyCommand returns the shell command of the session-reach deny
 // hook: it writes sessionReachDenyMessage and a newline to stderr, nothing to
 // stdout, and exits 2 (block) whatever stdin holds. shellQuote keeps the
-// apostrophe in the message intact. It drains stdin first so the block never
-// depends on how the harness treats a hook that exits before reading its payload
-// (a write error on the hook's stdin); the harness closes stdin after the
-// payload, as the post-guard, which reads it, already relies on.
+// apostrophe in the message intact.
+//
+// The command reads stdin to the end before refusing. A hook that exits without
+// reading leaves Claude Code writing the payload into a closed pipe, and its hook
+// runner handles that write error on a separate path from a normal exit; draining
+// keeps the block on the normal path. Draining is safe because Claude Code closes
+// the hook's stdin after writing the payload, which the post-guard's grep already
+// relies on; if stdin were ever held open, the hook would wait until its timeout
+// rather than block.
+//
+// The command is part of the hook's identity (see preToolUseHasHook), so changing
+// it leaves the old entry beside the new one in an instance staged before the
+// change. That is harmless while both refuse.
 func sessionReachDenyCommand() string {
 	return `cat >/dev/null 2>&1; printf '%s\n' ` + shellQuote(sessionReachDenyMessage) + ` >&2; exit 2`
 }
 
 // sessionReachDenyHook returns the PreToolUse hook that refuses the tools able to
 // reach other sessions (see sessionReachDenyMatcher). It is applied in every
-// containment mode. Like the other review hooks it blocks by exiting 2, which
-// holds under every permission mode, including bypassPermissions.
+// containment mode. Like the post-guard, egress-deny, and filesystem-guard hooks it
+// blocks by exiting 2, which holds under every permission mode, including
+// bypassPermissions.
 func sessionReachDenyHook() map[string]any {
 	return map[string]any{
 		"matcher": sessionReachDenyMatcher,

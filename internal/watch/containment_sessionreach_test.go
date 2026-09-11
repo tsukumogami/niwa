@@ -3,6 +3,7 @@ package watch
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -102,7 +103,8 @@ func TestSessionReachDenyMatcher_Form(t *testing.T) {
 	}
 }
 
-// TestSessionReachDenyHook_Shape pins the entry: exactly a matcher and one command hook.
+// TestSessionReachDenyHook_Shape pins the entry (exactly a matcher and one command
+// hook) and the refusal message text, which later tests and docs quote.
 func TestSessionReachDenyHook_Shape(t *testing.T) {
 	h := sessionReachDenyHook()
 	if len(h) != 2 {
@@ -134,6 +136,12 @@ func TestSessionReachDenyHook_Shape(t *testing.T) {
 // through sh, once per denied tool and once with empty stdin, in every mode. Each run
 // must exit 2 with exactly the refusal line on stderr and nothing on stdout.
 func TestSessionReachDenyHook_CommandRefuses(t *testing.T) {
+	// The hook that blocks the four tools never fires for a normal review read.
+	for _, tok := range matcherTokens(sessionReachDenyMatcher) {
+		if tok == "Read" {
+			t.Error("Read must not be a token of the session-reach deny matcher")
+		}
+	}
 	for _, mode := range reviewModes {
 		t.Run(mode.name, func(t *testing.T) {
 			inst := t.TempDir()
@@ -146,19 +154,7 @@ func TestSessionReachDenyHook_CommandRefuses(t *testing.T) {
 				t.Fatal("applied settings carry no session-reach deny command")
 			}
 
-			// The hook that blocks the four tools never fires for a normal review read.
-			for _, tok := range matcherTokens(sessionReachDenyMatcher) {
-				if tok == "Read" {
-					t.Error("Read must not be a token of the session-reach deny matcher")
-				}
-			}
-
-			payloads := map[string]string{
-				"empty stdin": "",
-				// Larger than a pipe buffer, so a hook that exits without reading
-				// would leave the writer blocked or failing.
-				"large payload": `{"hook_event_name":"PreToolUse","tool_name":"SendMessage","tool_input":{"message":"` + strings.Repeat("x", 300*1024) + `"}}`,
-			}
+			payloads := map[string]string{"empty stdin": ""}
 			for _, tool := range matcherTokens(sessionReachDenyMatcher) {
 				payloads[tool] = `{"hook_event_name":"PreToolUse","tool_name":"` + tool + `","tool_input":{}}`
 			}
@@ -230,10 +226,9 @@ func TestApplyReviewSettings_SessionReachDenyOnlyUnderPreToolUse(t *testing.T) {
 	}
 }
 
-// withoutSessionReachDeny returns a copy of the PreToolUse entries with every
-// session-reach deny entry removed.
-func withoutSessionReachDeny(t *testing.T, settings map[string]any) map[string]any {
-	t.Helper()
+// withoutSessionReachDeny removes every session-reach deny entry from the
+// settings' PreToolUse array in place and returns the same settings map.
+func withoutSessionReachDeny(settings map[string]any) map[string]any {
 	hooks := settings["hooks"].(map[string]any)
 	var kept []any
 	for _, e := range hooks["PreToolUse"].([]any) {
@@ -263,7 +258,7 @@ func TestApplyReviewSettings_SessionReachDenyEveryMode(t *testing.T) {
 			if err := VerifyReviewSettings(got, mode.sandbox, mode.ask); err != nil {
 				t.Fatalf("applied settings must verify: %v", err)
 			}
-			err := VerifyReviewSettings(withoutSessionReachDeny(t, got), mode.sandbox, mode.ask)
+			err := VerifyReviewSettings(withoutSessionReachDeny(got), mode.sandbox, mode.ask)
 			if err == nil {
 				t.Fatal("settings without the deny hook must fail verification")
 			}
@@ -442,14 +437,67 @@ func TestNoEgressSandboxStanza_NetworkAllowsNoUnixSockets(t *testing.T) {
 // TestExistingReviewMatchersUnchanged pins the matchers of the hooks that predate the
 // session-reach deny hook.
 func TestExistingReviewMatchersUnchanged(t *testing.T) {
-	for got, want := range map[string]string{
-		egressDenyMatcher: "WebFetch|WebSearch|mcp__",
-		fsGuardMatcher:    "Write|Edit|MultiEdit|NotebookEdit",
-		postGuardMatcher:  "Bash",
-		autoAllowMatcher:  "Bash|Read|Glob|Grep",
+	for _, c := range []struct{ name, got, want string }{
+		{"egressDenyMatcher", egressDenyMatcher, "WebFetch|WebSearch|mcp__"},
+		{"fsGuardMatcher", fsGuardMatcher, "Write|Edit|MultiEdit|NotebookEdit"},
+		{"postGuardMatcher", postGuardMatcher, "Bash"},
+		{"autoAllowMatcher", autoAllowMatcher, "Bash|Read|Glob|Grep"},
 	} {
-		if got != want {
-			t.Errorf("matcher = %q, want %q", got, want)
+		if c.got != c.want {
+			t.Errorf("%s = %q, want %q", c.name, c.got, c.want)
 		}
+	}
+}
+
+// TestSessionReachDenyHook_DrainsStdin proves the hook reads its whole payload
+// before exiting. os/exec swallows a write error on a command's stdin, so the test
+// writes a payload larger than a pipe buffer through its own pipe and checks that
+// write directly. A control run of the same command without the drain must fail
+// the write, which shows the check tells the two apart.
+func TestSessionReachDenyHook_DrainsStdin(t *testing.T) {
+	payload := `{"hook_event_name":"PreToolUse","tool_name":"SendMessage","tool_input":{"message":"` +
+		strings.Repeat("x", 300*1024) + `"}}`
+
+	run := func(command string) (writeErr error, exitCode int) {
+		t.Helper()
+		c := exec.Command("sh", "-c", command)
+		stdin, err := c.StdinPipe()
+		if err != nil {
+			t.Fatalf("stdin pipe: %v", err)
+		}
+		if err := c.Start(); err != nil {
+			t.Fatalf("starting hook: %v", err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			_, err := io.WriteString(stdin, payload)
+			if cerr := stdin.Close(); err == nil {
+				err = cerr
+			}
+			done <- err
+		}()
+		// Collect the write result before Wait, which closes the pipe itself.
+		writeErr = <-done
+		if err := c.Wait(); err != nil {
+			ee, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("waiting for hook: %v", err)
+			}
+			exitCode = ee.ExitCode()
+		}
+		return writeErr, exitCode
+	}
+
+	deny := sessionReachDenyCommand()
+	if werr, code := run(deny); werr != nil || code != 2 {
+		t.Errorf("deny hook: write error = %v, exit = %d; want the whole payload read and exit 2", werr, code)
+	}
+
+	control := strings.TrimPrefix(deny, "cat >/dev/null 2>&1; ")
+	if control == deny {
+		t.Fatalf("deny command no longer starts with the stdin drain: %q", deny)
+	}
+	if werr, code := run(control); werr == nil || code != 2 {
+		t.Errorf("control without the drain: write error = %v, exit = %d; want a failed write and exit 2", werr, code)
 	}
 }
