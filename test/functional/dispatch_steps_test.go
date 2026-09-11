@@ -222,10 +222,11 @@ func iRunCommandFromTheWorkspaceRoot(ctx context.Context, command string) (conte
 //
 // Two steps call it: `I run "..." from the workspace root` and its pty twin.
 // They have to agree, or a later assertion reads whichever instance some
-// earlier step happened to find. The other steps that can run a dispatch --
-// the two stdin-driving ones, the spill step built on the first, and the
-// parallel step -- record nothing, so after one of those a scenario that wants
-// the instance must find it itself.
+// earlier step happened to find. Every other step that can run a dispatch
+// records nothing -- the two stdin-driving ones, the spill step built on the
+// first, the parallel step, and `I run "..." from workspace root`, which
+// differs from the first of these by one word and runs from the same place --
+// so after one of those a scenario that wants the instance must find it itself.
 func recordDispatchInstance(s *testState, command string) {
 	if strings.Contains(command, "dispatch") {
 		s.lastDispatchInstancePath = findDispatchInstance(s.workspaceRoot)

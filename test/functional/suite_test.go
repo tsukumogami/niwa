@@ -116,8 +116,9 @@ type testState struct {
 	// lastDispatchInstancePath records the instance directory the last `niwa
 	// dispatch` run created, so later steps can assert on it without
 	// hardcoding the random name suffix. The name is "<config>+-<8 hex>" or
-	// "<config>+<slug>-<8 hex>"; see dispatchInstanceNameRe, and
-	// recordDispatchInstance for why "last" is decided by modification time.
+	// "<config>+<slug>-<8 hex>"; see dispatchInstanceNameRe, recordDispatchInstance
+	// for which steps fill it in, and findDispatchInstance for why "last" is
+	// decided by modification time.
 	lastDispatchInstancePath string
 
 	// Session-message acceptance state. See session_message_steps_test.go.
