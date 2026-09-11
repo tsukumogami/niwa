@@ -144,6 +144,22 @@ type InstanceState struct {
 	// not tell its own entry from the developer's answer. omitempty keeps the
 	// field invisible to old binaries reading new state files.
 	TrustKeys []string `json:"trust_keys,omitempty"`
+	// ClaudePermissions records the declared permission posture the
+	// instance-root settings document resolved from: "bypass", "ask", or
+	// empty when nothing is declared. It is niwa's own record of the
+	// declaration, not a Claude Code mode string, so it stays meaningful
+	// whatever the materializer writes into permissions.defaultMode.
+	//
+	// The instance pipeline recomputes it on every Create and Apply; it is
+	// never carried over from an earlier state file. Only `niwa dispatch`
+	// reads it, for the instance it just provisioned. niwa init and
+	// saveWorkspaceRootDisclosures write a multi-instance workspace root's
+	// state file outside the pipeline and never set it; a root that was
+	// applied as a single-instance layout before gaining child instances may
+	// still carry the value that apply recorded, and nothing reads it there.
+	// omitempty keeps the field invisible to old binaries reading new state
+	// files.
+	ClaudePermissions string `json:"claude_permissions,omitempty"`
 }
 
 // AuthSourceRecord is one row of the credential-source audit map
@@ -379,6 +395,17 @@ type InstanceRecord struct {
 	// from the session mappings. It has no omitempty, so every record carries
 	// the key and a consumer never has to treat a missing key as false.
 	AcceptsSessionMessages bool `json:"accepts_session_messages"`
+	// SessionName is the display name the instance's dispatch forwarded to
+	// the agent and recorded on its session mapping. Like KeepAlive,
+	// EnumerateInstanceRecords leaves it empty and the list command fills it
+	// in at the CLI layer, from the newest mapping for the instance and only
+	// when the recorded value has the forwarded-name shape. It is empty when
+	// no name was recorded (an unnamed dispatch, an agent with no display-name
+	// flag, or a mapping written before names were recorded), and also when the
+	// newest mapping recorded none or a malformed one, even if an older mapping
+	// for the same instance recorded a valid name. omitempty keeps the --json
+	// shape unchanged for those instances.
+	SessionName string `json:"session_name,omitempty"`
 }
 
 // EnumerateInstanceRecords enumerates the instances under workspaceRoot as

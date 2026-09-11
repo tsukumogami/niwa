@@ -101,6 +101,12 @@ type SessionMapping struct {
 	// and mappings written before this field existed, byte-identical; both
 	// decode as false.
 	AcceptsSessionMessages bool `json:"accepts_session_messages,omitempty"`
+	// SessionName holds the display name the dispatch forwarded to the agent
+	// ("<slug>-<token>", sharing the instance name's random token), empty when
+	// none was: an unnamed dispatch, or an agent that declares no display-name
+	// flag. It is display-only and never used to find or reclaim the session.
+	// omitempty keeps unnamed and legacy mappings byte-identical.
+	SessionName string `json:"session_name,omitempty"`
 }
 
 // sessionsDirName is the directory under the config dir that holds the session

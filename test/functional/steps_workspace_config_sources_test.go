@@ -134,10 +134,7 @@ func theProvenanceMarkerExistsInWorkspaceRoot(ctx context.Context) (context.Cont
 // file at <workspaceRoot>/<relPath> exists and contains want. Unlike
 // theFileUnderWorkspaceRootContains (which anchors under a named subdir), this
 // targets the workspace root directly, as the `init from config repo` flow
-// makes the root itself the niwa-managed dir. Materialized files are written
-// from the loaded config, so this proves a source-side config change took
-// effect on the SAME apply run (issue #214): a stale config would leave the old
-// content in place and require a second apply.
+// makes the root itself the niwa-managed dir.
 func theMaterializedFileAtWorkspaceRootContains(ctx context.Context, relPath, want string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
@@ -150,6 +147,48 @@ func theMaterializedFileAtWorkspaceRootContains(ctx context.Context, relPath, wa
 	}
 	if !strings.Contains(string(data), want) {
 		return ctx, fmt.Errorf("expected %s to contain %q, got:\n%s", path, want, string(data))
+	}
+	return ctx, nil
+}
+
+// lookupJSONKeyAtWorkspaceRoot is lookupJSONKey for a path relative to the
+// workspace root.
+func lookupJSONKeyAtWorkspaceRoot(ctx context.Context, relPath, dottedKey string) (value any, found bool, path string, err error) {
+	s := getState(ctx)
+	if s == nil {
+		return nil, false, "", fmt.Errorf("no test state")
+	}
+	path = filepath.Join(s.workspaceRoot, relPath)
+	value, found, err = lookupJSONKey(path, dottedKey)
+	return value, found, path, err
+}
+
+// theJSONFileAtWorkspaceRootHasNoKey asserts the JSON file at relPath under
+// the workspace root parses and carries no value at the dotted key path.
+func theJSONFileAtWorkspaceRootHasNoKey(ctx context.Context, relPath, dottedKey string) (context.Context, error) {
+	value, found, path, err := lookupJSONKeyAtWorkspaceRoot(ctx, relPath, dottedKey)
+	if err != nil {
+		return ctx, err
+	}
+	if found {
+		return ctx, fmt.Errorf("expected %s to have no %q, got %v", path, dottedKey, value)
+	}
+	return ctx, nil
+}
+
+// theJSONFileAtWorkspaceRootHasKeyEqualTo asserts the JSON file at relPath
+// under the workspace root parses and carries the string want at the dotted
+// key path.
+func theJSONFileAtWorkspaceRootHasKeyEqualTo(ctx context.Context, relPath, dottedKey, want string) (context.Context, error) {
+	value, found, path, err := lookupJSONKeyAtWorkspaceRoot(ctx, relPath, dottedKey)
+	if err != nil {
+		return ctx, err
+	}
+	if !found {
+		return ctx, fmt.Errorf("expected %s to have %q, but it is absent", path, dottedKey)
+	}
+	if got, ok := value.(string); !ok || got != want {
+		return ctx, fmt.Errorf("expected %s %q = %q, got %v", path, dottedKey, want, value)
 	}
 	return ctx, nil
 }

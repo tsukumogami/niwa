@@ -480,6 +480,15 @@ agent's ships, would build in exactly the asymmetry this work exists to
 remove -- and it would put a measured, working route on the generated gap
 list, which is a lie the gap list is designed not to tell.
 
+(Later change: the passage above describes the Claude-side mapping as it
+shipped when this design was written. Claude Code 2.1.257 stopped honoring
+`permissions.defaultMode` from a project settings file, so niwa no longer
+writes `bypassPermissions` there and `permissionsMapping` is gone. Claude's
+posture now travels on the `--permission-mode` flag `niwa dispatch` passes to
+the workers it launches, derived from the posture niwa records in instance
+state. The parity argument still holds: a workspace author relaxes a
+dispatched Claude worker's approvals through workspace config.)
+
 So the capability is implemented, with R21's three safety properties:
 
 1. **Opt-in and absent by default.** With no posture declared in workspace
@@ -1131,8 +1140,9 @@ produced path or hash and fails the pinned manifest.
   Claude Code's `bypassPermissions` does not have -- niwa never derives a
   sandbox change from an approval declaration. The capability ships rather
   than being withheld because the equivalent Claude-side escalation
-  already exists in shipped code (`materialize.go:295-298`, consumed at
-  `:669`), and a contract that declares one agent's route unavailable
+  already exists in shipped code (then `materialize.go:295-298`, consumed
+  at `:669`; it now travels on the `--permission-mode` dispatch flag, see
+  Decision 2), and a contract that declares one agent's route unavailable
   while the other's ships is the asymmetry this work exists to remove.
 - **Environment inheritance.** Codex's `ignore_default_excludes` defaults
   to true, so sessions inherit `*KEY*`/`*TOKEN*` variables -- Codex's
@@ -1229,4 +1239,6 @@ Negative, accepted:
   managed-file record the characterization test pins.
 - `internal/workspace/materialize.go:295-298` and `:669` -- the shipped
   Claude-side mapping from a workspace `permissions` declaration to
-  `permissions.defaultMode`, the parity precedent behind row 12.
+  `permissions.defaultMode`, the parity precedent behind row 12. Since
+  removed; the posture now reaches Claude workers as the `--permission-mode`
+  dispatch flag (see Decision 2).

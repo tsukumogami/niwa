@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -98,7 +99,7 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 		f.provisionCalled++
 		name := "test-ws" + sep + namePrefix
 		dir := filepath.Join(root, name)
-		if err := os.MkdirAll(filepath.Join(dir, ".niwa"), 0o755); err != nil {
+		if err := writeMinimalInstanceState(dir); err != nil {
 			return provisionResult{}, err
 		}
 		f.instancePath = dir
@@ -180,6 +181,19 @@ func resetDispatchFlags(t *testing.T) {
 		dispatchDetach = prevDetach
 		dispatchKeepAlive = prevKeepAlive
 		dispatchAcceptSessionMessages = prevAcceptSessionMessages
+	})
+}
+
+// writeMinimalInstanceState gives a fake-provisioned instance directory the
+// .niwa/instance.json a real Create always saves, with no recorded permissions
+// posture. Dispatch reads that file to derive --permission-mode and warns when
+// it is missing, so a fake provisioner that skipped it would make every test
+// that isn't about the posture exercise the broken-state path instead.
+func writeMinimalInstanceState(dir string) error {
+	return workspace.SaveState(dir, &workspace.InstanceState{
+		SchemaVersion: workspace.SchemaVersion,
+		InstanceName:  filepath.Base(dir),
+		Root:          dir,
 	})
 }
 
@@ -490,6 +504,18 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 	installDispatchFakes(t, root)
 	dispatchDetach = true // no attach in the fan-out path
 
+	// Every dispatch runs the opportunistic reaper before it provisions, so a
+	// later goroutine sweeps the instances earlier ones already mapped -- they
+	// are instances the sweep can enumerate because the fake provisioner
+	// writes their .niwa/instance.json. A mapped session whose job entry is
+	// absent is gone by the reaper's rule and is reclaimed, mapping and all. A
+	// real dispatched worker has a job entry; the fake capture below writes one
+	// for each session it hands out, under a HOME of the test's own so the
+	// sweep reads this test's jobs directory.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	jobsDir := filepath.Join(home, ".claude", "jobs")
+
 	// Override the launch seam with a goroutine-safe no-op. The default fake from
 	// installDispatchFakes mutates shared dispatchFakes counters without
 	// synchronization, which would be a data race under concurrent dispatch; this
@@ -506,7 +532,7 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 		atomic.AddInt64(&provisionCount, 1)
 		name := "test-ws" + sep + namePrefix
 		dir := filepath.Join(r, name)
-		if err := os.MkdirAll(filepath.Join(dir, ".niwa"), 0o755); err != nil {
+		if err := writeMinimalInstanceState(dir); err != nil {
 			return provisionResult{}, err
 		}
 		return provisionResult{Name: name, Path: dir}, nil
@@ -520,7 +546,19 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 		// hex digit (i is 1..n, single hex digit covers n <= 15). A distinct
 		// short id accompanies each so the mapping key (full UUID) and the
 		// user-facing handle (short id) stay separable.
-		return fmt.Sprintf("00000000-0000-0000-0000-00000000000%x", i), fmt.Sprintf("short%x", i), nil
+		sid := fmt.Sprintf("00000000-0000-0000-0000-00000000000%x", i)
+		dir := filepath.Join(jobsDir, sid)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", "", err
+		}
+		body, err := json.Marshal(jobState{SessionID: sid, Template: bgJobTemplate})
+		if err != nil {
+			return "", "", err
+		}
+		if err := os.WriteFile(filepath.Join(dir, "state.json"), body, 0o644); err != nil {
+			return "", "", err
+		}
+		return sid, fmt.Sprintf("short%x", i), nil
 	}
 
 	var wg sync.WaitGroup
@@ -691,7 +729,9 @@ func assertSlugShape(t *testing.T, slug string) {
 // (1) produces an instance name that contains the underscore slug AND still ends
 // with the structural "-<8hex>" signature isDispatchInstanceName recognizes (the
 // end-anchored regex is unaffected by underscores inside the slug), and (2)
-// forwards "--name my_thing" to the launched worker.
+// forwards "--name my_thing-<token>" to the launched worker, where <token> is
+// the instance name's trailing 8 hex. It runs on the real random source, so a
+// session name minted from a second token would not match the instance's.
 func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
@@ -755,8 +795,14 @@ func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 		}
 	}
 
-	if !passthroughHasNameSlug(gotPass, "my_thing") {
-		t.Errorf("launcher passthrough %v should contain \"--name my_thing\"", gotPass)
+	token := gotName[len(gotName)-8:]
+	wantForwarded := "my_thing-" + token
+	forwarded, _ := forwardedDisplayName(gotPass, "--name")
+	if forwarded != wantForwarded {
+		t.Errorf("launcher passthrough %v should contain \"--name %s\" (the instance's token)", gotPass, wantForwarded)
+	}
+	if !dispatchSessionNameRe.MatchString(forwarded) {
+		t.Errorf("forwarded name %q does not match %s", forwarded, dispatchSessionNamePattern)
 	}
 }
 
@@ -839,15 +885,4 @@ func TestDispatch_NameSanitizesEmpty_FallsBack(t *testing.T) {
 			t.Errorf("an empty-sanitizing --name must forward no --name; passthrough[%d] = %q (full %v)", i, a, gotPass)
 		}
 	}
-}
-
-// passthroughHasNameSlug reports whether pass contains the discrete pair
-// "--name" immediately followed by slug.
-func passthroughHasNameSlug(pass []string, slug string) bool {
-	for i := 0; i+1 < len(pass); i++ {
-		if pass[i] == "--name" && pass[i+1] == slug {
-			return true
-		}
-	}
-	return false
 }

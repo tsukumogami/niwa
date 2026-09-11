@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,7 +24,7 @@ import (
 
 func init() {
 	dispatchCmd.Flags().StringVar(&dispatchLabel, "label", "", "optional human-friendly alias recorded on the session mapping")
-	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session (sanitized into a slug; also names the niwa instance: <config>+-<id> with no name, <config>+<slug>-<id> with one -- '+' always marks the end of the config name)")
+	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session, sanitized into a slug. The session name is the slug plus the instance's random suffix (<slug>-<id>), and the instance is <config>+<slug>-<id>; with no name the instance is <config>+-<id> and no session name is forwarded -- '+' always marks the end of the config name. An agent with no display-name flag gets no session name, though the slug still names the instance")
 	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", dispatchModelFlagHelp())
 	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker; dropped for an agent that has no such flag")
 	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "subagent type to forward to the background worker; this selects a role within the launched agent, not which agent is launched (that is --harness). Dropped for an agent that has no such flag")
@@ -453,18 +454,31 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		prompt = captured
 	}
 
-	// (4) Generate a unique "-<8 hex>" name suffix via crypto/rand and pass it
-	// as the customName branch of the existing provision path, sidestepping the
-	// racy numbered scan (DESIGN Decision 2). When --name sanitizes to a usable
-	// slug it is prepended, so the suffix is "<slug>-<8hex>" and the name becomes
-	// "<config>+<slug>-<8hex>"; with no slug the suffix is "-<8hex>" and the name
-	// is "<config>+-<8hex>". The random hex is always kept, and the mandatory
-	// "-<8hex>" is the structural signature isDispatchInstanceName (and thus the
-	// reaper backstop) keys on -- there is no "disp" literal.
+	// (4) Mint one random 8-hex token for this dispatch and derive both names
+	// from it. The instance suffix is passed as the customName branch of the
+	// existing provision path, sidestepping the racy numbered scan (DESIGN
+	// Decision 2). When --name sanitizes to a usable slug it is prepended, so
+	// the suffix is "<slug>-<8hex>" and the name becomes "<config>+<slug>-<8hex>";
+	// with no slug the suffix is "-<8hex>" and the name is "<config>+-<8hex>".
+	// The random hex is always kept, and the mandatory "-<8hex>" is the
+	// structural signature isDispatchInstanceName (and thus the reaper
+	// backstop) keys on -- there is no "disp" literal. A failed read returns
+	// here, before anything is reaped or provisioned.
 	slug := sanitizeInstanceSlug(dispatchName)
-	namePrefix, err := dispatchNameSuffix(slug)
+	token, err := newDispatchToken()
 	if err != nil {
 		return fmt.Errorf("niwa: error: generating instance name: %w", err)
+	}
+	namePrefix := dispatchInstancePrefix(slug, token)
+	// The session name shares the instance's token, so it is unique for the
+	// same reason the directory is. It is forwarded only to an agent that
+	// declares a display-name flag; the gate reads a declared flag spelling,
+	// never an agent's name. Left empty, it also keeps the mapping's
+	// session_name and the report's session name line empty, so neither
+	// claims a name the agent was never given.
+	forwardedName := ""
+	if spec.Flags.DisplayName != "" {
+		forwardedName = dispatchSessionName(slug, token)
 	}
 	// "+" is the end-of-config marker for dispatch instances, present for every
 	// dispatch whether or not a slug is supplied: no-name dispatch is
@@ -532,42 +546,58 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", modelWarning)
 	}
 
-	// (9a-derive) Read the instance's materialized settings once, ahead of the
-	// passthrough build so a derived --permission-mode can be assigned to
-	// dispatchPermissionMode before (9b) reads that variable. The 9c/9d
-	// consumers below reuse this same `inst` value instead of reading the
-	// file again -- this is the "read once" the (9c) comment below already
-	// promised, moved one step earlier so this derivation can share it too.
-	//
-	// A workspace's own declared `permissions = "bypass"` posture is carried
-	// through the materialized `.claude/settings.json` (RootSettingsMaterializer
-	// writes it there from workspace.toml). Since Claude Code 2.1.258 that
-	// posture no longer reaches a worker through the settings-file channel; the
-	// only channel still honored is this CLI flag. Deriving it here restores
-	// parity with pre-2.1.258 behavior for a workspace that already declared
-	// the posture -- it does not grant anything new. The derivation is scoped
-	// to the agent whose permission flag is Claude's own spelling
+	// (9a-derive) Derive the permission mode the worker launches with. An
+	// operator's explicit --permission-mode always wins and is the only one on
+	// the argv. Otherwise a workspace that declared `permissions = "bypass"`
+	// gets --permission-mode bypassPermissions, because the CLI flag is the
+	// channel Claude Code honors for a launched worker. The derivation is
+	// scoped to the agent whose permission flag is Claude's own spelling
 	// (`--permission-mode`): Codex's equivalent (`--sandbox`) takes an
 	// unrelated value vocabulary and Codex workers already get full trust
 	// through WorkdirGrantArgs, so forwarding "bypassPermissions" there would
-	// be wrong rather than merely unhelpful. A missing, unreadable, or
-	// malformed settings file degrades to "nothing derived", consistent with
-	// every other reader of readInstanceSettings, and never fails the dispatch.
-	inst, _ := readInstanceSettings(instancePath)
-	if dispatchPermissionMode == "" &&
-		spec.Flags.PermissionMode == "--permission-mode" &&
-		inst != nil && inst.Permissions != nil &&
-		inst.Permissions.DefaultMode == "bypassPermissions" {
-		dispatchPermissionMode = "bypassPermissions"
-		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: derived --permission-mode bypassPermissions from the workspace's declared permissions posture\n")
+	// be wrong rather than merely unhelpful.
+	//
+	// The posture comes from the instance state Create just saved, never from
+	// a generated settings document: what niwa writes into .claude/settings.json
+	// is free to change, and a hand-edited or deleted settings file must not
+	// grant or withhold the flag. The recorded value is trusted only because
+	// this process provisioned the instance moments ago. Code that needs the
+	// posture of an instance it did not just provision must re-resolve it from
+	// configuration rather than read ClaudePermissions from existing state.
+	//
+	// A missing, unreadable, or unparseable state file withholds the flag with
+	// a warning naming the file -- the worker then prompts rather than running
+	// unattended -- and never fails the dispatch.
+	recordedPermissions := ""
+	state, stateErr := workspace.LoadState(instancePath)
+	if stateErr == nil {
+		recordedPermissions = state.ClaudePermissions
 	}
+	permissionMode, derived := derivePermissionMode(dispatchPermissionMode, recordedPermissions, spec.Flags)
+	// An explicit --permission-mode sets the mode regardless of the posture, so
+	// the warning is skipped then: it would describe a decision that changed
+	// nothing. It still prints for an agent whose permission flag the
+	// derivation never uses, which is noise rather than harm. The path is named
+	// separately because a parse error does not carry it.
+	if stateErr != nil && permissionMode == "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: warning: could not read %s (%v); treating the workspace's permissions posture as undeclared\n",
+			filepath.Join(instancePath, workspace.StateDir, workspace.StateFile), stateErr)
+	}
+	if derived {
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: derived --permission-mode %s from the workspace's declared permissions posture\n", permissionMode)
+	}
+
+	// Read the instance's materialized settings once, for the remote-control
+	// default-fill in (9c) and the keep-alive resolution in (9d). A missing,
+	// unreadable, or malformed file degrades to "downstream unset" for both.
+	inst, _ := readInstanceSettings(instancePath)
 
 	// (9b) Build the pass-through argv. Flags become discrete argv elements --
 	// never string-concatenated -- so a crafted value cannot inject a flag
 	// (DESIGN Decision 8). The spelling of each flag is the launched agent's,
 	// and an intent that agent has no flag for is dropped rather than guessed
 	// at.
-	passthrough := buildDispatchPassthrough(spec.Flags, slug, resolvedModel)
+	passthrough := buildDispatchPassthrough(spec.Flags, forwardedName, resolvedModel, permissionMode)
 
 	// (9b-host) The host [global] settings as a value, zero when the config
 	// could not be loaded. Both the inbound resolution in (9c) and keep-alive in
@@ -594,9 +624,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// `niwa apply` sessions. Neither read can fail the dispatch: a
 	// missing/unreadable global config degrades to "no injection" (the preference
 	// is treated as unset), and an unreadable instance settings file is treated as
-	// "downstream unset" -- so the host default-fill still applies. Neither read
-	// stops the launch. The global config is loaded once at (2a) and reused
-	// here. The instance settings were read once too, ahead of (9b) at
+	// "downstream unset" -- so the host default-fill still applies. Either way
+	// the dispatch always launches. The global config is loaded once at (2a) and
+	// reused here. The instance settings were read once too, ahead of (9b) at
 	// (9a-derive) -- the keep-alive resolution in (9d) consults the same
 	// projection.
 	//
@@ -838,6 +868,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		Origin:       "dispatch",
 		Label:        dispatchLabel,
 		KeepAlive:    keepAliveArmed,
+		SessionName:  forwardedName,
 		// The same boolean that gates the audit line at (12a), so the record
 		// and the line can never disagree about this session.
 		AcceptsSessionMessages: inboundApplied,
@@ -904,6 +935,12 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Dispatched session %s\n", sessionID)
 	fmt.Fprintf(out, "  instance: %s\n", instancePath)
+	// The session name goes right under the instance, which shares its token.
+	// It is printed only when one was forwarded, so an unnamed dispatch and an
+	// agent with no display-name flag report exactly what they did before.
+	if forwardedName != "" {
+		fmt.Fprintf(out, "  session name: %s\n", forwardedName)
+	}
 
 	for _, line := range reentryHints(spec, handle, instancePath) {
 		fmt.Fprintf(out, "  %s\n", line)
@@ -972,10 +1009,64 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// dispatchRandReader is the random source for the dispatch token. It is a
+// package variable so tests can swap it the way they swap dispatchLaunch and
+// provisionInstanceFunc; production reads crypto/rand.
+var dispatchRandReader io.Reader = rand.Reader
+
+// newDispatchToken returns 8 lowercase hex digits built from exactly 4 bytes
+// read from dispatchRandReader. io.ReadFull turns a short read into an error
+// rather than a token with zeroed bytes.
+func newDispatchToken() (string, error) {
+	var b [4]byte
+	if _, err := io.ReadFull(dispatchRandReader, b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// dispatchInstancePrefix is the instance name suffix for a token: "<slug>-<token>",
+// or "-<token>" with no slug. The provision path joins it to the config name
+// with "+", so the "+" is NOT added here.
+func dispatchInstancePrefix(slug, token string) string {
+	if slug == "" {
+		return "-" + token
+	}
+	return slug + "-" + token
+}
+
+// dispatchSessionName is the display name a named dispatch forwards to the
+// agent: "<slug>-<token>", sharing the token with the instance name so the two
+// are unique together. With no slug there is no name, and it returns "". It
+// spells the join out rather than calling dispatchInstancePrefix, because the
+// two answer different questions and only agree while a slug is present.
+func dispatchSessionName(slug, token string) string {
+	if slug == "" {
+		return ""
+	}
+	return slug + "-" + token
+}
+
+// dispatchSessionNamePattern is the one definition of the forwarded session
+// name's shape: a 1-40 character slug (maxDispatchSlugRunes; sanitizeInstanceSlug
+// guarantees [a-z0-9_] with no leading or trailing underscore), a "-", and the
+// 8-hex token, which is the same token the instance name ends in. The first and
+// last slug characters are matched on their own, so the middle's {0,38} is
+// maxDispatchSlugRunes minus 2. niwa list shows a name recorded on a session
+// mapping only when it matches, because those files are writable by any
+// same-user process.
+const dispatchSessionNamePattern = "^[a-z0-9](?:[a-z0-9_]{0,38}[a-z0-9])?-[0-9a-f]{8}$"
+
+// dispatchSessionNameRe is dispatchSessionNamePattern compiled.
+var dispatchSessionNameRe = regexp.MustCompile(dispatchSessionNamePattern)
+
 // dispatchNameSuffix returns a unique name suffix ending in a mandatory "-" plus
-// 8 lowercase hex digits, using crypto/rand for collision safety under
-// concurrency without a lock (DESIGN Decision 2). The provision path joins this
-// to the config name with "+" (the end-of-config marker for dispatch instances).
+// 8 lowercase hex digits, read from dispatchRandReader (crypto/rand in
+// production) for collision safety under concurrency without a lock (DESIGN
+// Decision 2). The provision path joins this to the config name with "+" (the
+// end-of-config marker for dispatch instances). runDispatch mints its token
+// directly so it can share it with the session name; this wrapper serves
+// `niwa watch`'s stageReview, which needs only the instance suffix.
 //
 // With no slug the suffix is "-<8hex>", so the instance dir is "<config>+-<8hex>"
 // (the "+" then "-" sit adjacent). With a slug the suffix is "<slug>-<8hex>", so
@@ -988,15 +1079,11 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 // trailing "-<8hex>"); it relies on slugs being dash-free (sanitizeInstanceSlug)
 // so the only "-" after the "+" is the one this suffix adds.
 func dispatchNameSuffix(slug string) (string, error) {
-	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
+	token, err := newDispatchToken()
+	if err != nil {
 		return "", err
 	}
-	suffix := "-" + hex.EncodeToString(b[:])
-	if slug != "" {
-		return slug + suffix, nil
-	}
-	return suffix, nil
+	return dispatchInstancePrefix(slug, token), nil
 }
 
 // sanitizeInstanceSlug normalizes a raw --name value into a filesystem- and
@@ -1070,19 +1157,48 @@ func isDispatchInstanceName(name string) bool {
 	return dispatchInstanceNameRe.MatchString(name)
 }
 
+// derivePermissionMode decides the permission mode a dispatched worker is
+// launched with. explicit is the operator's --permission-mode value, recorded
+// is the instance's recorded posture (InstanceState.ClaudePermissions), and
+// flags is the launched agent's flag spelling.
+//
+// An explicit value always wins and is returned unchanged, with derived false.
+// Otherwise the mode is "bypassPermissions", with derived true, exactly when the
+// agent's permission flag is Claude's own --permission-mode and the recorded
+// posture is "bypass". Every other case -- "ask", an empty or unrecognized
+// posture, or an agent with a different permission flag -- yields ("", false),
+// so nothing is forwarded.
+func derivePermissionMode(explicit, recorded string, flags agentplan.LaunchFlags) (mode string, derived bool) {
+	if explicit != "" {
+		return explicit, false
+	}
+	if flags.PermissionMode == "--permission-mode" && recorded == "bypass" {
+		return "bypassPermissions", true
+	}
+	return "", false
+}
+
 // buildDispatchPassthrough turns the set pass-through flags into discrete argv
 // elements (flag, value pairs). Each value stays its own element so a crafted
 // value cannot smuggle in an extra claude flag (DESIGN Decision 8).
 //
-// A non-empty slug (the sanitized --name) is forwarded to the worker as
-// "--name <slug>" so the launched claude session carries the same display name
-// embedded in the instance directory. An empty slug forwards nothing, preserving
-// the original slug-less behavior.
+// displayName is forwarded as "<flag> <displayName>" only when the agent
+// declares a display-name flag and the value is non-empty. Dispatch passes its
+// session name ("<slug>-<token>", see dispatchSessionName); `niwa watch` passes
+// its own review handle. An empty value forwards nothing.
 //
 // model is the already-resolved main-loop model (see resolveDispatchModel): a
 // concrete versionless name, forwarded as "--model <model>", or "" to forward
 // nothing. Resolution happens in the caller so this stays a pure argv builder.
-func buildDispatchPassthrough(flags agentplan.LaunchFlags, slug, model string) []string {
+//
+// permissionMode is the mode to forward as the agent's permission flag, or ""
+// to forward none. It is a parameter rather than a read of the --permission-mode
+// flag variable so every caller states what it passes: dispatch passes what
+// derivePermissionMode returned, and `niwa watch` passes "" at both of its
+// launch sites, so no shared variable can leak a permission mode into a
+// launch that never asked for one. The subagent type is still read from its
+// flag variable, which only `niwa dispatch` sets.
+func buildDispatchPassthrough(flags agentplan.LaunchFlags, displayName, model, permissionMode string) []string {
 	var pass []string
 	// Each pair is appended only when niwa has something to say AND the agent
 	// has a flag to say it with. An intent an agent has no flag for is dropped
@@ -1091,9 +1207,9 @@ func buildDispatchPassthrough(flags agentplan.LaunchFlags, slug, model string) [
 	// developer something they did not ask for.
 	for _, pair := range []struct{ flag, value string }{
 		{flags.Model, model},
-		{flags.PermissionMode, dispatchPermissionMode},
+		{flags.PermissionMode, permissionMode},
 		{flags.SubagentType, dispatchAgent},
-		{flags.DisplayName, slug},
+		{flags.DisplayName, displayName},
 	} {
 		if pair.flag != "" && pair.value != "" {
 			pass = append(pass, pair.flag, pair.value)

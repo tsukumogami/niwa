@@ -15,7 +15,7 @@ import (
 func init() {
 	rootCmd.AddCommand(listCmd)
 	listCmd.Flags().BoolVar(&listJSON, "json", false,
-		"emit a JSON array of {name, path, ephemeral, accepts_session_messages[, keep_alive]} records, one per instance")
+		"emit a JSON array of {name, path, ephemeral, accepts_session_messages[, keep_alive][, session_name]} records, one per instance")
 }
 
 var listJSON bool
@@ -37,6 +37,10 @@ Run from inside a workspace (at the root or inside any instance); list
 resolves the workspace root from the current directory and enumerates every
 instance beneath it.
 
+An instance whose dispatch forwarded a session name is followed by a
+"  session name: <name>" line: the name the session answers to in Agent
+View and to its peers, as recorded when it was dispatched.
+
 An instance backed by a dispatched session is followed by the command that
 steps back into that session, so the handle survives the terminal that
 printed it.
@@ -55,7 +59,8 @@ shows an "(accepts session messages)" marker in the human output.
 An instance whose session was dispatched with keep-alive armed and is still
 live additionally carries keep_alive:true (and a "(keep-alive)" marker in
 the human output, placed before the "(accepts session messages)" marker when
-both apply).`,
+both apply). An instance whose dispatch recorded a session name additionally
+carries session_name, the same value the session name: line shows.`,
 	Args: cobra.NoArgs,
 	RunE: runList,
 }
@@ -106,6 +111,12 @@ func runList(cmd *cobra.Command, args []string) error {
 			line += acceptsSessionMessagesMarker
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), line)
+		// The name the session answers to, as the dispatch recorded it. It
+		// was validated against the forwarded-name shape when the join filled
+		// it, so what prints here is never raw mapping content.
+		if r.SessionName != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "  session name: %s\n", r.SessionName)
+		}
 		// A dispatched session's handle is printed once, by the dispatch that
 		// created it, and then lives in scrollback. For an agent that will not
 		// hand over a session mid-turn the terminal never attached in the first
@@ -139,7 +150,20 @@ func runList(cmd *cobra.Command, args []string) error {
 // It returns, keyed by instance path, the command that steps back into the
 // session an instance is backed by, for the instances niwa can name one for.
 // A store read failure degrades to no annotation and no commands, which leaves
-// both flags false; list must stay usable with a partially written store.
+// both flags false and the name empty; list must stay usable with a partially
+// written store.
+//
+// It also fills each record's SessionName from the mapping with the latest
+// Created time for that instance. The value is checked against
+// dispatchSessionNamePattern before it is used, because mapping files are
+// writable by any same-user process and the name reaches a terminal; a value
+// that fails the check counts as absent. There is no fallback to an older
+// mapping's name: the newest mapping is the session currently backing the
+// instance, and an older name belongs to a session it replaced. The resume
+// command deliberately keeps its own, pre-existing selection (the last
+// mapping, in session-id order, that yields a non-empty resume command), so an
+// instance with several mappings can show a name and a resume command from
+// different ones; changing resume is out of scope for the name.
 func annotateFromSessionMappings(records []workspace.InstanceRecord, workspaceRoot, jobsDir string, now time.Time) map[string]string {
 	mappings, err := workspace.ListSessionMappings(workspaceRoot)
 	if err != nil || len(mappings) == 0 {
@@ -148,6 +172,11 @@ func annotateFromSessionMappings(records []workspace.InstanceRecord, workspaceRo
 	keptAlive := make(map[string]bool)
 	accepting := make(map[string]bool)
 	resume := make(map[string]string)
+	// newest is the latest-Created mapping per instance path. It is chosen
+	// before its name is checked: a newer mapping whose name is empty or fails
+	// the check hides an older one's rather than falling back to it. Ties keep
+	// the first in session-id order.
+	newest := make(map[string]workspace.SessionMapping)
 	for _, m := range mappings {
 		if m.KeepAlive && sessionLive(jobsDir, m.SessionID, now) {
 			keptAlive[m.InstancePath] = true
@@ -158,6 +187,9 @@ func annotateFromSessionMappings(records []workspace.InstanceRecord, workspaceRo
 		if cmdline := sessionResumeCommand(m); cmdline != "" {
 			resume[m.InstancePath] = cmdline
 		}
+		if cur, ok := newest[m.InstancePath]; !ok || m.Created.After(cur.Created) {
+			newest[m.InstancePath] = m
+		}
 	}
 	for i := range records {
 		if keptAlive[records[i].Path] {
@@ -165,6 +197,9 @@ func annotateFromSessionMappings(records []workspace.InstanceRecord, workspaceRo
 		}
 		if accepting[records[i].Path] {
 			records[i].AcceptsSessionMessages = true
+		}
+		if m, ok := newest[records[i].Path]; ok && dispatchSessionNameRe.MatchString(m.SessionName) {
+			records[i].SessionName = m.SessionName
 		}
 	}
 	return resume

@@ -40,13 +40,16 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
 
   # --- Permission-mode derivation from the workspace's declared posture ---
   #
-  # Claude Code 2.1.258 stopped honoring permissions.defaultMode from a
-  # project's materialized .claude/settings.json; --permission-mode is one of
-  # the two channels still honored. This is niwa's regression fix: a workspace
-  # that declares permissions = "bypass" gets that posture forwarded to the
-  # launched worker via --permission-mode, restoring pre-2.1.258 behavior.
+  # Claude Code 2.1.257 stopped honoring a bypassPermissions defaultMode from a
+  # project's .claude/settings.json; --permission-mode is one of the two
+  # channels still honored. niwa records the posture a workspace declares
+  # (permissions = "bypass") in the instance state, and dispatch derives
+  # --permission-mode from that recorded declaration rather than from the
+  # materialized settings file, so the launched worker gets the posture the
+  # workspace declared.
   #
-  # Design: docs/designs/current/DESIGN-dispatch-permission-mode.md
+  # Designs: docs/designs/current/DESIGN-dispatch-permission-mode.md
+  #          docs/designs/current/DESIGN-inert-defaultmode-key.md
 
   @critical
   Scenario: dispatch derives --permission-mode from a bypass-declared workspace
@@ -86,6 +89,241 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     Then the exit code is 0
     And the launched claude was invoked with "--permission-mode acceptEdits"
     And the launched claude was not invoked with "bypassPermissions"
+    And the launched claude was invoked with "--permission-mode" exactly 1 time
+
+  # The rest of the declared-posture matrix: the scenarios S1-S9 from the
+  # expected-value table in docs/prds/PRD-inert-defaultmode-key.md. Every
+  # posture comes from the config repo's workspace.toml or from a personal
+  # overlay, run through niwa init, so the derivation reads what niwa itself
+  # recorded. The instance's effective posture decides the flag; a repo-level
+  # override changes that repo's settings document but not the launch. S8 and
+  # S9 use the personal overlay's two spellings, [global.claude.settings] and
+  # [workspaces.<name>.claude.settings], so both are exercised.
+
+  Scenario: S1: a bypass-declared worker with remote control on gets both launch flags
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [claude.settings]
+      permissions = "bypass"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given the host config declares global settings:
+      """
+      remote_control_on_dispatch = true
+      """
+    # An API key in the environment forces API-key auth, which rules out remote
+    # control; clear it so the developer's own environment can't decide this.
+    And I set env "ANTHROPIC_API_KEY" to ""
+    And a fake claude for dispatch with session "14141414-1414-4414-8414-141414141414"
+    When I run "niwa dispatch rc-task --detach" from the workspace root
+    Then the exit code is 0
+    And the launched claude was invoked with "--permission-mode bypassPermissions"
+    And the launched claude was invoked with "--settings"
+    And the launched claude was invoked with "remoteControlAtStartup"
+
+  Scenario: S2: an explicit --permission-mode bypassPermissions reaches a worker in an ask-declared workspace
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [claude.settings]
+      permissions = "ask"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "15151515-1515-4515-8515-151515151515"
+    When I run "niwa dispatch ask-task --permission-mode bypassPermissions --detach" from the workspace root
+    Then the exit code is 0
+    And the launched claude was invoked with "--permission-mode bypassPermissions"
+    And the launched claude was invoked with "--permission-mode" exactly 1 time
+
+  Scenario: S3: dispatch passes no --permission-mode for an undeclared workspace
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "16161616-1616-4616-8616-161616161616"
+    When I run "niwa dispatch undeclared-task --detach" from the workspace root
+    Then the exit code is 0
+    And the launched claude was not invoked with "--permission-mode"
+
+  Scenario: S4: dispatch keeps bypass when only one repo asks
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "app" exists
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [claude.settings]
+      permissions = "bypass"
+
+      [groups.tools]
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+
+      [repos.app.claude.settings]
+      permissions = "ask"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "17171717-1717-4717-8717-171717171717"
+    When I run "niwa dispatch repo-ask-task --detach" from the workspace root
+    Then the exit code is 0
+    And the launched claude was invoked with "--permission-mode bypassPermissions"
+
+  Scenario: S5: dispatch passes no --permission-mode when the instance overrides bypass with ask
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [claude.settings]
+      permissions = "bypass"
+
+      [instance.claude.settings]
+      permissions = "ask"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "18181818-1818-4818-8818-181818181818"
+    When I run "niwa dispatch instance-ask-task --detach" from the workspace root
+    Then the exit code is 0
+    And the launched claude was not invoked with "--permission-mode"
+
+  Scenario: S6: dispatch derives bypass when the instance overrides ask with bypass
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [claude.settings]
+      permissions = "ask"
+
+      [instance.claude.settings]
+      permissions = "bypass"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "19191919-1919-4919-8919-191919191919"
+    When I run "niwa dispatch instance-bypass-task --detach" from the workspace root
+    Then the exit code is 0
+    And the launched claude was invoked with "--permission-mode bypassPermissions"
+
+  Scenario: S7: dispatch passes no --permission-mode when only one repo declares bypass
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "app" exists
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [claude.settings]
+      permissions = "ask"
+
+      [groups.tools]
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+
+      [repos.app.claude.settings]
+      permissions = "bypass"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "20202020-2020-4020-8020-202020202020"
+    When I run "niwa dispatch repo-bypass-task --detach" from the workspace root
+    Then the exit code is 0
+    And the launched claude was not invoked with "--permission-mode"
+
+  Scenario: S8: dispatch derives bypass from a personal overlay on an undeclared workspace
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    And a personal overlay exists with body:
+      """
+      [global.claude.settings]
+      permissions = "bypass"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "21212121-2121-4121-8121-212121212121"
+    When I run "niwa dispatch personal-bypass-task --detach" from the workspace root
+    Then the exit code is 0
+    And the launched claude was invoked with "--permission-mode bypassPermissions"
+
+  Scenario: S9: a personal overlay that asks overrides a bypass-declared workspace at dispatch
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [claude.settings]
+      permissions = "bypass"
+      """
+    And a personal overlay exists with body:
+      """
+      [workspaces.myws.claude.settings]
+      permissions = "ask"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "22222222-2222-4222-8222-222222222222"
+    When I run "niwa dispatch personal-ask-task --detach" from the workspace root
+    Then the exit code is 0
+    And the launched claude was not invoked with "--permission-mode"
+
+  # --permission-mode is a Claude Code flag. A Codex worker launched from a
+  # bypass-declared workspace must get neither it nor a sandbox flag niwa made
+  # up to stand in for it.
+
+  Scenario: S1: a Codex worker in a bypass-declared workspace gets no permission or sandbox flag
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [claude.settings]
+      permissions = "bypass"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake codex for dispatch with session "01a60000-0000-7000-8000-0000000b1a55"
+    When I run "niwa dispatch codex-task --detach --harness codex" from the workspace root
+    Then the exit code is 0
+    And the codex launch argv does not contain "--permission-mode"
+    And the codex launch argv does not contain "--sandbox"
 
   # --- Model selection resolves a category to a concrete model ---
 

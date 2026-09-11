@@ -231,7 +231,9 @@ func fsGuardHook(instancePath string, ask bool) map[string]any {
 // (Bash/Read/Glob/Grep) in the operator-approval posture. Under a non-bypass permission
 // mode these tools would otherwise prompt and hang the --bg session; the hook emits an
 // explicit allow decision on stdout so the review runs autonomously. It is applied only
-// in the ask posture (bypassPermissions already allows these in the hard-deny posture).
+// in the ask posture. The hard-deny posture neither adds it nor sets a permission mode:
+// that session launches with no --permission-mode and runs in whatever mode its merged
+// settings resolve to, which niwa leaves unset for a bypass or undeclared workspace.
 func autoAllowHook() map[string]any {
 	const decision = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"niwa watch review: in-instance tool auto-approved"}}`
 	return map[string]any{
@@ -279,10 +281,10 @@ func postGuardHook() map[string]any {
 // sandbox is true):
 //
 //   - ask == false (hard-deny posture, the shipped floor): the emitted settings are
-//     the PR #198 shape plus the session-reach deny hook. permissions.defaultMode is
-//     NOT set (the session inherits the bypassPermissions the dispatch applies), no
-//     auto-allow hook is added, and the filesystem guard uses its exit-code wrapper
-//     (out-of-instance = hard deny).
+//     the PR #198 shape plus the session-reach deny hook. permissions.defaultMode
+//     is NOT set here: this function does not choose a mode and leaves any the
+//     instance's settings already hold. No auto-allow hook is added, and the
+//     filesystem guard uses its exit-code wrapper (out-of-instance = hard deny).
 //   - ask == true (operator-approval posture): niwa fully owns
 //     permissions.defaultMode = "default" (so a hook ask is honored instead of
 //     silently allowed), appends the Bash/Read/Glob/Grep auto-allow hook (so the

@@ -273,11 +273,13 @@ func TestDispatch_Inbound_PrecedenceMatrix(t *testing.T) {
 // keep-alive arming identical to a dispatch without the behavior.
 func TestDispatch_Inbound_BothKeysOneDocument(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
-	root := setupDispatchWorkspace(t)
+	// The bypass posture comes from a workspace declaration run through a real
+	// Create, the only channel dispatch derives the permission mode from.
+	root := setupDeclaredDispatchWorkspace(t, postureS1)
 	chdir(t, root)
 	setHostConfig(t, "[global]\nremote_control_on_dispatch = true\nkeep_alive_on_dispatch = true\naccept_session_messages_on_dispatch = true\n")
 	f := installDispatchFakes(t, root)
-	provisionWithInstanceSettings(t, f, bypassSettings)
+	provisionThroughCreate(t, f, nil)
 	var prompt string
 	var pass []string
 	captureLaunchPrompt(f, &prompt, &pass)

@@ -401,6 +401,8 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^a dispatch brief "([^"]*)" exists in the workspace root$`, aDispatchBriefExistsInWorkspaceRoot)
 	ctx.Step(`^the dispatch brief "([^"]*)" still exists in the workspace root$`, theDispatchBriefStillExistsInWorkspaceRoot)
 	ctx.Step(`^the file "([^"]*)" under the workspace root contains "([^"]*)"$`, theMaterializedFileAtWorkspaceRootContains)
+	ctx.Step(`^the JSON file "([^"]*)" under the workspace root has no key "([^"]*)"$`, theJSONFileAtWorkspaceRootHasNoKey)
+	ctx.Step(`^the JSON file "([^"]*)" under the workspace root has key "([^"]*)" equal to "([^"]*)"$`, theJSONFileAtWorkspaceRootHasKeyEqualTo)
 
 	// Assertions
 	ctx.Step(`^the exit code is (\d+)$`, theExitCodeIs)
@@ -512,6 +514,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// accept_session_messages_on_dispatch machine key, and what each one puts
 	// in front of the launched worker ---
 	registerSessionMessageSteps(ctx)
+
+	// --- permission posture: the host config a posture scenario needs and the
+	// settings documents a declared posture reaches ---
+	registerPostureSteps(ctx)
 
 	// --- the Codex acceptance bar: what a session in a prepared instance gets
 	// from the capability contract, and what the table says it does not ---

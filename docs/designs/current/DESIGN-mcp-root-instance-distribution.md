@@ -231,6 +231,20 @@ in `bypassPermissions` mode, under which Claude Code does not gate project MCP
 servers behind a per-session trust prompt. That covers the motivating case
 without new niwa code.
 
+**Later change.** This decision rested on behavior Claude Code 2.1.257
+removed. From that release, Claude Code no longer honors
+`permissions.defaultMode: bypassPermissions` from a project
+`.claude/settings.json`, so the root and instance settings no longer put
+sessions in bypass mode, and niwa stopped writing the value: a `bypass`
+declaration now writes no mode, and `ask` writes `default`. Workers launched by
+`niwa dispatch` still run in `bypassPermissions`, through the
+`--permission-mode` flag dispatch derives from the declared posture. A session
+a developer starts at the root or an instance root runs in the developer's own
+mode and may see the trust prompt unless it's launched with
+`--permission-mode bypassPermissions`. Picking a replacement for the
+trust-prompt skip at those levels, such as emitting
+`enableAllProjectMcpServers`, is still the follow-up described below.
+
 Emitting a dedicated `enableAllProjectMcpServers` (or `enabledMcpjsonServers`)
 setting would require extending `buildSettingsDoc`'s honored-key set, which
 changes settings semantics for every level that calls it. That is a separate
@@ -247,7 +261,8 @@ pluggable rename step distributes them verbatim while the per-repo
 are tracked and cleaned through the existing `ManagedFiles` machinery;
 workspace-root files are overwrite-idempotent like the other root-managed files.
 The `enableAllProjectMcpServers` question is deferred; `permissions = "bypass"`
-is the supported way to auto-load the delivered MCP server today.
+was the supported way to auto-load the delivered MCP server until Claude Code
+2.1.257 (see the later-change note under Decision 5).
 
 ## Solution Architecture
 
@@ -269,10 +284,11 @@ explicit filename, no trailing slash, so no `.local` is inserted):
 [instance.files]
 "mcp.json" = ".mcp.json"
 
-# So a session at either level auto-loads the project MCP server without a
-# per-session trust prompt. permissions = "bypass" maps to Claude Code's
-# bypassPermissions mode (see Decision 5); it is the supported way to suppress
-# the prompt today. Drop this block if a trust prompt is acceptable.
+# So dispatched workers auto-load the project MCP server without a
+# per-session trust prompt: niwa dispatch passes --permission-mode
+# bypassPermissions to them. Before Claude Code 2.1.257 this also covered
+# sessions started directly at either level (see Decision 5). Drop this block
+# if a trust prompt is acceptable.
 [claude.settings]
 permissions = "bypass"
 ```
@@ -411,7 +427,8 @@ world-readable by default.
 
 The feature does not relax any permission posture on its own. The only
 permission-related interaction is documentation: a workspace that opts into
-`permissions = "bypass"` already runs in `bypassPermissions` mode; this feature
+`permissions = "bypass"` already runs its dispatched workers in
+`bypassPermissions` mode; this feature
 does not introduce that mode, it only notes that the mode is what lets a
 delivered MCP server load without a prompt.
 

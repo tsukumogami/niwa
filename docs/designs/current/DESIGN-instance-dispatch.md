@@ -85,8 +85,9 @@ grounding research against the current niwa code:
 Options: a top-level `niwa dispatch <prompt>`; `niwa run`; `niwa agent`; a nested
 `niwa instance dispatch`. **Chosen: `niwa dispatch <prompt>`**, a top-level verb beside
 `niwa create`/`niwa reap`, with `--label` for the optional freeform mapping alias,
-`--name`/`-n` for an optional session name (see D2 -- sanitized into a slug that names
-both the instance and the Claude session), a resolved `--model` (see D1a), and
+`--name`/`-n` for an optional session name (see D2 -- sanitized into a slug that goes
+into the instance name, while the session name is the slug plus `-` and the instance's
+8-hex random token, `<slug>-<8 random hex>`), a resolved `--model` (see D1a), and
 pass-through `--permission-mode`/`--agent` forwarded verbatim to `claude --bg`.
 
 **Attach by default; `--detach`/`-d` to skip (R47).** The common interactive case is
@@ -163,18 +164,24 @@ passes `--name <raw>`, it is sanitized into a slug (lowercase, runs of character
 `[a-z0-9]` collapsed to single underscores, trimmed, length-capped; empty result falls
 back to no slug) and used two ways: it is inserted into the instance name BEFORE the
 mandatory `-<8 random hex>` suffix -- `<config>+<slug>-<8 random hex>` -- and it is
-forwarded to the session as
-`claude --bg --name <slug>` so the Claude session carries a human display name in Agent
-View. The separator inside the slug is an underscore, so the slug is dash-free
+forwarded to the session as `claude --bg --name <slug>-<8 random hex>`, with the same
+token the instance name uses, so the Claude session carries a human display name in
+Agent View that a second dispatch with the same `--name` doesn't reuse. The separator inside the slug is an
+underscore, so the slug is dash-free
 (`"My Feature!"` -> `my_feature`, and even a user-typed dash collapses: `"auth-layer"` ->
 `auth_layer`); this dash-free property is load-bearing (see below). The random 8-hex is
 always kept, so the structural signature the reaper backstop matches
 (`isDispatchInstanceName`, regex `\+[a-z0-9_]*-[0-9a-f]{8}$`) is preserved and
-concurrency stays collision-safe even when two dispatches share a `--name`. The slug is
-additive: it never replaces the random token. With no `--name` (or an
-empty-after-sanitize one), behavior is exactly the random-token default. `--name` (the
-slug, which names the instance and the session) is distinct from `--label` (a freeform
-alias recorded only on the mapping).
+concurrency stays collision-safe even when two dispatches share a `--name`: session
+names carry the same suffix as the instance directories, so two dispatches with the same
+`--name` get different session names as well as different directories. Session-name
+uniqueness rests on the same 32-bit random token; niwa can't see sessions started
+outside dispatch, so it doesn't rule out a clash with those. The slug is additive: it
+never replaces the random token.
+With no `--name` (or an empty-after-sanitize one), behavior is exactly the random-token
+default. `--name` (the slug, which appears in the instance name and, followed by the
+random suffix, in the session name) is distinct from `--label` (a freeform alias
+recorded only on the mapping).
 
 **The dispatch signature is purely structural -- there is no `disp` literal.** Earlier
 iterations embedded a literal `disp-` segment in the name; that has been DROPPED. The

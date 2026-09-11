@@ -181,7 +181,7 @@ var runClaudePluginCmd = func(ctx context.Context, dir string, args ...string) e
 }
 
 // instanceSettings is the narrow projection of .claude/settings.json this package
-// reads back: the plugin/marketplace, remote-control, keep-alive, and permissions
+// reads back: the plugin/marketplace, remote-control, and keep-alive
 // declarations niwa materialized. Unknown fields are ignored.
 type instanceSettings struct {
 	EnabledPlugins         map[string]bool             `json:"enabledPlugins"`
@@ -195,13 +195,6 @@ type instanceSettings struct {
 	// set it; the dispatch keep-alive resolver reads it as the downstream layer
 	// between the --keep-alive flag and the host default.
 	KeepAliveOnDispatch *bool `json:"keepAliveOnDispatch"`
-	// Permissions mirrors the materialized settings.json permissions key.
-	// Non-nil only when the file declared one; a nil Permissions or a
-	// DefaultMode other than "bypassPermissions" both mean "nothing to
-	// derive" to every reader of this field.
-	Permissions *struct {
-		DefaultMode string `json:"defaultMode"`
-	} `json:"permissions"`
 }
 
 type marketplaceEntry struct {
@@ -221,10 +214,10 @@ type marketplaceSource struct {
 
 // readInstanceSettings reads the dispatched instance's Claude settings from
 // <instancePath>/.claude/settings.json. The instance root receives settings.json
-// (per RootSettingsMaterializer; see internal/workspace/permissions.go) -- the
-// settings.local.json variant is for per-repo dirs, never the root, so it is not
-// consulted here. Returns an error when the file is absent or not valid JSON;
-// callers treat any error as "nothing to pre-warm."
+// (RootSettingsMaterializer writes it there) -- the settings.local.json variant
+// is for per-repo dirs, never the root, so it is not consulted here. Returns an
+// error when the file is absent or not valid JSON; callers treat any error as
+// "nothing to pre-warm."
 func readInstanceSettings(instancePath string) (*instanceSettings, error) {
 	data, err := os.ReadFile(filepath.Join(instancePath, ".claude", "settings.json"))
 	if err != nil {

@@ -464,6 +464,11 @@ func captureReviewSession(instancePath string) (sessionID, shortID string) {
 // realStopSession.
 var stopSessionFunc = realStopSession
 
+// fetchPRHeadFunc is the seam over watch.FetchPRHead so the watch
+// characterization tests can drive stageReview/continueReview without a
+// network fetch. Production wires it to watch.FetchPRHead.
+var fetchPRHeadFunc = watch.FetchPRHead
+
 // realStopSession stops a background review session by its short id (the id
 // `claude stop` accepts; the full UUID is rejected). The short id is charset-
 // validated before it becomes an argument -- defense in depth over the capture-
@@ -546,7 +551,7 @@ func continueReview(cmd *cobra.Command, root, cwd, token string, client *github.
 		cloneURL = fmt.Sprintf("https://github.com/%s/%s.git", pr.Owner, pr.Repo)
 	}
 	cloneDir := filepath.Join(instancePath, watch.DefaultCloneRelDir)
-	if err := watch.FetchPRHead(ctx, cloneURL, head.SHA, cloneDir, token); err != nil {
+	if err := fetchPRHeadFunc(ctx, cloneURL, head.SHA, cloneDir, token); err != nil {
 		return fmt.Errorf("fetching PR head: %w", err)
 	}
 
@@ -573,21 +578,7 @@ func continueReview(cmd *cobra.Command, root, cwd, token string, client *github.
 	// (buildDispatchPassthrough + --strict-mcp-config when sandboxed) and additionally
 	// carries --resume <SessionID>. The re-review prompt is a fixed template.
 	prompt := watch.BuildResumePrompt(watch.DefaultCloneRelDir, watch.DefaultDraftRelPath)
-	passthrough := buildDispatchPassthrough(claudeLaunchSpec().Flags, rec.Handle, "")
-	passthrough = append(passthrough, "--resume", rec.SessionID)
-	if plan.sandbox {
-		passthrough = append(passthrough, "--strict-mcp-config")
-	}
-	if err := dispatchLaunch(ctx, launchRequest{
-		Spec: claudeLaunchSpec(),
-		// This agent's runner backgrounds its own session, so the process
-		// model is the same whether or not anything asks to detach; a sweep
-		// has no terminal to run a turn in either way.
-		Mode:        claudeLaunchSpec().Runner.ModeFor(true),
-		InstanceDir: instancePath,
-		Body:        prompt,
-		Passthrough: passthrough,
-	}); err != nil {
+	if err := dispatchLaunch(ctx, watchResumeLaunch(instancePath, rec.Handle, rec.SessionID, prompt, plan.sandbox)); err != nil {
 		return fmt.Errorf("resuming review agent: %w", err)
 	}
 
@@ -812,7 +803,7 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 
 	// Fetch the PR head as inert data (hardened) into the clone subdir.
 	cloneDir := filepath.Join(instancePath, watch.DefaultCloneRelDir)
-	if err := watch.FetchPRHead(ctx, cloneURL, head.SHA, cloneDir, token); err != nil {
+	if err := fetchPRHeadFunc(ctx, cloneURL, head.SHA, cloneDir, token); err != nil {
 		return fmt.Errorf("fetching PR head: %w", err)
 	}
 
@@ -833,24 +824,9 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	}
 
 	prompt := watch.BuildReviewPrompt(pr, watch.DefaultCloneRelDir, watch.DefaultDraftRelPath)
-	passthrough := buildDispatchPassthrough(claudeLaunchSpec().Flags, slug, "")
-	if plan.sandbox {
-		// Belt-and-suspenders: reduce MCP server loading so the egress-deny hook
-		// is not the only thing standing between an MCP tool and the network.
-		passthrough = append(passthrough, "--strict-mcp-config")
-	}
 
 	// Launch detached (no terminal attach) with the real environment.
-	if err := dispatchLaunch(ctx, launchRequest{
-		Spec: claudeLaunchSpec(),
-		// This agent's runner backgrounds its own session, so the process
-		// model is the same whether or not anything asks to detach; a sweep
-		// has no terminal to run a turn in either way.
-		Mode:        claudeLaunchSpec().Runner.ModeFor(true),
-		InstanceDir: instancePath,
-		Body:        prompt,
-		Passthrough: passthrough,
-	}); err != nil {
+	if err := dispatchLaunch(ctx, watchReviewLaunch(instancePath, slug, prompt, plan.sandbox)); err != nil {
 		return fmt.Errorf("launching review agent: %w", err)
 	}
 
@@ -888,6 +864,56 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 		"niwa watch: staged review for %s/%s#%d (handle %s)%s\n",
 		pr.Owner, pr.Repo, pr.Number, slug, reviewWritePosture(plan.sandbox, askPosture))
 	return nil
+}
+
+// watchReviewLaunch builds the launch request for a fresh review session
+// (stageReview), and watchResumeLaunch the one for its `--resume` continuation
+// (continueReview). Each is the only place its launch's argv is assembled, so a
+// test can build it exactly as production does.
+//
+// Neither launch carries a permission mode. A review session's mode comes from
+// its instance's settings: under the operator-approval posture
+// watch.ApplyReviewSettings writes permissions.defaultMode itself, and
+// otherwise it writes none, so the session runs in whatever those settings
+// resolve to, which may be no mode at all. Either way the session must not get
+// the mode dispatch derives from the instance's recorded permissions posture.
+// The final "" (the permission mode) handed to buildDispatchPassthrough is
+// that rule.
+func watchReviewLaunch(instancePath, slug, prompt string, sandbox bool) launchRequest {
+	passthrough := buildDispatchPassthrough(claudeLaunchSpec().Flags, slug, "", "")
+	if sandbox {
+		// Belt-and-suspenders: reduce MCP server loading so the egress-deny hook
+		// is not the only thing standing between an MCP tool and the network.
+		passthrough = append(passthrough, "--strict-mcp-config")
+	}
+	return watchLaunchRequest(instancePath, prompt, passthrough)
+}
+
+// watchResumeLaunch mirrors watchReviewLaunch and additionally carries
+// --resume <sessionID>. See watchReviewLaunch for why it passes no permission
+// mode.
+func watchResumeLaunch(instancePath, handle, sessionID, prompt string, sandbox bool) launchRequest {
+	passthrough := buildDispatchPassthrough(claudeLaunchSpec().Flags, handle, "", "")
+	passthrough = append(passthrough, "--resume", sessionID)
+	if sandbox {
+		passthrough = append(passthrough, "--strict-mcp-config")
+	}
+	return watchLaunchRequest(instancePath, prompt, passthrough)
+}
+
+// watchLaunchRequest is the launch request both watch launches share: Claude
+// Code, backgrounded, in the review instance.
+func watchLaunchRequest(instancePath, prompt string, passthrough []string) launchRequest {
+	return launchRequest{
+		Spec: claudeLaunchSpec(),
+		// This agent's runner backgrounds its own session, so the process
+		// model is the same whether or not anything asks to detach; a sweep
+		// has no terminal to run a turn in either way.
+		Mode:        claudeLaunchSpec().Runner.ModeFor(true),
+		InstanceDir: instancePath,
+		Body:        prompt,
+		Passthrough: passthrough,
+	}
 }
 
 // reviewWritePosture returns a human-readable suffix naming how an out-of-instance

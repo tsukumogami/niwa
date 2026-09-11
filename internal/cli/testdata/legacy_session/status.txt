@@ -1,0 +1,10 @@
+== summary ==
+Instances:
+
+  test-ws+review-4e33acfa 0 repos   0 drifted   applied <RELATIVE>
+== detail ==
+Instance: test-ws+review-4e33acfa
+Config:   test-ws
+Root:     <INSTANCE>
+Created:  2026-01-02 03:04
+Applied:  2026-01-02 03:04

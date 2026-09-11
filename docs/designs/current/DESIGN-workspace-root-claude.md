@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 problem: |
   niwa needs to configure Claude Code at the workspace instance root (above all
@@ -25,7 +26,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Current
 
 ## Context and Problem Statement
 
@@ -110,7 +111,12 @@ Plugins use `claude plugin install --scope local` which writes
 non-git directories.
 
 **Experimentally verified:**
-- `settings.json` with `bypassPermissions`: works in non-git (3/3 runs)
+- `settings.json` with `bypassPermissions`: works in non-git (3/3 runs).
+  This finding is superseded: Claude Code 2.1.257 stopped honoring
+  `permissions.defaultMode: bypassPermissions` from a project settings file,
+  and niwa no longer writes it. A workspace's `bypass` posture now reaches
+  dispatched workers as the `--permission-mode bypassPermissions` flag
+  `niwa dispatch` passes (see `docs/designs/current/DESIGN-inert-defaultmode-key.md`).
 - Hooks in `settings.json`: work in non-git
 - `claude plugin install --scope local`: works in non-git
 
