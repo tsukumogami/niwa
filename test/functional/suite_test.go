@@ -480,8 +480,8 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	registerDispatchSpillSteps(ctx)
 	registerKeepAliveSteps(ctx)
 
-	// --- permission posture: the dispatch argv and the settings documents a
-	// declared posture reaches, checked from outside the process ---
+	// --- permission posture: the host config a posture scenario needs and the
+	// settings documents a declared posture reaches ---
 	registerPostureSteps(ctx)
 
 	// --- the Codex acceptance bar: what a session in a prepared instance gets

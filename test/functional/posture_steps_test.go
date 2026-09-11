@@ -10,11 +10,13 @@ import (
 	"github.com/cucumber/godog"
 )
 
-// posture_steps_test.go holds the steps that check a workspace's declared
-// permission posture from outside the process: what the launched worker's argv
-// carries, and what each generated Claude Code settings document says. The
-// scenarios take their posture from a config repo or a personal overlay run
-// through the real binary, never from a hand-written settings or state file.
+// posture_steps_test.go holds the steps that set up and check a workspace's
+// declared permission posture from outside the process: the host-config step
+// the remote-control dispatch scenario needs, and the steps that read what each
+// generated Claude Code settings document says. The argv assertions live with
+// the other dispatch steps in dispatch_steps_test.go. The scenarios take their
+// posture from a config repo or a personal overlay run through the real binary,
+// never from a hand-written settings or state file.
 
 // theHostConfigDeclaresGlobalSettings puts the docstring's keys under [global]
 // in the sandboxed host config ($XDG_CONFIG_HOME/niwa/config.toml). It edits
@@ -67,9 +69,10 @@ func theHostConfigDeclaresGlobalSettings(ctx context.Context, body *godog.DocStr
 // document may carry. bypassPermissions and auto no longer take effect from a
 // project or local settings file, and askPermissions isn't a mode at all: it
 // makes Claude Code discard the whole file. The set follows the modes Claude
-// Code honors, not niwa's posture vocabulary: a new posture value changes the
-// Examples in permission-posture-documents.feature, and this set changes only
-// if Claude Code's own list of modes does.
+// Code honors from a project or local settings file, not niwa's posture
+// vocabulary: a new posture value changes the Examples in
+// permission-posture-documents.feature, and this set changes only when that
+// list of honored modes does.
 var validDefaultModes = map[string]bool{
 	"default":     true,
 	"acceptEdits": true,
@@ -170,8 +173,9 @@ func theLastWorktreeSettingsDocumentHasDefaultMode(ctx context.Context, want str
 // every document the matrix reads is on disk and parses: the workspace root,
 // the instance root, each named repo (comma-separated "<group>/<repo>"), and
 // the last worktree. Each value step would also fail on a missing or broken
-// document; this step makes that check up front and in one place, so a row
-// that fails for a missing document says so before any value is compared.
+// document; this step makes that check up front and in one place, and it is
+// the only check of the worktree document as niwa worktree create left it,
+// since S9's row applies the instance before its worktree value is read.
 func theSettingsDocumentsExistAndParse(ctx context.Context, instance, repos string) error {
 	s := getState(ctx)
 	if s == nil {
