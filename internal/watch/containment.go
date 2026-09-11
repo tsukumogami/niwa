@@ -45,8 +45,9 @@ const (
 	// discovery). The list comes from Claude Code 2.1.267's tool list. The matcher
 	// uses only letters and "|", so Claude Code compares it as an exact list of
 	// tool names, aliases included (ListPeers resolves to ListAgents), rather than
-	// as a substring or a regex. Adding any other character would change how every
-	// token is compared.
+	// as a substring or a regex. That exact-list form holds only while the matcher
+	// is made of letters, digits, underscores, and "|"; any other character (".",
+	// "*", "(", a space) makes Claude Code treat it as a pattern instead.
 	//
 	// sessionReachDenyHook is applied and required in every containment mode, and
 	// its identity is this matcher AND its command, so a workspace or overlay hook
@@ -132,10 +133,13 @@ func egressDenyHook() map[string]any {
 
 // sessionReachDenyCommand returns the shell command of the session-reach deny
 // hook: it writes sessionReachDenyMessage and a newline to stderr, nothing to
-// stdout, and exits 2 (block) without reading stdin. shellQuote keeps the
-// apostrophe in the message intact.
+// stdout, and exits 2 (block) whatever stdin holds. shellQuote keeps the
+// apostrophe in the message intact. It drains stdin first so the block never
+// depends on how the harness treats a hook that exits before reading its payload
+// (a write error on the hook's stdin); the harness closes stdin after the
+// payload, as the post-guard, which reads it, already relies on.
 func sessionReachDenyCommand() string {
-	return `printf '%s\n' ` + shellQuote(sessionReachDenyMessage) + ` >&2; exit 2`
+	return `cat >/dev/null 2>&1; printf '%s\n' ` + shellQuote(sessionReachDenyMessage) + ` >&2; exit 2`
 }
 
 // sessionReachDenyHook returns the PreToolUse hook that refuses the tools able to
@@ -466,10 +470,13 @@ func preToolUseHasMatcher(preToolUse []any, matcher string) bool {
 }
 
 // preToolUseHasHook reports whether any entry in a PreToolUse array has the given
-// matcher and, among its hooks, one of type "command" whose command is exactly the
-// given string. It is the identity for the session-reach deny hook, where the matcher
-// alone isn't enough; the other hooks keep using preToolUseHasMatcher. Shared by the
-// apply-time dedupe and the verify-time check.
+// matcher and, among its hooks, one holding exactly the keys "type" (equal to
+// "command") and "command" (equal to the given string). It is the identity for the
+// session-reach deny hook, where the matcher alone isn't enough; the other hooks keep
+// using preToolUseHasMatcher. Any extra handler key is refused because Claude Code
+// honors fields such as async, once, if, and timeout that can keep a hook with the
+// right command from blocking. Shared by the apply-time dedupe and the verify-time
+// check.
 func preToolUseHasHook(preToolUse []any, matcher, command string) bool {
 	for _, entry := range preToolUse {
 		m, ok := entry.(map[string]any)
@@ -482,7 +489,7 @@ func preToolUseHasHook(preToolUse []any, matcher, command string) bool {
 		inner, _ := m["hooks"].([]any)
 		for _, h := range inner {
 			hm, ok := h.(map[string]any)
-			if !ok {
+			if !ok || len(hm) != 2 {
 				continue
 			}
 			typ, _ := hm["type"].(string)

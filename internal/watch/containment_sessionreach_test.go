@@ -153,7 +153,12 @@ func TestSessionReachDenyHook_CommandRefuses(t *testing.T) {
 				}
 			}
 
-			payloads := map[string]string{"empty stdin": ""}
+			payloads := map[string]string{
+				"empty stdin": "",
+				// Larger than a pipe buffer, so a hook that exits without reading
+				// would leave the writer blocked or failing.
+				"large payload": `{"hook_event_name":"PreToolUse","tool_name":"SendMessage","tool_input":{"message":"` + strings.Repeat("x", 300*1024) + `"}}`,
+			}
 			for _, tool := range matcherTokens(sessionReachDenyMatcher) {
 				payloads[tool] = `{"hook_event_name":"PreToolUse","tool_name":"` + tool + `","tool_input":{}}`
 			}
@@ -312,6 +317,46 @@ func TestSessionReachDeny_ImpostorCannotStandIn(t *testing.T) {
 			wrongMatcher := reviewDocFor(mode.sandbox, mode.ask, commandHook("SendMessage", sessionReachDenyCommand()))
 			if err := VerifyReviewSettings(wrongMatcher, mode.sandbox, mode.ask); err == nil {
 				t.Error("niwa's command under a different matcher must not satisfy verification")
+			}
+		})
+	}
+}
+
+// TestSessionReachDeny_ExtraHandlerKeysCannotStandIn covers an entry with niwa's
+// matcher and exact command plus a handler key Claude Code honors (async, once, if,
+// timeout), any of which can keep it from blocking. It must not satisfy the verify
+// check, and apply must add niwa's plain hook beside it.
+func TestSessionReachDeny_ExtraHandlerKeysCannotStandIn(t *testing.T) {
+	extras := map[string]any{"async": true, "once": true, "if": "Bash(never)", "timeout": 0.001}
+	for key, val := range extras {
+		t.Run(key, func(t *testing.T) {
+			variant := map[string]any{
+				"matcher": sessionReachDenyMatcher,
+				"hooks": []any{map[string]any{
+					"type":    "command",
+					"command": sessionReachDenyCommand(),
+					key:       val,
+				}},
+			}
+			for _, mode := range reviewModes {
+				if err := VerifyReviewSettings(reviewDocFor(mode.sandbox, mode.ask, variant), mode.sandbox, mode.ask); err == nil {
+					t.Errorf("%s: a deny entry carrying %q must not satisfy verification", mode.name, key)
+				}
+			}
+
+			inst := t.TempDir()
+			claudeDir := filepath.Join(inst, ".claude")
+			if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeJSON(t, filepath.Join(claudeDir, "settings.json"), map[string]any{
+				"hooks": map[string]any{"PreToolUse": []any{variant}},
+			})
+			if err := ApplyReviewSettings(inst, false, false); err != nil {
+				t.Fatalf("ApplyReviewSettings with a %q variant present: %v", key, err)
+			}
+			if n := countPreToolUseMatcher(t, readSettings(t, inst), sessionReachDenyMatcher); n != 2 {
+				t.Errorf("apply must keep the %q variant and add niwa's plain hook, got %d entries", key, n)
 			}
 		})
 	}
