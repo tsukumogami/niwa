@@ -135,8 +135,8 @@ const inboundNoticeMarker = "accept-session-messages-notice"
 
 // The one-time explanation, as three constants a reader can diff against the
 // design and a guide can quote. The body is the same either way; which closing
-// sentence follows it depends on whether stderr was a terminal, because that is
-// what decides whether niwa is about to remember having shown it.
+// sentence follows it depends on whether niwa is about to remember having shown
+// it, which is a terminal and a resolvable configuration directory together.
 //
 // The point of the whole paragraph is the asymmetry a developer would otherwise
 // discover the hard way: this dispatch settles what the worker ACCEPTS, and
@@ -146,11 +146,22 @@ const (
 	// inboundExplanationBody is every sentence before the closing one,
 	// including the "niwa dispatch: note: " prefix and ending in a period, so
 	// a caller joins it to a closing sentence with a single space.
+	//
+	// It names an agent, its /config screen and its settings file, in a file
+	// the dispatch-path layout scan covers. That is deliberate and within the
+	// scan's rule, which compares whole literal values: this is advice about
+	// where the developer's OWN sessions get their setting, addressed to a
+	// reader, not a delivery decision taken at a call site. Nothing branches on
+	// it and no other code reads it. It reaches only a dispatch that already
+	// resolved to an agent declaring the capability, so no agent that cannot
+	// receive the behavior is ever told to go and configure it.
 	inboundExplanationBody = `niwa dispatch: note: accepting messages without asking is inbound only. A message this worker sends into a session launched without it, such as a coordinator dispatched earlier, one dispatched with the behavior off, or one another tool started, still waits for approval there when the two run in different permission modes; dispatching that session again with the behavior on clears it. Your own interactive Claude Code sessions are one such case, and they are governed by your Claude Code user settings, which niwa doesn't change. To accept there too, set "Messages from your other sessions" to accept in Claude Code's /config, or add "crossSessionInbound": "accept" to ~/.claude/settings.json. That change applies to every Claude Code session you run and to messages from any session able to reach yours, on this machine or elsewhere.`
 
 	// inboundExplanationTerminalClose closes the line when stderr is a
-	// terminal, which is also when niwa writes the marker. Its verb is the
-	// guide URL.
+	// terminal, which is also when niwa tries to write the marker. It promises
+	// silence niwa may not manage to deliver -- a write that fails leaves the
+	// paragraph showing again -- which is the safe direction for the promise
+	// to be wrong in. Its verb is the guide URL.
 	inboundExplanationTerminalClose = "niwa won't show this again; it's also at %s"
 
 	// inboundExplanationNonTerminalClose closes the line when stderr is not a
@@ -228,7 +239,11 @@ func showInboundExplanation(w io.Writer, dir string, dirErr error, isTTY func() 
 }
 
 // showInboundExplanationAt is the production call: it resolves the directory
-// holding config.toml and hands it to showInboundExplanation.
+// holding config.toml and hands it to showInboundExplanation. It exists as its
+// own function because runDispatch calls it from two sites -- behind the audit
+// line and after the attach -- and splitting a path from its error at both
+// would be the same three lines twice. showInboundExplanation itself takes the
+// directory rather than resolving it, so its tests can point it anywhere.
 //
 // config.GlobalConfigPath() is the source, not config.GlobalConfigDir(): the
 // latter returns the overlay clone directory, which a [global_config] clone

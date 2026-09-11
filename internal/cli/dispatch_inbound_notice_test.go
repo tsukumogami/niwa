@@ -17,17 +17,45 @@ import (
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
-// The two closing sentences, rendered. Tests compare against these rather than
-// against the format constants so a change to either wording is visible here.
-var (
-	terminalClose    = inboundExplanationLine(true)[len(inboundExplanationBody)+1:]
-	nonTerminalClose = inboundExplanationLine(false)[len(inboundExplanationBody)+1:]
+// The explanation, written out here rather than rebuilt from the constants,
+// the way TestInboundLinesExactText pins the other three stderr lines. This is
+// the whole point of the duplication: expectations derived from
+// inboundExplanationLine would reword themselves along with a reworded
+// constant, and every test in this file would keep passing while the paragraph
+// said something else.
+const (
+	explanationGuideURL = "https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md"
+
+	explanationBodyText = `niwa dispatch: note: accepting messages without asking is inbound only. A message this worker sends into a session launched without it, such as a coordinator dispatched earlier, one dispatched with the behavior off, or one another tool started, still waits for approval there when the two run in different permission modes; dispatching that session again with the behavior on clears it. Your own interactive Claude Code sessions are one such case, and they are governed by your Claude Code user settings, which niwa doesn't change. To accept there too, set "Messages from your other sessions" to accept in Claude Code's /config, or add "crossSessionInbound": "accept" to ~/.claude/settings.json. That change applies to every Claude Code session you run and to messages from any session able to reach yours, on this machine or elsewhere.`
+
+	terminalClose    = "niwa won't show this again; it's also at " + explanationGuideURL
+	nonTerminalClose = "niwa will show this again until it's been shown at a terminal; it's also at " + explanationGuideURL
+
+	explanationTerminalLine    = explanationBodyText + " " + terminalClose
+	explanationNonTerminalLine = explanationBodyText + " " + nonTerminalClose
 )
 
-// explanationMarker is the shortest substring unique to the explanation. Tests
-// asserting the paragraph is absent look for this rather than a whole line, so
-// a reworded explanation still counts as printed.
+// explanationMarker is a substring no other niwa output carries. Tests asserting
+// the paragraph is ABSENT match on it rather than on a whole line, so that a
+// reworded explanation still counts as printed and the absence assertion stays
+// strict. Tests asserting it is present match on the whole line instead.
 const explanationMarker = "accepting messages without asking is inbound only"
+
+// TestInboundExplanationExactText pins the paragraph and the marker file name,
+// both of which are contracts beyond this package: the guide quotes the text,
+// and the functional scenarios look the marker up by name.
+func TestInboundExplanationExactText(t *testing.T) {
+	if inboundNoticeMarker != "accept-session-messages-notice" {
+		t.Errorf("inboundNoticeMarker = %q, want %q; the name is what suppresses the notice and what the guide tells a developer to delete",
+			inboundNoticeMarker, "accept-session-messages-notice")
+	}
+	if got := inboundExplanationLine(true); got != explanationTerminalLine {
+		t.Errorf("terminal explanation =\n%q\nwant\n%q", got, explanationTerminalLine)
+	}
+	if got := inboundExplanationLine(false); got != explanationNonTerminalLine {
+		t.Errorf("non-terminal explanation =\n%q\nwant\n%q", got, explanationNonTerminalLine)
+	}
+}
 
 // alwaysTTY and neverTTY are the two isTTY stubs the helper tests pass.
 func alwaysTTY() bool { return true }
@@ -103,7 +131,7 @@ func TestInboundExplanationText(t *testing.T) {
 			`"crossSessionInbound": "accept"`,
 			"~/.claude/settings.json",
 			"That change applies to every Claude Code session you run and to messages from any session able to reach yours, on this machine or elsewhere",
-			inboundGuideURL,
+			explanationGuideURL,
 		} {
 			if !strings.Contains(line, want) {
 				t.Errorf("terminal=%v: explanation is missing %q:\n%s", terminal, want, line)
@@ -560,7 +588,7 @@ func TestDispatch_Notice_WaitsForTheAttach(t *testing.T) {
 			}
 
 			stderr := errBuf.String()
-			if !strings.HasSuffix(stderr, inboundExplanationLine(true)+"\n") {
+			if !strings.HasSuffix(stderr, explanationTerminalLine+"\n") {
 				t.Errorf("stderr does not end with the terminal explanation:\n%s", stderr)
 			}
 			requireMarker(t, cfgDir)
@@ -864,23 +892,31 @@ func TestDispatch_Notice_LeavesConfigTomlAlone(t *testing.T) {
 // half. The explanation is stderr's business whether or not there is a terminal
 // on the other end.
 func TestDispatch_Notice_StaysOffStdout(t *testing.T) {
-	for _, terminal := range []bool{true, false} {
-		root := setupDispatchWorkspace(t)
-		chdir(t, root)
-		setHostConfig(t, hostInboundOn)
-		installDispatchFakes(t, root)
-		stubStderrTTY(t, terminal)
-		dispatchDetach = true
+	for _, tc := range []struct {
+		name     string
+		terminal bool
+	}{
+		{"at a terminal", true},
+		{"not at a terminal", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := setupDispatchWorkspace(t)
+			chdir(t, root)
+			setHostConfig(t, hostInboundOn)
+			installDispatchFakes(t, root)
+			stubStderrTTY(t, tc.terminal)
+			dispatchDetach = true
 
-		stdout, stderr, err := runDispatchCmd(t, "do a thing")
-		if err != nil {
-			t.Fatalf("terminal=%v: dispatch: %v", terminal, err)
-		}
-		if !strings.Contains(stderr, explanationMarker) {
-			t.Fatalf("terminal=%v: the explanation did not print at all:\n%s", terminal, stderr)
-		}
-		if strings.Contains(stdout, explanationMarker) || strings.Contains(stdout, inboundGuideURL) {
-			t.Errorf("terminal=%v: stdout carries the explanation:\n%s", terminal, stdout)
-		}
+			stdout, stderr, err := runDispatchCmd(t, "do a thing")
+			if err != nil {
+				t.Fatalf("dispatch: %v", err)
+			}
+			if !strings.Contains(stderr, explanationMarker) {
+				t.Fatalf("the explanation did not print at all:\n%s", stderr)
+			}
+			if strings.Contains(stdout, explanationMarker) || strings.Contains(stdout, explanationGuideURL) {
+				t.Errorf("stdout carries the explanation:\n%s", stdout)
+			}
+		})
 	}
 }
