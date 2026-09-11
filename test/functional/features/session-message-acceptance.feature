@@ -491,6 +491,10 @@ Feature: niwa dispatch: accepting messages from other sessions
     Then the exit code is 0
     And the launched claude settings document has no crossSessionInbound
     And the error output has exactly 0 lines containing "accepts messages from other sessions without asking"
+    # This is the fixture with a cloned repository and no committed settings
+    # files of its own, so it is the one where the per-repository half of the
+    # scan below actually reads something niwa wrote:
+    # <instance>/tools/app/.claude/settings.local.json.
     And no settings file niwa wrote into the dispatch instance contains "crossSessionInbound"
 
   Scenario: crossSessionInbound under claude.settings does not turn it on
@@ -564,11 +568,14 @@ Feature: niwa dispatch: accepting messages from other sessions
     Then the exit code is 0
     And the launched claude settings document has no crossSessionInbound
     And the error output has exactly 0 lines containing "accepts messages from other sessions without asking"
-    # No "no settings file niwa wrote" step here, deliberately. This fixture
-    # commits a file at .claude/settings.local.json, which is the very path that
-    # step reads as niwa's own; it could not tell the repository's committed key
-    # from a leaked one. The sibling fixtures, whose repositories commit no
-    # settings files, are where that step carries its weight.
+    # This is the only fixture that asks whether niwa's materializer copies a
+    # key out of a repository's committed settings into the file niwa owns. The
+    # repository commits both paths; niwa owns .claude/settings.local.json and
+    # replaces it wholesale with its own generated document, so what the step
+    # reads there is niwa's file and not the fixture's. The committed
+    # .claude/settings.json survives beside it and is never read: the step only
+    # ever looks at a repository's settings.local.json.
+    And no settings file niwa wrote into the dispatch instance contains "crossSessionInbound"
 
   # --- Coexistence with the other launch-settings contributors ---
   #

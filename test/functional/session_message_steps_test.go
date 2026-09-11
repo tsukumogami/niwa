@@ -796,10 +796,15 @@ func thePersonalClaudeSettingsFileIsNotReadable(ctx context.Context) error {
 // text.
 //
 // Those are the instance-root .claude/settings.json and the
-// .claude/settings.local.json niwa writes inside each cloned repository. A
-// settings.json a fixture repository committed is deliberately NOT inspected:
-// it is the fixture's own file, and the point of these scenarios is that niwa
-// neither reads it for this decision nor copies it into a file it owns.
+// .claude/settings.local.json niwa writes inside each cloned repository.
+//
+// A repository's committed .claude/settings.json is never among them, and that
+// is the point rather than an omission: it is the fixture's own file at a path
+// niwa does not write, so reading it would assert something about the fixture.
+// What these scenarios are asking is whether niwa copies a key out of it into a
+// file niwa owns. settings.local.json IS such a file even when a repository
+// committed one, because the materializer replaces that path wholesale with its
+// own generated document.
 func noSettingsFileNiwaWroteIntoTheDispatchInstanceContains(ctx context.Context, unwanted string) error {
 	s := getState(ctx)
 	if s == nil {
@@ -813,12 +818,13 @@ func noSettingsFileNiwaWroteIntoTheDispatchInstanceContains(ctx context.Context,
 		return fmt.Errorf("no dispatch instance found under %s\nstdout:\n%s\nstderr:\n%s", s.workspaceRoot, s.stdout, s.stderr)
 	}
 
-	paths := []string{filepath.Join(inst, ".claude", "settings.json")}
+	rootSettings := filepath.Join(inst, ".claude", "settings.json")
 	// Repositories sit two levels down, at <instance>/<group>/<repo>, so the
 	// per-repository settings niwa writes are at
 	// <instance>/<group>/<repo>/.claude/settings.local.json. Probing one level
 	// down finds nothing at all, which would leave this step asserting only the
 	// instance-root file while reading as though it covered both.
+	var repoSettings []string
 	groups, err := os.ReadDir(inst)
 	if err != nil {
 		return fmt.Errorf("reading dispatch instance %s: %w", inst, err)
@@ -835,26 +841,53 @@ func noSettingsFileNiwaWroteIntoTheDispatchInstanceContains(ctx context.Context,
 			if !r.IsDir() || strings.HasPrefix(r.Name(), ".") {
 				continue
 			}
-			paths = append(paths, filepath.Join(inst, g.Name(), r.Name(), ".claude", "settings.local.json"))
+			repoSettings = append(repoSettings, filepath.Join(inst, g.Name(), r.Name(), ".claude", "settings.local.json"))
 		}
 	}
 
-	checked := 0
-	for _, path := range paths {
+	read := func(path string) (bool, error) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			if os.IsNotExist(err) {
-				continue
+				return false, nil
 			}
-			return fmt.Errorf("reading %s: %w", path, err)
+			return false, fmt.Errorf("reading %s: %w", path, err)
 		}
-		checked++
 		if strings.Contains(string(data), unwanted) {
-			return fmt.Errorf("%s contains %q:\n%s", path, unwanted, data)
+			return true, fmt.Errorf("%s contains %q:\n%s", path, unwanted, data)
+		}
+		return true, nil
+	}
+
+	rootRead, err := read(rootSettings)
+	if err != nil {
+		return err
+	}
+	repoRead := 0
+	for _, path := range repoSettings {
+		ok, err := read(path)
+		if err != nil {
+			return err
+		}
+		if ok {
+			repoRead++
 		}
 	}
-	if checked == 0 {
-		return fmt.Errorf("niwa wrote no settings file into %s, so this assertion checked nothing", inst)
+
+	// Both floors exist so this step cannot quietly become an assertion about
+	// nothing. The first catches an instance niwa wrote no settings into at all.
+	// The second is the one that matters for the per-repository half: a scenario
+	// that clones a repository is relying on that half running, and if the
+	// materializer ever stops writing settings.local.json the step would still
+	// pass on the instance-root file alone while the scenario's comment went on
+	// claiming coverage it no longer had.
+	if !rootRead && repoRead == 0 {
+		return fmt.Errorf("niwa wrote no settings file into %s, so this assertion checked nothing; candidates were %v",
+			inst, append([]string{rootSettings}, repoSettings...))
+	}
+	if len(repoSettings) > 0 && repoRead == 0 {
+		return fmt.Errorf("the dispatch instance %s has %d cloned repositor(y/ies) but niwa wrote no settings.local.json into any of them, so the per-repository half of this assertion checked nothing; candidates were %v",
+			inst, len(repoSettings), repoSettings)
 	}
 	return nil
 }

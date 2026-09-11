@@ -81,9 +81,11 @@ func iSetEnvToTempPath(ctx context.Context, key string) (context.Context, error)
 // dispatch refuses to inject when it is set, because Claude Code Remote needs a
 // claude.ai login. Left inherited, a scenario that exercises remote control
 // passes on CI and fails on the machine of any developer who has the key
-// exported -- and fails by taking the silent branch, which reads as niwa being
-// broken rather than as the environment deciding. A scenario that genuinely
-// needs the real key re-appends it after this call; see runClaudeP.
+// exported. niwa itself is not quiet about it -- it prints a warning naming the
+// variable -- but the assertion that fails reports only the missing setting and
+// never shows stderr, so the failure reads as niwa being broken rather than as
+// the environment deciding. A scenario that genuinely needs the real key
+// re-appends it after this call; see runClaudeP.
 func (s *testState) buildEnv() []string {
 	// pathDirs are prepended to $PATH for the niwa subprocess, highest
 	// priority first: a per-scenario pathPrefix (e.g. a fake `claude`) wins
