@@ -347,7 +347,7 @@ Feature: niwa dispatch: accepting messages from other sessions
     And the session-message notice marker exists
     And at least one parallel transcript contains the text:
       """
-      accepting messages without asking is inbound only
+      accepting messages without asking is inbound only. A message this worker sends into a session launched without it, such as a coordinator dispatched earlier, one dispatched with the behavior off, or one another tool started, still waits for approval there when the two run in different permission modes; dispatching that session again with the behavior on clears it.
       """
     And every parallel transcript has exactly 1 line containing "accepts messages from other sessions without asking"
     And there are 4 dispatch mappings that record session-message acceptance
@@ -491,9 +491,8 @@ Feature: niwa dispatch: accepting messages from other sessions
     Then the exit code is 0
     And the launched claude settings document has no crossSessionInbound
     And the error output has exactly 0 lines containing "accepts messages from other sessions without asking"
-    # This is the fixture with a cloned repository and no committed settings
-    # files of its own, so it is the one where the per-repository half of the
-    # scan below actually reads something niwa wrote:
+    # This fixture clones a repository, so the scan below reads a per-repository
+    # file niwa wrote as well as the instance-root one:
     # <instance>/tools/app/.claude/settings.local.json.
     And no settings file niwa wrote into the dispatch instance contains "crossSessionInbound"
 

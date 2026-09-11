@@ -824,6 +824,11 @@ func noSettingsFileNiwaWroteIntoTheDispatchInstanceContains(ctx context.Context,
 	// <instance>/<group>/<repo>/.claude/settings.local.json. Probing one level
 	// down finds nothing at all, which would leave this step asserting only the
 	// instance-root file while reading as though it covered both.
+	//
+	// Every non-dot directory two levels down is treated as a repository. That
+	// is the instance layout rather than a fact this step can check, so a future
+	// layout that puts something else there would widen the scan rather than
+	// narrow it -- the safe direction for an assertion about absence.
 	var repoSettings []string
 	groups, err := os.ReadDir(inst)
 	if err != nil {
@@ -876,17 +881,17 @@ func noSettingsFileNiwaWroteIntoTheDispatchInstanceContains(ctx context.Context,
 
 	// Both floors exist so this step cannot quietly become an assertion about
 	// nothing. The first catches an instance niwa wrote no settings into at all.
-	// The second is the one that matters for the per-repository half: a scenario
-	// that clones a repository is relying on that half running, and if the
-	// materializer ever stops writing settings.local.json the step would still
-	// pass on the instance-root file alone while the scenario's comment went on
-	// claiming coverage it no longer had.
+	// The second is the one that matters for the per-repository half: once an
+	// instance has repository directories at all, a scenario is relying on that
+	// half running, and if the materializer ever stopped writing
+	// settings.local.json the step would still pass on the instance-root file
+	// alone while the scenario went on claiming coverage it no longer had.
 	if !rootRead && repoRead == 0 {
 		return fmt.Errorf("niwa wrote no settings file into %s, so this assertion checked nothing; candidates were %v",
 			inst, append([]string{rootSettings}, repoSettings...))
 	}
 	if len(repoSettings) > 0 && repoRead == 0 {
-		return fmt.Errorf("the dispatch instance %s has %d cloned repositor(y/ies) but niwa wrote no settings.local.json into any of them, so the per-repository half of this assertion checked nothing; candidates were %v",
+		return fmt.Errorf("the dispatch instance %s has %d <group>/<repo> director(y/ies) but niwa wrote no settings.local.json into any of them, so the per-repository half of this assertion checked nothing; candidates were %v",
 			inst, len(repoSettings), repoSettings)
 	}
 	return nil
