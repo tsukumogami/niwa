@@ -877,9 +877,20 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// The override line is for a developer whose machine setting would have
 	// applied: an agent that could not receive the behavior gets none, because
 	// nothing was overridden there.
+	//
+	// attachFollows is the one place step (14)'s third outcome is decided, and
+	// it is decided here because the one-time explanation needs it too: a
+	// paragraph printed just before `claude attach` takes the terminal is a
+	// paragraph the developer never reads, and niwa would then remember having
+	// shown it. So when an attach follows, the explanation waits for it to
+	// return; when none does, it goes out right behind the audit line.
+	attachFollows := launchMode != agentplan.LaunchForeground && spec.ResumeDuringTurn && !dispatchDetach
 	switch {
 	case inboundApplied:
 		fmt.Fprintln(cmd.ErrOrStderr(), inboundAuditLine(inbound.source))
+		if !attachFollows {
+			showInboundExplanationAt(cmd.ErrOrStderr(), IsStderrTTY)
+		}
 	case inbound.overrodeMachineOn && inboundDeliverable:
 		fmt.Fprintln(cmd.ErrOrStderr(), inboundOverrideLine)
 	}
@@ -937,12 +948,24 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// developer asked to be left where they are. A failure here is NON-fatal:
 	// the session and instance survive, so degrade to a warning and never roll
 	// back or delete the mapping (success is already true; DESIGN Decision 1).
-	if !dispatchDetach {
+	//
+	// attachFollows, hoisted at (12a), is this branch's own condition: the two
+	// returns above have already ruled out the other launch shapes, so all it
+	// adds here is --detach. Reading it rather than repeating the flag check
+	// keeps the explanation's "is an attach coming?" question and the attach
+	// itself answering from one expression.
+	if attachFollows {
 		if err := dispatchAttach(spec, handle, instancePath); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: warning: could not attach to session %s: %v\n", sessionID, err)
 			if again := reentryCommand(spec, handle, instancePath); again != "" {
 				fmt.Fprintf(cmd.ErrOrStderr(), "niwa: the session is running; attach later with: %s\n", again)
 			}
+		}
+		// The terminal is the developer's again, whether the attach handed it
+		// back or never took it, so this is the first moment the explanation
+		// can be read -- and the first moment it is honest to remember it.
+		if inboundApplied {
+			showInboundExplanationAt(cmd.ErrOrStderr(), IsStderrTTY)
 		}
 	}
 

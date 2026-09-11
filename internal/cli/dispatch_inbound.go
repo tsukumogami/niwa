@@ -2,6 +2,9 @@ package cli
 
 import (
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/tsukumogami/niwa/internal/config"
 )
@@ -117,4 +120,125 @@ func inboundAuditLine(source string) string {
 		detail = inboundMachineSourceDetail
 	}
 	return fmt.Sprintf(inboundAuditFormat, detail, inboundGuideURL)
+}
+
+// inboundNoticeMarker is the file whose presence means the explanation below
+// has already been shown at a terminal. It lives beside config.toml -- in the
+// directory part of the path config.GlobalConfigPath() returns, so it follows
+// XDG_CONFIG_HOME -- and it is empty: the name is the whole record. Deleting it
+// shows the explanation again; creating it by hand suppresses it.
+//
+// It is a file rather than a key in config.toml because niwa never rewrites a
+// developer's configuration to record something it printed, and because the
+// record is per configuration directory rather than per instance.
+const inboundNoticeMarker = "accept-session-messages-notice"
+
+// The one-time explanation, as three constants a reader can diff against the
+// design and a guide can quote. The body is the same either way; which closing
+// sentence follows it depends on whether stderr was a terminal, because that is
+// what decides whether niwa is about to remember having shown it.
+//
+// The point of the whole paragraph is the asymmetry a developer would otherwise
+// discover the hard way: this dispatch settles what the worker ACCEPTS, and
+// says nothing about what happens when the worker speaks first into a session
+// that was launched without the same setting.
+const (
+	// inboundExplanationBody is every sentence before the closing one,
+	// including the "niwa dispatch: note: " prefix and ending in a period, so
+	// a caller joins it to a closing sentence with a single space.
+	inboundExplanationBody = `niwa dispatch: note: accepting messages without asking is inbound only. A message this worker sends into a session launched without it, such as a coordinator dispatched earlier, one dispatched with the behavior off, or one another tool started, still waits for approval there when the two run in different permission modes; dispatching that session again with the behavior on clears it. Your own interactive Claude Code sessions are one such case, and they are governed by your Claude Code user settings, which niwa doesn't change. To accept there too, set "Messages from your other sessions" to accept in Claude Code's /config, or add "crossSessionInbound": "accept" to ~/.claude/settings.json. That change applies to every Claude Code session you run and to messages from any session able to reach yours, on this machine or elsewhere.`
+
+	// inboundExplanationTerminalClose closes the line when stderr is a
+	// terminal, which is also when niwa writes the marker. Its verb is the
+	// guide URL.
+	inboundExplanationTerminalClose = "niwa won't show this again; it's also at %s"
+
+	// inboundExplanationNonTerminalClose closes the line when stderr is not a
+	// terminal, or when the configuration directory cannot be resolved. In
+	// both cases nothing is remembered, and saying so is more honest than
+	// promising silence niwa cannot deliver. Its verb is the guide URL.
+	inboundExplanationNonTerminalClose = "niwa will show this again until it's been shown at a terminal; it's also at %s"
+)
+
+// inboundExplanationLine renders the whole explanation as one line, without its
+// trailing newline. terminal picks the closing sentence.
+func inboundExplanationLine(terminal bool) string {
+	closing := inboundExplanationNonTerminalClose
+	if terminal {
+		closing = inboundExplanationTerminalClose
+	}
+	return inboundExplanationBody + " " + fmt.Sprintf(closing, inboundGuideURL)
+}
+
+// showInboundExplanation prints the one-time explanation to w when the marker
+// in dir is absent, and then, only if isTTY reports a terminal, remembers it by
+// creating the marker.
+//
+// It returns nothing, deliberately. Every call site runs after the dispatch has
+// already succeeded and its mapping is durable, so there is no failure here
+// worth turning into a non-zero exit: a marker niwa could not write costs the
+// developer one repeated paragraph on the next dispatch, which is the safe
+// direction to err in.
+//
+// dir is the directory holding config.toml and dirErr is the error from
+// resolving it. A non-nil dirErr means there is no directory to remember
+// anything in, so the explanation prints with its non-terminal closing sentence
+// and isTTY is never consulted -- asking would only produce a promise niwa
+// cannot keep.
+//
+// Presence is os.Lstat rather than os.Stat: a dangling symlink at the marker
+// path counts as present, which is what the exclusive create below would find
+// anyway, and a symlink is never followed or written through. Any error at all,
+// including a permission error on an unsearchable directory, counts as absent,
+// so the explanation shows rather than being swallowed by a directory niwa
+// cannot read.
+func showInboundExplanation(w io.Writer, dir string, dirErr error, isTTY func() bool) {
+	if dirErr != nil {
+		fmt.Fprintln(w, inboundExplanationLine(false))
+		return
+	}
+
+	marker := filepath.Join(dir, inboundNoticeMarker)
+	if _, err := os.Lstat(marker); err == nil {
+		return
+	}
+
+	terminal := isTTY()
+	fmt.Fprintln(w, inboundExplanationLine(terminal))
+	if !terminal {
+		// Nobody is reading this stream, so it does not count as shown.
+		return
+	}
+
+	// 0o755 is the mode the config writer already uses for this same
+	// directory, so a marker written before the first `niwa config set` does
+	// not leave a directory the writer would have made differently.
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	// O_EXCL is what makes concurrent first dispatches safe: exactly one of
+	// them creates the file and the rest get an "exists" error, which is
+	// ignored along with every other error for the reason above. The file
+	// stays empty -- its name is the record.
+	f, err := os.OpenFile(marker, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	_ = f.Close()
+}
+
+// showInboundExplanationAt is the production call: it resolves the directory
+// holding config.toml and hands it to showInboundExplanation.
+//
+// config.GlobalConfigPath() is the source, not config.GlobalConfigDir(): the
+// latter returns the overlay clone directory, which a [global_config] clone
+// owns and can replace wholesale, and a notice remembered there would be
+// forgotten by the next clone.
+func showInboundExplanationAt(w io.Writer, isTTY func() bool) {
+	path, err := config.GlobalConfigPath()
+	dir := ""
+	if err == nil {
+		dir = filepath.Dir(path)
+	}
+	showInboundExplanation(w, dir, err, isTTY)
 }
