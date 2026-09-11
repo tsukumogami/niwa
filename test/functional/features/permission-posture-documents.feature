@@ -15,12 +15,14 @@ Feature: a declared permission posture across the generated settings documents
   a whole declaration fits in one cell: the workspace and instance keys sit at
   the top of workspace.toml, and the repo key sits inside [repos.app]. Repo
   "app" plays the table's repo X and carries the worktree; repo "other" has no
-  override of its own. A row with no personal posture writes an empty overlay.
+  override of its own. A row with no personal posture writes an empty overlay,
+  which declares nothing.
 
   The worktree resolves its settings through its own config path, which skips
   the personal overlay, so S9's worktree takes the overlay's "ask" only at the
-  next instance apply. That row runs one apply after the worktree is created;
-  every other row checks the worktree right after creating it.
+  next instance apply. The roots and repos are checked as niwa create and
+  niwa worktree create left them; then S9's row runs one instance apply before
+  its worktree check, and every other row runs none.
 
   Scenario Outline: <scenario> reaches every settings document with the mode the table gives it
     Given a clean niwa environment
@@ -55,13 +57,13 @@ Feature: a declared permission posture across the generated settings documents
     When I run "niwa create posture"
     Then the exit code is 0
     When I call niwa worktree create for repo "app" with purpose "posture-matrix" in instance "posture"
-    And I run niwa apply <applies_after_worktree> times in instance "posture"
     Then the settings documents for repos "tools/app,tools/other" in instance "posture" and the last worktree exist and parse as JSON
     And the workspace root settings document has permissions.defaultMode "<workspace_root>"
     And the instance "posture" settings document has permissions.defaultMode "<instance_root>"
     And the repo "tools/app" settings document in instance "posture" has permissions.defaultMode "<repo_app>"
     And the repo "tools/other" settings document in instance "posture" has permissions.defaultMode "<repo_other>"
-    And the last worktree settings document has permissions.defaultMode "<worktree>"
+    When I run niwa apply <applies_after_worktree> times in instance "posture"
+    Then the last worktree settings document has permissions.defaultMode "<worktree>"
 
     @critical
     Examples: the bypass posture a dispatched worker relies on

@@ -2,7 +2,6 @@ package functional
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -93,35 +92,15 @@ var validDefaultModes = map[string]bool{
 	"dontAsk":     true,
 }
 
-// readSettingsDocument reads and parses the settings document at path. A
-// missing file or one that isn't a JSON object is an error, so an absence
-// check can't pass on a document that was never written.
-func readSettingsDocument(path string) (map[string]any, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading settings document %s: %w", path, err)
-	}
-	var doc map[string]any
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("settings document %s doesn't parse as a JSON object: %w\n%s", path, err, data)
-	}
-	return doc, nil
-}
-
 // assertSettingsDefaultMode checks the document's permissions.defaultMode
 // against want, where "none" means the key must be absent. Whatever the
-// expectation, a present value outside validDefaultModes fails.
+// expectation, a present value outside validDefaultModes fails. The lookup is
+// lookupJSONKey, so a missing file, a file that isn't JSON, or a "permissions"
+// that isn't an object fails rather than reading as no mode.
 func assertSettingsDefaultMode(path, want string) error {
-	doc, err := readSettingsDocument(path)
+	mode, present, err := lookupJSONKey(path, "permissions.defaultMode")
 	if err != nil {
 		return err
-	}
-	var (
-		mode    any
-		present bool
-	)
-	if perms, ok := doc["permissions"].(map[string]any); ok {
-		mode, present = perms["defaultMode"]
 	}
 	if present {
 		str, ok := mode.(string)
@@ -221,7 +200,7 @@ func theSettingsDocumentsExistAndParse(ctx context.Context, repos, instance stri
 	}
 	paths = append(paths, wt)
 	for _, p := range paths {
-		if _, err := readSettingsDocument(p); err != nil {
+		if _, _, err := lookupJSONKey(p, "permissions.defaultMode"); err != nil {
 			return err
 		}
 	}
