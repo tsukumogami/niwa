@@ -49,7 +49,7 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
   # workspace declared.
   #
   # Designs: docs/designs/current/DESIGN-dispatch-permission-mode.md
-  #          docs/designs/DESIGN-inert-defaultmode-key.md
+  #          docs/designs/current/DESIGN-inert-defaultmode-key.md
 
   @critical
   Scenario: dispatch derives --permission-mode from a bypass-declared workspace
