@@ -66,9 +66,10 @@ func theHostConfigDeclaresGlobalSettings(ctx context.Context, body *godog.DocStr
 // validDefaultModes are the permissions.defaultMode values a project settings
 // document may carry. bypassPermissions and auto no longer take effect from a
 // project or local settings file, and askPermissions isn't a mode at all: it
-// makes Claude Code discard the whole file. A new posture value that maps to a
-// mode belongs in this set and in the expected-value table the outline in
-// permission-posture-documents.feature mirrors.
+// makes Claude Code discard the whole file. The set follows the modes Claude
+// Code honors, not niwa's posture vocabulary: a new posture value changes the
+// Examples in permission-posture-documents.feature, and this set changes only
+// if Claude Code's own list of modes does.
 var validDefaultModes = map[string]bool{
 	"default":     true,
 	"acceptEdits": true,
@@ -168,7 +169,9 @@ func theLastWorktreeSettingsDocumentHasDefaultMode(ctx context.Context, want str
 // theSettingsDocumentsExistAndParse checks, before any value is compared, that
 // every document the matrix reads is on disk and parses: the workspace root,
 // the instance root, each named repo (comma-separated "<group>/<repo>"), and
-// the last worktree. Without it a "none" cell could pass on a missing file.
+// the last worktree. Each value step would also fail on a missing or broken
+// document; this step makes that check up front and in one place, so a row
+// that fails for a missing document says so before any value is compared.
 func theSettingsDocumentsExistAndParse(ctx context.Context, instance, repos string) error {
 	s := getState(ctx)
 	if s == nil {

@@ -1363,7 +1363,11 @@ func lookupJSONKey(path, dottedKey string) (value any, found bool, err error) {
 	for _, seg := range strings.Split(dottedKey, ".") {
 		obj, ok := cur.(map[string]any)
 		if !ok {
-			return nil, false, fmt.Errorf("%s: %q is %v, not an object, so %q can't be looked up", path, walked, cur, dottedKey)
+			where := "the document root"
+			if walked != "" {
+				where = fmt.Sprintf("%q", walked)
+			}
+			return nil, false, fmt.Errorf("%s: %s is %v, not an object, so %q can't be looked up", path, where, cur, dottedKey)
 		}
 		cur, ok = obj[seg]
 		if !ok {
