@@ -228,7 +228,7 @@ Document matrix, in a new feature file under `test/functional/features/`:
 
 Compatibility and suite health:
 - [x] No `workspace.toml` body in a functional scenario that existed before this issue changes. `git diff` on the pre-existing feature files shows only added scenarios and added assertion steps, with no edited line inside an existing config-repo docstring.
-- [ ] `make test-functional-critical` and the full functional suite pass.
+- [x] `make test-functional-critical` and the full functional suite pass.
 
 **Dependencies**: Blocked by <<ISSUE:3>>
 
