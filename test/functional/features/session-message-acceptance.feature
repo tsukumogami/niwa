@@ -97,7 +97,7 @@ Feature: niwa dispatch: accepting messages from other sessions
     Then the exit code is 0
     And the launched claude settings document has crossSessionInbound "accept"
     And the error output has exactly 1 line containing "accepts messages from other sessions without asking"
-    And the error output has exactly 1 line containing "(source: --accept-session-messages); see https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md"
+    And the error output has exactly 1 line containing "without asking (source: --accept-session-messages); see https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md"
     And the dispatch mapping for session "<session>" records session-message acceptance
     When I run "niwa list --json" from the workspace root
     Then the exit code is 0
@@ -110,6 +110,29 @@ Feature: niwa dispatch: accepting messages from other sessions
       | flag                            | session                              |
       | --accept-session-messages       | ab000000-0000-4000-8000-000000000001 |
       | --accept-session-messages=true  | ab000000-0000-4000-8000-000000000002 |
+
+  @critical
+  Scenario: the flag turns acceptance on over a machine setting of false
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    And the niwa machine config global table contains:
+      """
+      accept_session_messages_on_dispatch = false
+      """
+    Given a fake claude for dispatch with session "ab000000-0000-4000-8000-000000000003"
+    When I run "niwa dispatch flag-over-false --accept-session-messages --detach" from the workspace root
+    Then the exit code is 0
+    And the launched claude settings document has crossSessionInbound "accept"
+    And the error output has exactly 1 line containing "without asking (source: --accept-session-messages); see https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md"
+    And the error output has exactly 0 lines containing "keeps Claude Code's default for messages from other sessions"
+    And the dispatch mapping for session "ab000000-0000-4000-8000-000000000003" records session-message acceptance
 
   # --- On by machine setting ---
 
@@ -133,7 +156,7 @@ Feature: niwa dispatch: accepting messages from other sessions
     Then the exit code is 0
     And the launched claude settings document has crossSessionInbound "accept"
     And the error output has exactly 1 line containing "accepts messages from other sessions without asking"
-    And the error output has exactly 1 line containing "(source: machine setting accept_session_messages_on_dispatch); see https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md"
+    And the error output has exactly 1 line containing "without asking (source: machine setting accept_session_messages_on_dispatch); see https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md"
     And the error output has exactly 0 lines containing "keeps Claude Code's default for messages from other sessions"
     And the dispatch mapping for session "ac000000-0000-4000-8000-000000000001" records session-message acceptance
 
@@ -186,8 +209,7 @@ Feature: niwa dispatch: accepting messages from other sessions
     Then the exit code is 0
     And the launched claude settings document has no crossSessionInbound
     And the error output has exactly 0 lines containing "accepts messages from other sessions without asking"
-    And the error output has exactly 1 line containing "keeps Claude Code's default for messages from other sessions"
-    And the error output has exactly 1 line containing "--accept-session-messages=false"
+    And the error output has exactly 1 line containing "keeps Claude Code's default for messages from other sessions (--accept-session-messages=false overrides the machine setting)"
     And the dispatch mapping for session "ad000000-0000-4000-8000-000000000001" does not record session-message acceptance
 
   @critical
@@ -304,12 +326,15 @@ Feature: niwa dispatch: accepting messages from other sessions
     # other scenario here clones one from the local git server, but a config
     # source that is not GitHub is re-materialized on every provision, and four
     # of those at once collide in the shared staging directory the snapshot
-    # writer swaps through -- a concurrency gap in provisioning that has nothing
-    # to do with what this scenario is about. What it is about is four dispatches
-    # racing for one configuration directory: the notice, its marker, and the
-    # four session records.
+    # writer swaps through -- a provisioning concurrency gap that also loses
+    # session mappings, tracked separately as issue #297. What this scenario is
+    # about is four dispatches racing for one configuration directory: the
+    # notice, its marker, and the four session records.
     When I run "niwa init" from workspace root
     Then the exit code is 0
+    # Scaffold mode writes no registry entry, so there is no config.toml yet and
+    # the record step below would have nothing to read. An empty [global] table
+    # is the smallest file that changes no behavior.
     And the niwa machine config is replaced with:
       """
       [global]
@@ -486,6 +511,7 @@ Feature: niwa dispatch: accepting messages from other sessions
     Then the exit code is 0
     And the launched claude settings document has no crossSessionInbound
     And the error output has exactly 0 lines containing "accepts messages from other sessions without asking"
+    And no settings file niwa wrote into the dispatch instance contains "crossSessionInbound"
 
   Scenario: crossSessionInbound in the workspace root settings file does not turn it on
     Given a clean niwa environment
@@ -538,6 +564,11 @@ Feature: niwa dispatch: accepting messages from other sessions
     Then the exit code is 0
     And the launched claude settings document has no crossSessionInbound
     And the error output has exactly 0 lines containing "accepts messages from other sessions without asking"
+    # No "no settings file niwa wrote" step here, deliberately. This fixture
+    # commits a file at .claude/settings.local.json, which is the very path that
+    # step reads as niwa's own; it could not tell the repository's committed key
+    # from a leaked one. The sibling fixtures, whose repositories commit no
+    # settings files, are where that step carries its weight.
 
   # --- Coexistence with the other launch-settings contributors ---
   #
@@ -707,7 +738,7 @@ Feature: niwa dispatch: accepting messages from other sessions
     When I run "niwa dispatch unreadable-on --accept-session-messages --detach" from the workspace root
     Then the exit code is 0
     And the launched claude settings document has crossSessionInbound "accept"
-    And the error output has exactly 1 line containing "(source: --accept-session-messages); see https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md"
+    And the error output has exactly 1 line containing "without asking (source: --accept-session-messages); see https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md"
 
   Scenario Outline: a config.toml niwa cannot use leaves the behavior off, and the flag still turns it on
     Given a clean niwa environment
@@ -731,7 +762,7 @@ Feature: niwa dispatch: accepting messages from other sessions
     When I run "niwa dispatch broken-on --accept-session-messages --detach" from the workspace root
     Then the exit code is 0
     And the launched claude settings document has crossSessionInbound "accept"
-    And the error output has exactly 1 line containing "(source: --accept-session-messages); see https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md"
+    And the error output has exactly 1 line containing "without asking (source: --accept-session-messages); see https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md"
 
     Examples:
       | line                                        |

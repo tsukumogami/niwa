@@ -74,6 +74,16 @@ func iSetEnvToTempPath(ctx context.Context, key string) (context.Context, error)
 // HOME, XDG_CONFIG_HOME, and TMPDIR to the sandbox so config, state, and
 // temp files don't leak across scenarios or into the real user environment.
 // Per-scenario overrides win last.
+//
+// ANTHROPIC_API_KEY is dropped rather than overridden. It is not a path, so
+// there is nothing sandboxed to point it at, but niwa branches on it: an
+// ANTHROPIC_API_KEY forces Claude Code into API-key auth, and remote control on
+// dispatch refuses to inject when it is set, because Claude Code Remote needs a
+// claude.ai login. Left inherited, a scenario that exercises remote control
+// passes on CI and fails on the machine of any developer who has the key
+// exported -- and fails by taking the silent branch, which reads as niwa being
+// broken rather than as the environment deciding. A scenario that genuinely
+// needs the real key re-appends it after this call; see runClaudeP.
 func (s *testState) buildEnv() []string {
 	// pathDirs are prepended to $PATH for the niwa subprocess, highest
 	// priority first: a per-scenario pathPrefix (e.g. a fake `claude`) wins
@@ -95,6 +105,7 @@ func (s *testState) buildEnv() []string {
 		if strings.HasPrefix(kv, "HOME=") ||
 			strings.HasPrefix(kv, "XDG_CONFIG_HOME=") ||
 			strings.HasPrefix(kv, "TMPDIR=") ||
+			strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") ||
 			(overridePath && strings.HasPrefix(kv, "PATH=")) {
 			continue
 		}

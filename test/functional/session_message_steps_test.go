@@ -92,8 +92,11 @@ func theNiwaMachineConfigGlobalTableContains(ctx context.Context, body *godog.Do
 	return writeMachineConfig(s, "[global]\n"+added+"\n\n"+existing)
 }
 
-// theNiwaMachineConfigIsReplacedWith writes the machine config verbatim, for
-// the fixtures whose whole point is a file niwa cannot parse.
+// theNiwaMachineConfigIsReplacedWith writes the machine config verbatim. It is
+// what the fixtures whose whole point is a file niwa cannot parse need, and
+// also what a scenario running against a scaffolded workspace needs to bring
+// the file into existence at all -- scaffold mode writes no registry entry, so
+// nothing else creates it.
 func theNiwaMachineConfigIsReplacedWith(ctx context.Context, body *godog.DocString) error {
 	s := getState(ctx)
 	if s == nil {
@@ -811,15 +814,29 @@ func noSettingsFileNiwaWroteIntoTheDispatchInstanceContains(ctx context.Context,
 	}
 
 	paths := []string{filepath.Join(inst, ".claude", "settings.json")}
-	entries, err := os.ReadDir(inst)
+	// Repositories sit two levels down, at <instance>/<group>/<repo>, so the
+	// per-repository settings niwa writes are at
+	// <instance>/<group>/<repo>/.claude/settings.local.json. Probing one level
+	// down finds nothing at all, which would leave this step asserting only the
+	// instance-root file while reading as though it covered both.
+	groups, err := os.ReadDir(inst)
 	if err != nil {
 		return fmt.Errorf("reading dispatch instance %s: %w", inst, err)
 	}
-	for _, e := range entries {
-		if !e.IsDir() || e.Name() == ".niwa" || e.Name() == ".claude" {
+	for _, g := range groups {
+		if !g.IsDir() || strings.HasPrefix(g.Name(), ".") {
 			continue
 		}
-		paths = append(paths, filepath.Join(inst, e.Name(), ".claude", "settings.local.json"))
+		repos, err := os.ReadDir(filepath.Join(inst, g.Name()))
+		if err != nil {
+			return fmt.Errorf("reading group %s: %w", g.Name(), err)
+		}
+		for _, r := range repos {
+			if !r.IsDir() || strings.HasPrefix(r.Name(), ".") {
+				continue
+			}
+			paths = append(paths, filepath.Join(inst, g.Name(), r.Name(), ".claude", "settings.local.json"))
+		}
 	}
 
 	checked := 0

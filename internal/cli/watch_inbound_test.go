@@ -34,9 +34,10 @@ import (
 // PATH records what it received.
 //
 // Everything it does replace sits outside the launch and was already a seam:
-// provisioning, the session-id capture, and the `claude stop` that precedes a
-// resume. If stageReview, continueReview, realDispatchLaunch, or
-// buildLaunchArgs ever starts putting the key in, this fails.
+// provisioning, the session-id capture, the `claude stop` that precedes a
+// resume, and instance destruction. If stageReview, continueReview,
+// realDispatchLaunch, or buildLaunchArgs ever starts putting the key in, this
+// fails.
 
 // watchFakeClaudeScript is the fake `claude` the test puts first on PATH. Every
 // invocation records its argv NUL-separated into a fresh file under a recording
@@ -260,6 +261,19 @@ func TestWatchReviewLaunchesNeverCarryCrossSessionInbound(t *testing.T) {
 	assertNoCrossSessionInbound(t, resumeArgv, "the resume")
 	assertLastElementIs(t, resumeArgv, watch.BuildResumePrompt(watch.DefaultCloneRelDir, watch.DefaultDraftRelPath), "the resume")
 	assertResumesSession(t, resumeArgv, capturedSession)
+
+	// The argv is one of two ways the behavior could reach a review session.
+	// The other is the instance's own settings file, which ApplyReviewSettings
+	// writes and re-writes from inside both functions above, so a regression
+	// there would be invisible to every assertion so far.
+	settingsPath := filepath.Join(instancePath, ".claude", "settings.json")
+	settings, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("reading the review instance settings %s: %v", settingsPath, err)
+	}
+	if strings.Contains(string(settings), "crossSessionInbound") {
+		t.Errorf("the review instance's settings file carries crossSessionInbound:\n%s", settings)
+	}
 }
 
 // seedLiveJob writes the Claude Code job state that makes continueReview's
