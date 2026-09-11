@@ -167,11 +167,10 @@ Feature: workspace config sources (snapshot model)
     And the JSON file ".claude/settings.json" under the workspace root has no key "permissions.defaultMode"
 
   # --- issue #227: a newly declared env key reaches .local.env on the SAME apply ---
-  # The #214 scenario above asserts the posture recorded in the workspace root's
-  # instance state, which is resolved from the config `niwa apply` loads at the
-  # root, in the same process that reconciles the snapshot. Per-repo secret
-  # output (.local.env) is materialized further down, inside the per-instance
-  # apply pipeline, from the config that pipeline is handed. A newly declared
+  # The #214 scenario above asserts the posture apply records in the instance
+  # state, which the per-instance apply pipeline resolves from the config it is
+  # handed. Per-repo secret output (.local.env) comes out of that same pipeline,
+  # so this is the same-run guarantee for a different output. A newly declared
   # [env.vars] / [env.secrets] key must land on the apply that pulls it, not the
   # one after -- otherwise a correct declaration reads as a broken value lookup.
   #

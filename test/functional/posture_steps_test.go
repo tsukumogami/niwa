@@ -63,28 +63,12 @@ func theHostConfigDeclaresGlobalSettings(ctx context.Context, body *godog.DocStr
 	return ctx, nil
 }
 
-// theLaunchedClaudeWasInvokedWithExactlyTimes counts how often a fragment
-// appears in the argv the fake claude recorded on its --bg launch. It is what
-// tells "the explicit flag won" apart from "both flags were passed": a worker
-// handed --permission-mode twice gets whichever one Claude Code parses last.
-func theLaunchedClaudeWasInvokedWithExactlyTimes(ctx context.Context, fragment string, want int) error {
-	s := getState(ctx)
-	if s == nil {
-		return fmt.Errorf("no test state")
-	}
-	argv, err := launchedClaudeArgv(s)
-	if err != nil {
-		return err
-	}
-	if got := strings.Count(argv, fragment); got != want {
-		return fmt.Errorf("launched claude argv contains %q %d times, want %d:\n%s", fragment, got, want, strings.TrimSpace(argv))
-	}
-	return nil
-}
-
 // validDefaultModes are the permissions.defaultMode values a project settings
-// document may carry. niwa must never write bypassPermissions (ignored from a
-// project file), auto, or askPermissions (rejected, voiding the whole file).
+// document may carry. bypassPermissions and auto no longer take effect from a
+// project or local settings file, and askPermissions isn't a mode at all: it
+// makes Claude Code discard the whole file. A new posture value that maps to a
+// mode belongs in this set and in the expected-value table the outline in
+// permission-posture-documents.feature mirrors.
 var validDefaultModes = map[string]bool{
 	"default":     true,
 	"acceptEdits": true,
@@ -185,7 +169,7 @@ func theLastWorktreeSettingsDocumentHasDefaultMode(ctx context.Context, want str
 // every document the matrix reads is on disk and parses: the workspace root,
 // the instance root, each named repo (comma-separated "<group>/<repo>"), and
 // the last worktree. Without it a "none" cell could pass on a missing file.
-func theSettingsDocumentsExistAndParse(ctx context.Context, repos, instance string) error {
+func theSettingsDocumentsExistAndParse(ctx context.Context, instance, repos string) error {
 	s := getState(ctx)
 	if s == nil {
 		return fmt.Errorf("no test state")
@@ -232,11 +216,10 @@ func iRunNiwaApplyTimesInInstance(ctx context.Context, times int, instance strin
 // context. Called from initializeScenario.
 func registerPostureSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the host config declares global settings:$`, theHostConfigDeclaresGlobalSettings)
-	ctx.Step(`^the launched claude was invoked with "([^"]*)" exactly (\d+) times?$`, theLaunchedClaudeWasInvokedWithExactlyTimes)
 	ctx.Step(`^the workspace root settings document has permissions\.defaultMode "([^"]*)"$`, theWorkspaceRootSettingsDocumentHasDefaultMode)
 	ctx.Step(`^the instance "([^"]*)" settings document has permissions\.defaultMode "([^"]*)"$`, theInstanceSettingsDocumentHasDefaultMode)
 	ctx.Step(`^the repo "([^"]*)" settings document in instance "([^"]*)" has permissions\.defaultMode "([^"]*)"$`, theRepoSettingsDocumentHasDefaultMode)
 	ctx.Step(`^the last worktree settings document has permissions\.defaultMode "([^"]*)"$`, theLastWorktreeSettingsDocumentHasDefaultMode)
-	ctx.Step(`^the settings documents for repos "([^"]*)" in instance "([^"]*)" and the last worktree exist and parse as JSON$`, theSettingsDocumentsExistAndParse)
+	ctx.Step(`^the workspace root, instance "([^"]*)", repos "([^"]*)", and last worktree settings documents exist and parse as JSON$`, theSettingsDocumentsExistAndParse)
 	ctx.Step(`^I run niwa apply (\d+) times? in instance "([^"]*)"$`, iRunNiwaApplyTimesInInstance)
 }

@@ -96,9 +96,11 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
   # posture comes from the config repo's workspace.toml or from a personal
   # overlay, run through niwa init, so the derivation reads what niwa itself
   # recorded. The instance's effective posture decides the flag; a repo-level
-  # override changes that repo's settings document but not the launch.
+  # override changes that repo's settings document but not the launch. S8 and
+  # S9 use the personal overlay's two spellings, [global.claude.settings] and
+  # [workspaces.<name>.claude.settings], so both are exercised.
 
-  Scenario: a bypass-declared worker with remote control on gets both launch flags
+  Scenario: S1: a bypass-declared worker with remote control on gets both launch flags
     Given a clean niwa environment
     And a local git server is set up
     And a config repo "myws" exists with body:
@@ -125,7 +127,7 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     And the launched claude was invoked with "--settings"
     And the launched claude was invoked with "remoteControlAtStartup"
 
-  Scenario: an explicit --permission-mode bypassPermissions reaches a worker in an ask-declared workspace
+  Scenario: S2: an explicit --permission-mode bypassPermissions reaches a worker in an ask-declared workspace
     Given a clean niwa environment
     And a local git server is set up
     And a config repo "myws" exists with body:
@@ -144,7 +146,7 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     And the launched claude was invoked with "--permission-mode bypassPermissions"
     And the launched claude was invoked with "--permission-mode" exactly 1 time
 
-  Scenario: dispatch passes no --permission-mode for an undeclared workspace
+  Scenario: S3: dispatch passes no --permission-mode for an undeclared workspace
     Given a clean niwa environment
     And a local git server is set up
     And a config repo "myws" exists with body:
@@ -159,7 +161,7 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     Then the exit code is 0
     And the launched claude was not invoked with "--permission-mode"
 
-  Scenario: dispatch keeps bypass when only one repo asks
+  Scenario: S4: dispatch keeps bypass when only one repo asks
     Given a clean niwa environment
     And a local git server is set up
     And a source repo "app" exists
@@ -187,7 +189,7 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     Then the exit code is 0
     And the launched claude was invoked with "--permission-mode bypassPermissions"
 
-  Scenario: dispatch passes no --permission-mode when the instance overrides bypass with ask
+  Scenario: S5: dispatch passes no --permission-mode when the instance overrides bypass with ask
     Given a clean niwa environment
     And a local git server is set up
     And a config repo "myws" exists with body:
@@ -208,7 +210,7 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     Then the exit code is 0
     And the launched claude was not invoked with "--permission-mode"
 
-  Scenario: dispatch derives bypass when the instance overrides ask with bypass
+  Scenario: S6: dispatch derives bypass when the instance overrides ask with bypass
     Given a clean niwa environment
     And a local git server is set up
     And a config repo "myws" exists with body:
@@ -229,7 +231,7 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     Then the exit code is 0
     And the launched claude was invoked with "--permission-mode bypassPermissions"
 
-  Scenario: dispatch passes no --permission-mode when only one repo declares bypass
+  Scenario: S7: dispatch passes no --permission-mode when only one repo declares bypass
     Given a clean niwa environment
     And a local git server is set up
     And a source repo "app" exists
@@ -257,7 +259,7 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     Then the exit code is 0
     And the launched claude was not invoked with "--permission-mode"
 
-  Scenario: dispatch derives bypass from a personal overlay on an undeclared workspace
+  Scenario: S8: dispatch derives bypass from a personal overlay on an undeclared workspace
     Given a clean niwa environment
     And a local git server is set up
     And a config repo "myws" exists with body:
@@ -277,7 +279,7 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     Then the exit code is 0
     And the launched claude was invoked with "--permission-mode bypassPermissions"
 
-  Scenario: a personal overlay that asks overrides a bypass-declared workspace at dispatch
+  Scenario: S9: a personal overlay that asks overrides a bypass-declared workspace at dispatch
     Given a clean niwa environment
     And a local git server is set up
     And a config repo "myws" exists with body:
@@ -304,7 +306,7 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
   # bypass-declared workspace must get neither it nor a sandbox flag niwa made
   # up to stand in for it.
 
-  Scenario: a Codex worker in a bypass-declared workspace gets no permission or sandbox flag
+  Scenario: S1: a Codex worker in a bypass-declared workspace gets no permission or sandbox flag
     Given a clean niwa environment
     And a local git server is set up
     And a config repo "myws" exists with body:

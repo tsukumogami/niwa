@@ -2,7 +2,6 @@ package functional
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -135,10 +134,7 @@ func theProvenanceMarkerExistsInWorkspaceRoot(ctx context.Context) (context.Cont
 // file at <workspaceRoot>/<relPath> exists and contains want. Unlike
 // theFileUnderWorkspaceRootContains (which anchors under a named subdir), this
 // targets the workspace root directly, as the `init from config repo` flow
-// makes the root itself the niwa-managed dir. Materialized files are written
-// from the loaded config, so this proves a source-side config change took
-// effect on the SAME apply run (issue #214): a stale config would leave the old
-// content in place and require a second apply.
+// makes the root itself the niwa-managed dir.
 func theMaterializedFileAtWorkspaceRootContains(ctx context.Context, relPath, want string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
@@ -153,38 +149,6 @@ func theMaterializedFileAtWorkspaceRootContains(ctx context.Context, relPath, wa
 		return ctx, fmt.Errorf("expected %s to contain %q, got:\n%s", path, want, string(data))
 	}
 	return ctx, nil
-}
-
-// lookupJSONKey parses the JSON file at path and walks a dotted key path
-// ("permissions.defaultMode"). It returns the value and whether every segment
-// was present. A file that is missing or doesn't parse is an error, so a "no
-// key" assertion can't pass on an unreadable document. So is a segment that
-// is present but isn't an object: "permissions": "bypassPermissions" is a
-// malformed document, not one without a mode. The path splits on ".", so a key
-// that itself contains a dot can't be addressed.
-func lookupJSONKey(path, dottedKey string) (value any, found bool, err error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, false, fmt.Errorf("reading %s: %w", path, err)
-	}
-	var doc any
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, false, fmt.Errorf("parsing %s as JSON: %w\n%s", path, err, data)
-	}
-	cur := doc
-	walked := ""
-	for _, seg := range strings.Split(dottedKey, ".") {
-		obj, ok := cur.(map[string]any)
-		if !ok {
-			return nil, false, fmt.Errorf("%s: %q is %v, not an object, so %q can't be looked up", path, walked, cur, dottedKey)
-		}
-		cur, ok = obj[seg]
-		if !ok {
-			return nil, false, nil
-		}
-		walked = strings.TrimPrefix(walked+"."+seg, ".")
-	}
-	return cur, true, nil
 }
 
 // lookupJSONKeyAtWorkspaceRoot is lookupJSONKey for a path relative to the
