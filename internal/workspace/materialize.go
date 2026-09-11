@@ -343,17 +343,21 @@ func claudeDefaultMode(posture string) (mode string, write bool, err error) {
 	}
 }
 
-// settingValueError formats a rejected [claude.settings] value without
-// leaking secret material. A plain value is quoted so a typo is easy to spot.
-// A vault-backed value is described by its config key and the secret's origin
+// settingValueError formats a rejected Claude settings value without leaking
+// secret material. A plain value is quoted so a typo is easy to spot. A
+// vault-backed value is described by its config key and the secret's origin
 // instead: the resolved plaintext must never reach an error string, because
 // the pipeline's secret redactor doesn't scrub plain fmt.Errorf text.
+//
+// The message names the key but not a table. buildSettingsDoc sees the merged
+// settings, so it can't tell whether the value came from [claude.settings],
+// [instance.claude.settings], a repo's table, or the personal overlay.
 func settingValueError(problem, key string, v config.MaybeSecret, want string) error {
 	if v.IsSecret() {
 		o := v.Secret.Origin()
-		return fmt.Errorf("%s in [claude.settings] %s (secret-backed: provider %q, key %q): %s", problem, key, o.ProviderName, o.Key, want)
+		return fmt.Errorf("%s for claude settings key %s (secret-backed: provider %q, key %q): %s", problem, key, o.ProviderName, o.Key, want)
 	}
-	return fmt.Errorf("%s %q in [claude.settings] %s: %s", problem, v.Plain, key, want)
+	return fmt.Errorf("%s %q for claude settings key %s: %s", problem, v.Plain, key, want)
 }
 
 // hookEventMapping translates snake_case hook event names used in niwa config
