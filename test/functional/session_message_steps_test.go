@@ -864,6 +864,10 @@ func noSettingsFileNiwaWroteIntoTheDispatchInstanceContains(ctx context.Context,
 		}
 	}
 
+	// read reports whether the file was there and read, NOT whether it was
+	// clean: a file carrying the text returns true alongside the error saying
+	// so. The boolean feeds the floors below, which ask what was inspected, and
+	// only the error says what was found.
 	read := func(path string) (bool, error) {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -936,9 +940,10 @@ func aFileExistsUnderTheWorkspaceRootWithBody(ctx context.Context, relPath strin
 // feature that depends on a terminal -- the closing sentence of the explanation
 // and whether the marker is written -- needs one.
 //
-// It records the dispatch instance through the same helper its non-pty sibling
-// `I run "..." from the workspace root` uses, so the two leave the same state
-// behind; see recordDispatchInstance for why that matters.
+// The command runs from the workspace root, as its non-pty sibling `I run
+// "..." from the workspace root` does -- runUnderPTY cds there before exec --
+// and it records the dispatch instance through the same helper, so the two
+// leave the same state behind. See recordDispatchInstance for why that matters.
 func iRunUnderAPTY(ctx context.Context, command string) (context.Context, error) {
 	ctx, err := iRunUnderPTYWithInput(ctx, command, "")
 	if err != nil {

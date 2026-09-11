@@ -56,9 +56,9 @@ var dispatchInstanceNameRe = regexp.MustCompile(`\+[a-z0-9_]*-[0-9a-f]{8}$`)
 // asserts the second launch twice and the reordering is a silent pass. And
 // concurrent launches race for the same two files, so nothing may read them
 // after a parallel step -- that is why the parallel scenario asserts on
-// transcripts and mappings instead. The watch unit test's own fake mints a file
-// per invocation for exactly this reason; it has two launch sites to tell apart
-// within one test, which no scenario here does.
+// transcripts and mappings instead. The fake in internal/cli/watch_inbound_test.go
+// mints a file per invocation for exactly this reason; it has two launch sites
+// to tell apart within one test, which no scenario here does.
 //
 // attach/logs exit 0 (dispatch only calls attach without --detach; the scenarios
 // pass --detach, so attach is never reached, but the fake handles it for
@@ -79,10 +79,18 @@ func dispatchFakeClaudeScript(behaviour string) string {
 		// unresolved /tmp path (tsukumogami/niwa#243). A portable generator
 		// here would be the only portable thing in the harness, so this reads
 		// /proc directly and is one of the lines whoever closes #243 has to
-		// revisit. Off Linux it leaves sid empty and the scenario fails at a
-		// mapping assertion, which names nothing about the fake -- the cost of
-		// not guarding it, accepted while the suite cannot run there anyway.
-		pickSession = `  sid=$(cat /proc/sys/kernel/random/uuid)`
+		// revisit.
+		//
+		// It refuses rather than continuing with an empty id, because an empty
+		// id fails somewhere that names nothing about the fake: the launch
+		// still exits 0, the capture polls for a session id it never gets, and
+		// thirty seconds later the dispatch rolls the instance back over a
+		// capture timeout. That reads as a broken capture path in the product.
+		pickSession = `  sid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null)
+  if [ -z "$sid" ]; then
+    echo "fake claude: no session-id generator; this fake needs /proc (see the minting mode in dispatch_steps_test.go)" >&2
+    exit 1
+  fi`
 	}
 	bg := pickSession + `
   short=$(printf '%s' "$sid" | cut -c1-8)
@@ -218,12 +226,13 @@ func iRunCommandFromTheWorkspaceRoot(ctx context.Context, command string) (conte
 // some earlier step happened to find.
 //
 // The other steps that can run a dispatch deliberately do not: the two
-// stdin-driving steps (`under a pty with input`, `with stdin held open`) are
-// used by scenarios that assert on the launch rather than the instance, and the
-// parallel step leaves several instances behind at once, where a single
-// "the instance" is the wrong idea rather than a missing feature. A scenario
-// that dispatches through one of those and then wants the instance should say
-// so by dispatching through this pair instead.
+// stdin-driving steps (`under a pty with input`, `with stdin held open`) and
+// the spill step built on the first are used by scenarios that assert on the
+// launch rather than the instance, and the parallel step leaves several
+// instances behind at once, where a single "the instance" is the wrong idea
+// rather than a missing feature. A scenario that dispatches through one of
+// those and then wants the instance should say so by dispatching through this
+// pair instead.
 //
 // It takes the NEWEST instance, not the first one on disk. Several scenarios
 // dispatch twice into one workspace root, and the instance names end in a

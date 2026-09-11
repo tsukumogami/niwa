@@ -29,10 +29,11 @@ import (
 // and nothing else.
 
 // ptyStepTimeout bounds the steps that hand the binary a standard input this
-// harness controls: the three that go through runUnderPTY, whether or not they
-// supply any input, and iRunWithStdinHeldOpen, which holds a pipe open without
-// a pty at all. (The live-Codex interactive step is not among them; it runs on
-// its own dwell.)
+// harness controls: the four that go through runUnderPTY -- three registered
+// steps plus the spill step, which calls iRunUnderPTYWithInput directly --
+// whether or not they supply any input, and iRunWithStdinHeldOpen, which holds
+// a pipe open without a pty at all. (The live-Codex interactive step is not
+// among them; it runs on its own dwell.)
 //
 // Supplying no input is not the safe case. A pty hands the child a terminal
 // rather than an immediate end-of-input, so a command that reads stdin waits
@@ -189,8 +190,10 @@ func runUnderPTY(ctx context.Context, s *testState, command, input string) (ptyR
 }
 
 // shellQuote escapes s for use inside a `bash -c` string. Single-quotes
-// are doubled with the standard `'\”` trick. Used by iRunUnderPTYWithInput
-// to thread arbitrary command strings through `script -c` safely.
+// are doubled with the standard `'\”` trick. It is what lets a command
+// string, and the directory it runs in, travel through `script -c` safely:
+// runUnderPTY quotes both, and the live-Codex interactive step quotes its own
+// directory the same way.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
