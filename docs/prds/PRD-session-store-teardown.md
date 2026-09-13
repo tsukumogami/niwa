@@ -80,6 +80,16 @@ just deleted can come back; and a write that lands mid-swap can leave the
 directory without its configuration (#297). Developers launch parallel
 dispatches routinely, so this is ordinary use, not an edge case.
 
+Three further failures share that window. A mapping-store read taken while the
+directory is being swapped comes back empty, and the reaper treats an instance
+with no mapping as reclaimable once it is half an hour old, so a live worker's
+directory is deleted. A refresh killed between its two renames leaves the
+directory moved aside, and the next one deletes the only remaining copy. And
+the root `instance.json`, which records whether this workspace provisions an
+instance per session at all, is read with its error ignored and rewritten
+without a temp file, so a torn read can drop that flag and quietly stop
+ephemeral provisioning for everyone using the workspace.
+
 ## Goals
 
 - A developer tearing down a finished worker uses the id they already have,
@@ -93,6 +103,9 @@ dispatches routinely, so this is ordinary use, not an edge case.
   recorded mapping that `niwa list` shows, and none fails because of another.
 - A reaped worker's mapping stays gone, and a live worker's mapping stays
   present, regardless of what else is provisioning.
+- Nothing deletes a live worker because it read the store mid-swap, an
+  interrupted refresh repairs itself, and the workspace's own settings survive
+  a burst of parallel provisioning.
 
 ## User Stories
 
@@ -123,6 +136,13 @@ dispatches routinely, so this is ordinary use, not an edge case.
 - As a developer running `niwa reap` while other dispatches are still
   provisioning, I want reaped workers to stay reaped and live workers to keep
   their mappings, so that the reaper's view of the workspace stays true.
+- As a developer whose worker is still running, I want the reaper never to
+  reclaim its instance because it happened to read the mapping store during a
+  refresh, so that a half-hour-old worker doesn't lose its working directory.
+- As a developer who has just launched several dispatches, I want my
+  workspace to keep provisioning an instance per session afterwards, so that
+  a torn read of the workspace's own settings doesn't silently turn that off
+  for everyone using it.
 
 ## Requirements
 
@@ -148,7 +168,15 @@ dispatches routinely, so this is ordinary use, not an edge case.
 - **Newest mapping for an instance**: of the mappings whose recorded instance
   path is that instance, the one with the latest recorded `created` time; on a
   tie, the first in session-id order. This is the ordering `niwa list` already
-  uses to choose among several mappings for one instance.
+  uses to pick an instance's session name.
+- **Single-instance layout**: a workspace whose root is itself an instance:
+  niwa enumerates no child instance under it, and the root's `instance.json`
+  names an instance. Every other workspace is multi-instance, including one
+  with no instances yet, and including one whose root `instance.json` names no
+  instance, which is what a registered `niwa init` writes.
+- **`NIWA_INSTANCE_ROOT`**: when this environment variable is set it names the
+  instance directory verbatim, taking precedence over the working directory,
+  and is never refused by R10. niwa sets it only to an instance root.
 
 ### Functional: teardown id resolution
 
@@ -162,10 +190,15 @@ dispatches routinely, so this is ordinary use, not an edge case.
   refuse one with uncommitted changes, and delete its branch only if merged,
   keeping an unmerged branch with a warning naming it. A refusal leaves that
   worktree in place and does not stop the others from being processed.
+  `--force`, which today bypasses all three of those guards for one named
+  worktree, is refused when the value resolves to a session: it would delete
+  every unmerged branch in the instance, which is the loss this feature exists
+  to prevent. Forcing stays available one worktree at a time.
 - **R3.** Session resolution works the same from the workspace root, from
   inside any instance of the workspace, and from inside a niwa-managed
   worktree. From any directory outside the workspace, the command fails as it
-  does today.
+  does today. When `NIWA_INSTANCE_ROOT` is set it decides the instance and the
+  working directory is not consulted.
 - **R4.** A value matches a mapping when it equals the mapping's session id,
   equals its recorded handle, or, for a mapping that records no handle and
   only when the value is exactly 8 lowercase hex characters, is the first 8
@@ -182,10 +215,11 @@ dispatches routinely, so this is ordinary use, not an edge case.
 - **R7.** A resolved mapping's recorded instance path is checked in this
   order, and the first rule that applies decides the outcome:
   1. The path is not an instance location: refused, nothing destroyed.
-  2. Nothing exists at the path: the R9 "instance directory no longer
-     exists" outcome.
-  3. The path exists but is not an instance of this workspace (for example a
-     symlink resolving elsewhere): refused, nothing destroyed.
+  2. Nothing exists at the path, tested without following symlinks: the R9
+     "instance directory no longer exists" outcome.
+  3. Something exists at the path but it is not an instance of this workspace
+     (a symlink resolving elsewhere or to nothing, or a file): refused,
+     nothing destroyed.
   4. R6 applies.
   5. The instance's active worktrees are processed per R2.
 - **R8.** Teardown by session never deletes the mapping, the instance, or the
@@ -200,13 +234,24 @@ dispatches routinely, so this is ordinary use, not an edge case.
   | Nothing to destroy: no active worktree in the instance | 0 | stdout: `session: nothing to destroy: session <session-id> has no active niwa-managed worktree in <instance>; branches outside niwa-managed worktrees were not checked` |
   | Nothing to destroy: the instance directory no longer exists | 0 | stdout: `session: nothing to destroy: instance <path> for session <session-id> no longer exists` |
   | At least one worktree refused by a guard | 1 | stdout: the destroyed lines for the others. stderr: the kept-branch warnings for the destroyed ones, plus one `niwa: error:` line per refused worktree with the guard's existing message |
-  | Mapping refused (R6, R7) | 1 | stderr: `niwa: error:` line naming the session and the reason |
+  | Mapping refused (R6, R7) | 1 | stderr: `niwa: error: session <session-id> <reason>` |
+  | `--force` passed with a session id or handle | 2 | stderr: `niwa: error: --force applies to one worktree; pass a worktree id or --by-path <worktree path>` |
   | The value matches no worktree and no session | 3 | stderr: `niwa: error: no worktree or session matches "<value>"` |
-  | The value is ambiguous (R4, R5) | 4 | stderr: `niwa: error:` line naming every match; when a worktree id is among the matches, also the R5 guidance |
+  | The value is ambiguous (R4, R5) | 4 | stderr: `niwa: error: "<value>" matches <match>, <match>`; when a worktree id is among the matches, also the R5 guidance |
+  | The configuration directory is held past R17's bound | 1 | stderr: R17's timeout error |
 
-  Exit 2 stays the usage-error code. Destroy by worktree id and by
-  `--by-path` keep their current output and exit codes, except that a
-  worktree id matching nothing now exits 3 with the no-match line.
+  `<instance>` and `<path>` are both the instance directory's path. The
+  enriched `session: destroyed <worktree-id> (<repo>) at <path>` line is
+  emitted only when the value resolved to a session: destroy by worktree id and
+  by `--by-path` keep today's bare `session: destroyed <id>` line, their
+  current stderr and their exit codes, except that a worktree id matching
+  nothing now exits 3 with the no-match line.
+
+  Exit 2 stays the usage-error code. These codes are scoped to `destroy`:
+  within the `niwa worktree` group, `attach` already exits 3 when the attach
+  lock is held and `detach --force` exits 4 after killing a live holder, and
+  those keep their meanings. The worktree guide gains a second table so a
+  script author reads the codes per subcommand.
 - **R10.** At the root of a multi-instance workspace, no `niwa worktree`
   subcommand reads the root session mapping store as worktree records:
 
@@ -216,24 +261,29 @@ dispatches routinely, so this is ordinary use, not an edge case.
   | `list` | stderr: `niwa: this is the workspace root, not an instance; run inside an instance, or pass a session id to niwa worktree destroy`; no table; exit 0 |
   | `destroy <value>` that matches no session | The R9 no-match line; exit 3 |
   | `destroy --by-path <path>` | As today |
-  | `create`, `apply <x>`, `attach <x>`, `detach <x>`, and `niwa go <repo> <worktree-id>` | stderr: `niwa: error: this is the workspace root, not an instance; run inside an instance, or pass a session id to niwa worktree destroy`; exit 1. Each already exits 1 at the root today, with a misleading error read from the mapping store, so only the message changes. `niwa go` gains no session resolution |
+  | `list --json` | The same stderr line, `[]` on stdout, exit 0 |
+  | `apply <x>`, `attach <x>`, `detach <x>`, and `niwa go <repo> <worktree-id>` | stderr: `niwa: error: this is the workspace root, not an instance; run inside an instance, or pass a session id to niwa worktree destroy`; exit 1. Each already exits 1 there today, so only the message changes. `niwa go` gains no session resolution |
+  | `create` | The same stderr line, exit 2. Bare `create` at the root exits 2 today through its repo-inference usage error, and keeps that code |
   | Shell completion of worktree ids | Offers nothing, as today |
   | The WorktreeRemove hook | Logs and exits 0, as today |
 
-  In the single-instance layout, where the workspace root is itself the only
-  instance, worktree subcommands keep treating the root as the instance, as
-  today.
+  In the single-instance layout (see Terms), worktree subcommands keep treating
+  the root as the instance, as today. A root with no child instance whose
+  `instance.json` names no instance is multi-instance for this rule, so the
+  table above applies to it.
 
 ### Functional: concurrent refresh
 
 - **R11.** Concurrent niwa commands that refresh the same configuration
-  directory (`niwa dispatch`, `niwa create`, `niwa apply`, `niwa reset`, the
+  directory (`niwa dispatch`, `niwa create`, `niwa apply`, `niwa reset`,
+  `niwa watch`'s review staging, `niwa config set global`, the
   ephemeral-session hook, and any other caller of the snapshot refresh) do not
   fail because of each other, for both GitHub and non-GitHub sources and in
   both the refresh and no-change paths. The one permitted failure is R17's
-  bounded-wait error, which must not occur for four concurrent dispatches on
-  an otherwise idle machine. This holds for the workspace-root configuration
-  directory, overlay directories and the global configuration directory.
+  bounded-wait error, which must not occur under the conditions of the
+  four-dispatch acceptance criterion. This holds for the workspace-root
+  configuration directory, overlay directories and the global configuration
+  directory.
 - **R12.** A session mapping that niwa writes while another command is
   refreshing the configuration directory is present after that refresh
   completes, and the write itself returns success.
@@ -241,21 +291,26 @@ dispatches routinely, so this is ordinary use, not an edge case.
   refreshing the configuration directory stays deleted after that refresh
   completes.
 - **R14.** After every concurrent command has finished, the configuration
-  directory contains the configuration files of the most recent successful
-  refresh, whatever niwa wrote into it in the meantime.
-- **R15.** Neither the reaper nor `niwa worktree destroy` decides anything on
-  the basis of a mapping-store read taken while the configuration directory
-  was being swapped.
+  directory holds the configuration files of the refresh that swapped last,
+  together with the local state R12 and R13 cover. Because fetches run outside
+  the wait (R18), the refresh that swaps last may have fetched first; that is
+  acceptable and no generation check is required.
+- **R15.** Nothing that reads the session mapping store to decide whether to
+  destroy or reclaim acts on a read taken while the configuration directory was
+  being swapped. That covers the reaper's sweeps, `niwa worktree destroy`, and
+  the ephemeral-instance scan `niwa list` uses, which reads the store directly
+  today.
 - **R16.** A refresh interrupted at any point (the process killed) leaves the
-  configuration directory usable, and the next refresh proceeds without
-  manual cleanup and removes what the interrupted one left behind.
+  configuration directory usable, and the next niwa command that reads or
+  refreshes it proceeds without manual cleanup; the next refresh removes what
+  the interrupted one left behind.
 
 ### Non-functional
 
 - **R17.** Waiting on another command is bounded. The bound is a named
   constant, 30 seconds by default, that tests can override. A command that
-  would wait longer fails with an error that names the configuration directory
-  and says another niwa command is using it.
+  would wait longer exits 1 with an error that names the configuration
+  directory and says another niwa command is using it.
 - **R18.** How long one command waits on another does not grow with network
   fetch time: while one command's fetch is in progress, another command's
   mapping write and another command's refresh of the same directory both
@@ -267,15 +322,17 @@ dispatches routinely, so this is ordinary use, not an edge case.
   ships for, using advisory file locking. On platforms without it, the code
   still builds and the missing guarantee is stated in a comment where the
   fallback is defined.
-- **R21.** Apart from R9's new outcome codes and R10's root-level behavior,
-  existing invocations keep their prompts (none), output and exit codes, and
-  `go.mod` gains no new module. `niwa worktree list` at the root keeps exit 0.
+- **R21.** Apart from R9's new outcome codes, R10's root-level behavior, R17's
+  timeout under contention, and the tightened single-instance test in Terms
+  (which changes how a root with no named instance is classified), existing
+  invocations keep their prompts (none), output and exit codes, and `go.mod`
+  gains no new module. `niwa worktree list` at the root keeps exit 0.
 
 ### Functional: root instance state
 
-- **R22.** Writing an `instance.json` (the root's or an instance's) never
-  leaves a reader, or a concurrent refresh's carry-over, able to see an empty
-  or partial file.
+- **R22.** Writing an `instance.json` (the root's or an instance's), or
+  rewriting the provenance marker in place, never leaves a reader, or a
+  concurrent refresh's carry-over, able to see an empty or partial file.
 - **R23.** A command that failed to read an existing root `instance.json`
   never writes the root `instance.json`. A notice it would have recorded is
   recorded by a later command instead.
@@ -298,8 +355,11 @@ Criteria marked (pre-fix fails) must fail against the code before this
 change. "Forced" means a test-only hook holds one side at the named point, so
 the ordering does not depend on timing. Because every command reaches the
 refresh through the same snapshot writer, forced tests against that writer
-are the accepted proof for R11-R13 across commands; the parallel-dispatch
-criterion is the command-level check.
+are the accepted proof for R11-R14 across commands; the parallel-dispatch
+criterion is the command-level check. Forcing an interleaving needs a hook the
+pre-fix code does not have, so for the forced criteria the baseline is the
+parent commit plus the behavior-neutral commit that adds the hook points: the
+tests are shown failing there before the fix lands.
 
 ### Teardown
 
@@ -363,10 +423,35 @@ criterion is the command-level check.
 - [ ] (pre-fix fails) At the root of a multi-instance workspace with at least
       one mapping, `niwa worktree list` prints the R10 root-level message on
       stderr, prints no table, and exits 0.
-- [ ] At the same root, `niwa worktree create`, `apply <x>`, `attach <x>`,
-      `detach <x>` and `niwa go <repo> <x>`, where `<x>` is an 8-hex value that
-      is no worktree id in any instance, each print the R10 root-level error on
+- [ ] At the same root, `niwa worktree apply <x>`, `attach <x>`, `detach <x>`
+      and `niwa go <repo> <x>`, where `<x>` is an 8-hex value that is no
+      worktree id in any instance, each print the R10 root-level error on
       stderr and exit 1.
+- [ ] At the same root, bare `niwa worktree create` and
+      `niwa worktree create <repo>` for a repo that exists in some instance
+      each print the R10 root-level error on stderr and exit 2, the code bare
+      `create` returns there today.
+- [ ] At the same root, `niwa worktree list --json` prints `[]` on stdout, the
+      R10 message on stderr, and exits 0.
+- [ ] At the same root, shell completion of worktree ids offers no candidates,
+      and a WorktreeRemove hook invocation logs its warning and exits 0 without
+      attempting a destroy.
+- [ ] With `NIWA_INSTANCE_ROOT` set to an instance directory, every worktree
+      subcommand behaves as it does inside that instance, including when the
+      working directory is a multi-instance workspace root.
+- [ ] From a directory outside any workspace, `niwa worktree destroy <value>`
+      fails as it does today.
+- [ ] `niwa worktree destroy --force <session-id>` and `--force <handle>` exit
+      2 with the R9 usage line and destroy nothing; `--force` with a worktree
+      id and with `--by-path` behaves as today.
+- [ ] A session-resolved destroy prints the full
+      `session: destroyed <worktree-id> (<repo>) at <path>` line, while destroy
+      by worktree id prints today's bare `session: destroyed <id>` line.
+- [ ] A mapping whose instance path is a dangling symlink, and one that is a
+      regular file, each exit 1 and destroy nothing.
+- [ ] Teardown run from inside one of the target session's own worktrees
+      destroys it and exits per R9; the invoking shell is left in a removed
+      directory, which the guide documents.
 - [ ] In a single-instance-layout workspace, `niwa worktree create` and
       `destroy <worktree-id>` at the root work as before.
 
@@ -405,8 +490,12 @@ criterion is the command-level check.
       for 3 seconds does not stop a concurrent mapping write, or a concurrent
       refresh of the same directory, from completing within 1 second.
 - [ ] With the bound set to 1 second, a command blocked for 3 seconds on the
-      configuration directory exits non-zero within 2 seconds with a message
+      configuration directory exits 1 within 2 seconds with a message
       containing the directory path and the words "another niwa command".
+- [ ] Forced: the ephemeral-instance scan `niwa list` uses, taken during a
+      swap, does not report a mapped instance as unmapped.
+- [ ] Forced: a provenance-marker rewrite in the no-change path concurrent
+      with a reader never lets that reader see an empty or partial marker.
 - [ ] One `niwa dispatch` run against a local-source workspace, which refreshes
       twice and writes a mapping, completes with the default bound.
 - [ ] (pre-fix fails) Four parallel `niwa dispatch --detach` runs, with stdin
@@ -425,10 +514,16 @@ criterion is the command-level check.
 
 ### Platforms
 
-- [ ] `GOOS=windows go build ./...` succeeds, the non-unix fallback file
-      carries a comment stating that no ordering is provided, `go test -race
-      ./...` passes on Linux and macOS in CI, the functional suite passes on
-      Linux, and `go.mod` lists no new module.
+- [ ] `GOOS=windows go build` succeeds for every package this change touches
+      or adds (`./internal/workspace/...`, `./internal/config/...`,
+      `./internal/watch/...`, `./internal/worktree/...`, and the two new
+      packages). `GOOS=windows go build ./...` is not required and does not
+      pass today: `internal/cli/sessionattach` and `internal/promptcapture`
+      already fail to build for Windows, and this change neither fixes nor
+      worsens that.
+- [ ] The non-unix fallback file carries a comment stating that no ordering is
+      provided, `go test -race ./...` passes on Linux and macOS in CI, the
+      functional suite passes on Linux, and `go.mod` lists no new module.
 
 ## Out of Scope
 
@@ -442,6 +537,8 @@ criterion is the command-level check.
 - Accepting an instance name or a session display name as a destroy target,
   and adding the session id or handle to `niwa list --json`. The ids come from
   `claude agents --json` or the dispatch output.
+- Listing every instance's worktrees from the workspace root. That is a new
+  feature; at the root `niwa worktree list` says where to run instead.
 - Moving niwa's local state out of the configuration directory so refreshes no
   longer carry it across (#74).
 - Files other tools write into the configuration directory, such as dispatch
@@ -480,10 +577,15 @@ criterion is the command-level check.
   follow-up.
 - **Watch state is not covered.** Watch's handled-set and staged records under
   the root configuration directory are not carried across any refresh,
-  concurrent or not. That is left for a separate issue.
+  concurrent or not, and `niwa watch` triggers a refresh itself before writing
+  them, so it routinely destroys its own handled-set and re-treats handled
+  pull requests as new. That is left for a separate issue, and this is why it
+  matters more than a passive gap.
 - **Single-instance layout.** Where the workspace root is itself the instance,
-  its worktree lifecycle records share the rotated directory with the
-  mappings and are not covered by R12-R16.
+  its worktree lifecycle records share the rotated directory with the mappings,
+  and the ordering guarantee does not extend to them. Teardown by session is
+  also refused there: the mapping's recorded instance path is the root, which
+  is not an instance location under R7.
 - **Non-unix platforms get no ordering**, matching niwa's existing lock
   fallback.
 

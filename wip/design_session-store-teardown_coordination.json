@@ -1,0 +1,11 @@
+{
+  "topic": "session-store-teardown",
+  "decisions": [
+    {"id": 1, "question": "How are refreshes of a config directory ordered against each other and against niwa's own writes and destructive reads of that directory (lock placement and scope, what is held while fetching, staging/prev naming, crash recovery, in-process reentrancy)?", "status": "complete", "complexity": "standard", "report": "wip/design_session-store-teardown_decision_1_report.md", "chosen": "A: short per-config-dir flock around carry-over+swap, fetch unlocked in private staging"},
+    {"id": 2, "question": "How does niwa worktree destroy resolve a session id, handle or worktree id to records, and where does the workspace-root refusal for other worktree subcommands live?", "status": "complete", "complexity": "standard", "report": "wip/design_session-store-teardown_decision_2_report.md", "chosen": "A: resolver in internal/cli, root refusal centralized in resolveInstanceRoot"},
+    {"id": 3, "question": "What test-only seam forces the race interleavings (between carry-over and swap, inside the rename pair, before a mapping read) deterministically in unit and functional tests?", "status": "complete", "complexity": "standard", "report": "wip/design_session-store-teardown_decision_3_report.md", "chosen": "internal/testhook named in-process hook points + helper-process re-exec for kills"}
+  ],
+  "cross_validation": "passed",
+  "cross_validation_notes": "No conflicts. D1 lock helper in a leaf package (usable by internal/config); D3 contended hook fires in its acquire loop; D2's mapping read is ListSessionMappings under D1's SH lock; root disclosure SaveState routed through D1's EX lock (write only) to close the MkdirAll(.niwa) hazard D1 flagged.",
+  "round": 0
+}

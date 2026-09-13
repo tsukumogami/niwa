@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 problem: |
   `niwa worktree destroy` finds its records through `resolveInstanceRoot`,
   which treats the workspace root as an instance, and it accepts only an 8-hex
@@ -45,7 +45,7 @@ user_visible_surface: true
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
@@ -206,19 +206,52 @@ before taking the lock.
 **Staging and recovery.** Each refresh creates a private staging directory,
 locked by the refresh for its life, while holding the shared lock, so a
 recovery sweep (which runs only under the exclusive lock) never meets one whose
-owner has not yet locked it. Recovery decides by content: a directory "holds
-the snapshot" when it contains the provenance marker, or `workspace.toml` for a
-directory with no marker. It renames a moved-aside `D.prev` back when `D` is
-missing, trashes `D.prev` when `D` holds the snapshot, and, when something
-recreated `D` during a swap so that only `D.prev` holds the snapshot, moves `D`
-aside to a kept `D.stray-*` and renames `D.prev` back. It trashes staging
-directories whose owner has died. Every removal under the lock is a rename to a
-trash name, deleted after release, so a large git-clone tree never holds up a
-reaper sweep or a mapping write. The exact rules, and the checks that keep them
-from touching a directory niwa did not create, are in Solution Architecture and
-Security Considerations. `config.Discover` gains one narrow branch that runs the
-moved-aside repair, so the next command of any kind finds its configuration;
-it is the one place discovery can take a lock and rename a directory.
+owner has not yet locked it.
+
+**Every auxiliary path is identified by content, never by name alone.** These
+siblings live in a directory niwa does not own exclusively: overlay clones are
+`<org>-<repo>` under one per-user directory and neither component is
+charset-checked, so an overlay named `acme/tools.prev` lands exactly where
+this scheme would put `acme-tools`'s previous snapshot. Recovery therefore acts
+on a sibling only when it carries niwa's own evidence: a previous snapshot must
+be a real directory, owned by the current user, holding the provenance marker
+as a regular file; a staging directory must hold both its lock file and its
+`snap/`; a trash directory must hold the sentinel niwa writes when it creates
+one. A directory holding only a `workspace.toml`, which is what any legitimate
+overlay clone holds, is not evidence. Only a refreshed directory ever has a
+previous snapshot, and a refreshed directory always carries the marker, so the
+marker is what separates niwa's own rotation from a name that merely looks like
+it. Anything else at those paths is left alone and reported.
+
+Recovery then renames a moved-aside snapshot back when the live directory is
+missing, trashes it when the live directory carries the marker, and, when
+something recreated the live directory during a swap so that only the moved
+aside copy carries it, moves the recreated one to a kept stray name and renames
+the snapshot back. It trashes staging whose owner has died. Every removal under
+the lock is a rename to a trash name, deleted after release, so a large
+git-clone tree never holds up a reaper sweep or a mapping write. Trash and
+stray names carry random suffixes rather than predictable ones, because Go's
+rename refuses an existing destination: a planted entry at a guessable path
+would not redirect the rename but fail it, and since recovery runs at the head
+of every exclusive section, that would wedge every mapping write, watch write
+and state write on the directory. A collision retries once with a fresh name
+and then returns an error naming the path. The exact rules are in Solution
+Architecture and the checks that bound them are in Security Considerations.
+
+**Recovery does not run on non-unix.** There the lock is a no-op, so running a
+multi-step rename dance with no exclusion would be worse than today, where
+nothing renames a moved-aside snapshot back at all. On those platforms the
+exclusive entry point runs its callback without recovery, an interrupted
+refresh needs manual cleanup, and the fallback file says so. This is a
+different trade from the existing Codex trust lock's no-op, which guards a
+single atomic replacement rather than a rename sequence.
+
+`config.Discover` gains one narrow branch that runs the moved-aside repair, so
+the next command of any kind finds its configuration. It is the one place
+discovery can take a lock and rename a directory; it repairs at most one
+candidate per command, so the bound applies once rather than once per directory
+the walk passes through, and it must never be reached from inside an entry
+point's callback, which the nested detector would turn into an immediate error.
 
 **No nesting, and fairness.** The lock is taken only inside the two entry
 points, whose callbacks never call another lock-taking function, so a
@@ -226,10 +259,15 @@ dispatch's reap, two refreshes and mapping write are one acquisition after
 another and R19 holds; the nested-acquisition detector turns any future
 violation into an immediate error instead of a 30-second stall. Polling
 non-blocking tries gives no fairness, so an exclusive waiter can lose rounds to
-overlapping shared readers; readers hold only for a directory scan and the
-bound turns sustained starvation into an error, so this is accepted, and a test
-checks an exclusive waiter behind repeated shared holds gets through within the
-bound.
+overlapping shared readers. Shared holds are short but not all equal: the
+mapping scan is one directory read, while the post-swap reload spans a config
+parse and staging creation spans a mkdir and a lock. The bound turns sustained
+starvation into an error rather than a hang, which is what this design accepts,
+and a test checks an exclusive waiter behind repeated shared holds gets through
+within the bound. Watch's state writes add exclusive traffic on the root
+directory for state no refresh carries across, which is the cost of keeping
+them from recreating that directory mid-swap; the follow-up that makes watch
+state survive a refresh is where that stops being a trade.
 
 #### Alternatives Considered
 
@@ -325,14 +363,46 @@ Destroy's positional form gets its own resolver in a new
   `Lstat`, and calls `worktree.DestroySession` for each, printing R9's lines,
   continuing past refusals, and returning exit 1 if any worktree was refused.
 
+**The record's own fields are validated where they are used, which means
+`internal/worktree` changes after all.** A lifecycle record is a JSON file any
+process running as the user can write, and today nothing checks its path or
+branch fields: `DestroySession` passes `worktree_path` to
+`git worktree remove --force` and the record's branch name to `git branch -d`
+as positional arguments, with no containment test and no end-of-options marker,
+and the uncommitted-changes guard reports a missing or empty path as clean,
+so a record naming another tree of the same repository passes a guard about a
+different directory. Teardown by session multiplies what that is worth: one
+command from the workspace root now reaches every active record in an instance
+rather than the single id a developer typed.
+
+Putting those checks in `internal/cli` would guard values the callee re-reads
+from disk for itself, and would leave destroy-by-id and the WorktreeRemove hook
+unguarded, so they go next to the git calls instead. `DestroySession` requires
+the record's worktree path to be non-empty and, after resolution, to lie
+under the instance's own worktrees directory; requires the branch name to be a
+plausible ref that does not begin with `-`, and passes it after `--`; and
+treats a missing worktree directory as a refusal rather than as a clean tree.
+The reads that feed it resolve through a root opened on the instance directory,
+so a path swapped for a symlink after the check cannot redirect them. This
+narrows rather than closes the window for the paths that still resolve by
+string, and the design says so rather than claiming a closure.
+
+Every value interpolated into an outcome, refusal or ambiguity line has control
+characters stripped by the sanitizer the dispatch path already uses, rather
+than being quoted, so the literal shapes R9 pins are preserved. That covers the
+kept-branch warning, which carries a record-supplied branch name into a
+paste-ready `git branch -D` line and which teardown by session now emits once
+per worktree.
+
 A worktree-only match takes today's `DestroySession` path byte for byte.
 `--force` with a session id or handle is refused as a usage error (exit 2);
-forcing stays available one worktree at a time. `internal/worktree` is
-unchanged and imports nothing new. Two behavior changes for existing
-invocations are called out in the pull request: a worktree id matching
-nothing, or a non-hex value, exits 3 instead of 1 (sanctioned by the PRD); and
-a destroy by worktree id now reads the root mapping store, so under contention
-past the 30-second bound it can fail with R17's error.
+forcing stays available one worktree at a time. Three behavior changes for
+existing invocations are called out in the pull request: a worktree id matching
+nothing, or a non-hex value, exits 3 instead of 1 (sanctioned by the PRD); a
+destroy by worktree id now reads the root mapping store, so under contention
+past the bound it can fail with R17's error; and a lifecycle record whose path
+or branch field fails the new validation is refused rather than acted on, which
+changes nothing for records niwa wrote.
 
 #### Alternatives Considered
 
@@ -549,7 +619,7 @@ internal/watch                             state writers through Mutate
         ^
 internal/cli                               session.go, worktree_destroy_resolve.go,
                                             session_lifecycle_cmd.go, list.go, apply.go
-internal/worktree (unchanged leaf)         DestroySession, lifecycle store
+internal/worktree (leaf)                   DestroySession + argument validation
 ```
 
 - **`internal/testhook`** (new): `type Point string`; constants
@@ -565,12 +635,21 @@ internal/worktree (unchanged leaf)         DestroySession, lifecycle store
   file created `O_CREAT|O_EXCL` and held exclusive), `Recover(dir) (trash
   []string, err error)` implementing the rules below, and
   `RecoverMovedAside(dir)` for discovery. `configdir_unix.go` opens lock files
-  with `O_NOFOLLOW`, requires a regular file, polls
+  with the repository's existing `O_NOFOLLOW|O_NONBLOCK` pair, so a planted
+  symlink fails cleanly and a planted FIFO cannot block the open before the
+  deadline logic runs, then `fstat`s the descriptor and refuses anything that
+  is not a regular file; it polls
   `syscall.Flock(LOCK_SH|LOCK_NB or LOCK_EX|LOCK_NB)` every 20 ms, calls
   `testhook.Hit(ConfigDirLockContended)` on the first busy try, and returns
   `timed out after 30s waiting for another niwa command using <dir> (lock
-  <dir>.lock)`; `configdir_other.go` returns a no-op release with a comment
-  that no ordering is provided.
+  <dir>.lock)`. Ownership checks live in the unix file too, since the type they
+  need does not exist on other platforms, and `recover.go` is split the same
+  way. `configdir_other.go` returns a no-op release and a `Recover` that does
+  nothing, with a comment stating that the platform gets neither ordering nor
+  crash repair. The package copies the two marker filenames it tests for rather
+  than importing them (it sits below the packages that define them), with a
+  test that fails if either copy drifts, because a wrong marker name makes
+  recovery pick the wrong side.
 - **`internal/workspace/snapshotwriter.go`**: `refreshSnapshot` and
   `EnsureConfigSnapshotWithStatus` read the marker and `.git` inside
   `configdir.Read`; the no-drift branch re-reads and rewrites the marker inside
@@ -578,7 +657,10 @@ internal/worktree (unchanged leaf)         DestroySession, lifecycle store
   missing, creates its staging inside `Read`, fetches into `snap/` unlocked,
   then inside `Mutate` writes the marker, runs the three `preserve*` copies,
   calls `testhook.Hit(SnapshotCarriedOver)`, and swaps; afterwards it removes
-  its staging directory.
+  its staging directory. The three `preserve*` helpers switch from `Stat` and
+  `ReadFile` to `Lstat` and refuse a symlinked source: today a symlink at
+  `<configDir>/sessions` would be walked and its target's contents promoted by
+  the swap to become the mapping store.
 - **`internal/workspace/snapshot.go`**: `SwapSnapshotAtomic` takes its paths
   from `configdir`, loses its unconditional preflight delete (recovery now owns
   `.prev`), calls `testhook.Hit(SnapshotMovedAside)` between its two renames,
@@ -586,7 +668,9 @@ internal/worktree (unchanged leaf)         DestroySession, lifecycle store
 - **`internal/workspace/session_map.go`**: `WriteSessionMapping` and
   `DeleteSessionMapping` run inside `Mutate` on `<root>/.niwa`, create only
   `sessions/` (0700) with `os.Mkdir`, and fail if `.niwa` is missing;
-  `ListSessionMappings` and `ReadSessionMapping` run inside `Read`. New
+  `ListSessionMappings` and `ReadSessionMapping` run inside `Read`. The
+  resolver's filter is on each record's `session_id` field, since the store
+  returns bodies rather than filenames. New
   `NewestMappingPerInstance([]SessionMapping) map[string]SessionMapping` keyed
   by `filepath.Clean(InstancePath)`, with the latest `Created` and
   first-in-session-id order on ties; `niwa list` adopts it, which changes its
@@ -607,7 +691,16 @@ internal/worktree (unchanged leaf)         DestroySession, lifecycle store
   only their own leaf with `os.Mkdir`.
 - **`internal/config/discover.go`**: when `.niwa/workspace.toml` is missing
   but `.niwa.lock` and `.niwa.prev/` exist in a candidate directory owned by
-  the current user, call `configdir.RecoverMovedAside` and re-check.
+  the current user, call `configdir.RecoverMovedAside` and re-check. At most
+  one candidate per command is repaired, so a walk cannot multiply the bound.
+- **`internal/worktree/worktree.go`**: `DestroySession` validates the record it
+  read before either git call. The worktree path must be non-empty and resolve
+  under `<instanceRoot>/.niwa/worktrees/`; the branch name must look like a ref
+  and must not begin with `-`, and it is passed after `--`; a record whose
+  worktree directory is missing is refused rather than reported clean by the
+  uncommitted-changes guard. Record reads resolve through a root opened on the
+  instance directory. `EffectiveBranchName` and the store's shape are
+  unchanged, so a record niwa wrote behaves exactly as before.
 - **`internal/cli/session.go`**: `discoverInstanceRoot` rebuilt on
   `ClassifyCwd` and `IsSingleInstanceLayout`; `errAtWorkspaceRoot` sentinel.
 - **`internal/cli/worktree_destroy_resolve.go`** (new): the six functions of
@@ -618,17 +711,20 @@ internal/worktree (unchanged leaf)         DestroySession, lifecycle store
 - **`internal/cli/list.go`**, **`internal/cli/apply.go`**: adopt
   `NewestMappingPerInstance` and `IsSingleInstanceLayout`.
 
-**Recovery rules**, run by `configdir.Recover` at the start of every `Mutate`,
-where "holds the snapshot" means `HoldsSnapshot` and every candidate is first
-checked with `Lstat` to be a real directory:
+**Recovery rules**, run by `configdir.Recover` at the start of every `Mutate`
+on unix, and not at all on other platforms. "Is a previous snapshot" means the
+path is a real directory (`Lstat`), owned by the current user, holding the
+provenance marker as a regular file. `HoldsSnapshot(D)` is the same marker test
+on the live directory, so a directory carrying only a `workspace.toml` never
+satisfies either:
 
-1. `D` is missing and `D.prev` holds the snapshot and is owned by the current
-   user: the refresh was killed between its renames; rename `D.prev` to `D`.
-2. `D` and `D.prev` both exist and `D` holds the snapshot: the refresh was
+1. `D` is missing and `D.prev` is a previous snapshot: the refresh was killed
+   between its renames; rename `D.prev` to `D`.
+2. `D` holds the marker and `D.prev` is a previous snapshot: the refresh was
    killed after its second rename; rename `D.prev` to a trash name.
-3. `D` and `D.prev` both exist and only `D.prev` holds the snapshot: something
-   recreated `D` during a swap; rename `D` to `D.stray-<timestamp>` (kept, not
-   deleted) and `D.prev` to `D`.
+3. `D` exists without the marker and `D.prev` is a previous snapshot:
+   something recreated `D` during a swap; rename `D` to `D.stray-<random>`
+   (kept, not deleted) and `D.prev` to `D`.
 4. A candidate staging directory is recognized only when it is a real
    directory holding both `lock` and `snap/`. Its `lock` is opened without
    `O_CREAT` and tried `LOCK_EX|LOCK_NB`: acquired means its owner died, so
@@ -636,7 +732,14 @@ checked with `Lstat` to be a real directory:
    missing `lock` means it is not a niwa staging directory (or one being set
    up, which cannot happen while the exclusive lock is held), so leave it. The
    legacy fixed `D.next` from older binaries is the one lockless shape removed.
-5. Leftover trash from a killed deleter is renamed into this run's trash list.
+5. Leftover trash, recognized by the sentinel file niwa writes into every trash
+   directory it creates, is folded into this run's trash list.
+
+Anything at one of those paths that fails its evidence test is left in place
+and reported. Every rename destination this list creates carries a random
+suffix, and a rename that fails because the destination exists retries once
+with a fresh name and then returns an error naming the path rather than
+leaving the directory wedged.
 
 ### Key Interfaces
 
@@ -647,13 +750,13 @@ const (Shared Mode = iota; Exclusive)
 var Timeout = DefaultTimeout // 30 * time.Second
 func LockPath(dir string) string
 func PrevPath(dir string) string
-func HoldsSnapshot(dir string) bool
+func HoldsSnapshot(dir string) bool                             // provenance marker, regular file
 func Acquire(dir string, mode Mode) (release func(), err error) // errors on nested acquisition
-func Mutate(dir string, fn func() error) error                  // EX, Recover, fn, release, delete trash
+func Mutate(dir string, fn func() error) error                  // EX, Recover (unix), fn, release, delete trash
 func Read(dir string, fn func() error) error                    // SH, fn, release
 func NewStaging(dir string) (*Staging, error)                   // call inside Read
-func Recover(dir string) (trash []string, err error)            // caller holds EX
-func RecoverMovedAside(dir string) error                        // takes EX itself
+func Recover(dir string) (trash []string, err error)            // caller holds EX; no-op on non-unix
+func RecoverMovedAside(dir string) error                        // takes EX itself; one candidate
 
 // internal/testhook
 type Point string
@@ -672,13 +775,16 @@ func matchMappings(ms []workspace.SessionMapping, v string) []workspace.SessionM
 func resolveDestroyTarget(s destroyScope, v string, ms []workspace.SessionMapping) (destroyTarget, error)
 func checkSessionInstance(root string, m workspace.SessionMapping, all []workspace.SessionMapping) (instanceDir string, gone bool, err error)
 func destroySessionWorktrees(cmd *cobra.Command, instanceDir string, m workspace.SessionMapping, git worktree.GitInvoker) error
+
+// internal/worktree (unexported)
+func validateSessionRecord(instanceRoot string, r *SessionRecord) error // path containment, branch shape
 ```
 
 On-disk additions: `<dir>.lock` beside each refreshed config directory
 (regular file, 0600, never removed); transient `<dir>.next-<random>/` staging
 directories during a fetch and `<dir>.trash-<random>/` directories awaiting
-deletion; and, only after recovery found a directory recreated mid-swap, a kept
-`<dir>.stray-<timestamp>/`.
+deletion, each holding a sentinel file that marks it as niwa's; and, only after
+recovery found a directory recreated mid-swap, a kept `<dir>.stray-<random>/`.
 
 ### Data Flow
 
@@ -698,7 +804,8 @@ recreate `D`.
 A teardown by session: classify cwd; `Read`: scan mappings; match; R7 checks
 against the snapshot, yielding the enumerated instance directory; for each
 active worktree of that instance, re-`Lstat` the directory and call
-`DestroySession`. No directory lock is needed there: in the multi-instance
+`DestroySession`, which validates the record's own worktree path and branch
+before it runs git. No directory lock is needed there: in the multi-instance
 layout, lifecycle records live in the instance's own `.niwa/`, which no refresh
 rotates.
 
@@ -741,10 +848,11 @@ Deliverables:
 
 Reshape `materializeAndSwap` and `SwapSnapshotAtomic` around the package;
 route the marker reads, the no-drift rewrite and the post-swap reload through
-it; route the mapping store and the watch state writers through `Mutate` and
-`Read` and stop them recreating `.niwa`; add the `config.Discover` branch. The
-mapping, watch, refresh, reaper and kill tests from Phase 1 turn green.
-Depends on Phase 2.
+it; switch the three `preserve*` helpers to `Lstat` and make them refuse a
+symlinked source; route the mapping store and the watch state writers through
+`Mutate` and `Read` and stop them recreating `.niwa`; add the `config.Discover`
+branch. The mapping, watch, refresh, reaper and kill tests from Phase 1 turn
+green. Depends on Phase 2.
 
 Deliverables:
 - `snapshotwriter.go`, `snapshot.go`, `session_map.go`, `configreload.go`,
@@ -773,14 +881,18 @@ Deliverables:
 ### Phase 6: Teardown resolution
 
 Add `NewestMappingPerInstance` and switch `list.go` to it; add the destroy
-resolver and wire `runSessionDestroy`; table tests for `matchMappings` and
-`resolveDestroyTarget`, command tests for every R9 outcome and the R10 table,
-and the forced teardown-read test. Depends on Phase 3 (the locked mapping
-read) and Phase 5.
+resolver and wire `runSessionDestroy`; validate the lifecycle record's worktree
+path and branch inside `DestroySession` and make the uncommitted-changes guard
+fail closed on a missing tree; route the printed values through the dispatch
+sanitizer. Table tests for `matchMappings` and `resolveDestroyTarget`, command
+tests for every R9 outcome and the R10 table, record-validation tests for a
+crafted path and a dash-leading branch, and the forced teardown-read test.
+Depends on Phase 3 (the locked mapping read) and Phase 5.
 
 Deliverables:
 - `internal/cli/worktree_destroy_resolve.go`, `session_lifecycle_cmd.go`,
-  `list.go`; `internal/workspace/session_map.go`
+  `list.go`; `internal/workspace/session_map.go`;
+  `internal/worktree/worktree.go`
 
 ### Phase 7: Functional coverage and docs
 
@@ -807,50 +919,91 @@ whether the new files widen what other users can see or block.
 loaded mappings and against worktree ids of the current instance; it never
 becomes a path until a lifecycle read that first requires eight lowercase hex
 characters. Mapping files can be written by any process running as the user,
-so their fields are untrusted. The resolver keeps only mappings whose key is a
-valid UUID, and accepts a recorded `instance_path` only if it is lexically a
-direct child of the workspace root other than `.niwa`, exists, and, after
-symlinks are resolved, is one of the directories `EnumerateInstances` returns.
+so their fields are untrusted. The resolver keeps only mappings whose
+`session_id` field is a valid UUID, and accepts a recorded `instance_path` only
+if it is lexically a direct child of the workspace root other than `.niwa`,
+exists, and, after symlinks are resolved, is one of the directories
+`EnumerateInstances` returns. That last clause is the containment invariant, and
+it holds only because `EnumerateInstances` returns direct children of the
+workspace root: a mapping naming a directory elsewhere on the filesystem is
+refused because it is not in that set, not because the string was inspected.
 The path handed to `DestroySession` is that enumerated directory, not the
-recorded string, and it is re-checked with `Lstat` right before each destroy,
-so swapping the directory for a symlink after the check can't redirect
-teardown. Every mapping-derived value printed in outcome, refusal or ambiguity
-lines is quoted with `%q`, so a crafted handle or path can't inject terminal
-control sequences.
+recorded string, and it is re-checked with `Lstat` right before each destroy.
+That check narrows the window rather than closing it -- a directory swapped for
+a symlink between the check and the git call would still be followed -- which
+is why the record's own fields are validated at the point of use rather than
+trusted because the instance path was checked.
+
+Mapping-derived values reach stderr through the same sanitizer the dispatch
+path already applies, which strips control characters, rather than through
+`%q`: R9 fixes the literal shape of the refusal, ambiguity and destroyed lines,
+and quoting would change it. The kept-branch warning goes through the sanitizer
+too, since the branch name it prints comes from the same untrusted record.
 
 **Scope of teardown by session.** Teardown by session applies the guards
 `niwa worktree destroy` already has to each active lifecycle record of one
-instance, and never removes the mapping, the instance or its clones. Before any
-git call it checks that each record's worktree path lies under the instance's
-worktree directory and that its branch name doesn't start with `-`. `--force`
-is refused with a session id or handle (usage error, exit 2); forcing stays
-available one worktree at a time through the worktree id or `--by-path`, so a
-mistyped or prefix-matched id can't discard a whole instance's uncommitted work
-and unmerged branches.
+instance, and never removes the mapping, the instance or its clones. Those
+guards were written for records niwa itself wrote, so this design adds the
+validation they assumed: before any git call, `DestroySession` requires the
+record's worktree path to be non-empty and to resolve under the instance's
+worktrees directory, requires a branch name that looks like a ref and does not
+begin with `-`, and passes it after `--`. A record whose worktree directory is
+missing is refused rather than reported clean -- today the uncommitted-changes
+guard fails open on a missing tree, which is exactly the case a crafted record
+produces. `--force` is refused with a session id or handle (usage error,
+exit 2); forcing stays available one worktree at a time through the worktree id
+or `--by-path`, so a mistyped or prefix-matched id can't discard a whole
+instance's uncommitted work and unmerged branches.
 
 **Lock, staging and previous-snapshot paths.** The lock file `<dir>.lock` is
-opened with `O_NOFOLLOW`, must be a regular file, and is created 0600, so
-other users can't open it to hold the lock, and a planted symlink can't make
-niwa create or lock a file elsewhere. Each refresh stages in an
+opened with `O_NOFOLLOW|O_NONBLOCK` and must `fstat` as a regular file, so a
+planted symlink can't redirect the open and a planted FIFO can't block it
+before the timeout logic is reached; it is created 0600, so no other
+unprivileged user can open it to hold the lock. Each refresh stages in an
 `os.MkdirTemp` directory (0700), inside which niwa creates `lock` with
 `O_CREAT|O_EXCL` and `snap/` with 0755, so the live directory keeps its current
-mode after the swap. Recovery treats a directory as dead staging only when it
-is a real directory holding both `lock` and `snap/` whose `lock` it can take
-without waiting, and its liveness check never creates the lock file, so it
-neither deletes a live fetch nor a directory that merely matches the name
-pattern. That matters for overlays: their clones are named `<org>-<repo>` in
-one per-user directory, so a repository named, say, `cfg.prev` or `cfg.next-x`
-has a name that matches another overlay's suffix. Recovery renames `<dir>.prev`
-back only when it is a real directory owned by the current user that holds the
-snapshot marker. Removals rename to a trash name and delete with
-`safeRemoveAll`, which removes a top-level symlink without following it. All of
-recovery's check-then-act steps run with the exclusive lock held.
+mode after the swap.
+
+Every auxiliary path is identified by content rather than by name. Recovery
+treats a directory as dead staging only when it is a real directory holding
+both `lock` and `snap/` whose `lock` it can take without waiting, and its
+liveness check never creates the lock file; it treats a directory as a previous
+snapshot only when it is a real directory, owned by the current user, holding
+the provenance marker as a regular file; and it folds in leftover trash only by
+the sentinel niwa writes into each trash directory it creates. That matters for
+overlays, whose clones are named `<org>-<repo>` in one per-user directory, so a
+repository can legitimately be named `cfg.prev` or `cfg.next-x` and collide with
+every suffix this design uses. A clone holds a `workspace.toml`, not niwa's
+marker, so it fails all three tests and is left in place and reported. The
+destinations niwa creates carry random suffixes, and since Go's rename refuses
+an existing destination, a planted entry at a guessed path fails the rename
+rather than redirecting it; that failure is retried once with a fresh name and
+then reported, so a name squatter cannot wedge mapping writes indefinitely.
+Removals rename to a trash name and delete with `safeRemoveAll`, which removes a
+top-level symlink without following it. All of recovery's check-then-act steps
+run with the exclusive lock held.
+
+Recovery runs only on unix, because the lock it depends on exists only there;
+running the renames unserialized would be worse than leaving the directory as
+the crash left it. A Windows user whose refresh is killed mid-swap still has to
+re-run the command that repairs it, which is the behavior that exists today.
+
+**Symlinked sources in the snapshot.** The three `preserve*` carry-over helpers
+use `Lstat` and refuse a symlinked source. Without that, a symlink planted at
+`<configDir>/sessions` would be walked and its target's contents copied into the
+staging directory, and the swap would promote them to be the mapping store. The
+same reasoning drives the R7 destroy-side rule that a dangling symlink or a file
+at an instance path is a refusal rather than a "gone" verdict: a "gone" verdict
+lets the caller reclaim, and the two sides must not disagree about what counts
+as an instance directory.
 
 **Recovery during configuration discovery.** `config.Discover` repairs a
 moved-aside `.niwa` only when the candidate directory, its `.niwa.lock` and its
-`.niwa.prev` belong to the current user. A walk up through a shared directory
-therefore never renames another user's files, and never loads another user's
-directory as workspace configuration because of this branch.
+`.niwa.prev` belong to the current user, and repairs at most one candidate per
+command, so a deep walk cannot turn into an unbounded sequence of renames. A
+walk up through a shared directory therefore never renames another user's files,
+and never loads another user's directory as workspace configuration because of
+this branch.
 
 **File modes and data exposure.** Lock files are empty. The mapping store
 keeps 0700 for `sessions/` and 0600 for its files, both in the writer (which
@@ -875,10 +1028,13 @@ lock within 30 seconds fails with an error naming the directory. Other users
 can't hold the lock because they can't open a 0600 file. A process running as
 the same user can keep niwa failing by holding the lock, but such a process
 could as well kill niwa. flock doesn't queue waiters fairly, so a steady stream
-of overlapping shared readers can in principle push a writer to the bound;
-shared holds last one directory scan, so this needs sustained concurrent
-`niwa list` or watch traffic, and it is accepted. Non-unix platforms get no
-ordering, as stated at the fallback.
+of overlapping shared readers can in principle push a writer to the bound.
+Shared holds are not all the same length: a mapping scan is one directory read,
+but a config parse and a staging creation are longer, and `niwa watch` adds
+exclusive traffic of its own. Reaching the bound still needs sustained
+overlapping commands against one config directory, which is a local,
+same-user condition, and it is accepted. Non-unix platforms get neither
+ordering nor crash recovery, as stated at the fallback.
 
 **Dependencies.** No module is added. The lock uses `syscall.Flock` from the
 standard library, as niwa's existing Codex trust lock does.
@@ -899,6 +1055,10 @@ standard library, as niwa's existing Codex trust lock does.
   and every other worktree subcommand stops treating the root as an instance.
 - The swap's file names have one owner, and the two entry points make
   recovery-first and delete-outside-the-lock automatic.
+- `DestroySession` stops trusting the record it just read: a crafted or corrupt
+  lifecycle record can no longer point git at a path outside the instance, pass
+  a branch name that reads as a flag, or slip past a dirty-tree guard that
+  today returns clean for a missing worktree.
 - The race tests are deterministic and fail on today's code.
 
 ### Negative
@@ -916,9 +1076,13 @@ standard library, as niwa's existing Codex trust lock does.
   bound.
 - Readers of config content during a long pipeline can still hit the rename
   window, and the ephemeral-session hook's mode read is not locked.
-- Non-unix platforms keep today's races.
+- Non-unix platforms keep today's races, and get no crash repair either.
+- The instance directory is re-checked with `Lstat` immediately before each
+  destroy, which narrows the swap window rather than closing it.
 - A reap that removes an instance between teardown's read and its destroys
   shows up as per-worktree errors and exit 1.
+- `internal/worktree` stops being an unchanged leaf: record validation lands
+  there, so a record written by an older niwa is read by stricter code.
 - niwa now has two flock helpers doing similar work (the Codex trust lock and
   `internal/configdir`).
 
@@ -937,7 +1101,13 @@ standard library, as niwa's existing Codex trust lock does.
   Limitations; the atomic exchange swap is a possible later hardening that
   closes the window on supporting filesystems.
 - The non-unix gap is documented at the no-op fallback, matching niwa's
-  existing lock.
+  existing lock; running recovery's renames unserialized would be worse than
+  leaving the directory as the crash left it.
+- The remaining swap window is why the record's own fields are validated where
+  they are used rather than trusted because the instance path was checked.
+- The validation accepts every shape niwa writes today -- a worktree under the
+  instance's worktrees directory and a branch name from `EffectiveBranchName` --
+  so only a record niwa did not write is refused.
 - The reap race fails closed: nothing is deleted wrongly, and exit 1 is R9's
   "refused" signal that tells a script to look.
 - The Codex trust lock can move onto `internal/configdir`'s lock primitive in
