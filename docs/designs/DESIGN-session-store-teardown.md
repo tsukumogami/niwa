@@ -166,13 +166,30 @@ gets exactly two siblings: the lock file `D + ".lock"` and a working directory
 stray directories all live *inside* `D@swap`, under random names, rather than
 beside `D`.
 
-The `@` is load-bearing. Overlay clones share the directory that holds `D`, and
-`config.OverlayDir` names them `<org> + "-" + <repo>` with neither component
-charset-checked, so an overlay named `acme/tools.prev` lands byte-identical to
-where a `<dir>.prev` scheme would put `acme-tools`'s previous snapshot. A forge
-host's names cannot contain `@`, so no overlay can produce `D@swap`. Everything
-niwa rotates is therefore out of the namespace it shares with data it must not
-touch, and recovery never has to decide whether a sibling is its own.
+The `@` narrows the collision without closing it, and the difference matters.
+Overlay clones share the directory that holds `D`, and `config.OverlayDir` names
+them `<org> + "-" + <repo>`. `parseOrgRepo` splits a URL on `/` and charset-checks
+neither component, so an overlay named `acme/tools.prev` lands byte-identical to
+where a `<dir>.prev` scheme would put `acme-tools`'s previous snapshot -- and, by
+the same mechanism, shorthand `acme/tools@swap` produces `acme-tools@swap`. A
+forge would reject that repository name and it takes a deliberately odd config
+source to reach, so `@` makes the collision rare rather than impossible. Any
+claim that niwa's names are unreachable would be a claim about a charset check
+that does not exist.
+
+So the collision is detected rather than assumed away. niwa creates `D@swap`
+itself and writes a sentinel file into it at creation. A `D@swap` that exists
+without the sentinel is not niwa's: the refresh refuses with an error naming both
+paths and saying the overlay directory collides with niwa's working directory, and
+nothing is written into it, renamed or deleted. A user whose overlay is named
+that way gets a clear failure and renames the overlay; they never get a corrupted
+clone. That is the property worth having, and it holds whatever the naming rules
+turn out to be.
+
+The journal carries the rest of the weight. Recovery touches only the paths a
+journal names, so even a colliding directory is never promoted or deleted by it;
+the sentinel is what keeps the *swap* from writing into someone else's clone,
+and the journal is what keeps *recovery* from acting on one.
 
 This also removes the fixed rename destination. The swap renames `D` to
 `D@swap/prev-<random>`, not to `D + ".prev"`, so there is no guessable path
@@ -1219,9 +1236,13 @@ directory maintained by this same pipeline, so it carries the marker too, and
 The marker proves a directory is niwa's; it cannot prove which one it belongs to
 or what role it plays.
 
-So niwa takes exactly two sibling names -- `<dir>.lock` and `<dir>@swap` -- and
-`@` is a character no forge org or repo name can contain, so neither collides
-with an overlay. Everything rotated lives inside `@swap` under random names. A
+So niwa takes exactly two sibling names -- `<dir>.lock` and `<dir>@swap` -- both
+chosen so that reaching them takes a config source URL a forge would reject,
+since `parseOrgRepo` splits on `/` and charset-checks nothing. Rare is not
+impossible, so the swap directory carries a sentinel niwa writes at creation and
+a `@swap` without it is refused rather than used: a colliding overlay clone
+produces a clear error, never a write into someone else's clone. Everything
+rotated lives inside `@swap` under random names. A
 directory that merely resembles a moved-aside snapshot is never acted on,
 because recovery reads the swap journal and touches only the paths it names,
 rather than inferring role from a name or from content. That is also what keeps

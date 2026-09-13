@@ -136,10 +136,15 @@ documented non-unix no-op.
       paths are all `<dir>@swap/{prev,next,trash,stray}-<random>`. Every suffix
       is random rather than derived from the clock, and two calls never collide.
       No helper produces `<dir>.prev` or `<dir>.next`.
-- [ ] A test asserts the sibling names are unreachable from overlay naming: for
-      every `(org, repo)` pair accepted by the overlay slug parser, the derived
-      directory name is never `<dir>.lock` or `<dir>@swap`, because `@` is not in
-      the accepted charset.
+- [ ] `SwapDir` refuses a `<dir>@swap` that exists without niwa's sentinel: a
+      test plants a populated overlay-shaped clone at that exact path, runs a
+      refresh, and asserts it fails with an error naming both paths, that the
+      planted directory is untouched byte for byte, and that nothing was written
+      into it. `parseOrgRepo` charset-checks nothing, so the collision is
+      reachable from shorthand `<org>/<repo>@swap` and must be detected rather
+      than assumed impossible.
+- [ ] niwa creates `<dir>@swap` with the sentinel in one step, and a second
+      refresh reuses the same directory without re-creating it.
 - [ ] `HoldsSnapshot` is true only for a real directory holding the provenance
       marker as a regular file, and false for a directory holding only
       `workspace.toml` (which is what a legitimate overlay clone holds), for a
