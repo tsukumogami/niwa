@@ -91,12 +91,23 @@ func resolveDestroyScope() (destroyScope, error) {
 // for what it can get wrong: a read taken while the workspace root's config
 // directory is being swapped sees the directory missing (ListSessionMappings
 // returns no mappings) or a subset of its files, because each mapping is read
-// whole and a malformed one is skipped. A subset can only remove candidates, so
-// the resolver can report "no match" where a match existed, and can miss an
-// ambiguity it would otherwise have refused. It cannot invent a mapping, and it
-// cannot name an instance no mapping named. Issue #297 replaces this one call
-// with a locked read; until then the failure direction is recorded as a known
-// limitation rather than papered over.
+// whole and a malformed one is skipped. It cannot invent a mapping, and it
+// cannot name an instance no mapping named -- checkSessionInstance returns the
+// enumerated directory rather than the recorded string, so containment does not
+// rest on this read at all.
+//
+// For matching, a subset only removes candidates: the resolver can report "no
+// match" where a match existed, and can miss an ambiguity it would otherwise
+// have refused. Both fail toward doing nothing.
+//
+// The newest-mapping rung is the exception, and it fails the other way. It runs
+// NewestMappingPerInstance over this same snapshot, so if the file a mid-swap
+// read misses is the *newer* mapping for an instance, a superseded session
+// passes a check that exists to stop exactly that. It still acts on an instance
+// that its own mapping genuinely named, and the merged-branch, dirty-tree and
+// attach guards all still run, so this weakens a guard rather than breaking
+// containment. Issue #297's locked read closes it; until then it is recorded as
+// a known limitation rather than papered over.
 //
 // Two filters run here rather than at the match site. Entries whose session_id
 // is not a UUID are dropped, so the single-instance layout's lifecycle records

@@ -572,6 +572,15 @@ tests are shown failing there before the fix lands.
 - **Dispatch briefs keep a narrower guarantee.** A brief the `/dispatch` skill
   writes while another command is mid-refresh can still be lost, because the
   skill writes it with its own tools.
+- **R6's newest-session check is best-effort until the mapping read is
+  serialized.** The rung reads the same store snapshot the match ran against.
+  While that read is unlocked, a read taken mid-refresh can miss the *newer*
+  mapping for an instance, and a superseded session then passes a check that
+  exists to stop exactly that. Containment is unaffected: teardown still acts on
+  the enumerated instance directory that the matched mapping named, and R8's
+  guards all still run, so the failure is a guard that did not fire rather than
+  the wrong instance. Every other way a partial read can go wrong removes
+  candidates and therefore fails toward doing nothing.
 - **Root `instance.json` notices can still be lost.** R22 and R23 stop a
   concurrent command from wiping the root `instance.json`. Two commands that
   each record a different new one-time notice still rewrite it from reads

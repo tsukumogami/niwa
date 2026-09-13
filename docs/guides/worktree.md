@@ -455,6 +455,9 @@ updates clones and every worktree in one pass, run `niwa apply` instead.
 Marks the worktree ended, removes the working directory, and deletes the branch
 when it's already merged (use `--force` to delete regardless).
 
+`--force` applies to a single worktree only — it is a usage error with a session
+id or handle. See [Guards](#guards) for why.
+
 ```bash
 niwa worktree destroy ab12cd34
 niwa worktree destroy ab12cd34 --force
@@ -494,6 +497,16 @@ A session target destroys **every active worktree of that session's instance**,
 in worktree-id order, continuing past a refusal. It never removes the session
 mapping, the instance directory, or the repositories cloned inside it — the
 instance outlives its worktrees, and reclaiming it is `niwa reap`'s job.
+
+A session that no longer backs its instance — because a newer session was
+dispatched into it — is refused, and the error names the newer one. That check
+is currently best-effort: it reads the session mapping store without a lock, so
+a read taken while the workspace's configuration is being refreshed can miss the
+newer mapping and let the superseded session through. Teardown still acts only
+on the instance that session's own mapping named, and the merged-branch,
+uncommitted-work and attach guards all still run, so the worst case is a guard
+that didn't fire rather than the wrong instance. It closes when the mapping
+store's reads are serialized against the config refresh.
 
 Session targets work from anywhere in the workspace: the root, another instance,
 or inside a worktree. Worktree ids only mean something inside the instance that
