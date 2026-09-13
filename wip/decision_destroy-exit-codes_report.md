@@ -1,4 +1,4 @@
-<!-- decision:start id="destroy-exit-codes" status="proposed" -->
+<!-- decision:start id="destroy-exit-codes" status="confirmed" -->
 ### Decision: Which exit codes `niwa worktree destroy` returns for no match and ambiguity
 
 **Context**

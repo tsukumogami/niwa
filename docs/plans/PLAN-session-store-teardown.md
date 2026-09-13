@@ -448,6 +448,10 @@ active worktrees under the outcome contract.
       attached and uncommitted cases, and `--by-path` from the root gives
       today's result; existing destroy tests pass apart from the collision
       (exit 4) and no-match (exit 3) changes.
+- [ ] `--by-path` for a path that is no niwa-managed worktree exits 3 through
+      the same error the positional no-match uses, with its message unchanged;
+      a test pins that it exits 1 before the change and 3 after, so the one
+      moved code is recorded rather than absorbed.
 - [ ] Session resolution gives the same result from the root, another
       instance, and a worktree, for both id forms; a value matching nothing
       exits 3 from either location.
@@ -504,7 +508,12 @@ behavior.
       continues past a refusal, that `--force` with a session is a usage error,
       and that the mapping, instance and clones are never removed.
 - [ ] The same section carries the outcome table with exit codes, streams and
-      exact wording, and notes that a worktree id matching nothing now exits 3.
+      exact wording, notes that a worktree id matching nothing now exits 3 and
+      that `--by-path` finding nothing moves from 1 to 3, and states that these
+      codes are `destroy`'s own -- `attach`'s 3 and `detach --force`'s 4 keep
+      their meanings -- so the two tables cannot be read as one.
+- [ ] `niwa worktree destroy --help` names its exit codes inline, the way
+      `attach` already does, so a reader meets them without the guide.
 - [ ] The guide documents worktree subcommands at a multi-instance root and
       states that the single-instance layout is unchanged.
 - [ ] `docs/guides/workspace-config-sources.md`'s atomic-refresh section is

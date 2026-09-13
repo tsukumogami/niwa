@@ -243,9 +243,14 @@ ephemeral provisioning for everyone using the workspace.
   `<instance>` and `<path>` are both the instance directory's path. The
   enriched `session: destroyed <worktree-id> (<repo>) at <path>` line is
   emitted only when the value resolved to a session: destroy by worktree id and
-  by `--by-path` keep today's bare `session: destroyed <id>` line, their
-  current stderr and their exit codes, except that a worktree id matching
-  nothing now exits 3 with the no-match line.
+  by `--by-path` keep today's bare `session: destroyed <id>` line and their
+  current stderr, and their exit codes are unchanged except when nothing is
+  found. Both no-match forms exit 3: a worktree id matching nothing, and a
+  `--by-path` path resolving to no worktree, which exits 1 today. Two routes to
+  the same outcome must not differ by which one located the target, and a
+  cleanup script calling `--by-path` after a reaper pass is exactly the caller
+  that needs to tell "already gone" from a guard refusal. The `--by-path`
+  message is unchanged; only its code moves.
 
   Exit 2 stays the usage-error code. These codes are scoped to `destroy`:
   within the `niwa worktree` group, `attach` already exits 3 when the attach
@@ -260,7 +265,7 @@ ephemeral provisioning for everyone using the workspace.
   | `destroy <session id or handle>` | Resolves per R1-R9 |
   | `list` | stderr: `niwa: this is the workspace root, not an instance; run inside an instance, or pass a session id to niwa worktree destroy`; no table; exit 0 |
   | `destroy <value>` that matches no session | The R9 no-match line; exit 3 |
-  | `destroy --by-path <path>` | As today |
+  | `destroy --by-path <path>` | As today, except that a path resolving to no worktree exits 3 rather than 1 (R9) |
   | `list --json` | The same stderr line, `[]` on stdout, exit 0 |
   | `apply <x>`, `attach <x>`, `detach <x>`, `create`, and `niwa go <repo> <worktree-id>` | stderr: `niwa: error: this is the workspace root, not an instance; run inside an instance, or pass a session id to niwa worktree destroy`; exit 1. `apply`, `attach`, `detach` and `go` already exit 1 there today, so only the message changes. `create` is the one code change: `create <repo>` already exits 1, but bare `create` exits 2 today because the refusal comes from repo inference rather than from the root check, and the refusal now fires first. `niwa go` gains no session resolution |
   | Shell completion of worktree ids | Offers nothing, as today |
@@ -411,6 +416,10 @@ tests are shown failing there before the fix lands.
       matching handle, and a non-hex value each exit 3.
 - [ ] From the workspace root, `niwa worktree destroy --by-path <worktree
       path>` gives the same result as before the change.
+- [ ] `niwa worktree destroy --by-path <path>` for a path that is no niwa-managed
+      worktree exits 3 with its existing message; it exits 1 before the change,
+      and this is the one exit code the change moves for an outcome that already
+      had one.
 - [ ] Inside an instance, a value equal to both a worktree id there and a
       session's handle exits 4, names both, prints the `--by-path` and full
       session id guidance, and destroys nothing.

@@ -351,7 +351,18 @@ Destroy's positional form gets its own resolver in a new
 - `resolveDestroyTarget` is pure: given the scope, the value and the snapshot,
   it returns a worktree id or one mapping, or an `ExitCodeError` with code 3
   (no match) or 4 (ambiguity, with the R5 guidance when a worktree is among
-  the matches).
+  the matches). `--by-path` bypasses the resolver but shares its no-match
+  error, so a path resolving to no worktree exits 3 rather than today's 1; its
+  message does not change. Both routes reach the same outcome, so they must not
+  differ by which one located the target. Codes 3 and 4 are `destroy`'s own:
+  `attach` already exits 3 when the attach lock is held and `detach --force`
+  exits 4 after killing a live holder, and per-subcommand code tables are
+  already this codebase's pattern -- `niwa init` reuses 3 and 4 for meanings of
+  its own. The worktree guide gains a second table bound to `destroy`, and
+  `destroy --help` names its codes inline the way `attach` does. Nothing in the
+  repository branches on a worktree-family exit code today, so the moved code
+  breaks no caller; it still ships announced as a behavior change rather than
+  folded in as a fix.
 - `checkSessionInstance` applies R7's ordered checks against the same
   snapshot and returns the enumerated instance directory, not the recorded
   string: instance location (lexically, and against the root's resolved
