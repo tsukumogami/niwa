@@ -272,6 +272,39 @@ func TestResolveDestroyScope_HonoursInstanceRootOverride(t *testing.T) {
 	}
 }
 
+// TestLoadMappingsForDestroy_NoWorkspaceRootReadsNothing: the store path is
+// built with filepath.Join, so an empty root yields a relative `.niwa/sessions`
+// and would read whatever sits under the working directory. Reachable whenever
+// NIWA_INSTANCE_ROOT names somewhere outside a workspace.
+func TestLoadMappingsForDestroy_NoWorkspaceRootReadsNothing(t *testing.T) {
+	dir := t.TempDir()
+	sessionsDir := filepath.Join(dir, ".niwa", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	body := `{"session_id":"` + uuidA + `","instance_path":"/ws/a"}`
+	if err := os.WriteFile(filepath.Join(sessionsDir, "m.json"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	prev, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(prev) }()
+
+	got, err := loadMappingsForDestroy("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("an unknown workspace root has no mapping store; got %+v", got)
+	}
+}
+
 // TestResolveDestroyScope_OverrideTakenVerbatim: the value is niwa's own, and
 // resolveInstanceRoot returns it without classifying. A path that resolves to
 // no workspace still names an instance, so a worktree id resolves there and a

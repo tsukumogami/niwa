@@ -136,6 +136,17 @@ func resolveDestroyScope() (destroyScope, error) {
 // handle match: the handle is matched as a string and then printed back in the
 // ambiguity line, and it comes from a file any same-user process can write.
 func loadMappingsForDestroy(workspaceRoot string) ([]workspace.SessionMapping, error) {
+	// No workspace root means no mapping store, so no session can match. This
+	// is not merely an optimization: the store path is built with
+	// filepath.Join, so an empty root yields the *relative* `.niwa/sessions`,
+	// and the resolver would read whatever happens to sit under the working
+	// directory. That is reachable whenever NIWA_INSTANCE_ROOT names somewhere
+	// outside a workspace. It failed safe -- the location rung refused every
+	// mapping it found -- but it refused with a message about the wrong thing,
+	// and read a store it had no business reading.
+	if workspaceRoot == "" {
+		return nil, nil
+	}
 	all, err := workspace.ListSessionMappings(workspaceRoot)
 	if err != nil {
 		return nil, fmt.Errorf("niwa: error: reading session mappings: %w", err)
