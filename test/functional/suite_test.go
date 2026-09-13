@@ -500,6 +500,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// supported/deny/opt-out install branches (deterministic via a fake claude) ---
 	registerWorktreeDelegationSteps(ctx)
 
+	// --- worktree teardown by session id or handle: destroy resolved from the
+	// workspace root against the worktrees of a dispatched session's instance ---
+	registerWorktreeTeardownSteps(ctx)
+
 	// --- ephemeral-session integration: instance from-hook provision/teardown
 	// and the orphan reaper, driven against the offline localGitServer ---
 	registerEphemeralSessionSteps(ctx)

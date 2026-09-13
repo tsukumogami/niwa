@@ -93,9 +93,17 @@ and exits 0.
 - [ ] Session-id completion offers nothing there, and the WorktreeRemove hook
       logs its existing warning carrying the sentinel text and exits 0 without
       attempting a destroy.
-- [ ] `internal/cli/apply.go` uses `IsSingleInstanceLayout` in place of its
-      inline check, so a freshly initialized root is no longer treated as
-      single-instance while a named one still is.
+- [ ] `internal/cli/apply.go` keeps its own inline check and does NOT adopt
+      `IsSingleInstanceLayout`. The two questions differ: the resolver asks
+      whether worktrees may be created in this root, where a freshly
+      initialized one must say no; apply asks whether the root is the thing to
+      apply to, where a freshly initialized root with no children is exactly
+      the bootstrap case that must say yes. The `@critical` scenarios
+      `niwa apply lazy-converts a legacy working tree to a snapshot` and
+      `niwa apply reconciles a settings change from the source on the same run`
+      both fail if the stricter predicate is shared, because the lazy snapshot
+      conversion and the `claude_permissions` write live in the per-instance
+      pipeline that is then skipped.
 - [ ] In a single-instance workspace, `worktree create` and
       `destroy <worktree-id>` at the root behave exactly as before, and `list`
       there prints its table.
@@ -105,7 +113,7 @@ and exits 0.
 **Dependencies**: None
 
 **Type**: code
-**Files**: `internal/cli/session.go`, `internal/cli/session_lifecycle_cmd.go`, `internal/cli/apply.go`, `internal/workspace/state.go`
+**Files**: `internal/cli/session.go`, `internal/cli/session_lifecycle_cmd.go`, `internal/workspace/state.go`
 
 ### Issue 2: fix(worktree): validate a lifecycle record before it reaches git
 

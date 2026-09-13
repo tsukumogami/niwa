@@ -302,6 +302,45 @@ func TestWorktreeListJSONAtMultiInstanceRoot_EmptyArray(t *testing.T) {
 	}
 }
 
+// TestApplyDoesNotShareTheResolverPredicate guards a regression that two
+// @critical functional scenarios caught the first time.
+//
+// `apply` and the worktree resolver ask different questions of the same layout.
+// The resolver asks whether worktrees may be created in this root, and a
+// freshly initialized root -- one whose instance.json carries no instance_name,
+// which is what every registered `niwa init` writes -- must answer no, or
+// worktrees land inside the config directory a refresh rotates. Apply asks
+// whether the root is the thing to apply to, and for a root with state and no
+// children the answer is yes precisely then: that is the bootstrap case, and
+// the lazy snapshot conversion and the claude_permissions write both live in
+// the per-instance pipeline that is otherwise skipped.
+//
+// So this asserts the two disagree on a freshly initialized root. If someone
+// makes apply adopt IsSingleInstanceLayout, this fails here rather than 35
+// seconds into the functional suite.
+func TestApplyDoesNotShareTheResolverPredicate(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceRoot(t, root)
+	writeInstanceState(t, root, "")
+
+	if workspace.IsSingleInstanceLayout(root) {
+		t.Fatal("the resolver predicate must refuse a freshly initialized root")
+	}
+
+	// Apply's own predicate: state file present, no child instances.
+	instances, err := workspace.EnumerateInstances(root)
+	if err != nil {
+		t.Fatalf("enumerate: %v", err)
+	}
+	if len(instances) != 0 {
+		t.Fatalf("fixture should have no child instances, got %v", instances)
+	}
+	statePath := filepath.Join(root, workspace.StateDir, workspace.StateFile)
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("apply treats this root as the sole instance, so its state file must exist: %v", err)
+	}
+}
+
 // TestCompletionAtMultiInstanceRootOffersNothing: a TAB press at the root must
 // not offer worktree ids read out of the mapping store.
 func TestCompletionAtMultiInstanceRootOffersNothing(t *testing.T) {

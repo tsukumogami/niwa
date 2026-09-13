@@ -436,8 +436,21 @@ new `workspace.IsSingleInstanceLayout(root)`: no child instance, and the root's
 registered `niwa init` writes a root `instance.json` without an instance name,
 so a freshly initialized workspace, or one whose instances were all reaped,
 would otherwise count as single-instance and have worktrees created inside the
-rotated directory. `internal/cli/apply.go` switches to the same helper, so it
-gets the same fix. Because `Execute` prints plain errors verbatim with exit 1,
+rotated directory.
+
+`internal/cli/apply.go` keeps its own inline check and deliberately does **not**
+adopt the helper, which an earlier draft of this design got wrong. The two look
+like one question and are not. The worktree resolver asks "may I create and
+destroy worktrees in this root?", where a freshly initialized root must answer
+no. Apply asks "is the root the thing I should apply to?", and for a root with
+state and no children the answer is yes precisely when it is freshly
+initialized: that is the bootstrap case, `niwa init` followed by
+`niwa apply <name>`, where `instance_name` has not been written yet and the
+per-instance pipeline still has to run the lazy snapshot conversion and the
+`claude_permissions` write. Sharing the stricter predicate skipped both
+silently, which two `@critical` functional scenarios caught.
+
+Because `Execute` prints plain errors verbatim with exit 1,
 create, apply, attach, detach and `niwa go` produce R10's behavior with no
 edit (for `niwa go` only the message changes, and it gains no session
 resolution), completion already turns a resolver error into no candidates, and
@@ -939,8 +952,9 @@ internal/worktree (leaf)                   DestroySession + argument validation
 - **`internal/cli/session_lifecycle_cmd.go`**: `runSessionDestroy`'s
   positional branch calls the resolver and refuses `--force` with a session;
   `runSessionLifecycleList` handles `errAtWorkspaceRoot` with exit 0.
-- **`internal/cli/list.go`**, **`internal/cli/apply.go`**: adopt
-  `NewestMappingPerInstance` and `IsSingleInstanceLayout`.
+- **`internal/cli/list.go`**: adopts `NewestMappingPerInstance`.
+  `internal/cli/apply.go` is unchanged: its single-instance question is not the
+  resolver's (see Decision 2).
 
 **Recovery rules**, run by `configdir.Recover` at the start of every `Mutate`
 on unix, and not at all on other platforms. Recovery reads
@@ -1155,13 +1169,14 @@ Deliverables:
 
 ### Phase 5: Root refusal
 
-Add `IsSingleInstanceLayout` and switch `internal/cli/apply.go` to it; rebuild
+Add `IsSingleInstanceLayout` for the resolver only, leaving
+`internal/cli/apply.go`'s own check alone; rebuild
 `discoverInstanceRoot` with its layout table test; add the `worktree list`
 branch. Depends on nothing earlier and can land before Phase 2; it changes
 behavior for nine callers, so it lands on its own commit.
 
 Deliverables:
-- `internal/cli/session.go`, `session_lifecycle_cmd.go`, `apply.go`;
+- `internal/cli/session.go`, `session_lifecycle_cmd.go`;
   `internal/workspace/state.go`
 
 ### Phase 6: Teardown resolution
