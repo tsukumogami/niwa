@@ -524,18 +524,40 @@ under the instance's own worktrees directory, and treats a missing worktree
 directory as a refusal rather than as a clean tree. The dirty-tree guard fails
 closed on *any* `stat` error, not only on `ENOENT`: today a permission error or
 an `ELOOP` on a symlink loop leaves the error untested and falls through to the
-git call. The reads that feed it resolve through a root opened on the instance
-directory, so a path swapped for a symlink after the check cannot redirect them.
-This narrows rather than closes the window for the paths that still resolve by
-string, and the design says so rather than claiming a closure.
+git call. Containment compares symlink-resolved forms, so a symlink planted
+inside the worktrees directory cannot redirect teardown. This narrows rather
+than closes the window: a path swapped between the check and the git call would
+still be followed, and the design says so rather than claiming a closure.
 
 The branch name gets an exact pattern, not a judgement call, because it is the
 only barrier between a wholly unvalidated JSON field and two git argv positions
 plus a copy-pasteable command line. It must be a valid ref under
-`git check-ref-format`'s rules as applied here: non-empty; no byte below 0x20 and
-no DEL; no space; none of `~`, `^`, `:`, `?`, `*`, `[`, `\`; no `..`; no leading
-`-`; no trailing `.lock`; no leading or trailing `/` and no `//`; and not the
-single character `@`. It is passed after `--`.
+`git check-ref-format`'s rules as applied here: non-empty; valid UTF-8; no
+non-printable rune; no space; none of `~`, `^`, `:`, `?`, `*`, `[`, `\`; no
+`..`; no leading `-`; no trailing `.lock`; no leading or trailing `/` and no
+`//`; not the single character `@`; and no `@{` anywhere, since
+`git branch -d -- '@{-1}'` deletes the previously checked-out branch. It is
+passed after `--`.
+
+"No non-printable rune" is deliberately stricter than the ASCII control bytes
+this rule started as. It also rejects the bidi overrides, which is worth having
+at the validation layer and not only at the print boundary: the same field
+reaches a git argv, where the print-boundary stripper never runs. It refuses a
+handful of names git itself would accept, such as one carrying a non-breaking
+space, and that is acceptable because niwa generates branch names from
+`EffectiveBranchName` and never produces one — the test asserts every shape the
+tree actually writes still passes, so only a record niwa did not write is
+refused.
+
+The worktree path is checked by refusing any `..` component outright and then
+comparing symlink-resolved forms of both sides. Cleaning `..` lexically would be
+wrong whenever something along the path is a symlink, and a record carrying one
+was not written by `CreateSession` anyway; resolving both sides then keeps a
+symlinked instance root — the default for anything under `/tmp` on macOS — from
+producing a false refusal, while a symlink planted inside the worktrees
+directory cannot redirect teardown. Opening a root handle on the instance
+directory (`os.Root`) would narrow the remaining check-to-use window further and
+is left as a later hardening; it is not what ships here.
 
 The same argv exists a third time, in `workspace.DefaultDestroySession`, the
 `niwa init --bootstrap` rollback, which parses the record with its own inline
@@ -902,10 +924,10 @@ internal/worktree (leaf)                   DestroySession + argument validation
   pattern in Decision 2 and is passed after `--`; a record whose worktree
   directory is missing is refused rather than reported clean by the
   uncommitted-changes guard, which now fails closed on any `stat` error rather
-  than only on `ENOENT`. Record reads resolve through a root opened on the
-  instance directory, and the kept-branch warning goes through
-  the CLI's widened stripper at the print boundary. `EffectiveBranchName` and the store's shape are unchanged,
-  so a record niwa wrote behaves exactly as before.
+  than only on `ENOENT`. Containment compares symlink-resolved forms, and the
+  kept-branch warning goes through the CLI's widened stripper at the print
+  boundary. `EffectiveBranchName` and the store's shape are unchanged, so a
+  record niwa wrote behaves exactly as before.
 - **`internal/workspace/bootstrap.go`**: `DefaultDestroySession`, the
   `niwa init --bootstrap` rollback, is the third copy of the destroy argv. It
   routes through the same validator rather than remaining the one unguarded
@@ -1400,9 +1422,7 @@ removing one is safe once its contents have been checked; nothing deletes one
 automatically, because the whole point is that niwa could not tell what it was.
 
 **Dependencies.** No module is added. The lock uses `syscall.Flock` from the
-standard library, as niwa's existing Codex trust lock does; `os.OpenRoot`, used
-for the record reads, is standard library too and available at the `go 1.25.3`
-this module already declares.
+standard library, as niwa's existing Codex trust lock does.
 
 ## Consequences
 

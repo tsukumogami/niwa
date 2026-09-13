@@ -137,7 +137,10 @@ same rules.
       than only on `ENOENT`: tests cover a missing worktree directory and one
       whose `stat` fails for another reason, both of which reach the git call
       today and report clean.
-- [ ] Record reads resolve through a root opened on the instance directory.
+- [ ] Containment refuses a `..` component outright rather than cleaning it,
+      and compares symlink-resolved forms of both sides, so a symlinked instance
+      root resolves rather than producing a false refusal while a symlink planted
+      inside the worktrees directory cannot redirect teardown.
 - [ ] `workspace.DefaultDestroySession`, the `niwa init --bootstrap` rollback,
       calls the same validator and passes its branch after `--`; a test covers a
       crafted record there, where today there is no validation and no `--`.
