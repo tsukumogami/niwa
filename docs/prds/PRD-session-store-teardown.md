@@ -15,13 +15,42 @@ goals: |
   Concurrent niwa commands that refresh the same configuration directory all
   succeed, and every session mapping written or deleted around them ends in
   the state its writer left it.
-upstream: docs/briefs/BRIEF-session-store-teardown.md
+absorbed: docs/briefs/BRIEF-session-store-teardown.md
 source_issue: 292
 ---
 
 ## Status
 
 Accepted
+
+Absorbed [BRIEF-session-store-teardown](docs/briefs/BRIEF-session-store-teardown.md); carried in Absorbed Brief.
+
+## Absorbed Brief
+
+**Why this work exists.** Developers reclaim finished workers with a fixed
+sequence: destroy the worker's niwa-managed worktrees, stop and remove the
+Claude session, then `niwa reap`. Only the first step refuses to delete an
+unmerged branch, and today it can't resolve any id a developer holds, so the
+sequence runs with its one safety check silently skipped. The same developers
+routinely launch dispatches in parallel, which is exactly when the session
+mappings that make a worker reachable get lost (#292, #297).
+
+**Why the two issues are one feature.** Both leave the workspace's session
+records untrustworthy at a session's lifecycle boundaries, teardown and
+provisioning, and both are fixed in the same store.
+
+**The outcome a user should experience.** A developer or cleanup script
+tearing down a finished worker names it by the id they already have and gets
+the merged-branch check applied, or a plain statement, in a form a script can
+act on, that there was nothing to check. A developer who launches several
+dispatches at once finds every worker recorded and reachable, and a reaped
+worker stays reaped.
+
+**Where the boundary sits.** Teardown covers niwa-managed worktrees only; it
+reports honestly rather than extending the check to worktrees Claude Code
+creates itself or to branches in an instance's own clones. The concurrency
+guarantee covers what niwa itself writes, not files other tools drop into the
+configuration directory.
 
 ## Problem Statement
 
