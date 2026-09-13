@@ -228,6 +228,37 @@ func ListSessionMappings(workspaceRoot string) ([]SessionMapping, error) {
 	return out, nil
 }
 
+// NewestMappingPerInstance groups mappings by the instance they name and keeps
+// the newest of each, by Created, with ties broken by the first session id in
+// order so the result does not depend on directory-read order.
+//
+// An instance can be named by several mappings: each dispatch into it writes
+// one, and the older ones describe sessions that have since been replaced. The
+// newest is the session currently backing the instance, which is the one a
+// caller asking "whose instance is this?" means. Keys are cleaned instance
+// paths, so two mappings that spell the same directory differently group
+// together.
+//
+// Created comes from the mapping file and is therefore not trustworthy against
+// a crafted store. This is a usability rule — it keeps a command off a
+// superseded session — not a security control.
+func NewestMappingPerInstance(mappings []SessionMapping) map[string]SessionMapping {
+	newest := make(map[string]SessionMapping, len(mappings))
+	for _, m := range mappings {
+		key := filepath.Clean(m.InstancePath)
+		cur, ok := newest[key]
+		switch {
+		case !ok:
+			newest[key] = m
+		case m.Created.After(cur.Created):
+			newest[key] = m
+		case m.Created.Equal(cur.Created) && m.SessionID < cur.SessionID:
+			newest[key] = m
+		}
+	}
+	return newest
+}
+
 // DeleteSessionMapping removes the mapping for sessionID from the workspace
 // root. The session id is validated before any path is constructed.
 // Removing a mapping that does not exist is not an error, so teardown and

@@ -338,6 +338,21 @@ func stripControlChars(s string) string {
 		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 			continue
 		}
+		// Drop the line/paragraph separators and the bidi and zero-width
+		// formatting characters. These are not control characters by
+		// unicode.IsControl, so a Cc-only filter passes them through, and they
+		// are exactly what reorders or hides part of a rendered line. It
+		// matters because values from the session mapping store and from
+		// worktree lifecycle records reach a terminal here, including the
+		// kept-branch warning, which carries a record-supplied branch name into
+		// a copy-pasteable `git branch -D` line.
+		if r == '\u2028' || r == '\u2029' ||
+			(r >= '\u200b' && r <= '\u200f') ||
+			(r >= '\u202a' && r <= '\u202e') ||
+			(r >= '\u2066' && r <= '\u2069') ||
+			r == '\ufeff' {
+			continue
+		}
 		b.WriteRune(r)
 	}
 	return b.String()
