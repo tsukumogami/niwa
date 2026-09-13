@@ -14,6 +14,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/tsukumogami/niwa/internal/gitexclude"
 )
@@ -73,19 +75,169 @@ var ErrSessionAttached = errors.New("session attached")
 // Passing force=true bypasses the guard.
 var ErrWorktreeDirty = errors.New("worktree has uncommitted changes")
 
+// branchNameForbiddenChars are the ASCII characters git rejects in a ref name
+// and that would additionally be ambiguous or dangerous in the argv position
+// destroy puts the branch name in. The set matches git-check-ref-format's
+// rules for the characters callers most plausibly control.
+const branchNameForbiddenChars = "~^:?*[\\"
+
+// ValidateRecordFields checks the two session-record fields that reach git in
+// an argv position: the worktree path and the branch name. A session record is
+// a JSON file on disk that any process running as the user can write, so both
+// fields are untrusted input by the time destroy reads them back; neither is
+// validated on write. The guard runs immediately before the git calls rather
+// than at read time so every teardown path gets it.
+//
+// It takes the fields individually rather than a SessionLifecycleState because
+// workspace.DefaultDestroySession parses its own minimal struct out of the same
+// JSON and must route through the same rules.
+//
+// worktreePath must resolve inside <instanceRoot>/.niwa/worktrees/ — the only
+// directory CreateSession ever writes a worktree into. branchName must satisfy
+// git's ref rules as they apply here: no leading dash (which git would read as
+// an option, e.g. `--upload-pack=...`), no `@{` (`git branch -d -- '@{-1}'`
+// deletes the previously checked-out branch), and no character that makes the
+// name unprintable or ambiguous. It fails closed: an unverifiable field is a
+// refusal, not a warning.
+func ValidateRecordFields(instanceRoot, worktreePath, branchName string) error {
+	if err := validateRecordWorktreePath(instanceRoot, worktreePath); err != nil {
+		return err
+	}
+	return validateRecordBranchName(branchName)
+}
+
+// validateRecordWorktreePath asserts worktreePath lies at or under
+// <instanceRoot>/.niwa/worktrees/, the only directory CreateSession ever puts a
+// worktree in. A `..` component is refused outright rather than cleaned away:
+// cleaning it is only correct when nothing along the path is a symlink, and a
+// record that carries one was not written by CreateSession regardless. The
+// containment test then runs on the symlink-resolved forms of both sides, so a
+// symlinked instance root (/tmp on macOS, a symlinked home) does not produce a
+// false refusal while a symlink planted inside the worktrees directory cannot
+// point teardown at an unrelated tree.
+func validateRecordWorktreePath(instanceRoot, worktreePath string) error {
+	if worktreePath == "" {
+		return errors.New("invalid session record: worktree_path is empty")
+	}
+	for _, part := range strings.Split(filepath.ToSlash(worktreePath), "/") {
+		if part == ".." {
+			return fmt.Errorf("invalid session record: worktree_path %q contains a %q component", worktreePath, "..")
+		}
+	}
+
+	worktreesRoot := filepath.Join(instanceRoot, ".niwa", "worktrees")
+	absRoot, err := filepath.Abs(worktreesRoot)
+	if err != nil {
+		return fmt.Errorf("invalid session record: resolving worktrees root %s: %w", worktreesRoot, err)
+	}
+	absPath, err := filepath.Abs(worktreePath)
+	if err != nil {
+		return fmt.Errorf("invalid session record: resolving worktree_path %q: %w", worktreePath, err)
+	}
+
+	if !pathWithin(resolveForContainment(absRoot), resolveForContainment(absPath)) {
+		return fmt.Errorf("invalid session record: worktree_path %q is outside %s", worktreePath, absRoot)
+	}
+	return nil
+}
+
+// resolveForContainment returns p with every symlink along it resolved. A path
+// that does not exist — the worktree of a session being destroyed a second
+// time, or the worktrees directory of an instance that never created one — is
+// resolved as far as its deepest existing ancestor, with the remaining
+// components rejoined verbatim. That is sound here only because the caller has
+// already refused `..` components, so the unresolved tail cannot walk upward.
+func resolveForContainment(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return filepath.Clean(resolved)
+	}
+	ancestor := p
+	var tail []string
+	for {
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return filepath.Clean(p)
+		}
+		tail = append([]string{filepath.Base(ancestor)}, tail...)
+		ancestor = parent
+		if resolved, err := filepath.EvalSymlinks(ancestor); err == nil {
+			return filepath.Clean(filepath.Join(append([]string{resolved}, tail...)...))
+		}
+	}
+}
+
+// pathWithin reports whether candidate is at or under root. Both arguments are
+// expected to be absolute and to have had the same resolution applied.
+func pathWithin(root, candidate string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(candidate))
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// validateRecordBranchName asserts branchName is a plausible git branch ref.
+// The rules are git-check-ref-format's, restricted to what a record can carry:
+// no unprintable rune (which covers ASCII control bytes, DEL, and the Unicode
+// bidirectional overrides that would let a crafted name reorder the recovery
+// command destroy prints), no space, none of ~^:?*[\, no `..`, no leading dash,
+// no trailing .lock, no leading/trailing or doubled slash, not a bare `@`, and
+// no `@{` anywhere.
+func validateRecordBranchName(branchName string) error {
+	if branchName == "" {
+		return errors.New("invalid session record: branch_name is empty")
+	}
+	if !utf8.ValidString(branchName) {
+		return fmt.Errorf("invalid session record: branch_name %q is not valid UTF-8", branchName)
+	}
+	for _, r := range branchName {
+		switch {
+		case r == ' ':
+			return fmt.Errorf("invalid session record: branch_name %q contains a space", branchName)
+		case !unicode.IsPrint(r):
+			return fmt.Errorf("invalid session record: branch_name %q contains a non-printable character (U+%04X)", branchName, r)
+		case strings.ContainsRune(branchNameForbiddenChars, r):
+			return fmt.Errorf("invalid session record: branch_name %q contains the forbidden character %q", branchName, r)
+		}
+	}
+	if strings.Contains(branchName, "..") {
+		return fmt.Errorf("invalid session record: branch_name %q contains %q", branchName, "..")
+	}
+	if strings.HasPrefix(branchName, "-") {
+		return fmt.Errorf("invalid session record: branch_name %q starts with a dash", branchName)
+	}
+	if strings.HasSuffix(branchName, ".lock") {
+		return fmt.Errorf("invalid session record: branch_name %q ends with %q", branchName, ".lock")
+	}
+	if strings.HasPrefix(branchName, "/") || strings.HasSuffix(branchName, "/") || strings.Contains(branchName, "//") {
+		return fmt.Errorf("invalid session record: branch_name %q has a leading, trailing, or repeated %q", branchName, "/")
+	}
+	if branchName == "@" {
+		return fmt.Errorf("invalid session record: branch_name %q is the single character %q", branchName, "@")
+	}
+	if strings.Contains(branchName, "@{") {
+		return fmt.Errorf("invalid session record: branch_name %q contains %q", branchName, "@{")
+	}
+	return nil
+}
+
 // worktreeHasUncommittedChanges reports whether worktreePath has uncommitted
 // git changes, mirroring the instance-level CheckUncommittedChanges pattern:
 // it runs `git status --porcelain` in the worktree and treats any non-empty
 // output as dirty. All git access flows through gitInvoker so the destroy
 // path stays test-injectable and the worktree package stays a leaf (no
-// internal/workspace import). A missing worktree directory is treated as not
-// dirty (nothing to lose), letting the idempotent teardown proceed.
+// internal/workspace import). It fails closed: a worktree path that cannot be
+// stat'd — missing, unreadable, a symlink loop — is an error, not a "clean"
+// verdict. Reporting an unverifiable worktree as clean would let a record that
+// points somewhere unexpected walk straight past the guard and into `git
+// worktree remove --force`; the caller is better served by a refusal it can
+// retry with --force.
 func worktreeHasUncommittedChanges(ctx context.Context, worktreePath string, gitInvoker GitInvoker) (bool, error) {
 	if worktreePath == "" {
-		return false, nil
+		return false, errors.New("worktree path is empty")
 	}
-	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
-		return false, nil
+	if _, err := os.Stat(worktreePath); err != nil {
+		return false, fmt.Errorf("checking worktree %s: %w", worktreePath, err)
 	}
 	out, err := gitInvoker.CommandContext(ctx, "-C", worktreePath, "status", "--porcelain").Output()
 	if err != nil {
@@ -282,6 +434,14 @@ func DestroySession(ctx context.Context, instanceRoot, sessionID string, force b
 
 	worktreePath := state.WorktreePath
 
+	// Validate the two record fields that reach git in an argv position before
+	// any git invocation — including the dirty check's `git status -C <path>`.
+	// The record was read from a JSON file that is not validated on write, so
+	// this is the first place the fields are checked at all.
+	if err := ValidateRecordFields(instanceRoot, worktreePath, state.EffectiveBranchName()); err != nil {
+		return state, err
+	}
+
 	// Reject when an attach lock is held by a live process and force is not
 	// set. This protects the preserved worktree-attach primitive: removing the
 	// worktree out from under a live `niwa session attach` process would
@@ -340,10 +500,13 @@ func DestroySession(ctx context.Context, instanceRoot, sessionID string, force b
 		// sessions and historic `session/<sid>` sessions both delete the
 		// correct ref. EffectiveBranchName falls back to `session/<sid>` for
 		// pre-v1.1 state files that pre-date the BranchName field.
+		// The `--` terminator keeps git from reading the branch name as an
+		// option even if a future change relaxes the leading-dash rule in
+		// ValidateRecordFields.
 		branchName := state.EffectiveBranchName()
-		if err := gitInvoker.CommandContext(ctx, "-C", repoPath, "branch", branchArg, branchName).Run(); err != nil && !force {
+		if err := gitInvoker.CommandContext(ctx, "-C", repoPath, "branch", branchArg, "--", branchName).Run(); err != nil && !force {
 			state.BranchWarning = fmt.Sprintf(
-				"branch %s was not deleted (unmerged commits remain); review and delete manually: git -C %s branch -D %s",
+				"branch %s was not deleted (unmerged commits remain); review and delete manually: git -C %s branch -D -- %s",
 				branchName, repoPath, branchName,
 			)
 		}
