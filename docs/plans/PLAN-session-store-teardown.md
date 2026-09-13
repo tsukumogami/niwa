@@ -5,7 +5,7 @@ execution_mode: single-pr
 tracking_level: none
 upstream: docs/designs/DESIGN-session-store-teardown.md
 milestone: "session-store-teardown"
-issue_count: 7
+issue_count: 8
 ---
 
 # PLAN: session-store-teardown
@@ -47,6 +47,14 @@ half-ordered directory is the bug being fixed.
 The root refusal (issue 5) is deliberately independent of the lock work. It
 changes resolution for nine callers, so it is easier to review as its own
 commit, and nothing in it needs the lock.
+
+Record validation (issue 6) is independent for the same reason, and it is split
+out of the resolver rather than folded into it because it lands in a different
+package, along a seam the design deliberately pushed down: the checks sit beside
+the git calls in `internal/worktree`, not next to the CLI that resolves the id.
+It is also the one part of this change that refuses input today's code accepts,
+so isolating it makes that behavior change reviewable on its own rather than
+buried in a feature commit.
 
 ## Issue Outlines
 
@@ -145,14 +153,15 @@ documented non-unix no-op.
       than assumed impossible.
 - [ ] niwa creates `<dir>@swap` with the sentinel in one step, and a second
       refresh reuses the same directory without re-creating it.
-- [ ] `HoldsSnapshot` is true only for a real directory holding the provenance
-      marker as a regular file, and false for a directory holding only
-      `workspace.toml` (which is what a legitimate overlay clone holds), for a
-      missing path, for a regular file, for a symlink to a qualifying directory,
-      and for one whose marker is a directory or a symlink.
-- [ ] The package's copies of the two marker filenames are covered by a test
-      that fails if either drifts from the constant it mirrors in
-      `internal/workspace`.
+- [ ] The package tests no provenance marker and copies no marker filename:
+      journal-based recovery removed the need, and that check stays in
+      `internal/workspace` beside the constant that defines it. A test asserts
+      the package's identifier set exports no marker helper.
+- [ ] Acquisition and recovery are unexported. The package's exported surface is
+      `LockPath`, `SwapDir`, `Mutate`, `Read`, `NewStaging` and
+      `RecoverMovedAside` only, so there is no way to take the lock without
+      going through an entry point that guarantees recovery-first and
+      delete-after-release.
 - [ ] `Acquire` opens the lock with `O_CREAT|O_RDWR|O_NOFOLLOW|O_NONBLOCK` at
       0600, `fstat`s the descriptor and refuses without taking a lock anything
       that is not a regular file, is not owned by the invoking user, or has a
@@ -176,10 +185,14 @@ documented non-unix no-op.
 - [ ] A second acquisition of a path this process already holds fails
       immediately with `nested acquisition of <dir>.lock`, well inside the
       bound, and the held-path set clears on release.
-- [ ] Acquisitions are ordered global, then overlay, then workspace root: taking
-      a lock ranked at or below one this process already holds fails immediately
-      with a message naming both directories. A test takes root-then-overlay and
-      asserts the refusal, and asserts the legal order succeeds.
+- [ ] Taking a second config-directory lock while this process holds any other
+      one fails immediately with a message naming both directories, which is
+      what makes a cross-directory deadlock impossible without ranking
+      directories (ranking would need `config.GlobalConfigDir` and
+      `config.OverlayDir`, and `internal/config` imports this package). A test
+      takes the root lock, then the overlay lock, and asserts the refusal well
+      inside the bound; a second test takes them one after another and
+      succeeds.
 - [ ] `Mutate` acquires exclusive, runs `Recover` before `fn`, releases before
       deleting trash, and leaves no trash behind; a test proves the deletes
       happen after release. `Read` acquires shared. In both, an error from `fn`
@@ -238,16 +251,18 @@ documented non-unix no-op.
 - [ ] With the bound at 1s, a dispatch-shaped sequence of acquisitions in one
       process completes without timing out, and an exclusive waiter behind
       repeatedly overlapping shared holds acquires within the bound.
-- [ ] `internal/safetext.Strip` removes C0, C1, DEL, U+2028, U+2029 and the Cf
-      bidi and zero-width block, and leaves ordinary text unchanged. A table test
-      covers U+202E and U+200B specifically, since every existing stripper in the
-      repository is Cc-only and passes both. The package is a leaf importing only
-      the standard library, so `internal/worktree` can import it.
+- [ ] `internal/cli`'s existing `stripControlChars` is widened to remove U+2028,
+      U+2029 and the Cf bidi and zero-width block alongside the C0, C1 and DEL it
+      already drops, and leaves ordinary text unchanged. A table test covers
+      U+202E and U+200B specifically, since every existing stripper in the
+      repository is Cc-only and passes both. No new package: both consumers of
+      the record's `BranchWarning` live in `internal/cli`, so stripping happens
+      at the print boundary and `internal/worktree` gains no import.
 
 **Dependencies**: Blocked by <<ISSUE:1>>
 
 **Type**: code
-**Files**: `internal/configdir/configdir.go`, `internal/configdir/configdir_unix.go`, `internal/configdir/configdir_other.go`, `internal/configdir/journal.go`, `internal/configdir/recover_unix.go`, `internal/configdir/recover_other.go`, `internal/safetext/safetext.go`
+**Files**: `internal/configdir/configdir.go`, `internal/configdir/configdir_unix.go`, `internal/configdir/configdir_other.go`, `internal/configdir/journal.go`, `internal/configdir/recover_unix.go`, `internal/configdir/recover_other.go`, `internal/cli/session_from_hook_cmd.go`
 
 ### Issue 3: fix(workspace): order refresh, mapping store and watch writes
 
@@ -420,7 +435,50 @@ and exits 0.
 **Type**: code
 **Files**: `internal/cli/session.go`, `internal/cli/session_lifecycle_cmd.go`, `internal/cli/apply.go`, `internal/workspace/state.go`
 
-### Issue 6: feat(cli): resolve worktree destroy by session id or handle
+### Issue 6: fix(worktree): validate a lifecycle record before it reaches git
+
+**Goal**: Stop `DestroySession` trusting the record it just read. Validate the
+worktree path and branch name beside the git calls that consume them, fail the
+dirty-tree guard closed, and route the third copy of the same argv through the
+same rules.
+
+**Acceptance Criteria**:
+- [ ] `worktree.ValidateRecordFields(instanceRoot, worktreePath, branchName)` is
+      exported and takes fields rather than a record type, because
+      `workspace.DefaultDestroySession` parses its own inline struct rather than
+      `SessionLifecycleState`; `internal/workspace` already imports
+      `internal/worktree`, so this adds no dependency edge.
+- [ ] It requires a non-empty worktree path resolving under
+      `<instanceRoot>/.niwa/worktrees/`, and a branch name matching the design's
+      exact ref pattern -- non-empty; no byte below 0x20 and no DEL; no space;
+      none of `~ ^ : ? * [ \`; no `..`; no leading `-`; no trailing `.lock`; no
+      leading or trailing `/` and no `//`; not the single character `@`. Table
+      tests cover a path escaping the instance, an absolute path elsewhere, an
+      empty path, a `--upload-pack=`-shaped branch, a branch with a control
+      character, a branch with U+202E, and a normal record.
+- [ ] Every branch name `EffectiveBranchName` produces today passes, and a
+      generated-table test asserts it over the shapes niwa writes, so the
+      validation refuses only records niwa did not write.
+- [ ] `DestroySession` calls it before either git call and passes the branch
+      after `--`; a test asserts the `--` is present in the argv.
+- [ ] The uncommitted-changes guard fails closed on *any* `stat` error rather
+      than only on `ENOENT`: tests cover a missing worktree directory and one
+      whose `stat` fails for another reason, both of which reach the git call
+      today and report clean.
+- [ ] Record reads resolve through a root opened on the instance directory.
+- [ ] `workspace.DefaultDestroySession`, the `niwa init --bootstrap` rollback,
+      calls the same validator and passes its branch after `--`; a test covers a
+      crafted record there, where today there is no validation and no `--`.
+- [ ] `go build ./...`, `go vet ./...` and `go test -race
+      ./internal/worktree/... ./internal/workspace/...` pass, `internal/worktree`
+      gains no import beyond what it has today, and `go.mod` gains no module.
+
+**Dependencies**: None
+
+**Type**: code
+**Files**: `internal/worktree/worktree.go`, `internal/workspace/bootstrap.go`
+
+### Issue 7: feat(cli): resolve worktree destroy by session id or handle
 
 **Goal**: Resolve `niwa worktree destroy <value>` as a session id, handle or
 worktree id against one locked mapping snapshot, and destroy that session's
@@ -466,25 +524,6 @@ active worktrees under the outcome contract.
       resolving outside.
 - [ ] `destroySessionWorktrees` processes active records in worktree-id order
       and re-checks the instance directory immediately before each destroy.
-- [ ] `DestroySession` validates the record it read before either git call: it
-      requires a non-empty worktree path resolving under
-      `<instanceRoot>/.niwa/worktrees/`, and requires the branch name to match
-      the design's exact ref pattern -- non-empty; no byte below 0x20 and no DEL;
-      no space; none of `~ ^ : ? * [ \`; no `..`; no leading `-`; no trailing
-      `.lock`; no leading or trailing `/` and no `//`; not the single character
-      `@` -- passed after `--`. Unit tests cover a path escaping the instance, an
-      absolute path elsewhere, an empty path, a `--upload-pack=`-shaped branch, a
-      branch with a control character, a branch with U+202E, and a normal record,
-      and assert every record niwa writes today still passes.
-- [ ] A record whose worktree directory is missing is refused rather than
-      reported clean, and the uncommitted-changes guard fails closed on *any*
-      `stat` error rather than only on `ENOENT`: tests cover the missing tree and
-      a tree whose `stat` fails for another reason, both of which reach the git
-      call today.
-- [ ] Record reads resolve through a root opened on the instance directory.
-- [ ] `workspace.DefaultDestroySession`, the `niwa init --bootstrap` rollback and
-      the third copy of this argv, routes through the same validator and passes
-      its branch after `--`; a test covers a crafted record there too.
 - [ ] `checkSessionInstance` resolves both sides of the `EnumerateInstances`
       membership comparison, since the enumeration returns lexical joins. A test
       with the workspace root reached through a symlink resolves the session
@@ -502,12 +541,13 @@ active worktrees under the outcome contract.
       exits 1.
 - [ ] Teardown by session never deletes the mapping, the instance or its
       clones; every session-resolved test asserts all three survive.
-- [ ] Every mapping- and record-derived value in output goes through
-      `safetext.Strip` rather than `%q`, so the literal line shapes the outcome
-      contract fixes are preserved: a mapping whose handle carries an ANSI
-      escape, and a kept-branch warning naming a branch with a control character
-      or U+202E, all print stripped and unquoted. The kept-branch warning is
-      composed inside `internal/worktree`, so the strip happens there.
+- [ ] Every mapping- and record-derived value in output goes through the widened
+      `stripControlChars` rather than `%q`, so the literal line shapes the
+      outcome contract fixes are preserved: a mapping whose handle carries an
+      ANSI escape, and a kept-branch warning naming a branch with a control
+      character or U+202E, all print stripped and unquoted. The strip happens at
+      the print boundary in `internal/cli`, where both `BranchWarning` consumers
+      already are.
 - [ ] `runSessionDestroy` routes the positional value through the resolver and
       refuses `--force` with a session id or handle as a usage error (exit 2)
       before anything is destroyed; `--force` with a worktree id or
@@ -526,12 +566,12 @@ active worktrees under the outcome contract.
 - [ ] Forced: a destroy whose mapping read lands during a swap resolves the
       session rather than exiting 3.
 
-**Dependencies**: Blocked by <<ISSUE:3>>, <<ISSUE:5>>
+**Dependencies**: Blocked by <<ISSUE:3>>, <<ISSUE:5>>, <<ISSUE:6>>
 
 **Type**: code
-**Files**: `internal/cli/worktree_destroy_resolve.go`, `internal/cli/session_lifecycle_cmd.go`, `internal/cli/list.go`, `internal/workspace/session_map.go`, `internal/workspace/bootstrap.go`, `internal/worktree/worktree.go`
+**Files**: `internal/cli/worktree_destroy_resolve.go`, `internal/cli/session_lifecycle_cmd.go`, `internal/cli/list.go`, `internal/cli/session_from_hook_cmd.go`, `internal/workspace/session_map.go`
 
-### Issue 7: docs(worktree): functional coverage and guide updates
+### Issue 8: docs(worktree): functional coverage and guide updates
 
 **Goal**: Cover destroy by session id and by handle from the workspace root end
 to end, recompose the four-way parallel dispatch against a local config source,
@@ -603,7 +643,7 @@ behavior.
 - [ ] `go test ./test/functional/...` passes on Linux, `go vet ./...` is clean,
       and no committed file references a non-durable working path.
 
-**Dependencies**: Blocked by <<ISSUE:3>>, <<ISSUE:6>>
+**Dependencies**: Blocked by <<ISSUE:3>>, <<ISSUE:4>>, <<ISSUE:7>>
 
 **Type**: docs
 **Files**: `test/functional/features/worktree-teardown-by-session.feature`, `test/functional/features/session-message-acceptance.feature`, `docs/guides/worktree.md`, `docs/guides/workspace-config-sources.md`
@@ -612,28 +652,32 @@ behavior.
 
 ## Implementation Sequence
 
-**Edges:** 1 before 2; 2 before 3 and 4; 3 and 5 before 6; 3 and 6 before 7.
-Issues 1 and 5 have no blockers. Each outline above declares the same
+**Edges:** 1 before 2; 2 before 3 and 4; 3, 5 and 6 before 7; 3, 4 and 7 before
+8. Issues 1, 5 and 6 have no blockers. Each outline above declares the same
 dependencies, which is where an implementing agent reads them.
 
-**Critical path:** Issue 1 -> Issue 2 -> Issue 3 -> Issue 6 -> Issue 7 (5 of 7).
+**Critical path:** Issue 1 -> Issue 2 -> Issue 3 -> Issue 7 -> Issue 8 (5 of 8).
 
 **Recommended order:**
 1. Issue 1 -- the test seam and the red tests, whose failing output is the
    evidence the PRD's verification requirements ask for.
 2. Issue 5 -- the root refusal, independent of everything else and easiest to
    review on its own.
-3. Issue 2 -- the lock package the rest of the concurrency work sits on.
-4. Issue 3 -- the routed writers and readers; most of Issue 1's tests turn
+3. Issue 6 -- record validation, also independent, and the one commit that
+   refuses input today's code accepts.
+4. Issue 2 -- the lock package the rest of the concurrency work sits on.
+5. Issue 3 -- the routed writers and readers; most of Issue 1's tests turn
    green here.
-5. Issue 4 -- the root-state guards; the remaining Issue 1 tests turn green.
-6. Issue 6 -- the destroy resolver, which needs the locked mapping read from
-   Issue 3 and the scope classification from Issue 5.
-7. Issue 7 -- functional scenarios and the guides, last because they drive the
-   finished command.
+6. Issue 4 -- the root-state guards; the remaining Issue 1 tests turn green.
+7. Issue 7 -- the destroy resolver, which needs the locked mapping read from
+   Issue 3, the scope classification from Issue 5, and the validated destroy
+   from Issue 6.
+8. Issue 8 -- functional scenarios and the guides, last because they drive the
+   finished command; it needs Issue 4 as well, because the four-parallel-dispatch
+   scenario exercises the root `instance.json` writes that issue makes atomic.
 
-**Parallelization:** Issues 1 and 5 can start together. After Issue 2, Issues 3
-and 4 are independent of each other. Everything else is on the critical path.
+**Parallelization:** Issues 1, 5 and 6 can start together. After Issue 2, Issues
+3 and 4 are independent of each other. Everything else is on the critical path.
 
-All seven land as commits in one pull request, so the red commit at the head is
+All eight land as commits in one pull request, so the red commit at the head is
 never the tip of a merged branch.

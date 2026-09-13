@@ -12,14 +12,16 @@ problem: |
   directory.
 decision: |
   A new `internal/configdir` package owns the lock, staging and recovery layout
-  of a refreshed config directory. Each such directory gets a sibling
-  `<dir>.lock` flock. A refresh fetches unlocked into a private staging
-  directory created under a shared lock, and takes the lock exclusive only to
-  recover, carry local state over and swap; every niwa write into the directory
+  of a refreshed config directory. Each such directory gets two siblings: a
+  `<dir>.lock` flock and a `<dir>@swap` working directory holding everything the
+  swap rotates. A refresh fetches unlocked into a private staging directory
+  created under a shared lock, and takes the lock exclusive only to recover,
+  carry local state over and swap; every niwa write into the directory
   (mappings, watch state, `instance.json`) goes through one entry point that
   takes the lock exclusive, runs recovery and never recreates the directory;
-  mapping reads take it shared. Recovery decides by which side holds the
-  snapshot marker. Worktree teardown gets a resolver in `internal/cli` that
+  mapping reads take it shared. Recovery acts only on the paths a swap journal
+  names, so it never touches a look-alike directory or an older binary's
+  in-flight swap. Worktree teardown gets a resolver in `internal/cli` that
   matches a session id, handle or worktree id against one locked mapping
   snapshot and the current instance, refuses ambiguity, and destroys each
   active worktree of the session's instance through the existing guarded
@@ -33,8 +35,9 @@ rationale: |
   delete is undone and the directory is never left without its configuration;
   it reuses the flock pattern niwa already ships and adds no module. Putting
   the root refusal in the resolver all nine worktree callers share fixes them
-  all, including completion and the hook, with no per-command checks. Keeping
-  teardown resolution in `internal/cli` leaves `internal/worktree` a leaf. A
+  all, including completion and the hook, with no per-command checks. Teardown
+  resolution stays in `internal/cli`, but the lifecycle record's own fields are
+  validated in `internal/worktree`, beside the git calls that consume them. A
   test-only registry is the cheapest seam that reaches across packages and
   cannot be triggered from a release binary.
 upstream: docs/prds/PRD-session-store-teardown.md
@@ -239,13 +242,21 @@ fresh descriptor, a second acquisition of the same lock in one process would
 wait on itself until the bound; the package therefore keeps a process-local set
 of held lock paths and fails a nested acquisition at once with
 `nested acquisition of <D>.lock`. That set detects a misuse; it does not grant
-reentry. It also enforces an order: config directories are ranked global,
-then overlay, then workspace root, and an acquisition that would take a lock
-ranked at or below one this process already holds is refused the same way.
-`Apply` touches all three in one command, so without the rule two processes
-taking them in opposite orders would each wait out the full bound and both fail.
-The detector already tracks the held set; the ordering rule is one comparison
-against it.
+reentry.
+
+The set covers a second hazard, and covers it without needing to know anything
+about which directory is which. `Apply` touches the workspace root, an overlay
+clone and the global clone in one command; if it held two of those locks at
+once, two processes taking them in opposite orders would each wait out the full
+bound and both fail. The rule that prevents it is simply that the set is checked
+against *any* held path, not only the same one: while this process holds one
+config-directory lock, taking a second is refused immediately. Nothing in the
+design needs to hold two, because the entry points' callbacks never call another
+lock-taking function, so this costs nothing and turns a future deadlock into an
+error at the call site that introduced it. A rank over directories would have
+been the other way to get an order, and it is rejected: computing one needs
+`config.GlobalConfigDir` and `config.OverlayDir`, and `internal/config` imports
+this package, so a leaf cannot ask.
 
 **Two entry points.** `configdir.Mutate(D, fn)` takes the lock exclusive, runs
 recovery, calls `fn`, releases, then deletes any trash recovery or `fn`
@@ -359,7 +370,7 @@ point's callback, which the nested detector would turn into an immediate error.
 **No nesting, and fairness.** The lock is taken only inside the two entry
 points, whose callbacks never call another lock-taking function, so a
 dispatch's reap, two refreshes and mapping write are one acquisition after
-another and R19 holds; the nested-acquisition detector and the ordering rule
+another and R19 holds; the held-set detector
 turn any future violation into an immediate error instead of a 30-second stall
 or a deadlock between two commands. Polling
 non-blocking tries gives no fairness, so an exclusive waiter can lose rounds to
@@ -532,18 +543,25 @@ struct and runs `git branch -D` with no validation and no `--`. Its only caller
 acts on a record the bootstrap just wrote, so the exposure is small, but the
 reasoning for putting the checks beside the git calls applies there identically
 and it is routed through the same validator rather than left as the one copy
-that is still unguarded.
+that is still unguarded. That is why the validator is exported and takes the
+three fields rather than a record type: `internal/workspace` already imports
+`internal/worktree`, but it parses its own struct there, so a rule keyed to
+`SessionLifecycleState` would not reach it.
 
 Every value interpolated into an outcome, refusal or ambiguity line has control
 characters stripped rather than being quoted, so the literal shapes R9 pins are
-preserved. No existing helper can do this: the dispatch path deliberately
-*refuses* rather than strips (and its comment says so), `internal/tui`'s
-sanitizer and every hand-rolled stripper here match Cc only, and the one
-adequate stripper is unexported inside `internal/cli`, which `internal/worktree`
-cannot import because `internal/cli` imports it. So this change adds a small leaf
-package, `internal/safetext`, that both can import, stripping C0, C1, DEL,
-U+2028, U+2029 and the Cf bidi and zero-width block. The Cf coverage is the
-point: U+202E and U+200B pass every Cc-only stripper in this repository, and the
+preserved. No existing helper does this as it stands: the dispatch path
+deliberately *refuses* rather than strips (and its comment says so),
+`internal/tui`'s sanitizer and every hand-rolled stripper here match Cc only.
+The closest one, `stripControlChars` in `internal/cli`, already covers C0, C1
+and DEL, and this change extends it to U+2028, U+2029 and the Cf bidi and
+zero-width block and makes it the CLI's single stripper for untrusted values.
+Stripping happens at the print boundary rather than where the string is
+composed, which is what keeps `internal/worktree` a leaf: both consumers of the
+record's `BranchWarning` are in `internal/cli` -- one prints it, one wraps it
+into an error -- so no new package and no new import is needed. The Cf coverage
+is the point: U+202E and U+200B pass every Cc-only stripper in this repository,
+and the
 line that most needs the protection is the kept-branch warning, which carries a
 record-supplied branch name into a paste-ready `git branch -D` line and which
 teardown by session now emits once per worktree instead of once per command.
@@ -765,7 +783,6 @@ test-only registry spans both.
 
 ```
 internal/testhook (new leaf)      named points; Hit / Set
-internal/safetext (new leaf)      control-character stripping for printed values
         ^            ^
         |            |
 internal/configdir (new leaf) ----+        lock, @swap layout, journal, recovery
@@ -788,14 +805,22 @@ internal/worktree (leaf)                   DestroySession + argument validation
   func())`, which panics on a second registration. Imports only `sync` and
   `sync/atomic`; no environment reads, no `init()`.
 - **`internal/configdir`** (new): the layout (`LockPath`, `SwapDir`, and the
-  random `prev-`, `next-`, `trash-` and `stray-` names inside it),
-  `HoldsSnapshot(dir)`, `Acquire(dir, mode)` with the nested-acquisition
-  detector and the lock-ordering rule, `Mutate(dir, fn)` and `Read(dir, fn)`,
-  `NewStaging(dir) (*Staging, error)` (called inside `Read`; creates the staging
-  directory inside `D@swap` 0700 with `snap/` 0755 and a `lock` file created
-  `O_CREAT|O_EXCL` and held exclusive), the journal (`writeJournal`,
-  `readJournal`, `clearJournal`), `Recover(dir) (trash []string, err error)`
+  random `prev-`, `next-`, `trash-` and `stray-` names inside it), an
+  unexported `acquire(dir, mode)` with the held-set detector, `Mutate(dir, fn)`
+  and `Read(dir, fn)`, `NewStaging(dir) (*Staging, error)` (called inside
+  `Read`; creates the staging directory inside `D@swap` 0700 with `snap/` 0755
+  and a `lock` file created `O_CREAT|O_EXCL` and held exclusive), the journal
+  (`writeJournal`, `readJournal`, `clearJournal`), an unexported `recover(dir)`
   implementing the rules below, and `RecoverMovedAside(dir)` for discovery.
+  Acquisition and recovery stay unexported on purpose: `Mutate` and `Read` are
+  the package's whole contract, and an exported `Acquire` whose documentation
+  said "caller holds the exclusive lock" would be a bypass no compiler enforces.
+  `RecoverMovedAside` is the one exception, because discovery genuinely runs
+  outside an entry point and takes the lock itself. The package does not test
+  the provenance marker at all: journal-based recovery made that check
+  unnecessary, and it stays in `internal/workspace` beside the `ProvenanceFile`
+  constant that defines it, which also removes the duplicated filenames and the
+  drift test they needed.
   `configdir_unix.go` opens lock files with the repository's existing
   `O_NOFOLLOW|O_NONBLOCK` pair (`internal/workspace/contextprobe_unix.go`), so a
   planted symlink fails cleanly and a planted FIFO cannot block the open before
@@ -813,18 +838,16 @@ internal/worktree (leaf)                   DestroySession + argument validation
   is new code with no precedent to copy and no `GOOS=windows` CI job to catch a
   build-tag mistake in it; the Windows build is checked per package in this
   change's own criteria. `configdir_other.go` returns a no-op release and a
-  `Recover` that does nothing, with a comment stating that the platform gets
-  neither ordering nor crash repair. The package copies the two marker filenames
-  it tests for rather than importing them (it sits below the packages that define
-  them), with a test that fails if either copy drifts, because a wrong marker
-  name makes recovery pick the wrong side.
-- **`internal/safetext`** (new leaf): `Strip(string) string`, removing C0, C1,
-  DEL, U+2028, U+2029 and the Cf bidi and zero-width block. It is a leaf so that
-  `internal/worktree`, which composes the kept-branch warning, and
-  `internal/cli`, which prints the resolver's lines, can both import it. The
-  existing candidates cannot serve: `internal/tui`'s sanitizer and every
-  hand-rolled stripper in the repository match Cc only, and the one with the
-  right coverage is unexported in `internal/cli`.
+  `recover` that does nothing, with a comment stating that the platform gets
+  neither ordering nor crash repair.
+- **`internal/cli/session_from_hook_cmd.go`**: `stripControlChars`, already
+  unexported here and already dropping C0, C1 and DEL, gains U+2028, U+2029 and
+  the Cf bidi and zero-width block, and becomes the one stripper the CLI uses
+  for untrusted values. No new package: both consumers of the record's
+  `BranchWarning` are in this package (`session_lifecycle_cmd.go` prints it,
+  `session_from_hook_cmd.go` wraps it into an error), so the strip happens at
+  the print boundary and `internal/worktree` needs no stripper and no new
+  import.
 - **`internal/workspace/snapshotwriter.go`**: `refreshSnapshot` and
   `EnsureConfigSnapshotWithStatus` read the marker and `.git` inside
   `configdir.Read`; the no-drift branch re-reads and rewrites the marker inside
@@ -881,7 +904,7 @@ internal/worktree (leaf)                   DestroySession + argument validation
   uncommitted-changes guard, which now fails closed on any `stat` error rather
   than only on `ENOENT`. Record reads resolve through a root opened on the
   instance directory, and the kept-branch warning goes through
-  `safetext.Strip`. `EffectiveBranchName` and the store's shape are unchanged,
+  the CLI's widened stripper at the print boundary. `EffectiveBranchName` and the store's shape are unchanged,
   so a record niwa wrote behaves exactly as before.
 - **`internal/workspace/bootstrap.go`**: `DefaultDestroySession`, the
   `niwa init --bootstrap` rollback, is the third copy of the destroy argv. It
@@ -942,14 +965,13 @@ type Mode int
 const (Shared Mode = iota; Exclusive)
 var Timeout = DefaultTimeout // 30 * time.Second
 func LockPath(dir string) string                                // <dir>.lock
-func SwapDir(dir string) string                                 // <dir>@swap
-func HoldsSnapshot(dir string) bool                             // provenance marker, regular file
-func Acquire(dir string, mode Mode) (release func(), err error) // errors on nested or out-of-order acquisition
-func Mutate(dir string, fn func() error) error                  // EX, Recover (unix), fn, release, delete trash
+func SwapDir(dir string) (string, error)                        // <dir>@swap; errors if it exists without niwa's sentinel
+func Mutate(dir string, fn func() error) error                  // EX, recover (unix), fn, release, delete trash
 func Read(dir string, fn func() error) error                    // SH, fn, release
 func NewStaging(dir string) (*Staging, error)                   // call inside Read; inside <dir>@swap
-func Recover(dir string) (trash []string, err error)            // caller holds EX; no-op on non-unix
 func RecoverMovedAside(dir string) error                        // takes EX itself; one candidate
+
+// unexported: acquire (held-set detector), recover (no-op on non-unix)
 
 type Journal struct {
 	MovedAside string // <dir>@swap/prev-<random>
@@ -960,8 +982,8 @@ type Journal struct {
 	Recreated  bool // D reappeared after the first rename
 }
 
-// internal/safetext
-func Strip(s string) string // C0, C1, DEL, U+2028/9, Cf bidi and zero-width
+// internal/cli (unexported, existing, widened)
+func stripControlChars(s string) string // + U+2028/9 and the Cf bidi/zero-width block
 
 // internal/testhook
 type Point string
@@ -981,8 +1003,10 @@ func resolveDestroyTarget(s destroyScope, v string, ms []workspace.SessionMappin
 func checkSessionInstance(root string, m workspace.SessionMapping, all []workspace.SessionMapping) (instanceDir string, gone bool, err error)
 func destroySessionWorktrees(cmd *cobra.Command, instanceDir string, m workspace.SessionMapping, git worktree.GitInvoker) error
 
-// internal/worktree (unexported)
-func validateSessionRecord(instanceRoot string, r *SessionRecord) error // path containment, branch shape
+// internal/worktree
+// Exported because workspace.DefaultDestroySession parses its own struct and
+// must reach the same rules; it takes fields rather than the record type.
+func ValidateRecordFields(instanceRoot, worktreePath, branchName string) error
 ```
 
 On-disk additions, per refreshed config directory: exactly two siblings, the
@@ -1041,11 +1065,11 @@ Deliverables:
 
 ### Phase 2: Config-directory package
 
-Add `internal/configdir` with the `@swap` layout helpers, `HoldsSnapshot`, the
-lock with its owner-and-mode check, its post-`flock` inode re-check, its
-nested-acquisition detector and ordering rule and its contended hook, `Mutate`
-and `Read`, staging creation, the journal, and the recovery rules. Unit tests
-cover contention within one process, nested and out-of-order acquisition failing
+Add `internal/configdir` with the `@swap` layout helpers and their sentinel
+check, the lock with its owner-and-mode check, its post-`flock` inode re-check,
+its held-set detector and its contended hook, `Mutate` and `Read`, staging
+creation, the journal, and the recovery rules. Unit tests
+cover contention within one process, a nested and a second-directory acquisition failing
 at once, a pre-existing lock file that is group-writable or another user's,
 a lock file replaced between open and `flock`, timeout wording, an exclusive
 waiter behind repeated shared holds, a dispatch-shaped sequence of acquisitions
@@ -1057,7 +1081,6 @@ have used. Depends on Phase 1 for the contended hook.
 Deliverables:
 - `internal/configdir/configdir.go`, `configdir_unix.go`, `configdir_other.go`,
   `journal.go`, `recover_unix.go`, `recover_other.go`, tests
-- `internal/safetext/safetext.go` and its table test
 
 ### Phase 3: Snapshot writer and in-place writer ordering
 
@@ -1104,7 +1127,8 @@ field alongside the UUID filter and resolving both sides of the
 `EnumerateInstances` membership comparison; validate the lifecycle record's
 worktree path and branch inside `DestroySession`, make the uncommitted-changes
 guard fail closed on any `stat` error, and route the same validation through
-`workspace.DefaultDestroySession`; print through `safetext.Strip`. Table tests
+`workspace.DefaultDestroySession`; widen `stripControlChars` and print through
+it. Table tests
 for `matchMappings` and `resolveDestroyTarget`, command tests for every R9
 outcome and the R10 table, record-validation tests covering a path escaping the
 instance, an empty path, a `--upload-pack=`-shaped branch, a branch with a
@@ -1180,14 +1204,15 @@ nothing against a crafted store.
 
 Values interpolated into R9's lines have control characters stripped rather than
 quoted, because R9 fixes those lines' literal shapes and quoting would change
-them. The stripper is new: nothing in the repository does this job today, the
-dispatch path deliberately refuses rather than strips, and every existing
-stripper here is Cc-only, which leaves U+202E and U+200B intact. A new leaf
-package `internal/safetext` covers C0, C1, DEL, U+2028, U+2029 and the Cf bidi
-and zero-width block, and is a leaf precisely so that `internal/worktree` can
-import it -- the kept-branch warning is composed there, carries a
-record-supplied branch name into a paste-ready `git branch -D` line, and is now
-emitted once per worktree rather than once per command.
+them. No stripper in the repository covers the job as it stands: the dispatch
+path deliberately refuses rather than strips, and every existing stripper is
+Cc-only, which leaves U+202E and U+200B intact. `internal/cli`'s existing
+`stripControlChars` is widened to U+2028, U+2029 and the Cf bidi and zero-width
+block and becomes the CLI's single stripper for untrusted values. It runs at the
+print boundary: the kept-branch warning is composed in `internal/worktree` and
+carries a record-supplied branch name into a paste-ready `git branch -D` line
+emitted once per worktree, but both of its consumers are in `internal/cli`, so
+stripping there covers it without giving a leaf package a new import.
 
 **Scope of teardown by session.** Teardown by session applies the guards
 `niwa worktree destroy` already has to each active lifecycle record of one
@@ -1393,8 +1418,8 @@ this module already declares.
   `instance.json` write now takes a file lock, and a destroy by worktree id
   inside an instance now reads the root store, so under contention past the
   bound it can fail (exit 1).
-- Three new internal packages (`testhook`, `configdir`, `safetext`), and two
-  persistent siblings beside each refreshed config directory: `<dir>.lock` and
+- Two new internal packages (`testhook`, `configdir`), and two persistent
+  siblings beside each refreshed config directory: `<dir>.lock` and
   `<dir>@swap/`.
 - Kept stray directories accumulate inside `@swap` and nothing sweeps them,
   because niwa could not tell what they were in the first place.
@@ -1445,8 +1470,9 @@ this module already declares.
   so only a record niwa did not write is refused.
 - The branch pattern is spelled out byte by byte rather than described, because
   it is the only barrier between an unvalidated JSON field and two git argv
-  positions; `safetext.Strip` and the handle's `IsSafeHandle` filter are the
-  second and third layers on what reaches a terminal.
+  positions; the widened `stripControlChars` at the print boundary and the
+  handle's `IsSafeHandle` filter are the second and third layers on what
+  reaches a terminal.
 - The reap race fails closed: nothing is deleted wrongly, and exit 1 is R9's
   "refused" signal that tells a script to look.
 - The Codex trust lock can move onto `internal/configdir`'s lock primitive in
