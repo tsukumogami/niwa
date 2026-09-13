@@ -373,6 +373,30 @@ func EnumerateInstances(workspaceRoot string) ([]string, error) {
 	return instances, nil
 }
 
+// IsSingleInstanceLayout reports whether workspaceRoot is itself the instance,
+// rather than a root whose instances are children. In that layout
+// instance.json lives at workspaceRoot/.niwa/ and EnumerateInstances returns
+// nothing, because it only scans children.
+//
+// The presence of instance.json is not enough on its own. Every registered
+// `niwa init` writes root state with no instance_name, so a freshly
+// initialized multi-instance root — and one whose instances have all been
+// reaped — would otherwise look single-instance and invite worktree commands
+// to operate inside the rotated config directory. Requiring a named instance
+// distinguishes "the root is the instance" from "the root has no instances
+// yet".
+func IsSingleInstanceLayout(workspaceRoot string) bool {
+	instances, err := EnumerateInstances(workspaceRoot)
+	if err != nil || len(instances) > 0 {
+		return false
+	}
+	state, err := LoadState(workspaceRoot)
+	if err != nil {
+		return false
+	}
+	return state.InstanceName != ""
+}
+
 // InstanceRecord is a machine-readable summary of one instance under a
 // workspace root, emitted by `niwa list --json`. Name is the instance
 // directory's base name; Path is its absolute directory; Ephemeral is true

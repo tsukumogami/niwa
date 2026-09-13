@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
+
+	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
 func init() {
@@ -144,24 +146,47 @@ func resolveInstanceRoot() (string, error) {
 	return discoverInstanceRoot(cwd)
 }
 
-// discoverInstanceRoot walks up from startDir to find the nearest
-// directory containing .niwa/instance.json. Mirrors
-// workspace.DiscoverInstance but avoids the circular import and lets
-// tests override via NIWA_INSTANCE_ROOT without running an apply first.
+// errAtWorkspaceRoot is returned by discoverInstanceRoot when the working
+// directory is the root of a multi-instance workspace. The root is not an
+// instance, and its .niwa holds the workspace's configuration snapshot and
+// session mapping store rather than worktree records — so a worktree command
+// that treated it as one would read the wrong store entirely.
+//
+// Callers match it with errors.Is. Its text is what Execute prints before
+// exiting 1, so it reads as a redirect rather than a failure.
+//
+// atWorkspaceRootMessage is the message without a severity prefix, because
+// `worktree list` prints the same redirect and exits 0: there is nothing wrong
+// with listing worktrees at the root, there just aren't any there.
+const atWorkspaceRootMessage = "this is the workspace root, not an instance; run inside an instance, or pass a session id to niwa worktree destroy"
+
+var errAtWorkspaceRoot = errors.New("niwa: error: " + atWorkspaceRootMessage)
+
+// discoverInstanceRoot resolves startDir to the instance it belongs to.
+//
+// It classifies rather than walking up for .niwa/instance.json. The walk was
+// the bug behind #292: a workspace root carries its own instance.json (init
+// persists init-time state there for `niwa create` to read), so the walk
+// stopped at the root and every worktree command silently treated the root as
+// instance zero. workspace.ClassifyCwd already distinguishes the two by looking
+// for .niwa/workspace.toml, and it is the same classifier `niwa destroy` and
+// `niwa apply` use.
 func discoverInstanceRoot(startDir string) (string, error) {
-	abs, err := filepath.Abs(startDir)
+	class, err := workspace.ClassifyCwd(startDir)
 	if err != nil {
-		return "", fmt.Errorf("resolve path: %w", err)
+		return "", err
 	}
-	dir := abs
-	for {
-		if _, err := os.Stat(filepath.Join(dir, ".niwa", "instance.json")); err == nil {
-			return dir, nil
+	switch class.Class {
+	case workspace.CwdInsideWorktree, workspace.CwdInsideInstance:
+		return class.InstanceDir, nil
+	case workspace.CwdAtWorkspaceRoot:
+		// The single-instance layout is the one case where the root really is
+		// the instance, and worktree commands there keep working as before.
+		if workspace.IsSingleInstanceLayout(class.WorkspaceRoot) {
+			return class.WorkspaceRoot, nil
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", fmt.Errorf("not inside a workspace instance (no .niwa/instance.json found walking up from %s)", startDir)
-		}
-		dir = parent
+		return "", errAtWorkspaceRoot
+	default:
+		return "", fmt.Errorf("not inside a workspace instance (no .niwa/instance.json found walking up from %s)", startDir)
 	}
 }

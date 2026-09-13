@@ -360,12 +360,14 @@ func resolveRegistryScope(name string) (*workspace.ApplyScope, error) {
 	// in a child subdirectory). EnumerateInstances only scans children, so
 	// it returns empty for this layout. Fall back to treating workspaceRoot
 	// as the sole instance.
-	singleInstanceLayout := false
-	if len(instances) == 0 {
-		if _, statErr := os.Stat(filepath.Join(workspaceRoot, workspace.StateDir, workspace.StateFile)); statErr == nil {
-			instances = []string{workspaceRoot}
-			singleInstanceLayout = true
-		}
+	//
+	// The check requires a named instance, not merely a state file: every
+	// registered `niwa init` writes root state with no instance_name, so a
+	// freshly initialized root would otherwise be mistaken for the
+	// single-instance layout and skip root materialization.
+	singleInstanceLayout := workspace.IsSingleInstanceLayout(workspaceRoot)
+	if singleInstanceLayout {
+		instances = []string{workspaceRoot}
 	}
 
 	scope := &workspace.ApplyScope{

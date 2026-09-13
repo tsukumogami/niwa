@@ -611,6 +611,18 @@ func runSessionLifecycleList(cmd *cobra.Command, repo, status string, onlyAttach
 	}
 	instanceRoot, err := resolveInstanceRoot()
 	if err != nil {
+		// At a multi-instance root there are no worktrees to list, which is a
+		// fact about where the command ran rather than a failure. Print the
+		// redirect and exit 0, so a script looping over directories is not
+		// derailed by hitting the root. --json still gets a parseable empty
+		// array on stdout, with the redirect kept on stderr.
+		if errors.Is(err, errAtWorkspaceRoot) {
+			fmt.Fprintln(cmd.ErrOrStderr(), "niwa: "+atWorkspaceRootMessage)
+			if sessionListJSON {
+				fmt.Fprintln(cmd.OutOrStdout(), "[]")
+			}
+			return nil
+		}
 		return err
 	}
 
