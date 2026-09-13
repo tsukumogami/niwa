@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   Developers can't trust niwa's session records when tearing down a finished
   worker or starting several at once: teardown can't find the id they hold,
@@ -22,7 +22,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 Framing for making niwa's session records dependable during worker teardown
 and during concurrent provisioning. The two problems share one brief because
@@ -162,23 +162,6 @@ there once the other dispatches finish.
 - Worktree attach not resuming a conversation (#265) and push credentials
   for dispatched workers (#279). Both touch the same commands and neither is
   about the session records.
-
-## Open Questions
-
-- Whether teardown accepts both the full session id and the short handle, or
-  only one of them, is the PRD's call against how developers and cleanup
-  scripts actually obtain ids. Whichever form is not accepted must still be
-  answered with a message naming the form that is, so the outcome above
-  holds either way.
-- What teardown should do when a short handle and a worktree id could name
-  different things is the PRD's to specify; the DESIGN owns the lookup that
-  implements it.
-- Whether the configuration directory's other niwa-written state (instance
-  state, dispatch briefs) gets the same concurrency guarantee as mappings is
-  the PRD's to bound. The brief's default is mappings only; the PRD may widen
-  it but not silently.
-
-None of these block the brief; each is a detail the downstream PRD settles.
 
 ## References
 
