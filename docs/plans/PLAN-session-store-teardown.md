@@ -513,6 +513,12 @@ behavior.
       deleted after release, the kept stray directory, the bounded wait, and
       that ordering and crash repair are unix-only; the stale claims about
       idempotent preflight cleanup and never reading mid-swap are corrected.
+- [ ] Every exit code a `niwa worktree destroy` invocation returns for an
+      outcome that exits 1 today is announced as a behavior change, not folded
+      in as a fix: the pull request body carries them under their own "Behavior
+      changes" heading, naming the old code and the new one per outcome, and
+      flags them for the release notes. The repository has no `CHANGELOG` file,
+      so the release notes are where a user meets the change.
 - [ ] `go test ./test/functional/...` passes on Linux, `go vet ./...` is clean,
       and no committed file references a non-durable working path.
 

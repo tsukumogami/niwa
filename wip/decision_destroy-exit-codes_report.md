@@ -119,7 +119,11 @@ to the coordinator as a follow-up proposal.
   Issue 6 and Issue 7 acceptance criteria pick it up.
 - One behavior change beyond the draft: `--by-path` that resolves nothing
   moves from exit 1 to exit 3. No test, script, hook or CI step in the
-  repository asserts on it.
+  repository asserts on it. Exit codes are a user-visible contract, so this is
+  announced as a behavior change rather than folded in as a fix: the pull
+  request body carries it under its own "Behavior changes" heading, and it is
+  flagged for the release notes. The repository has no `CHANGELOG` file, so the
+  release notes are where a user meets it.
 - Follow-up proposed to the coordinator (not filed): a niwa-wide exit-code
   policy with a constants block and a deprecation window for the codes
   `attach`, `detach` and `init` already return.
