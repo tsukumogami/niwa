@@ -62,7 +62,27 @@ type destroyTarget struct {
 // resolveDestroyScope classifies the working directory. A worktree and a
 // single-instance root both count as being inside an instance, because in both
 // the lifecycle store of that instance is the one a worktree id refers to.
+//
+// NIWA_INSTANCE_ROOT overrides the classification, exactly as
+// resolveInstanceRoot honours it for every other worktree subcommand. niwa
+// exports it into worktree setup scripts, so a destroy that ignored it would
+// resolve against the wrong instance -- or, at a multi-instance root, refuse a
+// worktree id that the override makes perfectly resolvable. The value is taken
+// verbatim and never refused; niwa only ever sets it to an instance root.
+//
+// The workspace root still has to be found, because that is where the session
+// mapping store lives, and the override says nothing about it. Classifying the
+// override's own directory is best-effort: if it yields no workspace root, a
+// worktree id still resolves against the named instance and a session id
+// simply finds no mappings, which is the same answer as an empty store.
 func resolveDestroyScope() (destroyScope, error) {
+	if root := os.Getenv("NIWA_INSTANCE_ROOT"); root != "" {
+		scope := destroyScope{instanceDir: root}
+		if class, err := workspace.ClassifyCwd(root); err == nil {
+			scope.workspaceRoot = class.WorkspaceRoot
+		}
+		return scope, nil
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return destroyScope{}, fmt.Errorf("niwa: error: getting working directory: %w", err)

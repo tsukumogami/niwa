@@ -224,6 +224,71 @@ func TestResolveDestroyTarget(t *testing.T) {
 	})
 }
 
+// TestResolveDestroyScope_HonoursInstanceRootOverride pins R3's override on the
+// positional path. `--by-path` went through resolveInstanceRoot and honoured
+// NIWA_INSTANCE_ROOT from the start; the positional path classified cwd
+// directly and ignored it, so at a multi-instance root a worktree id the
+// override makes resolvable exited 3 instead of destroying. niwa exports the
+// variable into worktree setup scripts, so this is reachable in ordinary use.
+func TestResolveDestroyScope_HonoursInstanceRootOverride(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceRoot(t, root)
+	writeInstanceState(t, root, "")
+	instanceDir := filepath.Join(root, "inst-a")
+	writeInstanceState(t, instanceDir, "inst-a")
+
+	prev, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(prev) }()
+
+	// Without the override, standing at a multi-instance root means no
+	// instance, so a worktree id has nothing to resolve against.
+	t.Setenv("NIWA_INSTANCE_ROOT", "")
+	bare, err := resolveDestroyScope()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if bare.instanceDir != "" {
+		t.Fatalf("at a multi-instance root the scope has no instance; got %q", bare.instanceDir)
+	}
+
+	// With it, the named instance is the scope, and the workspace root is
+	// still found so session ids keep resolving.
+	t.Setenv("NIWA_INSTANCE_ROOT", instanceDir)
+	got, err := resolveDestroyScope()
+	if err != nil {
+		t.Fatalf("the override must never be refused, got: %v", err)
+	}
+	if got.instanceDir != instanceDir {
+		t.Fatalf("want instanceDir %q, got %q", instanceDir, got.instanceDir)
+	}
+	if got.workspaceRoot != root {
+		t.Fatalf("want workspaceRoot %q, got %q", root, got.workspaceRoot)
+	}
+}
+
+// TestResolveDestroyScope_OverrideTakenVerbatim: the value is niwa's own, and
+// resolveInstanceRoot returns it without classifying. A path that resolves to
+// no workspace still names an instance, so a worktree id resolves there and a
+// session id finds no mappings rather than erroring.
+func TestResolveDestroyScope_OverrideTakenVerbatim(t *testing.T) {
+	orphan := t.TempDir()
+	t.Setenv("NIWA_INSTANCE_ROOT", orphan)
+
+	got, err := resolveDestroyScope()
+	if err != nil {
+		t.Fatalf("the override must never be refused, got: %v", err)
+	}
+	if got.instanceDir != orphan {
+		t.Fatalf("want the value verbatim (%q), got %q", orphan, got.instanceDir)
+	}
+}
+
 // TestCheckSessionInstance walks the ordered rungs. The returned directory is
 // always the enumerated one, never the recorded string: a mapping can name any
 // path, and only those the workspace root actually holds as instances survive.

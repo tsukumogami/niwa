@@ -23,7 +23,7 @@ Feature: niwa worktree destroy resolves a session id or handle from the workspac
   directory, and the clone inside it. A teardown that reclaimed the instance
   would leave the developer with no session to go back to.
 
-  Design: docs/designs/DESIGN-session-store-teardown.md
+  Design: docs/designs/current/DESIGN-session-store-teardown.md
 
   # ---------------------------------------------------------------------
   # Destroy by session id, merged branch: the whole worktree goes.

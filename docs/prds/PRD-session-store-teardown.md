@@ -1,27 +1,24 @@
 ---
 schema: prd/v1
-status: In Progress
+status: Done
 problem: |
   Developers who run many dispatched sessions in one workspace can't rely on
-  niwa's session records at teardown or during parallel provisioning.
-  `niwa worktree destroy` can't resolve the session id or handle a developer
-  holds, so its merged-branch check never runs before `niwa reap` deletes the
-  instance; and concurrent refreshes of the workspace configuration directory
-  can fail each other or silently lose, or resurrect, a session mapping.
+  niwa's session records at teardown. `niwa worktree destroy` can't resolve the
+  session id or handle a developer holds, so its merged-branch check never runs
+  before `niwa reap` deletes the instance, and run from the workspace root it
+  looks for worktree records in the directory that holds session mappings.
 goals: |
   Teardown by the id a developer or script already holds reaches that
   session's niwa-managed worktrees and applies the merged-branch check, or
-  reports, in a form a script can act on, that there was nothing to check.
-  Concurrent niwa commands that refresh the same configuration directory all
-  succeed, and every session mapping written or deleted around them ends in
-  the state its writer left it.
+  reports, in a form a script can act on, that there was nothing to check. No
+  worktree subcommand treats a multi-instance workspace root as an instance.
 absorbed: docs/briefs/BRIEF-session-store-teardown.md
 source_issue: 292
 ---
 
 ## Status
 
-In Progress
+Done
 
 Absorbed [BRIEF-session-store-teardown](docs/briefs/BRIEF-session-store-teardown.md); carried in Absorbed Brief.
 
@@ -31,26 +28,46 @@ Absorbed [BRIEF-session-store-teardown](docs/briefs/BRIEF-session-store-teardown
 sequence: destroy the worker's niwa-managed worktrees, stop and remove the
 Claude session, then `niwa reap`. Only the first step refuses to delete an
 unmerged branch, and today it can't resolve any id a developer holds, so the
-sequence runs with its one safety check silently skipped. The same developers
-routinely launch dispatches in parallel, which is exactly when the session
-mappings that make a worker reachable get lost (#292, #297).
-
-**Why the two issues are one feature.** Both leave the workspace's session
-records untrustworthy at a session's lifecycle boundaries, teardown and
-provisioning, and both are fixed in the same store.
+sequence runs with its one safety check silently skipped (#292).
 
 **The outcome a user should experience.** A developer or cleanup script
 tearing down a finished worker names it by the id they already have and gets
 the merged-branch check applied, or a plain statement, in a form a script can
-act on, that there was nothing to check. A developer who launches several
-dispatches at once finds every worker recorded and reachable, and a reaped
-worker stays reaped.
+act on, that there was nothing to check.
 
 **Where the boundary sits.** Teardown covers niwa-managed worktrees only; it
 reports honestly rather than extending the check to worktrees Claude Code
-creates itself or to branches in an instance's own clones. The concurrency
-guarantee covers what niwa itself writes, not files other tools drop into the
-configuration directory.
+creates itself or to branches in an instance's own clones.
+
+## Scope
+
+This document covers teardown id resolution and the workspace-root refusal
+(niwa issue #292), which shipped together.
+
+It was originally written to cover niwa issue #297 — ordering concurrent
+refreshes of a configuration directory against each other and against niwa's
+own writes — as well, on the reading that both issues left the same store
+untrustworthy. The work was split during implementation once it was clear the
+two halves meet at exactly one call site: teardown's single read of the session
+mapping store. That read ships unlocked here, as every reader of that store is
+today, and #297 replaces it with a locked read.
+
+The concurrency requirements were removed from this document rather than
+carried unmet. Marking a requirement Done that no code satisfies is worse than
+having no requirement written down, because a later reader has no way to tell
+the two apart. #297 authors its own chain, from the research and review
+material the implementing session preserved and from the findings recorded on
+the issue itself.
+
+**Two requirement numbers were reused, so a citation written against an earlier
+draft can resolve to the wrong requirement instead of failing.** R1-R10 keep
+their original numbers and wording. The two survivors from the removed sections
+were renumbered: the old R21 (no other behavior changes) is now **R11**, and
+the old R24 (pre-fix evidence) is now **R12**. In the earlier draft R11 was a
+concurrency requirement and R12 did not exist. Anything citing R11 or R12
+against that draft — a comment, a commit message, a review note — now points at
+a different requirement silently. The removed numbers R13-R25 resolve to
+nothing, which at least fails loudly.
 
 ## Problem Statement
 
@@ -70,25 +87,13 @@ skipped, and the `niwa reap` that follows deletes the instance and any
 unmerged branch in it. The failure looks the same as a check that passed
 (#292).
 
-At provisioning, the mappings live inside the workspace-root configuration
-directory, which every provisioning command refreshes by rebuilding it
-elsewhere and swapping it into place. Nothing orders two refreshes, or a
-refresh and a mapping write, against each other. Two parallel dispatches can
-fail each other with a missing staging path; a mapping written during another
-command's refresh can vanish when that refresh lands; a mapping the reaper
-just deleted can come back; and a write that lands mid-swap can leave the
-directory without its configuration (#297). Developers launch parallel
-dispatches routinely, so this is ordinary use, not an edge case.
-
-Three further failures share that window. A mapping-store read taken while the
-directory is being swapped comes back empty, and the reaper treats an instance
-with no mapping as reclaimable once it is half an hour old, so a live worker's
-directory is deleted. A refresh killed between its two renames leaves the
-directory moved aside, and the next one deletes the only remaining copy. And
-the root `instance.json`, which records whether this workspace provisions an
-instance per session at all, is read with its error ignored and rewritten
-without a temp file, so a torn read can drop that flag and quietly stop
-ephemeral provisioning for everyone using the workspace.
+The mappings live inside the workspace-root configuration directory, which
+every provisioning command refreshes by rebuilding it elsewhere and swapping it
+into place. Teardown therefore reads a store that a concurrent refresh can be
+moving. Ordering those against each other is #297; what this document requires
+of teardown is that the read fail safely, which R7 and R8 pin by making
+resolution act on an enumerated instance directory rather than on a recorded
+string.
 
 ## Goals
 
@@ -99,13 +104,9 @@ ephemeral provisioning for everyone using the workspace.
 - A cleanup script can tell from exit status and stable output whether
   teardown destroyed something, found nothing to destroy, couldn't resolve
   the id, or refused.
-- Several dispatches launched at once each produce an instance and a
-  recorded mapping that `niwa list` shows, and none fails because of another.
-- A reaped worker's mapping stays gone, and a live worker's mapping stays
-  present, regardless of what else is provisioning.
-- Nothing deletes a live worker because it read the store mid-swap, an
-  interrupted refresh repairs itself, and the workspace's own settings survive
-  a burst of parallel provisioning.
+- No worktree subcommand run at a multi-instance workspace root treats that
+  root as an instance, or reads its session mapping store as though those files
+  were worktree records.
 
 ## User Stories
 
@@ -128,21 +129,10 @@ ephemeral provisioning for everyone using the workspace.
 - As a developer inside an instance, I want `niwa worktree destroy <id>` with
   the id `niwa worktree list` shows, and `--by-path`, to keep working exactly
   as today, so that the fix costs me nothing.
-- As a developer starting four pieces of work at once with backgrounded
-  `niwa dispatch --detach` commands against a workspace whose configuration
-  source is re-fetched on every provision, I want all four to succeed with
-  four recorded mappings, so that every worker I started shows in
-  `niwa list`.
-- As a developer running `niwa reap` while other dispatches are still
-  provisioning, I want reaped workers to stay reaped and live workers to keep
-  their mappings, so that the reaper's view of the workspace stays true.
-- As a developer whose worker is still running, I want the reaper never to
-  reclaim its instance because it happened to read the mapping store during a
-  refresh, so that a half-hour-old worker doesn't lose its working directory.
-- As a developer who has just launched several dispatches, I want my
-  workspace to keep provisioning an instance per session afterwards, so that
-  a torn read of the workspace's own settings doesn't silently turn that off
-  for everyone using it.
+- As a developer standing at a multi-instance workspace root, I want
+  `niwa worktree list` to tell me I am at the root rather than printing an
+  empty table built from session mappings, so that I am not misled into
+  thinking the instance has no worktrees.
 
 ## Requirements
 
@@ -234,11 +224,10 @@ ephemeral provisioning for everyone using the workspace.
   | Nothing to destroy: no active worktree in the instance | 0 | stdout: `session: nothing to destroy: session <session-id> has no active niwa-managed worktree in <instance>; branches outside niwa-managed worktrees were not checked` |
   | Nothing to destroy: the instance directory no longer exists | 0 | stdout: `session: nothing to destroy: instance <path> for session <session-id> no longer exists` |
   | At least one worktree refused by a guard | 1 | stdout: the destroyed lines for the others. stderr: the kept-branch warnings for the destroyed ones, plus one `niwa: error:` line per refused worktree with the guard's existing message |
-  | Mapping refused (R6, R7) | 1 | stderr: `niwa: error: session <session-id> <reason>` |
+  | Mapping refused (R6, R7) | 1 | stderr: `niwa: error: session <session-id> <reason>`, with one exception: a failure to enumerate the workspace's instances emits `niwa: error: enumerating instances: <reason>`, which names no session because the refusal is not about one |
   | `--force` passed with a session id or handle | 2 | stderr: `niwa: error: --force applies to one worktree; pass a worktree id or --by-path <worktree path>` |
   | The value matches no worktree and no session | 3 | stderr: `niwa: error: no worktree or session matches "<value>"` |
   | The value is ambiguous (R4, R5) | 4 | stderr: `niwa: error: "<value>" matches <match>, <match>`; when a worktree id is among the matches, also the R5 guidance |
-  | The configuration directory is held past R17's bound | 1 | stderr: R17's timeout error |
 
   `<instance>` and `<path>` are both the instance directory's path. The
   enriched `session: destroyed <worktree-id> (<repo>) at <path>` line is
@@ -276,94 +265,26 @@ ephemeral provisioning for everyone using the workspace.
   `instance.json` names no instance is multi-instance for this rule, so the
   table above applies to it.
 
-### Functional: concurrent refresh
-
-- **R11.** Concurrent niwa commands that refresh the same configuration
-  directory (`niwa dispatch`, `niwa create`, `niwa apply`, `niwa reset`,
-  `niwa watch`'s review staging, `niwa config set global`, the
-  ephemeral-session hook, and any other caller of the snapshot refresh) do not
-  fail because of each other, for both GitHub and non-GitHub sources and in
-  both the refresh and no-change paths. The one permitted failure is R17's
-  bounded-wait error, which must not occur under the conditions of the
-  four-dispatch acceptance criterion. This holds for the workspace-root
-  configuration directory, overlay directories and the global configuration
-  directory.
-- **R12.** A session mapping that niwa writes while another command is
-  refreshing the configuration directory is present after that refresh
-  completes, and the write itself returns success.
-- **R13.** A session mapping that niwa deletes while another command is
-  refreshing the configuration directory stays deleted after that refresh
-  completes.
-- **R14.** After every concurrent command has finished, the configuration
-  directory holds the configuration files of the refresh that swapped last,
-  together with the local state R12 and R13 cover. Because fetches run outside
-  the wait (R18), the refresh that swaps last may have fetched first; that is
-  acceptable and no generation check is required.
-- **R15.** Nothing that reads the session mapping store to decide whether to
-  destroy or reclaim acts on a read taken while the configuration directory was
-  being swapped. That covers the reaper's sweeps, `niwa worktree destroy`, and
-  the ephemeral-instance scan `niwa list` uses, which reads the store directly
-  today.
-- **R16.** A refresh interrupted at any point (the process killed) leaves the
-  configuration directory usable, and the next niwa command that reads or
-  refreshes it proceeds without manual cleanup; the next refresh removes what
-  the interrupted one left behind.
-
 ### Non-functional
 
-- **R17.** Waiting on another command is bounded. The bound is a named
-  constant, 30 seconds by default, that tests can override. A command that
-  would wait longer exits 1 with an error that names the configuration
-  directory and says another niwa command is using it.
-- **R18.** How long one command waits on another does not grow with network
-  fetch time: while one command's fetch is in progress, another command's
-  mapping write and another command's refresh of the same directory both
-  complete.
-- **R19.** A single command never waits on itself: a command that refreshes
-  the same directory more than once and writes a mapping (as `niwa dispatch`
-  does) completes without hitting R17's bound.
-- **R20.** The ordering guarantees hold on Linux and macOS, the platforms niwa
-  ships for, using advisory file locking. On platforms without it, the code
-  still builds and the missing guarantee is stated in a comment where the
-  fallback is defined.
-- **R21.** Apart from R9's new outcome codes, R10's root-level behavior, R17's
-  timeout under contention, and the tightened single-instance test in Terms
-  (which changes how a root with no named instance is classified), existing
-  invocations keep their prompts (none), output and exit codes, and `go.mod`
-  gains no new module. `niwa worktree list` at the root keeps exit 0.
-
-### Functional: root instance state
-
-- **R22.** Writing an `instance.json` (the root's or an instance's), or
-  rewriting the provenance marker in place, never leaves a reader, or a
-  concurrent refresh's carry-over, able to see an empty or partial file.
-- **R23.** A command that failed to read an existing root `instance.json`
-  never writes the root `instance.json`. A notice it would have recorded is
-  recorded by a later command instead.
+- **R11.** Apart from R9's new outcome codes, R10's root-level behavior, and
+  the tightened single-instance test in Terms (which changes how a root with no
+  named instance is classified), existing invocations keep their prompts
+  (none), output and exit codes, and `go.mod` gains no new module.
+  `niwa worktree list` at the root keeps exit 0.
 
 ### Verification
 
-- **R24.** A test that fails on the pre-fix code shows `niwa worktree
+- **R12.** A test that fails on the pre-fix code shows `niwa worktree
   destroy`, run from the workspace root with a dispatched session's session
   id and with its handle, destroying that session's worktree and keeping an
   unmerged branch with a warning.
-- **R25.** Tests that fail on the pre-fix code force a mapping write, and
-  separately a mapping delete, into another refresh's window between carrying
-  local state over and swapping it into place, and assert the write survives
-  and the delete sticks. Another forces two refreshes of one directory to
-  overlap and asserts neither errors.
-
 ## Acceptance Criteria
 
 Criteria marked (pre-fix fails) must fail against the code before this
-change. "Forced" means a test-only hook holds one side at the named point, so
-the ordering does not depend on timing. Because every command reaches the
-refresh through the same snapshot writer, forced tests against that writer
-are the accepted proof for R11-R14 across commands; the parallel-dispatch
-criterion is the command-level check. Forcing an interleaving needs a hook the
-pre-fix code does not have, so for the forced criteria the baseline is the
-parent commit plus the behavior-neutral commit that adds the hook points: the
-tests are shown failing there before the fix lands.
+change. The baseline is the parent commit, and the evidence is a binary built
+from it run against the same fixture: unit tests cannot serve, because they
+reference identifiers the pre-fix tree does not have.
 
 ### Teardown
 
@@ -464,75 +385,16 @@ tests are shown failing there before the fix lands.
 - [ ] In a single-instance-layout workspace, `niwa worktree create` and
       `destroy <worktree-id>` at the root work as before.
 
-### Concurrent refresh
-
-- [ ] (pre-fix fails) Forced: two refreshes of one workspace-root
-      configuration directory with a local (non-GitHub) source overlap with
-      the second starting while the first is between fetch and swap; both
-      complete without error.
-- [ ] Forced: the same overlap for an overlay directory and for the global
-      configuration directory; both complete without error.
-- [ ] With a GitHub-style source (fake fetcher), overlapping refreshes in the
-      drift path and in the no-change path both complete without error.
-- [ ] (pre-fix fails) Forced: a mapping write between another refresh's
-      carry-over and its swap returns success, and the mapping is present
-      afterwards.
-- [ ] (pre-fix fails) Forced: a mapping delete at the same point returns
-      success, and the mapping is absent afterwards.
-- [ ] Forced: a mapping write while a swap is renaming the directory returns
-      success, and afterwards the directory contains `workspace.toml` and the
-      provenance marker from that refresh, the carried-over `instance.json`,
-      and the new mapping.
-- [ ] Forced: the reaper's mapping read during a swap, against a mapped
-      dispatch instance whose age is past the reaper's backstop threshold,
-      leaves the instance and its mapping in place (pre-fix fails).
-- [ ] Forced: `niwa worktree destroy <session-id>` whose mapping read lands
-      during a swap resolves the session rather than exiting 3.
-- [ ] A refresh killed after staging and before swap, then a second refresh:
-      the second succeeds and no staging or previous-snapshot directory from
-      the first remains.
-- [ ] A refresh killed after moving the live directory aside and before moving
-      the new snapshot into place: the next niwa command that reads the
-      configuration directory finds `workspace.toml` and the existing mappings
-      there without manual cleanup, and the next refresh succeeds.
-- [ ] With the bound set to 1 second in the test, a refresh whose fetch is held
-      for 3 seconds does not stop a concurrent mapping write, or a concurrent
-      refresh of the same directory, from completing within 1 second.
-- [ ] With the bound set to 1 second, a command blocked for 3 seconds on the
-      configuration directory exits 1 within 2 seconds with a message
-      containing the directory path and the words "another niwa command".
-- [ ] Forced: the ephemeral-instance scan `niwa list` uses, taken during a
-      swap, does not report a mapped instance as unmapped.
-- [ ] Forced: a provenance-marker rewrite in the no-change path concurrent
-      with a reader never lets that reader see an empty or partial marker.
-- [ ] One `niwa dispatch` run against a local-source workspace, which refreshes
-      twice and writes a mapping, completes with the default bound.
-- [ ] (pre-fix fails) Four parallel `niwa dispatch --detach` runs, with stdin
-      closed, against a workspace initialized from a local configuration
-      repository all exit 0,
-      leave four distinct session mappings each pointing at an existing
-      instance directory, and `niwa list` shows all four instances.
-- [ ] (pre-fix fails) Forced: a `niwa create` whose read of the root
-      `instance.json` lands while another `niwa create` is writing root
-      disclosures to it never leaves the root `instance.json` without
-      `ephemeral_session_mode` and `overlay_url`, and the file always parses.
-- [ ] With the root `instance.json` read forced to fail by a test hook, a
-      `niwa create` that would record a new notice leaves the file
-      byte-identical; a later `niwa create` whose read succeeds records that
-      notice.
-
 ### Platforms
 
 - [ ] `GOOS=windows go build` succeeds for every package this change touches
-      or adds (`./internal/workspace/...`, `./internal/config/...`,
-      `./internal/watch/...`, `./internal/worktree/...`, and the two new
-      packages). `GOOS=windows go build ./...` is not required and does not
-      pass today: `internal/cli/sessionattach` and `internal/promptcapture`
-      already fail to build for Windows, and this change neither fixes nor
-      worsens that.
-- [ ] The non-unix fallback file carries a comment stating that no ordering is
-      provided, `go test -race ./...` passes on Linux and macOS in CI, the
-      functional suite passes on Linux, and `go.mod` lists no new module.
+      (`./internal/workspace/...`, `./internal/worktree/...`).
+      `GOOS=windows go build ./...` is not required and does not pass today:
+      `internal/cli/sessionattach` and `internal/promptcapture` already fail to
+      build for Windows, and this change neither fixes nor worsens that.
+- [ ] `go test ./...` passes on Linux and macOS in CI, `go test -race` passes
+      over the touched packages, the functional suite passes on Linux, and
+      `go.mod` lists no new module.
 
 ## Out of Scope
 
@@ -548,16 +410,12 @@ tests are shown failing there before the fix lands.
   `claude agents --json` or the dispatch output.
 - Listing every instance's worktrees from the workspace root. That is a new
   feature; at the root `niwa worktree list` says where to run instead.
+- Ordering concurrent refreshes of a configuration directory against each
+  other and against niwa's own writes into it (#297). Teardown's single read of
+  the session mapping store is the one place the two meet, and it ships
+  unlocked here; see Known Limitations.
 - Moving niwa's local state out of the configuration directory so refreshes no
   longer carry it across (#74).
-- Files other tools write into the configuration directory, such as dispatch
-  briefs written by the `/dispatch` skill.
-- The stale read-modify-write of the root `instance.json`, beyond R22 and
-  R23, and watch state that a refresh does not carry across. See Known
-  Limitations.
-- Concurrency for worktree lifecycle records. They live in each instance's own
-  `.niwa/`, which no refresh rotates, except in the single-instance layout;
-  see Known Limitations.
 - Redesigning `niwa reap` or the ephemeral-session lifecycle.
 - Worktree attach not resuming a conversation (#265) and push credentials for
   dispatched workers (#279).
@@ -569,9 +427,6 @@ tests are shown failing there before the fix lands.
   branch in its instance's repository clone, has nothing for
   `niwa worktree destroy` to check. The "nothing to destroy" line says so, and
   the reap that follows still deletes those branches.
-- **Dispatch briefs keep a narrower guarantee.** A brief the `/dispatch` skill
-  writes while another command is mid-refresh can still be lost, because the
-  skill writes it with its own tools.
 - **R6's newest-session check is best-effort until the mapping read is
   serialized.** The rung reads the same store snapshot the match ran against.
   While that read is unlocked, a read taken mid-refresh can miss the *newer*
@@ -581,31 +436,17 @@ tests are shown failing there before the fix lands.
   guards all still run, so the failure is a guard that did not fire rather than
   the wrong instance. Every other way a partial read can go wrong removes
   candidates and therefore fails toward doing nothing.
-- **Root `instance.json` notices can still be lost.** R22 and R23 stop a
-  concurrent command from wiping the root `instance.json`. Two commands that
-  each record a different new one-time notice still rewrite it from reads
-  taken at their start, so one notice key can be lost and that notice shown
-  again. That is left for a separate issue.
-- **Other readers of the root configuration directory can still see a swap.**
-  R15 covers the reads that decide to destroy something. The ephemeral-session
-  hook's read of `ephemeral_session_mode` and the upward search for a
-  workspace's configuration are not covered: a session that starts during the
-  microseconds a swap has the directory moved aside gets no instance, and says
-  so no more loudly than today. That belongs with the root `instance.json`
-  follow-up.
-- **Watch state is not covered.** Watch's handled-set and staged records under
-  the root configuration directory are not carried across any refresh,
-  concurrent or not, and `niwa watch` triggers a refresh itself before writing
-  them, so it routinely destroys its own handled-set and re-treats handled
-  pull requests as new. That is left for a separate issue, and this is why it
-  matters more than a passive gap.
-- **Single-instance layout.** Where the workspace root is itself the instance,
-  its worktree lifecycle records share the rotated directory with the mappings,
-  and the ordering guarantee does not extend to them. Teardown by session is
-  also refused there: the mapping's recorded instance path is the root, which
-  is not an instance location under R7.
-- **Non-unix platforms get no ordering**, matching niwa's existing lock
-  fallback.
+- **The mapping read is not ordered against a config refresh.** Teardown reads
+  the store without a lock, as every reader of it does today, so a read taken
+  while the workspace root's configuration directory is being swapped sees the
+  directory missing or a subset of its files. That is #297's subject. The read
+  fails toward doing nothing — it cannot invent a mapping, and R7's enumeration
+  check means it cannot name a directory the workspace does not hold as an
+  instance — with the single exception recorded above.
+- **Single-instance layout.** Teardown by session is refused where the
+  workspace root is itself the instance: the mapping's recorded instance path is
+  the root, which is not an instance location under R7. Destroy by worktree id
+  and `--by-path` work there as they always have.
 
 ## Decisions and Trade-offs
 
@@ -642,20 +483,16 @@ tests are shown failing there before the fix lands.
   store. It now prints where to run instead, and keeps exit 0 so an existing
   successful invocation doesn't start failing; the single-worktree actions,
   which already fail there today, exit 1 with the same message.
-- **The concurrency guarantee covers mappings, the reads that act on them,
-  and two guards on the root `instance.json`.** The brief's default was
-  mappings only. Research found that a dispatch reads the root
-  `instance.json` with its error ignored and may rewrite it, non-atomically,
-  from that read, so a torn read during parallel dispatches can drop
-  `ephemeral_session_mode` and silently stop ephemeral provisioning for the
-  whole workspace. An atomic write and a no-write-after-failed-read rule close
-  that without reordering how commands handle state. The remaining notice-key
-  loss and watch state are left for their own issues. Closes the brief's third
-  open question.
-- **The reaper's and teardown's reads are in scope.** A mapping-store read
-  taken mid-swap looks empty. The reaper's backstop sweep then treats mapped
-  dispatch instances as reclaimable, and teardown would report "no such
-  session". Both are the same failure as a dropped mapping.
-- **The wait is bounded at 30 seconds by default.** That matches niwa's
-  existing lock timeout. R18 keeps the wait short in practice by keeping
-  network fetches out of it.
+- **Containment does not depend on the mapping read.** The read is unlocked
+  and can return a subset, so the resolver was built not to need more from it:
+  R7 hands `DestroySession` a directory that instance enumeration produced,
+  never the string a mapping recorded. A crafted or stale mapping can therefore
+  cost a refusal, but cannot point teardown at a directory the workspace does
+  not hold as an instance. That is what let #297 be split off rather than
+  blocking this.
+- **`--force` is refused with a session target.** It applies to one worktree,
+  and a session can back several. A prefix-matched or mistyped id that forced
+  its way through would discard every uncommitted change and unmerged branch in
+  the instance at once. Forcing stays available one worktree at a time through
+  the worktree id or `--by-path`. This was added after the outcome table was
+  first settled, and is called out as a behavior change.
