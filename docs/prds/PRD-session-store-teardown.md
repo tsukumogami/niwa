@@ -262,8 +262,7 @@ ephemeral provisioning for everyone using the workspace.
   | `destroy <value>` that matches no session | The R9 no-match line; exit 3 |
   | `destroy --by-path <path>` | As today |
   | `list --json` | The same stderr line, `[]` on stdout, exit 0 |
-  | `apply <x>`, `attach <x>`, `detach <x>`, and `niwa go <repo> <worktree-id>` | stderr: `niwa: error: this is the workspace root, not an instance; run inside an instance, or pass a session id to niwa worktree destroy`; exit 1. Each already exits 1 there today, so only the message changes. `niwa go` gains no session resolution |
-  | `create` | The same stderr line, exit 2. Bare `create` at the root exits 2 today through its repo-inference usage error, and keeps that code |
+  | `apply <x>`, `attach <x>`, `detach <x>`, `create`, and `niwa go <repo> <worktree-id>` | stderr: `niwa: error: this is the workspace root, not an instance; run inside an instance, or pass a session id to niwa worktree destroy`; exit 1. `apply`, `attach`, `detach` and `go` already exit 1 there today, so only the message changes. `create` is the one code change: `create <repo>` already exits 1, but bare `create` exits 2 today because the refusal comes from repo inference rather than from the root check, and the refusal now fires first. `niwa go` gains no session resolution |
   | Shell completion of worktree ids | Offers nothing, as today |
   | The WorktreeRemove hook | Logs and exits 0, as today |
 
@@ -429,8 +428,9 @@ tests are shown failing there before the fix lands.
       stderr and exit 1.
 - [ ] At the same root, bare `niwa worktree create` and
       `niwa worktree create <repo>` for a repo that exists in some instance
-      each print the R10 root-level error on stderr and exit 2, the code bare
-      `create` returns there today.
+      each print the R10 root-level error on stderr and exit 1; bare `create`
+      exits 2 there before the fix, through the repo-inference usage error the
+      root refusal now pre-empts.
 - [ ] At the same root, `niwa worktree list --json` prints `[]` on stdout, the
       R10 message on stderr, and exits 0.
 - [ ] At the same root, shell completion of worktree ids offers no candidates,
