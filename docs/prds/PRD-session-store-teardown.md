@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: In Progress
 problem: |
   Developers who run many dispatched sessions in one workspace can't rely on
   niwa's session records at teardown or during parallel provisioning.
@@ -21,7 +21,7 @@ source_issue: 292
 
 ## Status
 
-Accepted
+In Progress
 
 Absorbed [BRIEF-session-store-teardown](docs/briefs/BRIEF-session-store-teardown.md); carried in Absorbed Brief.
 
