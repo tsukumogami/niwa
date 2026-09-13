@@ -926,22 +926,45 @@ on unix, and not at all on other platforms. Recovery reads
 directories that look like a moved-aside snapshot, and it never touches anything
 outside `D@swap` except `D` itself.
 
+The journal names two paths: `P`, where the live directory was moved aside, and
+`S`, the staging subdirectory that gets renamed into place. Every arm below is
+decided by `Lstat` on `P`, `S` and `D` — state a killed process leaves behind,
+never a flag it would have had to survive long enough to write.
+
 0. No journal: nothing was interrupted. Go to rule 4. Anything at the legacy
    `D.prev` or `D.next` is left untouched, because it belongs to a binary this
    code cannot coordinate with; that binary clears it with its own preflight.
 1. A journal exists and the staging directory it names still holds its `lock`
    (tried `LOCK_EX|LOCK_NB`, opened without `O_CREAT`): the owner is alive.
    Leave everything and clear nothing.
-2. The owner is gone and `D` is missing: the swap was killed between its
-   renames. Rename the journal's moved-aside path back to `D`, then remove the
-   journal.
-3. The owner is gone and `D` exists: the second rename landed. If the journal
-   records that `D` was recreated after the move, rename `D` to
-   `D@swap/stray-<random>` and keep it, then rename the moved-aside path back;
-   otherwise rename the moved-aside path to a trash name. Remove the journal.
-4. Staging directories inside `D@swap` that no journal names are trashed when
+2. `P` is absent: either the swap died before moving anything aside, or it had
+   already finished trashing. Nothing is outstanding. Trash `S` if it is still
+   there and remove the journal.
+3. `P` and `S` both exist, and `D` is absent: the swap was killed between its two
+   renames. Rename `P` back to `D` and remove the journal.
+4. `P` and `S` both exist, and `D` exists: the second rename has not run, so the
+   `D` standing there is not this swap's output — something recreated it inside
+   the window. Rename it to `D@swap/stray-<random>` and keep it, rename `P` back
+   to `D`, and remove the journal.
+5. `P` exists and `S` is absent: the second rename landed, so `D` is the new
+   snapshot. Trash `P` and remove the journal.
+6. Staging directories inside `D@swap` that no journal names are trashed when
    their `lock` can be taken and left alone when it cannot. Leftover trash
    directories are folded into this run's trash list.
+
+The arms are exhaustive and mutually exclusive, and the way to see it is to walk
+the swap's own rename sequence and write down what each interruption leaves.
+`SwapSnapshotAtomic` renames `D` to `P`, then renames `S` into `D`, then trashes
+`P`; the second of those is `os.Rename(staging, target)`, so `S` stops existing
+at exactly the moment the new snapshot becomes live. That gives four reachable
+states — (`P` absent, `S` present) before the first rename, (`P`, `S`, no `D`)
+between them, (`P`, no `S`, `D`) after the second, and (`P` absent) after
+trashing — plus one anomaly, `D` reappearing before the second rename, which is
+the only way to reach (`P`, `S`, `D`) together. Each maps to exactly one rule
+above. An earlier draft of this design keyed the recreated case off a
+`Recreated` flag in the journal; that was unimplementable, because the journal is
+written once before the first rename and the process that would have needed to
+amend it is the one that died.
 
 A path the journal names that is missing, or is not a directory, is a warning
 rather than an error: recovery reports it once per directory per process and
