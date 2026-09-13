@@ -162,6 +162,35 @@ becomes `ended`, and the state file stays on disk so `niwa worktree list
 > identifier is still called a session id in JSON output. The user-facing
 > concept is the worktree.
 
+### Worktree commands at a workspace root
+
+Worktrees belong to an instance. At the root of a multi-instance workspace there
+are none, so the worktree subcommands say where to run instead of guessing:
+
+| Command at a multi-instance root | Behavior |
+|---|---|
+| `destroy <session id or handle>` | Resolves normally — session targets are exactly the case the root can answer |
+| `destroy --by-path <path>` | As inside an instance |
+| `list` | Prints `niwa: this is the workspace root, not an instance; …` on stderr, no table, exit 0 |
+| `list --json` | The same stderr line, `[]` on stdout, exit 0 |
+| `create`, `apply`, `attach`, `detach`, `niwa go` | Print the same line prefixed `niwa: error:` on stderr, exit 1 |
+
+`list` exits 0 because there is nothing wrong with asking: a script walking a
+set of directories shouldn't be derailed by reaching the root, and `--json`
+still gives it a parseable `[]`.
+
+This matters more than it looks. A workspace root carries its own
+`.niwa/instance.json` — `niwa init` persists init-time state there for `niwa
+create` to read — so anything that resolved an instance by walking up for that
+file used to stop at the root and treat it as an instance, then read the root's
+session *mapping* store as though those files were worktree records. They are
+different stores with different shapes.
+
+The **single-instance layout**, where the root genuinely is the instance, is
+unchanged: worktree commands there work exactly as they do inside a child
+instance. niwa tells the two apart by whether the root's `instance.json` names
+an instance, because a registered `niwa init` writes one without a name.
+
 ## Default worktree delegation for Claude Code
 
 In a niwa workspace, `niwa apply` makes niwa the default worktree mechanism for
@@ -421,7 +450,7 @@ Like create, it re-syncs the worktree's environment by inheriting the clone's
 materialized output — no secret resolution. For a workspace-wide refresh that
 updates clones and every worktree in one pass, run `niwa apply` instead.
 
-### `niwa worktree destroy <id> [--force]`
+### `niwa worktree destroy <target> [--force]`
 
 Marks the worktree ended, removes the working directory, and deletes the branch
 when it's already merged (use `--force` to delete regardless).
@@ -431,20 +460,60 @@ niwa worktree destroy ab12cd34
 niwa worktree destroy ab12cd34 --force
 ```
 
-Identify the worktree by session id or by path. `--by-path <path>` resolves a
-worktree directory to its owning session, then destroys it — useful when you
-have the path but not the id (a script holding the `--json` output's
-`worktree_path`, say):
+#### What you can name
 
-```bash
-niwa worktree destroy --by-path /abs/path/to/.niwa/worktrees/niwa-ab12cd34
-```
+There are four ways to name what to tear down, and they fall into two groups.
 
-Pass exactly one identifier: a session id or `--by-path`, not both and not
-neither. The path is canonicalized (symlinks resolved, `..` and trailing
-slashes normalized) before the lookup, so it matches regardless of how it's
-spelled. If no active worktree owns the path, niwa exits with code 1 and points
-you at `niwa worktree list`.
+**One worktree**, which is what destroy has always done:
+
+| Target | Example |
+|---|---|
+| Worktree id | `niwa worktree destroy ab12cd34` |
+| `--by-path <path>` | `niwa worktree destroy --by-path /abs/path/to/.niwa/worktrees/niwa-ab12cd34` |
+
+**A whole session's worktrees**, which is newer:
+
+| Target | Example |
+|---|---|
+| Session id | `niwa worktree destroy 6f1f8a0e-1f1a-4a3b-9c2d-5e6f70818283` |
+| Session handle | `niwa worktree destroy brave-otter` |
+
+The session forms exist because those are the ids you actually have. A
+dispatched session is known by its agent session id and by the short handle
+`niwa list` shows; neither appears anywhere in the worktree lifecycle store, so
+before this existed you had to look the worktree id up first — and if you
+didn't, teardown fell through to `niwa reap`, which has no merged-branch or
+uncommitted-work guard at all.
+
+A session with no recorded handle can also be named by the first eight
+characters of its session id. A session that *does* record a handle is named by
+that handle and not by its id prefix, so one session never answers to two short
+forms.
+
+A session target destroys **every active worktree of that session's instance**,
+in worktree-id order, continuing past a refusal. It never removes the session
+mapping, the instance directory, or the repositories cloned inside it — the
+instance outlives its worktrees, and reclaiming it is `niwa reap`'s job.
+
+Session targets work from anywhere in the workspace: the root, another instance,
+or inside a worktree. Worktree ids only mean something inside the instance that
+owns them.
+
+#### Ambiguity
+
+Inside an instance, a value can name both a worktree of that instance and a
+session. There's no safe default between "remove this one worktree" and "remove
+all of that session's", so niwa refuses, names both readings, and exits 4. Pass
+`--by-path` for the worktree, or the full session id for the session. At the
+workspace root the worktree reading doesn't exist, so the same value resolves to
+the session with nothing to disambiguate.
+
+Pass exactly one identifier: a positional target or `--by-path`, not both and
+not neither. A `--by-path` path is canonicalized (symlinks resolved, `..` and
+trailing slashes normalized) before the lookup, so it matches regardless of how
+it's spelled.
+
+#### Guards
 
 Two guards protect uncommitted or in-use work:
 
@@ -456,6 +525,39 @@ Two guards protect uncommitted or in-use work:
   [Attaching](#attaching-to-a-worktree)), destroy refuses unless `--force` is
   passed. The error carries the holder PID and points at
   `niwa worktree detach <id> --force`.
+
+`--force` applies to one worktree, so it is a usage error with a session id or
+handle. Forcing stays available one worktree at a time, through the worktree id
+or `--by-path`. A session can back several worktrees, and a mistyped or
+prefix-matched id that forced its way through would discard every uncommitted
+change and unmerged branch in the instance at once.
+
+#### Destroy exit codes
+
+These are `destroy`'s own codes. They are **not** the same as
+[the attach codes](#attach-exit-codes): `attach` uses 3 for lock contention and
+`detach --force` uses 4 for killing a live holder. Read the table for the
+subcommand you ran.
+
+| Code | Meaning | Output |
+|---|---|---|
+| 0 | Worktrees destroyed, or nothing left to destroy | stdout: one destroyed line per worktree. stderr: a `warning:` line per branch kept for unmerged commits |
+| 1 | At least one worktree refused by a guard, or the session cannot be torn down | stdout: destroyed lines for the others. stderr: one `niwa: error:` line per refusal |
+| 2 | Usage error, including `--force` with a session id or handle | stderr: the usage line |
+| 3 | The target matched no worktree and no session | stderr: `niwa: error: no worktree or session matches "<value>"` |
+| 4 | The target is ambiguous | stderr: the matches, and how to disambiguate |
+
+A session-resolved teardown prints the enriched
+`session: destroyed <worktree-id> (<repo>) at <path>` line, because a caller
+naming a session needs to know which worktrees went. A worktree id or
+`--by-path` keeps the bare `session: destroyed <id>` line.
+
+Two codes moved in the release that added session targets. A worktree id
+matching nothing, and a `--by-path` path resolving to no worktree, both exited 1
+before and exit 3 now. Both are the same outcome — you named something and niwa
+found nothing — and they should not differ by which flag located the target. A
+cleanup script running after a reap is exactly the caller that needs to tell
+"already gone" from "a guard refused".
 
 ### `niwa worktree list [--repo <name>] [--status …] [--attached|--available]`
 
@@ -526,6 +628,10 @@ holder was killed. If `niwa worktree list` reports `AVAILABILITY=stale`,
 `--force` is not needed — the flagless detach reaps the dead-holder sentinel.
 
 ### Attach exit codes
+
+These are `attach` and `detach`'s codes. `destroy` has
+[its own table](#destroy-exit-codes), where 3 and 4 mean something different —
+each subcommand documents the codes it returns.
 
 | Code | Meaning |
 |------|---------|

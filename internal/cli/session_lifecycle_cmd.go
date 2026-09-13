@@ -66,17 +66,33 @@ instead of the human-readable summary.`,
 }
 
 var sessionDestroyCmd = &cobra.Command{
-	Use:   "destroy <session-id>",
-	Short: "Destroy a worktree and its working directory",
+	Use:   "destroy <target>",
+	Short: "Destroy a worktree, or every worktree of a session",
 	Long: `Destroy a worktree: mark its lifecycle state ended, remove the working
 directory, and delete the worktree branch (only if already merged; use
 --force to delete regardless).
 
-Identify the worktree either by <session-id> or by --by-path <path>, which
-resolves a worktree directory to its owning session before destroying it.
+<target> is one of four things. A worktree id, or --by-path <path>, names one
+worktree. A session id, or the short handle niwa list shows, names a session
+and destroys every active worktree of that session's instance, in worktree-id
+order, continuing past a refusal. A session with no recorded handle can also be
+named by the first eight characters of its session id.
 
-Refuses to destroy a worktree that holds uncommitted changes unless --force
-is passed (the worktree analog of the instance-level uncommitted-work guard).`,
+A session target never removes the session mapping, the instance directory, or
+the repositories cloned inside it, and it resolves from anywhere in the
+workspace. A worktree id only means something inside the instance that owns it.
+
+Refuses to destroy a worktree that holds uncommitted changes, or one with a
+live attach lock, unless --force is passed. --force applies to one worktree, so
+it is a usage error with a session id or handle: pass a worktree id or
+--by-path to force one at a time.
+
+Exit codes (destroy's own; attach and detach use 3 and 4 for other things):
+  0  destroyed, or nothing left to destroy
+  1  a guard refused at least one worktree, or the session cannot be torn down
+  2  usage error, including --force with a session
+  3  the target matched no worktree and no session
+  4  the target is ambiguous; the message names the matches`,
 	// Same reasoning as sessionCreateCmd: RunE handles missing-arg with a
 	// usage string and exit code 2 via *sessionattach.ExitCodeError.
 	Args:              cobra.MaximumNArgs(1),
