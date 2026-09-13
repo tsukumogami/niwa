@@ -130,11 +130,16 @@ documented non-unix no-op.
 **Acceptance Criteria**:
 - [ ] The package is a leaf: its dependency list is the standard library plus
       `internal/testhook`, and `go.mod` gains no module.
-- [ ] Layout helpers are exported and pinned by a table test: `LockPath` is
-      `<dir>.lock`, `PrevPath` is `<dir>.prev`, staging is `<dir>.next-<random>`,
-      trash is `<dir>.trash-<random>`, stray is `<dir>.stray-<random>`; every
-      generated suffix is random rather than derived from the clock, and two
-      calls never collide.
+- [ ] Layout helpers are exported and pinned by a table test: the only two
+      siblings a config directory gains are `LockPath` (`<dir>.lock`) and
+      `SwapDir` (`<dir>@swap`), and the moved-aside, staging, trash and stray
+      paths are all `<dir>@swap/{prev,next,trash,stray}-<random>`. Every suffix
+      is random rather than derived from the clock, and two calls never collide.
+      No helper produces `<dir>.prev` or `<dir>.next`.
+- [ ] A test asserts the sibling names are unreachable from overlay naming: for
+      every `(org, repo)` pair accepted by the overlay slug parser, the derived
+      directory name is never `<dir>.lock` or `<dir>@swap`, because `@` is not in
+      the accepted charset.
 - [ ] `HoldsSnapshot` is true only for a real directory holding the provenance
       marker as a regular file, and false for a directory holding only
       `workspace.toml` (which is what a legitimate overlay clone holds), for a
@@ -144,11 +149,17 @@ documented non-unix no-op.
       that fails if either drifts from the constant it mirrors in
       `internal/workspace`.
 - [ ] `Acquire` opens the lock with `O_CREAT|O_RDWR|O_NOFOLLOW|O_NONBLOCK` at
-      0600, `fstat`s the descriptor and refuses anything that is not a regular
-      file without taking a lock, never unlinks the file, and polls `flock`
+      0600, `fstat`s the descriptor and refuses without taking a lock anything
+      that is not a regular file, is not owned by the invoking user, or has a
+      group or world write bit; it never unlinks the file, and polls `flock`
       every 20 ms against a deadline from the overridable `Timeout` (default
-      30s); a FIFO planted at the lock path produces that refusal promptly
-      rather than blocking the open.
+      30s). Tests plant a FIFO (refused promptly rather than blocking the open),
+      a symlink, and a pre-existing 0666 lock file, each producing a refusal
+      naming the path.
+- [ ] After `flock` succeeds, `Acquire` compares the descriptor's `(dev, ino)`
+      against the path's and, on a mismatch, closes, reopens and retries within
+      the bound. A test unlinks and recreates the lock file between the open and
+      the lock and asserts the two holders never both believe they hold it.
 - [ ] Mode semantics are proved with concurrent goroutines: two shared holds
       overlap; exclusive excludes shared and exclusive in either order;
       releasing lets the waiter through; nothing upgrades shared to exclusive.
@@ -160,38 +171,61 @@ documented non-unix no-op.
 - [ ] A second acquisition of a path this process already holds fails
       immediately with `nested acquisition of <dir>.lock`, well inside the
       bound, and the held-path set clears on release.
+- [ ] Acquisitions are ordered global, then overlay, then workspace root: taking
+      a lock ranked at or below one this process already holds fails immediately
+      with a message naming both directories. A test takes root-then-overlay and
+      asserts the refusal, and asserts the legal order succeeds.
 - [ ] `Mutate` acquires exclusive, runs `Recover` before `fn`, releases before
       deleting trash, and leaves no trash behind; a test proves the deletes
       happen after release. `Read` acquires shared. In both, an error from `fn`
       propagates and the lock is still released.
-- [ ] `NewStaging`, called inside `Read`, creates `<dir>.next-<random>` at 0700
-      holding `snap/` at 0755 and a `lock` created `O_CREAT|O_EXCL` and held
+- [ ] `NewStaging`, called inside `Read`, creates `<dir>@swap/next-<random>` at
+      0700 holding `snap/` at 0755 and a `lock` created `O_CREAT|O_EXCL` and held
       exclusive for its life; two calls produce distinct paths.
-- [ ] `Recover` has a case-per-rule table test: rename-back when the live
-      directory is missing and `.prev` is a previous snapshot; trash `.prev`
-      when the live directory holds the marker; quarantine a live directory
-      without the marker to `.stray-<random>` and rename `.prev` back when only
-      `.prev` qualifies; and fold a leftover trash directory, recognized by its
-      sentinel file, into this run's list.
+- [ ] The journal round-trips: `writeJournal` records the moved-aside path, the
+      staging path, a random token, the pid, the start time and the recreated
+      flag; `readJournal` returns it; `clearJournal` removes it. A malformed or
+      truncated journal reads as absent and is reported, not as a crash to act
+      on.
+- [ ] `Recover` acts only on paths the journal names, and a test proves it: with
+      a directory at `<dir>@swap/prev-zzz` that no journal mentions, recovery
+      renames nothing and deletes nothing.
+- [ ] `Recover` has a case-per-rule table test: no journal is a no-op; a journal
+      whose staging lock is still held leaves everything alone and clears
+      nothing; the owner gone with the live directory missing renames the
+      moved-aside path back and removes the journal; the owner gone with the live
+      directory present trashes the moved-aside path; and the recreated flag
+      quarantines the live directory to `stray-<random>` and renames the snapshot
+      back.
 - [ ] Staging recovery treats a candidate as dead only when it is a real
       directory holding both `lock` and `snap/`, opens that `lock` without
       `O_CREAT`, leaves a live holder's staging alone, and leaves a look-alike
-      directory with no `lock` untouched and uncreated; the legacy fixed
-      `<dir>.next` is the one lockless shape removed.
-- [ ] Name collisions with legitimate overlay clones are proved harmless: a real
-      directory at `<dir>.prev`, `<dir>.next-x` or a trash-shaped name holding
-      only a `workspace.toml` and no niwa marker or sentinel is left in place and
-      reported, with no rename and no delete.
-- [ ] Planted paths are refused rather than acted on: a `.prev` that is a
-      symlink, a regular file, or another user's directory produces no rename;
-      removals unlink a top-level symlink without following it; and
+      directory with no `lock` untouched and uncreated.
+- [ ] Overlay collisions are proved harmless: with a fully-formed overlay
+      snapshot directory (its own `workspace.toml` *and* provenance marker)
+      planted at every name the old scheme would have used --
+      `<dir>.prev`, `<dir>.next-x`, `<dir>.trash-x` -- a refresh and a mapping
+      write both succeed and the planted directory is untouched, byte for byte.
+      This is the case the marker test could not have caught, since an overlay
+      clone carries the marker.
+- [ ] A legacy `<dir>.prev` left by an older binary is never read, renamed or
+      deleted: a test plants one, runs a refresh and a mapping write, and asserts
+      it is still there and the operations succeeded.
+- [ ] A journal naming a path that is missing or is not a directory produces a
+      warning, not a failure: the `Mutate` callback still runs and a mapping
+      write through it succeeds. The warning is emitted once per directory per
+      process.
+- [ ] Removals unlink a top-level symlink without following it, and
       `RecoverMovedAside` takes the lock itself, performs only the rename-back
-      under the same checks, repairs at most one candidate per call, and returns
-      nil when the live directory exists.
+      under the same journal rules, repairs at most one candidate per call, and
+      returns nil when the live directory exists.
 - [ ] A rename whose random destination already exists retries once with a fresh
       name and then returns an error naming the path, rather than leaving the
       live directory moved aside; a test plants the first destination and asserts
       the mapping write that follows still succeeds.
+- [ ] Post-lock trash deletion is best-effort: with two processes folding in the
+      same trash directory, both complete successfully and neither surfaces an
+      `ENOENT` or `ENOTEMPTY` from the concurrent removal.
 - [ ] The non-unix file builds and returns a no-op release and a `Recover` that
       does nothing, each documenting that the platform gets neither ordering nor
       crash repair; `GOOS=windows go build ./internal/configdir/...` succeeds and
@@ -199,11 +233,16 @@ documented non-unix no-op.
 - [ ] With the bound at 1s, a dispatch-shaped sequence of acquisitions in one
       process completes without timing out, and an exclusive waiter behind
       repeatedly overlapping shared holds acquires within the bound.
+- [ ] `internal/safetext.Strip` removes C0, C1, DEL, U+2028, U+2029 and the Cf
+      bidi and zero-width block, and leaves ordinary text unchanged. A table test
+      covers U+202E and U+200B specifically, since every existing stripper in the
+      repository is Cc-only and passes both. The package is a leaf importing only
+      the standard library, so `internal/worktree` can import it.
 
 **Dependencies**: Blocked by <<ISSUE:1>>
 
 **Type**: code
-**Files**: `internal/configdir/configdir.go`, `internal/configdir/configdir_unix.go`, `internal/configdir/configdir_other.go`, `internal/configdir/recover_unix.go`, `internal/configdir/recover_other.go`
+**Files**: `internal/configdir/configdir.go`, `internal/configdir/configdir_unix.go`, `internal/configdir/configdir_other.go`, `internal/configdir/journal.go`, `internal/configdir/recover_unix.go`, `internal/configdir/recover_other.go`, `internal/safetext/safetext.go`
 
 ### Issue 3: fix(workspace): order refresh, mapping store and watch writes
 
@@ -219,9 +258,16 @@ directory.
       `NewStaging` inside `Read`, fetches unlocked, and does the marker write,
       the three carry-over copies and the swap inside one `Mutate`, removing
       its staging afterwards.
-- [ ] `SwapSnapshotAtomic` takes `prev` from `configdir.PrevPath`, has lost its
-      unconditional preflight delete, and renames the old snapshot to a trash
-      name deleted after the lock is released.
+- [ ] `SwapSnapshotAtomic` moves the live directory aside to
+      `<dir>@swap/prev-<random>`, writes the journal before that rename and
+      clears it after the second, has lost its unconditional preflight delete,
+      and renames the old snapshot to a trash name deleted after the lock is
+      released. No code path writes or reads `<dir>.prev`.
+- [ ] A test pins the root-scanner invariant this change makes fragile: with
+      `<root>/.niwa.lock` present and `<root>/.niwa@swap/` holding a staging
+      directory, a trash directory and a stray directory,
+      `EnumerateInstances` and both reaper sweeps return exactly what they
+      returned before those existed.
 - [ ] The marker and `.git` probes and `ReadProvenance` run inside `Read`; the
       no-drift branch re-reads, compares and rewrites the marker atomically
       inside `Mutate`; the post-swap `config.Load` runs inside `Read`.
@@ -240,8 +286,8 @@ directory.
       root `.niwa` remains in `internal/watch`.
 - [ ] `config.Discover` gains exactly one branch: a candidate with no
       `.niwa/workspace.toml` but with a `.niwa.lock` regular file and a
-      `.niwa.prev` directory, all owned by the current user, calls
-      `RecoverMovedAside` and re-checks; every other outcome is unchanged.
+      `.niwa@swap` directory holding a journal, all owned by the current user,
+      calls `RecoverMovedAside` and re-checks; every other outcome is unchanged.
 - [ ] No literal config-directory suffix remains in `internal/workspace`,
       `internal/watch` or `internal/config`; those names come only from
       `internal/configdir`.
@@ -383,9 +429,14 @@ active worktrees under the outcome contract.
       resolver functions; `internal/worktree` gains no import of
       `internal/cli` and its exported signatures are unchanged.
 - [ ] `loadMappingsForDestroy` makes exactly one mapping read, through the
-      locked `ListSessionMappings`, and keeps only entries whose session id is
-      a valid UUID; a planted 8-hex lifecycle file beside the mappings is not
-      treated as a mapping.
+      locked `ListSessionMappings`, and keeps only entries whose `session_id`
+      field is a valid UUID; a planted 8-hex lifecycle file beside the mappings
+      is not treated as a mapping.
+- [ ] The same loader drops the handle match for any mapping whose `handle`
+      fails the existing exported `watch.IsSafeHandle`: such a mapping still
+      matches by session id, still appears in output, and can no longer put an
+      arbitrary byte sequence into the ambiguity line. A test uses a handle
+      carrying an ANSI escape and one carrying U+202E.
 - [ ] A table test on matching covers: session id, recorded handle, and the
       exactly-8-hex prefix of a handle-less mapping; exact and case-sensitive;
       deduplicated so a Codex mapping whose handle is its id yields one match;
@@ -412,15 +463,27 @@ active worktrees under the outcome contract.
       and re-checks the instance directory immediately before each destroy.
 - [ ] `DestroySession` validates the record it read before either git call: it
       requires a non-empty worktree path resolving under
-      `<instanceRoot>/.niwa/worktrees/`, requires a branch name that looks like
-      a ref and does not begin with `-`, and passes it after `--`. Unit tests
-      cover a path escaping the instance, an absolute path elsewhere, an empty
-      path, a `--upload-pack=`-shaped branch and a normal record, and assert
-      every record niwa writes today still passes.
+      `<instanceRoot>/.niwa/worktrees/`, and requires the branch name to match
+      the design's exact ref pattern -- non-empty; no byte below 0x20 and no DEL;
+      no space; none of `~ ^ : ? * [ \`; no `..`; no leading `-`; no trailing
+      `.lock`; no leading or trailing `/` and no `//`; not the single character
+      `@` -- passed after `--`. Unit tests cover a path escaping the instance, an
+      absolute path elsewhere, an empty path, a `--upload-pack=`-shaped branch, a
+      branch with a control character, a branch with U+202E, and a normal record,
+      and assert every record niwa writes today still passes.
 - [ ] A record whose worktree directory is missing is refused rather than
-      reported clean: a test asserts the uncommitted-changes guard now fails
-      closed on a missing tree, where today it returns clean.
+      reported clean, and the uncommitted-changes guard fails closed on *any*
+      `stat` error rather than only on `ENOENT`: tests cover the missing tree and
+      a tree whose `stat` fails for another reason, both of which reach the git
+      call today.
 - [ ] Record reads resolve through a root opened on the instance directory.
+- [ ] `workspace.DefaultDestroySession`, the `niwa init --bootstrap` rollback and
+      the third copy of this argv, routes through the same validator and passes
+      its branch after `--`; a test covers a crafted record there too.
+- [ ] `checkSessionInstance` resolves both sides of the `EnumerateInstances`
+      membership comparison, since the enumeration returns lexical joins. A test
+      with the workspace root reached through a symlink resolves the session
+      rather than refusing it.
 - [ ] Success prints one destroyed line per worktree on stdout and each kept
       branch's existing warning on stderr, exiting 0; tests cover merged and
       unmerged branches.
@@ -434,12 +497,12 @@ active worktrees under the outcome contract.
       exits 1.
 - [ ] Teardown by session never deletes the mapping, the instance or its
       clones; every session-resolved test asserts all three survive.
-- [ ] Every mapping- and record-derived value in output goes through the
-      dispatch path's existing sanitizer rather than `%q`, so the literal line
-      shapes the outcome contract fixes are preserved: a mapping whose handle
-      carries an ANSI escape, and a kept-branch warning naming a branch with a
-      control character, both print with the control characters stripped and no
-      surrounding quotes.
+- [ ] Every mapping- and record-derived value in output goes through
+      `safetext.Strip` rather than `%q`, so the literal line shapes the outcome
+      contract fixes are preserved: a mapping whose handle carries an ANSI
+      escape, and a kept-branch warning naming a branch with a control character
+      or U+202E, all print stripped and unquoted. The kept-branch warning is
+      composed inside `internal/worktree`, so the strip happens there.
 - [ ] `runSessionDestroy` routes the positional value through the resolver and
       refuses `--force` with a session id or handle as a usage error (exit 2)
       before anything is destroyed; `--force` with a worktree id or
@@ -461,7 +524,7 @@ active worktrees under the outcome contract.
 **Dependencies**: Blocked by <<ISSUE:3>>, <<ISSUE:5>>
 
 **Type**: code
-**Files**: `internal/cli/worktree_destroy_resolve.go`, `internal/cli/session_lifecycle_cmd.go`, `internal/cli/list.go`, `internal/workspace/session_map.go`, `internal/worktree/worktree.go`
+**Files**: `internal/cli/worktree_destroy_resolve.go`, `internal/cli/session_lifecycle_cmd.go`, `internal/cli/list.go`, `internal/workspace/session_map.go`, `internal/workspace/bootstrap.go`, `internal/worktree/worktree.go`
 
 ### Issue 7: docs(worktree): functional coverage and guide updates
 
@@ -518,10 +581,14 @@ behavior.
       states that the single-instance layout is unchanged.
 - [ ] `docs/guides/workspace-config-sources.md`'s atomic-refresh section is
       rewritten for the implemented swap: the sibling lock file, private
-      staging, the unlocked fetch, recovery instead of preflight cleanup, trash
-      deleted after release, the kept stray directory, the bounded wait, and
-      that ordering and crash repair are unix-only; the stale claims about
-      idempotent preflight cleanup and never reading mid-swap are corrected.
+      staging, the unlocked fetch, the swap journal and recovery instead of
+      preflight cleanup, trash deleted after release, the bounded wait, and that
+      ordering and crash repair are unix-only; the stale claims about idempotent
+      preflight cleanup and never reading mid-swap are corrected.
+- [ ] The same guide documents the two siblings a config directory gains --
+      `<dir>.lock` and `<dir>@swap/` -- says what a leftover `stray-*` inside
+      `@swap` is, that niwa keeps it because it could not tell what it was, and
+      that removing one is safe once its contents have been checked.
 - [ ] Every exit code a `niwa worktree destroy` invocation returns for an
       outcome that exits 1 today is announced as a behavior change, not folded
       in as a fix: the pull request body carries them under their own "Behavior
