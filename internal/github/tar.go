@@ -221,17 +221,23 @@ func extractFromTarReader(tr *tar.Reader, subpath, dest string, bytesBudget int6
 				return fmt.Errorf("extractSubpath: create %s: %w", target, err)
 			}
 			n, err := io.CopyN(f, tr, hdr.Size)
+			// OpenFile's mode argument is masked by the process umask,
+			// so the exec bit just recovered from the header would be
+			// stripped straight back off on a restrictive runner
+			// (issue #306). Re-apply it through the open descriptor
+			// rather than by path: fchmod lands on the file we just
+			// wrote, with no second name resolution in between that
+			// could resolve somewhere else.
+			chmodErr := f.Chmod(perm)
 			closeErr := f.Close()
 			if err != nil && err != io.EOF {
 				return fmt.Errorf("extractSubpath: write %s: %w", target, err)
 			}
+			if chmodErr != nil {
+				return fmt.Errorf("extractSubpath: chmod %s: %w", target, chmodErr)
+			}
 			if closeErr != nil {
 				return fmt.Errorf("extractSubpath: close %s: %w", target, closeErr)
-			}
-			// OpenFile applies umask; chmod restores the tar mode so
-			// GitHub-sourced hooks keep their exec bit (issue #306).
-			if err := os.Chmod(target, perm); err != nil {
-				return fmt.Errorf("extractSubpath: chmod %s: %w", target, err)
 			}
 			written += n
 			if written > bytesBudget {
@@ -478,6 +484,15 @@ func isAllowedEntryType(typeflag byte) bool {
 // than a request for an unreadable file. Those fall back to 0644, the
 // same non-executable default the extractor used before it looked at
 // the mode at all.
+//
+// One consequence is worth stating because it looks like a bug: an
+// exec-only 0o111 has no owner-read either, so it takes that fallback
+// and comes out 0644, losing the exec bit. That is deliberate. Git
+// cannot record such a mode, so it is unreachable from the source this
+// extractor actually reads; and for the incoherent modes that are only
+// reachable from a hand-built archive, falling back to the safe
+// non-executable default is the behavior to prefer over inferring that
+// something was meant to be runnable.
 func filePerm(mode int64) os.FileMode {
 	perm := os.FileMode(mode) & 0o777 &^ 0o022
 	if perm&0o400 == 0 {

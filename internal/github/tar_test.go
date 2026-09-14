@@ -184,6 +184,9 @@ func TestFilePerm(t *testing.T) {
 		{0, 0o644, "an absent mode falls back to the non-executable default"},
 		{0o022, 0o644, "a mode that survives masking as unreadable falls back too"},
 		{0o007, 0o644, "so does one the owner could not read either"},
+		{0o111, 0o644, "exec-only has no owner-read, so it takes the fallback and " +
+			"deliberately loses exec rather than inferring a runnable file from an " +
+			"incoherent mode git cannot record"},
 	}
 
 	for _, c := range cases {
