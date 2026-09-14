@@ -205,6 +205,11 @@ func writePlanFile(path string, content []byte, mode fs.FileMode) error {
 	if err := os.WriteFile(path, content, mode); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
+	// WriteFile applies umask, so chmod after so the plan's Mode is what
+	// lands on disk regardless of the process umask.
+	if err := os.Chmod(path, mode); err != nil {
+		return fmt.Errorf("setting mode on %s: %w", path, err)
+	}
 	return nil
 }
 
