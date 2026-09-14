@@ -51,3 +51,6 @@ Claude integration), the tsuku network install and the macOS leg are left out on
   wherever Codex is installed: remove it from the list when tsukumogami/niwa#304 is fixed. The
   hermetic `@codex-posture` still runs here, though CI's runners, having no Codex, skip it.)
 - `go build -o niwa-test ./cmd/niwa && for shell in bash zsh; do output=$(./niwa-test shell-init "$shell") && [ -n "$output" ] && echo "$output" | grep -q "niwa()" && echo "$output" | grep -q "__complete" || exit 1; done && rm niwa-test`
+  (copied as CI has it, including its gap: `niwa()` also matches the generated completion
+  functions, so a renamed wrapper still passes this check; fix CI and this line together when
+  tsukumogami/niwa#309 is fixed)
