@@ -15,8 +15,10 @@ default, since halting every map edit would make the map painful to maintain. Th
 - `**/*.go`, `go.mod`, `go.sum`, `Makefile`, `cmd/**`, `internal/**`, `test/functional/**` ->
   every default command below
 - `docs/**` -> all of:
-  - `go test ./internal/agentplan/` (pins the generated gap list in `docs/guides/codex-agent.md`,
-    the only part of `docs/` any Go test reads; the functional suite reads the same region)
+  - `go test ./internal/agentplan/` (pins the generated gap list in `docs/guides/codex-agent.md`;
+    the functional suite reads the same region)
+  - `go test -count=1 ./internal/cli/` (its repository scan reads every `.md` outside
+    `docs/prds` and `docs/designs`, so a guide can fail CI that the line above passes)
   - `B=$(git merge-base origin/main HEAD) && git diff --name-only --diff-filter=ACMR "$B" -- :/docs/ | grep -vE "(^|/)(evals|tests)/fixtures/" | xargs -r shirabe validate --visibility=public` (errors out when `origin/main` is missing: that is cannot-verify, not a failed change)
   - `shirabe validate --visibility=public --lifecycle . --mode=draft` (not `ready`: an in-flight `/execute` chain keeps its PLAN, which the ready posture rejects)
 - `.tsuku-recipes/**` -> `tsuku validate .tsuku-recipes/niwa.toml` (not in PR CI: CI's recipe step installs niwa from main over the network, so it never reads the changed recipe; this checks structure only, so a download or checksum change passes it)
