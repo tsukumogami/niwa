@@ -182,7 +182,8 @@ func extractFromTarReader(tr *tar.Reader, subpath, dest string, bytesBudget int6
 				return fmt.Errorf("extractSubpath: entry %s would exceed decompression-bomb cap (%d bytes)",
 					hdr.Name, MaxDecompressedBytes)
 			}
-			f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+			perm := filePerm(hdr.Mode)
+			f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 			if err != nil {
 				return fmt.Errorf("extractSubpath: create %s: %w", target, err)
 			}
@@ -193,6 +194,11 @@ func extractFromTarReader(tr *tar.Reader, subpath, dest string, bytesBudget int6
 			}
 			if closeErr != nil {
 				return fmt.Errorf("extractSubpath: close %s: %w", target, closeErr)
+			}
+			// OpenFile applies umask; chmod restores the tar mode so
+			// GitHub-sourced hooks keep their exec bit (issue #306).
+			if err := os.Chmod(target, perm); err != nil {
+				return fmt.Errorf("extractSubpath: chmod %s: %w", target, err)
 			}
 			written += n
 			if written > bytesBudget {
@@ -409,6 +415,17 @@ func ProbeMarkers(tr *tar.Reader, markers config.MarkerSet) (config.MarkerSet, e
 // pass would skip it.
 func isAllowedEntryType(typeflag byte) bool {
 	return typeflag == tar.TypeReg || typeflag == tar.TypeDir
+}
+
+// filePerm keeps the tar entry's permission bits, including exec, so
+// worktree hooks extracted from a GitHub tarball stay runnable. Setuid,
+// setgid, and sticky bits are stripped. A zero mode falls back to 0644.
+func filePerm(mode int64) os.FileMode {
+	perm := os.FileMode(mode) & 0o777
+	if perm == 0 {
+		return 0o644
+	}
+	return perm
 }
 
 // validateEntryName enforces filename safety rules: no NUL, no `..`

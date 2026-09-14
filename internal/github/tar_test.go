@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -91,6 +92,66 @@ name = "foo"
 		if _, err := os.Stat(filepath.Join(dest, rel)); err == nil {
 			t.Errorf("file %s should not have been extracted", rel)
 		}
+	}
+}
+
+func TestExtractSubpath_PreservesExecBit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file exec bits are not preserved on Windows")
+	}
+
+	var raw bytes.Buffer
+	gz := gzip.NewWriter(&raw)
+	tw := tar.NewWriter(gz)
+	mustHeader(t, tw, &tar.Header{Name: "wrap/", Mode: 0o755, Typeflag: tar.TypeDir})
+	body := []byte("#!/bin/sh\necho hi\n")
+	mustHeader(t, tw, &tar.Header{
+		Name:     "wrap/.niwa/hooks/start.sh",
+		Mode:     0o755,
+		Size:     int64(len(body)),
+		Typeflag: tar.TypeReg,
+	})
+	if _, err := tw.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	plain := []byte("[workspace]\nname = \"foo\"\n")
+	mustHeader(t, tw, &tar.Header{
+		Name:     "wrap/.niwa/workspace.toml",
+		Mode:     0o644,
+		Size:     int64(len(plain)),
+		Typeflag: tar.TypeReg,
+	})
+	if _, err := tw.Write(plain); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir()
+	if err := ExtractSubpath(&raw, ".niwa", dest); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	hook := filepath.Join(dest, "hooks/start.sh")
+	info, err := os.Stat(hook)
+	if err != nil {
+		t.Fatalf("stat hook: %v", err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Errorf("hooks/start.sh mode=%o, want exec bit", info.Mode().Perm())
+	}
+
+	cfg := filepath.Join(dest, "workspace.toml")
+	info, err = os.Stat(cfg)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+	if info.Mode()&0o111 != 0 {
+		t.Errorf("workspace.toml mode=%o, did not want exec bit", info.Mode().Perm())
 	}
 }
 
