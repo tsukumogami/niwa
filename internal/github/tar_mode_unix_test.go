@@ -5,8 +5,12 @@ package github
 import (
 	"archive/tar"
 	"bytes"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -22,17 +26,83 @@ import (
 // is safe because a umask can only clear bits and no realistic umask
 // clears owner-exec. Everything sharper than that lives here.
 //
-// syscall.Umask is process-global, which is safe in this package only
-// because nothing in it calls t.Parallel. If you add a parallel test to
-// package github, these two stop being trustworthy -- move them to
-// their own package rather than weakening the assertions.
-
 // withUmask sets the process umask for the duration of one test and
 // restores whatever was there before.
+//
+// READ THIS BEFORE ADDING t.Parallel ANYWHERE IN PACKAGE github. The
+// umask is process-global, not per-goroutine, so this helper is only
+// sound while test functions in this package run one at a time. Under a
+// parallel test the window between these two calls overlaps whatever
+// else is running: files those tests create get this umask instead of
+// their own, and -- worse for the tests below -- the mode they assert
+// stops being attributable to the extractor. They would not go red.
+// They would go quietly meaningless, still passing, still looking like
+// coverage. That is the same defect class this whole change exists to
+// fix, so it is not left to a comment: TestNoParallelTestsInPackage
+// below fails if anyone adds the call.
+//
+// If you need parallelism here, move these tests to their own package
+// rather than weakening what they assert.
 func withUmask(t *testing.T, mask int) {
 	t.Helper()
 	previous := syscall.Umask(mask)
 	t.Cleanup(func() { syscall.Umask(previous) })
+}
+
+// TestNoParallelTestsInPackage enforces the precondition withUmask
+// depends on, by parsing this package's own test sources and failing on
+// any real t.Parallel call.
+//
+// A comment asking people not to do something is a check that cannot
+// fail. This can. It parses rather than greps so that the word appearing
+// in prose -- as it does in withUmask's comment, several times -- is not
+// a false positive: go/parser discards comments, and only a genuine call
+// expression is matched.
+//
+// Test binaries run with the working directory set to the package
+// source directory, so the files are readable from here.
+func TestNoParallelTestsInPackage(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading package directory: %v", err)
+	}
+
+	fset := token.NewFileSet()
+	checked := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		checked++
+
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Parallel" || len(call.Args) != 0 {
+				return true
+			}
+			t.Errorf("%s: t.Parallel() at %s -- the umask tests in this file "+
+				"assert a process-global value and stop meaning anything once "+
+				"tests here run concurrently. Read withUmask's comment: move "+
+				"those tests to their own package rather than leaving them "+
+				"passing and unable to fail.", name, fset.Position(sel.Sel.Pos()))
+			return true
+		})
+	}
+
+	// A guard that silently checked nothing would be the same mistake it
+	// exists to prevent.
+	if checked == 0 {
+		t.Fatal("found no _test.go files to check; this guard is not running")
+	}
 }
 
 // tarballWithModes builds a gzipped tarball whose single wrapper holds

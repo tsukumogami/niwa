@@ -180,14 +180,27 @@ func extractFromTarReader(tr *tar.Reader, subpath, dest string, bytesBudget int6
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			// Directories keep a fixed 0755 rather than the header
-			// mode, and that is a decision, not an oversight. Nothing
-			// in niwa reads a directory's committed mode the way
-			// runWorktreeHooks reads a file's exec bit, so honoring it
-			// buys no behavior; what it would buy is the chance for an
-			// archive to hand us a directory we cannot descend into
-			// (0644 in the tarball) or one anyone can write into. The
-			// file case below is different because there the mode is
-			// load-bearing.
+			// mode, and that is a decision, not an oversight.
+			//
+			// Why not the header: nothing in niwa reads a directory's
+			// committed mode the way runWorktreeHooks reads a file's
+			// exec bit, so honoring it buys no behavior. What it would
+			// buy is an archive's ability to hand us a directory we
+			// cannot descend into (0644 in the tarball) or one anyone
+			// can write into, which would undo for the containing
+			// directory what filePerm is careful about for the file.
+			//
+			// Why 0755 specifically: it is the least that lets the
+			// owner populate the tree and lets anything reading the
+			// config traverse it, and it is what every other directory
+			// on this path already gets -- the parent MkdirAll in the
+			// TypeReg case below uses the same value, so a snapshot
+			// does not end up with two classes of directory depending
+			// on whether the tarball happened to carry an explicit
+			// entry for one.
+			//
+			// The file case below is different because there the mode
+			// is load-bearing.
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return fmt.Errorf("extractSubpath: mkdir %s: %w", target, err)
 			}
