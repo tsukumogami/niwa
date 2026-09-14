@@ -63,6 +63,17 @@ var maxDecompressedBytesTestHook *int64
 //     caller stages into a fresh dir and the snapshot swap promotes
 //     it only on success).
 //
+// Entry modes are honored, narrowly. A regular file is created with the
+// permission bits its tar header carries, so a hook a config repo
+// commits as 100755 is still executable after extraction (issue #306).
+// The header is attacker-controlled like every other field here, so the
+// mode is narrowed by filePerm before it reaches disk: setuid, setgid
+// and sticky are dropped, and group and other write are cleared. That
+// narrowing is an eighth constraint layered on top of the seven
+// defenses above, not a relaxation of any of them -- read filePerm's
+// comment before widening the mask. Directory entries are deliberately
+// NOT given their header mode; see the TypeDir case.
+//
 // Calls testfault.Maybe("extract-entry") once per entry processed so
 // fault-injection scenarios can interrupt mid-extraction.
 func ExtractSubpath(r io.Reader, subpath, dest string) error {
@@ -168,6 +179,15 @@ func extractFromTarReader(tr *tar.Reader, subpath, dest string, bytesBudget int6
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
+			// Directories keep a fixed 0755 rather than the header
+			// mode, and that is a decision, not an oversight. Nothing
+			// in niwa reads a directory's committed mode the way
+			// runWorktreeHooks reads a file's exec bit, so honoring it
+			// buys no behavior; what it would buy is the chance for an
+			// archive to hand us a directory we cannot descend into
+			// (0644 in the tarball) or one anyone can write into. The
+			// file case below is different because there the mode is
+			// load-bearing.
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return fmt.Errorf("extractSubpath: mkdir %s: %w", target, err)
 			}
@@ -417,12 +437,37 @@ func isAllowedEntryType(typeflag byte) bool {
 	return typeflag == tar.TypeReg || typeflag == tar.TypeDir
 }
 
-// filePerm keeps the tar entry's permission bits, including exec, so
-// worktree hooks extracted from a GitHub tarball stay runnable. Setuid,
-// setgid, and sticky bits are stripped. A zero mode falls back to 0644.
+// filePerm narrows a tar entry's mode to the permission bits this
+// extractor is willing to reproduce on disk. It honors exec, so a hook
+// a config repo commits as 100755 is still runnable after extraction
+// (issue #306), and drops everything that would hand an archive more
+// authority than the file it describes.
+//
+// What is dropped, and why. The mode arrives from a tarball fetched off
+// the network, so it is attacker-controlled in the same sense every
+// other field this file defends against is:
+//
+//   - Setuid, setgid and sticky are outside the 0o777 mask, so they
+//     never survive. Reproducing them would let an archive plant a
+//     setuid binary during a routine config refresh.
+//   - Group and other write are cleared. This extractor is the one that
+//     populates the config snapshot niwa runs worktree hooks out of, and
+//     honoring the exec bit is precisely what makes those files
+//     executable, so a group- or world-writable entry here would be a
+//     write-what-you-run seam for any other account on the machine.
+//     Clearing it costs nothing real: git records only 100644 and
+//     100755, so no legitimate GitHub tarball carries those bits.
+//
+// A mode that leaves the owner unable to read the file it just wrote is
+// treated as absent, not honored: some tar writers omit the mode
+// entirely, and an entry that survives the narrowing above as 0 (or as
+// something equally unusable, like a bare 0o022) is nonsense rather
+// than a request for an unreadable file. Those fall back to 0644, the
+// same non-executable default the extractor used before it looked at
+// the mode at all.
 func filePerm(mode int64) os.FileMode {
-	perm := os.FileMode(mode) & 0o777
-	if perm == 0 {
+	perm := os.FileMode(mode) & 0o777 &^ 0o022
+	if perm&0o400 == 0 {
 		return 0o644
 	}
 	return perm

@@ -155,6 +155,44 @@ func TestExtractSubpath_PreservesExecBit(t *testing.T) {
 	}
 }
 
+// TestFilePerm pins the mask itself, rather than what reaches disk.
+//
+// It is not redundant with the on-disk tests, and the setuid rows are
+// why. os.Chmod takes an os.FileMode, and Go signals setuid with
+// os.ModeSetuid (a high bit), not with the POSIX 0o4000 -- so a raw
+// 0o4000 in an os.FileMode is discarded by Go's own conversion on the
+// way to the syscall, and an extractor that forgot to mask it still
+// writes a file with no setuid bit. That makes "stat the extracted file"
+// structurally unable to tell a masked setuid from an unmasked one.
+// Asserting on filePerm's return value can tell them apart, so this is
+// the test that fails if someone widens the mask.
+func TestFilePerm(t *testing.T) {
+	cases := []struct {
+		mode int64
+		want os.FileMode
+		why  string
+	}{
+		{0o755, 0o755, "an executable committed 100755 is the whole point of issue #306"},
+		{0o644, 0o644, "a plain file keeps its mode"},
+		{0o600, 0o600, "a mode narrower than the default stays narrow"},
+		{0o777, 0o755, "group and other write are cleared"},
+		{0o666, 0o644, "group and other write are cleared on a non-executable too"},
+		{0o4755, 0o755, "setuid is masked off, never reproduced from an archive"},
+		{0o2755, 0o755, "setgid is masked off, never reproduced from an archive"},
+		{0o1777, 0o755, "the sticky bit is masked off, and write is still cleared"},
+		{0o7777, 0o755, "all three special bits at once are masked off"},
+		{0, 0o644, "an absent mode falls back to the non-executable default"},
+		{0o022, 0o644, "a mode that survives masking as unreadable falls back too"},
+		{0o007, 0o644, "so does one the owner could not read either"},
+	}
+
+	for _, c := range cases {
+		if got := filePerm(c.mode); got != c.want {
+			t.Errorf("filePerm(%#o) = %#o, want %#o -- %s", c.mode, uint32(got), uint32(c.want), c.why)
+		}
+	}
+}
+
 func TestExtractSubpath_WholeRepo(t *testing.T) {
 	dest := t.TempDir()
 	tarball := buildTarball(t, map[string]string{
