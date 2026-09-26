@@ -150,32 +150,55 @@ jobs:
           fi
           echo "OK: HEAD unchanged and the working tree is as the suite found it"
 
-      # Everything from here down is Linux-only: the Infisical CLI is pinned
-      # to a linux_amd64 release, the Claude and tsuku integration steps
-      # consume shared credentials and rate limits that gain nothing from a
-      # second platform, and the shell-init check inspects Go string output
-      # that does not vary by OS.
+      # Everything from here down is Linux-only: tsuku and the Infisical CLI
+      # are pinned to linux_amd64 releases, the Claude and tsuku integration
+      # steps consume shared credentials and rate limits that gain nothing
+      # from a second platform, and the shell-init check inspects Go string
+      # output that does not vary by OS.
       #
-      # The CLI comes from a fixed GitHub release and is checked against a
-      # committed sha256 before it is installed, so what runs here is decided
-      # by this file rather than by a package source at run time. To bump it,
-      # change both values together; the checksum is the linux_amd64 tarball's
-      # line in that release's checksums.txt. A mismatch fails the step.
+      # tsuku is bootstrapped from a fixed GitHub release and checked against
+      # a committed sha256 before it runs, so what executes here is decided by
+      # this file rather than by an install script fetched at run time. To
+      # bump it, change both values together; the checksum is the
+      # tsuku-linux-amd64 line in that release's checksums.txt. A mismatch
+      # fails the step. It installs where tsuku's own installer would
+      # ($HOME/.tsuku/bin), which the recipe-install check below relies on.
+      - name: Install tsuku
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/tsuku-linux-amd64" \
+            "https://github.com/tsukumogami/tsuku/releases/download/v${TSUKU_VERSION}/tsuku-linux-amd64"
+          echo "${TSUKU_SHA256}  $RUNNER_TEMP/tsuku-linux-amd64" | sha256sum --check --strict
+          install -D -m 0755 "$RUNNER_TEMP/tsuku-linux-amd64" "$HOME/.tsuku/bin/tsuku"
+          echo "$HOME/.tsuku/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.tsuku/tools/current" >> "$GITHUB_PATH"
+          "$HOME/.tsuku/bin/tsuku" --version
+        env:
+          TSUKU_VERSION: 0.14.0
+          TSUKU_SHA256: 1b95bbc396c2bcee12dcf1748be4458d3f76aa697a0b3860a69ce38a0f3a4156
+
+      # The Infisical CLI comes through tsuku, pinned. The version carries the
+      # release tag's leading v because tsuku 0.14.0 doesn't match a bare
+      # version against v-prefixed tags (tsukumogami/tsuku#2693). tsuku checks
+      # the download against the checksums.txt Infisical publishes with the
+      # release; the step fails if the installed CLI isn't the pinned version.
       - name: Install Infisical CLI
         if: matrix.os == 'ubuntu-latest' && env.INFISICAL_CLIENT_ID != ''
         run: |
           set -euo pipefail
-          tarball="cli_${INFISICAL_CLI_VERSION}_linux_amd64.tar.gz"
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$tarball" \
-            "https://github.com/Infisical/cli/releases/download/v${INFISICAL_CLI_VERSION}/${tarball}"
-          echo "${INFISICAL_CLI_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum --check --strict
-          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" infisical
-          sudo install -m 0755 "$RUNNER_TEMP/infisical" /usr/local/bin/infisical
-          infisical --version
+          tsuku install "infisical@v${INFISICAL_CLI_VERSION}"
+          version_line=$(infisical --version)
+          echo "$version_line"
+          if [ "$version_line" != "infisical version ${INFISICAL_CLI_VERSION}" ]; then
+            echo "::error::expected infisical ${INFISICAL_CLI_VERSION}, got: $version_line"
+            exit 1
+          fi
         env:
           INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
           INFISICAL_CLI_VERSION: 0.43.132
-          INFISICAL_CLI_SHA256: 4c141a0b3ad82467497b68c5ed63137a3a62a9cfc46705aa14bd34826f3c98f6
+          GITHUB_TOKEN: ${{ github.token }}
+          TSUKU_NO_TELEMETRY: "1"
 
       - name: Vault integration tests
         if: matrix.os == 'ubuntu-latest' && env.INFISICAL_CLIENT_ID != ''
@@ -205,10 +228,6 @@ jobs:
         run: make test-functional-claude-integration
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-
-      - name: Install tsuku
-        if: matrix.os == 'ubuntu-latest'
-        run: curl -fsSL https://tsuku.dev/install.sh | bash
 
       # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
       - name: Verify shell-init output
