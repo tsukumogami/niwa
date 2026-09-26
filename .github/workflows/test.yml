@@ -150,18 +150,32 @@ jobs:
           fi
           echo "OK: HEAD unchanged and the working tree is as the suite found it"
 
-      # Everything from here down is Linux-only: the Infisical CLI installs
-      # from a .deb, the Claude and tsuku integration steps consume shared
-      # credentials and rate limits that gain nothing from a second platform,
-      # and the shell-init check inspects Go string output that does not vary
-      # by OS.
+      # Everything from here down is Linux-only: the Infisical CLI is pinned
+      # to a linux_amd64 release, the Claude and tsuku integration steps
+      # consume shared credentials and rate limits that gain nothing from a
+      # second platform, and the shell-init check inspects Go string output
+      # that does not vary by OS.
+      #
+      # The CLI comes from a fixed GitHub release and is checked against a
+      # committed sha256 before it is installed, so what runs here is decided
+      # by this file rather than by a package source at run time. To bump it,
+      # change both values together; the checksum is the linux_amd64 tarball's
+      # line in that release's checksums.txt. A mismatch fails the step.
       - name: Install Infisical CLI
         if: matrix.os == 'ubuntu-latest' && env.INFISICAL_CLIENT_ID != ''
         run: |
-          curl -1sLf 'https://dl.cloudsmith.io/public/infisical/infisical-cli/setup.deb.sh' | sudo -E bash
-          sudo apt-get install -y infisical
+          set -euo pipefail
+          tarball="cli_${INFISICAL_CLI_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/Infisical/cli/releases/download/v${INFISICAL_CLI_VERSION}/${tarball}"
+          echo "${INFISICAL_CLI_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" infisical
+          sudo install -m 0755 "$RUNNER_TEMP/infisical" /usr/local/bin/infisical
+          infisical --version
         env:
           INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLI_VERSION: 0.43.132
+          INFISICAL_CLI_SHA256: 4c141a0b3ad82467497b68c5ed63137a3a62a9cfc46705aa14bd34826f3c98f6
 
       - name: Vault integration tests
         if: matrix.os == 'ubuntu-latest' && env.INFISICAL_CLIENT_ID != ''
