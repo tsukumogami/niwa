@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   Onboarding a machine-identity workspace vault is a long, cross-context
