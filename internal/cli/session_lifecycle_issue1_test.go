@@ -287,8 +287,12 @@ func TestResolveSessionIDByPath_UnknownPathErrors(t *testing.T) {
 	if !errors.As(err, &ece) {
 		t.Fatalf("err is not *ExitCodeError: %T (%v)", err, err)
 	}
-	if ece.Code != 1 {
-		t.Errorf("Code = %d, want 1", ece.Code)
+	// Exit 3 is destroy's "nothing matched". This asserted 1 before the
+	// resolver landed; both routes to the same outcome now agree, so a cleanup
+	// script can tell "already gone" from a guard refusal whichever way it
+	// named the worktree. The message is deliberately unchanged.
+	if ece.Code != 3 {
+		t.Errorf("Code = %d, want 3", ece.Code)
 	}
 	if !strings.Contains(ece.Msg, "no active worktree found at path") {
 		t.Errorf("message = %q, want substring 'no active worktree found at path'", ece.Msg)

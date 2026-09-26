@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -90,6 +91,107 @@ name = "foo"
 	for _, rel := range []string{"README.md", "src/main.go", "src"} {
 		if _, err := os.Stat(filepath.Join(dest, rel)); err == nil {
 			t.Errorf("file %s should not have been extracted", rel)
+		}
+	}
+}
+
+func TestExtractSubpath_PreservesExecBit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file exec bits are not preserved on Windows")
+	}
+
+	var raw bytes.Buffer
+	gz := gzip.NewWriter(&raw)
+	tw := tar.NewWriter(gz)
+	mustHeader(t, tw, &tar.Header{Name: "wrap/", Mode: 0o755, Typeflag: tar.TypeDir})
+	body := []byte("#!/bin/sh\necho hi\n")
+	mustHeader(t, tw, &tar.Header{
+		Name:     "wrap/.niwa/hooks/start.sh",
+		Mode:     0o755,
+		Size:     int64(len(body)),
+		Typeflag: tar.TypeReg,
+	})
+	if _, err := tw.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	plain := []byte("[workspace]\nname = \"foo\"\n")
+	mustHeader(t, tw, &tar.Header{
+		Name:     "wrap/.niwa/workspace.toml",
+		Mode:     0o644,
+		Size:     int64(len(plain)),
+		Typeflag: tar.TypeReg,
+	})
+	if _, err := tw.Write(plain); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir()
+	if err := ExtractSubpath(&raw, ".niwa", dest); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	hook := filepath.Join(dest, "hooks/start.sh")
+	info, err := os.Stat(hook)
+	if err != nil {
+		t.Fatalf("stat hook: %v", err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Errorf("hooks/start.sh mode=%o, want exec bit", info.Mode().Perm())
+	}
+
+	cfg := filepath.Join(dest, "workspace.toml")
+	info, err = os.Stat(cfg)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+	if info.Mode()&0o111 != 0 {
+		t.Errorf("workspace.toml mode=%o, did not want exec bit", info.Mode().Perm())
+	}
+}
+
+// TestFilePerm pins the mask itself, rather than what reaches disk.
+//
+// It is not redundant with the on-disk tests, and the setuid rows are
+// why. os.Chmod takes an os.FileMode, and Go signals setuid with
+// os.ModeSetuid (a high bit), not with the POSIX 0o4000 -- so a raw
+// 0o4000 in an os.FileMode is discarded by Go's own conversion on the
+// way to the syscall, and an extractor that forgot to mask it still
+// writes a file with no setuid bit. That makes "stat the extracted file"
+// structurally unable to tell a masked setuid from an unmasked one.
+// Asserting on filePerm's return value can tell them apart, so this is
+// the test that fails if someone widens the mask.
+func TestFilePerm(t *testing.T) {
+	cases := []struct {
+		mode int64
+		want os.FileMode
+		why  string
+	}{
+		{0o755, 0o755, "an executable committed 100755 is the whole point of issue #306"},
+		{0o644, 0o644, "a plain file keeps its mode"},
+		{0o600, 0o600, "a mode narrower than the default stays narrow"},
+		{0o777, 0o755, "group and other write are cleared"},
+		{0o666, 0o644, "group and other write are cleared on a non-executable too"},
+		{0o4755, 0o755, "setuid is masked off, never reproduced from an archive"},
+		{0o2755, 0o755, "setgid is masked off, never reproduced from an archive"},
+		{0o1777, 0o755, "the sticky bit is masked off, and write is still cleared"},
+		{0o7777, 0o755, "all three special bits at once are masked off"},
+		{0, 0o644, "an absent mode falls back to the non-executable default"},
+		{0o022, 0o644, "a mode that survives masking as unreadable falls back too"},
+		{0o007, 0o644, "so does one the owner could not read either"},
+		{0o111, 0o644, "exec-only has no owner-read, so it takes the fallback and " +
+			"deliberately loses exec rather than inferring a runnable file from an " +
+			"incoherent mode git cannot record"},
+	}
+
+	for _, c := range cases {
+		if got := filePerm(c.mode); got != c.want {
+			t.Errorf("filePerm(%#o) = %#o, want %#o -- %s", c.mode, uint32(got), uint32(c.want), c.why)
 		}
 	}
 }

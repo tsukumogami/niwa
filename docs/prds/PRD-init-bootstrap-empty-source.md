@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   A user adopting a freshly-created GitHub repository as a niwa-managed

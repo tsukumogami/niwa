@@ -31,24 +31,69 @@ Both targets build the binary first. Set `NIWA_TEST_BINARY` and
 
 ```
 test/functional/
-  features/          # Gherkin .feature files — one file per area
-  suite_test.go      # godog entry point, Before hook, step registration
-  steps_test.go      # step implementations
-  localrepo_test.go  # localGitServer — offline bare-repo test helper
+  features/            # Gherkin .feature files — one file per area
+  suite_test.go        # TestMain, godog entry point, Before hook, step registration
+  steps_test.go        # step implementations
+  localrepo_test.go    # localGitServer — offline bare-repo test helper
+  gitfixture_test.go   # the only place the fixture shells out to git
 ```
 
 ### The sandbox
 
-The Before hook creates a fresh sandbox for every scenario:
+`TestMain` allocates one sandbox root per test process with
+`os.MkdirTemp("", "niwa-func-")`, and the Before hook carves a fresh
+`scenario-*` directory out of it for each scenario. Nothing is ever wiped and
+nothing lives at a predictable path, so two suites running at once can't see —
+or delete — each other's files.
+
+Everything a scenario touches is a child of its own sandbox:
 
 - `homeDir` — sandboxed `$HOME` (holds `.config/niwa/`, `.bashrc`, etc.)
 - `tmpDir` — sandboxed `$TMPDIR`
-- `workspaceRoot` — where `niwa init` is run from and where instances land;
-  placed under `os.TempDir()` (not inside the repo) so `CheckInitConflicts`
-  never fires on a developer machine that has a niwa workspace ancestor
+- `workspaceRoot` — where `niwa init` is run from and where instances land
+- `gitserver/` — the bare repos `localGitServer` serves over `file://`
+
+The sandbox root lives under the system temp dir, never inside the checkout.
+That keeps `CheckInitConflicts` quiet on a developer machine whose repo has a
+niwa workspace ancestor, and — more to the point — it means a scenario can't
+write into, or delete out of, the working tree it was built from. `TestMain`
+asserts at startup that no ancestor of the sandbox root contains a `.git`, and
+refuses to run if one does.
 
 The binary runs with `HOME`, `XDG_CONFIG_HOME`, and `TMPDIR` all pointing
 into the sandbox so nothing leaks between scenarios or into real state.
+
+The sandbox root is removed when the process exits. Set
+`NIWA_TEST_KEEP_SANDBOX=1` to keep it instead — the path is printed to stderr
+at the end of the run, and the After hook prints the sandbox of each scenario
+that failed.
+
+The Makefile's `test-functional*` and `test-install` targets take a `flock` on
+`.functional-test.lock` so a second run in the same checkout fails fast rather
+than interleaving. (`flock` is util-linux; where it's absent the targets run
+unguarded, which is safe on its own since each process gets its own sandbox.)
+
+### Shelling out to git
+
+Fixture code calls git through the helpers in `gitfixture_test.go` —
+`fixtureGit`, `fixtureGitWorkTree`, `fixtureGitCommit`, `fixtureGitBare` — and
+never through `exec.Command("git", ...)` directly.
+
+The reason is that neither `git -C <dir>` nor `cmd.Dir` bounds anything. Both
+only tell git where to *start* looking for a repository; if that directory has
+been removed, or was never a repository, git keeps walking up until it finds
+one. In a fixture that runs `git add -A`, `git commit`, and `git push`, the
+repository it eventually finds is the checkout you're working in. That has
+happened here: a suite committed a developer's working tree onto `main` and
+pushed it.
+
+The helpers refuse to run outside the process sandbox, set
+`GIT_CEILING_DIRECTORIES` so discovery can't climb past it, and pin `GIT_DIR`
+(plus `GIT_WORK_TREE`, where there is one) for commands that operate on an
+ambient repository. They also point `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM`
+at `/dev/null` so whoever's running the suite can't change its behaviour from
+their `~/.gitconfig`. A plain `exec.Command("git", ...)` in a new step gets
+none of that and reopens the hole.
 
 ## Testing commands that need a remote
 

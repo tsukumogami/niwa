@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/vault"
 )
@@ -702,14 +704,14 @@ func teamOnlyKeys(vr *config.VaultRegistry) map[string]bool {
 //     for keys not present in the base); tier maps merged additively.
 //   - Files: base wins per key; overlay keys not in base are added, but only
 //     after checking destination is not a protected path.
-//   - Claude.Content.Repos: overlay entries with source= add new content entries
+//   - Content.Repos: overlay entries with source= add new content entries
 //     (base wins on key collision). Overlay entries with overlay= set OverlaySource
 //     on an existing base entry (error if the base entry does not exist).
 func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.WorkspaceOverlay, overlayDir string) (*config.WorkspaceConfig, error) {
 	// Deep-copy the input config.
 	merged := *ws
 	merged.Claude = *copyClaudeConfigFull(&ws.Claude)
-	merged.Claude.Content = copyContentConfig(ws.Claude.Content)
+	merged.Content = copyContentConfig(ws.Content)
 	merged.Env = copyEnv(ws.Env)
 	merged.Files = copyStringMap(ws.Files)
 	merged.Sources = append([]config.SourceConfig(nil), ws.Sources...)
@@ -902,44 +904,44 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 		}
 	}
 
-	// Claude.Content.Repos: process overlay content entries.
+	// Content.Repos: process overlay content entries.
 	for repoName, entry := range overlay.Claude.Content.Repos {
 		if entry.Source != "" {
-			if _, exists := merged.Claude.Content.Repos[repoName]; exists {
+			if _, exists := merged.Content.Repos[repoName]; exists {
 				// R13: source= on a repo already defined in the base config is an error.
 				// Use overlay= to append content to a base-config repo's CLAUDE.local.md.
 				return nil, fmt.Errorf("overlay content entry for repo %q uses source= but %q is already defined in the base config; use overlay= to append content instead", repoName, repoName)
 			}
 			// Overlay-only repo: add a new content entry.
-			if merged.Claude.Content.Repos == nil {
-				merged.Claude.Content.Repos = make(map[string]config.RepoContentEntry)
+			if merged.Content.Repos == nil {
+				merged.Content.Repos = make(map[string]config.RepoContentEntry)
 			}
-			merged.Claude.Content.Repos[repoName] = config.RepoContentEntry{
+			merged.Content.Repos[repoName] = config.RepoContentEntry{
 				Source:        entry.Source,
 				OverlaySource: "",
 			}
 		} else if entry.Overlay != "" {
 			// Overlay appends to an existing base entry via OverlaySource.
-			base, exists := merged.Claude.Content.Repos[repoName]
+			base, exists := merged.Content.Repos[repoName]
 			if !exists {
 				return nil, fmt.Errorf("overlay content entry for repo %q uses overlay= but the repo has no entry in the base config", repoName)
 			}
 			base.OverlaySource = entry.Overlay
-			merged.Claude.Content.Repos[repoName] = base
+			merged.Content.Repos[repoName] = base
 		}
 	}
 
-	// Claude.Content.Groups: overlay entries add new group content; base wins on collision.
+	// Content.Groups: overlay entries add new group content; base wins on collision.
 	// The source path is relative to the overlay directory directly (not the workspace
 	// content_dir), so OverlayDir is recorded on the entry for resolution at install time.
 	for groupName, entry := range overlay.Claude.Content.Groups {
-		if _, exists := merged.Claude.Content.Groups[groupName]; exists {
+		if _, exists := merged.Content.Groups[groupName]; exists {
 			continue // base wins
 		}
-		if merged.Claude.Content.Groups == nil {
-			merged.Claude.Content.Groups = make(map[string]config.ContentEntry)
+		if merged.Content.Groups == nil {
+			merged.Content.Groups = make(map[string]config.ContentEntry)
 		}
-		merged.Claude.Content.Groups[groupName] = config.ContentEntry{
+		merged.Content.Groups[groupName] = config.ContentEntry{
 			Source:     entry.Source,
 			OverlayDir: overlayDir,
 		}
@@ -1054,16 +1056,84 @@ func copyClaudeConfigFull(c *config.ClaudeConfig) *config.ClaudeConfig {
 	return &out
 }
 
-// ClaudeEnabled returns whether Claude content installation (CLAUDE.local.md,
-// hooks, settings, env) should be performed for the given repo. When the
-// repo has no override or the override doesn't set claude.enabled, it
-// defaults to true.
-func ClaudeEnabled(ws *config.WorkspaceConfig, repoName string) bool {
-	override, ok := ws.Repos[repoName]
-	if !ok || override.Claude == nil || override.Claude.Enabled == nil {
+// Gate keys, one per agent block. They are the TOML names, matched against the
+// agent value a caller already holds, which is why no caller has to pick one:
+// the loop that produces every agent's plan asks with the agent it is on.
+const (
+	claudeGateKey = "claude"
+	codexGateKey  = "codex"
+)
+
+// AgentEnabled reports whether niwa produces plans for one agent, in one
+// repository's scope.
+//
+// [claude] enabled filters Claude's plan and only Claude's; [codex] enabled
+// filters Codex's and only Codex's. That is the whole of the restructure this
+// function carries: the shape it replaces read Claude's key in front of a loop
+// over every agent, so disabling Claude on a repository silently disabled every
+// Codex delivery there too. Renaming the key would have left one boolean
+// deciding two agents' deliveries, so the key stayed and the wiring moved --
+// the resolved value goes to that agent's producer through
+// agentplan.Producer.Gated, and nothing downstream of plan production sees a
+// gate at all.
+//
+// Resolution is per-repo override first, then the workspace-level block, then
+// enabled. An agentName niwa has no gate key for is enabled: a gate nobody
+// declared is not a reason to withhold a delivery.
+func AgentEnabled(ws *config.WorkspaceConfig, repoName, agentName string) bool {
+	if ws == nil {
 		return true
 	}
-	return *override.Claude.Enabled
+
+	var repoGate, workspaceGate *bool
+	override, hasOverride := ws.Repos[repoName]
+	switch agentName {
+	case claudeGateKey:
+		if hasOverride && override.Claude != nil {
+			repoGate = override.Claude.Enabled
+		}
+		workspaceGate = ws.Claude.Enabled
+	case codexGateKey:
+		if hasOverride && override.Codex != nil {
+			repoGate = override.Codex.Enabled
+		}
+		workspaceGate = ws.Codex.Enabled
+	}
+
+	switch {
+	case repoGate != nil:
+		return *repoGate
+	case workspaceGate != nil:
+		return *workspaceGate
+	default:
+		return true
+	}
+}
+
+// hookOwningAgentsEnabled reports whether the hooks and settings materializers
+// should run for a repository.
+//
+// Those two write into the file formats of whichever agent receives lifecycle
+// hooks -- a settings document is where niwa registers them -- so their gate is
+// that agent's gate. Which agent that is comes from the declaration table
+// rather than from a name written here: hardcoding one would put a delivery
+// decision inside a writer, and it would silently go wrong the day a second
+// agent grows a hook route. Neither materializer takes a producer, which is why
+// this is a function rather than a Gated call.
+//
+// It is true when any agent that receives hooks has its gate open, and false
+// only when every such agent is turned off.
+func hookOwningAgentsEnabled(ws *config.WorkspaceConfig, repoName string) bool {
+	for _, ag := range agent.All() {
+		d, err := agentplan.Lookup(agentplan.Hooks, ag)
+		if err != nil || d.State != agentplan.StateImplemented {
+			continue
+		}
+		if AgentEnabled(ws, repoName, string(ag)) {
+			return true
+		}
+	}
+	return false
 }
 
 // RepoCloneURL returns the clone URL for a repo, preferring the per-repo

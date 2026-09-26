@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -27,6 +28,12 @@ type GlobalConfigSource struct {
 type GlobalSettings struct {
 	CloneProtocol      string `toml:"clone_protocol,omitempty"`
 	AutoInstallPlugins *bool  `toml:"auto_install_plugins,omitempty"`
+	// CloneWorkers is the host-level default for how many repos apply/create/
+	// dispatch clone concurrently. Zero (omitted) preserves niwa's built-in
+	// default; a positive value caps concurrency. The --parallel flag overrides
+	// it for a single run. Useful on consistently slow or flaky networks where
+	// the default parallelism saturates the link.
+	CloneWorkers int `toml:"clone_workers,omitempty"`
 	// RemoteControlOnDispatch, when non-nil and true, makes `niwa dispatch`
 	// workers start with Claude Code Remote enabled by default (the worker is
 	// launched with `remoteControlAtStartup: true`). It is a host-level default
@@ -34,6 +41,31 @@ type GlobalSettings struct {
 	// remoteControlAtStartup value overrides it. nil preserves today's behavior
 	// (no remote-control injection).
 	RemoteControlOnDispatch *bool `toml:"remote_control_on_dispatch,omitempty"`
+	// KeepAliveOnDispatch, when non-nil and true, makes `niwa dispatch` arm a
+	// keep-alive self-wake on workers that start with remote control, so their
+	// remote session stays reachable across long idle. It is a host-level
+	// default scoped to dispatched workers only; the per-dispatch --keep-alive
+	// flag overrides it in both directions, and a downstream instance setting
+	// outranks it too. nil preserves today's behavior (no keep-alive arming).
+	// It mirrors RemoteControlOnDispatch, plus the flag layer RC does not have.
+	KeepAliveOnDispatch *bool `toml:"keep_alive_on_dispatch,omitempty"`
+	// AcceptSessionMessagesOnDispatch, when non-nil and true, makes `niwa
+	// dispatch` start workers that accept inbound messages from other Claude
+	// Code sessions without asking (the worker is launched with the
+	// crossSessionInbound setting). The senders are any session able to
+	// address the worker, including sessions on other machines and in the
+	// cloud. It only applies to agents that support the setting; for others it
+	// does nothing. It is a host-level default scoped to dispatched workers
+	// only; the per-dispatch --accept-session-messages flag overrides it in
+	// both directions. Unlike RemoteControlOnDispatch and KeepAliveOnDispatch,
+	// which a downstream setting can outrank, no workspace, instance, or
+	// repository settings source is read for it at all: whether a worker takes
+	// messages from other sessions is meant to be the developer's call, not a
+	// cloned repo's. nil means off unless the flag turns it on for one
+	// dispatch. Off launches the worker without the setting, which keeps
+	// Claude Code's default holds on inbound messages; it does not isolate the
+	// worker from other sessions (see CrossSessionInboundKey).
+	AcceptSessionMessagesOnDispatch *bool `toml:"accept_session_messages_on_dispatch,omitempty"`
 	// DispatchModel is the default model for a `niwa dispatch` worker's main
 	// chat loop when the command is run without --model. It accepts the same
 	// vocabulary as the flag: a capability category (fast/balanced/powerful) or
@@ -49,6 +81,58 @@ type GlobalSettings struct {
 	// host (bubblewrap+socat on Linux, Seatbelt on macOS); "off" dispatches with no
 	// sandbox (the trusted path). "" resolves to "required".
 	WatchSandbox string `toml:"watch_sandbox,omitempty"`
+	// WatchMaxStaged is the cross-run cap on how many live staged review agents
+	// `niwa watch --once` allows at once, composed with the per-run bound. It is a
+	// plain int following the decision layer's `<= 0 -> default` convention: 0 (the
+	// default) resolves to watch.DefaultMaxStaged, a positive value is honored, and a
+	// negative value is a hard error at the use site (resolveMaxStaged). The cap
+	// counts records whose instance still has a live job, so a dismissed or dead
+	// session frees capacity on the next pass.
+	WatchMaxStaged int `toml:"watch_max_staged,omitempty"`
+	// DefaultDispatchHarness is the developer's machine-wide default for which
+	// coding agent harnesses a niwa-dispatched session, written by
+	// `niwa config set default-dispatch-harness` and removed by
+	// `niwa config unset default-dispatch-harness`.
+	//
+	// It is the BROADEST rung of a four-source resolution, in full:
+	//
+	//	--harness  >  NIWA_DISPATCH_HARNESS  >  [workspace].default_agent  >
+	//	[global].default_dispatch_harness  >  claude
+	//
+	// So a workspace that states its own default_agent keeps launching that
+	// agent and this value fills in for every workspace that states none. That
+	// polarity matches RemoteControlOnDispatch and KeepAliveOnDispatch above,
+	// both of which a downstream value outranks; a key in this file with the
+	// opposite polarity would make the file's precedence something a reader
+	// looks up per key rather than learns once.
+	//
+	// The workspace rung keeps the older `default_agent` spelling because it is
+	// a shipped key living in committed workspace.toml files; the three rungs
+	// niwa owns end-to-end say "dispatch harness".
+	//
+	// It never changes what `niwa apply` prepares. Every apply prepares the tree
+	// for every agent niwa supports whatever this says; the value names a launch
+	// target and nothing else, so changing it needs no re-apply and takes
+	// nothing away from the other agent.
+	//
+	// It accepts the same closed set as [workspace].default_agent and goes
+	// through the same single validation boundary (agent.ParseAgent), so it is
+	// stored raw here rather than as a typed Agent -- a value decoded from a
+	// file never looks validated by its type. "" (the default) means no
+	// machine-wide preference.
+	DefaultDispatchHarness string `toml:"default_dispatch_harness,omitempty"`
+}
+
+// DefaultDispatchHarness returns the machine-wide default dispatch harness
+// from ~/.config/niwa/config.toml, or "" when the file, the section, or the key
+// is absent. The value comes back raw and unvalidated on purpose: the
+// closed-set check belongs to agent.ParseAgent, the one boundary every source
+// is forced through.
+func (g *GlobalConfig) DefaultDispatchHarness() string {
+	if g == nil {
+		return ""
+	}
+	return g.Global.DefaultDispatchHarness
 }
 
 // SkipPluginInstall reports whether the user has explicitly opted
@@ -90,6 +174,15 @@ func (g *GlobalConfig) CloneProtocol() string {
 		return g.Global.CloneProtocol
 	}
 	return "ssh"
+}
+
+// CloneWorkers returns the configured maximum number of repos cloned
+// concurrently during apply/create/dispatch. Zero (the default) means "unset":
+// callers fall back to niwa's built-in default. Lowering it on a slow or
+// unreliable network reduces the chance that many parallel git transports
+// saturate the link and one clone times out.
+func (g *GlobalConfig) CloneWorkers() int {
+	return g.Global.CloneWorkers
 }
 
 // RegisteredNames returns a sorted, sanitized list of workspace names from
@@ -219,21 +312,88 @@ func SaveGlobalConfig(cfg *GlobalConfig) error {
 // SaveGlobalConfigTo writes the global config to the given path, creating
 // parent directories as needed. The file is created with 0o600 permissions
 // because config.toml may contain sensitive values like repo URLs.
+//
+// KNOWN LOSS, deliberately not fixed here: this re-encodes the parsed struct,
+// and toml.Unmarshal keeps only the keys the struct declares. So every write
+// drops the file's comments and any key this build does not know about --
+// a key written by a newer niwa, or one of the [global] settings that has no
+// setter at all (dispatch_model, remote_control_on_dispatch,
+// keep_alive_on_dispatch, accept_session_messages_on_dispatch, watch_sandbox,
+// watch_max_staged), whose documented way to use them is to hand-edit this
+// file. A developer who hand-edits with a comment explaining why loses it to an
+// unrelated `niwa config set`.
+//
+// It predates any one caller and affects all of them, and fixing it means
+// editing the TOML tree in place rather than round-tripping a struct -- a
+// different encoder and a change to every writer. It is recorded here rather
+// than in a planning document because this is where the next person to touch
+// this function will be standing, and planning documents for this work are
+// deleted when it merges.
 func SaveGlobalConfigTo(path string, cfg *GlobalConfig) error {
+	return writeGlobalConfigFile(path, func(w io.Writer) error {
+		return toml.NewEncoder(w).Encode(cfg)
+	})
+}
+
+// writeGlobalConfigFile replaces path with whatever encode writes, atomically:
+// the bytes go to a temporary file in the same directory and only become the
+// config once a rename swaps them in. Same directory matters -- rename is
+// atomic within a filesystem and not across one, so a temp file in the system
+// temp directory would degrade to a copy and reopen the window this closes.
+//
+// The window is worth closing because this one file is the whole workspace
+// registry rather than a handful of settings. Truncating it in place means any
+// interruption between the truncate and the last byte -- a crash, a full disk,
+// a SIGINT during a long `niwa apply` -- leaves a config that has lost every
+// instance the workspace knew about, and a concurrent reader can observe the
+// half-written state even when the writer goes on to finish. With the rename,
+// a reader sees either the whole previous config or the whole new one.
+//
+// This is deliberately not a lock. Atomic replacement fixes torn writes and
+// torn reads; it does not fix a lost update, where two processes each load the
+// config, change different parts, and the second save overwrites the first.
+// Fixing that means holding a lock across load-mutate-save at every call site,
+// which is a different change to a different set of functions.
+//
+// encode is a parameter so a test can fail the encode partway and assert what
+// the target path holds afterwards, which is the case this exists for.
+func writeGlobalConfigFile(path string, encode func(io.Writer) error) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
 
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	tmp, err := os.CreateTemp(dir, ".config-*.toml")
 	if err != nil {
 		return fmt.Errorf("creating global config file: %w", err)
 	}
-	defer f.Close()
+	tmpPath := tmp.Name()
+	// Runs on every path. After a successful rename the temp name no longer
+	// exists, so both calls are harmless no-ops; on every failure below they
+	// are what keeps a partial write from being left on disk.
+	defer func() {
+		tmp.Close()
+		os.Remove(tmpPath)
+	}()
 
-	encoder := toml.NewEncoder(f)
-	if err := encoder.Encode(cfg); err != nil {
+	// CreateTemp already opens at 0o600, but the mode is part of this file's
+	// contract rather than an accident of the helper, so it is set explicitly.
+	if err := tmp.Chmod(0o600); err != nil {
+		return fmt.Errorf("setting global config file permissions: %w", err)
+	}
+
+	if err := encode(tmp); err != nil {
 		return fmt.Errorf("encoding global config: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("flushing global config file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing global config file: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("replacing global config file: %w", err)
 	}
 	return nil
 }

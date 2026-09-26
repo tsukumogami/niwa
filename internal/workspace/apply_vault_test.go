@@ -13,6 +13,7 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/vault"
 	"github.com/tsukumogami/niwa/internal/vault/fake"
 )
@@ -162,10 +163,15 @@ API_TOKEN = "vault://API_TOKEN"
 	}
 }
 
-// TestApplyVaultProviderMissingKeyErrors confirms the apply pipeline
-// surfaces resolver errors (a missing vault key without
-// ?required=false and without AllowMissingSecrets).
-func TestApplyVaultProviderMissingKeyErrors(t *testing.T) {
+// TestApplyVaultProviderMissingKeyReachesMaterialization confirms the
+// apply pipeline runs past resolution and materializes when a vault key
+// cannot be supplied, and that the unresolvable reference itself never
+// reaches the generated file.
+//
+// This test previously asserted the opposite -- that the pipeline
+// stopped at the resolver and surfaced the error. That was the wall
+// this work removes.
+func TestApplyVaultProviderMissingKeyReachesMaterialization(t *testing.T) {
 	withFakeVaultBackend(t)
 
 	configTOML := `
@@ -205,15 +211,25 @@ MISSING = "vault://MISSING"
 	}
 
 	workspaceRoot := tmpDir
+	instanceRoot := filepath.Join(workspaceRoot, "vault-miss-ws")
+	groupDir := filepath.Join(instanceRoot, "default")
+	if err := os.MkdirAll(filepath.Join(groupDir, "app", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
 	applier := NewApplier(mockClient)
 	applier.Cloner = &Cloner{}
 
-	_, err = applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name)
-	if err == nil {
-		t.Fatal("expected error for missing vault key")
+	if _, err = applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name); err != nil {
+		t.Fatalf("apply must survive a key the provider does not hold, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "MISSING") {
-		t.Errorf("expected error to name the missing key, got %v", err)
+
+	data, err := os.ReadFile(filepath.Join(groupDir, "app", ".local.env"))
+	if err != nil {
+		t.Fatalf("reading materialized env file: %v", err)
+	}
+	if strings.Contains(string(data), "vault://MISSING") {
+		t.Errorf("env file must not contain the unresolved vault URI, got:\n%s", data)
 	}
 }
 
@@ -412,10 +428,12 @@ LOG_LEVEL = "trace"
 	}
 }
 
-// TestApplyVaultAllowMissingSecretsDowngrades confirms the
-// AllowMissingSecrets plumbing threads through to the resolver and
-// downgrades the missing key instead of failing apply.
-func TestApplyVaultAllowMissingSecretsDowngrades(t *testing.T) {
+// TestApplyVaultMissingKeyDoesNotFailApply confirms the default: a
+// declared key a reachable provider does not hold, with no requirement
+// sub-table entry, no longer stops the apply. Nothing about the
+// invocation asks for tolerance -- tolerance is what the command does
+// now.
+func TestApplyVaultMissingKeyDoesNotFailApply(t *testing.T) {
 	withFakeVaultBackend(t)
 
 	configTOML := `
@@ -463,10 +481,9 @@ MISSING = "vault://MISSING"
 
 	applier := NewApplier(mockClient)
 	applier.Cloner = &Cloner{}
-	applier.AllowMissingSecrets = true
 
 	if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name); err != nil {
-		t.Fatalf("expected apply to succeed with AllowMissingSecrets, got %v", err)
+		t.Fatalf("expected apply to succeed despite the missing key, got %v", err)
 	}
 }
 
@@ -670,11 +687,24 @@ TOKEN = "vault://TOKEN"
 	}
 }
 
-// TestApplyFailsOnMissingRequiredEnvSecret enforces PRD R33: a
-// [env.secrets.required] key with no corresponding value MUST cause
-// niwa apply to fail. The error must name the missing key and include
-// the team-authored description string.
-func TestApplyFailsOnMissingRequiredEnvSecret(t *testing.T) {
+// TestApplyToleratesRequiredEnvSecretWithNoProvider is the inverse of
+// the test it replaces, and the whole point of this work: a
+// [env.secrets.required] key with no value and no provider configured
+// anywhere no longer stops the apply.
+//
+// Nothing here identifies a fault the reader can fix by editing the
+// workspace configuration. No backend was configured, so no backend
+// reported anything; the key is simply unsatisfiable in this
+// environment. Failing would refuse to materialize an instance a
+// contributor can otherwise use.
+//
+// The key is still enumerated for the reader: the apply survives AND
+// the run's collector names the key, its declared level and its
+// description. This is the end-to-end proof that the report is not
+// assembled from marks alone -- there is no mark anywhere in this
+// scenario, because nothing referenced the key for the resolver to
+// visit.
+func TestApplyToleratesRequiredEnvSecretWithNoProvider(t *testing.T) {
 	withFakeVaultBackend(t)
 
 	configTOML := `
@@ -720,29 +750,45 @@ GITHUB_TOKEN = "GitHub PAT with repo:read scope"
 
 	applier := NewApplier(mockClient)
 	applier.Cloner = &Cloner{}
+	keys := keyreport.New()
+	applier.Keys = keys
 
-	_, err = applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot, parsed.Config.Workspace.Name)
-	if err == nil {
-		t.Fatal("expected apply to fail when a required env secret is missing")
+	if _, err = applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot, parsed.Config.Workspace.Name); err != nil {
+		t.Fatalf("apply must survive a required key no configured provider could supply, got: %v", err)
 	}
-	msg := err.Error()
-	if !strings.Contains(msg, "GITHUB_TOKEN") {
-		t.Errorf("error must name the missing key, got: %v", err)
+
+	report := keys.Report()
+	if len(report) != 1 {
+		t.Fatalf("collector holds %d entries, want the one declared key: %v", len(report), report)
 	}
-	if !strings.Contains(msg, "GitHub PAT with repo:read scope") {
-		t.Errorf("error must include the required-table description, got: %v", err)
+	got := report[0]
+	if got.Key != "GITHUB_TOKEN" || got.Scope != "env.secrets" {
+		t.Errorf("entry = %s in %s, want GITHUB_TOKEN in env.secrets", got.Key, got.Scope)
 	}
-	if !strings.Contains(msg, "env.secrets") {
-		t.Errorf("error must name the offending scope, got: %v", err)
+	if got.Cause != keyreport.CauseNoSource {
+		t.Errorf("cause = %q, want no-source: no provider was configured, so none was asked", got.Cause)
+	}
+	if got.Level != config.LevelRequired {
+		t.Errorf("level = %q, want required", got.Level)
+	}
+	if got.Description != "GitHub PAT with repo:read scope" {
+		t.Errorf("description = %q, want the declared text", got.Description)
+	}
+	if rendered := keyreport.RenderText(report); !strings.Contains(rendered, "GITHUB_TOKEN") {
+		t.Errorf("rendered report does not name the key:\n%s", rendered)
 	}
 }
 
-// TestApplyAllowMissingSecretsDoesNotDowngradeRequired enforces PRD R34:
-// --allow-missing-secrets downgrades missing vault refs to empty, but
-// MUST NOT downgrade a [env.*.required] declaration. The required
-// check runs on the post-resolve value and fires on the empty
-// MaybeSecret the resolver produced.
-func TestApplyAllowMissingSecretsDoesNotDowngradeRequired(t *testing.T) {
+// TestApplyRequiredKeyOnReachableProviderStaysFatal is the
+// strict-when-reachable rule end to end: a provider is configured, is
+// reachable, and does not hold a key declared under
+// [env.secrets.required]. That combination identifies a real fault with
+// a known owner, so it remains the one shortfall that stops the apply.
+//
+// This is the surviving half of a test that used to prove
+// --allow-missing-secrets could not downgrade a required key. The flag
+// is gone; the guarantee it was pinned against is not.
+func TestApplyRequiredKeyOnReachableProviderStaysFatal(t *testing.T) {
 	withFakeVaultBackend(t)
 
 	configTOML := `
@@ -794,11 +840,10 @@ GITHUB_TOKEN = "vault://GITHUB_TOKEN"
 
 	applier := NewApplier(mockClient)
 	applier.Cloner = &Cloner{}
-	applier.AllowMissingSecrets = true
 
 	_, err = applier.Create(context.Background(), parsed.Config, niwaDir, workspaceRoot, parsed.Config.Workspace.Name)
 	if err == nil {
-		t.Fatal("expected apply to fail even with --allow-missing-secrets when a required key is missing (R34)")
+		t.Fatal("expected apply to fail: the provider was reachable and does not hold the required key")
 	}
 	msg := err.Error()
 	if !strings.Contains(msg, "GITHUB_TOKEN") {

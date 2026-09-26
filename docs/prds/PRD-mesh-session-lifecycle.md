@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 problem: |
   Coordinators running multi-step workflows—delegating design, then planning, then

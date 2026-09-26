@@ -1,5 +1,6 @@
 ---
-status: Planned
+schema: design/v1
+status: Current
 problem: |
   niwa's workspace.toml has a top-level `[content]` table whose semantics
   are 100% Claude-coupled — every consumer writes to literal `CLAUDE.md` /
@@ -38,7 +39,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 

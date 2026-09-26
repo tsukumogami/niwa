@@ -1037,7 +1037,9 @@ source = "workspace.md"
 
 	// Verify settings.local.json was generated with permissions and hooks.
 	settingsPath := filepath.Join(repoDir, ".claude", "settings.local.json")
-	assertFileContains(t, settingsPath, `"defaultMode": "bypassPermissions"`)
+	// bypass writes no permission mode; the posture travels on dispatch's
+	// --permission-mode flag instead.
+	assertFileNotContains(t, settingsPath, `"defaultMode"`)
 	assertFileContains(t, settingsPath, `"PreToolUse"`)
 	assertFileContains(t, settingsPath, "lint.local.sh")
 
@@ -2223,8 +2225,10 @@ RECOMMENDED_KEY = "Should be present - resolved by overlay vault"
 	envPath := filepath.Join(instanceRoot, "all", "repo1", ".local.env")
 	assertFileContains(t, envPath, "REQUIRED_KEY=")
 
-	// Now verify a missing required key fails the apply.
-	// Use a new workspace with REQUIRED_KEY required but no overlay vault resolution.
+	// Now verify a required key that no configured provider could supply
+	// does NOT fail the apply. Nothing was asked and nothing answered, so
+	// there is no fault here for the reader to fix -- only a value this
+	// environment cannot produce.
 	configTOMLMissing := `
 [workspace]
 name = "test-ws2"
@@ -2257,12 +2261,8 @@ MUST_HAVE = "This key is never provided"
 	// No overlay — MUST_HAVE is never resolved.
 	applier2 := NewApplier(mockClient)
 	applier2.vaultRegistry = newFakeVaultRegistry(t)
-	applyErr := applier2.Apply(context.Background(), result2.Config, niwaDir2, instanceRoot2)
-	if applyErr == nil {
-		t.Fatal("expected error for missing required secret, got nil")
-	}
-	if !strings.Contains(applyErr.Error(), "MUST_HAVE") {
-		t.Errorf("error should name the missing key, got: %v", applyErr)
+	if applyErr := applier2.Apply(context.Background(), result2.Config, niwaDir2, instanceRoot2); applyErr != nil {
+		t.Fatalf("apply must survive a required secret no provider could supply, got: %v", applyErr)
 	}
 }
 
@@ -2501,7 +2501,7 @@ org = "testorg"
 [groups.public]
 visibility = "public"
 
-[claude.content.groups.public]
+[content.groups.public]
 source = "claude/public.md"
 `
 	mockClient := &mockGitHubClient{

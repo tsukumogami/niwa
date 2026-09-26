@@ -335,3 +335,46 @@ Feature: Critical path: init, create, and apply
     And the error output contains "myws-2: directory exists but is not a valid niwa instance"
     And the error output does not contain "myws-3: directory exists"
     And the error output does not contain "myws-4: directory exists"
+
+  # --- Regression: a failing setup script must explain itself (issue #239) ---
+  # Setup-script output was routed through Reporter.Status, which is a no-op off
+  # a TTY and transient on one, so a script that failed on every apply took its
+  # explanation with it. The failure surfaced only as a deferred warning printed
+  # below a summary that said the apply succeeded.
+
+  @critical
+  Scenario: a failing setup script streams its output and is counted below the summary
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is 0
+    And the repo "tools/myapp" exists in instance "myws"
+    When I write an executable file "scripts/setup/01-deps.sh" in repo "tools/myapp" of instance "myws" with body:
+      """
+      #!/bin/sh
+      echo "installing dependencies"
+      echo "cannot find the foo toolchain" >&2
+      exit 1
+      """
+    And I run "niwa apply myws"
+    Then the exit code is 0
+    And the error output contains "running setup script myapp/01-deps.sh"
+    And the error output contains "[myapp/01-deps.sh] installing dependencies"
+    And the error output contains "[myapp/01-deps.sh] cannot find the foo toolchain"
+    And the error output contains "setup incomplete for 1 repo: myapp"
+    And the instance "myws" exists
+    And the file ".niwa/instance.json" exists in instance "myws"

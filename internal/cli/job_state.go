@@ -11,14 +11,25 @@ import (
 // jobState is the subset of ~/.claude/jobs/<id>/state.json niwa reads. The dir
 // name is the session-id prefix; the full SessionID inside confirms the match.
 //
-// Two distinct consumers read this file:
+// Everything here is Claude Code's own harness surface rather than a
+// general-purpose reader, and its consumers are the paths that are Claude
+// Code's by declaration:
 //   - the SessionStart guard (instance_from_hook.go) keys on Template == "bg"
-//     to confirm a dispatched background worker.
-//   - the dispatch capture path (dispatch_capture.go) keys on Cwd to correlate a
-//     launched worker to its instance directory and recover its session id.
+//     to confirm a dispatched background worker. Ephemeral-session provisioning
+//     rides that hook, and the capability is declared unavailable for every
+//     agent that has no such hook.
+//   - the reaper's entry-present liveness rule and `niwa watch`'s review
+//     continuation, both of which read a Claude Code job entry.
+//
+// The dispatch capture path no longer reads this file. Correlating a launched
+// worker to its instance is one behavior for whichever agent was launched, so
+// it moved to session_records.go, which is driven by the agent's own
+// declaration of where its records sit and what shape they are.
 //
 // The reaper's liveness rule (sessionLive) keys on the job ENTRY existing, not
 // on any field inside it, so no field here feeds liveness (DESIGN Decision 6).
+// Which agents that rule applies to is decided before it is called, from the
+// agent recorded on the session mapping.
 //
 // state.json is an undocumented internal Claude Code file, so absent fields
 // decode to their zero value and every reader fails safe on a miss.
@@ -30,6 +41,27 @@ type jobState struct {
 	// launched worker to its instance by matching this against the unique
 	// instance directory. Absent decodes to "".
 	Cwd string `json:"cwd"`
+	// The remaining fields feed ONLY the watch continuation classifier
+	// (recordJobActivity -> watch.ClassifySessionActivity). They are the job
+	// lifecycle/tempo fields the reaper and capture paths deliberately ignore.
+	// Absent decodes to the zero value, so a state.json without them classifies
+	// dead/unknown (fail-closed), never a wrong Continue.
+	//
+	// State is the job lifecycle ("done", "working", "blocked"); Tempo is the
+	// session tempo ("idle", "active", "blocked").
+	State string `json:"state"`
+	Tempo string `json:"tempo"`
+	// InFlight.Tasks counts in-flight sub-tasks. Advisory only: a nonzero value
+	// forces busy, but a zero value is not sufficient for idle on its own (stale
+	// teammate counts persist after a turn ends).
+	InFlight struct {
+		Tasks int `json:"tasks"`
+	} `json:"inFlight"`
+	// Block is present (non-nil) when the session is blocked on a pending
+	// question; Needs is non-empty when it needs a human answer. Either marks
+	// the session as awaiting a human (the "attached" proxy).
+	Block json.RawMessage `json:"block"`
+	Needs string          `json:"needs"`
 }
 
 // defaultJobsDir returns the Claude Code jobs directory (~/.claude/jobs). A

@@ -53,6 +53,28 @@ type SessionMapping struct {
 	TranscriptPath string    `json:"transcript_path"`
 	Created        time.Time `json:"created"`
 	Ephemeral      bool      `json:"ephemeral"`
+	// Agent names the coding agent whose session this is. Every later question
+	// about a session -- whether it still exists, how to step back into it --
+	// is answered against that agent's own declaration, and a reader that had
+	// to infer the agent from the shape of an id would be guessing. It is
+	// omitempty, and an absent value reads as the zero Agent, which
+	// internal/agent documents as Claude: a mapping written before this field
+	// existed describes a Claude session, because that is the only kind niwa
+	// wrote one for.
+	Agent string `json:"agent,omitempty"`
+	// Handle is the string the agent's own verbs accept for this session,
+	// which is not always the session id: one agent's management verbs reject
+	// the full UUID and take the name of the record directory instead. The
+	// dispatch path learns both when it captures the session and records the
+	// handle here, because a reader that has only the id cannot derive it --
+	// and a resume command built from the wrong one fails at the binary.
+	//
+	// omitempty, and an absent value means the mapping predates this field or
+	// was written by a path that never learned a handle. A reader then falls
+	// back to the session id ONLY for an agent whose declaration says the id
+	// is the handle, and otherwise offers nothing rather than a command that
+	// would not work.
+	Handle string `json:"handle,omitempty"`
 	// Label is an optional human-friendly alias derived later from the
 	// session topic. It is metadata only and is never used to rename the
 	// on-disk instance directory. omitempty keeps it absent when unset.
@@ -63,12 +85,42 @@ type SessionMapping struct {
 	// provenance only -- the reaper ignores it, so reclamation eligibility
 	// is unchanged. omitempty keeps legacy mappings byte-identical.
 	Origin string `json:"origin,omitempty"`
+	// KeepAlive records that the dispatch armed a keep-alive self-wake on
+	// this session (the resolved opt-in AND remote control on, so the arming
+	// actually happened). Like Origin it is informational only: it powers
+	// `niwa list` observability and is NEVER read by the reaper -- keep-alive
+	// must not defer or suppress reclamation, which keys purely on the job
+	// entry. omitempty keeps non-opted and legacy mappings byte-identical.
+	KeepAlive bool `json:"keep_alive,omitempty"`
+	// AcceptsSessionMessages records that the dispatch launched this session
+	// accepting messages from other Claude Code sessions without an approval
+	// prompt: the flag or machine setting asked for it AND the agent could
+	// receive it, so the setting actually went into the launch. Like KeepAlive
+	// it is informational only: it powers `niwa list` and is NEVER read by the
+	// reaper. omitempty keeps mappings where the behavior did not take effect,
+	// and mappings written before this field existed, byte-identical; both
+	// decode as false.
+	AcceptsSessionMessages bool `json:"accepts_session_messages,omitempty"`
+	// SessionName holds the display name the dispatch forwarded to the agent
+	// ("<slug>-<token>", sharing the instance name's random token), empty when
+	// none was: an unnamed dispatch, or an agent that declares no display-name
+	// flag. It is display-only and never used to find or reclaim the session.
+	// omitempty keeps unnamed and legacy mappings byte-identical.
+	SessionName string `json:"session_name,omitempty"`
 }
+
+// sessionsDirName is the directory under the config dir that holds the session
+// mapping store. It is a named constant because two places must agree on it:
+// this store, which writes it, and the snapshot writer, which has to carry it
+// across the swap that replaces the config dir wholesale (preserveSessionMappings).
+// A literal in both would let them drift apart silently, and the way that shows
+// up is every dispatch handle in the workspace disappearing on the next refresh.
+const sessionsDirName = "sessions"
 
 // sessionsDir returns the workspace-root session mapping directory,
 // .niwa/sessions, under workspaceRoot.
 func sessionsDir(workspaceRoot string) string {
-	return filepath.Join(workspaceRoot, StateDir, "sessions")
+	return filepath.Join(workspaceRoot, StateDir, sessionsDirName)
 }
 
 // sessionMappingPath returns the on-disk path for a session mapping after
@@ -174,6 +226,37 @@ func ListSessionMappings(workspaceRoot string) ([]SessionMapping, error) {
 		return out[i].SessionID < out[j].SessionID
 	})
 	return out, nil
+}
+
+// NewestMappingPerInstance groups mappings by the instance they name and keeps
+// the newest of each, by Created, with ties broken by the first session id in
+// order so the result does not depend on directory-read order.
+//
+// An instance can be named by several mappings: each dispatch into it writes
+// one, and the older ones describe sessions that have since been replaced. The
+// newest is the session currently backing the instance, which is the one a
+// caller asking "whose instance is this?" means. Keys are cleaned instance
+// paths, so two mappings that spell the same directory differently group
+// together.
+//
+// Created comes from the mapping file and is therefore not trustworthy against
+// a crafted store. This is a usability rule — it keeps a command off a
+// superseded session — not a security control.
+func NewestMappingPerInstance(mappings []SessionMapping) map[string]SessionMapping {
+	newest := make(map[string]SessionMapping, len(mappings))
+	for _, m := range mappings {
+		key := filepath.Clean(m.InstancePath)
+		cur, ok := newest[key]
+		switch {
+		case !ok:
+			newest[key] = m
+		case m.Created.After(cur.Created):
+			newest[key] = m
+		case m.Created.Equal(cur.Created) && m.SessionID < cur.SessionID:
+			newest[key] = m
+		}
+	}
+	return newest
 }
 
 // DeleteSessionMapping removes the mapping for sessionID from the workspace

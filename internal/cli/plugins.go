@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -45,10 +46,17 @@ the on-disk plugin already matches the embedded version it reports
 
 func runPluginsInstall(cmd *cobra.Command, args []string) error {
 	reporter := workspace.NewReporter(cmd.ErrOrStderr())
-	action, err := plugin.Install(nil, reporter, plugin.InstallOpts{SkipInstall: false})
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("installing niwa plugin: resolving the home directory: %w", err)
+	}
+	action, err := plugin.Install(home, plugin.InstallOpts{SkipInstall: false})
 	if err != nil {
 		return fmt.Errorf("installing niwa plugin: %w", err)
 	}
+	// The installer no longer reports for itself, so the notice it used to
+	// emit is emitted here, alongside this command's own stdout line.
+	workspace.EmitPluginInstallNotice(action, reporter)
 	switch action {
 	case plugin.Installed:
 		fmt.Fprintln(cmd.OutOrStdout(), "niwa plugin installed.")

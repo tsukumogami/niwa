@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Superseded
 superseded_by: docs/designs/current/DESIGN-niwa-mesh-removal.md
 upstream: docs/prds/PRD-cross-session-communication.md
@@ -58,6 +59,8 @@ rationale: |
 # DESIGN: Cross-Session Communication
 
 ## Status
+
+Superseded
 
 Superseded by [DESIGN-niwa-mesh-removal.md](docs/designs/current/DESIGN-niwa-mesh-removal.md)
 
@@ -1100,52 +1103,6 @@ Deliverables:
 - Delete the two prior-art design files (`docs/designs/current/DESIGN-cross-session-communication.md` and `docs/designs/DESIGN-channels-integration-test.md`).
 - Move the accepted `docs/designs/DESIGN-cross-session-communication.md` to `docs/designs/current/` as part of the acceptance transition.
 
-## Consequences
-
-### Positive
-
-- **Uniform tool surface regardless of worker liveness.** A coordinator calls `niwa_delegate(to="web")` the same way whether `web` has ever been opened or not. Niwa spawns the worker when needed. This is the headline win the PRD was written to deliver.
-- **Task-level semantics decoupled from process lifetime.** A task completes only via explicit `niwa_finish_task`; a crashing worker is a restart event, not a silent success. The delegator has a real handle (`task_id`) for query, await, update, cancel.
-- **Crash-safe at every level.** Messages live in files, not memory; the daemon is stateless across restarts; per-task state is recovered via `state.json` on daemon restart; `cmd.Wait()` + atomic renames preserve at-most-once claim and at-most-once completion.
-- **Deterministic testability.** The test harness (`NIWA_WORKER_SPAWN_COMMAND` + timing overrides + daemon pause hooks) makes every PRD AC verifiable in seconds without involving a live Claude; race-window AC are reproducible on demand via pause hooks.
-- **Zero-config in the common case.** Workspaces with descriptive repo names get a full mesh from `--channels` or `NIWA_CHANNELS=1` alone; no role map needed; hybrid activation covers team, personal, and one-off needs.
-- **Forward-compatible tool API.** The tool contracts encode no assumption about how workers are started or woken. If Claude Code's Channels push ever becomes viable, only the daemon's spawn code changes; the tool surface is unaffected.
-- **No new runtime dependencies.** Go stdlib + fsnotify (already in `go.mod`). No new IPC layer, no cryptographic tokens, no database.
-- **Observability.** `niwa task list`, `niwa task show`, and the `transitions.log` NDJSON audit trail give a complete record of every task's lifecycle for debugging and post-mortems.
-
-### Negative
-
-- **Per-task fsync cost bounds transition rate.** Each state transition fsyncs `state.json`, the parent directory, and `transitions.log` — approximately 3 fsync round-trips per transition. On slow disks this is user-observable under pathological load (many concurrent delegations). Within PRD R47's 1000-iteration concurrent-writer stress profile, still well under latency budgets.
-- **macOS worker-auth degradation.** `PIDStartTime` is conservative on macOS (returns "alive" without a precise timestamp), so the PPID + start-time check degrades to PID match only. This is weaker than the Linux path but within the PRD's trust ceiling ("role integrity is the only trust boundary"). Documented as a Known Limitation.
-- **Stalled-progress watchdog has a 15-minute default.** A worker stuck in a non-progressing loop burns tokens until the watchdog fires. The threshold is configurable (`NIWA_STALL_WATCHDOG_SECONDS`) but a lower default would produce false-positives on legitimately-slow operations.
-- **Task directories accumulate indefinitely.** `.niwa/tasks/<task-id>/` directories are not garbage-collected in v1. A long-lived workspace with thousands of completed tasks grows unbounded. Manual `rm` is the workaround; `niwa mesh gc` is v2.
-- **Daemon doesn't survive machine restarts.** After reboot, all instance daemons are gone. User must run `niwa apply` to restore. Tasks that were `running` at reboot time go through adopted-orphan reconciliation when the daemon returns (if the worker process survived) or through unexpected-exit path (if it did not).
-- **Pre-1.0 migration discards queued envelopes.** Instances provisioned under the old mesh lose any unconsumed envelopes on upgrade; the migration helper emits a one-line stderr warning but does not preserve state. Pre-1.0 posture makes this acceptable; users with critical in-flight work should `niwa destroy` + `niwa create --channels` on their own schedule.
-- **No in-flight task cancellation.** A delegator that wants to stop a running task waits for the worker to exit or the watchdog to fire. `niwa_cancel_task` only works for `queued` tasks. In-flight cancellation is v2.
-- **Delegator liveness bounds sync semantics.** `niwa_delegate(mode="sync")` and `niwa_await_task` only return if the coordinator's session is alive. Results accumulate in the inbox for asynchronous pickup via `niwa_check_messages` or `niwa_query_task` on the next session start, but sync behavior requires a live coordinator.
-- **Role integrity is the only trust boundary against same-UID processes.** An agent that overrides `NIWA_SESSION_ROLE` can act on tasks belonging to the spoofed role. Per-agent keys / cryptographic signing is out of scope.
-- **PPID-walk assumes claude → mcp-serve spawn topology.** If Claude Code ever introduces a helper layer between `claude -p` and `niwa mcp-serve`, the `PPIDChain(1)` check lands on the wrong PID and fails closed (auth rejects legitimate workers). This is the safe direction — the check does not silently pass — but real workers start failing `niwa_finish_task`. Mitigated by: (a) Decision 3 retains the token-file alternative as a migration path with identical API; (b) functional tests via the scripted fake assert that `PPIDChain(1)` lands on the PID the daemon recorded; regression will surface in CI before users are affected.
-- **`worker.pid == 0` race window on first tool call.** Between the daemon's consumption-rename (writes `state.json` with `worker.pid=0, spawn_started_at=now`) and the subsequent backfill after `cmd.Start()` (writes `worker.pid=<real>, worker.start_time=<real>`), a freshly-spawned worker's first task-authorized tool call will fail `authorizeTaskCall` with `NOT_TASK_PARTY`. The happy path (worker's first call is `niwa_check_messages`, which is not task-authorized) hides this window. Scripted workers calling `niwa_report_progress` or `niwa_finish_task` as their first action must retry on `NOT_TASK_PARTY` for a brief initial window (millisecond-scale under normal operation). The test harness's scripted fake implements retry-with-backoff on this error for up to 2 seconds before surfacing.
-- **Completion is a behavioral contract, not structurally verified.** A worker LLM that calls `niwa_finish_task(outcome="completed", result={"ok":true})` without actually performing the delegated work will mark the task complete and exit. Niwa has no way to detect this from the outside. The restart cap bounds the blast radius of a worker that fails in an obvious way (crash, timeout, early exit), but not of one that returns a plausible-looking false result. Documented as a PRD Known Limitation; a v2 heuristic ("reject finish_task if no progress event was emitted") is tracked but deferred.
-- **Single-worker-per-role sequential execution limits parallelism.** Two queued tasks for the same role run one after the other; the daemon does not parallelize within a role (this is the git-conflict-avoidance design choice). In workflows where one role has many independent quick tasks (e.g., "run 20 test-case generators in the `tests` repo"), the latency is sum-of-tasks rather than max. PRD Out of Scope.
-- **MCP server process count scales with session count.** Each Claude session — coordinator plus every running worker — runs its own stdio `niwa mcp-serve` subprocess with its own fsnotify watch, its own waiter map, its own JSON decoder. For a coordinator delegating to three parallel roles, the process count during peak work is ≥ 4 (1 coordinator claude + 1 coordinator mcp-serve + 3 worker claudes + 3 worker mcp-serves = ~8). Visible in `htop` but not a scaling concern at realistic session counts.
-- **Hand-rolled `/proc/<pid>/stat` parsing on Linux.** `PIDStartTime` and `PPIDChain` rely on parsing `/proc/<pid>/stat` fields 22 (starttime) and 4 (ppid). The Go stdlib does not wrap this. If future kernels change the `/proc/<pid>/stat` layout, the parsing needs updating. Existing code in `internal/mcp/liveness.go` already has this dependency; this design extends it but does not introduce it.
-- **Removed roles leave orphan inbox directories.** If a user removes a repo from `workspace.toml` and re-runs `niwa apply`, the now-unreferenced `.niwa/roles/<old-role>/inbox/` directory is not garbage-collected. Queued envelopes for the removed role survive but are never consumed. Manual cleanup (`rm -rf .niwa/roles/<old-role>/`) is the v1 workaround; GC is v2.
-- **Instance root must be on a local POSIX filesystem.** The atomic-rename + flock + parent-directory-fsync pattern assumes local filesystem semantics (ext4/xfs/btrfs/apfs/tmpfs all qualify; ext4's `data=ordered` default is the reference model). NFS, SMB, sshfs, and other network filesystems have varying atomic-rename and advisory-flock semantics and are unsupported in v1. Placing `.niwa/` on tmpfs is allowed but trades durability for the lifetime of the filesystem.
-
-### Mitigations
-
-- **fsync cost**: acceptable within PRD's stated stress profile; if a future workload saturates this, batching or write-coalescing is a local optimization.
-- **macOS degradation**: documented as Known Limitation; PRD's trust ceiling already accepts role-based integrity.
-- **Watchdog default**: 15 minutes is conservative; users with known-slow tasks bump `NIWA_STALL_WATCHDOG_SECONDS` per invocation; users with known-fast tasks lower it.
-- **Task dir accumulation**: documented as Known Limitation; `niwa mesh gc` command and retention policy are tracked as v2 work.
-- **Reboot recovery**: `niwa apply` is the documented recovery path; daemon reconciliation handles stale state. A future `niwa mesh start` subcommand could expose targeted per-instance restart.
-- **Migration warning**: explicit stderr warning on first post-upgrade apply; documented in user-facing guide; pre-1.0 posture makes envelope loss the accepted tradeoff for a clean break.
-- **In-flight cancellation**: documented as Known Limitation; `niwa_fail_task` from inside a running worker is the v1 path for a worker that wants to bail; watchdog catches runaways.
-- **Delegator liveness**: `niwa_query_task` is the pull-surface backstop; `task.completed` / `task.abandoned` messages accumulate in the delegator's inbox for offline pickup.
-- **Role spoofing**: per-agent cryptographic identity is out of PRD scope; documented as Known Limitation and a deliberate choice for v1.
-- **PPID assumption**: the token-file alternative (Decision 3's rejected C-path) is explicitly retained as a drop-in replacement if Claude Code's MCP topology changes; the MCP tool contract and authorization semantics would not change.
-
 ## Security Considerations
 
 ### Trust Model
@@ -1254,3 +1211,49 @@ These are not negotiable design choices — they are required implementation pro
 - `niwa mesh gc` for task directory retention.
 - Per-caller rate limiting on `niwa_delegate` / `niwa_send_message`.
 - Structural verification that `niwa_finish_task(completed)` is accompanied by genuine work (heuristic, e.g., presence of at least one `niwa_report_progress` event).
+## Consequences
+
+### Positive
+
+- **Uniform tool surface regardless of worker liveness.** A coordinator calls `niwa_delegate(to="web")` the same way whether `web` has ever been opened or not. Niwa spawns the worker when needed. This is the headline win the PRD was written to deliver.
+- **Task-level semantics decoupled from process lifetime.** A task completes only via explicit `niwa_finish_task`; a crashing worker is a restart event, not a silent success. The delegator has a real handle (`task_id`) for query, await, update, cancel.
+- **Crash-safe at every level.** Messages live in files, not memory; the daemon is stateless across restarts; per-task state is recovered via `state.json` on daemon restart; `cmd.Wait()` + atomic renames preserve at-most-once claim and at-most-once completion.
+- **Deterministic testability.** The test harness (`NIWA_WORKER_SPAWN_COMMAND` + timing overrides + daemon pause hooks) makes every PRD AC verifiable in seconds without involving a live Claude; race-window AC are reproducible on demand via pause hooks.
+- **Zero-config in the common case.** Workspaces with descriptive repo names get a full mesh from `--channels` or `NIWA_CHANNELS=1` alone; no role map needed; hybrid activation covers team, personal, and one-off needs.
+- **Forward-compatible tool API.** The tool contracts encode no assumption about how workers are started or woken. If Claude Code's Channels push ever becomes viable, only the daemon's spawn code changes; the tool surface is unaffected.
+- **No new runtime dependencies.** Go stdlib + fsnotify (already in `go.mod`). No new IPC layer, no cryptographic tokens, no database.
+- **Observability.** `niwa task list`, `niwa task show`, and the `transitions.log` NDJSON audit trail give a complete record of every task's lifecycle for debugging and post-mortems.
+
+### Negative
+
+- **Per-task fsync cost bounds transition rate.** Each state transition fsyncs `state.json`, the parent directory, and `transitions.log` — approximately 3 fsync round-trips per transition. On slow disks this is user-observable under pathological load (many concurrent delegations). Within PRD R47's 1000-iteration concurrent-writer stress profile, still well under latency budgets.
+- **macOS worker-auth degradation.** `PIDStartTime` is conservative on macOS (returns "alive" without a precise timestamp), so the PPID + start-time check degrades to PID match only. This is weaker than the Linux path but within the PRD's trust ceiling ("role integrity is the only trust boundary"). Documented as a Known Limitation.
+- **Stalled-progress watchdog has a 15-minute default.** A worker stuck in a non-progressing loop burns tokens until the watchdog fires. The threshold is configurable (`NIWA_STALL_WATCHDOG_SECONDS`) but a lower default would produce false-positives on legitimately-slow operations.
+- **Task directories accumulate indefinitely.** `.niwa/tasks/<task-id>/` directories are not garbage-collected in v1. A long-lived workspace with thousands of completed tasks grows unbounded. Manual `rm` is the workaround; `niwa mesh gc` is v2.
+- **Daemon doesn't survive machine restarts.** After reboot, all instance daemons are gone. User must run `niwa apply` to restore. Tasks that were `running` at reboot time go through adopted-orphan reconciliation when the daemon returns (if the worker process survived) or through unexpected-exit path (if it did not).
+- **Pre-1.0 migration discards queued envelopes.** Instances provisioned under the old mesh lose any unconsumed envelopes on upgrade; the migration helper emits a one-line stderr warning but does not preserve state. Pre-1.0 posture makes this acceptable; users with critical in-flight work should `niwa destroy` + `niwa create --channels` on their own schedule.
+- **No in-flight task cancellation.** A delegator that wants to stop a running task waits for the worker to exit or the watchdog to fire. `niwa_cancel_task` only works for `queued` tasks. In-flight cancellation is v2.
+- **Delegator liveness bounds sync semantics.** `niwa_delegate(mode="sync")` and `niwa_await_task` only return if the coordinator's session is alive. Results accumulate in the inbox for asynchronous pickup via `niwa_check_messages` or `niwa_query_task` on the next session start, but sync behavior requires a live coordinator.
+- **Role integrity is the only trust boundary against same-UID processes.** An agent that overrides `NIWA_SESSION_ROLE` can act on tasks belonging to the spoofed role. Per-agent keys / cryptographic signing is out of scope.
+- **PPID-walk assumes claude → mcp-serve spawn topology.** If Claude Code ever introduces a helper layer between `claude -p` and `niwa mcp-serve`, the `PPIDChain(1)` check lands on the wrong PID and fails closed (auth rejects legitimate workers). This is the safe direction — the check does not silently pass — but real workers start failing `niwa_finish_task`. Mitigated by: (a) Decision 3 retains the token-file alternative as a migration path with identical API; (b) functional tests via the scripted fake assert that `PPIDChain(1)` lands on the PID the daemon recorded; regression will surface in CI before users are affected.
+- **`worker.pid == 0` race window on first tool call.** Between the daemon's consumption-rename (writes `state.json` with `worker.pid=0, spawn_started_at=now`) and the subsequent backfill after `cmd.Start()` (writes `worker.pid=<real>, worker.start_time=<real>`), a freshly-spawned worker's first task-authorized tool call will fail `authorizeTaskCall` with `NOT_TASK_PARTY`. The happy path (worker's first call is `niwa_check_messages`, which is not task-authorized) hides this window. Scripted workers calling `niwa_report_progress` or `niwa_finish_task` as their first action must retry on `NOT_TASK_PARTY` for a brief initial window (millisecond-scale under normal operation). The test harness's scripted fake implements retry-with-backoff on this error for up to 2 seconds before surfacing.
+- **Completion is a behavioral contract, not structurally verified.** A worker LLM that calls `niwa_finish_task(outcome="completed", result={"ok":true})` without actually performing the delegated work will mark the task complete and exit. Niwa has no way to detect this from the outside. The restart cap bounds the blast radius of a worker that fails in an obvious way (crash, timeout, early exit), but not of one that returns a plausible-looking false result. Documented as a PRD Known Limitation; a v2 heuristic ("reject finish_task if no progress event was emitted") is tracked but deferred.
+- **Single-worker-per-role sequential execution limits parallelism.** Two queued tasks for the same role run one after the other; the daemon does not parallelize within a role (this is the git-conflict-avoidance design choice). In workflows where one role has many independent quick tasks (e.g., "run 20 test-case generators in the `tests` repo"), the latency is sum-of-tasks rather than max. PRD Out of Scope.
+- **MCP server process count scales with session count.** Each Claude session — coordinator plus every running worker — runs its own stdio `niwa mcp-serve` subprocess with its own fsnotify watch, its own waiter map, its own JSON decoder. For a coordinator delegating to three parallel roles, the process count during peak work is ≥ 4 (1 coordinator claude + 1 coordinator mcp-serve + 3 worker claudes + 3 worker mcp-serves = ~8). Visible in `htop` but not a scaling concern at realistic session counts.
+- **Hand-rolled `/proc/<pid>/stat` parsing on Linux.** `PIDStartTime` and `PPIDChain` rely on parsing `/proc/<pid>/stat` fields 22 (starttime) and 4 (ppid). The Go stdlib does not wrap this. If future kernels change the `/proc/<pid>/stat` layout, the parsing needs updating. Existing code in `internal/mcp/liveness.go` already has this dependency; this design extends it but does not introduce it.
+- **Removed roles leave orphan inbox directories.** If a user removes a repo from `workspace.toml` and re-runs `niwa apply`, the now-unreferenced `.niwa/roles/<old-role>/inbox/` directory is not garbage-collected. Queued envelopes for the removed role survive but are never consumed. Manual cleanup (`rm -rf .niwa/roles/<old-role>/`) is the v1 workaround; GC is v2.
+- **Instance root must be on a local POSIX filesystem.** The atomic-rename + flock + parent-directory-fsync pattern assumes local filesystem semantics (ext4/xfs/btrfs/apfs/tmpfs all qualify; ext4's `data=ordered` default is the reference model). NFS, SMB, sshfs, and other network filesystems have varying atomic-rename and advisory-flock semantics and are unsupported in v1. Placing `.niwa/` on tmpfs is allowed but trades durability for the lifetime of the filesystem.
+
+### Mitigations
+
+- **fsync cost**: acceptable within PRD's stated stress profile; if a future workload saturates this, batching or write-coalescing is a local optimization.
+- **macOS degradation**: documented as Known Limitation; PRD's trust ceiling already accepts role-based integrity.
+- **Watchdog default**: 15 minutes is conservative; users with known-slow tasks bump `NIWA_STALL_WATCHDOG_SECONDS` per invocation; users with known-fast tasks lower it.
+- **Task dir accumulation**: documented as Known Limitation; `niwa mesh gc` command and retention policy are tracked as v2 work.
+- **Reboot recovery**: `niwa apply` is the documented recovery path; daemon reconciliation handles stale state. A future `niwa mesh start` subcommand could expose targeted per-instance restart.
+- **Migration warning**: explicit stderr warning on first post-upgrade apply; documented in user-facing guide; pre-1.0 posture makes envelope loss the accepted tradeoff for a clean break.
+- **In-flight cancellation**: documented as Known Limitation; `niwa_fail_task` from inside a running worker is the v1 path for a worker that wants to bail; watchdog catches runaways.
+- **Delegator liveness**: `niwa_query_task` is the pull-surface backstop; `task.completed` / `task.abandoned` messages accumulate in the delegator's inbox for offline pickup.
+- **Role spoofing**: per-agent cryptographic identity is out of PRD scope; documented as Known Limitation and a deliberate choice for v1.
+- **PPID assumption**: the token-file alternative (Decision 3's rejected C-path) is explicitly retained as a drop-in replacement if Claude Code's MCP topology changes; the MCP tool contract and authorization semantics would not change.
+

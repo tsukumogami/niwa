@@ -1234,3 +1234,35 @@ func TestLoadStateV3WithoutAuthSources(t *testing.T) {
 		t.Errorf("AuthSources after rewrite should still be nil, got %+v", reloaded.AuthSources)
 	}
 }
+
+// TestLoadStateWithoutClaudePermissions checks that a state file written by a
+// binary that predates the claude_permissions key loads cleanly with an empty
+// posture.
+func TestLoadStateWithoutClaudePermissions(t *testing.T) {
+	dir := t.TempDir()
+	niwaDir := filepath.Join(dir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	oldJSON := `{
+  "schema_version": 4,
+  "config_name": "ws",
+  "instance_name": "ws",
+  "instance_number": 1,
+  "root": "` + dir + `",
+  "created": "2026-01-01T00:00:00Z",
+  "last_applied": "2026-01-01T00:00:00Z",
+  "managed_files": [],
+  "repos": {}
+}`
+	if err := os.WriteFile(filepath.Join(niwaDir, StateFile), []byte(oldJSON), 0o600); err != nil {
+		t.Fatalf("writing state: %v", err)
+	}
+	loaded, err := LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if loaded.ClaudePermissions != "" {
+		t.Errorf("ClaudePermissions = %q, want empty", loaded.ClaudePermissions)
+	}
+}

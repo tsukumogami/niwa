@@ -1,6 +1,8 @@
 package workspace
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,8 +11,12 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/gitexclude"
+	"github.com/tsukumogami/niwa/internal/keyreport"
+	"github.com/tsukumogami/niwa/internal/secret"
 )
 
 // worktreeApplyEvent is the worktree-lifecycle event run by ApplyToWorktree on
@@ -18,6 +24,179 @@ import (
 // the apply path, so a single event covers both (mirroring how instance create
 // runs the apply pipeline).
 const worktreeApplyEvent = "apply"
+
+// worktreeHookEvents is the closed set of worktree-lifecycle events niwa
+// consumes, in the order they run. It has exactly one consumer on each side:
+// DiscoverWorktreeHooks validates discovered names against it, and
+// runWorktreeHooks iterates it to decide which scripts to run. Neither reads
+// worktreeApplyEvent directly any more.
+//
+// Adding an event is adding one entry here. That is the whole point of the
+// indirection: validating against a set while the runner still read the bare
+// constant would make a newly-valid event name *valid and still never run* --
+// the original silent no-op with a validation step in front of it.
+var worktreeHookEvents = []string{worktreeApplyEvent}
+
+// ErrUnknownWorktreeHookEvent is the sentinel DiscoverWorktreeHooks wraps when
+// it finds a hook registered under an event name outside worktreeHookEvents.
+//
+// It exists so runWorktreeHooks can downgrade exactly this case to a warning
+// while every other error from discovery stays fatal. That distinction is
+// load-bearing: DiscoverWorktreeHooks also reports symlink-escape containment
+// failures and directory-read failures, and a downgrade written as "discovery
+// returned an error" would turn the containment check into best-effort logging.
+// Match it with errors.Is and nothing broader.
+var ErrUnknownWorktreeHookEvent = errors.New("unknown worktree-hook event")
+
+// reporterFor resolves the Reporter setup-script output goes to, implementing
+// the precedence documented on WorktreeApplyOptions.Reporter: an explicit
+// Reporter wins, then a Reporter wrapping the caller's Stderr, then one
+// wrapping os.Stderr.
+//
+// The two overlapping output channels are deliberate rather than accidental.
+// The apply pipeline holds a real *Reporter whose deferred warnings and verdict
+// line are where a worktree setup failure belongs; the two interactive commands
+// hold only an io.Writer. Rather than force one shape on both, the struct takes
+// either and states which wins.
+func reporterFor(opts WorktreeApplyOptions) *Reporter {
+	if opts.Reporter != nil {
+		return opts.Reporter
+	}
+	if opts.Stderr != nil {
+		return NewReporter(opts.Stderr)
+	}
+	return NewReporter(os.Stderr)
+}
+
+// worktreeSetupEnv is what a repo's setup script receives when it runs against
+// a worktree rather than a clone.
+//
+// It reuses the NIWA_WORKTREE_* shape runWorktreeHooks already exports, because
+// opening a second namespace for the same four facts would be a divergence with
+// nothing behind it.
+//
+// NIWA_INSTANCE_ROOT is the substantive addition, and it is the whole point.
+// Setup scripts have only ever had one working directory, so they find the
+// instance root by walking up from it -- `cd ../..` from
+// <instanceRoot>/<group>/<repo>. From a worktree, whose path is
+// <instanceRoot>/.niwa/worktrees/<repo>-<sid>, that same expression reaches
+// <instanceRoot>/.niwa: a directory that exists and is writable, so the script
+// succeeds, writes to the wrong place, and exits 0. There is no error for any
+// warning stream to carry. The group segment is absent from the worktree path
+// too, so a script reaching sideways to a peer repo is wrong in a second,
+// independent way. Exporting the anchor is what retires the idiom.
+//
+// A script tells the two apart by the presence of NIWA_WORKTREE_PATH, which is
+// absent on the clone path. That is the mechanism a repo uses when one
+// scripts/setup/ directory holds both a per-tree dependency install and a
+// shared-state step like a git-hooks installer -- git hooks live in the shared
+// git-common-dir, so running that per tree is duplicate work at best.
+//
+// Nothing here is secret-derived. Paths and names only; see RunSetupScripts.
+func worktreeSetupEnv(instanceRoot, worktreePath, repo, purpose, branch string) []string {
+	return []string{
+		"NIWA_WORKTREE_PATH=" + worktreePath,
+		"NIWA_WORKTREE_REPO=" + repo,
+		"NIWA_WORKTREE_PURPOSE=" + purpose,
+		"NIWA_WORKTREE_BRANCH=" + branch,
+		"NIWA_INSTANCE_ROOT=" + instanceRoot,
+	}
+}
+
+// cloneSetupEnv is what a repo's setup script receives when it runs against the
+// clone. It carries the instance-root anchor and nothing else.
+//
+// The anchor goes on BOTH surfaces deliberately. Exporting it only in worktrees
+// would leave `cd ../..` working in clones and therefore still load-bearing --
+// fixing the symptom in the new location while the fragile idiom stays in the
+// old one, ready to break again at the next layout change. R15's
+// clone-behaviour guarantee explicitly permits adding non-secret niwa-supplied
+// entries for this reason.
+//
+// The absence of NIWA_WORKTREE_PATH here is the signal a script gates on.
+func cloneSetupEnv(instanceRoot string) []string {
+	return []string{"NIWA_INSTANCE_ROOT=" + instanceRoot}
+}
+
+// worktreeRedactor builds the scrubber for output produced inside a worktree,
+// for the surfaces that cannot borrow the apply pipeline's.
+//
+// The problem it solves is not wiring. `niwa worktree create` and
+// `niwa worktree apply` resolve no secrets -- that is the whole point of the
+// inherit design -- so a secret.NewRedactor() constructed in those processes
+// holds zero fragments and Scrub short-circuits. Meanwhile the worktree DOES
+// contain the clone's byte-copied env output, at 0600, in the working directory
+// a setup script runs in. So the material is there and the scrubber is empty.
+//
+// The fix reads nothing new: the values come from a file this same process just
+// placed in that tree. It registers the resolved value of every key
+// config.SecretCapableKeys names -- which is derived from the one enumeration
+// of MaybeSecret slots, shared with vault provider validation, rather than from
+// a hand-written list of tables that would go stale the first time someone adds
+// a secret-capable field.
+//
+// A nil return means there is nothing to scrub, which RunSetupScripts treats as
+// no redaction. That is correct rather than a fallback: it happens when the repo
+// declares no secret-capable keys at all.
+//
+// The minimum-fragment-length guard inside Register stays underneath, so a
+// short declared value does not turn every occurrence of a common word into a
+// placeholder.
+func worktreeRedactor(cfg *config.WorkspaceConfig, cloneRepoDir, repo string, globalEnvOutput config.OutputTargets) *secret.Redactor {
+	keys := config.SecretCapableKeys(cfg, repo)
+	if len(keys) == 0 {
+		return nil
+	}
+
+	values, _, err := readCloneEnvOutput(cloneRepoDir, cfg, repo, globalEnvOutput)
+	if err != nil {
+		// A worktree we cannot read the inherited env for is one we cannot
+		// scrub precisely. Returning nil here would silently disable
+		// redaction, so the caller treats a nil redactor as "nothing declared"
+		// rather than "read failed" -- and this path returns an empty-but-real
+		// redactor instead, which scrubs nothing and says nothing, matching
+		// the pre-existing behaviour without claiming coverage it lacks.
+		return secret.NewRedactor()
+	}
+
+	red := secret.NewRedactor()
+	var registered int
+	for key, value := range values {
+		if keys[key] && value != "" {
+			red.Register([]byte(value))
+			registered++
+		}
+	}
+	if registered == 0 {
+		return nil
+	}
+	return red
+}
+
+// recordSetupOutcome copies a setup outcome into the caller's sink when one was
+// supplied, and does nothing when it was not.
+//
+// This is the same shape as collectExempt: a nil sink is the caller saying it
+// does not want the data, not an error. Keeping the outcome on a sink rather
+// than on the return value is what lets the five entry paths into
+// ApplyToWorktree disagree about what a setup failure means without the
+// function having to know which one it is on.
+func recordSetupOutcome(sink *SetupResult, result *SetupResult) {
+	if sink == nil || result == nil {
+		return
+	}
+	*sink = *result
+}
+
+// isKnownWorktreeHookEvent reports whether event is one niwa consumes.
+func isKnownWorktreeHookEvent(event string) bool {
+	for _, known := range worktreeHookEvents {
+		if event == known {
+			return true
+		}
+	}
+	return false
+}
 
 // worktreeRulesFile is the per-worktree rules import file. A worktree, when
 // launched as its own Claude Code project root, does not inherit the instance
@@ -56,6 +235,34 @@ type repoMaterializeInputs struct {
 	// WorktreeDelegation carries the apply-time worktree-integration decision
 	// (probe result + niwa absolute path). nil installs neither hook nor deny.
 	WorktreeDelegation *WorktreeDelegation
+	// InheritedEnv, when non-nil, is the clone's already-materialized env from
+	// which the SettingsMaterializer resolves [claude.env] promoted keys instead
+	// of re-resolving secrets. The worktree path sets this (see ApplyToWorktree);
+	// the instance apply path leaves it nil so promotion resolves from config.
+	InheritedEnv map[string]string
+	// InheritedUnresolved is the worktree path's unresolved-key set, recovered
+	// from the records in the clone's materialized env file. It rides alongside
+	// InheritedEnv for the same reason: this path holds no marks to read.
+	InheritedUnresolved map[string]unresolvedEnvKey
+	// Keys collects the declared keys this repo could not supply. nil disables
+	// collection; the worktree path leaves it nil because it renders no report.
+	Keys *keyreport.Collector
+	// StrictSecrets is the run's resolved strictness, threaded here for the
+	// promote branch alone -- promotion happens per-repo, after the applier's
+	// post-merge gate has already passed. The worktree path leaves it false
+	// and must keep doing so: it re-materializes from an already-written file
+	// and resolves nothing, so there is nothing there to be strict about.
+	StrictSecrets bool
+	// SessionEnv is the workspace's resolved [session.env] values, computed
+	// once per apply and threaded here so every agent's delivery is generated
+	// from the same map. The Claude settings document layers [claude.env] over
+	// it per key; nothing here consults it to decide whether another agent gets
+	// an environment at all.
+	SessionEnv map[string]string
+	// SessionEnvSources is the provenance of the inputs that produced
+	// SessionEnv, rolled into the settings document's fingerprint alongside
+	// the agent-specific declaration's own.
+	SessionEnvSources []SourceEntry
 }
 
 // runRepoMaterializers runs the given materializers for a single repo against
@@ -146,13 +353,21 @@ func runRepoMaterializers(materializers []Materializer, in repoMaterializeInputs
 		GlobalEnvExamplePolicy: in.GlobalEnvExamplePolicy,
 		GlobalEnvOutput:        in.GlobalEnvOutput,
 		WorktreeDelegation:     in.WorktreeDelegation,
+		InheritedEnv:           in.InheritedEnv,
+		InheritedUnresolved:    in.InheritedUnresolved,
+		Keys:                   in.Keys,
+		StrictSecrets:          in.StrictSecrets,
+		SessionEnv:             in.SessionEnv,
+		SessionEnvSources:      in.SessionEnvSources,
 	}
 
 	var written []string
-	claudeOn := ClaudeEnabled(in.Cfg, in.RepoName)
+	hooksOn := hookOwningAgentsEnabled(in.Cfg, in.RepoName)
 	for _, m := range materializers {
-		// Skip hooks and settings materializers when claude is disabled.
-		if !claudeOn && (m.Name() == "hooks" || m.Name() == "settings") {
+		// The hooks and settings materializers write into the formats of
+		// whichever agent receives lifecycle hooks, so they follow that agent's
+		// gate and no other's. See hookOwningAgentsEnabled.
+		if !hooksOn && (m.Name() == "hooks" || m.Name() == "settings") {
 			continue
 		}
 
@@ -309,6 +524,78 @@ func inheritEnvOutputs(cloneRepoDir, worktreeDir string, cfg *config.WorkspaceCo
 	return written, customPatterns, nil
 }
 
+// readCloneEnvOutput reads the instance clone's already-materialized env output
+// file(s) for a repo and merges them into a single key->value map. It is the
+// promoted-key counterpart to inheritEnvOutputs: the worktree path resolves
+// [claude.env] promoted keys from this inherited env rather than re-resolving
+// secrets (the worktree apply runs no vault / machine-identity sync, so a
+// promoted key sourced from a secret is absent from the static config it sees).
+//
+// Every source path passes through safeTargetPath (the config-derived target set
+// is untrusted), so a crafted ../ or symlinked target.Path cannot read outside
+// the clone. A missing clone dir or a missing/dir output file yields no keys
+// rather than an error: the caller resolves promoted keys against the result and
+// surfaces a genuinely-absent key as the promote error, while inheritEnvOutputs
+// owns the friendlier R8 "run niwa apply first" message for a missing clone. The
+// returned map is always non-nil so it can signal "worktree path" to the
+// SettingsMaterializer even when empty.
+//
+// The second return is the unresolved-key set recovered from the file's
+// records. It is what lets the worktree half of the promote branch tell a key
+// the instance apply deliberately omitted from one that was never there — the
+// clone's file is the only evidence of that decision this path can see.
+//
+// That recovery is a trust boundary, and it is worth naming: a repository can
+// write its own environment file, so a crafted record can move a key out of the
+// promote branch's hard error and into its tolerated branch. The effect is
+// bounded to degradation — the key is dropped rather than promoted, no value is
+// invented — and envformat.ParseRecord revalidates the key and description
+// before either reaches this map.
+func readCloneEnvOutput(cloneRepoDir string, cfg *config.WorkspaceConfig, repo string, globalEnvOutput config.OutputTargets) (map[string]string, map[string]unresolvedEnvKey, error) {
+	out := map[string]string{}
+	unresolved := map[string]unresolvedEnvKey{}
+	if _, err := os.Stat(cloneRepoDir); err != nil {
+		if os.IsNotExist(err) {
+			return out, unresolved, nil
+		}
+		return nil, nil, fmt.Errorf("repo %s: stating clone directory %s: %w", repo, cloneRepoDir, err)
+	}
+
+	for _, tgt := range config.EffectiveEnvOutput(globalEnvOutput, cfg, repo) {
+		srcAbs, err := safeTargetPath(cloneRepoDir, tgt.Path)
+		if err != nil {
+			return nil, nil, fmt.Errorf("repo %s: clone env output %q: %w", repo, tgt.Path, err)
+		}
+		info, statErr := os.Stat(srcAbs)
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue
+			}
+			return nil, nil, fmt.Errorf("repo %s: stating clone env output %q: %w", repo, srcAbs, statErr)
+		}
+		if info.IsDir() {
+			continue
+		}
+		parsed, records, err := parseEnvFileWithRecords(srcAbs)
+		if err != nil {
+			return nil, nil, fmt.Errorf("repo %s: parsing clone env output %q: %w", repo, srcAbs, err)
+		}
+		for k, v := range parsed {
+			out[k] = v
+			// A later target holding a real assignment for the key wins over an
+			// earlier target's record, mirroring how the values themselves merge.
+			delete(unresolved, k)
+		}
+		for k, rec := range records {
+			if _, ok := out[k]; ok {
+				continue
+			}
+			unresolved[k] = unresolvedEnvKey{Record: rec}
+		}
+	}
+	return out, unresolved, nil
+}
+
 // FindRepoGroup resolves the group a repo belongs to by scanning the instance
 // layout (<instanceRoot>/<group>/<repo>) two levels deep. The on-disk layout is
 // the ground truth: niwa apply already cloned the repo into its group directory,
@@ -340,6 +627,13 @@ func FindRepoGroup(instanceRoot, repoName string) (string, error) {
 // WorktreeApplyOptions carries the inputs ApplyToWorktree needs that are not
 // derivable from the worktree path alone.
 type WorktreeApplyOptions struct {
+	// Exempt, when non-nil, receives the paths this apply refused to write
+	// because the worktree checkout commits its own file at one of niwa's
+	// names. The instance apply path passes one so its managed-file cleanup
+	// leaves those paths alone; the standalone `niwa worktree apply` path
+	// persists no managed-file record and passes none, so there is nothing for
+	// it to exempt from.
+	Exempt *[]string
 	// OverlayDir is the local clone path of the overlay repo when one is
 	// active, used to append overlay content / resolve overlay-sourced repo
 	// content. Empty when no overlay is active.
@@ -367,6 +661,61 @@ type WorktreeApplyOptions struct {
 	// declaration, threaded so the worktree path resolves the same targets as
 	// the instance apply path. Empty when no global override is available.
 	GlobalEnvOutput config.OutputTargets
+	// DeveloperHome is the developer's own home directory, which is where a
+	// generated configuration's collision check resolves the developer's own
+	// agent configuration under. It arrives as data, exactly as
+	// Applier.DeveloperHome does: empty means the caller has not been wired to
+	// supply one, and the collision check is skipped rather than a home being
+	// resolved here -- which is what keeps the unit suites off a developer's
+	// files.
+	DeveloperHome string
+	// WorktreeDelegation carries the apply-time worktree-integration decision
+	// (probe result + niwa fallback path) so a worktree's settings record the
+	// same hook or deny entries as the clone it was made from. Without it the
+	// two configurations drift: the clone carries one of them and the worktree
+	// carries neither. nil installs neither, which is the pre-Decision-9
+	// behavior, so a caller that does not set it is unaffected.
+	// See DESIGN-niwa-default-worktree.md Decision 9.
+	WorktreeDelegation *WorktreeDelegation
+	// Setup, when non-nil, receives the outcome of the repo's setup-script run
+	// against this worktree. It is an output sink in the same shape as Exempt
+	// above: a caller that wants the outcome passes a pointer, a caller that
+	// does not gets a silent no-op.
+	//
+	// The sink is what keeps a setup failure from travelling as an error, and
+	// that is a constraint on this code rather than a preference. Five entry
+	// paths funnel through ApplyToWorktree and they want opposite things from a
+	// failure: `worktree create` retains the worktree and says to re-sync, the
+	// apply fan-out warns and continues, and the delegated WorktreeCreate path
+	// runs a guarded teardown that DELETES the worktree. That teardown retains
+	// only a tree git reports as dirty, and every file niwa writes is
+	// git-excluded a few steps above -- so a script that fails after writing
+	// only into an ignored path (node_modules, say) leaves the tree reading
+	// clean and its work is destroyed, while a script that fails after writing
+	// an unignored log file survives. Retention tracks what the script happened
+	// to touch rather than whether anything was lost.
+	//
+	// Carrying the outcome as data is what lets each caller decide. A later
+	// change that makes any of this fatal puts that teardown back in reach
+	// immediately; see niwa#285.
+	Setup *SetupResult
+	// Reporter, when non-nil, is where setup-script output is announced and
+	// streamed. It takes precedence over Stderr: a caller that supplies one
+	// gets it, a caller that supplies only Stderr gets a Reporter wrapping
+	// that, and a caller that supplies neither gets one wrapping os.Stderr.
+	//
+	// It exists because RunSetupScripts takes a *Reporter rather than a bare
+	// writer, and because the apply pipeline already holds one whose deferred
+	// warnings and verdict line are where a worktree failure belongs. The two
+	// interactive commands hold only a writer, which is why Stderr remains the
+	// fallback rather than being replaced.
+	Reporter *Reporter
+	// Redactor, when non-nil, scrubs setup-script output through the same choke
+	// point the clone path uses. nil means no scrubbing, which is only
+	// appropriate where no secret has been resolved into the tree -- and a
+	// worktree does hold the clone's byte-copied env output, so the standalone
+	// paths build one rather than passing nil.
+	Redactor *secret.Redactor
 }
 
 // ApplyToWorktree installs, into worktreePath, the same class of CLAUDE
@@ -388,21 +737,260 @@ type WorktreeApplyOptions struct {
 //
 // Returns the list of files written.
 func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, group, repo, purpose, branch string, opts WorktreeApplyOptions) ([]string, error) {
-	if !ClaudeEnabled(cfg, repo) {
-		// Claude content is disabled for this repo; install only the
-		// worktree-context layer so the worktree still records its purpose.
-		return installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch)
+	// Every enumerated agent's plan is produced, exactly as on the instance
+	// path: a worktree is prepared for both, and which documents each one
+	// receives is the declaration table's answer rather than a caller's choice.
+	// A producer is what turns an agent into declared writes, so the installers
+	// below never see the agent as anything they could branch on.
+	// Each agent's gate, resolved once for this worktree's repository, and
+	// applied to that agent's producer alone. The shape this replaces read
+	// Claude's gate and, when it was off, returned early -- taking every Codex
+	// delivery in the worktree with it. Now a closed gate empties one agent's
+	// plans and leaves the other's untouched.
+	gated := func(ag agent.Agent) agentplan.Producer {
+		return agentplan.For(ag).Gated(AgentEnabled(cfg, repo, string(ag)))
 	}
+
+	// The materialization below (settings, hooks, the rules import) writes into
+	// one agent's own file formats and has no producer to carry a gate, so it
+	// asks the declaration table which agents receive hooks -- the mechanism
+	// those documents exist to register -- and then asks those agents' gates.
+	// Naming the agent here would put a delivery decision in a writer, and it
+	// would go stale the day a second agent grows a hook route.
+	materializeOwned := hookOwningAgentsEnabled(cfg, repo)
 
 	var written []string
+	var contentExcludes []string
+	var envOutputs []string
 
-	// 1. Owning repo's content (CLAUDE.local.md + subdir content), targeted at
-	//    the worktree root. Same function the instance apply path calls.
-	result, err := InstallRepoContentTo(cfg, configDir, opts.OverlayDir, instanceRoot, worktreePath, group, repo)
-	if err != nil {
-		return nil, fmt.Errorf("installing repo content into worktree: %w", err)
+	// 1. Owning repo's content, targeted at the worktree root. Same function the
+	//    instance apply path calls, so worktree and instance content cannot
+	//    drift on sources, composition, or the ownership rule.
+	//
+	//    What each agent's chain came to travels to step 1c, which declares a
+	//    budget covering it. The worktree layer at step 4 adds its own section
+	//    to the same document afterwards; it is a heading and a line or two
+	//    about the purpose and branch, and the headroom the budget carries is
+	//    sized to absorb far more than that.
+	contextChains := map[agent.Agent]int{}
+	for _, ag := range agent.All() {
+		result, err := InstallRepoContentTo(cfg, configDir, opts.OverlayDir, instanceRoot, worktreePath, group, repo, gated(ag))
+		if err != nil {
+			return nil, fmt.Errorf("installing repo content into worktree: %w", err)
+		}
+		written = append(written, result.WrittenFiles...)
+		contentExcludes = append(contentExcludes, result.Excludes...)
+		reportWorktreeContentWarnings(opts.Stderr, worktreePath, result.Warnings)
+		collectExempt(opts.Exempt, result.Exempt)
+		contextChains[ag] = result.ChainBytes
 	}
-	written = append(written, result.WrittenFiles...)
+
+	// 1b. The workspace's declared plugin skills, delivered into the worktree
+	//     for the same reason the content above is: a session opened here finds
+	//     this directory first and reads nothing above it. Resolution passes no
+	//     fetcher -- the worktree path re-delivers what the instance apply
+	//     already fetched rather than reaching for the network on every worktree.
+	pluginTrees, missingPlugins := ResolvePluginTrees(context.Background(), PluginSkillsInputs{
+		InstanceRoot: instanceRoot,
+		Plugins:      MergeInstanceOverrides(cfg).Plugins,
+		Marketplaces: cfg.Claude.Marketplaces,
+		RepoIndex:    instanceRepoIndex(instanceRoot),
+	})
+	var skillReports []string
+	for _, m := range missingPlugins {
+		skillReports = append(skillReports, m.String())
+	}
+	for _, ag := range agent.All() {
+		skills, err := InstallRepoSkills(worktreePath, pluginTrees, gated(ag))
+		if err != nil {
+			return nil, fmt.Errorf("delivering plugin skills into worktree: %w", err)
+		}
+		skillReports = append(skillReports, skills.Warnings...)
+		contentExcludes = append(contentExcludes, skills.Excludes...)
+	}
+	reportWorktreeWarnings(opts.Stderr, worktreePath, skillReports)
+
+	// 1c. The workspace's declared MCP servers and session environment,
+	//     generated into the worktree for the same reason: an agent that
+	//     resolves a project root stops at the worktree root, so a
+	//     configuration written in the owning clone is never read from here. A
+	//     value this path could not resolve is left out with a report rather
+	//     than written as the reference it still is -- see the unresolved note
+	//     in step 2 for why cfg here can carry one.
+	mcpServers, payloadReports := MCPServersFromConfig(cfg)
+	sessionEnv, _, err := SessionEnvVars(cfg, MergeInstanceOverrides(cfg), configDir)
+	if err != nil {
+		return nil, err
+	}
+	sessionPosture := SessionPostureFromConfig(cfg)
+	for _, ag := range agent.All() {
+		producer := gated(ag)
+		existingMCP, collisionWarning := ReadDeclaredMCPNames(opts.DeveloperHome, producer.MCPCollisionSpec())
+		if collisionWarning != "" {
+			payloadReports = append(payloadReports, collisionWarning)
+		}
+		if report := producer.PostureReport(sessionPosture); report != "" {
+			payloadReports = append(payloadReports, report)
+		}
+		install, err := InstallPayloadConfig(PayloadRequest{
+			Scope:             agentplan.PayloadInRepo,
+			Dir:               worktreePath,
+			Servers:           mcpServers,
+			Env:               sessionEnv,
+			Posture:           sessionPosture,
+			Existing:          existingMCP,
+			ContextChainBytes: contextChains[ag],
+		}, producer)
+		if err != nil {
+			return nil, fmt.Errorf("generating the payload configuration for worktree: %w", err)
+		}
+		written = append(written, install.Written...)
+		contentExcludes = append(contentExcludes, install.Excludes...)
+		collectExempt(opts.Exempt, install.Exempt)
+		payloadReports = append(payloadReports, install.Warnings...)
+	}
+	reportWorktreeWarnings(opts.Stderr, worktreePath, payloadReports)
+
+	// 2 and 2b. The materialization that writes into one agent's own formats,
+	//    behind that agent's gate. It is a separate function rather than an
+	//    indented block so the gate reads as one decision at one place.
+	if materializeOwned {
+		matFiles, matEnvOutputs, err := installWorktreeMaterialization(cfg, configDir, instanceRoot, worktreePath, group, repo, sessionEnv, opts)
+		if err != nil {
+			return nil, err
+		}
+		written = append(written, matFiles...)
+		envOutputs = append(envOutputs, matEnvOutputs...)
+	}
+
+	// 3. Worktree rules import: an absolute @import to the instance's
+	//    workspace-context.md, plus overlay/global where present. Reuses the
+	//    same write/append helpers the instance root uses. It is part of the
+	//    same agent's own configuration directory as the materialization above
+	//    and follows the same gate.
+	if materializeOwned {
+		rulesFiles, err := installWorktreeRulesImport(instanceRoot, worktreePath)
+		if err != nil {
+			return nil, err
+		}
+		written = append(written, rulesFiles...)
+	}
+
+	// 4. Worktree-specific layer naming the purpose and branch (or the
+	//    configured [content.worktree] template, when set).
+	//
+	//    Its exclude patterns join the set below rather than being dropped.
+	//    This layer can be the only thing that writes an agent's document into
+	//    the worktree -- when no content layer is configured, or when the
+	//    other agent's gate is closed -- so a discarded pattern here is a
+	//    worktree that reads dirty and a teardown that then refuses to reclaim
+	//    it.
+	for _, ag := range agent.All() {
+		layerFiles, layerExcludes, err := installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch, gated(ag), opts.Stderr, opts.Exempt)
+		if err != nil {
+			return nil, err
+		}
+		written = append(written, layerFiles...)
+		contentExcludes = append(contentExcludes, layerExcludes...)
+	}
+
+	// Record git-ignore coverage for any custom secret-output target names so
+	// they stay invisible to the worktree's git status, matching the instance
+	// apply path's end state. The materializer already established coverage
+	// before writing; this re-asserts the full set idempotently.
+	//
+	// worktreeRulesFile (.claude/rules/worktree-imports.md) is the one
+	// niwa-authored worktree file under .claude/ whose name carries no ".local"
+	// infix, so the base "*.local*" pattern does not cover it. Without explicit
+	// coverage a freshly created worktree reads dirty to `git status
+	// --porcelain`, which makes the non-force from-hook teardown log-and-retain
+	// every delegated worktree (orphan accumulation). It is added here as an
+	// extra pattern — scoped to this exact path rather than widening the global
+	// niwaExcludePatterns — so genuine user-authored .claude/ files still show.
+	//
+	// The coverage is recorded whatever the gates said, and after every write
+	// rather than before the last of them: a worktree that reads dirty is one
+	// the teardown refuses to reclaim, and an agent being turned off is no
+	// reason to leave that behind.
+	excludeExtras := append([]string{worktreeRulesFile}, envOutputs...)
+	excludeExtras = append(excludeExtras, contentExcludes...)
+	if err := gitexclude.EnsureRepoExclude(worktreePath, excludeExtras...); err != nil {
+		return nil, fmt.Errorf("recording git exclude coverage for worktree %s: %w", repo, err)
+	}
+
+	// 5. Worktree-event hooks, run on create/apply. Analog of the instance
+	//    setup-script run: discovered from <configDir>/worktree-hooks/ and
+	//    executed against the worktree, with worktree context in the env.
+	//    These are the workspace's own lifecycle scripts, not an agent's, so
+	//    no agent's gate decides whether they run.
+	// The hook runner streams its scripts' output through the same scrubbing
+	// choke point setup scripts use. It did not before: it piped cmd.Stdout
+	// straight to the writer with no redactor at all, on these same surfaces,
+	// in a tree holding the clone's copied plaintext. So DESIGN-post-clone-
+	// scripts.md Decision C's premise -- that setup output would otherwise be
+	// the only unscrubbed subprocess output in niwa -- was already false, at
+	// the exact call site this feature inserts beside. Routing it through here
+	// is what makes that decision true rather than preserved.
+	hookRed := opts.Redactor
+	if hookRed == nil {
+		hookRed = worktreeRedactor(cfg, filepath.Join(instanceRoot, group, repo), repo, opts.GlobalEnvOutput)
+	}
+	if err := runWorktreeHooks(configDir, worktreePath, repo, purpose, branch,
+		reporterFor(opts), hookRed); err != nil {
+		return nil, err
+	}
+
+	// 6. The repo's OWN setup scripts, when this repo has opted in. Step 5
+	//    above runs the workspace's lifecycle scripts, which live in the config
+	//    repo and fire for every repo; these are the repo's own, which is the
+	//    cell that was missing -- a worktree got every accessory a clone gets
+	//    except the one its repo's scripts produce.
+	//
+	//    RunSetupScripts is reused verbatim rather than forked. It never
+	//    touches git and is already parameterized on the directory it runs in,
+	//    so pointing it at the worktree gives the same discovery, ordering and
+	//    executable-bit policy the clone run has, for free.
+	//
+	//    The outcome leaves on opts.Setup and NEVER as an error. That is the
+	//    constraint the whole design turns on: the delegated WorktreeCreate
+	//    path treats a failed content install as a reason to run a guarded
+	//    teardown, and that teardown retains only a tree git reports dirty --
+	//    while everything niwa writes is git-excluded at step 4 above. So a
+	//    script that fails after writing only into an ignored path leaves the
+	//    tree reading clean and its work is deleted, and a script that fails
+	//    after writing an unignored file survives. Returning an error here
+	//    would make retention depend on what the script happened to touch. See
+	//    niwa#285; a later change that makes this fatal reopens that path.
+	if config.EffectiveWorktreeSetup(cfg, repo) {
+		setupDir := ResolveSetupDir(cfg, repo)
+		// The apply pipeline supplies its own redactor, populated from what it
+		// resolved this run. The standalone commands cannot: they resolve
+		// nothing, so one built there is empty. They get one derived from the
+		// repo's declarations intersected with the env this worktree actually
+		// inherited -- see worktreeRedactor.
+		red := opts.Redactor
+		if red == nil {
+			red = worktreeRedactor(cfg, filepath.Join(instanceRoot, group, repo), repo, opts.GlobalEnvOutput)
+		}
+		result := RunSetupScripts(worktreePath, setupDir, reporterFor(opts), red,
+			worktreeSetupEnv(instanceRoot, worktreePath, repo, purpose, branch)...)
+		recordSetupOutcome(opts.Setup, result)
+	}
+
+	return written, nil
+}
+
+// installWorktreeMaterialization runs the worktree's repo materializers and the
+// env inherit that follows them, returning the files written and the custom
+// secret-output target names the caller has to cover with a git exclude.
+//
+// It is the part of a worktree apply that writes into one agent's own settings
+// and hooks formats, which is why the caller runs it behind that agent's gate
+// rather than unconditionally. Everything in it was inline in ApplyToWorktree
+// before the gate restructure; the split is what keeps that gate a single
+// readable decision instead of a ninety-line indentation.
+func installWorktreeMaterialization(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, group, repo string, sessionEnv map[string]string, opts WorktreeApplyOptions) ([]string, []string, error) {
+	var written []string
 
 	// 2. Repo materializers (settings, files, hooks) targeted at the worktree.
 	//    Same shared loop the instance apply path uses, but with the
@@ -441,6 +1029,20 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 		}
 	}
 	repoIndex := map[string]string{repo: worktreePath}
+
+	// The SettingsMaterializer resolves [claude.env] promoted keys, but the
+	// worktree path's cfg is unresolved (no vault / machine-identity sync ran),
+	// so a promoted key backed by a secret is absent from it. Inherit those
+	// values from the instance clone's already-materialized env — the same
+	// source inheritEnvOutputs copies in step 2b — so the settings file carries
+	// the promoted key rather than failing to resolve it. A non-nil (possibly
+	// empty) map signals the worktree path to the materializer.
+	cloneRepoDir := filepath.Join(instanceRoot, group, repo)
+	inheritedEnv, inheritedUnresolved, err := readCloneEnvOutput(cloneRepoDir, cfg, repo, opts.GlobalEnvOutput)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading clone env for worktree promote inheritance: %w", err)
+	}
+
 	matFiles, envOutputs, err := runRepoMaterializers(materializers, repoMaterializeInputs{
 		Cfg:             cfg,
 		ConfigDir:       configDir,
@@ -458,9 +1060,15 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 
 		GlobalEnvExamplePolicy: opts.GlobalEnvExamplePolicy,
 		GlobalEnvOutput:        opts.GlobalEnvOutput,
+		WorktreeDelegation:     opts.WorktreeDelegation,
+		InheritedEnv:           inheritedEnv,
+		InheritedUnresolved:    inheritedUnresolved,
+		// The same resolution the generated payload above used, so a worktree
+		// session carries the declared environment whichever agent runs in it.
+		SessionEnv: sessionEnv,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	written = append(written, matFiles...)
 
@@ -470,61 +1078,18 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 	//     primitive establishes git-exclude coverage for custom target names
 	//     before writing (fail-closed) and reports those names so the
 	//     re-assert below carries them in the unioned exclude block.
-	cloneRepoDir := filepath.Join(instanceRoot, group, repo)
 	effectiveEnv := MergeOverrides(cfg, repo).Env
 	envInherited, envCustomNames, err := inheritEnvOutputs(
 		cloneRepoDir, worktreePath, cfg, repo, opts.GlobalEnvOutput, effectiveEnv,
 		&DiscoveredEnv{WorkspaceFile: relWsEnv, RepoFiles: repoEnvFiles},
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	written = append(written, envInherited...)
 	envOutputs = append(envOutputs, envCustomNames...)
 
-	// Record git-ignore coverage for any custom secret-output target names so
-	// they stay invisible to the worktree's git status, matching the instance
-	// apply path's end state. The materializer already established coverage
-	// before writing; this re-asserts the full set idempotently.
-	//
-	// worktreeRulesFile (.claude/rules/worktree-imports.md) is the one
-	// niwa-authored worktree file under .claude/ whose name carries no ".local"
-	// infix, so the base "*.local*" pattern does not cover it. Without explicit
-	// coverage a freshly created worktree reads dirty to `git status
-	// --porcelain`, which makes the non-force from-hook teardown log-and-retain
-	// every delegated worktree (orphan accumulation). It is added here as an
-	// extra pattern — scoped to this exact path rather than widening the global
-	// niwaExcludePatterns — so genuine user-authored .claude/ files still show.
-	excludeExtras := append([]string{worktreeRulesFile}, envOutputs...)
-	if err := gitexclude.EnsureRepoExclude(worktreePath, excludeExtras...); err != nil {
-		return nil, fmt.Errorf("recording git exclude coverage for worktree %s: %w", repo, err)
-	}
-
-	// 3. Worktree rules import: an absolute @import to the instance's
-	//    workspace-context.md, plus overlay/global where present. Reuses the
-	//    same write/append helpers the instance root uses.
-	rulesFiles, err := installWorktreeRulesImport(instanceRoot, worktreePath)
-	if err != nil {
-		return nil, err
-	}
-	written = append(written, rulesFiles...)
-
-	// 4. Worktree-specific layer naming the purpose and branch (or the
-	//    configured [claude.content.worktree] template, when set).
-	layerFiles, err := installWorktreeContextLayer(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch)
-	if err != nil {
-		return nil, err
-	}
-	written = append(written, layerFiles...)
-
-	// 5. Worktree-event hooks, run on create/apply. Analog of the instance
-	//    setup-script run: discovered from <configDir>/worktree-hooks/ and
-	//    executed against the worktree, with worktree context in the env.
-	if err := runWorktreeHooks(configDir, worktreePath, repo, purpose, branch, opts.Stderr); err != nil {
-		return nil, err
-	}
-
-	return written, nil
+	return written, envOutputs, nil
 }
 
 // defaultRepoMaterializers returns the canonical repo-materializer set
@@ -591,55 +1156,96 @@ func installWorktreeRulesImport(instanceRoot, worktreePath string) ([]string, er
 	return []string{rulesPath}, nil
 }
 
-// installWorktreeContextLayer writes the worktree-specific section to
-// <worktree>/CLAUDE.local.md. The section is delimited by a stable heading so a
-// re-apply replaces it in place rather than appending a duplicate (idempotent).
-// purpose is interpolated only into file content, never a filesystem path.
+// installWorktreeContextLayer writes the worktree-specific section to the
+// worktree's context document. The section is delimited by a stable heading so
+// a re-apply replaces it in place rather than appending a duplicate
+// (idempotent). purpose is interpolated only into file content, never a
+// filesystem path.
 //
-// When [claude.content.worktree].source is configured, the section body is
+// When [content.worktree].source is configured, the section body is
 // rendered from that template (expanded with the worktree variables) in-memory
 // via renderWorktreeLayerBody -> renderContentFile (the same containment-checked
-// read+expand core as installContentFile, but no transient file is written).
+// read+expand core every other content layer resolves its source through).
 // When unset, the generated default purpose/branch body is used — the Stage-1
 // behavior, unchanged.
 //
-// The CLAUDE.local.md target is computed from worktreePath alone (at the
+// The target is the producer's, computed from worktreePath alone (at the
 // worktree root) and verified to stay within the worktree via checkContainment,
-// matching the containment discipline of the other content installers.
-func installWorktreeContextLayer(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, repo, purpose, branch string) ([]string, error) {
-	target := filepath.Join(worktreePath, "CLAUDE.local.md")
-	if err := checkContainment(target, worktreePath); err != nil {
-		return nil, fmt.Errorf("worktree context layer: %w", err)
-	}
-
+// matching the containment discipline of the other content installers. Under an
+// agent that does not receive worktree-level context (Codex) the producer
+// declares nothing, so niwa writes no context file into the worktree and the
+// git working tree stays clean.
+func installWorktreeContextLayer(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, repo, purpose, branch string, producer agentplan.Producer, stderr io.Writer, exempt *[]string) ([]string, []string, error) {
 	body, err := renderWorktreeLayerBody(cfg, configDir, instanceRoot, worktreePath, repo, purpose, branch)
 	if err != nil {
-		return nil, err
-	}
-	section := worktreeContextHeading + "\n\n" + body
-
-	existing, err := os.ReadFile(target)
-	if err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("reading worktree CLAUDE.local.md: %w", err)
+		return nil, nil, err
 	}
 
-	merged := stripWorktreeContextSection(string(existing))
-	if len(merged) > 0 {
-		// Separate prior content from the appended section with a blank line.
-		for len(merged) > 0 && (merged[len(merged)-1] == '\n') {
-			merged = merged[:len(merged)-1]
-		}
-		merged += "\n\n"
+	// The probe is taken here, after the repository-level install for the same
+	// worktree has run, because whether this section joins a document that
+	// already exists or has to stand as one is decided by what that install
+	// wrote.
+	probe, err := probeContextTree(producer.ContextProbeSpec(worktreePath))
+	if err != nil {
+		return nil, nil, err
 	}
-	merged += section
 
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return nil, fmt.Errorf("creating worktree dir: %w", err)
+	plan, err := producer.WorktreeContextPlan(agentplan.WorktreeContextInputs{
+		Dir:     worktreePath,
+		Heading: worktreeContextHeading,
+		Body:    []byte(body),
+		Probe:   probe,
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-	if err := os.WriteFile(target, []byte(merged), 0o644); err != nil {
-		return nil, fmt.Errorf("writing worktree CLAUDE.local.md: %w", err)
+	if err := checkPlanContainment(plan, worktreePath); err != nil {
+		return nil, nil, fmt.Errorf("worktree context layer: %w", err)
 	}
-	return []string{target}, nil
+
+	written, excludes, err := applyPlan(plan)
+	if err != nil {
+		return nil, nil, err
+	}
+	reportWorktreeWarnings(stderr, worktreePath, plan.Warnings)
+	collectExempt(exempt, plan.Exempt)
+	return written, excludes, nil
+}
+
+// collectExempt appends paths to a caller-supplied exemption list, if the
+// caller keeps one. A caller that persists no managed-file record has nothing
+// to exempt a path from, and passes nil.
+func collectExempt(sink *[]string, paths []string) {
+	if sink == nil {
+		return
+	}
+	*sink = append(*sink, paths...)
+}
+
+// reportWorktreeContentWarnings renders a content install's warnings for one
+// worktree. Every refusal names its path: the standalone worktree path has no
+// deferred-warning reporter, and a quiet skip is the silent failure the
+// ownership rule exists to prevent.
+func reportWorktreeContentWarnings(stderr io.Writer, worktreePath string, warnings []ContentWarning) {
+	messages := make([]string, 0, len(warnings))
+	for _, w := range warnings {
+		messages = append(messages, w.Message)
+	}
+	reportWorktreeWarnings(stderr, worktreePath, messages)
+}
+
+// reportWorktreeWarnings writes one line per warning, prefixed with the
+// worktree they are about.
+func reportWorktreeWarnings(stderr io.Writer, worktreePath string, warnings []string) {
+	if len(warnings) == 0 {
+		return
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	for _, w := range warnings {
+		fmt.Fprintf(stderr, "worktree %s: %s\n", worktreePath, w)
+	}
 }
 
 // worktreeLayerVars builds the template variable map for the worktree layer.
@@ -666,7 +1272,7 @@ func worktreeLayerVars(cfg *config.WorkspaceConfig, instanceRoot, worktreePath, 
 }
 
 // renderWorktreeLayerBody produces the body of the worktree-context section.
-// When [claude.content.worktree].source is set, the body is rendered from that
+// When [content.worktree].source is set, the body is rendered from that
 // template via the shared containment-checked renderContentFile (expandVars +
 // checkContainment on the SOURCE path) with the worktree variable map. When
 // unset, the generated default purpose/branch body is returned — the Stage-1
@@ -678,7 +1284,7 @@ func worktreeLayerVars(cfg *config.WorkspaceConfig, instanceRoot, worktreePath, 
 // its directory. No transient file is written into the worktree. purpose is
 // only ever expanded into content, never a path component.
 func renderWorktreeLayerBody(cfg *config.WorkspaceConfig, configDir, instanceRoot, worktreePath, repo, purpose, branch string) (string, error) {
-	source := cfg.Claude.Content.Worktree.Source
+	source := cfg.Content.Worktree.Source
 	if source == "" {
 		// Stage-1 default: generated purpose/branch section, unchanged.
 		return fmt.Sprintf("This is a niwa worktree of repo %q.\n\n- Purpose: %s\n- Branch: %s\n",
@@ -716,27 +1322,55 @@ func renderWorktreeLayerBody(cfg *config.WorkspaceConfig, configDir, instanceRoo
 // Scripts run in lexical order; the first non-zero exit stops the run and is
 // surfaced as an error (mirroring the setup-script contract). A missing
 // worktree-hooks/ directory or no scripts for the event is a no-op.
-func runWorktreeHooks(configDir, worktreePath, repo, purpose, branch string, stderr io.Writer) error {
-	if stderr == nil {
-		stderr = os.Stderr
+func runWorktreeHooks(configDir, worktreePath, repo, purpose, branch string, r *Reporter, red *secret.Redactor) error {
+	if r == nil {
+		r = NewReporter(os.Stderr)
 	}
+	stderr := r.Writer()
 
 	hooks, err := DiscoverWorktreeHooks(configDir)
 	if err != nil {
-		return fmt.Errorf("discovering worktree hooks: %w", err)
+		// An event name niwa does not consume is a config-repo mistake, not a
+		// reason to fail the worktree. It is reported here and the run
+		// continues with the hooks that ARE valid, which discovery returns
+		// alongside the diagnostic.
+		//
+		// The match is on this one sentinel and nothing broader. Discovery also
+		// reports symlink-escape containment failures and directory-read
+		// failures; those must stay fatal. Downgrading on "err != nil" would
+		// turn the containment check into best-effort logging on every caller
+		// of this function.
+		//
+		// Why non-fatal at all: this error would otherwise propagate out of
+		// ApplyToWorktree, and on the delegated WorktreeCreate path a failed
+		// content install runs a guarded teardown that deletes the worktree.
+		// Nothing has been written into the tree at this point except niwa's
+		// own files, all of which are git-excluded a few steps above, so the
+		// teardown's dirty guard would pass and the deletion would succeed --
+		// every time, for every agent worktree in the workspace, from one
+		// stale directory name in a different repository.
+		if !errors.Is(err, ErrUnknownWorktreeHookEvent) {
+			return fmt.Errorf("discovering worktree hooks: %w", err)
+		}
+		fmt.Fprintf(stderr, "niwa: warning: %v\n", err)
 	}
 
-	entries := hooks[worktreeApplyEvent]
-	if len(entries) == 0 {
+	// Iterate the event set rather than reading worktreeApplyEvent, so adding
+	// an event to worktreeHookEvents is enough to make it run. Scripts are
+	// sorted within each event for a deterministic run order; events run in
+	// the order they are declared.
+	var scripts []string
+	for _, event := range worktreeHookEvents {
+		var forEvent []string
+		for _, entry := range hooks[event] {
+			forEvent = append(forEvent, entry.Scripts...)
+		}
+		sort.Strings(forEvent)
+		scripts = append(scripts, forEvent...)
+	}
+	if len(scripts) == 0 {
 		return nil
 	}
-
-	// Collect script paths in lexical order for a deterministic run order.
-	var scripts []string
-	for _, entry := range entries {
-		scripts = append(scripts, entry.Scripts...)
-	}
-	sort.Strings(scripts)
 
 	for _, scriptPath := range scripts {
 		info, err := os.Stat(scriptPath)
@@ -752,8 +1386,6 @@ func runWorktreeHooks(configDir, worktreePath, repo, purpose, branch string, std
 
 		cmd := exec.Command(scriptPath)
 		cmd.Dir = worktreePath
-		cmd.Stdout = stderr
-		cmd.Stderr = stderr
 		// purpose is exported as content data only; the worktree dir name and
 		// cmd.Dir are derived from worktreePath, never from purpose.
 		cmd.Env = append(os.Environ(),
@@ -762,21 +1394,17 @@ func runWorktreeHooks(configDir, worktreePath, repo, purpose, branch string, std
 			"NIWA_WORKTREE_PURPOSE="+purpose,
 			"NIWA_WORKTREE_BRANCH="+branch,
 		)
-		if err := cmd.Run(); err != nil {
+		// Routed through the same scan-strip-scrub choke point setup scripts
+		// use, instead of piping cmd.Stdout straight at the writer as this did
+		// before. That raw wiring meant hook output was never scrubbed on any
+		// surface, in a tree holding the clone's byte-copied plaintext env --
+		// so the claim that setup output would otherwise be the only
+		// unscrubbed subprocess output in niwa was already false here.
+		prefix := fmt.Sprintf("[%s] ", stripEscapes(filepath.Base(scriptPath)))
+		if err := runCmdWithReporter(r, cmd, prefix, red); err != nil {
 			return fmt.Errorf("worktree hook %s failed: %w", scriptPath, err)
 		}
 	}
 
 	return nil
-}
-
-// stripWorktreeContextSection removes a previously-appended worktree-context
-// section (from worktreeContextHeading to end of file) so a re-apply replaces
-// it rather than appending a duplicate. Content before the heading is preserved.
-func stripWorktreeContextSection(content string) string {
-	idx := strings.Index(content, worktreeContextHeading)
-	if idx < 0 {
-		return content
-	}
-	return content[:idx]
 }

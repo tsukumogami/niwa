@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
@@ -154,24 +155,29 @@ func appendToWorkspaceRulesFile(rulesPath, absPath string) error {
 	return os.WriteFile(rulesPath, []byte(content), 0o644)
 }
 
-// removeImportFromCLAUDE removes an old relative @import from CLAUDE.md
-// (migration support). No-op if not present or file does not exist.
-func removeImportFromCLAUDE(claudePath, importLine string) error {
-	data, err := os.ReadFile(claudePath)
-	if os.IsNotExist(err) {
-		return nil
+// removeLegacyImport removes an old relative @import from the instance-root
+// context document earlier niwa versions wrote (migration support). No-op if
+// not present or the document does not exist.
+//
+// Reading is this side's job and rewriting is the producer's: the file to clean
+// is a fact about what niwa used to write rather than about the agent this
+// session prepares for, so agentplan names it and the removal lands as a plan
+// entry the executor applies.
+func removeLegacyImport(instanceRoot, importLine string) error {
+	path := agentplan.LegacyRootContextPath(instanceRoot)
+	data, readErr := os.ReadFile(path)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return readErr
 	}
-	if err != nil {
-		return err
-	}
-	content := string(data)
-	if !strings.Contains(content, importLine) {
-		return nil
-	}
-	// ensureImportInCLAUDE always added "line\n\n"; try that form first.
-	content = strings.Replace(content, importLine+"\n\n", "", 1)
-	content = strings.Replace(content, importLine+"\n", "", 1)
-	return os.WriteFile(claudePath, []byte(content), 0o644)
+
+	plan := agentplan.LegacyImportPlan(agentplan.LegacyImportInputs{
+		Dir:      instanceRoot,
+		Existing: data,
+		Exists:   readErr == nil,
+		Import:   importLine,
+	})
+	_, _, err := applyPlan(plan)
+	return err
 }
 
 // InstallWorkspaceContext generates a workspace context file at the instance
@@ -192,13 +198,85 @@ func InstallWorkspaceContext(cfg *config.WorkspaceConfig, classified []Classifie
 		return nil, fmt.Errorf("writing workspace rules file: %w", err)
 	}
 
-	// Migrate: remove old relative import from CLAUDE.md if present.
-	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
-	if err := removeImportFromCLAUDE(claudePath, workspaceContextImport); err != nil {
+	// Migrate: remove the old relative import from the legacy root context
+	// document if present.
+	if err := removeLegacyImport(instanceRoot, workspaceContextImport); err != nil {
 		return nil, fmt.Errorf("removing old workspace context import: %w", err)
 	}
 
 	return []string{contextPath, rulesPath}, nil
+}
+
+// readOverlayContextLayer reads the private overlay's addendum without writing
+// anything, returning (nil, nil) when the overlay declares none. It is the
+// single resolution of that source: the file beside the instance-root document
+// is copied from it, and so is the layer folded into the document itself for an
+// agent that cannot follow the reference between them.
+func readOverlayContextLayer(overlayDir string) ([]byte, error) {
+	if overlayDir == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(filepath.Join(overlayDir, overlayClaudeFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", overlayClaudeFile, err)
+	}
+	return data, nil
+}
+
+// readGlobalContextLayer is readOverlayContextLayer's counterpart for the
+// global layer, resolved from the developer's global config directory.
+func readGlobalContextLayer(globalConfigDir string) ([]byte, error) {
+	if globalConfigDir == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(filepath.Join(globalConfigDir, globalClaudeFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", globalClaudeFile, err)
+	}
+	return data, nil
+}
+
+// InstanceRootImportedLayers renders, in the order the @import lines establish
+// them, the documents an instance-root session reads only by following a
+// reference out of the root context document: the generated workspace context,
+// the private overlay's addendum, and the global layer.
+//
+// An agent with an import mechanism reads them where they are written and this
+// slice is ignored for it. An agent without one has them folded into the root
+// document, because a reference it cannot follow is content it does not have.
+// Which it is, is the producer's answer, not this function's -- this side only
+// resolves the sources, exactly as it does for every other layer.
+//
+// Every layer is resolved here rather than at the step that writes it, because
+// the root document is written before the files beside it are: the ordering the
+// import lines need is established by writing the workspace context first, and
+// the composed document has to know all three regardless.
+func InstanceRootImportedLayers(cfg *config.WorkspaceConfig, classified []ClassifiedRepo, overlayDir, globalConfigDir string) ([][]byte, error) {
+	layers := [][]byte{[]byte(generateWorkspaceContext(cfg, classified))}
+
+	overlay, err := readOverlayContextLayer(overlayDir)
+	if err != nil {
+		return nil, err
+	}
+	if overlay != nil {
+		layers = append(layers, overlay)
+	}
+
+	global, err := readGlobalContextLayer(globalConfigDir)
+	if err != nil {
+		return nil, err
+	}
+	if global != nil {
+		layers = append(layers, global)
+	}
+
+	return layers, nil
 }
 
 // InstallOverlayClaudeContent copies CLAUDE.overlay.md from the overlay clone
@@ -206,13 +284,12 @@ func InstallWorkspaceContext(cfg *config.WorkspaceConfig, classified []Classifie
 // .claude/rules/workspace-imports.md. Returns the installed path when the file
 // was present, or ("", nil) when it was absent.
 func InstallOverlayClaudeContent(overlayDir, instanceRoot string) (string, error) {
-	srcPath := filepath.Join(overlayDir, overlayClaudeFile)
-	data, err := os.ReadFile(srcPath)
+	data, err := readOverlayContextLayer(overlayDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", fmt.Errorf("reading %s: %w", overlayClaudeFile, err)
+		return "", err
+	}
+	if data == nil {
+		return "", nil
 	}
 
 	destPath := filepath.Join(instanceRoot, overlayClaudeFile)
@@ -225,21 +302,41 @@ func InstallOverlayClaudeContent(overlayDir, instanceRoot string) (string, error
 		return "", fmt.Errorf("adding overlay to workspace rules file: %w", err)
 	}
 
-	// Migrate: remove old relative import from CLAUDE.md if present.
-	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
-	if err := removeImportFromCLAUDE(claudePath, overlayClaudeImport); err != nil {
+	// Migrate: remove the old relative import from the legacy root context
+	// document if present.
+	if err := removeLegacyImport(instanceRoot, overlayClaudeImport); err != nil {
 		return "", fmt.Errorf("removing old overlay import: %w", err)
 	}
 
 	return destPath, nil
 }
 
-// InstallWorkspaceRootSettings generates .claude/settings.json at the instance
+// RootSettingsMaterializer generates .claude/settings.json at the instance
 // root with hooks, permissions, env, plugins, and marketplaces. Uses
 // settings.json (not .local) because the instance root is a non-git directory.
 // Plugins and marketplaces are declared declaratively -- Claude Code's startup
-// reconciler handles materialization.
-func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instanceRoot string, repoIndex map[string]string) ([]string, error) {
+// reconciler handles materialization, which is how root-installed skills reach
+// an agent whose plugins arrive by registration rather than as delivered trees.
+//
+// It carries no fields, and that is the whole of what the conversion from a
+// free function changed: every input it needs -- the config, the config
+// directory, the instance root, the repo index -- is already a
+// MaterializeContext field, so there was nothing left over to carry. What the
+// type buys is the name: the declaration table says which agent receives
+// root-installed skills, and the registry in delivery_binding.go says this is
+// what serves that row. A free function delivers the same bytes with nothing
+// tying it to the row it answers for.
+type RootSettingsMaterializer struct{}
+
+// Name is the delivery name the contract binds this materializer under.
+func (m *RootSettingsMaterializer) Name() string { return string(agentplan.DeliveryRootSettings) }
+
+// Materialize writes the instance root's settings document. ctx.RepoDir is the
+// instance root; the field is named for the repositories most materializers
+// write into, and what it means here is the directory being materialized.
+func (m *RootSettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, error) {
+	cfg, configDir, instanceRoot, repoIndex := ctx.Config, ctx.ConfigDir, ctx.RepoDir, ctx.RepoIndex
+
 	effective := MergeInstanceOverrides(cfg)
 
 	// Merge discovered hooks.
@@ -348,21 +445,22 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 	}
 	emitReports(nil, reports)
 
-	data, err := json.MarshalIndent(doc, "", "  ")
+	// The document lands as a plan entry: the executor owns the directory, the
+	// marshalled bytes, and the file mode, and this function owns what the
+	// document says.
+	plan, err := agentplan.SettingsPlan(agentplan.SettingsInputs{
+		Scope: agentplan.SettingsAtInstanceRoot,
+		Dir:   instanceRoot,
+		Doc:   doc,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("marshaling workspace root settings: %w", err)
+		return nil, fmt.Errorf("declaring workspace root settings: %w", err)
 	}
-	data = append(data, '\n')
 
-	claudeDir := filepath.Join(instanceRoot, ".claude")
-	os.MkdirAll(claudeDir, 0o755)
-	settingsPath := filepath.Join(claudeDir, "settings.json")
-	if err := os.WriteFile(settingsPath, data, secretFileMode); err != nil {
+	written, _, err := applyPlan(plan)
+	if err != nil {
 		return nil, fmt.Errorf("writing workspace root settings: %w", err)
 	}
-
-	var written []string
-	written = append(written, settingsPath)
 	// Track only the hook scripts this apply installed, not every file present
 	// in the output directory. Walking .claude/hooks/ here would re-adopt
 	// orphaned scripts left by removed features, marking them as produced and
@@ -388,13 +486,12 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 // .claude/rules/workspace-imports.md.
 // Returns nil, nil when CLAUDE.global.md does not exist in globalConfigDir.
 func InstallGlobalClaudeContent(globalConfigDir, instanceRoot string) ([]string, error) {
-	srcPath := filepath.Join(globalConfigDir, globalClaudeFile)
-	data, err := os.ReadFile(srcPath)
+	data, err := readGlobalContextLayer(globalConfigDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("reading %s: %w", globalClaudeFile, err)
+		return nil, err
+	}
+	if data == nil {
+		return nil, nil
 	}
 
 	destPath := filepath.Join(instanceRoot, globalClaudeFile)
@@ -407,9 +504,9 @@ func InstallGlobalClaudeContent(globalConfigDir, instanceRoot string) ([]string,
 		return nil, fmt.Errorf("adding global to workspace rules file: %w", err)
 	}
 
-	// Migrate: remove old relative import from CLAUDE.md if present.
-	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
-	if err := removeImportFromCLAUDE(claudePath, globalClaudeImport); err != nil {
+	// Migrate: remove the old relative import from the legacy root context
+	// document if present.
+	if err := removeLegacyImport(instanceRoot, globalClaudeImport); err != nil {
 		return nil, fmt.Errorf("removing old global import: %w", err)
 	}
 

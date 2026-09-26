@@ -33,12 +33,16 @@ init → create → apply workflow, add a `@critical` Gherkin scenario in
 
 ## Contributor Guides
 
+- `docs/guides/codex-agent.md` — running Codex in a prepared workspace: choosing which agent harnesses a dispatch (`--harness`, `NIWA_DISPATCH_HARNESS`, `[workspace].default_agent`, and `[global].default_dispatch_harness`), background dispatch and its costs, what a Codex session gets, the generated gap list of what it doesn't, and what niwa writes into the developer's own Codex configuration
 - `docs/guides/ephemeral-session-instances.md` — one ephemeral instance per Claude Code background session: SessionStart/SessionEnd hooks, mapping store, `niwa reap`, context-aware `niwa apply`, opt-out
 - `docs/guides/file-distribution.md` — the three file tables (`[files]`, `[instance.files]`, `[root.files]`): repo `.local` rewrite vs verbatim non-repo distribution, the `.mcp.json` use case, tracking/cleanup, and limitations
 - `docs/guides/functional-testing.md` — end-to-end test patterns and the `localGitServer` helper
 - `docs/guides/init-bootstrap.md` — `niwa init --bootstrap` flow: scaffold template, visibility lookup, branch-name format, success block
 - `docs/guides/machine-identity-vault-sync.md` — opting into machine-identity sync from your personal vault, vault key schema, audit surfaces
 - `docs/guides/one-time-notices.md` — how to add informational messages that appear once per workspace instance
+- `docs/guides/session-keep-alive.md` — keeping dispatched remote-control sessions reachable across idle: the `--keep-alive` / `keep_alive_on_dispatch` opt-in, RC-only scope, and the close-not-archive release behavior with the ~7-day TTL backstop
+- `docs/guides/session-message-acceptance.md` — letting a dispatched worker take messages from other Claude Code sessions without an approval prompt: the `[global] accept_session_messages_on_dispatch` machine key, the tri-state `--accept-session-messages` flag and their precedence, the audit and override lines, the one-time explanation and its marker, the `niwa list` marker and `accepts_session_messages` field, the `niwa watch` exclusion and its deny hook, and the Claude Code version the manual delivery check last passed on
+- `docs/guides/setup-scripts.md` — the contract a repo's `scripts/setup/` runs under: working directory and why not to walk up from it, the environment a script gets and what is removed from it, idempotency, opting a repo into worktree runs, and what a failure does
 - `docs/guides/worktree.md` — `niwa worktree` lifecycle: create/apply/destroy/list/attach/detach, content install, deprecation alias
 - `docs/guides/vault-integration.md` — vault provider architecture and acceptance coverage
 - `docs/guides/workspace-config-sources.md` — config source resolution, snapshot model, and discovery conventions

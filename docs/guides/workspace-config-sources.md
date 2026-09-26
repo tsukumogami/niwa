@@ -15,7 +15,7 @@ materializes the config on disk.
 > code paths in `configsync.go`/`overlaysync.go`/`init.go`; that work
 > is the remaining scope of PR #73 and lands in follow-up commits.
 > User-facing behavior described below reflects the eventual contract
-> per [DESIGN-workspace-config-sources.md](../designs/DESIGN-workspace-config-sources.md).
+> per [DESIGN-workspace-config-sources.md](../designs/current/DESIGN-workspace-config-sources.md).
 
 ## What you get
 
@@ -214,6 +214,44 @@ stale behavior should follow the deferred `--strict-refresh` flag
 (documented as future work in PRD-workspace-config-sources Out of
 Scope).
 
+### Same-run effect
+
+For a workspace in the snapshot model — one whose `.niwa/` carries a
+provenance marker — a refreshed snapshot takes effect on the run that pulls
+it. `apply`, `create`, `reset`, and the `instance from-hook` path behind
+session provisioning, `niwa dispatch`, and `niwa watch` each reconcile the
+config from its source and re-read it before it drives materialization. Push
+a new `[claude.settings]` posture, plugin, hook, or `[env.vars]` /
+`[env.secrets]` key upstream, and the next single command materializes it.
+You never need a second run.
+
+Three cases fall outside that guarantee. Check which one you are in before
+concluding a value is broken — the symptom is identical to a bad reference.
+
+**A config dir that is still a legacy git working tree** (`.niwa/.git`, no
+marker) gets converted to a snapshot on its next command. That one
+conversion run materializes from the pre-conversion config, so an upstream
+change lands on the run after it. Every run from then on is same-run.
+Reconciling ahead of the conversion would cost the one-time notice telling
+you local edits in that directory stop persisting, which is worth more than
+the single late run.
+
+**A workspace with a registered `source_url` but no marker and no `.git`**
+never reconciles — not on the second run, not ever. This is not the same as
+having no source: the registry says the workspace tracks a repo, and it
+does not. The self-contained single-repo bootstrap produces this shape.
+Tracked as issue #215.
+
+**Worktrees** never reconcile, by design. Under the inherit model a worktree
+is a derived view of its instance: it copies the environment its instance
+already materialized, and worktree-scoped `apply` and `niwa worktree` re-read
+the root config themselves to rewrite posture, `[files]`, hooks, and CLAUDE
+content — from whatever is on disk, without refreshing it first. Converge the
+instance to move a worktree forward.
+
+A true local-only workspace has no source to track and is correctly left
+alone.
+
 ## Failure modes
 
 | Trigger | Behavior |
@@ -267,6 +305,7 @@ a one-time coordination cost; subsequent applies behave normally.
 |---------|---------|
 | `niwa init <name> --from <slug>` | Register and clone a new workspace from a source slug. |
 | `niwa config set global <slug>` | Set the personal-overlay source. |
+| `niwa config set default-dispatch-harness <agent>` | Set which coding agent a niwa-launched session runs as, machine-wide. Writes `[global].default_dispatch_harness` in your own `~/.config/niwa/config.toml`, never inside a snapshot. `niwa config unset default-dispatch-harness` removes it. See [codex-agent.md](codex-agent.md). |
 | `niwa apply` | Fetch the latest snapshot and re-materialize. Detects URL changes and refuses without `--force`. |
 | `niwa apply --force` | Discard the on-disk `.niwa/` and re-materialize from the registered source. Required after a registered URL change. |
 | `niwa status` | Display the resolved source slug, the cached `resolved_commit`, and `(default branch)` annotation when no ref is pinned. |
@@ -277,7 +316,7 @@ a one-time coordination cost; subsequent applies behave normally.
 The snapshot pipeline's primary security surface is the GitHub
 tarball + tar extraction path. The defense suite is documented in
 [DESIGN-workspace-config-sources.md §Security
-Considerations](../designs/DESIGN-workspace-config-sources.md#security-considerations);
+Considerations](../designs/current/DESIGN-workspace-config-sources.md#security-considerations);
 in summary:
 
 - Positive type allowlist: only regular files and directories are

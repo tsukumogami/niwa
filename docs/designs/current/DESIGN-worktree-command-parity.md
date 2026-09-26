@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 problem: |
   niwa's worktree commands (`niwa worktree create|destroy|list|attach|detach`)

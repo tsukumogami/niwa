@@ -12,7 +12,7 @@ import (
 
 // TestRemoteControlKey_EndToEnd_MaterializeReadBack drives the real path a
 // downstream override travels: a [claude.settings].remoteControlAtStartup value ->
-// InstallWorkspaceRootSettings (the materializer the interactive, ephemeral, apply,
+// RootSettingsMaterializer (the materializer the interactive, ephemeral, apply,
 // and dispatch-provision paths all use) -> readInstanceSettings. A one-sided rename
 // of the emit key or the read-back struct tag breaks this test, which is what closes
 // the silent-override gap (read-back-as-absent would inject --settings and clobber a
@@ -41,8 +41,8 @@ func TestRemoteControlKey_EndToEnd_MaterializeReadBack(t *testing.T) {
 					},
 				},
 			}
-			if _, err := workspace.InstallWorkspaceRootSettings(cfg, configDir, instanceRoot, map[string]string{}); err != nil {
-				t.Fatalf("InstallWorkspaceRootSettings: %v", err)
+			if _, err := (&workspace.RootSettingsMaterializer{}).Materialize(&workspace.MaterializeContext{Config: cfg, ConfigDir: configDir, RepoDir: instanceRoot, RepoIndex: map[string]string{}}); err != nil {
+				t.Fatalf("RootSettingsMaterializer: %v", err)
 			}
 			inst, err := readInstanceSettings(instanceRoot)
 			if err != nil {

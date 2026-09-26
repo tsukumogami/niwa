@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -33,13 +35,9 @@ const dispatchTestShortID = "shortid1"
 // ClassifyCwd resolves it to CwdAtWorkspaceRoot. It returns the root path.
 func setupDispatchWorkspace(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
-	// t.TempDir can hand back a symlinked path (e.g. /var -> /private/var on
-	// macOS, or a symlinked TMPDIR on Linux). Resolve it so the workspace root
-	// ClassifyCwd derives matches the cwd we chdir into.
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		root = resolved
-	}
+	// Resolved so the workspace root ClassifyCwd derives matches the cwd we
+	// chdir into.
+	root := canonicalTempDir(t)
 	configDir := filepath.Join(root, config.ConfigDir)
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -79,57 +77,46 @@ type dispatchFakes struct {
 
 // installDispatchFakes wires every dispatch seam to a fake and resets the
 // command flags to their zero values, restoring all originals on cleanup. The
-// returned struct records calls. By default: lookClaude succeeds, provision
+// returned struct records calls. By default: lookAgentBinary succeeds, provision
 // creates a real temp instance dir under workspaceRoot, launch succeeds,
 // capture returns dispatchTestSessionID, attach succeeds.
 func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 	t.Helper()
 	f := &dispatchFakes{}
 
-	prevLook := lookClaude
+	resetDispatchFlags(t)
+
+	prevLook := lookAgentBinary
 	prevProvision := provisionInstanceFunc
 	prevLaunch := dispatchLaunch
 	prevCapture := dispatchCapture
 	prevAttach := dispatchAttach
 	prevDestroy := destroyInstanceFunc
-	prevLabel := dispatchLabel
-	prevName := dispatchName
-	prevModel := dispatchModel
-	prevPerm := dispatchPermissionMode
-	prevAgent := dispatchAgent
-	prevDetach := dispatchDetach
 
-	dispatchLabel = ""
-	dispatchName = ""
-	dispatchModel = ""
-	dispatchPermissionMode = ""
-	dispatchAgent = ""
-	dispatchDetach = false
+	lookAgentBinary = func(string) (string, error) { return "/usr/bin/claude", nil }
 
-	lookClaude = func() (string, error) { return "/usr/bin/claude", nil }
-
-	provisionInstanceFunc = func(_ context.Context, root, _, namePrefix, sep string) (provisionResult, error) {
+	provisionInstanceFunc = func(_ context.Context, root, _, namePrefix, sep string, _ int) (provisionResult, error) {
 		f.provisionCalled++
 		name := "test-ws" + sep + namePrefix
 		dir := filepath.Join(root, name)
-		if err := os.MkdirAll(filepath.Join(dir, ".niwa"), 0o755); err != nil {
+		if err := writeMinimalInstanceState(dir); err != nil {
 			return provisionResult{}, err
 		}
 		f.instancePath = dir
 		return provisionResult{Name: name, Path: dir}, nil
 	}
 
-	dispatchLaunch = func(_ context.Context, _, _ string, _ []string, _ []string) error {
+	dispatchLaunch = func(context.Context, launchRequest) error {
 		f.launchCalled++
 		return nil
 	}
 
-	dispatchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
+	dispatchCapture = func(_ agentplan.SessionRecords, _, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
 		f.captureCalled++
 		return dispatchTestSessionID, dispatchTestShortID, nil
 	}
 
-	dispatchAttach = func(id string) error {
+	dispatchAttach = func(_ agentplan.LaunchSpec, id string, _ string) error {
 		f.attachCalled++
 		f.attachedID = id
 		return nil
@@ -142,21 +129,72 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 	}
 
 	t.Cleanup(func() {
-		lookClaude = prevLook
+		lookAgentBinary = prevLook
 		provisionInstanceFunc = prevProvision
 		dispatchLaunch = prevLaunch
 		dispatchCapture = prevCapture
 		dispatchAttach = prevAttach
 		destroyInstanceFunc = prevDestroy
+	})
+
+	return f
+}
+
+// resetDispatchFlags zeroes every `niwa dispatch` flag variable and restores
+// what was there on cleanup. The flag variables are package-level, so a test
+// that sets one would otherwise decide the next test's dispatch.
+//
+// It is separate from installDispatchFakes because not every test that needs
+// the flags reset wants the seams faked: a test exercising the REAL launcher
+// still has to pin the flags, and installing a fake dispatchLaunch would defeat
+// the point of the exercise.
+func resetDispatchFlags(t *testing.T) {
+	t.Helper()
+
+	prevLabel := dispatchLabel
+	prevName := dispatchName
+	prevModel := dispatchModel
+	prevPerm := dispatchPermissionMode
+	prevAgent := dispatchAgent
+	prevHarness := dispatchHarness
+	prevDetach := dispatchDetach
+	prevKeepAlive := dispatchKeepAlive
+	prevAcceptSessionMessages := dispatchAcceptSessionMessages
+
+	dispatchLabel = ""
+	dispatchName = ""
+	dispatchModel = ""
+	dispatchPermissionMode = ""
+	dispatchAgent = ""
+	dispatchHarness = ""
+	dispatchDetach = false
+	dispatchKeepAlive = nil
+	dispatchAcceptSessionMessages = nil
+
+	t.Cleanup(func() {
 		dispatchLabel = prevLabel
 		dispatchName = prevName
 		dispatchModel = prevModel
 		dispatchPermissionMode = prevPerm
 		dispatchAgent = prevAgent
+		dispatchHarness = prevHarness
 		dispatchDetach = prevDetach
+		dispatchKeepAlive = prevKeepAlive
+		dispatchAcceptSessionMessages = prevAcceptSessionMessages
 	})
+}
 
-	return f
+// writeMinimalInstanceState gives a fake-provisioned instance directory the
+// .niwa/instance.json a real Create always saves, with no recorded permissions
+// posture. Dispatch reads that file to derive --permission-mode and warns when
+// it is missing, so a fake provisioner that skipped it would make every test
+// that isn't about the posture exercise the broken-state path instead.
+func writeMinimalInstanceState(dir string) error {
+	return workspace.SaveState(dir, &workspace.InstanceState{
+		SchemaVersion: workspace.SchemaVersion,
+		InstanceName:  filepath.Base(dir),
+		Root:          dir,
+	})
 }
 
 // runDispatchCmd invokes runDispatch with the given prompt, capturing stdout
@@ -174,10 +212,7 @@ func runDispatchCmd(t *testing.T, prompt string) (stdout, stderr string, err err
 }
 
 func TestDispatch_OutsideWorkspace_Errors(t *testing.T) {
-	outside := t.TempDir()
-	if resolved, err := filepath.EvalSymlinks(outside); err == nil {
-		outside = resolved
-	}
+	outside := canonicalTempDir(t)
 	chdir(t, outside)
 	f := installDispatchFakes(t, outside)
 
@@ -194,7 +229,7 @@ func TestDispatch_ClaudeNotOnPath_Errors(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
 	f := installDispatchFakes(t, root)
-	lookClaude = func() (string, error) { return "", errors.New("not found") }
+	lookAgentBinary = func(string) (string, error) { return "", errors.New("not found") }
 
 	_, _, err := runDispatchCmd(t, "do a thing")
 	if err == nil {
@@ -302,7 +337,7 @@ func TestDispatch_AttachFailure_NonFatal(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
 	f := installDispatchFakes(t, root)
-	dispatchAttach = func(id string) error {
+	dispatchAttach = func(_ agentplan.LaunchSpec, id string, _ string) error {
 		f.attachCalled++
 		f.attachedID = id
 		return errors.New("session already exited")
@@ -330,7 +365,7 @@ func TestDispatch_Rollback_LaunchFailure(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
 	f := installDispatchFakes(t, root)
-	dispatchLaunch = func(_ context.Context, _, _ string, _ []string, _ []string) error {
+	dispatchLaunch = func(context.Context, launchRequest) error {
 		f.launchCalled++
 		return errors.New("launch boom")
 	}
@@ -354,7 +389,7 @@ func TestDispatch_Rollback_CaptureFailure(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
 	f := installDispatchFakes(t, root)
-	dispatchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
+	dispatchCapture = func(_ agentplan.SessionRecords, _, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
 		f.captureCalled++
 		return "", "", errors.New("capture timeout")
 	}
@@ -377,7 +412,7 @@ func TestDispatch_Rollback_MappingWriteFailure(t *testing.T) {
 	f := installDispatchFakes(t, root)
 	// Force a mapping-write failure by having capture return an invalid id;
 	// WriteSessionMapping rejects a non-UUID session id without writing.
-	dispatchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
+	dispatchCapture = func(_ agentplan.SessionRecords, _, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
 		f.captureCalled++
 		return "not-a-uuid", "shortid1", nil
 	}
@@ -401,9 +436,9 @@ func TestDispatch_SelfDispatch_ResolvesEnclosingWorkspaceRoot(t *testing.T) {
 
 	var gotRoot string
 	prev := provisionInstanceFunc
-	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string) (provisionResult, error) {
+	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string, cloneWorkers int) (provisionResult, error) {
 		gotRoot = r
-		return prev(ctx, r, cwd, namePrefix, sep)
+		return prev(ctx, r, cwd, namePrefix, sep, cloneWorkers)
 	}
 
 	_, _, err := runDispatchCmd(t, "do a thing")
@@ -418,20 +453,7 @@ func TestDispatch_SelfDispatch_ResolvesEnclosingWorkspaceRoot(t *testing.T) {
 	}
 }
 
-func TestDispatch_OverLongPrompt_Errors(t *testing.T) {
-	root := setupDispatchWorkspace(t)
-	chdir(t, root)
-	f := installDispatchFakes(t, root)
-
-	big := bytes.Repeat([]byte("a"), maxPromptBytes+1)
-	_, _, err := runDispatchCmd(t, string(big))
-	if err == nil {
-		t.Fatal("expected an error for an over-limit prompt")
-	}
-	if f.provisionCalled != 0 {
-		t.Errorf("nothing must be created for an over-limit prompt; provision called %d", f.provisionCalled)
-	}
-}
+// Prompt-size boundary coverage lives in dispatch_promptsize_test.go.
 
 // TestDispatch_SessionStartGuard_NoOpsInsideDispatchInstance asserts that the
 // existing SessionStart re-entrancy guard no-ops against a dispatch-created
@@ -482,21 +504,35 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 	installDispatchFakes(t, root)
 	dispatchDetach = true // no attach in the fan-out path
 
+	// Every dispatch runs the opportunistic reaper before it provisions, so a
+	// later goroutine sweeps the instances earlier ones already mapped -- they
+	// are instances the sweep can enumerate because the fake provisioner
+	// writes their .niwa/instance.json. A mapped session whose job entry is
+	// absent is gone by the reaper's rule and is reclaimed, mapping and all. A
+	// real dispatched worker has a job entry; the fake capture below writes one
+	// for each session it hands out, under a HOME of the test's own so the
+	// sweep reads this test's jobs directory.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	jobsDir := filepath.Join(home, ".claude", "jobs")
+
 	// Override the launch seam with a goroutine-safe no-op. The default fake from
 	// installDispatchFakes mutates shared dispatchFakes counters without
 	// synchronization, which would be a data race under concurrent dispatch; this
 	// test asserts on the durable mappings instead of those counters.
-	dispatchLaunch = func(_ context.Context, _, _ string, _ []string, _ []string) error { return nil }
+	dispatchLaunch = func(context.Context, launchRequest) error {
+		return nil
+	}
 	destroyInstanceFunc = func(_ string) error { return nil }
 
 	// A goroutine-safe provision: each call mints a distinct instance dir under
 	// the workspace root using the unique namePrefix dispatch generated.
 	var provisionCount int64
-	provisionInstanceFunc = func(_ context.Context, r, _, namePrefix, sep string) (provisionResult, error) {
+	provisionInstanceFunc = func(_ context.Context, r, _, namePrefix, sep string, _ int) (provisionResult, error) {
 		atomic.AddInt64(&provisionCount, 1)
 		name := "test-ws" + sep + namePrefix
 		dir := filepath.Join(r, name)
-		if err := os.MkdirAll(filepath.Join(dir, ".niwa"), 0o755); err != nil {
+		if err := writeMinimalInstanceState(dir); err != nil {
 			return provisionResult{}, err
 		}
 		return provisionResult{Name: name, Path: dir}, nil
@@ -504,13 +540,25 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 
 	// A goroutine-safe capture handing back a distinct valid UUID per call.
 	var captureSeq int64
-	dispatchCapture = func(_, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
+	dispatchCapture = func(_ agentplan.SessionRecords, _, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
 		i := atomic.AddInt64(&captureSeq, 1)
 		// 12 distinct, well-formed lowercase UUIDs differing only in the final
 		// hex digit (i is 1..n, single hex digit covers n <= 15). A distinct
 		// short id accompanies each so the mapping key (full UUID) and the
 		// user-facing handle (short id) stay separable.
-		return fmt.Sprintf("00000000-0000-0000-0000-00000000000%x", i), fmt.Sprintf("short%x", i), nil
+		sid := fmt.Sprintf("00000000-0000-0000-0000-00000000000%x", i)
+		dir := filepath.Join(jobsDir, sid)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", "", err
+		}
+		body, err := json.Marshal(jobState{SessionID: sid, Template: bgJobTemplate})
+		if err != nil {
+			return "", "", err
+		}
+		if err := os.WriteFile(filepath.Join(dir, "state.json"), body, 0o644); err != nil {
+			return "", "", err
+		}
+		return sid, fmt.Sprintf("short%x", i), nil
 	}
 
 	var wg sync.WaitGroup
@@ -583,8 +631,8 @@ func TestDispatch_PassthroughFlags_DiscreteArgv(t *testing.T) {
 	dispatchDetach = true
 
 	var gotPass []string
-	dispatchLaunch = func(_ context.Context, _, _ string, passthrough []string, _ []string) error {
-		gotPass = passthrough
+	dispatchLaunch = func(_ context.Context, req launchRequest) error {
+		gotPass = req.Passthrough
 		return nil
 	}
 
@@ -681,7 +729,9 @@ func assertSlugShape(t *testing.T, slug string) {
 // (1) produces an instance name that contains the underscore slug AND still ends
 // with the structural "-<8hex>" signature isDispatchInstanceName recognizes (the
 // end-anchored regex is unaffected by underscores inside the slug), and (2)
-// forwards "--name my_thing" to the launched worker.
+// forwards "--name my_thing-<token>" to the launched worker, where <token> is
+// the instance name's trailing 8 hex. It runs on the real random source, so a
+// session name minted from a second token would not match the instance's.
 func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
@@ -690,16 +740,16 @@ func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 
 	var gotName string
 	prevProvision := provisionInstanceFunc
-	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string) (provisionResult, error) {
-		res, err := prevProvision(ctx, r, cwd, namePrefix, sep)
+	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string, cloneWorkers int) (provisionResult, error) {
+		res, err := prevProvision(ctx, r, cwd, namePrefix, sep, cloneWorkers)
 		gotName = res.Name
 		return res, err
 	}
 
 	var gotPass []string
-	dispatchLaunch = func(_ context.Context, _, _ string, passthrough []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, req launchRequest) error {
 		f.launchCalled++
-		gotPass = passthrough
+		gotPass = req.Passthrough
 		return nil
 	}
 	dispatchDetach = true
@@ -745,8 +795,14 @@ func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 		}
 	}
 
-	if !passthroughHasNameSlug(gotPass, "my_thing") {
-		t.Errorf("launcher passthrough %v should contain \"--name my_thing\"", gotPass)
+	token := gotName[len(gotName)-8:]
+	wantForwarded := "my_thing-" + token
+	forwarded, _ := forwardedDisplayName(gotPass, "--name")
+	if forwarded != wantForwarded {
+		t.Errorf("launcher passthrough %v should contain \"--name %s\" (the instance's token)", gotPass, wantForwarded)
+	}
+	if !dispatchSessionNameRe.MatchString(forwarded) {
+		t.Errorf("forwarded name %q does not match %s", forwarded, dispatchSessionNamePattern)
 	}
 }
 
@@ -760,16 +816,16 @@ func TestDispatch_NoName_NoSlugNoNameFlag(t *testing.T) {
 
 	var gotName string
 	prevProvision := provisionInstanceFunc
-	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string) (provisionResult, error) {
-		res, err := prevProvision(ctx, r, cwd, namePrefix, sep)
+	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string, cloneWorkers int) (provisionResult, error) {
+		res, err := prevProvision(ctx, r, cwd, namePrefix, sep, cloneWorkers)
 		gotName = res.Name
 		return res, err
 	}
 
 	var gotPass []string
-	dispatchLaunch = func(_ context.Context, _, _ string, passthrough []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, req launchRequest) error {
 		f.launchCalled++
-		gotPass = passthrough
+		gotPass = req.Passthrough
 		return nil
 	}
 	dispatchDetach = true
@@ -802,16 +858,16 @@ func TestDispatch_NameSanitizesEmpty_FallsBack(t *testing.T) {
 
 	var gotName string
 	prevProvision := provisionInstanceFunc
-	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string) (provisionResult, error) {
-		res, err := prevProvision(ctx, r, cwd, namePrefix, sep)
+	provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string, cloneWorkers int) (provisionResult, error) {
+		res, err := prevProvision(ctx, r, cwd, namePrefix, sep, cloneWorkers)
 		gotName = res.Name
 		return res, err
 	}
 
 	var gotPass []string
-	dispatchLaunch = func(_ context.Context, _, _ string, passthrough []string, _ []string) error {
+	dispatchLaunch = func(_ context.Context, req launchRequest) error {
 		f.launchCalled++
-		gotPass = passthrough
+		gotPass = req.Passthrough
 		return nil
 	}
 	dispatchDetach = true
@@ -829,15 +885,4 @@ func TestDispatch_NameSanitizesEmpty_FallsBack(t *testing.T) {
 			t.Errorf("an empty-sanitizing --name must forward no --name; passthrough[%d] = %q (full %v)", i, a, gotPass)
 		}
 	}
-}
-
-// passthroughHasNameSlug reports whether pass contains the discrete pair
-// "--name" immediately followed by slug.
-func passthroughHasNameSlug(pass []string, slug string) bool {
-	for i := 0; i+1 < len(pass); i++ {
-		if pass[i] == "--name" && pass[i+1] == slug {
-			return true
-		}
-	}
-	return false
 }

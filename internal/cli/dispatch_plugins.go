@@ -11,6 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/agentplan"
+	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -21,6 +24,30 @@ import (
 // on startup. It is generous (clones are normally seconds) so a slow-but-working
 // network is not cut off.
 const prewarmCmdTimeout = 120 * time.Second
+
+// configurePluginAutoInstall wires the plugin opt-out and the pre-warm seam
+// onto an Applier. Every CLI surface that constructs an Applier (apply, create,
+// reset, ...) must call this helper, so both behave the same regardless of
+// which command surfaced the rank-2 notice.
+//
+// flagOptOut is the per-invocation --no-install-plugins value; the persistent
+// auto_install_plugins = false global-config setting is OR'd in here so callers
+// don't have to load GlobalConfig twice. The opt-out gates two things at once:
+// the embedded niwa plugin's install, and the pre-warming of the workspace's
+// declared marketplaces.
+//
+// What is NOT wired here is the embedded plugin's installer. It used to arrive
+// as a function field, because internal/plugin imported internal/workspace and
+// the cli was the only place that could see both; internal/plugin is a leaf
+// now, so the pipeline calls it directly and there is nothing to inject.
+func configurePluginAutoInstall(applier *workspace.Applier, flagOptOut bool) {
+	skipFromGlobal := false
+	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
+		skipFromGlobal = globalCfg.SkipPluginInstall()
+	}
+	applier.SkipPluginInstall = flagOptOut || skipFromGlobal
+	applier.PrewarmDeclaredPlugins = prewarmDeclaredPlugins
+}
 
 // prewarmDeclaredPlugins resolves an instance's workspace-declared Claude
 // marketplaces and plugins to disk so the FIRST Claude session started in the
@@ -39,9 +66,10 @@ const prewarmCmdTimeout = 120 * time.Second
 // the materialized, post-overlay-merge set of marketplaces/plugins, so reading it
 // back keeps this self-contained and needs no extra config plumbing from the caller.
 //
-// It is best-effort. skipInstall (the same opt-out that gates InstallNiwaPlugin,
-// already OR'd with the global auto_install_plugins setting by the caller) short-
-// circuits it. Every other failure (claude absent, CLI error, unreadable settings)
+// It is best-effort. skipInstall (the same opt-out that gates the embedded
+// plugin's install, already OR'd with the global auto_install_plugins setting by
+// the caller) short-circuits it. Every other failure (claude absent, CLI error,
+// unreadable settings)
 // is a warning, never fatal: Claude still installs from settings.json at startup, so
 // pre-warming only removes the race -- a provision must never be less robust than
 // before when the plugin CLI is unavailable. reporter may be nil.
@@ -97,7 +125,8 @@ func prewarmDeclaredPlugins(instanceRoot string, reporter *workspace.Reporter, s
 }
 
 // warnPrewarm emits a best-effort warning, tolerating a nil reporter (the seam
-// contract allows a nil reporter, mirroring InstallNiwaPlugin).
+// contract allows a nil reporter, mirroring the notice emitters in
+// internal/workspace).
 func warnPrewarm(reporter *workspace.Reporter, format string, a ...any) {
 	if reporter != nil {
 		reporter.Warn(format, a...)
@@ -109,6 +138,26 @@ func warnPrewarm(reporter *workspace.Reporter, format string, a ...any) {
 // tests can record the issued commands without a real claude install, mirroring the
 // lookClaude/dispatchAttach seam pattern in dispatch.go. Output is folded into the
 // returned error so a failure surfaces a useful message in the caller's warning.
+// lookClaude reports the path to the Claude Code binary. Two callers want it by
+// name rather than by declaration: the plugin prewarm below, which drives
+// Claude Code's own `plugin` subcommand and answers for a capability the table
+// declares no other agent can receive, and `niwa watch`, whose review
+// continuation is Claude Code harness surface. In both the agent is not a choice
+// being made at a call site -- it is the only agent the capability exists for --
+// which is why this sits here rather than on the launch path, where the agent is
+// resolved rather than assumed.
+var lookClaude = func() (string, error) { return lookAgentBinary(claudeLaunchSpec().Binary) }
+
+// claudeLaunchSpec is Claude Code's own launch description, for the two paths
+// above that drive Claude Code specifically rather than whichever agent a
+// workspace resolves to. It reads the same table the dispatch path reads, so
+// there is still exactly one place that says how Claude Code is launched and
+// what its management verbs are.
+func claudeLaunchSpec() agentplan.LaunchSpec {
+	spec, _ := agentplan.For(agent.AgentClaude).LaunchSpec()
+	return spec
+}
+
 var runClaudePluginCmd = func(ctx context.Context, dir string, args ...string) error {
 	bin, err := lookClaude()
 	if err != nil {
@@ -132,8 +181,8 @@ var runClaudePluginCmd = func(ctx context.Context, dir string, args ...string) e
 }
 
 // instanceSettings is the narrow projection of .claude/settings.json this package
-// reads back: just the plugin/marketplace declarations niwa materialized. Unknown
-// fields are ignored.
+// reads back: the plugin/marketplace, remote-control, and keep-alive
+// declarations niwa materialized. Unknown fields are ignored.
 type instanceSettings struct {
 	EnabledPlugins         map[string]bool             `json:"enabledPlugins"`
 	ExtraKnownMarketplaces map[string]marketplaceEntry `json:"extraKnownMarketplaces"`
@@ -141,6 +190,11 @@ type instanceSettings struct {
 	// only when a downstream [claude.settings] explicitly set it, which is how the
 	// dispatch remote-control resolver tells "downstream decided" from "unset".
 	RemoteControlAtStartup *bool `json:"remoteControlAtStartup"`
+	// KeepAliveOnDispatch mirrors the niwa-defined settings key (Claude Code
+	// ignores it). Non-nil only when a downstream [claude.settings] explicitly
+	// set it; the dispatch keep-alive resolver reads it as the downstream layer
+	// between the --keep-alive flag and the host default.
+	KeepAliveOnDispatch *bool `json:"keepAliveOnDispatch"`
 }
 
 type marketplaceEntry struct {
@@ -160,10 +214,10 @@ type marketplaceSource struct {
 
 // readInstanceSettings reads the dispatched instance's Claude settings from
 // <instancePath>/.claude/settings.json. The instance root receives settings.json
-// (per InstallWorkspaceRootSettings; see internal/workspace/permissions.go) -- the
-// settings.local.json variant is for per-repo dirs, never the root, so it is not
-// consulted here. Returns an error when the file is absent or not valid JSON;
-// callers treat any error as "nothing to pre-warm."
+// (RootSettingsMaterializer writes it there) -- the settings.local.json variant
+// is for per-repo dirs, never the root, so it is not consulted here. Returns an
+// error when the file is absent or not valid JSON; callers treat any error as
+// "nothing to pre-warm."
 func readInstanceSettings(instancePath string) (*instanceSettings, error) {
 	data, err := os.ReadFile(filepath.Join(instancePath, ".claude", "settings.json"))
 	if err != nil {

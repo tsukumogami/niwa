@@ -2,89 +2,58 @@ package cli
 
 import (
 	"fmt"
-	"sort"
 	"strings"
+
+	"github.com/tsukumogami/niwa/internal/agentplan"
 )
 
-// modelCategories maps niwa's portable, vendor-neutral capability categories to
-// the concrete versionless model name forwarded to `claude --model`. The values
-// are deliberately versionless (e.g. "opus", not "claude-opus-4-8") so niwa
-// stays out of the version-pinning business: Claude Code resolves the alias to
-// whatever concrete model that name currently points at.
+// resolveDispatchModel maps a user-supplied --model value -- a portable
+// capability category or a versionless vendor name -- to the concrete value
+// forwarded to the agent being launched, plus an optional warning for stderr.
 //
-// The category vocabulary is the abstraction a caller reaches for when they care
-// about capability, not vendor -- "give me the fast one" -- and it is the layer
-// that a future multi-vendor router can remap without touching call sites.
-var modelCategories = map[string]string{
-	"fast":     "haiku",
-	"balanced": "sonnet",
-	"powerful": "opus",
-}
-
-// knownModelNames is the set of versionless vendor model names niwa recognizes
-// and forwards unchanged. Membership only suppresses the "unrecognized" warning;
-// an unknown value is still forwarded (see resolveDispatchModel), so a brand-new
-// alias or a full model id keeps working before niwa learns about it.
-var knownModelNames = map[string]bool{
-	"fable":  true,
-	"opus":   true,
-	"sonnet": true,
-	"haiku":  true,
-}
-
-// resolveDispatchModel maps a user-supplied --model value (a category or a
-// versionless vendor name) to the concrete value forwarded to `claude --model`,
-// plus an optional warning to surface on stderr.
-//
-// Resolution order:
+// Resolution order, against the launched agent's own vocabulary:
 //   - "" -> ("", "") -- no model selected, forward nothing.
-//   - a known category (fast/balanced/powerful) -> its concrete model, no warning.
-//   - a known vendor name (fable/opus/sonnet/haiku) -> that name lowercased, no warning.
-//   - anything else -> the raw value UNCHANGED, plus a warning.
+//   - a known category -> the concrete model that agent binds it to, no warning.
+//   - a known vendor name -> that name lowercased, no warning.
+//   - anything else -> the raw value unchanged, plus a warning.
 //
 // The unknown case forwards rather than rejects on purpose: niwa must not become
-// a gatekeeper that breaks the instant Anthropic ships a new alias or a caller
-// passes a full model id. The warning surfaces typos without blocking the launch.
-func resolveDispatchModel(raw string) (string, string) {
+// a gatekeeper that breaks the instant a vendor ships a new alias or a caller
+// passes a full model id. The warning surfaces a typo without blocking the
+// launch.
+//
+// Both vocabularies come from the agent's launch spec, so this function reads
+// the same table the launch itself does and there is no second list to drift
+// from it.
+func resolveDispatchModel(spec agentplan.LaunchSpec, raw string) (string, string) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return "", ""
 	}
 	key := strings.ToLower(trimmed)
-	if concrete, ok := modelCategories[key]; ok {
+	if concrete, ok := spec.ModelCategories[key]; ok {
 		return concrete, ""
 	}
-	if knownModelNames[key] {
-		return key, ""
+	for _, known := range spec.KnownModels {
+		if key == known {
+			return key, ""
+		}
 	}
 	return trimmed, fmt.Sprintf(
-		"unrecognized model %q; forwarding to claude as-is (categories: %s; models: %s)",
-		trimmed, joinSortedKeys(modelCategories), joinSortedBoolKeys(knownModelNames),
+		"unrecognized model %q; forwarding to %s as-is (categories: %s; models: %s)",
+		trimmed, spec.Binary,
+		strings.Join(spec.ModelCategoryNames(), ", "),
+		strings.Join(spec.KnownModelNames(), ", "),
 	)
 }
 
-// knownModelHint returns a human-readable one-line summary of the accepted
-// values, used in flag help text so the vocabulary is discoverable from
-// `niwa dispatch --help`.
-func knownModelHint() string {
-	return fmt.Sprintf("categories: %s; versionless names: %s",
-		joinSortedKeys(modelCategories), joinSortedBoolKeys(knownModelNames))
-}
-
-func joinSortedKeys(m map[string]string) string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return strings.Join(keys, ", ")
-}
-
-func joinSortedBoolKeys(m map[string]bool) string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return strings.Join(keys, ", ")
+// dispatchModelFlagHelp is the --model help line. It names the portable
+// categories, which are niwa's own vocabulary and the same three words whoever
+// is launched, and leaves the versionless names to the agent -- printing one
+// agent's list in help text for a flag that reaches whichever agent the
+// workspace resolves to would be a lie for the other.
+func dispatchModelFlagHelp() string {
+	return "model for the worker's main chat loop: a capability category (" +
+		strings.Join(agentplan.ModelCategories(), ", ") +
+		") or a versionless model name the launched agent accepts; overrides the [global] dispatch_model default"
 }

@@ -103,3 +103,40 @@ Feature: Parallel repo clones in niwa create and apply
     Then the exit code is 0
     And the repo "tools/alpha" exists in instance "myws"
     And the repo "tools/beta" exists in instance "myws"
+
+  # --- --parallel bounds concurrency: 1 clones serially and still lands every repo ---
+
+  @critical
+  Scenario: niwa create --parallel 1 clones all repos serially
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "alpha" exists
+    And a source repo "beta" exists
+    And a source repo "gamma" exists
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.alpha]
+      url = "{repo:alpha}"
+      group = "tools"
+
+      [repos.beta]
+      url = "{repo:beta}"
+      group = "tools"
+
+      [repos.gamma]
+      url = "{repo:gamma}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    When I run "niwa create myws --parallel 1"
+    Then the exit code is 0
+    And the instance "myws" exists
+    And the repo "tools/alpha" exists in instance "myws"
+    And the repo "tools/beta" exists in instance "myws"
+    And the repo "tools/gamma" exists in instance "myws"

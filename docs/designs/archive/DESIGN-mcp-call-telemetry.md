@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Superseded
 superseded_by: docs/designs/current/DESIGN-niwa-mesh-removal.md
 problem: |
@@ -28,6 +29,8 @@ rationale: |
 # DESIGN: MCP-call telemetry
 
 ## Status
+
+Superseded
 
 Superseded by [DESIGN-niwa-mesh-removal.md](docs/designs/current/DESIGN-niwa-mesh-removal.md)
 

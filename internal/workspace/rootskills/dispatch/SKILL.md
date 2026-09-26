@@ -1,6 +1,24 @@
 ---
 name: dispatch
-description: Hand the work you just discussed to an isolated background agent via `niwa dispatch`. Use when, after a planning chat at the workspace root, you are ready to launch the actual work in its own ephemeral niwa instance rather than doing it in this session. Triggers on "dispatch this", "hand this off", "launch a worker for this", "let's kick this off in its own instance".
+description: >-
+  Run the work just discussed as a background agent in its own fresh niwa
+  instance -- its own clone, its own branch, its own Agent View session --
+  instead of doing it in this conversation. Reach for it at the workspace root
+  when a planning chat turns into doing ("alright, go build it"), when several
+  independent units should be worked at once ("can you do these three
+  refactors in parallel?", "knock all of these out"), when the user wants to
+  stop waiting ("this'll take a while, don't block on me"), when isolation is
+  the constraint ("don't touch my working tree", "start clean on this one"),
+  and on "farm this out", "put it in the background", "queue this up", "fire
+  and forget" -- usually nobody says the word dispatch. The worker starts
+  blind, with the remotes' pushed state and none of this chat, so the
+  self-contained brief this skill writes is its only context; skip it and the
+  work either quietly happens here or lands on a worker that has no idea what
+  was decided. What separates this from an in-session Agent-tool fan-out, or
+  from `shirabe:work-on` and `shirabe:execute`, is where the work runs --
+  another session, another clone -- not what the work is. Do NOT use when the
+  user wants the work done in this session, or when the task depends on
+  uncommitted or unpushed local state the worker's clone cannot see.
 ---
 
 # /dispatch
@@ -91,8 +109,11 @@ niwa dispatch "Read <abs-path-to-brief> for your complete task brief, then imple
   session, pulling the coordinator into the worker. With `--detach`, this session stays put so
   the user can keep planning or dispatch more workers; they can `claude attach <id>` later to
   look in. Only omit `--detach` if the user explicitly wants to jump straight into the worker.
-- **`--name`** gives the session a readable name in Agent View (sanitized into a slug; it also
-  names the instance, e.g. `<config>+<slug>-<id>`).
+- **`--name`** gives the session a readable name in Agent View. It is sanitized into a slug, and
+  the session name is that slug followed by a random suffix, an 8-hex token
+  (`<slug>-<token>`), so two dispatches with the same `--name` still get different session
+  names. The token is not the session id. The instance carries the same slug and suffix, e.g.
+  `<config>+<slug>-<token>`.
 - **`--model`** (optional) picks the model that runs the worker's main chat loop. Pass it when
   the user asked for a specific model, or when the work clearly warrants a heavier or lighter
   one. It accepts either a capability **category** -- `fast`, `balanced`, or `powerful` -- or a
@@ -100,19 +121,29 @@ niwa dispatch "Read <abs-path-to-brief> for your complete task brief, then imple
   user named a specific model, since categories stay correct as concrete models change. Omit the
   flag to use the workspace default (the `[global] dispatch_model` host setting, if any). Example:
   `niwa dispatch "..." --name "<topic>" --model powerful --detach`.
-- Pass the brief's absolute path in the prompt; keep the inline summary short (the prompt is a
-  single shell argument).
+- Pass the brief's absolute path in the prompt and keep the inline summary short. The prompt
+  rides a single argv element and is never passed through a shell, so quoting and
+  metacharacters are not a hazard.
 
 ### 4. Report back
 
 Tell the user: the brief path, the dispatched session id and how to reach it
-(`claude attach <id>` / `claude logs <id>` / `claude stop <id>`), and that the worker is
-running in its own instance. If they want to fan out more, repeat from step 1.
+(`claude attach <id>` / `claude logs <id>` / `claude stop <id>`), the session name, and that
+the worker is running in its own instance. Take the session name from the `session name:` line
+of the dispatch output and relay it exactly as printed -- don't rebuild it from the `--name` you
+passed, because the random suffix only appears in that output. If there is no such line, don't
+make one up: identify the session by its id alone. That happens when no `--name` was given, the
+name sanitized to nothing, or the agent has no display-name flag (as with Codex). If the output
+has no session id either, relay what the command printed. If they want to fan out more, repeat
+from step 1.
 
 ## Cautions
 
-- **Don't paste giant context into the prompt.** Put it in the brief file; the prompt just
-  points at it. Long prompts also risk the argument-length limit.
+- **Put giant context in the brief file, not the prompt.** The prompt just points at it. This
+  is about legibility, not size: a prompt that is a wall of pasted text is harder for you and
+  the user to read back later than one that names a durable artifact. niwa handles size on its
+  own -- a prompt too large to pass as a command argument is written to a file automatically
+  and the worker gets a pointer -- so there is no limit here to work around.
 - **The worker can't see your unpushed work.** The clone comes from the remotes, so if the
   task depends on edits that only exist in this session's tree (uncommitted, or committed but
   not pushed), either commit AND push them first, or spell them out in the brief.

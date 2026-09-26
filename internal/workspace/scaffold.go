@@ -14,6 +14,19 @@ name = "%s"
 # version = "0.1.0"
 default_branch = "main"
 content_dir = "claude"
+# [workspace].default_agent names the coding agent this workspace's background
+# workers are launched as, for everyone who works in it. It does not select what
+# niwa prepares: every apply prepares the workspace for every agent niwa
+# supports, so a session can be opened as any of them without re-applying.
+#
+# The whole ladder, most specific first:
+#   --harness                          one niwa dispatch
+#   NIWA_DISPATCH_HARNESS              one shell, and every worker dispatched from it
+#   [workspace].default_agent          this workspace, for everyone in it
+#   [global].default_dispatch_harness  this machine
+#                                      (niwa config set default-dispatch-harness)
+# and niwa's built-in default when none of them is set.
+# default_agent = "codex"
 
 # --- Sources: GitHub orgs to discover repos from ---
 # Uncomment and configure at least one source before running niwa apply.
@@ -29,18 +42,24 @@ content_dir = "claude"
 # visibility = "private"
 
 # --- Per-repo overrides ---
-# [repos.my-repo]
-# claude = false
+# Each agent's enabled key gates that agent's delivery for the repo and
+# nothing else, so turning one off leaves the other's delivery whole.
+# [repos.my-repo.claude]
+# enabled = false
+# [repos.my-repo.codex]
+# enabled = false
 #
 # --- Explicit repos (from outside source orgs) ---
 # [repos.external-tool]
 # url = "git@github.com:other-org/tool.git"
 # group = "private"
 
-# --- Claude Code configuration, content hierarchy, environment ---
-# See docs/designs/DESIGN-workspace-config.md for full schema reference.
-# [claude.content.workspace]
+# --- Content hierarchy (agent-neutral: every agent's session reads it) ---
+# [content.workspace]
 # source = "workspace.md"
+
+# --- Claude Code configuration, environment ---
+# See docs/designs/DESIGN-workspace-config.md for full schema reference.
 # [claude]
 # marketplaces = ["my-org/my-plugins"]
 # plugins = ["my-tool@my-plugins"]
@@ -54,6 +73,9 @@ content_dir = "claude"
 # EXTRA_FLAG = "settings-only"
 # [claude.env.secrets]
 # ANTHROPIC_API_KEY = "vault://team/ANTHROPIC_API_KEY"
+# # The secret table is agent-neutral -- bind any agent's key the same way. For a
+# # workspace whose sessions also run OpenAI Codex, add:
+# OPENAI_API_KEY = "vault://team/OPENAI_API_KEY"
 # --- Instance root overrides (workspace-level Claude Code session) ---
 # [instance.claude.settings]
 # permissions = "ask"
@@ -153,8 +175,9 @@ visibility = "<vis-value>"
 # no live visibility, so name membership is what places the repo in a group.
 repos = ["<bootstrap-repo>"]
 
-# CLAUDE.md content hierarchy: drop a workspace.md in .niwa/claude/ to populate.
-# [claude.content.workspace]
+# Content hierarchy: drop a workspace.md in .niwa/claude/ to populate. It is
+# agent-neutral -- each agent's session reads it under that agent's own filename.
+# [content.workspace]
 # source = "workspace.md"
 
 # See https://github.com/tsukumogami/niwa/blob/main/docs/guides/workspace-config-sources.md

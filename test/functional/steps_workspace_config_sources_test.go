@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -42,24 +41,15 @@ func theConfigRepoIsForcePushedTo(ctx context.Context, name string, body string)
 	}
 	defer os.RemoveAll(work)
 
-	gitEnv := append(os.Environ(),
-		"GIT_AUTHOR_NAME=niwa-test",
-		"GIT_AUTHOR_EMAIL=niwa-test@example.com",
-		"GIT_COMMITTER_NAME=niwa-test",
-		"GIT_COMMITTER_EMAIL=niwa-test@example.com",
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
-	)
-
 	// Initialize a fresh repo with no shared history.
+	if out, err := fixtureGit(work, "init", "--initial-branch=main", work); err != nil {
+		return ctx, fmt.Errorf("git init in %s: %w\n%s", work, err, out)
+	}
 	for _, args := range [][]string{
-		{"init", "--initial-branch=main", work},
-		{"-C", work, "config", "user.email", "test@test.com"},
-		{"-C", work, "config", "user.name", "Test"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
 	} {
-		cmd := exec.Command("git", args...)
-		cmd.Env = gitEnv
-		if out, err := cmd.CombinedOutput(); err != nil {
+		if out, err := fixtureGitWorkTree(work, args...); err != nil {
 			return ctx, fmt.Errorf("git %v: %w\n%s", args, err, out)
 		}
 	}
@@ -76,13 +66,11 @@ func theConfigRepoIsForcePushedTo(ctx context.Context, name string, body string)
 	}
 
 	for _, args := range [][]string{
-		{"-C", work, "add", ".niwa/workspace.toml"},
-		{"-C", work, "commit", "-m", "force-pushed history"},
-		{"-C", work, "push", "--force", "file://" + bareDir, "main"},
+		{"add", ".niwa/workspace.toml"},
+		{"commit", "-m", "force-pushed history"},
+		{"push", "--force", "file://" + bareDir, "main"},
 	} {
-		cmd := exec.Command("git", args...)
-		cmd.Env = gitEnv
-		if out, err := cmd.CombinedOutput(); err != nil {
+		if out, err := fixtureGitCommit(work, args...); err != nil {
 			return ctx, fmt.Errorf("git %v: %w\n%s", args, err, out)
 		}
 	}
@@ -142,6 +130,69 @@ func theProvenanceMarkerExistsInWorkspaceRoot(ctx context.Context) (context.Cont
 	return ctx, nil
 }
 
+// theMaterializedFileAtWorkspaceRootContains asserts that the niwa-materialized
+// file at <workspaceRoot>/<relPath> exists and contains want. Unlike
+// theFileUnderWorkspaceRootContains (which anchors under a named subdir), this
+// targets the workspace root directly, as the `init from config repo` flow
+// makes the root itself the niwa-managed dir.
+func theMaterializedFileAtWorkspaceRootContains(ctx context.Context, relPath, want string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, relPath)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ctx, fmt.Errorf("reading %s: %w", path, err)
+	}
+	if !strings.Contains(string(data), want) {
+		return ctx, fmt.Errorf("expected %s to contain %q, got:\n%s", path, want, string(data))
+	}
+	return ctx, nil
+}
+
+// lookupJSONKeyAtWorkspaceRoot is lookupJSONKey for a path relative to the
+// workspace root.
+func lookupJSONKeyAtWorkspaceRoot(ctx context.Context, relPath, dottedKey string) (value any, found bool, path string, err error) {
+	s := getState(ctx)
+	if s == nil {
+		return nil, false, "", fmt.Errorf("no test state")
+	}
+	path = filepath.Join(s.workspaceRoot, relPath)
+	value, found, err = lookupJSONKey(path, dottedKey)
+	return value, found, path, err
+}
+
+// theJSONFileAtWorkspaceRootHasNoKey asserts the JSON file at relPath under
+// the workspace root parses and carries no value at the dotted key path.
+func theJSONFileAtWorkspaceRootHasNoKey(ctx context.Context, relPath, dottedKey string) (context.Context, error) {
+	value, found, path, err := lookupJSONKeyAtWorkspaceRoot(ctx, relPath, dottedKey)
+	if err != nil {
+		return ctx, err
+	}
+	if found {
+		return ctx, fmt.Errorf("expected %s to have no %q, got %v", path, dottedKey, value)
+	}
+	return ctx, nil
+}
+
+// theJSONFileAtWorkspaceRootHasKeyEqualTo asserts the JSON file at relPath
+// under the workspace root parses and carries the string want at the dotted
+// key path.
+func theJSONFileAtWorkspaceRootHasKeyEqualTo(ctx context.Context, relPath, dottedKey, want string) (context.Context, error) {
+	value, found, path, err := lookupJSONKeyAtWorkspaceRoot(ctx, relPath, dottedKey)
+	if err != nil {
+		return ctx, err
+	}
+	if !found {
+		return ctx, fmt.Errorf("expected %s to have %q, but it is absent", path, dottedKey)
+	}
+	if got, ok := value.(string); !ok || got != want {
+		return ctx, fmt.Errorf("expected %s %q = %q, got %v", path, dottedKey, want, value)
+	}
+	return ctx, nil
+}
+
 // theConfigDirIsAGitWorkingTree converts the snapshot at
 // <workspaceRoot>/.niwa/ back to a legacy git working tree by:
 //  1. removing the provenance marker
@@ -174,16 +225,10 @@ func theConfigDirIsAGitWorkingTree(ctx context.Context, configRepoName string) (
 	}
 	// We move .git out of clone, so don't defer RemoveAll until after the move.
 
-	gitEnv := append(os.Environ(),
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
-	)
 	// Clone needs an empty target — MkdirTemp creates one but git clone
 	// rejects non-empty dirs. Remove it first.
 	_ = os.Remove(clone)
-	cmd := exec.Command("git", "clone", url, clone)
-	cmd.Env = gitEnv
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := fixtureGit(s.tmpDir, "clone", url, clone); err != nil {
 		return ctx, fmt.Errorf("git clone for working-tree setup: %w\n%s", err, out)
 	}
 
@@ -194,5 +239,26 @@ func theConfigDirIsAGitWorkingTree(ctx context.Context, configRepoName string) (
 		return ctx, fmt.Errorf("move .git into niwa dir: %w", err)
 	}
 	_ = os.RemoveAll(clone)
+	return ctx, nil
+}
+
+// theConfigRepoIsUnreachable renames the bare repo backing the named config
+// source out of the way, so the next fetch against its recorded URL fails the
+// way a briefly-unreachable remote does. Used to prove `niwa reset` reconciles
+// before it destroys: the destroy must not have happened when the refetch
+// fails, or the user is left with nothing where their instance was.
+func theConfigRepoIsUnreachable(ctx context.Context, name string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	url, ok := s.repoURLs[name]
+	if !ok {
+		return ctx, fmt.Errorf("no URL stored for config repo %q", name)
+	}
+	bareDir := strings.TrimPrefix(url, "file://")
+	if err := os.Rename(bareDir, bareDir+".moved"); err != nil {
+		return ctx, fmt.Errorf("making config repo %q unreachable: %w", name, err)
+	}
 	return ctx, nil
 }

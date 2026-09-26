@@ -324,13 +324,16 @@ ephemeral-session model. (At init time there are no cloned repos to enumerate,
 so this is a minimal orientation file, not the per-instance generated
 workspace-context.)
 
-The root `.claude/settings.json` also carries a **permission posture**
-(`permissions.defaultMode`), sourced the same way instance materialization
-sources it. Note its scope: settings resolve at launch and cannot be scoped per
-session, so a root-level bypass-permissions posture applies to **every** session
-launched at the root, not only dispatched workers. This is wider than
-per-instance bypass; the opt-in ephemeral mode bounds it to workspaces that
-chose the feature.
+The root `.claude/settings.json` doesn't carry a bypass **permission posture**.
+Claude Code 2.1.257 stopped honoring a bypass mode set in a project's settings
+file, so a workspace's `permissions = "bypass"` declaration can't reach a
+session that way. Sessions a developer starts at the root, including ephemeral
+workers, get the developer's own Claude Code settings. The route to bypass for
+those sessions is `--permission-mode` on the developer's own launch, for
+example `claude --permission-mode bypassPermissions`. Workers launched by
+`niwa dispatch` are covered separately: niwa records the declared posture in
+each instance's state, and dispatch passes `--permission-mode bypassPermissions`
+to the worker when the workspace declared `bypass`.
 
 ### Workspace plugins and skills at the root
 

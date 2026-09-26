@@ -171,13 +171,21 @@ DEBUG_WEBHOOK_URL = "Personal debug webhook"
 
 | Sub-table | Behavior on miss |
 |-----------|------------------|
-| `*.required` | Hard error; `niwa apply` fails. Error names the key, the scope (e.g. `env.secrets`), and the description string. |
+| `*.required` | Hard error only when a configured provider is reachable and does not hold the key. Otherwise the key is reported and omitted, and apply continues. |
 | `*.recommended` | Stderr warning per missing key; apply continues. |
-| `*.optional` | Silent in v1; apply continues. Info-log output will land when a verbose flag is added. |
+| `*.optional` | Reported alongside other unresolved keys; apply continues. |
 
-`--allow-missing-secrets` downgrades vault misses to empty strings
-but does NOT downgrade `*.required` misses. A required key remains
-a hard error even with the flag set.
+A required key is fatal when a provider that could have supplied it was
+reachable and simply did not hold it — a real fault with a known owner. When no
+provider is configured, or a configured one could not be reached, the key is
+omitted from the generated environment files, recorded there, listed in the run
+report, and apply exits 0. Set `strict_secrets = true` under `[workspace]`, or
+pass `--strict-secrets`, to make any shortfall fatal again.
+
+`--allow-missing-secrets` is a deprecated no-op. It is still accepted
+so existing scripts and CI invocations keep working, and using it
+prints a deprecation notice on stderr. Passing it alongside
+`--strict-secrets` is rejected, since the two ask for opposite things.
 
 ### `[workspace].vault_scope`
 
@@ -210,6 +218,36 @@ team_only = ["TELEMETRY_ENDPOINT", "SHARED_METRICS_KEY"]
 A personal overlay that tries to shadow a `team_only` key fails
 with a distinct error. Personal-wins (see below) does not apply
 to the allow-list.
+
+## Binding multiple agents' keys (OpenAI Codex)
+
+The secret table is agent-neutral: it is keyed by environment-variable
+name, so binding a second agent's credential is just another row. A
+workspace prepared for OpenAI Codex (`[workspace].default_agent =
+"codex"`) binds `OPENAI_API_KEY` exactly the way a Claude workspace
+binds `ANTHROPIC_API_KEY`, and the two coexist:
+
+```toml
+[claude.env.secrets]
+ANTHROPIC_API_KEY = "vault://team/ANTHROPIC_API_KEY"
+OPENAI_API_KEY    = "vault://team/OPENAI_API_KEY"
+```
+
+Binding one key does not disturb the other, and Codex and Claude keep
+separate homes on the host (`~/.codex` and `~/.claude`) with separate
+credentials, so both agents can run on the same machine without
+collision. No mechanism change is needed to bind a Codex key — the
+existing vault resolution handles any env-var-named secret.
+
+**Launch-slice boundary.** When `default_agent = "codex"`, niwa
+materializes its context as `AGENTS.md` at the workspace-owned levels
+(the workspace root and each group directory). Repository- and
+worktree-level Codex context, and inlining the `@import`-composed
+companion layers (overlay/global content) into `AGENTS.md`, are not
+delivered in this slice — a Codex session launched at the instance root
+reads the root `AGENTS.md` directly. See
+[DESIGN-interactive-codex-session](../designs/current/DESIGN-interactive-codex-session.md)
+for the scope rationale.
 
 ## Personal overlay flow
 
@@ -543,7 +581,7 @@ policy.
 
 | Surface | Purpose |
 |---------|---------|
-| `niwa apply --allow-missing-secrets` | Downgrade unresolved `vault://` references to empty strings with stderr warnings. Does NOT override `*.required` misses. |
+| `niwa apply --allow-missing-secrets` | Deprecated no-op, accepted for compatibility. Rejected together with `--strict-secrets`. |
 | `niwa apply --allow-plaintext-secrets` | Bypass the public-repo guardrail and downgrade all `.env.example` failure-policy failures to warnings, for one invocation. No state persistence. |
 | `niwa status` (default) | Fully offline. Reads `state.json`, reports per-file drift and a shadowed-count summary. No provider calls. |
 | `niwa status --audit-secrets` | Classify every `*.secrets` value as plaintext / vault-ref / empty. Exits non-zero when plaintext values AND a vault are present. |

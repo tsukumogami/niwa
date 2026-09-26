@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 problem: |
   niwa needs a declarative TOML schema to replace a 700-line imperative bash
@@ -22,7 +23,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Current
 
 ## Context and Problem Statement
 
@@ -83,8 +84,11 @@ visibility = "private"            # Filter: matches repos with private visibilit
 
 # --- Per-repo overrides ---
 
-[repos.".github"]
-claude = false                    # Skip Claude Code configuration
+[repos.".github".claude]
+enabled = false                   # Skip Claude Code delivery for this repo
+
+[repos.".github".codex]
+enabled = false                   # Skip Codex delivery for this repo
 
 [repos.vision]
 scope = "strategic"
@@ -127,24 +131,24 @@ Content files are referenced by source path. Target paths are derived from conve
 name = "tsukumogami"
 content_dir = "claude"
 
-[claude.content.workspace]
+[content.workspace]
 source = "workspace.md"
 
-[claude.content.groups.public]
+[content.groups.public]
 source = "public.md"
 
-[claude.content.groups.private]
+[content.groups.private]
 source = "private.md"
 
-[claude.content.repos.tsuku]
+[content.repos.tsuku]
 source = "repos/tsuku.md"
 
-  [claude.content.repos.tsuku.subdirs]
+  [content.repos.tsuku.subdirs]
   recipes = "repos/tsuku-recipes.md"
   website = "repos/tsuku-website.md"
   telemetry = "repos/tsuku-telemetry.md"
 
-[claude.content.repos.koto]
+[content.repos.koto]
 source = "repos/koto.md"
 ```
 
@@ -160,7 +164,11 @@ Target paths follow a fixed convention based on whether the directory is a git r
 
 niwa warns (but does not auto-modify) if a repo's `.gitignore` lacks a `*.local*` pattern when writing `CLAUDE.local.md` files. The user is responsible for adding the pattern to their repo.
 
-When `content_dir` is set and a repo has no explicit `[claude.content.repos.X]` entry, niwa checks for `{content_dir}/repos/{repo_name}.md` and uses it automatically if found. This convention-over-configuration path means a minimal config can omit most content entries.
+When `content_dir` is set and a repo has no explicit `[content.repos.X]` entry, niwa checks for `{content_dir}/repos/{repo_name}.md` and uses it automatically if found. This convention-over-configuration path means a minimal config can omit most content entries.
+
+The `CLAUDE.md` / `CLAUDE.local.md` names above are Claude Code's. `[content]` itself is agent-neutral: the same declared sources feed every agent's plan producer, which routes them to that agent's own filenames (`AGENTS.md` and `AGENTS.override.md` for Codex). `[claude.content]` is accepted as a deprecated alias until v1.0, and setting both is an error. That alias direction reverses the one v0.7 shipped, when content really was Claude-coupled; see `docs/designs/current/DESIGN-agent-capability-contract.md` (Decision 6) and `docs/designs/current/DESIGN-claude-key-consolidation.md`.
+
+Each agent's delivery is gated by its own key — `[claude] enabled` and `[codex] enabled`, at the workspace level or on a per-repo override, both defaulting to enabled and the per-repo value winning. Neither reaches across: a repository with Claude disabled still receives its full Codex delivery, and the reverse.
 
 Template variables are expanded during `niwa apply`:
 
@@ -423,27 +431,27 @@ visibility = "private"                # Filter: matches repos with private visib
 
 # --- Per-repo overrides ---
 
-[repos.".github"]
-claude = false                        # Skip Claude Code configuration
+[repos.".github".claude]
+enabled = false                       # Skip Claude Code delivery for this repo
 
 [repos.vision]
 scope = "strategic"
 
 # --- Content hierarchy ---
 
-[claude.content.workspace]
+[content.workspace]
 source = "workspace.md"
 
-[claude.content.groups.public]
+[content.groups.public]
 source = "public.md"
 
-[claude.content.groups.private]
+[content.groups.private]
 source = "private.md"
 
-[claude.content.repos.tsuku]
+[content.repos.tsuku]
 source = "repos/tsuku.md"
 
-  [claude.content.repos.tsuku.subdirs]
+  [content.repos.tsuku.subdirs]
   recipes = "repos/tsuku-recipes.md"
   website = "repos/tsuku-website.md"
   telemetry = "repos/tsuku-telemetry.md"
@@ -582,6 +590,23 @@ type TelegramGroupConfig struct {
 11. Install repo CLAUDE.local.md files (expand variables, warn if `*.local*` missing from .gitignore)
 12. Install subdirectory CLAUDE.local.md files
 13. Copy hooks, generate settings.local.json, merge env files per repo
+
+## Implementation Approach
+
+The schema shipped as `internal/config`, which parses `workspace.toml` into the
+types this document describes, and `internal/workspace`, which materializes
+from them. Repo discovery, group classification, content placement, and the
+hooks, settings and environment tables each landed against the shapes named
+above.
+
+Two later changes moved keys this document defines, and both are recorded
+where they happened rather than rewritten into the history here.
+`docs/designs/current/DESIGN-claude-key-consolidation.md` moved the content
+hierarchy under the Claude namespace, and
+`docs/designs/current/DESIGN-agent-capability-contract.md` moved it back out
+once a second agent read the same declared content, adding the per-agent
+delivery gates in place of the single Claude-named one. The key names in this
+document reflect where they stand now.
 
 ## Scope
 

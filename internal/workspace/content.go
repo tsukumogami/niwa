@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
@@ -20,101 +22,178 @@ func (w ContentWarning) String() string {
 }
 
 // InstallWorkspaceContent reads the workspace content source file, expands
-// template variables, and writes it to {instanceRoot}/CLAUDE.md.
-// Returns the list of files written.
-func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoot string) ([]string, error) {
-	if cfg.Claude.Content.Workspace.Source == "" {
-		return nil, nil
-	}
-
-	absInstance, err := filepath.Abs(instanceRoot)
+// template variables, and installs it at the instance root for one agent.
+//
+// imported are the further documents an instance-root session reads only by
+// following a reference out of this one, in the order those references
+// establish. This side resolves them and the producer decides what to do with
+// them: an agent with an import mechanism reads them where they are written, an
+// agent without one has them folded in. Resolve them with
+// InstanceRootImportedLayers, so every caller composes the same layers in the
+// same order.
+//
+// The producer decides the filename and the content. Returns the files written
+// and any warning the plan carried -- a composed document past the agent's
+// context budget is reported here, because a directory niwa owns outright
+// carries no configuration layer to declare a larger one in.
+func InstallWorkspaceContent(cfg *config.WorkspaceConfig, configDir, instanceRoot string, ag agent.Agent, imported [][]byte) ([]string, []string, error) {
+	body, ok, err := renderWorkspaceLayer(cfg, configDir, instanceRoot)
 	if err != nil {
-		return nil, fmt.Errorf("resolving instance root: %w", err)
+		return nil, nil, err
 	}
 
-	vars := map[string]string{
-		"{workspace}":      absInstance,
-		"{workspace_name}": cfg.Workspace.Name,
+	plan, err := agentplan.For(ag).RootContextPlan(agentplan.RootContextInputs{
+		Dir:      instanceRoot,
+		Body:     []byte(body),
+		HasBody:  ok,
+		Imported: imported,
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-
-	source := cfg.Claude.Content.Workspace.Source
-	target := filepath.Join(instanceRoot, "CLAUDE.md")
-
-	if err := installContentFile(contentDirRoot(cfg, configDir), source, target, vars); err != nil {
-		return nil, err
-	}
-	return []string{target}, nil
+	written, _, err := applyPlan(plan)
+	return written, plan.Warnings, err
 }
 
 // InstallGroupContent reads the group content source file, expands template
-// variables, and writes it to {instanceRoot}/{groupName}/CLAUDE.md.
-// Group directories are non-git directories, so they get CLAUDE.md (not .local).
+// variables, and installs it in the group directory for one agent.
+//
+// Group directories are not repositories, so they get the agent's plain context
+// filename. As with the instance root, the producer decides whether there is
+// anything to write: an agent whose discovery never visits a group directory
+// receives the group layer inside each repository's own document instead.
 // Returns the list of files written.
-func InstallGroupContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, groupName string) ([]string, error) {
-	entry, ok := cfg.Claude.Content.Groups[groupName]
-	if !ok || entry.Source == "" {
-		return nil, nil
+func InstallGroupContent(cfg *config.WorkspaceConfig, configDir, instanceRoot, groupName string, ag agent.Agent) ([]string, error) {
+	body, ok, err := renderGroupLayer(cfg, configDir, instanceRoot, groupName)
+	if err != nil {
+		return nil, err
+	}
+
+	plan, err := agentplan.For(ag).GroupContextPlan(agentplan.RootContextInputs{
+		Dir:     filepath.Join(instanceRoot, groupName),
+		Body:    []byte(body),
+		HasBody: ok,
+	})
+	if err != nil {
+		return nil, err
+	}
+	written, _, err := applyPlan(plan)
+	return written, err
+}
+
+// renderWorkspaceLayer renders the instance-root content entry without writing
+// it, reporting whether the configuration declares one at all. It is the single
+// resolution of that source: the instance-root document is written from it, and
+// so is the outermost layer of every composed repository document, so the two
+// cannot drift on which file the workspace layer comes from.
+func renderWorkspaceLayer(cfg *config.WorkspaceConfig, configDir, instanceRoot string) (string, bool, error) {
+	source := cfg.Content.Workspace.Source
+	if source == "" {
+		return "", false, nil
 	}
 
 	absInstance, err := filepath.Abs(instanceRoot)
 	if err != nil {
-		return nil, fmt.Errorf("resolving instance root: %w", err)
+		return "", false, fmt.Errorf("resolving instance root: %w", err)
 	}
 
-	vars := map[string]string{
+	body, err := renderContentFile(contentDirRoot(cfg, configDir), source, map[string]string{
 		"{workspace}":      absInstance,
 		"{workspace_name}": cfg.Workspace.Name,
-		"{group_name}":     groupName,
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return body, true, nil
+}
+
+// renderGroupLayer renders a group's content entry without writing it. An
+// overlay-added group resolves its source from the overlay directory rather
+// than from the workspace content_dir, because the overlay carries its own file
+// layout.
+func renderGroupLayer(cfg *config.WorkspaceConfig, configDir, instanceRoot, groupName string) (string, bool, error) {
+	entry, ok := cfg.Content.Groups[groupName]
+	if !ok || entry.Source == "" {
+		return "", false, nil
 	}
 
-	target := filepath.Join(instanceRoot, groupName, "CLAUDE.md")
+	absInstance, err := filepath.Abs(instanceRoot)
+	if err != nil {
+		return "", false, fmt.Errorf("resolving instance root: %w", err)
+	}
 
-	// Overlay-added groups have OverlayDir set; source is resolved directly from
-	// that directory (not from configDir/contentDir) because the overlay has its
-	// own file layout independent of the workspace content_dir.
 	contentRoot := contentDirRoot(cfg, configDir)
 	if entry.OverlayDir != "" {
 		contentRoot = entry.OverlayDir
 	}
 
-	if err := installContentFile(contentRoot, entry.Source, target, vars); err != nil {
-		return nil, err
+	body, err := renderContentFile(contentRoot, entry.Source, map[string]string{
+		"{workspace}":      absInstance,
+		"{workspace_name}": cfg.Workspace.Name,
+		"{group_name}":     groupName,
+	})
+	if err != nil {
+		return "", false, err
 	}
-	return []string{target}, nil
+	return body, true, nil
 }
 
 // RepoContentResult holds the results of installing repo content.
 type RepoContentResult struct {
 	Warnings     []ContentWarning
 	WrittenFiles []string
+	// Exempt lists paths the install refused to write because the repository
+	// commits its own file at one of niwa's names. The managed-file cleanup
+	// consults it so a refusal is not undone by the deletion pass that follows.
+	Exempt []string
+	// Excludes lists the git-exclude patterns the written documents imply,
+	// relative to the working tree they landed in. They travel out with the
+	// write rather than being restated by the caller, so a document niwa adds
+	// cannot arrive without the coverage that keeps the tree clean.
+	Excludes []string
+	// ChainBytes is how many bytes the documents this install wrote occupy in
+	// the worst chain a session reads under the target directory, zero for an
+	// agent that spends no shared budget across them. It goes on to the same
+	// tree's generated payload configuration, which declares a budget covering
+	// it.
+	ChainBytes int
 }
 
 // InstallRepoContent reads the repo content source file, expands template
-// variables, and writes it to {instanceRoot}/{groupName}/{repoName}/CLAUDE.local.md.
-// Repo directories are git directories, so they get CLAUDE.local.md.
+// variables, and installs the repository's context document for one agent, in
+// the repository's checkout under the instance root.
 //
 // If no explicit content entry exists for the repo, auto-discovery checks for
 // {content_dir}/repos/{repoName}.md and uses it if found.
 //
 // When the repo has an OverlaySource set in its content entry, the overlay
-// content is appended to CLAUDE.local.md (separated by a blank line). In that
-// case overlayDir must be non-empty; if overlayDir is empty and OverlaySource
-// is set, an error is returned.
+// content is appended to the document (separated by a blank line). In that case
+// overlayDir must be non-empty; if overlayDir is empty and OverlaySource is set,
+// an error is returned.
 //
-// Returns a result with content warnings and files written.
-func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, groupName, repoName string) (*RepoContentResult, error) {
+// Returns a result with content warnings, files written, refused paths, and the
+// git-exclude patterns the writes imply.
+func InstallRepoContent(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, groupName, repoName string, ag agent.Agent) (*RepoContentResult, error) {
 	repoDir := filepath.Join(instanceRoot, groupName, repoName)
-	return InstallRepoContentTo(cfg, configDir, overlayDir, instanceRoot, repoDir, groupName, repoName)
+	return InstallRepoContentTo(cfg, configDir, overlayDir, instanceRoot, repoDir, groupName, repoName, agentplan.For(ag))
 }
 
 // InstallRepoContentTo is the target-directory-parameterized form of
-// InstallRepoContent. It installs the repo's CLAUDE.local.md (and subdir
+// InstallRepoContent. It installs the repo's context document (and subdir
 // content) into repoDir, while still resolving the {workspace} template
 // variable from instanceRoot. The instance apply path calls this with
 // repoDir = {instanceRoot}/{group}/{repo}; ApplyToWorktree calls it with the
 // worktree path so a worktree gets the same content a repo checkout does. Both
 // callers share this single function (no forked installer).
-func InstallRepoContentTo(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, repoDir, groupName, repoName string) (*RepoContentResult, error) {
+//
+// The producer decides the filename, the composition, and whether there is
+// anything to write at all. This function resolves sources, renders bodies,
+// runs whatever probes the producer asked for, and executes the resulting plan;
+// it never learns which agent it is installing for, which is what keeps the
+// difference between "one document per level" and "the whole chain composed
+// into the repository's own document" inside the producer where it can be
+// reviewed as one decision.
+func InstallRepoContentTo(cfg *config.WorkspaceConfig, configDir, overlayDir, instanceRoot, repoDir, groupName, repoName string, producer agentplan.Producer) (*RepoContentResult, error) {
 	result := &RepoContentResult{}
 
 	absInstance, err := filepath.Abs(instanceRoot)
@@ -130,7 +209,7 @@ func InstallRepoContentTo(cfg *config.WorkspaceConfig, configDir, overlayDir, in
 	}
 
 	// Resolve source: explicit entry or auto-discovery.
-	entry, hasExplicit := cfg.Claude.Content.Repos[repoName]
+	entry, hasExplicit := cfg.Content.Repos[repoName]
 	source := ""
 	if hasExplicit {
 		source = entry.Source
@@ -138,47 +217,34 @@ func InstallRepoContentTo(cfg *config.WorkspaceConfig, configDir, overlayDir, in
 		source = autoDiscoverRepoSource(cfg, configDir, repoName)
 	}
 
+	// Everything below resolves content; nothing writes. The rendered bodies
+	// become plan entries and the executor puts them on disk, so the decision
+	// about which file each body lands in stays with the producer.
+	in := agentplan.RepoContextInputs{Dir: repoDir}
+
 	if source != "" {
-		target := filepath.Join(repoDir, "CLAUDE.local.md")
-		if err := installContentFile(contentDirRoot(cfg, configDir), source, target, vars); err != nil {
+		body, err := renderContentFile(contentDirRoot(cfg, configDir), source, vars)
+		if err != nil {
 			return nil, err
 		}
-		result.WrittenFiles = append(result.WrittenFiles, target)
+		in.Body, in.HasBody = []byte(body), true
 
 		// Append overlay content if present.
 		if hasExplicit && entry.OverlaySource != "" {
-			if overlayDir == "" {
-				return nil, fmt.Errorf("repo %q has OverlaySource %q but overlayDir is empty", repoName, entry.OverlaySource)
+			overlayData, err := readRepoOverlaySource(overlayDir, repoName, entry.OverlaySource)
+			if err != nil {
+				return nil, err
 			}
-			overlaySrcPath := filepath.Join(overlayDir, entry.OverlaySource)
-			overlayData, readErr := os.ReadFile(overlaySrcPath)
-			if readErr != nil {
-				return nil, fmt.Errorf("reading overlay content for repo %q: %w", repoName, readErr)
-			}
-			existing, readErr := os.ReadFile(target)
-			if readErr != nil {
-				return nil, fmt.Errorf("reading CLAUDE.local.md for overlay append for repo %q: %w", repoName, readErr)
-			}
-			combined := string(existing) + "\n" + string(overlayData)
-			if writeErr := os.WriteFile(target, []byte(combined), 0o644); writeErr != nil {
-				return nil, fmt.Errorf("writing overlay-appended CLAUDE.local.md for repo %q: %w", repoName, writeErr)
-			}
+			in.Overlay, in.HasOverlay = overlayData, true
 		}
 	} else if hasExplicit && entry.OverlaySource != "" {
-		// No base source, but OverlaySource is set — write overlay content as CLAUDE.local.md.
-		if overlayDir == "" {
-			return nil, fmt.Errorf("repo %q has OverlaySource %q but overlayDir is empty", repoName, entry.OverlaySource)
+		// No base source, but OverlaySource is set — the overlay content is the
+		// whole document.
+		overlayData, err := readRepoOverlaySource(overlayDir, repoName, entry.OverlaySource)
+		if err != nil {
+			return nil, err
 		}
-		target := filepath.Join(repoDir, "CLAUDE.local.md")
-		overlaySrcPath := filepath.Join(overlayDir, entry.OverlaySource)
-		overlayData, readErr := os.ReadFile(overlaySrcPath)
-		if readErr != nil {
-			return nil, fmt.Errorf("reading overlay content for repo %q: %w", repoName, readErr)
-		}
-		if writeErr := os.WriteFile(target, overlayData, 0o644); writeErr != nil {
-			return nil, fmt.Errorf("writing overlay CLAUDE.local.md for repo %q: %w", repoName, writeErr)
-		}
-		result.WrittenFiles = append(result.WrittenFiles, target)
+		in.Overlay, in.HasOverlay = overlayData, true
 	}
 
 	// Install subdirectory content if present.
@@ -191,15 +257,70 @@ func InstallRepoContentTo(cfg *config.WorkspaceConfig, configDir, overlayDir, in
 			if err := checkContainment(subdirPath, repoDir); err != nil {
 				return nil, fmt.Errorf("subdirectory %q for repo %q: %w", subdir, repoName, err)
 			}
-			target := filepath.Join(subdirPath, "CLAUDE.local.md")
-			if err := installContentFile(contentDirRoot(cfg, configDir), subdirSource, target, vars); err != nil {
+			body, err := renderContentFile(contentDirRoot(cfg, configDir), subdirSource, vars)
+			if err != nil {
 				return nil, err
 			}
-			result.WrittenFiles = append(result.WrittenFiles, target)
+			in.Subdirs = append(in.Subdirs, agentplan.SubdirContext{Dir: subdirPath, Body: []byte(body)})
 		}
 	}
 
+	// The outer layers, for a producer that folds them into this document. One
+	// whose discovery reaches them where they are written ignores them.
+	if wsBody, ok, err := renderWorkspaceLayer(cfg, configDir, instanceRoot); err != nil {
+		return nil, err
+	} else if ok {
+		in.Workspace = []byte(wsBody)
+	}
+	if grpBody, ok, err := renderGroupLayer(cfg, configDir, instanceRoot, groupName); err != nil {
+		return nil, err
+	} else if ok {
+		in.Group = []byte(grpBody)
+	}
+
+	// Probes: the producer names the paths whose current state its plan depends
+	// on, this side looks, and the answers go back in as data.
+	if in.Probe, err = probeContextTree(producer.ContextProbeSpec(repoDir)); err != nil {
+		return nil, err
+	}
+	for i := range in.Subdirs {
+		if in.Subdirs[i].Probe, err = probeContextTree(producer.ContextProbeSpec(in.Subdirs[i].Dir)); err != nil {
+			return nil, err
+		}
+	}
+
+	plan, err := producer.RepoContextPlan(in)
+	if err != nil {
+		return nil, err
+	}
+	written, excludes, err := applyPlan(plan)
+	if err != nil {
+		return nil, err
+	}
+	result.WrittenFiles = append(result.WrittenFiles, written...)
+	result.Exempt = append(result.Exempt, plan.Exempt...)
+	result.Excludes = append(result.Excludes, excludes...)
+	result.ChainBytes = plan.ChainBytes
+	for _, w := range plan.Warnings {
+		result.Warnings = append(result.Warnings, ContentWarning{RepoName: repoName, Message: w})
+	}
+
 	return result, nil
+}
+
+// readRepoOverlaySource reads a repo's overlay addendum from the overlay clone.
+// An OverlaySource with no overlay directory behind it is a configuration error
+// rather than a missing file: the entry names content that cannot be resolved,
+// and silently dropping it would ship a repo the private half of its context.
+func readRepoOverlaySource(overlayDir, repoName, overlaySource string) ([]byte, error) {
+	if overlayDir == "" {
+		return nil, fmt.Errorf("repo %q has OverlaySource %q but overlayDir is empty", repoName, overlaySource)
+	}
+	data, err := os.ReadFile(filepath.Join(overlayDir, overlaySource))
+	if err != nil {
+		return nil, fmt.Errorf("reading overlay content for repo %q: %w", repoName, err)
+	}
+	return data, nil
 }
 
 // autoDiscoverRepoSource checks for {content_dir}/repos/{repoName}.md
@@ -235,9 +356,9 @@ func contentDirRoot(cfg *config.WorkspaceConfig, configDir string) string {
 // resolved source path stays within contentRoot, and returns the content with
 // template variables expanded. It performs no write — callers that need to
 // persist the result write the returned string themselves. This is the shared
-// read+containment+expand core used by both installContentFile (write-to-file)
-// and the worktree layer (render-to-string), so neither path can drift on the
-// containment guarantee.
+// read+containment+expand core every content path shares -- the instance-root,
+// group, repository, and worktree layers all resolve their sources through it --
+// so none of them can drift on the containment guarantee.
 func renderContentFile(contentRoot, source string, vars map[string]string) (string, error) {
 	sourcePath := filepath.Join(contentRoot, source)
 
@@ -251,27 +372,6 @@ func renderContentFile(contentRoot, source string, vars map[string]string) (stri
 	}
 
 	return expandVars(string(data), vars), nil
-}
-
-// installContentFile reads a source file relative to contentRoot, expands
-// template variables, and writes the result to the target path.
-// It verifies that the resolved source path stays within contentRoot.
-func installContentFile(contentRoot, source, target string, vars map[string]string) error {
-	content, err := renderContentFile(contentRoot, source, vars)
-	if err != nil {
-		return err
-	}
-
-	targetDir := filepath.Dir(target)
-	if err := os.MkdirAll(targetDir, 0o755); err != nil {
-		return fmt.Errorf("creating directory %s: %w", targetDir, err)
-	}
-
-	if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
-		return fmt.Errorf("writing %s: %w", target, err)
-	}
-
-	return nil
 }
 
 // checkContainment verifies that targetPath resolves within parentDir.
@@ -288,14 +388,13 @@ func checkContainment(targetPath, parentDir string) error {
 		return fmt.Errorf("resolving target path: %w", err)
 	}
 
-	// Resolve symlinks for the parent directory (it must exist).
-	realParent, err := filepath.EvalSymlinks(absParent)
-	if err != nil {
-		// If parent doesn't exist, fall back to the cleaned abs path.
-		realParent = absParent
-	}
-
-	// For the target, resolve symlinks on the longest existing prefix.
+	// Resolve both sides the same way: the longest existing prefix, with the
+	// rest appended. Resolving one side and not the other is what makes this
+	// check platform-dependent -- on a system where a temporary directory sits
+	// under a symlink (macOS resolves /var to /private/var), a parent that does
+	// not exist yet stays unresolved while the target resolves, and a path well
+	// inside its parent reads as an escape.
+	realParent := resolveExistingPrefix(absParent)
 	realTarget := resolveExistingPrefix(absTarget)
 
 	// Ensure the resolved target starts with the resolved parent directory.

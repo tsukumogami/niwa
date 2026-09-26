@@ -286,11 +286,16 @@ func writeLiveAttachSentinel(t *testing.T, worktreePath string) {
 }
 
 // seedActiveSession writes an active session lifecycle state file pointing at
-// worktreePath and returns the session ID.
+// worktreePath, creates that directory (the record validation and the dirty
+// guard both require a worktree that is actually there), and returns the
+// session ID.
 func seedActiveSession(t *testing.T, root, repo, worktreePath string) string {
 	t.Helper()
 	sessionsDir := filepath.Join(root, ".niwa", "sessions")
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(worktreePath, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	sid := "abcd1234"
@@ -304,13 +309,19 @@ func seedActiveSession(t *testing.T, root, repo, worktreePath string) string {
 // TestDestroySession_AttachLockGuard verifies the attach-lock guard restored
 // from the old MCP destroy handler: destroying a session whose worktree is
 // held by a live attach process is refused unless force is set.
+//
+// The worktree paths below must keep the <root>/.niwa/worktrees/<repo>-<sid>
+// shape CreateSession produces. DestroySession validates the record's path for
+// containment in that directory before any guard runs, so a path of any other
+// shape is refused for the wrong reason and the subtests stop testing the
+// attach lock.
 func TestDestroySession_AttachLockGuard(t *testing.T) {
 	repo := "myrepo"
 
 	// Refused: live attach holder, force=false.
 	t.Run("refused_when_attached_and_live", func(t *testing.T) {
 		root := t.TempDir()
-		worktreePath := filepath.Join(root, "group", repo)
+		worktreePath := filepath.Join(root, ".niwa", "worktrees", repo+"-abcd1234")
 		sid := seedActiveSession(t, root, repo, worktreePath)
 		writeLiveAttachSentinel(t, worktreePath)
 
@@ -339,7 +350,7 @@ func TestDestroySession_AttachLockGuard(t *testing.T) {
 	// Allowed: live attach holder but force=true bypasses the guard.
 	t.Run("succeeds_when_attached_but_force", func(t *testing.T) {
 		root := t.TempDir()
-		worktreePath := filepath.Join(root, "group", repo)
+		worktreePath := filepath.Join(root, ".niwa", "worktrees", repo+"-abcd1234")
 		sid := seedActiveSession(t, root, repo, worktreePath)
 		writeLiveAttachSentinel(t, worktreePath)
 
@@ -356,7 +367,7 @@ func TestDestroySession_AttachLockGuard(t *testing.T) {
 	// Allowed: no attach sentinel, force=false proceeds normally.
 	t.Run("succeeds_when_not_attached", func(t *testing.T) {
 		root := t.TempDir()
-		worktreePath := filepath.Join(root, "group", repo)
+		worktreePath := filepath.Join(root, ".niwa", "worktrees", repo+"-abcd1234")
 		sid := seedActiveSession(t, root, repo, worktreePath)
 		// No attach sentinel written -> AttachAvailable.
 
@@ -373,7 +384,8 @@ func TestDestroySession_AttachLockGuard(t *testing.T) {
 
 // TestWorktreeHasUncommittedChanges exercises the dirty-check helper against a
 // real git repo: a clean checkout reports not-dirty, an untracked/modified file
-// reports dirty, and a missing path reports not-dirty (nothing to lose).
+// reports dirty, and a path that cannot be stat'd (missing or empty) is an
+// error rather than a clean verdict.
 func TestWorktreeHasUncommittedChanges(t *testing.T) {
 	if _, err := runCmd("git", "--version"); err != nil {
 		t.Skip("git not available")
@@ -413,22 +425,15 @@ func TestWorktreeHasUncommittedChanges(t *testing.T) {
 		t.Error("worktree with an untracked file reported not dirty")
 	}
 
-	// Missing path: not dirty (nothing to lose).
-	dirty, err = worktreeHasUncommittedChanges(ctx, filepath.Join(repo, "does-not-exist"), inv)
-	if err != nil {
-		t.Fatalf("missing-path check: %v", err)
-	}
-	if dirty {
-		t.Error("missing worktree path reported dirty")
+	// Missing path: refusal, not a clean verdict. The guard fails closed so a
+	// record pointing at a directory that is not there cannot walk past it.
+	if _, err = worktreeHasUncommittedChanges(ctx, filepath.Join(repo, "does-not-exist"), inv); err == nil {
+		t.Error("missing worktree path reported clean; want an error")
 	}
 
-	// Empty path: not dirty.
-	dirty, err = worktreeHasUncommittedChanges(ctx, "", inv)
-	if err != nil {
-		t.Fatalf("empty-path check: %v", err)
-	}
-	if dirty {
-		t.Error("empty worktree path reported dirty")
+	// Empty path: refusal for the same reason.
+	if _, err = worktreeHasUncommittedChanges(ctx, "", inv); err == nil {
+		t.Error("empty worktree path reported clean; want an error")
 	}
 }
 

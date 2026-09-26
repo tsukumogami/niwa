@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/source"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // GitInvoker is the test-injection seam for the bootstrap pipeline's git
@@ -301,11 +302,21 @@ func DefaultDestroySession(ctx context.Context, instanceRoot, sessionID string, 
 		st.BranchName = "session/" + st.SessionID
 	}
 
+	// The record is a JSON file on disk that nothing validates on write, and
+	// its path and branch fields go straight into git argv positions below.
+	// Route them through the same validator DestroySession uses rather than
+	// leaving this copy of the argv as the one that is still unguarded. A
+	// refusal leaves the state file in place: it is the only remaining record
+	// of a worktree this function will not touch.
+	if vErr := worktree.ValidateRecordFields(instanceRoot, st.WorktreePath, st.BranchName); vErr != nil {
+		return fmt.Errorf("validating session state: %w", vErr)
+	}
+
 	// Find the repo path so git worktree remove / branch -D can use it.
 	repoPath, repoErr := findRepoInWorkspaceForDestroy(instanceRoot, st.Repo)
 	if repoErr == nil && st.WorktreePath != "" {
 		_ = gitInvoker.CommandContext(ctx, "-C", repoPath, "worktree", "remove", "--force", st.WorktreePath).Run()
-		_ = gitInvoker.CommandContext(ctx, "-C", repoPath, "branch", "-D", st.BranchName).Run()
+		_ = gitInvoker.CommandContext(ctx, "-C", repoPath, "branch", "-D", "--", st.BranchName).Run()
 	}
 	_ = os.Remove(statePath)
 	return nil

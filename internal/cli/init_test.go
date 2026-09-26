@@ -181,7 +181,9 @@ func TestRunInit_ScaffoldMode(t *testing.T) {
 }
 
 func TestRunInit_NamedMode(t *testing.T) {
-	dir := t.TempDir()
+	// Resolved: init records the workspace root in the registry after
+	// canonicalizing it, so an unresolved dir here would not compare equal.
+	dir := canonicalTempDir(t)
 	origDir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)

@@ -342,7 +342,11 @@ func TestSettingsMaterializerNoopWhenEmpty(t *testing.T) {
 	}
 }
 
-func TestSettingsMaterializerPermissionsOnly(t *testing.T) {
+// TestSettingsMaterializerBypassOnlyWritesNoPermissions declares only a bypass
+// posture. The document is still written, just without a permissions block:
+// rewriting it on every apply is what clears a permissions.defaultMode an
+// earlier niwa left in the file.
+func TestSettingsMaterializerBypassOnlyWritesNoPermissions(t *testing.T) {
 	tmpDir := t.TempDir()
 	repoDir := filepath.Join(tmpDir, "repo")
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
@@ -382,12 +386,10 @@ func TestSettingsMaterializerPermissionsOnly(t *testing.T) {
 		t.Fatalf("parsing settings JSON: %v", err)
 	}
 
-	perms, ok := doc["permissions"].(map[string]any)
-	if !ok {
-		t.Fatal("expected permissions key in output")
-	}
-	if perms["defaultMode"] != "bypassPermissions" {
-		t.Errorf("defaultMode = %v, want %q", perms["defaultMode"], "bypassPermissions")
+	// bypass writes no permission mode, and with no deny fallback the
+	// permissions block is left out entirely.
+	if perms, ok := doc["permissions"]; ok {
+		t.Errorf("permissions = %v, want the block absent for bypass", perms)
 	}
 
 	if _, ok := doc["hooks"]; ok {
@@ -431,8 +433,8 @@ func TestSettingsMaterializerAskPermissions(t *testing.T) {
 	}
 
 	perms := doc["permissions"].(map[string]any)
-	if perms["defaultMode"] != "askPermissions" {
-		t.Errorf("defaultMode = %v, want %q", perms["defaultMode"], "askPermissions")
+	if perms["defaultMode"] != "default" {
+		t.Errorf("defaultMode = %v, want %q", perms["defaultMode"], "default")
 	}
 }
 
@@ -566,10 +568,9 @@ func TestSettingsMaterializerSettingsAndHooks(t *testing.T) {
 		t.Fatalf("parsing JSON: %v", err)
 	}
 
-	// Verify permissions.
-	perms := doc["permissions"].(map[string]any)
-	if perms["defaultMode"] != "bypassPermissions" {
-		t.Errorf("defaultMode = %v, want %q", perms["defaultMode"], "bypassPermissions")
+	// Verify permissions: bypass writes no permission mode.
+	if perms, ok := doc["permissions"]; ok {
+		t.Errorf("permissions = %v, want the block absent for bypass", perms)
 	}
 
 	// Verify hooks.
@@ -885,7 +886,9 @@ func TestSettingsMaterializerAllBlocks(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
-				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
+				// ask, not bypass: bypass writes no permissions block, and this
+				// test wants every block present.
+				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "ask"}},
 				Env:      config.ClaudeEnvConfig{Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"GH_TOKEN": config.MaybeSecret{Plain: "ghp_test"}}}},
 			},
 		},

@@ -2,6 +2,7 @@ package functional
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -74,6 +75,18 @@ func iSetEnvToTempPath(ctx context.Context, key string) (context.Context, error)
 // HOME, XDG_CONFIG_HOME, and TMPDIR to the sandbox so config, state, and
 // temp files don't leak across scenarios or into the real user environment.
 // Per-scenario overrides win last.
+//
+// ANTHROPIC_API_KEY is dropped rather than overridden. It is not a path, so
+// there is nothing sandboxed to point it at, but niwa branches on it: an
+// ANTHROPIC_API_KEY forces Claude Code into API-key auth, and remote control on
+// dispatch refuses to inject when it is set, because Claude Code Remote needs a
+// claude.ai login. Left inherited, a scenario that exercises remote control
+// passes on CI and fails on the machine of any developer who has the key
+// exported. niwa itself is not quiet about it -- it prints a warning naming the
+// variable -- but the assertion that fails reports only the missing setting and
+// never shows stderr, so the failure reads as niwa being broken rather than as
+// the environment deciding. A scenario that genuinely needs the real key
+// re-appends it after this call; see runClaudeP.
 func (s *testState) buildEnv() []string {
 	// pathDirs are prepended to $PATH for the niwa subprocess, highest
 	// priority first: a per-scenario pathPrefix (e.g. a fake `claude`) wins
@@ -95,6 +108,7 @@ func (s *testState) buildEnv() []string {
 		if strings.HasPrefix(kv, "HOME=") ||
 			strings.HasPrefix(kv, "XDG_CONFIG_HOME=") ||
 			strings.HasPrefix(kv, "TMPDIR=") ||
+			strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") ||
 			(overridePath && strings.HasPrefix(kv, "PATH=")) {
 			continue
 		}
@@ -1281,6 +1295,27 @@ func iWriteFileBodyToRepoInInstance(ctx context.Context, relFilePath, groupRepo,
 	return iWriteFileToRepoInInstance(ctx, body.Content, relFilePath, groupRepo, instanceName)
 }
 
+// iWriteExecutableFileToRepoInInstance is the executable-mode variant of
+// iWriteFileBodyToRepoInInstance, and it creates intermediate directories.
+// Setup scripts need both: the setup runner correctly skips anything without
+// the executable bit, and the scripts live in a subdirectory the cloned repo
+// does not have.
+func iWriteExecutableFileToRepoInInstance(ctx context.Context, relFilePath, groupRepo, instanceName string, body *godog.DocString) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	repoDir := filepath.Join(s.workspaceRoot, instanceName, filepath.FromSlash(groupRepo))
+	dst := filepath.Join(repoDir, filepath.FromSlash(relFilePath))
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return ctx, fmt.Errorf("creating %s: %w", filepath.Dir(dst), err)
+	}
+	if err := os.WriteFile(dst, []byte(body.Content), 0o755); err != nil {
+		return ctx, fmt.Errorf("writing %s: %w", dst, err)
+	}
+	return ctx, nil
+}
+
 // noNiwaTempFilesRemain scans the scenario's scoped TMPDIR for wrapper
 // leftovers. TMPDIR is set to s.tmpDir in buildEnv, so the wrapper's
 // `mktemp` creates files there; its `rm -f` should clean them up. Any
@@ -1454,4 +1489,40 @@ func runClaudeP(s *testState, cwd, prompt string) error {
 	}
 	s.exitCode = 0
 	return nil
+}
+
+// lookupJSONKey parses the JSON file at path and walks a dotted key path
+// ("permissions.defaultMode"). It returns the value and whether every segment
+// was present. A file that is missing or doesn't parse is an error, so a "no
+// key" assertion can't pass on an unreadable document. So is an intermediate
+// segment that is present but isn't an object: "permissions": "bypassPermissions" is a
+// malformed document, not one without a mode. The path splits on ".", so a key
+// that itself contains a dot can't be addressed.
+func lookupJSONKey(path, dottedKey string) (value any, found bool, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false, fmt.Errorf("reading %s: %w", path, err)
+	}
+	var doc any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, false, fmt.Errorf("parsing %s as JSON: %w\n%s", path, err, data)
+	}
+	cur := doc
+	walked := ""
+	for _, seg := range strings.Split(dottedKey, ".") {
+		obj, ok := cur.(map[string]any)
+		if !ok {
+			where := "the document root"
+			if walked != "" {
+				where = fmt.Sprintf("%q", walked)
+			}
+			return nil, false, fmt.Errorf("%s: %s is %v, not an object, so %q can't be looked up", path, where, cur, dottedKey)
+		}
+		cur, ok = obj[seg]
+		if !ok {
+			return nil, false, nil
+		}
+		walked = strings.TrimPrefix(walked+"."+seg, ".")
+	}
+	return cur, true, nil
 }

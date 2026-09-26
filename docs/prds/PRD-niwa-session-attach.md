@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Done
 source_issue: 117
 problem: |

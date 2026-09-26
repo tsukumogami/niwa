@@ -188,8 +188,8 @@ func TestPrewarm_NilReporterDoesNotPanic(t *testing.T) {
 
 // TestConfigurePluginAutoInstall_WiresPrewarm guards the load-bearing wiring: if the
 // PrewarmDeclaredPlugins seam is left nil, the provisioning pipeline silently skips
-// pre-warming and the whole fix becomes a no-op. It must be wired alongside
-// InstallNiwaPlugin for every Applier the cli constructs.
+// pre-warming and the whole fix becomes a no-op. It must be wired for every Applier
+// the cli constructs.
 func TestConfigurePluginAutoInstall_WiresPrewarm(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // isolate from the host's global config
 	var applier workspace.Applier
@@ -197,9 +197,6 @@ func TestConfigurePluginAutoInstall_WiresPrewarm(t *testing.T) {
 
 	if applier.PrewarmDeclaredPlugins == nil {
 		t.Error("configurePluginAutoInstall must wire PrewarmDeclaredPlugins (nil would no-op the fix)")
-	}
-	if applier.InstallNiwaPlugin == nil {
-		t.Error("configurePluginAutoInstall must still wire InstallNiwaPlugin")
 	}
 	if applier.SkipPluginInstall {
 		t.Error("SkipPluginInstall should be false with flagOptOut=false and no global opt-out")

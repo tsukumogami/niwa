@@ -25,15 +25,31 @@ var shellInitCmd = &cobra.Command{
 	Short: "Generate shell integration (wrapper function and completions)",
 	Long: `Generate shell wrapper function and completions for niwa.
 
-The wrapper intercepts cd-eligible commands (create, go) so that niwa can
-change the shell's working directory after creating or switching to a
-workspace instance.
+The wrapper intercepts cd-eligible commands (create, destroy, go, init, and
+worktree create) so that niwa can change the shell's working directory after
+creating or switching to a workspace instance or a worktree.
 
 Add this to your shell profile:
 
   eval "$(niwa shell-init auto)"`,
 }
 
+// shellWrapperTemplate is the shell function the wrapper installs. Editing it
+// needs no migration step: it never reaches disk as text. Both delivery paths
+// regenerate it from this binary -- ~/.niwa/env evals `niwa shell-init auto` at
+// shell startup, and .tsuku-recipes/niwa.toml builds its share/shell.d fragment
+// from `niwa shell-init {shell}` at post-install -- so a change here lands on a
+// user's next new shell after upgrading.
+//
+// A command belongs in the case dispatcher only if it calls writeLandingPath;
+// that call is what puts a directory in NIWA_RESPONSE_FILE for __niwa_cd_wrap to
+// read. Under `worktree`, only `create` does (runSessionCreate). `worktree
+// destroy` removes the directory you may be standing in but writes no landing
+// path, so an arm for it today could never fire; that gap is issue #283.
+//
+// The dispatcher matches on "$1", so a persistent flag before the command
+// (`niwa --no-progress worktree create`) falls through to the default arm and
+// does not navigate. Pre-existing and true of every wrapped command.
 const shellWrapperTemplate = `export _NIWA_SHELL_INIT=1
 
 __niwa_cd_wrap() {
@@ -54,7 +70,7 @@ niwa() {
         create|destroy|go|init)
             __niwa_cd_wrap "$@"
             ;;
-        session)
+        worktree|session)
             case "$2" in
                 create)
                     __niwa_cd_wrap "$@"
@@ -70,6 +86,47 @@ niwa() {
     esac
 }
 `
+
+// zshCompdefDeferGuard makes the cobra-generated `compdef _niwa niwa`
+// registration survive being sourced before compinit has run.
+//
+// zsh loads ~/.zshenv (and everything it sources -- including ~/.tsuku/env and
+// ~/.niwa/env) before ~/.zshrc, where compinit typically lives. At .zshenv time
+// the `compdef` autoload function does not exist yet, so cobra's compdef call
+// silently no-ops and tab-completion never activates. This is the common macOS
+// case: the default shell is zsh and the integration is sourced from an env
+// file. bash is unaffected because its `complete` builtin is always available.
+//
+// When compdef is missing, queue a one-shot precmd hook. By the time the first
+// prompt is drawn, all rc files (and thus compinit) have loaded, so compdef
+// exists and the registration succeeds. The hook then removes itself.
+const zshCompdefDeferGuard = `
+# niwa: register completion even if this file was sourced before compinit ran
+# (e.g. from ~/.zshenv or ~/.tsuku/env, which zsh loads before ~/.zshrc).
+if ! (( $+functions[compdef] )); then
+    __niwa_register_completion() {
+        (( $+functions[compdef] )) && compdef _niwa niwa
+        precmd_functions=(${precmd_functions:#__niwa_register_completion})
+        (( $+functions[__niwa_register_completion] )) && unfunction __niwa_register_completion
+    }
+    if [[ -z ${precmd_functions[(r)__niwa_register_completion]} ]]; then
+        precmd_functions+=(__niwa_register_completion)
+    fi
+fi
+`
+
+// guardZshCompdef wraps cobra's unconditional top-level `compdef _niwa niwa`
+// so it becomes a no-op instead of a "command not found: compdef" error when
+// the completion is sourced before compinit has run (see zshCompdefDeferGuard).
+// The deferral guard handles the actual registration in that case; this only
+// silences the stray error. If cobra's output format changes and the exact
+// line is not found, the input is returned unchanged (the deferral guard and
+// the shell wrappers that redirect stderr still keep things working).
+func guardZshCompdef(s string) string {
+	const bare = "\ncompdef _niwa niwa\n"
+	const guarded = "\n(( $+functions[compdef] )) && compdef _niwa niwa\n"
+	return strings.Replace(s, bare, guarded, 1)
+}
 
 var shellInitBashCmd = &cobra.Command{
 	Use:   "bash",
@@ -98,7 +155,8 @@ var shellInitZshCmd = &cobra.Command{
 		if err := rootCmd.GenZshCompletion(&buf); err != nil {
 			return fmt.Errorf("generating zsh completions: %w", err)
 		}
-		fmt.Fprint(cmd.OutOrStdout(), buf.String())
+		fmt.Fprint(cmd.OutOrStdout(), guardZshCompdef(buf.String()))
+		fmt.Fprint(cmd.OutOrStdout(), zshCompdefDeferGuard)
 		return nil
 	},
 }

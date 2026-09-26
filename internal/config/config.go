@@ -52,12 +52,41 @@ type ClaudeConfig struct {
 	// on. Workspace-scoped, like WorkSummaryHooks: not merged from per-repo
 	// overrides.
 	PrBodyHook *bool `toml:"pr_body_hook,omitempty"`
-	// Content declares the CLAUDE.md content hierarchy under
-	// [claude.content]. Workspace-scoped: per-repo overrides are not
-	// honored via RepoOverride.Claude. Migrated from the deprecated
-	// top-level [content] in v0.7; the old path is accepted as an alias
-	// with a deprecation warning until v1.0.
+	// Content is the deprecated [claude.content] spelling of the content
+	// hierarchy. The canonical table is the top-level [content]
+	// (WorkspaceConfig.Content): the same declared content now feeds every
+	// agent's plan producer, which routes it to that agent's filenames, so
+	// the table is agent-neutral again and its name says so. v0.7 moved
+	// [content] here on the premise that content was Claude-only; that
+	// premise no longer holds. Parse migrates this into
+	// WorkspaceConfig.Content with a deprecation warning, and the alias is
+	// removed at v1.0. Nothing outside Parse reads this field.
 	Content ContentConfig `toml:"content,omitempty"`
+}
+
+// CodexConfig is the workspace-level Codex configuration under [codex].
+//
+// It carries one key today, and deliberately so: Codex-side delivery is
+// declared through agent-neutral tables ([content], [mcp], [session]) that
+// each producer routes into its own format, so the only thing a
+// Codex-named block has to say is whether that routing happens at all.
+type CodexConfig struct {
+	// Enabled gates Codex plan production. nil (the key absent) means
+	// enabled, matching [claude] enabled's default. It gates Codex and
+	// nothing else -- see AgentEnabled in internal/workspace.
+	Enabled *bool `toml:"enabled,omitempty"`
+}
+
+// CodexOverride is the per-repo override position for the Codex block
+// ([repos.<name>.codex]), mirroring ClaudeOverride's role for [claude]. It
+// is a separate type from CodexConfig for the same reason ClaudeOverride is
+// separate from ClaudeConfig: a workspace-scoped key set at an override
+// position should surface as an unknown-field warning rather than be
+// silently accepted. Today the two carry the same single field, and that is
+// the point -- the shape is ready for a Codex-scoped key that is not
+// meaningful per repository.
+type CodexOverride struct {
+	Enabled *bool `toml:"enabled,omitempty"`
 }
 
 // ClaudeOverride is the narrower Claude configuration used at override
@@ -241,12 +270,30 @@ type WorkspaceConfig struct {
 	Sources   []SourceConfig          `toml:"sources"`
 	Groups    map[string]GroupConfig  `toml:"groups"`
 	Repos     map[string]RepoOverride `toml:"repos"`
-	Content   ContentConfig           `toml:"content"`
-	Claude    ClaudeConfig            `toml:"claude"`
-	Env       EnvConfig               `toml:"env"`
-	Files     map[string]string       `toml:"files,omitempty"`
-	Instance  InstanceConfig          `toml:"instance,omitempty"`
-	Root      RootConfig              `toml:"root,omitempty"`
+	// Content is the canonical content hierarchy, agent-neutral because
+	// every agent's producer reads the same declared sources and routes
+	// them to its own filenames. [claude.content] is accepted as a
+	// deprecated alias until v1.0; Parse folds it in here, so this is the
+	// only field the rest of niwa reads.
+	Content ContentConfig `toml:"content"`
+	Claude  ClaudeConfig  `toml:"claude"`
+	// Codex is the workspace-level [codex] block. Its enabled key gates
+	// Codex plan production the way [claude] enabled gates Claude's, and
+	// neither reaches across to the other.
+	Codex CodexConfig `toml:"codex,omitempty"`
+	// MCP is the agent-neutral MCP server declaration under [mcp]. It is
+	// workspace-scoped, like [claude.marketplaces]: no override position
+	// merges it.
+	MCP MCPConfig `toml:"mcp,omitempty"`
+	// Session is the agent-neutral session declaration under [session]. Like
+	// [mcp] it is workspace-scoped, and for the same reason: what a session
+	// runs with belongs to the prepared workspace rather than to one
+	// repository in it.
+	Session  SessionConfig     `toml:"session,omitempty"`
+	Env      EnvConfig         `toml:"env"`
+	Files    map[string]string `toml:"files,omitempty"`
+	Instance InstanceConfig    `toml:"instance,omitempty"`
+	Root     RootConfig        `toml:"root,omitempty"`
 	// Vault carries the optional [vault] block (anonymous [vault.provider]
 	// or named [vault.providers.<name>] shape, plus [vault].team_only).
 	// nil when the config declares no vault providers.
@@ -279,6 +326,16 @@ type WorkspaceMeta struct {
 	DefaultBranch string `toml:"default_branch,omitempty"`
 	ContentDir    string `toml:"content_dir,omitempty"`
 	SetupDir      string `toml:"setup_dir,omitempty"`
+	// DefaultAgent names the coding agent a niwa-launched session runs as
+	// (e.g. "claude" or "codex"). It does not affect what apply prepares:
+	// every apply prepares the workspace for every agent niwa supports, so
+	// changing this value needs no re-apply. It is a session-global
+	// discriminator, not a per-repo mergeable value, so it lives here on the
+	// workspace metadata rather than in the [claude] override cascade. It is
+	// stored as a raw string (validated at resolution time by
+	// internal/agent.ParseAgent) so internal/config does not import
+	// internal/agent. Empty means the default agent (claude).
+	DefaultAgent string `toml:"default_agent,omitempty"`
 	// VaultScope (PRD D-11) selects which [workspaces.<scope>] entry in
 	// the personal overlay applies to this workspace. When unset, the
 	// personal overlay falls back to matching on workspace source-org
@@ -288,6 +345,16 @@ type WorkspaceMeta struct {
 	// all repos in the workspace. nil means enabled (opt-out default).
 	// Per-repo overrides in RepoOverride.ReadEnvExample take precedence.
 	ReadEnvExample *bool `toml:"read_env_example,omitempty"`
+	// WorktreeSetup opts the workspace's repos into running their own
+	// scripts/setup/ against each worktree, not just against the clone.
+	// nil means OFF -- the opposite default from ReadEnvExample above, and
+	// deliberately so: every setup script that exists was written before
+	// worktrees ever ran one, and at least one first-party example computes
+	// its target by walking up two directories, which lands somewhere valid
+	// and wrong from a worktree and exits 0. A repo opts in after its author
+	// has read what a script may assume. Per-repo overrides in
+	// RepoOverride.WorktreeSetup take precedence.
+	WorktreeSetup *bool `toml:"worktree_setup,omitempty"`
 	// EnvExamplePolicy is the workspace-level .env.example failure policy.
 	// nil means inherit (from the global override, then the warn default).
 	// This is a project-scope position: its Vars sub-table is honored.
@@ -296,6 +363,42 @@ type WorkspaceMeta struct {
 	// Empty means inherit (from the global override, then the .local.env
 	// dotenv default). Per-repo EnvOutput overrides this.
 	EnvOutput OutputTargets `toml:"env_output,omitempty"`
+	// StrictSecrets opts the workspace into failing when a declared key
+	// could not be supplied, instead of materializing without it. It is
+	// tri-state on purpose: nil ("the workspace did not speak") has to be
+	// distinguishable from an explicit false, because the flag's precedence
+	// rule keys on whether a layer spoke, not on the value it carries.
+	//
+	// It lives on [workspace] for a security reason, not a taxonomic one.
+	// A visibility overlay carries no workspace stanza and the overlay merge
+	// never assigns this table, so an overlay cannot reach this field —
+	// which is what keeps a contributor's first run un-alterable by a
+	// configuration layer they cannot read. Moving it to [env] or [vault]
+	// would put it inside a table overlays do merge into, and the guarantee
+	// would then rest on a check someone could later forget.
+	StrictSecrets *bool `toml:"strict_secrets,omitempty"`
+}
+
+// ResolveStrictSecrets decides whether a run fails on a shortfall, from the
+// two layers allowed to speak.
+//
+// The arbiter for the flag is flagChanged, not flagValue: a bool flag's zero
+// value is indistinguishable from an explicit --strict-secrets=false, and
+// reading the value alone would make the de-escalating form a no-op against a
+// workspace that sets the setting. Cobra's Flags().Changed is the caller's
+// source for flagChanged.
+//
+// setting is the [workspace] strict_secrets value, nil when unset. Tolerant is
+// what neither layer speaking means, which is the default this work exists to
+// establish.
+func ResolveStrictSecrets(setting *bool, flagChanged, flagValue bool) bool {
+	if flagChanged {
+		return flagValue
+	}
+	if setting != nil {
+		return *setting
+	}
+	return false
 }
 
 // ParseResult holds the parsed config and any non-fatal warnings.
@@ -345,6 +448,34 @@ type SettingsConfig map[string]MaybeSecret
 // so a test pins that tag to this value.
 const RemoteControlAtStartupKey = "remoteControlAtStartup"
 
+// CrossSessionInboundKey is the Claude Code settings key that governs the holds
+// Claude Code puts on inbound messages from other Claude Code sessions. By
+// default Claude Code holds some of them for a person's approval, such as a
+// message from a session in a different permission-mode class; set to "accept",
+// the key lifts those holds and the session acts on the messages without asking.
+// Leaving it unset keeps Claude Code's default, which does not isolate a
+// session: a bypass-mode sender that attests its mode already reaches a
+// bypass-mode receiver without a hold. The senders are any session able to
+// address this one by name across the developer's Claude Code account,
+// including sessions on other machines and in the cloud. It is the single
+// source of truth for the key's spelling; the dispatch argv that injects it via
+// `claude --settings` must use this constant rather than a literal. Unlike
+// RemoteControlAtStartupKey, it must not be emitted into a materialized
+// settings.json: Claude Code honors "accept" only from managed settings, user
+// settings, or `--settings`, and silently ignores it in project or local
+// settings.
+const CrossSessionInboundKey = "crossSessionInbound"
+
+// KeepAliveOnDispatchKey is the settings key a downstream [claude.settings]
+// uses to decide dispatch keep-alive for its own instances. Unlike
+// RemoteControlAtStartupKey it is a niwa-defined key, not a Claude Code one --
+// Claude Code ignores it in settings.json; the materializer emits it there so
+// the dispatch keep-alive resolver can read the downstream decision back,
+// exactly the same read-back seam the remote-control resolver rides. It is the
+// single source of truth for the spelling shared by the materializer and the
+// reader (the reader's struct tag cannot reference a const, so a test pins it).
+const KeepAliveOnDispatchKey = "keepAliveOnDispatch"
+
 // EnvConfig defines environment configuration under [env]. It carries a list
 // of env files, a non-sensitive var map ([env.vars]) and a sensitive var map
 // ([env.secrets]), plus the three requirement-description sub-tables under
@@ -357,17 +488,27 @@ type EnvConfig struct {
 
 // RepoOverride holds per-repo configuration overrides.
 type RepoOverride struct {
-	URL      string            `toml:"url,omitempty"`
-	Group    string            `toml:"group,omitempty"`
-	Branch   string            `toml:"branch,omitempty"`
-	Scope    string            `toml:"scope,omitempty"`
-	Claude   *ClaudeOverride   `toml:"claude,omitempty"`
+	URL    string          `toml:"url,omitempty"`
+	Group  string          `toml:"group,omitempty"`
+	Branch string          `toml:"branch,omitempty"`
+	Scope  string          `toml:"scope,omitempty"`
+	Claude *ClaudeOverride `toml:"claude,omitempty"`
+	// Codex is the per-repo [repos.<name>.codex] block. Only enabled is
+	// meaningful here, and it gates this repo's Codex delivery alone.
+	Codex    *CodexOverride    `toml:"codex,omitempty"`
 	Env      EnvConfig         `toml:"env,omitempty"`
 	Files    map[string]string `toml:"files,omitempty"`
 	SetupDir *string           `toml:"setup_dir,omitempty"`
 	// ReadEnvExample overrides the workspace-level read_env_example setting
 	// for this repo. nil means inherit from WorkspaceMeta.ReadEnvExample.
 	ReadEnvExample *bool `toml:"read_env_example,omitempty"`
+	// WorktreeSetup overrides the workspace-level worktree_setup setting for
+	// this repo. nil means inherit from WorkspaceMeta.WorktreeSetup, which
+	// itself defaults to off. This is the operator-facing half of the opt-in;
+	// the script-facing half is the NIWA_WORKTREE_* environment a script reads
+	// to gate itself, which is what lets one scripts/setup/ directory hold both
+	// a per-tree dependency install and a shared-state git-hooks installer.
+	WorktreeSetup *bool `toml:"worktree_setup,omitempty"`
 	// EnvExamplePolicy is the per-repo .env.example failure policy. nil means
 	// inherit from the workspace policy. This is a project-scope position: its
 	// Vars sub-table is honored.
@@ -456,21 +597,30 @@ func Parse(data []byte) (*ParseResult, error) {
 
 	var warnings []string
 
-	// Handle deprecated [content] alias. The canonical location is
-	// [claude.content]; [content] is accepted through the deprecation
-	// window (until v1.0) with a warning. Both forms together is a
-	// configuration error -- we don't want silent precedence rules.
-	legacyHasContent := !isContentConfigZero(cfg.Content)
-	canonicalHasContent := !isContentConfigZero(cfg.Claude.Content)
+	// Handle the deprecated [claude.content] alias. The canonical location
+	// is the top-level [content]; [claude.content] is accepted through the
+	// deprecation window (until v1.0) with a warning. Both forms together
+	// is a configuration error -- we don't want silent precedence rules.
+	//
+	// This reverses the direction v0.7 shipped, and the messages below say
+	// so rather than presenting [content] as though it had always been
+	// canonical. v0.7 moved [content] under [claude] because every consumer
+	// wrote a CLAUDE.md-shaped destination; a second agent reading the same
+	// declared content is exactly what falsified that. A workspace still on
+	// [content] does nothing and simply stops being warned at.
+	deprecatedHasContent := !isContentConfigZero(cfg.Claude.Content)
+	canonicalHasContent := !isContentConfigZero(cfg.Content)
 	switch {
-	case legacyHasContent && canonicalHasContent:
+	case deprecatedHasContent && canonicalHasContent:
 		return nil, fmt.Errorf("config uses both [content] and [claude.content]; " +
-			"pick one -- [claude.content] is canonical, [content] is deprecated")
-	case legacyHasContent:
-		cfg.Claude.Content = cfg.Content
-		cfg.Content = ContentConfig{}
+			"pick one -- [content] is canonical again and [claude.content] is deprecated, " +
+			"reversing the v0.7 move now that more than one agent reads the same declared content")
+	case deprecatedHasContent:
+		cfg.Content = cfg.Claude.Content
+		cfg.Claude.Content = ContentConfig{}
 		warnings = append(warnings,
-			"[content] is deprecated; use [claude.content] instead (removed at v1.0)")
+			"[claude.content] is deprecated; move it back to the top-level [content] (removed at v1.0). "+
+				"This reverses the v0.7 consolidation: content is no longer Claude-only, so its table is agent-neutral again")
 	}
 
 	if err := validate(&cfg); err != nil {
@@ -547,25 +697,25 @@ func validate(cfg *WorkspaceConfig) error {
 	}
 
 	// Validate content source paths don't escape the content directory.
-	// Reads from cfg.Claude.Content because Parse() migrates the legacy
-	// top-level [content] into [claude.content] before validate() runs.
-	if err := validateContentSource("claude.content.workspace.source", cfg.Claude.Content.Workspace.Source); err != nil {
+	// Reads from cfg.Content because Parse() migrates the deprecated
+	// [claude.content] into the canonical [content] before validate() runs.
+	if err := validateContentSource("content.workspace.source", cfg.Content.Workspace.Source); err != nil {
 		return err
 	}
-	if err := validateContentSource("claude.content.worktree.source", cfg.Claude.Content.Worktree.Source); err != nil {
+	if err := validateContentSource("content.worktree.source", cfg.Content.Worktree.Source); err != nil {
 		return err
 	}
-	for name, entry := range cfg.Claude.Content.Groups {
-		if err := validateContentSource(fmt.Sprintf("claude.content.groups.%s.source", name), entry.Source); err != nil {
+	for name, entry := range cfg.Content.Groups {
+		if err := validateContentSource(fmt.Sprintf("content.groups.%s.source", name), entry.Source); err != nil {
 			return err
 		}
 	}
-	for name, entry := range cfg.Claude.Content.Repos {
-		if err := validateContentSource(fmt.Sprintf("claude.content.repos.%s.source", name), entry.Source); err != nil {
+	for name, entry := range cfg.Content.Repos {
+		if err := validateContentSource(fmt.Sprintf("content.repos.%s.source", name), entry.Source); err != nil {
 			return err
 		}
 		for subdir, src := range entry.Subdirs {
-			if err := validateContentSource(fmt.Sprintf("claude.content.repos.%s.subdirs.%s", name, subdir), src); err != nil {
+			if err := validateContentSource(fmt.Sprintf("content.repos.%s.subdirs.%s", name, subdir), src); err != nil {
 				return err
 			}
 			if err := validateSubdirKey(name, subdir); err != nil {
@@ -698,12 +848,12 @@ func rejectWorkerSpawnCommandKey(md toml.MetaData) error {
 // directory and doesn't escape via ".." or absolute path components.
 func validateSubdirKey(repoName, subdir string) error {
 	if filepath.IsAbs(subdir) {
-		return fmt.Errorf("claude.content.repos.%s.subdirs key %q: absolute paths are not allowed", repoName, subdir)
+		return fmt.Errorf("content.repos.%s.subdirs key %q: absolute paths are not allowed", repoName, subdir)
 	}
 	// Clean the path and verify it doesn't escape.
 	cleaned := filepath.Clean(subdir)
 	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("claude.content.repos.%s.subdirs key %q: must resolve within the repo directory", repoName, subdir)
+		return fmt.Errorf("content.repos.%s.subdirs key %q: must resolve within the repo directory", repoName, subdir)
 	}
 	return nil
 }

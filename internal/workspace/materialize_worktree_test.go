@@ -84,7 +84,11 @@ func TestSettingsMaterializerWorktreeSupportedWritesHooks(t *testing.T) {
 
 	doc, _ := readSettingsDoc(t, ctx)
 
-	wantCmd := "/usr/local/bin/niwa worktree from-hook"
+	// Decision 7: the command resolves niwa from PATH first and falls back to the
+	// absolute path recorded at apply time, so an installed hook survives a niwa
+	// upgrade without a re-apply.
+	wantCmd := "command -v niwa >/dev/null 2>&1 && exec niwa worktree from-hook; " +
+		"exec '/usr/local/bin/niwa' worktree from-hook"
 	for _, event := range []string{"WorktreeCreate", "WorktreeRemove"} {
 		cmds := worktreeHookCommands(t, doc, event)
 		if len(cmds) != 1 {
@@ -96,8 +100,16 @@ func TestSettingsMaterializerWorktreeSupportedWritesHooks(t *testing.T) {
 		if !strings.HasSuffix(cmds[0], "worktree from-hook") {
 			t.Errorf("%s command %q must end with 'worktree from-hook'", event, cmds[0])
 		}
-		if !filepath.IsAbs(strings.TrimSuffix(cmds[0], " worktree from-hook")) {
-			t.Errorf("%s command %q must use an absolute niwa path", event, cmds[0])
+		// The fallback arm must still carry an absolute path: it is the arm that
+		// runs when PATH does not carry niwa, so a relative path there would
+		// resolve against whatever cwd the harness happened to hand the hook.
+		_, fallback, found := strings.Cut(cmds[0], "; exec ")
+		if !found {
+			t.Fatalf("%s command %q has no fallback arm", event, cmds[0])
+		}
+		fallbackPath := strings.Trim(strings.TrimSuffix(fallback, " worktree from-hook"), "'")
+		if !filepath.IsAbs(fallbackPath) {
+			t.Errorf("%s fallback %q must use an absolute niwa path", event, fallbackPath)
 		}
 	}
 
@@ -150,10 +162,11 @@ func TestSettingsMaterializerWorktreeUnsupportedWritesDeny(t *testing.T) {
 	}
 }
 
-// TestSettingsMaterializerWorktreeUnsupportedPreservesDefaultMode asserts the
-// deny fallback coexists with a configured permissions.defaultMode rather than
-// clobbering it.
-func TestSettingsMaterializerWorktreeUnsupportedPreservesDefaultMode(t *testing.T) {
+// unsupportedDelegationPerms materializes a repo document for the given
+// posture with the worktree-delegation deny fallback active and returns its
+// permissions block.
+func unsupportedDelegationPerms(t *testing.T, posture string) map[string]any {
+	t.Helper()
 	repoDir := filepath.Join(t.TempDir(), "repo")
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -163,7 +176,7 @@ func TestSettingsMaterializerWorktreeUnsupportedPreservesDefaultMode(t *testing.
 		RepoDir: repoDir,
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
-				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
+				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: posture}},
 			},
 		},
 		WorktreeDelegation: &WorktreeDelegation{Supported: false},
@@ -175,11 +188,28 @@ func TestSettingsMaterializerWorktreeUnsupportedPreservesDefaultMode(t *testing.
 	if !ok {
 		t.Fatal("expected permissions key")
 	}
-	if perms["defaultMode"] != "bypassPermissions" {
-		t.Errorf("defaultMode = %v, want bypassPermissions (must be preserved)", perms["defaultMode"])
-	}
 	if _, ok := perms["deny"].([]any); !ok {
-		t.Errorf("expected permissions.deny alongside defaultMode, got %v", perms)
+		t.Errorf("expected permissions.deny, got %v", perms)
+	}
+	return perms
+}
+
+// TestSettingsMaterializerWorktreeUnsupportedPreservesDefaultMode asserts the
+// deny fallback coexists with a configured permissions.defaultMode rather than
+// clobbering it.
+func TestSettingsMaterializerWorktreeUnsupportedPreservesDefaultMode(t *testing.T) {
+	perms := unsupportedDelegationPerms(t, "ask")
+	if perms["defaultMode"] != "default" {
+		t.Errorf("defaultMode = %v, want default (must be preserved)", perms["defaultMode"])
+	}
+}
+
+// TestSettingsMaterializerWorktreeUnsupportedBypassDenyOnly asserts that a
+// bypass posture adds nothing to the deny fallback's permissions block.
+func TestSettingsMaterializerWorktreeUnsupportedBypassDenyOnly(t *testing.T) {
+	perms := unsupportedDelegationPerms(t, "bypass")
+	if len(perms) != 1 {
+		t.Errorf("permissions = %v, want only the deny key", perms)
 	}
 }
 
@@ -254,5 +284,87 @@ func TestSettingsMaterializerNoWorktreeDelegationUnchanged(t *testing.T) {
 	}
 	if written != nil {
 		t.Errorf("expected no file written with nil delegation and no settings, got %v", written)
+	}
+}
+
+// TestGuardedNiwaHookCommandQuotesFallbackPath covers Decision 7's quoting
+// requirement. The emitted command goes through a shell, so an install path
+// containing a space must survive word-splitting; without quoting the fallback
+// arm would exec the first word and pass the rest as arguments.
+func TestGuardedNiwaHookCommandQuotesFallbackPath(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		niwaPath string
+		want     string
+	}{
+		{
+			name:     "path with a space",
+			niwaPath: "/Users/x/My Tools/niwa",
+			want:     "command -v niwa >/dev/null 2>&1 && exec niwa worktree from-hook; exec '/Users/x/My Tools/niwa' worktree from-hook",
+		},
+		{
+			name:     "path with a single quote",
+			niwaPath: "/home/o'brien/bin/niwa",
+			want:     `command -v niwa >/dev/null 2>&1 && exec niwa worktree from-hook; exec '/home/o'\''brien/bin/niwa' worktree from-hook`,
+		},
+		{
+			name:     "plain path",
+			niwaPath: "/usr/local/bin/niwa",
+			want:     "command -v niwa >/dev/null 2>&1 && exec niwa worktree from-hook; exec '/usr/local/bin/niwa' worktree from-hook",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := guardedNiwaHookCommand(tc.niwaPath, worktreeFromHookCommandSuffix)
+			if got != tc.want {
+				t.Errorf("guardedNiwaHookCommand(%q) = %q, want %q", tc.niwaPath, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGuardedNiwaHookCommandSeparatesArmsWithSemicolon pins the `;` separator.
+// With `&& exec A || exec B`, a failed exec terminates a non-interactive shell
+// before the `||` is evaluated, so `||` would read as a fallback it is not.
+func TestGuardedNiwaHookCommandSeparatesArmsWithSemicolon(t *testing.T) {
+	got := guardedNiwaHookCommand("/usr/local/bin/niwa", worktreeFromHookCommandSuffix)
+	if strings.Contains(got, "||") {
+		t.Errorf("command %q must not join its arms with ||", got)
+	}
+	if !strings.Contains(got, "; exec ") {
+		t.Errorf("command %q must separate its arms with '; exec '", got)
+	}
+}
+
+// TestGuardedNiwaHookCommandIsIdempotent covers PRD R11: re-running apply must
+// produce a byte-identical command for the same inputs.
+func TestGuardedNiwaHookCommandIsIdempotent(t *testing.T) {
+	first := guardedNiwaHookCommand("/usr/local/bin/niwa", worktreeFromHookCommandSuffix)
+	second := guardedNiwaHookCommand("/usr/local/bin/niwa", worktreeFromHookCommandSuffix)
+	if first != second {
+		t.Errorf("command is not stable across calls: %q vs %q", first, second)
+	}
+}
+
+// TestBothHookConsumersShareTheGuardedShape covers the Decision 7 requirement
+// that the workspace-root SessionStart hook gets the same treatment as the
+// per-repo worktree hook. The root hook propagates staleness — it provisions
+// instances in-process — so fixing only one leaves the defect regenerating.
+func TestBothHookConsumersShareTheGuardedShape(t *testing.T) {
+	const niwaPath = "/usr/local/bin/niwa"
+	for _, tc := range []struct {
+		name string
+		got  string
+		verb string
+	}{
+		{name: "worktree hook", got: worktreeFromHookCommand(niwaPath), verb: "worktree from-hook"},
+		{name: "root session hook", got: instanceFromHookCommand(niwaPath), verb: "instance from-hook"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := "command -v niwa >/dev/null 2>&1 && exec niwa " + tc.verb +
+				"; exec '" + niwaPath + "' " + tc.verb
+			if tc.got != want {
+				t.Errorf("%s = %q, want %q", tc.name, tc.got, want)
+			}
+		})
 	}
 }

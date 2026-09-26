@@ -1,0 +1,3 @@
+claude attach 6a7b8c9d
+claude logs 6a7b8c9d
+claude stop 6a7b8c9d

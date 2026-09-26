@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/tsukumogami/niwa/internal/agentplan"
 )
 
 const (
@@ -131,6 +133,33 @@ type InstanceState struct {
 	DisclosedNotices   []string                    `json:"disclosed_notices,omitempty"`
 	ConfigSource       *ConfigSource               `json:"config_source,omitempty"`
 	AuthSources        map[string]AuthSourceRecord `json:"auth_sources,omitempty"`
+	// TrustKeys records the per-directory trust entries niwa has written into
+	// the developer's own agent configuration -- the one place an apply writes
+	// outside its instance. It holds canonical repository paths, never
+	// anything an agent's configuration says about them.
+	//
+	// It is the sole authority for what a later apply may retract: the agent
+	// that keeps such a record writes an identically shaped entry when the
+	// developer answers its own trust prompt, so without this list niwa could
+	// not tell its own entry from the developer's answer. omitempty keeps the
+	// field invisible to old binaries reading new state files.
+	TrustKeys []string `json:"trust_keys,omitempty"`
+	// ClaudePermissions records the declared permission posture the
+	// instance-root settings document resolved from: "bypass", "ask", or
+	// empty when nothing is declared. It is niwa's own record of the
+	// declaration, not a Claude Code mode string, so it stays meaningful
+	// whatever the materializer writes into permissions.defaultMode.
+	//
+	// The instance pipeline recomputes it on every Create and Apply; it is
+	// never carried over from an earlier state file. Only `niwa dispatch`
+	// reads it, for the instance it just provisioned. niwa init and
+	// saveWorkspaceRootDisclosures write a multi-instance workspace root's
+	// state file outside the pipeline and never set it; a root that was
+	// applied as a single-instance layout before gaining child instances may
+	// still carry the value that apply recorded, and nothing reads it there.
+	// omitempty keeps the field invisible to old binaries reading new state
+	// files.
+	ClaudePermissions string `json:"claude_permissions,omitempty"`
 }
 
 // AuthSourceRecord is one row of the credential-source audit map
@@ -190,72 +219,18 @@ type ManagedFile struct {
 }
 
 // SourceEntry describes one input that contributed to a materialized
-// file. SourceEntry values never carry secret material: SourceID and
-// VersionToken are derived from non-secret metadata (file paths,
-// provider-opaque revision IDs, plaintext content hashes). Backends
-// MUST NOT populate these fields from decrypted secret bytes (see
-// DESIGN-vault-integration.md Decision 4 and R15).
-type SourceEntry struct {
-	// Kind names the source category. One of SourceKindPlaintext,
-	// SourceKindVault, or SourceKindEnvExample.
-	Kind string `json:"kind"`
+// file. It lives in internal/agentplan, so plan entries can carry
+// provenance without that package and this one importing each other,
+// and is aliased here because the persisted state schema, its JSON
+// tags, and every reference to the name are unchanged by the move.
+type SourceEntry = agentplan.SourceEntry
 
-	// SourceID identifies the origin: a file path for plaintext
-	// sources, or "provider-name/key" for vault sources (the
-	// anonymous provider uses "/key").
-	SourceID string `json:"source_id"`
-
-	// VersionToken is the opaque per-backend revision identifier.
-	// For plaintext sources this is the SHA-256 content-hash of the
-	// source bytes at resolve time. For vault sources this is the
-	// provider-returned VersionToken.Token.
-	VersionToken string `json:"version_token"`
-
-	// Provenance is a user-facing pointer (audit-log URL, git SHA,
-	// fixture identifier) copied from VersionToken.Provenance for
-	// vault sources, or left empty for plaintext. Never a secret.
-	Provenance string `json:"provenance,omitempty"`
-}
-
-// ComputeSourceFingerprint returns the hex-encoded SHA-256 of a
-// stable-sorted, null-separated list of (SourceID, VersionToken)
-// tuples. Reducing a file's inputs to a single 32-byte digest is what
-// lets niwa status distinguish user-edited drift (content changed,
-// fingerprint matches) from upstream rotation (at least one source's
-// VersionToken changed).
-//
-// An empty or nil slice hashes to a stable zero-input digest
-// (SHA-256 of the empty byte string), so callers don't need to
-// special-case files with no recorded sources.
+// ComputeSourceFingerprint reduces a file's inputs to one digest. The
+// implementation moved to internal/agentplan with SourceEntry; this
+// forwards to it so the state, status, and apply paths keep calling
+// the fingerprint by the name they always have.
 func ComputeSourceFingerprint(sources []SourceEntry) string {
-	// Build a local slice of (SourceID, VersionToken) pairs so the
-	// sort is deterministic regardless of how the caller ordered the
-	// input. We sort pairs rather than mutating the original slice
-	// because callers hand-build the SourceEntry list in a logical
-	// order (plaintext files first, inline vars next) that is useful
-	// to preserve for diagnostic output.
-	type pair struct {
-		id, token string
-	}
-	pairs := make([]pair, len(sources))
-	for i, s := range sources {
-		pairs[i] = pair{s.SourceID, s.VersionToken}
-	}
-	sort.Slice(pairs, func(i, j int) bool {
-		if pairs[i].id != pairs[j].id {
-			return pairs[i].id < pairs[j].id
-		}
-		return pairs[i].token < pairs[j].token
-	})
-
-	h := sha256.New()
-	for _, p := range pairs {
-		h.Write([]byte(p.id))
-		h.Write([]byte{0})
-		h.Write([]byte(p.token))
-		h.Write([]byte{0})
-	}
-	return hex.EncodeToString(h.Sum(nil))
+	return agentplan.ComputeSourceFingerprint(sources)
 }
 
 // RepoState tracks clone status for a repo.
@@ -398,6 +373,30 @@ func EnumerateInstances(workspaceRoot string) ([]string, error) {
 	return instances, nil
 }
 
+// IsSingleInstanceLayout reports whether workspaceRoot is itself the instance,
+// rather than a root whose instances are children. In that layout
+// instance.json lives at workspaceRoot/.niwa/ and EnumerateInstances returns
+// nothing, because it only scans children.
+//
+// The presence of instance.json is not enough on its own. Every registered
+// `niwa init` writes root state with no instance_name, so a freshly
+// initialized multi-instance root — and one whose instances have all been
+// reaped — would otherwise look single-instance and invite worktree commands
+// to operate inside the rotated config directory. Requiring a named instance
+// distinguishes "the root is the instance" from "the root has no instances
+// yet".
+func IsSingleInstanceLayout(workspaceRoot string) bool {
+	instances, err := EnumerateInstances(workspaceRoot)
+	if err != nil || len(instances) > 0 {
+		return false
+	}
+	state, err := LoadState(workspaceRoot)
+	if err != nil {
+		return false
+	}
+	return state.InstanceName != ""
+}
+
 // InstanceRecord is a machine-readable summary of one instance under a
 // workspace root, emitted by `niwa list --json`. Name is the instance
 // directory's base name; Path is its absolute directory; Ephemeral is true
@@ -407,6 +406,30 @@ type InstanceRecord struct {
 	Name      string `json:"name"`
 	Path      string `json:"path"`
 	Ephemeral bool   `json:"ephemeral"`
+	// KeepAlive marks an instance whose backing session was dispatched with
+	// keep-alive armed AND is still live. EnumerateInstanceRecords leaves it
+	// false: the liveness half of the join (the Claude Code job-entry signal)
+	// lives at the CLI layer, so the list command fills this in. omitempty
+	// keeps the --json shape unchanged for every non-participating instance.
+	KeepAlive bool `json:"keep_alive,omitempty"`
+	// AcceptsSessionMessages marks an instance whose dispatched session was
+	// launched accepting messages from other sessions without an approval
+	// prompt, whether or not that session is still running.
+	// EnumerateInstanceRecords leaves it false; the list command fills it in
+	// from the session mappings. It has no omitempty, so every record carries
+	// the key and a consumer never has to treat a missing key as false.
+	AcceptsSessionMessages bool `json:"accepts_session_messages"`
+	// SessionName is the display name the instance's dispatch forwarded to
+	// the agent and recorded on its session mapping. Like KeepAlive,
+	// EnumerateInstanceRecords leaves it empty and the list command fills it
+	// in at the CLI layer, from the newest mapping for the instance and only
+	// when the recorded value has the forwarded-name shape. It is empty when
+	// no name was recorded (an unnamed dispatch, an agent with no display-name
+	// flag, or a mapping written before names were recorded), and also when the
+	// newest mapping recorded none or a malformed one, even if an older mapping
+	// for the same instance recorded a valid name. omitempty keeps the --json
+	// shape unchanged for those instances.
+	SessionName string `json:"session_name,omitempty"`
 }
 
 // EnumerateInstanceRecords enumerates the instances under workspaceRoot as

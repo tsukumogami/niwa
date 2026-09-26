@@ -63,6 +63,17 @@ var maxDecompressedBytesTestHook *int64
 //     caller stages into a fresh dir and the snapshot swap promotes
 //     it only on success).
 //
+// Entry modes are honored, narrowly. A regular file is created with the
+// permission bits its tar header carries, so a hook a config repo
+// commits as 100755 is still executable after extraction (issue #306).
+// The header is attacker-controlled like every other field here, so the
+// mode is narrowed by filePerm before it reaches disk: setuid, setgid
+// and sticky are dropped, and group and other write are cleared. That
+// narrowing is an eighth constraint layered on top of the seven
+// defenses above, not a relaxation of any of them -- read filePerm's
+// comment before widening the mask. Directory entries are deliberately
+// NOT given their header mode; see the TypeDir case.
+//
 // Calls testfault.Maybe("extract-entry") once per entry processed so
 // fault-injection scenarios can interrupt mid-extraction.
 func ExtractSubpath(r io.Reader, subpath, dest string) error {
@@ -168,6 +179,28 @@ func extractFromTarReader(tr *tar.Reader, subpath, dest string, bytesBudget int6
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
+			// Directories keep a fixed 0755 rather than the header
+			// mode, and that is a decision, not an oversight.
+			//
+			// Why not the header: nothing in niwa reads a directory's
+			// committed mode the way runWorktreeHooks reads a file's
+			// exec bit, so honoring it buys no behavior. What it would
+			// buy is an archive's ability to hand us a directory we
+			// cannot descend into (0644 in the tarball) or one anyone
+			// can write into, which would undo for the containing
+			// directory what filePerm is careful about for the file.
+			//
+			// Why 0755 specifically: it is the least that lets the
+			// owner populate the tree and lets anything reading the
+			// config traverse it, and it is what every other directory
+			// on this path already gets -- the parent MkdirAll in the
+			// TypeReg case below uses the same value, so a snapshot
+			// does not end up with two classes of directory depending
+			// on whether the tarball happened to carry an explicit
+			// entry for one.
+			//
+			// The file case below is different because there the mode
+			// is load-bearing.
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return fmt.Errorf("extractSubpath: mkdir %s: %w", target, err)
 			}
@@ -182,14 +215,26 @@ func extractFromTarReader(tr *tar.Reader, subpath, dest string, bytesBudget int6
 				return fmt.Errorf("extractSubpath: entry %s would exceed decompression-bomb cap (%d bytes)",
 					hdr.Name, MaxDecompressedBytes)
 			}
-			f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+			perm := filePerm(hdr.Mode)
+			f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 			if err != nil {
 				return fmt.Errorf("extractSubpath: create %s: %w", target, err)
 			}
 			n, err := io.CopyN(f, tr, hdr.Size)
+			// OpenFile's mode argument is masked by the process umask,
+			// so the exec bit just recovered from the header would be
+			// stripped straight back off on a restrictive runner
+			// (issue #306). Re-apply it through the open descriptor
+			// rather than by path: fchmod lands on the file we just
+			// wrote, with no second name resolution in between that
+			// could resolve somewhere else.
+			chmodErr := f.Chmod(perm)
 			closeErr := f.Close()
 			if err != nil && err != io.EOF {
 				return fmt.Errorf("extractSubpath: write %s: %w", target, err)
+			}
+			if chmodErr != nil {
+				return fmt.Errorf("extractSubpath: chmod %s: %w", target, chmodErr)
 			}
 			if closeErr != nil {
 				return fmt.Errorf("extractSubpath: close %s: %w", target, closeErr)
@@ -409,6 +454,51 @@ func ProbeMarkers(tr *tar.Reader, markers config.MarkerSet) (config.MarkerSet, e
 // pass would skip it.
 func isAllowedEntryType(typeflag byte) bool {
 	return typeflag == tar.TypeReg || typeflag == tar.TypeDir
+}
+
+// filePerm narrows a tar entry's mode to the permission bits this
+// extractor is willing to reproduce on disk. It honors exec, so a hook
+// a config repo commits as 100755 is still runnable after extraction
+// (issue #306), and drops everything that would hand an archive more
+// authority than the file it describes.
+//
+// What is dropped, and why. The mode arrives from a tarball fetched off
+// the network, so it is attacker-controlled in the same sense every
+// other field this file defends against is:
+//
+//   - Setuid, setgid and sticky are outside the 0o777 mask, so they
+//     never survive. Reproducing them would let an archive plant a
+//     setuid binary during a routine config refresh.
+//   - Group and other write are cleared. This extractor is the one that
+//     populates the config snapshot niwa runs worktree hooks out of, and
+//     honoring the exec bit is precisely what makes those files
+//     executable, so a group- or world-writable entry here would be a
+//     write-what-you-run seam for any other account on the machine.
+//     Clearing it costs nothing real: git records only 100644 and
+//     100755, so no legitimate GitHub tarball carries those bits.
+//
+// A mode that leaves the owner unable to read the file it just wrote is
+// treated as absent, not honored: some tar writers omit the mode
+// entirely, and an entry that survives the narrowing above as 0 (or as
+// something equally unusable, like a bare 0o022) is nonsense rather
+// than a request for an unreadable file. Those fall back to 0644, the
+// same non-executable default the extractor used before it looked at
+// the mode at all.
+//
+// One consequence is worth stating because it looks like a bug: an
+// exec-only 0o111 has no owner-read either, so it takes that fallback
+// and comes out 0644, losing the exec bit. That is deliberate. Git
+// cannot record such a mode, so it is unreachable from the source this
+// extractor actually reads; and for the incoherent modes that are only
+// reachable from a hand-built archive, falling back to the safe
+// non-executable default is the behavior to prefer over inferring that
+// something was meant to be runnable.
+func filePerm(mode int64) os.FileMode {
+	perm := os.FileMode(mode) & 0o777 &^ 0o022
+	if perm&0o400 == 0 {
+		return 0o644
+	}
+	return perm
 }
 
 // validateEntryName enforces filename safety rules: no NUL, no `..`

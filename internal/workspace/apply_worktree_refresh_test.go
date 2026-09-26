@@ -37,11 +37,9 @@ func worktreeRefreshFixture(t *testing.T, cloneEnv string) (*Applier, worktreeRe
 	cfg := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "myws", ContentDir: "claude"},
 		Env:       config.EnvConfig{Files: []string{"workspace.env"}},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"app": {Source: "repos/app.md"},
-				},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"app": {Source: "repos/app.md"},
 			},
 		},
 	}

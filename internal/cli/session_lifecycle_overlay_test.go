@@ -50,11 +50,9 @@ func TestMergeWorktreeOverlayPopulatesOverlaySource(t *testing.T) {
 	// Base config has an explicit content entry for "app" (overlay= appends to it).
 	cfg := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "myws"},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"app": {Source: "repos/app.md"},
-				},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"app": {Source: "repos/app.md"},
 			},
 		},
 	}
@@ -66,7 +64,7 @@ func TestMergeWorktreeOverlayPopulatesOverlaySource(t *testing.T) {
 	if gotDir != overlayDir {
 		t.Errorf("overlay dir = %q, want %q", gotDir, overlayDir)
 	}
-	if got := merged.Claude.Content.Repos["app"].OverlaySource; got != "app-overlay.md" {
+	if got := merged.Content.Repos["app"].OverlaySource; got != "app-overlay.md" {
 		t.Errorf("OverlaySource = %q, want %q", got, "app-overlay.md")
 	}
 }

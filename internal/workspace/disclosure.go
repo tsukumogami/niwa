@@ -1,5 +1,7 @@
 package workspace
 
+import "github.com/tsukumogami/niwa/internal/plugin"
+
 // NoticeIDRank2TeamConfig is the DisclosedNotices key for the rank-2
 // deprecation notice emitted when a workspace's team config source
 // resolves to the legacy whole-repo (rank-2) layout. Once recorded
@@ -42,6 +44,40 @@ func EmitPluginNotice(id, manualCmd string, reporter *Reporter) {
 	case NoticeIDPluginSkipped:
 		reporter.Log("note: niwa Claude Code plugin install skipped. To install manually, run: %s", manualCmd)
 	}
+}
+
+// EmitPluginInstallNotice reports what plugin.Install did. The
+// installer returns an Action and says nothing itself, so the mapping
+// from action to notice lives on this side of the boundary — that is
+// what lets internal/plugin stay a leaf the registry can call.
+//
+// Up-to-date reads as installed on purpose: what the user needs to
+// know is whether the plugin is there, not whether this particular
+// apply is what put it there. An opt-out and a filesystem failure
+// both read as skipped, since in both cases the plugin is absent and
+// the manual command is the way to get it.
+func EmitPluginInstallNotice(action plugin.Action, reporter *Reporter) {
+	if id := PluginInstallNoticeID(action); id != "" {
+		EmitPluginNotice(id, plugin.ManualInstallCommand, reporter)
+	}
+}
+
+// PluginInstallNoticeID is the notice an action maps to, without emitting it.
+//
+// The mapping and the emission were one function until the install became a
+// delivery the pipeline makes on every apply. A caller that has to dedup the
+// notice needs the id twice -- once to ask whether this workspace has already
+// heard it, once to record that it now has -- and deriving it a second time at
+// the call site would let the two mappings drift, which is how a user ends up
+// told about one notice and spared a different one.
+func PluginInstallNoticeID(action plugin.Action) string {
+	switch action {
+	case plugin.Installed, plugin.UpToDate:
+		return NoticeIDPluginInstalled
+	case plugin.Skipped, plugin.Failed:
+		return NoticeIDPluginSkipped
+	}
+	return ""
 }
 
 // EmitRank2Notice emits the PRD R10 rank-2 deprecation notice for

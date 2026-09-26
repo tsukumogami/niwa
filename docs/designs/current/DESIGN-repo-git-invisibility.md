@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 upstream: docs/prds/PRD-repo-git-invisibility.md
 status: Current
 problem: |

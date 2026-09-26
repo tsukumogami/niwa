@@ -21,9 +21,6 @@ func init() {
 	applyCmd.Flags().StringVar(&applyInstance, "instance", "", "target a specific instance by name")
 	applyCmd.Flags().BoolVar(&applyAllowDirty, "allow-dirty", false, "apply even if config directory has uncommitted changes")
 	applyCmd.Flags().BoolVar(&applyNoPull, "no-pull", false, "skip pulling latest changes into existing repos")
-	applyCmd.Flags().BoolVar(&applyAllowMissingSecrets, "allow-missing-secrets", false,
-		"downgrade unresolved vault:// references to empty strings with stderr warnings. "+
-			"Does NOT override *.required misses. One-shot -- re-evaluated each invocation.")
 	applyCmd.Flags().BoolVar(&applyAllowPlaintextSecrets, "allow-plaintext-secrets", false,
 		"bypass the public-repo plaintext-secrets guardrail and downgrade all .env.example failure-policy failures to warnings. Strictly one-shot -- no state persistence.")
 	applyCmd.Flags().BoolVar(&applyForce, "force", false,
@@ -32,6 +29,11 @@ func init() {
 		"skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected).")
 	applyCmd.Flags().BoolVar(&applyNoCascade, "no-cascade", false,
 		"at the workspace root, refresh the root-managed config only and do not re-converge the instances beneath it. Has no effect at an instance (its worktrees refresh with it under the inherit model) or at a worktree (leaf scope).")
+	applyCmd.Flags().IntVar(&applyParallel, "parallel", 0,
+		"maximum repos to clone concurrently (>=1). Lower this on slow or flaky networks; 1 clones serially. Overrides the [global] clone_workers config. 0 (the default) uses clone_workers, else niwa's built-in default.")
+	registerStrictSecretsFlag(applyCmd, &strictSecretsApply)
+	// Last: it declares a mutual-exclusion group against --strict-secrets.
+	registerAllowMissingSecretsFlag(applyCmd)
 	applyCmd.ValidArgsFunction = completeWorkspaceNames
 	_ = applyCmd.RegisterFlagCompletionFunc("instance", completeInstanceNames)
 }
@@ -40,11 +42,11 @@ var (
 	applyInstance              string
 	applyAllowDirty            bool
 	applyNoPull                bool
-	applyAllowMissingSecrets   bool
 	applyAllowPlaintextSecrets bool
 	applyForce                 bool
 	applyNoInstallPlugins      bool
 	applyNoCascade             bool
+	applyParallel              int
 )
 
 var applyCmd = &cobra.Command{
@@ -131,9 +133,6 @@ func runApply(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	for _, w := range result.Warnings {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
-	}
 	cfg := result.Config
 
 	// PRD R26-R27: detect URL change against a legacy working tree
@@ -147,8 +146,18 @@ func runApply(cmd *cobra.Command, args []string) error {
 	gh := github.NewAPIClient(token)
 	applier := workspace.NewApplier(gh)
 	applier.Reporter = workspace.NewReporterWithTTY(os.Stderr, !noProgress && term.IsTerminal(int(os.Stderr.Fd())))
+	configureDeveloperHome(applier)
 	applier.NoPull = applyNoPull
 	applier.AllowDirty = applyAllowDirty
+	// --parallel wins when > 0; otherwise the [global] clone_workers config
+	// (resolved below when it loads) sets the default; otherwise the Applier
+	// falls back to its built-in default.
+	applier.CloneWorkers = applyParallel
+	// One collector for the whole command, drained once below: apply may
+	// converge several instances, and R6 asks for a single consolidated report
+	// rather than one per instance. The collector deduplicates, so a key
+	// missing in every instance is named once.
+	defer wireKeyReport(applier, cmd.ErrOrStderr())()
 	configurePluginAutoInstall(applier, applyNoInstallPlugins)
 	if applyAllowDirty {
 		// PRD R32: --allow-dirty is meaningless under the snapshot
@@ -156,8 +165,34 @@ func runApply(cmd *cobra.Command, args []string) error {
 		// notice once per process invocation.
 		fmt.Fprintln(os.Stderr, "warning: --allow-dirty is no longer meaningful under the snapshot model and will be removed in v1.1")
 	}
-	applier.AllowMissingSecrets = applyAllowMissingSecrets
 	applier.AllowPlaintextSecrets = applyAllowPlaintextSecrets
+
+	// Reconcile the workspace-root config snapshot from its source BEFORE the
+	// loaded config drives root materialization and the instance loop below
+	// (issue #214). Ordering only: it runs after checkConfigSourceURLChange
+	// above, so the --force gate still sees pre-sync state. It is NOT the
+	// re-materialization that gate's doc describes -- refreshSnapshot refetches
+	// from the source recorded in the provenance marker and never consults the
+	// registry's URL, so a marker-bearing snapshot is not re-pointed at a
+	// changed registry URL by anything on this path.
+	result, err = workspace.ReconcileAndReloadConfig(cmd.Context(), configPath, gh, applier.Reporter, result)
+	if err != nil {
+		return err
+	}
+	cfg = result.Config
+
+	// Surface config-load warnings once, reflecting the effective
+	// (post-reconcile) config.
+	for _, w := range result.Warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
+
+	// No agent is resolved here. Every apply prepares the workspace for every
+	// agent niwa enumerates, so there is nothing to select.
+
+	// Resolved once for the whole command, against the post-reconcile config,
+	// so every instance in the cascade is converged under the same strictness.
+	applier.StrictSecrets = strictSecretsFor(cmd, strictSecretsApply, cfg)
 
 	// Resolve the effective workspace name for registry operations.
 	// configDir is `<workspaceRoot>/.niwa`, so its parent is where
@@ -176,6 +211,11 @@ func runApply(cmd *cobra.Command, args []string) error {
 		// manually-maintained personal overlays (no remote configured) work.
 		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
 			applier.GlobalConfigDir = gDir
+		}
+		// clone_workers is the host-level concurrency default; --parallel (set
+		// above) overrides it when provided.
+		if applyParallel <= 0 {
+			applier.CloneWorkers = globalCfg.CloneWorkers()
 		}
 		// ConfigSourceURL is the original GitHub URL stored at init time.
 		// It enables convention overlay discovery when OverlayURL is not yet
@@ -214,6 +254,11 @@ func runApply(cmd *cobra.Command, args []string) error {
 	// failure. Each instance's live worktrees are refreshed inside the instance
 	// apply pipeline itself (Applier.refreshWorktreeEnvs), so there is no
 	// separate per-instance worktree cascade here.
+	//
+	// A failure is recorded and not printed here. combineInstanceErrors names
+	// every failing instance in the returned error, which Execute prints once;
+	// printing here as well rendered the same multi-line message twice under
+	// two different prefixes.
 	var applyErrors []instanceError
 	for _, instanceRoot := range scope.Instances {
 		if applyErr := applier.Apply(cmd.Context(), cfg, configDir, instanceRoot); applyErr != nil {
@@ -221,7 +266,6 @@ func runApply(cmd *cobra.Command, args []string) error {
 				instance: instanceRoot,
 				err:      applyErr,
 			})
-			fmt.Fprintf(os.Stderr, "error: applying to %s: %v\n", instanceRoot, applyErr)
 			// Skip an instance that failed to converge.
 			continue
 		}
@@ -259,10 +303,12 @@ func runApplyWorktreeScope(cmd *cobra.Command, scope *workspace.ApplyScope) erro
 		return err
 	}
 
-	written, err := applyContentToWorktree(target.InstanceRoot, target.WorktreePath, state.Repo, state.Purpose, state.EffectiveBranchName())
+	var setup workspace.SetupResult
+	written, err := applyContentToWorktree(target.InstanceRoot, target.WorktreePath, state.Repo, state.Purpose, state.EffectiveBranchName(), &setup, cmd.ErrOrStderr())
 	if err != nil {
 		return fmt.Errorf("re-syncing content into worktree %s: %w", target.WorktreePath, err)
 	}
+	reportWorktreeSetup(cmd.ErrOrStderr(), target.WorktreePath, &setup)
 
 	fmt.Fprintf(cmd.OutOrStdout(), "apply: converged worktree at %s\n", target.WorktreePath)
 	printWorktreeContentFiles(cmd, written)
@@ -314,6 +360,18 @@ func resolveRegistryScope(name string) (*workspace.ApplyScope, error) {
 	// in a child subdirectory). EnumerateInstances only scans children, so
 	// it returns empty for this layout. Fall back to treating workspaceRoot
 	// as the sole instance.
+	//
+	// This deliberately does NOT use workspace.IsSingleInstanceLayout, which
+	// additionally requires a named instance. That helper answers the worktree
+	// commands' question -- "may I create and destroy worktrees in this root?"
+	// -- where a freshly initialized root must say no, or worktrees land inside
+	// the config directory a refresh rotates. Apply's question is different:
+	// "is the root the thing I should apply to?", and for a root with state and
+	// no children the answer is yes precisely when it is freshly initialized.
+	// That is the bootstrap case -- `niwa init` then `niwa apply <name>` --
+	// where instance_name has not been written yet and the per-instance
+	// pipeline still has to run the lazy snapshot conversion and the posture
+	// write. Sharing the stricter predicate here silently skipped both.
 	singleInstanceLayout := false
 	if len(instances) == 0 {
 		if _, statErr := os.Stat(filepath.Join(workspaceRoot, workspace.StateDir, workspace.StateFile)); statErr == nil {

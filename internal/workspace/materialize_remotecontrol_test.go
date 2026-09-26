@@ -9,14 +9,14 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
-// TestInstallWorkspaceRootSettings_NoRemoteControlByDefault is the AC2 guard: the
+// TestRootSettingsMaterializer_NoRemoteControlByDefault is the AC2 guard: the
 // materializer that the interactive, ephemeral SessionStart-hook, and `niwa apply`
 // paths use never emits remoteControlAtStartup on its own. The host dispatch
 // preference is not an input to materialization, so it cannot leak into a
 // non-dispatch session -- only an explicit [claude.settings] value produces the key.
 // A future regression wiring the host preference into the materializer would make
 // this fail.
-func TestInstallWorkspaceRootSettings_NoRemoteControlByDefault(t *testing.T) {
+func TestRootSettingsMaterializer_NoRemoteControlByDefault(t *testing.T) {
 	tmp := t.TempDir()
 	configDir := filepath.Join(tmp, ".niwa")
 	instanceRoot := filepath.Join(tmp, "instance")
@@ -27,8 +27,8 @@ func TestInstallWorkspaceRootSettings_NoRemoteControlByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &config.WorkspaceConfig{Workspace: config.WorkspaceMeta{Name: "ws"}}
-	if _, err := InstallWorkspaceRootSettings(cfg, configDir, instanceRoot, map[string]string{}); err != nil {
-		t.Fatalf("InstallWorkspaceRootSettings: %v", err)
+	if _, err := (&RootSettingsMaterializer{}).Materialize(&MaterializeContext{Config: cfg, ConfigDir: configDir, RepoDir: instanceRoot, RepoIndex: map[string]string{}}); err != nil {
+		t.Fatalf("RootSettingsMaterializer: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(instanceRoot, ".claude", "settings.json"))
 	if err != nil {

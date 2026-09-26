@@ -52,6 +52,7 @@ func init() {
 	initCmd.Flags().BoolVar(&initNoInstallPlugins, "no-install-plugins", false, "skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected)")
 	initCmd.Flags().BoolVar(&initBootstrap, "bootstrap", false, "when the source repo has no .niwa/workspace.toml, scaffold a minimal config and stage it on a niwa-bootstrap branch")
 	initCmd.Flags().BoolVar(&initNoBootstrap, "no-bootstrap", false, "explicitly decline bootstrap; equivalent to answering N at the R13 prompt (mutually exclusive with --bootstrap)")
+	registerStrictSecretsFlag(initCmd, &strictSecretsInit)
 	initCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
@@ -174,7 +175,9 @@ func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot,
 	// Step 4: build the applier and wire seam closures for RunBootstrap.
 	applier := workspace.NewApplier(gh)
 	applier.Reporter = workspace.NewReporter(cmd.ErrOrStderr())
+	configureDeveloperHome(applier)
 	applier.ConfigSourceURL = source
+	defer wireKeyReport(applier, cmd.ErrOrStderr())()
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
 		if gDir, dErr := config.GlobalConfigDir(); dErr == nil {
 			applier.GlobalConfigDir = gDir
@@ -189,6 +192,10 @@ func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot,
 		if loadErr != nil {
 			return "", loadErr
 		}
+		// The scaffold this reads was written moments ago at Step 2, so the
+		// setting is resolved here rather than at Step 4: before the scaffold
+		// exists there is no [workspace] table to read it from.
+		applier.StrictSecrets = strictSecretsFor(cmd, strictSecretsInit, result.Config)
 		return applier.Create(ctx, result.Config, configDir, wsRoot, instName)
 	}
 
@@ -692,8 +699,17 @@ func runInit(cmd *cobra.Command, args []string) error {
 			// invokes Claude Code. SkipInstall ORs the per-invocation
 			// --no-install-plugins flag with the persistent
 			// auto_install_plugins = false global-config setting (PRD R19).
+			// The developer home arrives as data now, so it is resolved
+			// here rather than inside the installer, and the notice the
+			// installer used to emit is emitted here too. An
+			// unresolvable home comes back as an error, which this path
+			// treats the way it always has: the plugin is not installed
+			// and the init carries on regardless.
 			skipInstall := initNoInstallPlugins || globalCfg.SkipPluginInstall()
-			plugin.Install(nil, reporter, plugin.InstallOpts{SkipInstall: skipInstall})
+			home, _ := os.UserHomeDir()
+			if action, installErr := plugin.Install(home, plugin.InstallOpts{SkipInstall: skipInstall}); installErr == nil {
+				workspace.EmitPluginInstallNotice(action, reporter)
+			}
 		}
 	}
 

@@ -544,3 +544,135 @@ func TestRunBootstrap_CommitFails_RollsBackSession(t *testing.T) {
 		t.Errorf("scaffold removed on commit failure: %v", statErr)
 	}
 }
+
+// seedBootstrapSessionRecord writes a session state JSON of the shape
+// DefaultDestroySession parses, alongside a repo directory the rollback's repo
+// lookup can find, and returns the session ID. The worktree path must keep the
+// <instanceRoot>/.niwa/worktrees/<repo>-<sid> shape CreateSession produces
+// unless the test is deliberately crafting a record that does not.
+func seedBootstrapSessionRecord(t *testing.T, instanceRoot, worktreePath, branchName string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(instanceRoot, "public", "niwa", ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(worktreePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sid := "abcd1234"
+	record := map[string]any{
+		"v":             1,
+		"session_id":    sid,
+		"repo":          "niwa",
+		"purpose":       "bootstrap",
+		"status":        "active",
+		"creation_time": "2026-01-01T00:00:00Z",
+		"worktree_path": worktreePath,
+		"branch_name":   branchName,
+		"creator_pid":   os.Getpid(),
+	}
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, sid+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return sid
+}
+
+// TestDefaultDestroySession_RefusesCraftedRecord covers the bootstrap
+// rollback's copy of the teardown argv: a record whose worktree path is
+// outside the instance, or whose branch name git would read as an option or
+// resolve to a different branch, is refused before either git call. The state
+// file is left on disk because it is the only remaining record of a worktree
+// this rollback will not touch.
+func TestDefaultDestroySession_RefusesCraftedRecord(t *testing.T) {
+	cases := []struct {
+		name         string
+		worktreePath func(instanceRoot string) string
+		branchName   string
+	}{
+		{
+			name:         "worktree_path_outside_instance",
+			worktreePath: func(string) string { return t.TempDir() },
+			branchName:   "niwa-bootstrap/abcd1234",
+		},
+		{
+			name: "worktree_path_escapes_via_dotdot",
+			worktreePath: func(instanceRoot string) string {
+				return filepath.Join(instanceRoot, ".niwa", "worktrees", "..", "..", "public", "niwa")
+			},
+			branchName: "niwa-bootstrap/abcd1234",
+		},
+		{
+			name: "branch_name_reads_as_option",
+			worktreePath: func(instanceRoot string) string {
+				return filepath.Join(instanceRoot, ".niwa", "worktrees", "niwa-abcd1234")
+			},
+			branchName: "--upload-pack=/tmp/x",
+		},
+		{
+			name: "branch_name_resolves_to_previous_branch",
+			worktreePath: func(instanceRoot string) string {
+				return filepath.Join(instanceRoot, ".niwa", "worktrees", "niwa-abcd1234")
+			},
+			branchName: "@{-1}",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			instanceRoot := t.TempDir()
+			sid := seedBootstrapSessionRecord(t, instanceRoot, tc.worktreePath(instanceRoot), tc.branchName)
+
+			rec := &recordingGitInvoker{}
+			if err := DefaultDestroySession(context.Background(), instanceRoot, sid, rec); err == nil {
+				t.Fatal("crafted record was accepted")
+			}
+			if invs, _ := rec.snapshot(); len(invs) != 0 {
+				t.Errorf("git ran despite the refusal: %v", invs)
+			}
+			statePath := filepath.Join(instanceRoot, ".niwa", "sessions", sid+".json")
+			if _, statErr := os.Stat(statePath); statErr != nil {
+				t.Errorf("session state removed on a refusal: %v", statErr)
+			}
+		})
+	}
+}
+
+// TestDefaultDestroySession_ValidRecord asserts the rollback still tears down
+// a record the bootstrap itself wrote, and that the branch name reaches git
+// after the end-of-options marker.
+func TestDefaultDestroySession_ValidRecord(t *testing.T) {
+	instanceRoot := t.TempDir()
+	wt := filepath.Join(instanceRoot, ".niwa", "worktrees", "niwa-abcd1234")
+	sid := seedBootstrapSessionRecord(t, instanceRoot, wt, "niwa-bootstrap/abcd1234")
+
+	rec := &recordingGitInvoker{}
+	if err := DefaultDestroySession(context.Background(), instanceRoot, sid, rec); err != nil {
+		t.Fatalf("DefaultDestroySession: %v", err)
+	}
+
+	invs, _ := rec.snapshot()
+	var sawBranch bool
+	for _, inv := range invs {
+		args := inv.Args
+		if len(args) < 2 || args[len(args)-1] != "niwa-bootstrap/abcd1234" {
+			continue
+		}
+		sawBranch = true
+		if args[len(args)-2] != "--" {
+			t.Errorf("branch argv does not pass the name after --: %v", args)
+		}
+	}
+	if !sawBranch {
+		t.Errorf("no branch delete call recorded: %v", invs)
+	}
+	statePath := filepath.Join(instanceRoot, ".niwa", "sessions", sid+".json")
+	if _, statErr := os.Stat(statePath); !os.IsNotExist(statErr) {
+		t.Errorf("session state survived a successful rollback: stat err = %v", statErr)
+	}
+}
