@@ -1,0 +1,521 @@
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+
+	"github.com/spf13/cobra"
+	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/keyreport"
+	"github.com/tsukumogami/niwa/internal/workspace"
+)
+
+func init() {
+	rootCmd.AddCommand(instanceCmd)
+	instanceCmd.AddCommand(instanceFromHookCmd)
+}
+
+// instanceCmd is the parent of `niwa instance ...`. It hosts the
+// workspace-root Claude Code session hook entry point (`from-hook`). It is
+// deliberately DISTINCT from the per-repo worktree hook (`niwa worktree
+// from-hook`, internal/cli/session_from_hook_cmd.go): that command operates at
+// the worktree level on WorktreeCreate/WorktreeRemove events, while this one
+// operates at the instance level on Claude SessionStart/SessionEnd events. The
+// two share nothing but the `from-hook` suffix convention. See DESIGN
+// Decision 2 (naming -- avoid the "session" collision).
+var instanceCmd = &cobra.Command{
+	Use:    "instance",
+	Short:  "Instance-level operations (Claude Code session hook entry point)",
+	Hidden: true,
+}
+
+// instanceFromHookCmd is the thin entry Claude Code invokes as the
+// workspace-root SessionStart/SessionEnd hook command (an absolute-path
+// `niwa instance from-hook`, piping the hook JSON on stdin). It reads the
+// payload, validates session_id, and dispatches on hook_event_name to the
+// provisioning (SessionStart) or teardown (SessionEnd) path.
+var instanceFromHookCmd = &cobra.Command{
+	Use:    "from-hook",
+	Short:  "Internal: dispatch a Claude Code session hook (reads JSON on stdin)",
+	Hidden: true,
+	Long: `Internal entry point invoked directly by Claude Code's workspace-root
+SessionStart/SessionEnd hooks.
+
+Reads the Claude hook JSON payload on stdin and dispatches on
+hook_event_name. Not intended for direct human use; the hook command is an
+absolute-path "niwa instance from-hook" written into the workspace-root
+.claude/settings.json by niwa.`,
+	Args:          cobra.NoArgs,
+	SilenceErrors: true,
+	SilenceUsage:  true,
+	RunE:          runInstanceFromHook,
+}
+
+// instanceHookPayload is the subset of the Claude Code SessionStart/SessionEnd
+// hook JSON this command reads. Absent fields decode to their zero value.
+type instanceHookPayload struct {
+	HookEventName  string `json:"hook_event_name"`
+	SessionID      string `json:"session_id"`
+	Cwd            string `json:"cwd"`
+	TranscriptPath string `json:"transcript_path"`
+	Source         string `json:"source"`
+}
+
+const (
+	hookEventSessionStart = "SessionStart"
+	hookEventSessionEnd   = "SessionEnd"
+
+	// bgJobTemplate is the job-state `template` value Claude Code records for a
+	// dispatched background worker. An interactive/foreground session carries
+	// "claude". This is the confirmed coordinator-vs-worker discriminator (see
+	// DESIGN Decision 3).
+	bgJobTemplate = "bg"
+
+	// sessionNamePrefixLen is how many leading hex characters of the session
+	// UUID are used as the `--name` suffix for the provisioned instance. A
+	// UUID prefix is filesystem-safe; 12 chars keeps collisions negligible
+	// while sidestepping the NextInstanceNumber race an unnamed concurrent
+	// create would hit (DESIGN Decision 5).
+	sessionNamePrefixLen = 12
+)
+
+// provisionResult carries the outcome of a successful instance provision: the
+// instance directory name and its absolute path. It mirrors the machine
+// surface of `niwa create --json` ({name, path}), which the real provisioner
+// reuses.
+type provisionResult struct {
+	Name string
+	Path string
+
+	// Keys are the declared keys the provisioning run could not supply. On the
+	// hook path they must travel inside the injected context: the hook's stderr
+	// is discarded rather than shown to the agent, and a hook that exits
+	// non-zero emits no structured output at all, so a report written anywhere
+	// else on a partial provision reaches nobody.
+	Keys []keyreport.Entry
+}
+
+// provisionInstanceFunc provisions an ephemeral instance for the given session
+// under workspaceRoot, naming it from namePrefix (the `--name` suffix) joined
+// to the config name with sep. The hook path passes "-" (so the hook-created
+// name stays byte-identical to before); the dispatch path passes "+" when a
+// user slug is present so the config|slug boundary is unambiguous. It returns
+// the created instance's name and absolute path. It is a package variable so
+// tests can substitute a fake provisioner that does no clone, exercising the
+// guard + mapping + injection logic in isolation.
+//
+// cloneWorkers overrides clone concurrency: `niwa dispatch --parallel` passes
+// its flag value, while the SessionStart hook, watch, and reap paths pass 0,
+// meaning "use the [global] clone_workers config, else the built-in default".
+// It is a parameter rather than package state because concurrent dispatches
+// share the process and would otherwise overwrite each other's setting.
+var provisionInstanceFunc = realProvisionInstance
+
+// destroyInstanceFunc force-destroys the instance at instancePath. It is a
+// package variable so SessionEnd teardown tests can substitute a fake that
+// records the call without touching the filesystem.
+var destroyInstanceFunc = realDestroyInstance
+
+func runInstanceFromHook(cmd *cobra.Command, _ []string) error {
+	raw, err := io.ReadAll(cmd.InOrStdin())
+	if err != nil {
+		return fmt.Errorf("niwa: error: reading hook payload from stdin: %w", err)
+	}
+
+	var payload instanceHookPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return fmt.Errorf("niwa: error: parsing hook payload JSON: %w", err)
+	}
+
+	switch payload.HookEventName {
+	case hookEventSessionStart:
+		return runInstanceHookStart(cmd, payload, defaultJobsDir())
+	case hookEventSessionEnd:
+		return runInstanceHookEnd(cmd, payload)
+	default:
+		// Unknown event: no-op exit 0. Unlike the worktree create hook, neither
+		// session event blocks the session, so an unrecognized event is not a
+		// hard error -- it is simply not ours to handle.
+		return nil
+	}
+}
+
+// runInstanceHookStart handles a SessionStart hook. It applies the three-part
+// guard (DESIGN Decision 3); on passing it provisions an ephemeral instance,
+// writes the session->instance mapping, and emits the additionalContext
+// injection JSON on stdout. If any guard fails it is a clean no-op (exit 0, no
+// output), so ordinary sessions are untouched.
+//
+// jobsDir is injected (rather than read from the environment) so the guard's
+// job-state read is unit-testable against a fixture jobs tree.
+func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsDir string) error {
+	// session_id flows from untrusted hook stdin into a path component and the
+	// instance name. Reject anything that is not a canonical UUID before use.
+	if !workspace.ValidSessionID(payload.SessionID) {
+		return nil
+	}
+
+	// The hook's cwd is the launch root (the workspace root for a dispatched
+	// session). Resolve the workspace root from it; if it does not resolve to a
+	// workspace, this is not a session we provision for.
+	workspaceRoot, ok := resolveHookWorkspaceRoot(payload.Cwd)
+	if !ok {
+		return nil
+	}
+
+	if !sessionStartGuardPasses(workspaceRoot, payload.Cwd, payload.SessionID, jobsDir) {
+		return nil
+	}
+
+	namePrefix := payload.SessionID[:sessionNamePrefixLen]
+	// The hook joins the session-hex suffix with "-" so the provisioned name
+	// stays "<config>-<sessionhex>", byte-identical to the pre-"+"-separator
+	// behavior. "+" is reserved for user-supplied dispatch slugs.
+	// cloneWorkers is 0 here: the hook path takes the [global] clone_workers
+	// config or the built-in default, the same as before this call gained the
+	// parameter.
+	res, err := provisionInstanceFunc(cmd.Context(), workspaceRoot, payload.Cwd, namePrefix, "-", 0)
+	if errors.Is(err, workspace.ErrStrictSecrets) {
+		// A strict refusal is the workspace working as configured, and the
+		// guarantee it buys -- no instance materializes holding a shortfall --
+		// is already upheld by Create, which removed the directory before
+		// returning. What is left to decide is only who hears about it, and a
+		// non-zero exit answers "nobody": this hook returns before it writes
+		// stdout, so a failing exit emits no payload at all and the session
+		// starts anyway, with the agent working at the root and no idea why it
+		// has no instance. That is the silence R14 exists to prevent, so the
+		// strict path takes the same delivery route as the partial one: emit
+		// the report as context, exit 0. No mapping is written, because there
+		// is no instance to map to. Every other provisioning failure is still
+		// a failure and still exits non-zero.
+		out, buildErr := buildStrictFailureInjection(res.Keys)
+		if buildErr != nil {
+			return fmt.Errorf("niwa: error: assembling session context: %w", buildErr)
+		}
+		if _, wErr := cmd.OutOrStdout().Write(out); wErr != nil {
+			return fmt.Errorf("niwa: error: writing session context: %w", wErr)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("niwa: error: provisioning instance for session %s: %w", payload.SessionID, err)
+	}
+
+	mapping := workspace.SessionMapping{
+		SessionID:      payload.SessionID,
+		InstanceName:   res.Name,
+		InstancePath:   res.Path,
+		TranscriptPath: payload.TranscriptPath,
+		Ephemeral:      true,
+	}
+	if err := workspace.WriteSessionMapping(workspaceRoot, mapping); err != nil {
+		return fmt.Errorf("niwa: error: writing session mapping for %s: %w", payload.SessionID, err)
+	}
+
+	out, err := buildSessionStartInjection(res.Path, res.Keys)
+	if err != nil {
+		return fmt.Errorf("niwa: error: assembling session context: %w", err)
+	}
+	if _, err := cmd.OutOrStdout().Write(out); err != nil {
+		return fmt.Errorf("niwa: error: writing session context: %w", err)
+	}
+	return nil
+}
+
+// runInstanceHookEnd handles a SessionEnd hook. It is a deliberate NO-OP: it
+// never destroys an instance and never deletes a mapping (DESIGN Decision 6,
+// revised -- delete-only teardown).
+//
+// SessionEnd is NOT a deletion signal. Claude Code fires it on idle-suspend
+// (`reason: resume`), `/clear`, logout, and similar -- none of which mean the
+// session was deleted from the Agent View. A session that finishes a task or
+// goes idle is still listed and resumable, and tearing its instance down here
+// (as the original code did) reclaimed instances while their sessions were
+// still alive. Teardown therefore lives entirely in the reaper, which keys on
+// the session's job entry disappearing (the proxy for an explicit delete); this
+// handler does nothing.
+//
+// The case is left wired in runInstanceFromHook's dispatch as defense in depth:
+// a workspace whose settings.json was materialized before this change still
+// carries a SessionEnd hook entry until it re-applies, and this no-op guarantees
+// that stale entry cannot destroy anything. The path always exits 0.
+func runInstanceHookEnd(cmd *cobra.Command, payload instanceHookPayload) error {
+	// Intentionally a no-op: never resolve a mapping, never destroy, never
+	// delete. The reaper is the single teardown path.
+	_ = cmd
+	_ = payload
+	return nil
+}
+
+// sessionStartGuardPasses evaluates the three-part SessionStart guard (DESIGN
+// Decision 3). All three must hold for provisioning to proceed:
+//
+//  1. The workspace root is in ephemeral-session mode (the opt-in master
+//     switch, default off).
+//  2. The session is a dispatched background worker: its job state at
+//     <jobsDir>/<session-id-prefix>/state.json exists, its sessionId confirms
+//     the match, and its template == "bg". CLAUDE_JOB_DIR is intentionally NOT
+//     consulted -- it is not reliably set.
+//  3. Re-entrancy: the launch cwd does not already resolve inside a niwa
+//     instance (a worker that dispatches sub-sessions must not nest).
+func sessionStartGuardPasses(workspaceRoot, cwd, sessionID, jobsDir string) bool {
+	// (1) Master switch.
+	if !workspace.EphemeralSessionMode(workspaceRoot) {
+		return false
+	}
+
+	// (2) Background-job detection.
+	if !isBackgroundWorker(jobsDir, sessionID) {
+		return false
+	}
+
+	// (3) Re-entrancy: already inside a genuine instance -> no-op. The
+	// discovered dir must be a real instance, not the workspace root, which
+	// also carries a .niwa/instance.json (the root state file holding the
+	// ephemeral-mode flag). ValidateInstanceDir rejects a workspace root (it
+	// also carries .niwa/workspace.toml), so it is the discriminator between
+	// "inside an instance" and "at the workspace root that merely has root
+	// state".
+	if dir, err := workspace.DiscoverInstance(cwd); err == nil {
+		if workspace.ValidateInstanceDir(dir) == nil {
+			return false
+		}
+	}
+
+	return true
+}
+
+// isBackgroundWorker reports whether sessionID is a dispatched background
+// worker by reading its Claude Code job state. The job dir is named by the
+// session-id prefix; the full sessionId inside state.json must confirm the
+// match before the template is trusted. Any read/parse failure, a sessionId
+// mismatch, or template != "bg" yields false (fail safe). An empty jobsDir
+// (HOME unresolved) yields false.
+func isBackgroundWorker(jobsDir, sessionID string) bool {
+	if jobsDir == "" {
+		return false
+	}
+	js, ok := readJobState(jobsDir, sessionID)
+	if !ok {
+		return false
+	}
+	// The dir is keyed by the session-id prefix, so confirm the full id inside
+	// matches before trusting the template -- a colliding prefix must not be
+	// mistaken for this session.
+	if js.SessionID != "" && js.SessionID != sessionID {
+		return false
+	}
+	return js.Template == bgJobTemplate
+}
+
+// sessionStartInjection is the SessionStart hook output shape Claude Code
+// consumes: hookSpecificOutput.additionalContext is injected into the
+// session's context.
+type sessionStartInjection struct {
+	HookSpecificOutput struct {
+		HookEventName     string `json:"hookEventName"`
+		AdditionalContext string `json:"additionalContext"`
+	} `json:"hookSpecificOutput"`
+}
+
+// buildSessionStartInjection assembles the SessionStart hook JSON carrying the
+// additionalContext payload: the instance path, the key report when the
+// provision was partial, the instance's CLAUDE.md content (so the agent
+// operates under the instance's guidance without a re-root), and an explicit
+// instruction to cd into the instance before any work (DESIGN Decision 4). A
+// missing instance CLAUDE.md is tolerated (the path + cd instruction still
+// inject); only the instance path is load-bearing.
+//
+// The key report goes above the CLAUDE.md content because it describes the
+// state of the instance the agent is about to work in, and below the cd
+// instruction because that instruction is what makes the instance reachable at
+// all. It is placed here rather than emitted as a warning because this JSON is
+// the only channel from this process that reaches the session.
+func buildSessionStartInjection(instancePath string, keys []keyreport.Entry) ([]byte, error) {
+	claudeMD := ""
+	if data, err := os.ReadFile(filepath.Join(instancePath, "CLAUDE.md")); err == nil {
+		claudeMD = string(data)
+	}
+
+	var b []byte
+	b = append(b, "A dedicated niwa instance has been provisioned for this session at:\n\n  "...)
+	b = append(b, instancePath...)
+	b = append(b, "\n\nBefore doing any work, run this first so all tools operate inside the instance:\n\n  cd "...)
+	b = append(b, instancePath...)
+	b = append(b, "\n\n"...)
+	if report := keyreport.RenderContext(keys); report != "" {
+		b = append(b, report...)
+		b = append(b, '\n')
+	}
+	if claudeMD != "" {
+		b = append(b, "The instance's CLAUDE.md follows; treat it as the authoritative guidance for this session:\n\n"...)
+		b = append(b, claudeMD...)
+	}
+
+	var inj sessionStartInjection
+	inj.HookSpecificOutput.HookEventName = hookEventSessionStart
+	inj.HookSpecificOutput.AdditionalContext = string(b)
+
+	encoded, err := json.Marshal(inj)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling session start injection: %w", err)
+	}
+	return append(encoded, '\n'), nil
+}
+
+// buildStrictFailureInjection assembles the SessionStart hook JSON for a
+// provision strict mode refused. It carries no instance path, because no
+// instance exists: the agent is told it is working without one, given the keys
+// that caused the refusal, and told to stop rather than improvise.
+//
+// It is a separate builder rather than a flag on buildSessionStartInjection
+// because almost nothing is shared. That function's payload is a cd
+// instruction and the instance's CLAUDE.md, and both would be wrong here.
+func buildStrictFailureInjection(keys []keyreport.Entry) ([]byte, error) {
+	const lead = "No niwa instance was provisioned for this session. The workspace runs with strict " +
+		"secret resolution, which refuses to create an instance missing any environment key it declares. " +
+		"You are working at the launch directory with no instance: report this and stop, rather than " +
+		"creating one by hand."
+
+	var b []byte
+	if report := keyreport.RenderContextLead(lead, keys); report != "" {
+		b = append(b, report...)
+	} else {
+		b = append(b, lead...)
+		b = append(b, '\n')
+	}
+
+	var inj sessionStartInjection
+	inj.HookSpecificOutput.HookEventName = hookEventSessionStart
+	inj.HookSpecificOutput.AdditionalContext = string(b)
+
+	encoded, err := json.Marshal(inj)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling strict failure injection: %w", err)
+	}
+	return append(encoded, '\n'), nil
+}
+
+// resolveHookWorkspaceRoot resolves the workspace root from the hook's
+// reported cwd (the launch root). It returns ok=false when cwd is empty or
+// does not classify to a workspace root, so the caller no-ops rather than
+// guessing a root.
+func resolveHookWorkspaceRoot(cwd string) (string, bool) {
+	if cwd == "" {
+		return "", false
+	}
+	class, err := workspace.ClassifyCwd(cwd)
+	if err != nil {
+		return "", false
+	}
+	if class.WorkspaceRoot == "" {
+		return "", false
+	}
+	return class.WorkspaceRoot, true
+}
+
+// realProvisionInstance is the production provisioner: it reuses the same
+// applier.Create path `niwa create --json --name <prefix>` drives, cloning an
+// instance under workspaceRoot named <config><sep><prefix>. sep is "-" for the
+// hook path and "+" for a user-supplied dispatch slug. It is wired into
+// provisionInstanceFunc; tests override that variable to avoid a real clone.
+func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, sep string, cloneWorkers int) (provisionResult, error) {
+	configPath, configDir, err := config.Discover(cwd)
+	if err != nil {
+		return provisionResult{}, fmt.Errorf("discovering workspace config from %q: %w", cwd, err)
+	}
+
+	result, err := config.Load(configPath)
+	if err != nil {
+		return provisionResult{}, err
+	}
+
+	token := resolveGitHubToken()
+	gh := github.NewAPIClient(token)
+
+	applier := workspace.NewApplier(gh)
+	applier.Reporter = workspace.NewReporter(os.Stderr)
+	configureDeveloperHome(applier)
+	// Collected rather than rendered: this path has no terminal. The caller
+	// decides where the report goes — into the hook's injected context, or onto
+	// dispatch's stderr.
+	keys := keyreport.New()
+	applier.Keys = keys
+
+	// Reconcile before the config drives materialization (issue #227). Every
+	// dispatched session's instance comes up through here, once, with no apply
+	// behind it to correct a stale read.
+	result, err = workspace.ReconcileAndReloadConfig(ctx, configPath, gh, applier.Reporter, result)
+	if err != nil {
+		return provisionResult{}, err
+	}
+	// No result.Warnings loop here, unlike apply/create/reset: this runs from a
+	// Claude hook whose stdout is a protocol, not a terminal someone is reading.
+	cfg := result.Config
+
+	configName, err := resolveEffectiveWorkspaceName(workspaceRoot, cfg)
+	if err != nil {
+		return provisionResult{}, err
+	}
+
+	instanceName, err := computeInstanceName(configName, namePrefix, sep, workspaceRoot)
+	if err != nil {
+		return provisionResult{}, err
+	}
+
+	configurePluginAutoInstall(applier, false)
+	// cloneWorkers comes from `niwa dispatch --parallel`; the hook, watch, and
+	// reap callers pass 0 (auto). It wins over clone_workers when > 0.
+	applier.CloneWorkers = cloneWorkers
+
+	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
+		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
+			applier.GlobalConfigDir = gDir
+		}
+		if cloneWorkers <= 0 {
+			applier.CloneWorkers = globalCfg.CloneWorkers()
+		}
+		if entry := globalCfg.LookupWorkspace(configName); entry != nil {
+			applier.ConfigSourceURL = entry.SourceURL
+		}
+	}
+
+	// This launch-coupled provisioning path (the Claude SessionStart hook,
+	// `niwa dispatch`, and `niwa watch`) launches a Claude worker into the
+	// instance, and it no longer has to say so: the instance is prepared for
+	// every agent, so the Claude worker finds what it reads whatever else is
+	// also there. Which agents can be launched into it is a separate question,
+	// answered by the launch path's own declaration lookup.
+	// This path has no command line, which is exactly why strict mode is a
+	// workspace setting: `niwa dispatch`, the SessionStart hook, `niwa watch`
+	// and the reaper all provision through here and all read it with no flag.
+	// cfg is the reconciled config loaded above, so nothing further is needed
+	// to make the setting reach them.
+	applier.StrictSecrets = strictSecretsFor(nil, false, cfg)
+	instancePath, err := applier.Create(ctx, cfg, configDir, workspaceRoot, instanceName)
+	if err != nil {
+		// The keys collected before the failure travel with it. A strict
+		// refusal is the one failure whose explanation is the report, and the
+		// hook caller cannot read it off disk: Create removed the instance.
+		return provisionResult{Keys: keys.Report()}, err
+	}
+
+	return provisionResult{Name: instanceName, Path: instancePath, Keys: keys.Report()}, nil
+}
+
+// realDestroyInstance is the production teardown: it force-destroys the
+// instance directory, equivalent to `niwa destroy --force <instance>`. It
+// validates the directory is a destroyable instance (not a workspace root)
+// first. It is wired into destroyInstanceFunc; tests override that variable.
+func realDestroyInstance(instancePath string) error {
+	if err := workspace.ValidateInstanceDir(instancePath); err != nil {
+		return err
+	}
+	return workspace.DestroyInstance(instancePath)
+}

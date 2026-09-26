@@ -28,6 +28,11 @@ type DestroyWorkspaceOpts struct {
 	// ProgressOut, if set, receives a final "Destroyed workspace: <path>"
 	// line on success. Defaults to nil (silent).
 	ProgressOut io.Writer
+
+	// PluginRecordBaseDir overrides the home directory used to locate Claude
+	// Code's plugin registry when pruning instance-owned records. Empty means
+	// the real ~/.claude. It exists for tests.
+	PluginRecordBaseDir string
 }
 
 // DestroyWorkspace wipes the entire workspace at workspaceRoot. The
@@ -81,6 +86,11 @@ func DestroyWorkspace(workspaceRoot string, opts DestroyWorkspaceOpts) error {
 			return fmt.Errorf("validating instance %s: %w",
 				filepath.Base(instanceDir), err)
 		}
+
+		// Prune the records this instance owns before removing it, so the
+		// instance-owned predicate matches against a path that still exists.
+		// Fail-safe: registry trouble never blocks the wipe.
+		prunePluginRecords(instanceDir, opts.Reporter, opts.PluginRecordBaseDir)
 
 		if err := os.RemoveAll(instanceDir); err != nil {
 			return fmt.Errorf("removing instance %s: %w",

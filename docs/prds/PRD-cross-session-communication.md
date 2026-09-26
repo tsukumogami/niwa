@@ -1,5 +1,6 @@
 ---
-status: Delivered
+schema: prd/v1
+status: Done
 problem: |
   Developers use niwa to manage multi-repo workspaces where work often needs to
   be delegated across repos from one coordinating Claude session. The existing
@@ -29,7 +30,7 @@ goals: |
 
 ## Status
 
-Delivered
+Done
 
 Superseded: the cross-session communication substrate this PRD specified
 (per-role inboxes, the task-delegation state machine, niwa_ask) was removed by

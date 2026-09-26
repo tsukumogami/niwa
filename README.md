@@ -15,6 +15,7 @@ has properly scoped context in every repo from the first session. It handles:
 - **Per-repo overrides** -- custom settings, hooks, and env per repo
 - **Overlay layer** -- companion repos that layer additional repos, groups, and Claude context onto the base config; auto-synced on every apply
 - **Multi-instance** -- run multiple workspace instances from the same config
+- **Both agents** -- every apply prepares Claude Code and Codex alike, with no agent flag on create or apply; you pick which one a launched session runs as per command (`niwa dispatch --harness`), per shell (`NIWA_DISPATCH_HARNESS`), per workspace (`[workspace].default_agent`), or per machine (`niwa config set default-dispatch-harness`), and none of it changes what apply prepares. See `docs/guides/codex-agent.md` for those settings, and for what a Codex session gets and what it doesn't
 
 ## Quick start
 
@@ -81,15 +82,39 @@ Create content files in `.niwa/claude/` that become CLAUDE.md files in your work
 Reference them in the config:
 
 ```toml
-[claude.content.workspace]
+[content.workspace]
 source = "workspace.md"
 
-[claude.content.groups.public]
+[content.groups.public]
 source = "public.md"
 ```
 
-The top-level `[content]` key is a deprecated alias for `[claude.content]`
-and still parses cleanly (with a warning) until niwa v1.0.
+`[content]` is agent-neutral: the same declared sources reach every agent
+niwa prepares the workspace for, each under that agent's own filename
+(`CLAUDE.md` and `CLAUDE.local.md` for Claude Code, `AGENTS.md` and
+`AGENTS.override.md` for Codex).
+
+`[claude.content]` is a deprecated alias for it and still parses cleanly,
+with a warning, until niwa v1.0. This reverses the v0.7 move that put
+`[content]` under `[claude]`: that move was made because every consumer
+wrote a `CLAUDE.md`-shaped destination, which stopped being true once a
+second agent read the same content. A workspace already on `[content]`
+needs no change and simply stops being warned at; a workspace on
+`[claude.content]` keeps working and can move the table name at its
+convenience. Setting both is an error.
+
+Each agent's delivery has its own switch, and neither reaches the other:
+
+```toml
+[repos.my-repo.claude]
+enabled = false            # skip Claude Code delivery for this repo
+
+[codex]
+enabled = false            # skip Codex delivery workspace-wide
+```
+
+Both default to enabled, both are accepted at the workspace level and on a
+per-repo override, and the per-repo value wins.
 
 ### 5. Create an instance
 
@@ -127,6 +152,7 @@ When `<name>` is already registered to a different directory, `niwa init` refuse
 | `niwa status [instance]` | Show workspace health: repos, drift, last applied |
 | `niwa reset [instance] [--force]` | Tear down and recreate an instance |
 | `niwa destroy [instance] [--force]` | Permanently remove an instance; when `[channels.mesh]` is configured, SIGKILLs running workers first, then stops the mesh watch daemon with a grace window |
+| `niwa dispatch ["<task>"] [--name <slug>] [--model <model>] [--harness <agent>] [--detach]` | Launch a background worker for `<task>` in its own ephemeral instance (Claude Code or Codex; `--harness` picks for one command, and `NIWA_DISPATCH_HARNESS`, `[workspace].default_agent`, and `niwa config set default-dispatch-harness` pick standing -- see `docs/guides/codex-agent.md`). The task is optional: with no argument on a terminal, dispatch opens an interactive capture so you can paste an error straight in (Enter dispatches, Ctrl-J inserts a newline, Ctrl-C cancels). `--model` picks the worker's main-loop model: a capability category (`fast`/`balanced`/`powerful`) or a versionless vendor name (`fable`/`sonnet`/`opus`/`haiku`); set a `dispatch_model` default in `~/.config/niwa/config.toml` `[global]` to apply it to every dispatch. Set `remote_control_on_dispatch = true` in the same `[global]` to start dispatched workers with Claude Code Remote on, so you can steer them from Agent View / mobile -- see `docs/guides/remote-control-on-dispatch.md` |
 | `niwa mesh watch --instance-root <path>` | Run the mesh watch daemon (started automatically by `niwa apply` when `[channels.mesh]` is configured; not normally invoked directly) |
 | `niwa task list` | List tasks (filter by `--role`, `--state`, `--delegator`, `--since`) |
 | `niwa task show <task-id>` | Show envelope, state, and transitions for one task |
@@ -142,10 +168,17 @@ On a TTY, `niwa create` and `niwa apply` show a single in-place status line for 
 Teams can share workspace configs via a GitHub repo:
 
 ```bash
-# Clone config from GitHub and set up the workspace
+# Clone config from GitHub; the workspace root is ready to use
 niwa init my-team --from my-org/workspace-config
-niwa apply
+# Create an instance to work in
+cd my-team && niwa create
 ```
+
+`niwa init` leaves you with a ready workspace root — it materializes the root
+configuration (CLAUDE.md, Claude Code settings and skills) but clones no repos.
+The repos live inside instances: `niwa create` makes one. You do not need to run
+`niwa apply` first; apply's job is to refresh an already-set-up workspace, not to
+set it up.
 
 The config repo is materialized as `.niwa/` — a snapshot of the source content at
 a specific commit, not a git checkout. Each `niwa apply` checks for upstream

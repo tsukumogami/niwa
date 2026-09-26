@@ -122,7 +122,10 @@ ENVEOF
 
     # Configure shell if requested
     if [ "$MODIFY_PATH" = true ]; then
-        SHELL_NAME=$(basename "$SHELL")
+        # $SHELL is unset in non-interactive shells (piped `sh`, CI, containers,
+        # cron). Default to empty so an unset value falls through to the `*)`
+        # branch below instead of aborting under `set -u`.
+        SHELL_NAME=$(basename "${SHELL:-}")
 
         # Helper function to add source line to a config file (idempotent)
         add_to_config() {

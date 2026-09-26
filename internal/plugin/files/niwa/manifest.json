@@ -6,7 +6,7 @@
     {
       "name": "migrate-config",
       "path": "skills/migrate-config/SKILL.md",
-      "description": "Help migrate a workspace config source from the deprecated rank-2 (whole-repo) layout to the rank-1 layout (.niwa/workspace.toml under a subpath)."
+      "description": "Move a niwa workspace's config SOURCE repository off the deprecated whole-repo layout onto the `.niwa/workspace.toml` subtree layout, or repoint a workspace at a different config repo without breaking it. The symptom users report is the clone -- \"why is niwa pulling down my entire config repo?\" -- since the old layout clones the whole repository where the new one fetches only the `.niwa/` directory. Also use when niwa rejects a source as ambiguous after a half-finished restructure left both layouts' markers in place, when someone wants `workspace.toml` moved into a `.niwa/` directory, or when niwa's post-apply note about a deprecated source needs acting on. Load it before any `source_url` edit: the auto-discovered `<repo>-overlay` slug derives from the source repo's name, so hand-editing `~/.config/niwa/config.toml` to point at a renamed or new config repo silently breaks overlay discovery and drops the workspace's overlay with no error. This is a niwa workspace config source repository -- NOT Claude Code settings, hooks, permissions, or `settings.json`, and not generic config-file migration."
     }
   ]
 }

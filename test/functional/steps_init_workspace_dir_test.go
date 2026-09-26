@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -123,6 +124,58 @@ func theWorkspaceRootHasWorkspaceTOML(ctx context.Context, name string) error {
 	return nil
 }
 
+// theFileExistsUnderWorkspaceRoot asserts that
+// `<workspaceRoot>/<name>/<relPath>` exists. Used to verify root-altitude
+// materialization (e.g. the `.claude/skills/dispatch/SKILL.md` project skill
+// MaterializeWorkspaceRoot installs at the workspace root during `niwa init`).
+func theFileExistsUnderWorkspaceRoot(ctx context.Context, relPath, name string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, name, filepath.FromSlash(relPath))
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("expected file %q under workspace root %q: %w", relPath, name, err)
+	}
+	return nil
+}
+
+// theFileDoesNotExistUnderWorkspaceRoot asserts that
+// `<workspaceRoot>/<name>/<relPath>` is absent. Used to prove `niwa apply` at
+// the root does not materialize repos directly under the workspace root.
+func theFileDoesNotExistUnderWorkspaceRoot(ctx context.Context, relPath, name string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, name, filepath.FromSlash(relPath))
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("path %q exists under workspace root %q but should not (apply must not clone repos into the root)", relPath, name)
+	}
+	return nil
+}
+
+// theFileUnderWorkspaceRootContains asserts that
+// `<workspaceRoot>/<name>/<relPath>` exists and its content contains `want`.
+// Pairs with theFileExistsUnderWorkspaceRoot to confirm the materialized file
+// is the real artifact (e.g. the dispatch SKILL.md frontmatter and heading)
+// rather than an empty placeholder.
+func theFileUnderWorkspaceRootContains(ctx context.Context, relPath, name, want string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, name, filepath.FromSlash(relPath))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading %q under workspace root %q: %w", relPath, name, err)
+	}
+	if !strings.Contains(string(data), want) {
+		return fmt.Errorf("file %q under workspace root %q does not contain %q; got:\n%s", relPath, name, want, string(data))
+	}
+	return nil
+}
+
 // theRegistryHasWorkspaceRootedAt asserts that the global registry has
 // an entry for `<name>` whose `root` matches `<wantRoot>` (relative
 // paths anchor under workspaceRoot). Reads the registry TOML directly
@@ -159,7 +212,6 @@ func theRegistryHasWorkspaceRootedAt(ctx context.Context, name, wantRoot string)
 	return nil
 }
 
-
 // iRunFromInstance runs `niwa <command>` with cwd set to the instance
 // directory `<workspaceRoot>/<workspace>/<instance>`, where the
 // `<workspace>` directory is the user-given name from `niwa init <name>`
@@ -174,7 +226,6 @@ func iRunFromInstance(ctx context.Context, command, instance, workspace string) 
 	cwd := filepath.Join(s.workspaceRoot, workspace, instance)
 	return ctx, runNiwa(s, cwd, command)
 }
-
 
 // niwaGoFromOutsideLandsIn runs `niwa go <name>` from a directory other
 // than the workspace, with a temp NIWA_RESPONSE_FILE set so the
@@ -228,4 +279,3 @@ func niwaGoFromOutsideLandsIn(ctx context.Context, name, expectedSubpath string)
 	}
 	return nil
 }
-

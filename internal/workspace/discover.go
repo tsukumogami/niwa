@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/config"
@@ -80,8 +81,32 @@ func DiscoverHooks(configDir string) (config.HooksConfig, error) {
 //   - worktree-hooks/{event}/*.sh -> each file maps to that event
 //
 // Non-.sh files are ignored. A missing worktree-hooks/ directory returns an
-// empty HooksConfig without error. Scripts are validated to stay within
-// configDir (no symlink escape).
+// empty HooksConfig without error.
+//
+// Script paths go through validateWithinDir, which is a LEXICAL containment
+// check against ".." traversal -- see its own comment. It does not resolve
+// symlinks, so it does not detect a script symlinked outside configDir, and
+// every path it guards here is filepath.Joined from a bare os.ReadDir entry
+// name, so in this function it cannot fail. An earlier version of this comment
+// claimed scripts were "validated to stay within configDir (no symlink
+// escape)"; that sentence was used to justify a security argument it could not
+// support. Whether these paths should resolve symlinks is niwa#290.
+//
+// Event names are validated against worktreeHookEvents. A hook registered under
+// a name niwa does not consume is reported through an error wrapping
+// ErrUnknownWorktreeHookEvent -- and the hooks that ARE valid come back
+// alongside it. That pairing is deliberate and load-bearing: every other error
+// path here returns a nil map, so reporting an unknown event the same way would
+// let one stale worktree-hooks/create/ directory silently disable a live
+// worktree-hooks/apply/ one. A configuration that works today would stop
+// working, which is the exact silent-provisioning failure this validation was
+// added to remove.
+//
+// A containment or directory-read failure returns immediately with that error
+// ALONE, never joined with unknown-event diagnostics collected earlier in the
+// same walk. errors.Is matches a sentinel anywhere inside a joined error, so a
+// combined return would let a containment failure ride inside what the caller
+// treats as the non-fatal case and be swallowed.
 func DiscoverWorktreeHooks(configDir string) (config.HooksConfig, error) {
 	hooksDir := filepath.Join(configDir, "worktree-hooks")
 
@@ -98,12 +123,17 @@ func DiscoverWorktreeHooks(configDir string) (config.HooksConfig, error) {
 	}
 
 	hooks := config.HooksConfig{}
+	var unknown []string
 
 	for _, entry := range entries {
 		entryPath := filepath.Join(hooksDir, entry.Name())
 
 		if entry.IsDir() {
 			event := entry.Name()
+			if !isKnownWorktreeHookEvent(event) {
+				unknown = append(unknown, entryPath+string(filepath.Separator))
+				continue
+			}
 			subEntries, err := os.ReadDir(entryPath)
 			if err != nil {
 				return nil, fmt.Errorf("reading worktree-hooks subdirectory %q: %w", event, err)
@@ -120,11 +150,23 @@ func DiscoverWorktreeHooks(configDir string) (config.HooksConfig, error) {
 			}
 		} else if strings.HasSuffix(entry.Name(), ".sh") {
 			event := strings.TrimSuffix(entry.Name(), ".sh")
+			if !isKnownWorktreeHookEvent(event) {
+				unknown = append(unknown, entryPath)
+				continue
+			}
 			if err := validateWithinDir(configDir, entryPath); err != nil {
 				return nil, err
 			}
 			hooks[event] = append(hooks[event], config.HookEntry{Scripts: []string{entryPath}})
 		}
+	}
+
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return hooks, fmt.Errorf("%w: %s (niwa consumes only: %s)",
+			ErrUnknownWorktreeHookEvent,
+			strings.Join(unknown, ", "),
+			strings.Join(worktreeHookEvents, ", "))
 	}
 
 	return hooks, nil
@@ -186,8 +228,27 @@ func DiscoverEnvFiles(configDir string) (workspaceFile string, repoFiles map[str
 	return workspaceFile, repoFiles, nil
 }
 
-// validateWithinDir ensures that resolvedPath stays within baseDir after
-// symlink resolution and cleaning.
+// validateWithinDir reports whether targetPath is lexically inside baseDir.
+//
+// It makes both paths absolute, cleans them, and compares prefixes. It does NOT
+// resolve symlinks -- filepath.Clean removes ".." textually and never touches
+// the filesystem -- so a symlink inside baseDir pointing outside it passes.
+// The check this actually provides is against ".." traversal in a
+// caller-supplied path.
+//
+// This comment previously claimed the containment held "after symlink
+// resolution", and that sentence was read by three reviewers in sequence and
+// restated as a symlink-escape control in a design document, a requirements
+// document and an acceptance criterion. Nobody read the body. So it is worded
+// here as what the function does rather than what it guards against, because
+// the next reader will verify against this comment and stop at the same depth.
+//
+// Note also that every current call site passes either
+// filepath.Join(dir, "<literal>") or filepath.Join(dir, entry.Name()) from an
+// os.ReadDir walk, and neither can produce a separator or a "..", so no call
+// site can currently fail. The calls are a defensive floor against a future
+// caller that passes something less constrained. Whether these paths should
+// resolve symlinks at all is niwa#290.
 func validateWithinDir(baseDir, targetPath string) error {
 	absBase, err := filepath.Abs(baseDir)
 	if err != nil {

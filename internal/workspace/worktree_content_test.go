@@ -1,7 +1,9 @@
 package workspace
 
 import (
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -28,11 +30,9 @@ func applyToWorktreeFixture(t *testing.T) (*config.WorkspaceConfig, string, stri
 
 	cfg := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "myws", ContentDir: "claude"},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"app": {Source: "repos/app.md"},
-				},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"app": {Source: "repos/app.md"},
 			},
 		},
 	}
@@ -51,6 +51,33 @@ func applyToWorktreeFixture(t *testing.T) (*config.WorkspaceConfig, string, stri
 	}
 
 	return cfg, configDir, instanceRoot, worktreePath
+}
+
+// TestApplyToWorktreeDeliversPluginSkills covers the placement that matters
+// most: a session runs in a worktree, whose own root is the nearest project-root
+// marker, so a delivery that only reached the clone would reach no session at
+// all. Resolution here passes no fetcher, which is the property the assertion
+// really rests on -- the worktree re-delivers what the instance already fetched.
+func TestApplyToWorktreeDeliversPluginSkills(t *testing.T) {
+	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
+
+	marketplace := filepath.Join(instanceRoot, ".niwa", "marketplaces", "tools")
+	writeMarketplaceTree(t, marketplace)
+	plugins := []string{"shirabe@tools"}
+	cfg.Claude.Plugins = &plugins
+	cfg.Claude.Marketplaces = config.MarketplaceConfigs{{Source: "acme/tools"}}
+
+	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
+		t.Fatalf("ApplyToWorktree: %v", err)
+	}
+
+	delivered := filepath.Join(worktreePath, ".codex", "skills", "shirabe")
+	if _, err := os.Lstat(delivered); err != nil {
+		t.Fatalf("worktree received no skills delivery at %s: %v", delivered, err)
+	}
+	if _, err := os.Stat(filepath.Join(delivered, "skills", "review", "SKILL.md")); err != nil {
+		t.Errorf("delivered tree is missing its skill: %v", err)
+	}
 }
 
 func TestApplyToWorktreeInstallsContentRulesAndLayer(t *testing.T) {
@@ -152,9 +179,9 @@ func TestApplyToWorktreeInstallsOverlayMergedContent(t *testing.T) {
 	// Simulate the post-merge config: the app entry has base Source plus the
 	// OverlaySource that MergeWorkspaceOverlay populates from an overlay=
 	// content entry.
-	entry := cfg.Claude.Content.Repos["app"]
+	entry := cfg.Content.Repos["app"]
 	entry.OverlaySource = "app-overlay.md"
-	cfg.Claude.Content.Repos["app"] = entry
+	cfg.Content.Repos["app"] = entry
 
 	written, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz",
 		WorktreeApplyOptions{OverlayDir: overlayDir})
@@ -185,9 +212,9 @@ func TestApplyToWorktreeInstallsOverlayMergedContent(t *testing.T) {
 func TestApplyToWorktreeOverlaySourceRequiresOverlayDir(t *testing.T) {
 	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
 
-	entry := cfg.Claude.Content.Repos["app"]
+	entry := cfg.Content.Repos["app"]
 	entry.OverlaySource = "app-overlay.md"
-	cfg.Claude.Content.Repos["app"] = entry
+	cfg.Content.Repos["app"] = entry
 
 	_, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz",
 		WorktreeApplyOptions{}) // OverlayDir left empty
@@ -200,7 +227,7 @@ func TestApplyToWorktreeOverlaySourceRequiresOverlayDir(t *testing.T) {
 }
 
 // TestApplyToWorktreeRendersConfiguredTemplate pins Stage-3: when
-// [claude.content.worktree].source is set, the worktree-context section is
+// [content.worktree].source is set, the worktree-context section is
 // rendered from that template with the worktree variables ({purpose}/{branch}/
 // {repo_name}/{worktree_path}) expanded, replacing the default body.
 func TestApplyToWorktreeRendersConfiguredTemplate(t *testing.T) {
@@ -211,7 +238,7 @@ func TestApplyToWorktreeRendersConfiguredTemplate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(configDir, "claude", "worktree.md"), []byte(tmpl), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg.Claude.Content.Worktree = config.ContentEntry{Source: "worktree.md"}
+	cfg.Content.Worktree = config.ContentEntry{Source: "worktree.md"}
 
 	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
 		t.Fatalf("ApplyToWorktree: %v", err)
@@ -247,7 +274,7 @@ func TestApplyToWorktreeRendersConfiguredTemplate(t *testing.T) {
 
 // TestApplyToWorktreeConfiguredTemplateIsIdempotent pins idempotency for the
 // CONFIGURED template path (not just the default-layer path): re-applying with a
-// [claude.content.worktree].source set must replace the worktree-context section
+// [content.worktree].source set must replace the worktree-context section
 // in place, so the sentinel heading and the template body each appear exactly
 // once after multiple applies.
 func TestApplyToWorktreeConfiguredTemplateIsIdempotent(t *testing.T) {
@@ -257,7 +284,7 @@ func TestApplyToWorktreeConfiguredTemplateIsIdempotent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(configDir, "claude", "worktree.md"), []byte(tmpl), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg.Claude.Content.Worktree = config.ContentEntry{Source: "worktree.md"}
+	cfg.Content.Worktree = config.ContentEntry{Source: "worktree.md"}
 
 	for i := 0; i < 3; i++ {
 		if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
@@ -294,7 +321,7 @@ func TestApplyToWorktreeTemplateWritesNoTempFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(configDir, "claude", "worktree.md"), []byte(tmpl), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg.Claude.Content.Worktree = config.ContentEntry{Source: "worktree.md"}
+	cfg.Content.Worktree = config.ContentEntry{Source: "worktree.md"}
 
 	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
 		t.Fatalf("ApplyToWorktree: %v", err)
@@ -307,11 +334,11 @@ func TestApplyToWorktreeTemplateWritesNoTempFile(t *testing.T) {
 }
 
 // TestApplyToWorktreeUnsetTemplateUsesDefaultLayer is the regression guard for
-// the additive contract: with no [claude.content.worktree] configured, the
+// the additive contract: with no [content.worktree] configured, the
 // Stage-1 default purpose/branch layer is produced unchanged.
 func TestApplyToWorktreeUnsetTemplateUsesDefaultLayer(t *testing.T) {
 	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
-	// cfg.Claude.Content.Worktree is the zero ContentEntry (unset).
+	// cfg.Content.Worktree is the zero ContentEntry (unset).
 
 	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
 		t.Fatalf("ApplyToWorktree: %v", err)
@@ -402,4 +429,258 @@ func TestFindRepoGroup(t *testing.T) {
 	if _, err := FindRepoGroup(instanceRoot, "nonexistent"); err == nil {
 		t.Error("expected error for missing repo, got nil")
 	}
+}
+
+// TestApplyToWorktreeInheritsCloneEnv pins the new contract (DESIGN decision
+// A1): a worktree's env is INHERITED from the instance clone's already-
+// materialized output file by byte-copy, with NO secret resolution. The test
+// writes a clone .local.env carrying resolved plaintext (the shape the instance
+// apply pipeline produced) and asserts the worktree's .local.env is byte-
+// identical -- including that a value the clone resolved from vault:// arrives
+// as plaintext and no literal vault:// URI leaks into the worktree.
+func TestApplyToWorktreeInheritsCloneEnv(t *testing.T) {
+	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
+
+	// The repo has env configured (a workspace env file is enough for the
+	// "configured" predicate), so a present clone output is required to inherit.
+	cfg.Env = config.EnvConfig{Files: []string{"workspace.env"}}
+	if err := os.WriteFile(filepath.Join(configDir, "workspace.env"), []byte("PLACEHOLDER=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The instance clone of the repo lives at <instanceRoot>/<group>/<repo> and
+	// already holds a materialized .local.env (resolved plaintext, no vault://).
+	cloneRepoDir := filepath.Join(instanceRoot, "apps", "app")
+	if err := os.MkdirAll(cloneRepoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const cloneEnv = "API_TOKEN=resolved-token-value-xxxxx\nPLACEHOLDER=1\n"
+	if err := os.WriteFile(filepath.Join(cloneRepoDir, ".local.env"), []byte(cloneEnv), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
+		t.Fatalf("ApplyToWorktree: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(worktreePath, ".local.env"))
+	if err != nil {
+		t.Fatalf("reading worktree .local.env: %v", err)
+	}
+	if string(got) != cloneEnv {
+		t.Errorf("worktree env not byte-identical to clone:\n got: %q\nwant: %q", got, cloneEnv)
+	}
+	if strings.Contains(string(got), "vault://") {
+		t.Errorf("worktree .local.env must not contain literal vault:// URI:\n%s", got)
+	}
+}
+
+// TestApplyToWorktreeLeavesGitStatusClean is the regression guard for the
+// delegated-worktree teardown bug: a freshly created niwa worktree must read
+// CLEAN to `git status --porcelain` after ApplyToWorktree, with no user
+// changes. If any niwa-authored file (notably .claude/rules/worktree-imports.md)
+// is left untracked, the non-force from-hook WorktreeRemove path treats the
+// worktree as dirty and log-and-retains it, leaking an orphan on every clean
+// agent teardown. The test builds a real git worktree (the production scaffold
+// shape) and asserts both that niwa content is invisible AND that a genuine
+// user file still shows (the exclude is scoped, not a blanket .claude/ ignore).
+func TestApplyToWorktreeLeavesGitStatusClean(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	tmpDir := t.TempDir()
+
+	// Config dir with a repo content source (same shape as the shared fixture).
+	configDir := filepath.Join(tmpDir, "config")
+	reposDir := filepath.Join(configDir, "claude", "repos")
+	if err := os.MkdirAll(reposDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := "# {repo_name}\n\nThis is the app repo content layer for group {group_name}.\n"
+	if err := os.WriteFile(filepath.Join(reposDir, "app.md"), []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "myws", ContentDir: "claude"},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"app": {Source: "repos/app.md"},
+			},
+		},
+	}
+
+	// Instance root carrying a workspace-context.md for the rules import target.
+	instanceRoot := filepath.Join(tmpDir, "instance")
+	if err := os.MkdirAll(instanceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(instanceRoot, workspaceContextFile), []byte("# workspace context\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a real git repo and add a worktree, mirroring how CreateSession
+	// scaffolds a delegated worktree: a primary checkout with one commit, then a
+	// linked worktree on a new branch. EnsureRepoExclude resolves the shared
+	// common dir from the worktree, so coverage recorded here is what production
+	// records.
+	primary := filepath.Join(tmpDir, "primary")
+	runGitWT(t, tmpDir, "init", primary)
+	if err := os.WriteFile(filepath.Join(primary, "README"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWT(t, primary, "add", "README")
+	runGitWT(t, primary, "commit", "-m", "init")
+
+	worktreePath := filepath.Join(tmpDir, "wt")
+	runGitWT(t, primary, "worktree", "add", worktreePath, "-b", "wtbranch")
+
+	if _, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{}); err != nil {
+		t.Fatalf("ApplyToWorktree: %v", err)
+	}
+
+	// Sanity: the rules import file (the formerly-uncovered file) was written.
+	if _, err := os.Stat(filepath.Join(worktreePath, worktreeRulesFile)); err != nil {
+		t.Fatalf("expected %s to be written: %v", worktreeRulesFile, err)
+	}
+
+	if out := gitStatusPorcelainWT(t, worktreePath); out != "" {
+		t.Errorf("freshly applied niwa worktree must read clean, got:\n%s", out)
+	}
+
+	// The exclude is scoped: a genuine user-authored file under .claude/ still
+	// shows, proving we did not blanket-ignore the whole .claude/ tree. git
+	// summarizes an untracked directory's contents as a single "?? .claude/"
+	// entry, so a non-empty status referencing .claude proves the user file
+	// surfaced (it would be empty if .claude/ were entirely ignored).
+	userFile := filepath.Join(worktreePath, ".claude", "user-notes.md")
+	if err := os.WriteFile(userFile, []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := gitStatusPorcelainWT(t, worktreePath)
+	if out == "" || !strings.Contains(out, ".claude") {
+		t.Errorf("a genuine user .claude/ file must still show in status, got:\n%q", out)
+	}
+}
+
+func gitStatusPorcelainWT(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "-C", dir, "status", "--porcelain")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status --porcelain: %v\n%s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func runGitWT(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+// worktreeSettingsDoc reads the worktree's materialized settings.local.json,
+// returning nil when the file does not exist.
+func worktreeSettingsDoc(t *testing.T, worktreePath string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(worktreePath, ".claude", "settings.local.json"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("reading worktree settings: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parsing worktree settings: %v", err)
+	}
+	return doc
+}
+
+// TestApplyToWorktreeCarriesDelegationDecision covers design Decision 9: a
+// worktree's settings must record the same hook or deny entries as the clone it
+// was made from. Before this, ApplyToWorktree never passed the decision through,
+// so the clone carried one of them and the worktree carried neither.
+func TestApplyToWorktreeCarriesDelegationDecision(t *testing.T) {
+	t.Run("supported writes hooks", func(t *testing.T) {
+		cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
+
+		if _, err := ApplyToWorktree(
+			cfg, configDir, instanceRoot, worktreePath, "apps", "app", "purpose", "branch-xyz",
+			WorktreeApplyOptions{WorktreeDelegation: &WorktreeDelegation{
+				Supported: true,
+				NiwaPath:  "/usr/local/bin/niwa",
+			}},
+		); err != nil {
+			t.Fatalf("ApplyToWorktree: %v", err)
+		}
+
+		doc := worktreeSettingsDoc(t, worktreePath)
+		if doc == nil {
+			t.Fatal("expected a worktree settings file carrying the hook entries")
+		}
+		for _, event := range []string{"WorktreeCreate", "WorktreeRemove"} {
+			cmds := worktreeHookCommands(t, doc, event)
+			if len(cmds) != 1 {
+				t.Fatalf("%s: expected 1 hook command in the worktree settings, got %v", event, cmds)
+			}
+			if !strings.Contains(cmds[0], "exec niwa worktree from-hook") {
+				t.Errorf("%s command %q should carry the PATH-first arm", event, cmds[0])
+			}
+		}
+	})
+
+	t.Run("unsupported writes deny", func(t *testing.T) {
+		cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
+
+		if _, err := ApplyToWorktree(
+			cfg, configDir, instanceRoot, worktreePath, "apps", "app", "purpose", "branch-xyz",
+			WorktreeApplyOptions{WorktreeDelegation: &WorktreeDelegation{Supported: false}},
+		); err != nil {
+			t.Fatalf("ApplyToWorktree: %v", err)
+		}
+
+		doc := worktreeSettingsDoc(t, worktreePath)
+		if doc == nil {
+			t.Fatal("expected a worktree settings file carrying the deny entries")
+		}
+		perms, ok := doc["permissions"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected permissions in the worktree settings, got %v", doc)
+		}
+		deny, ok := perms["deny"].([]any)
+		if !ok || len(deny) != 2 {
+			t.Fatalf("expected two permissions.deny entries, got %v", perms["deny"])
+		}
+	})
+
+	t.Run("nil preserves prior behavior", func(t *testing.T) {
+		cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
+
+		if _, err := ApplyToWorktree(
+			cfg, configDir, instanceRoot, worktreePath, "apps", "app", "purpose", "branch-xyz",
+			WorktreeApplyOptions{},
+		); err != nil {
+			t.Fatalf("ApplyToWorktree: %v", err)
+		}
+
+		doc := worktreeSettingsDoc(t, worktreePath)
+		if doc == nil {
+			return // no settings file at all is the pre-Decision-9 shape
+		}
+		if cmds := worktreeHookCommands(t, doc, "WorktreeCreate"); cmds != nil {
+			t.Errorf("nil delegation must not write hook entries, got %v", cmds)
+		}
+		if perms, ok := doc["permissions"].(map[string]any); ok {
+			if _, hasDeny := perms["deny"]; hasDeny {
+				t.Error("nil delegation must not write permissions.deny")
+			}
+		}
+	})
 }

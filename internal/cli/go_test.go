@@ -14,7 +14,7 @@ import (
 // containing repos under group directories.
 func setupTestWorkspace(t *testing.T) (workspaceRoot, instanceRoot string) {
 	t.Helper()
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 
 	// Create workspace config.
 	niwaDir := filepath.Join(root, ".niwa")

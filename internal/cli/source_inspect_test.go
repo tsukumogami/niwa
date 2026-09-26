@@ -104,8 +104,8 @@ func TestSourceInspect_SlugParseFailure(t *testing.T) {
 
 func TestSourceInspect_Rank1Text(t *testing.T) {
 	tarball := makeTarball(t, map[string]string{
-		"wrap/":                    "",
-		"wrap/.niwa/":              "",
+		"wrap/":                     "",
+		"wrap/.niwa/":               "",
 		"wrap/.niwa/workspace.toml": "name = team",
 	})
 	out, exit, err := runInspect(t, tarball, "org/repo")
@@ -124,8 +124,8 @@ func TestSourceInspect_Rank1Text(t *testing.T) {
 
 func TestSourceInspect_Rank1JSON(t *testing.T) {
 	tarball := makeTarball(t, map[string]string{
-		"wrap/":                    "",
-		"wrap/.niwa/":              "",
+		"wrap/":                     "",
+		"wrap/.niwa/":               "",
 		"wrap/.niwa/workspace.toml": "name = team",
 	})
 	out, exit, err := runInspect(t, tarball, "org/repo", "--json")
@@ -188,10 +188,10 @@ func TestSourceInspect_Rank2JSON(t *testing.T) {
 
 func TestSourceInspect_AmbiguityJSON(t *testing.T) {
 	tarball := makeTarball(t, map[string]string{
-		"wrap/":                    "",
-		"wrap/.niwa/":              "",
+		"wrap/":                     "",
+		"wrap/.niwa/":               "",
 		"wrap/.niwa/workspace.toml": "name = rank1",
-		"wrap/workspace.toml":      "name = rank2",
+		"wrap/workspace.toml":       "name = rank2",
 	})
 	out, exit, err := runInspect(t, tarball, "org/repo", "--json")
 	if err != nil {

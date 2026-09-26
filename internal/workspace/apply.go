@@ -7,16 +7,23 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/gitexclude"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/guardrail"
+	"github.com/tsukumogami/niwa/internal/keyreport"
+	"github.com/tsukumogami/niwa/internal/pluginrecord"
 	"github.com/tsukumogami/niwa/internal/secret"
 	"github.com/tsukumogami/niwa/internal/vault"
 	"github.com/tsukumogami/niwa/internal/vault/resolve"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // Applier orchestrates the apply pipeline.
@@ -28,17 +35,59 @@ type Applier struct {
 	AllowDirty      bool
 	GlobalConfigDir string // empty string means global config not registered
 
+	// CloneWorkers bounds how many repos are cloned concurrently. Values <= 0
+	// mean "use the built-in default" (cloneWorkers). Lowering it helps on slow
+	// or unreliable links where many parallel git transports saturate the
+	// connection. The CLI wires this from the --parallel flag and the [global]
+	// clone_workers config (flag > config > default).
+	CloneWorkers int
+
+	// There is deliberately no agent field here. An apply prepares the
+	// workspace for every agent niwa enumerates, and which capabilities each
+	// one receives is the declaration table's answer rather than a caller's
+	// choice -- so there is nothing for an entry point to select between, and a
+	// field to select it with would be a way for one to try.
+
+	// DeveloperHome is the developer's own home directory, and the only thing
+	// that lets this apply write outside the instance it is preparing. The
+	// procedure-routed deliveries -- today, the directory-trust entry a Codex
+	// session needs before it can write anything at all -- resolve their
+	// targets under it.
+	//
+	// It is empty by default and every such delivery is skipped while it is.
+	// The unit suites build Appliers by the dozen against temp directories,
+	// and a default that resolved the real home would have each of them edit
+	// the developer's own files. Every CLI surface that constructs an Applier
+	// sets it (see cli.configureDeveloperHome), so a real create or apply
+	// delivers what a session needs.
+	DeveloperHome string
+
+	// Keys collects the declared keys this run could not supply, for the
+	// caller to render once the run returns. It is caller-supplied rather
+	// than returned because Create removes its instance directory and
+	// returns a bare error on failure: a report handed back up the call
+	// stack would be dropped on exactly the path where the user most
+	// needs every key enumerated. A nil collector disables collection.
+	Keys *keyreport.Collector
+
+	// StrictSecrets is the run's resolved strictness: the --strict-secrets
+	// flag when it was explicitly present, else the workspace's
+	// strict_secrets setting, else false. The CLI resolves it once, through
+	// config.ResolveStrictSecrets, so every command surface answers the
+	// question the same way.
+	//
+	// It is read at two places for one decision. The gate beside the
+	// post-merge required-key check turns every collected shortfall fatal;
+	// the promote branch reads the same field because promotion runs later
+	// and per-repo, after that gate has already passed. Nothing threads it
+	// into worktree re-materialization: that path resolves no secrets, so it
+	// reaches neither consult site.
+	StrictSecrets bool
+
 	// Reporter receives all progress and diagnostic output for this applier.
 	// NewApplier initializes it with NewReporter(os.Stderr). Callers may
 	// replace it (e.g., with NewReporterWithTTY) before calling Apply or Create.
 	Reporter *Reporter
-
-	// AllowMissingSecrets threads through to the vault resolver's
-	// ResolveOptions.AllowMissing. When true, missing vault keys are
-	// downgraded to empty MaybeSecret values with a stderr warning.
-	// The CLI --allow-missing-secrets flag (Issue 10) populates this
-	// field; default false preserves the strict-apply behavior.
-	AllowMissingSecrets bool
 
 	// AllowPlaintextSecrets threads through to the public-repo
 	// plaintext-secrets guardrail
@@ -64,13 +113,17 @@ type Applier struct {
 	// the embedded plugin. The CLI wires this from flag + global config.
 	SkipPluginInstall bool
 
-	// InstallNiwaPlugin is the test seam for the niwa plugin
-	// auto-installer. Production wires this to plugin.Install via
-	// NewApplier; tests override to capture install-or-skip behavior
-	// without writing to the user's home directory. When nil, the
-	// installer is a no-op — useful for unit tests that don't
-	// exercise rank-2 + plugin-install at the same time.
-	InstallNiwaPlugin func(state *InstanceState, reporter *Reporter, skipInstall bool)
+	// PrewarmDeclaredPlugins resolves the instance's workspace-declared Claude
+	// marketplaces/plugins (the github-sourced ones) to disk after the pipeline
+	// materializes .claude/settings.json, so the FIRST Claude session started in
+	// the instance finds them already installed when it enumerates skills. This
+	// closes the race where a github marketplace is cloned asynchronously during
+	// that session's own startup and finishes AFTER enumeration, leaving its
+	// skills uninvocable. It runs for every provisioned instance, not just the
+	// dispatch path: `niwa create` followed by a manual `claude` launch hits the
+	// same race. Wired from cli (where the claude exec lives) via NewApplier's
+	// callers; nil means no-op (tests, or a surface that didn't wire it).
+	PrewarmDeclaredPlugins func(instanceRoot string, reporter *Reporter, skipInstall bool)
 
 	// cloneOrSync materializes or refreshes the overlay snapshot at dir.
 	// Returns wasFreshClone=true when no marker/.git was present (fresh
@@ -84,6 +137,31 @@ type Applier struct {
 	// headSHA is the function used to read the HEAD commit SHA of a repo.
 	// Defaults to HeadSHA. Overridable in tests.
 	headSHA func(dir string) (string, error)
+
+	// cloneRepo performs a single clone of one repo (no retry). When nil it
+	// falls back to a.Cloner.CloneWithBranch. Overridable in tests so the
+	// retry loop in cloneWithRetry can be exercised against simulated transient
+	// and permanent failures without invoking git.
+	cloneRepo func(ctx context.Context, url, targetDir, branch string, r *Reporter) (bool, error)
+
+	// prunePluginRecords removes dangling records from Claude Code's global
+	// plugin install registry. It is the test seam for the automatic heal
+	// step in runPipeline: production wires it (via NewApplier) to
+	// pluginrecord.Prune(pluginrecord.Dangling), which targets the real
+	// ~/.claude registry; tests override it to point at a temp HOME via
+	// pluginrecord.WithPruneBaseDir so the heal never touches the user's
+	// home directory. When nil, the heal is a silent no-op — useful for
+	// unit tests that don't exercise the registry at all.
+	prunePluginRecords func() (pluginrecord.PruneReport, error)
+
+	// reconcileMarketplaceAutoUpdate sets the autoUpdate flag in Claude Code's
+	// global known_marketplaces.json for the marketplaces niwa manages, so an
+	// already-registered marketplace adopts the configured policy instead of
+	// keeping a stale value Claude Code does not refresh from project settings.
+	// Production wires it (via NewApplier) to pluginrecord.ReconcileAutoUpdate
+	// against the real ~/.claude; tests override it to a temp HOME or a fake.
+	// When nil, the reconcile is a silent no-op.
+	reconcileMarketplaceAutoUpdate func(desired map[string]bool) (pluginrecord.ReconcileReport, error)
 
 	// vaultRegistry overrides vault.DefaultRegistry for vault bundle building.
 	// Nil means use the process-wide DefaultRegistry (production behaviour).
@@ -118,6 +196,17 @@ func NewApplier(gh github.Client) *Applier {
 		Reporter:     NewReporter(os.Stderr),
 		headSHA:      HeadSHA,
 	}
+	// The automatic dangling-record heal (runPipeline) prunes Claude Code's
+	// global plugin registry. Default to the real ~/.claude location;
+	// dangling-only keeps this broadly-run step from removing live records.
+	a.prunePluginRecords = func() (pluginrecord.PruneReport, error) {
+		return pluginrecord.Prune(pluginrecord.Dangling)
+	}
+	// Reconcile the global marketplace registry's autoUpdate flag to the
+	// configured per-marketplace policy. Defaults to the real ~/.claude.
+	a.reconcileMarketplaceAutoUpdate = func(desired map[string]bool) (pluginrecord.ReconcileReport, error) {
+		return pluginrecord.ReconcileAutoUpdate(desired)
+	}
 	a.cloneOrSync = func(ctx context.Context, url, dir string) (bool, int, error) {
 		fetcher, _ := a.GitHubClient.(FetchClient)
 		return EnsureOverlaySnapshot(ctx, url, dir, fetcher, a.Reporter)
@@ -148,8 +237,77 @@ const noticeProviderShadow = "provider-shadow"
 // recorded in DisclosedNotices and suppressed on subsequent runs.
 const noticeConfigConverted = "config-converted-to-snapshot"
 
-// cloneWorkers is the maximum number of repos cloned concurrently.
+// noticeWorktreeFallback is the one-time first-encounter explainer key for the
+// worktree-delegation deny fallback. It fires once per workspace instance,
+// pointing developers at `niwa worktree create`. It is DISTINCT from the
+// every-apply current-state warning: per docs/guides/one-time-notices.md, the
+// "harness does not support worktree hooks" fact is a current-state condition
+// surfaced on every apply, while this explainer is the one-time orientation.
+const noticeWorktreeFallback = "worktree-fallback"
+
+// worktreeFallbackWarning is the every-apply current-state message shown when
+// the harness does not support per-repo worktree hooks and niwa installs the
+// permissions.deny fallback instead. It surfaces on EVERY apply (not via a
+// one-time notice) because an unsupported harness stays unsupported across
+// applies — a current-state condition, not a first-encounter fact.
+const worktreeFallbackWarning = "worktree delegation unavailable: this Claude Code harness does not support per-repo worktree hooks; niwa denied native worktree creation. Use `niwa worktree create` instead."
+
+// worktreeFallbackExplainer is the one-time first-encounter orientation shown
+// alongside the every-apply warning the first time the deny fallback is
+// installed for a workspace instance.
+const worktreeFallbackExplainer = "note: agent-initiated worktree creation is disabled on this harness. Run `niwa worktree create` to get a niwa-managed worktree with secrets and CLAUDE context."
+
+// cloneWorkers is the default maximum number of repos cloned concurrently
+// when neither Applier.CloneWorkers nor the [global] clone_workers config
+// overrides it.
 const cloneWorkers = 8
+
+// cloneBackoff is the wait schedule between clone retries. Its length is the
+// number of retries on top of the initial attempt (len==3 -> up to 4 attempts
+// total). A transient clone failure (network blip, saturated link) is retried
+// after the corresponding wait; permanent failures (see isPermanentCloneError)
+// and successes return immediately. Tests override this slice to skip real
+// waits. Mirrors driftCheckBackoff in snapshotwriter.go.
+var cloneBackoff = []time.Duration{
+	1 * time.Second,
+	2 * time.Second,
+	4 * time.Second,
+}
+
+// permanentCloneErrorMarkers are lowercased substrings that identify a clone
+// failure as permanent (not worth retrying): a missing/inaccessible repo, an
+// auth failure, or a bad ref. Anything not matching is treated as transient.
+//
+// Caveat: over SSH a genuinely-missing repo prints "ERROR: Repository not
+// found." which niwa's git-output filter drops (uppercase, non-"fatal:"
+// prefix), leaving only the ambiguous "fatal: Could not read from remote
+// repository." — indistinguishable from a transient timeout. That case is
+// retried a few times before surfacing the error. HTTPS clones and bad-branch
+// refs do carry a "fatal:"-prefixed permanent marker and fail fast.
+var permanentCloneErrorMarkers = []string{
+	"repository not found",
+	"not found in upstream",
+	"permission denied",
+	"authentication failed",
+	"invalid username or password",
+	"could not read username",
+	"does not appear to be a git repository",
+}
+
+// isPermanentCloneError reports whether err is a clone failure that should not
+// be retried. A nil error is not permanent (there is nothing to classify).
+func isPermanentCloneError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range permanentCloneErrorMarkers {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
 
 // cloneJob carries per-repo inputs to a clone worker.
 type cloneJob struct {
@@ -168,17 +326,19 @@ type cloneResult struct {
 	targetDir string // echoed from job so the orchestrator can call repoAlreadyCloned
 	cloned    bool
 	syncWarn  string // non-empty if sync produced a deferred warning
+	retries   int    // number of transient-failure retries before this clone succeeded
 	err       error  // non-nil on clone failure; does not include sync errors
 }
 
 // pipelineOpts configures shared pipeline behavior for Create vs Apply.
 type pipelineOpts struct {
-	existingState    *InstanceState
-	skipGlobal       bool
-	overlayURL       string   // from InstanceState.OverlayURL (empty = no overlay URL in state)
-	noOverlay        bool     // from InstanceState.NoOverlay
-	configSourceURL  string   // original source URL for convention overlay discovery
-	disclosedNotices []string // workspace-root-level notices already shown to the user
+	existingState        *InstanceState
+	skipGlobal           bool
+	overlayURL           string   // from InstanceState.OverlayURL (empty = no overlay URL in state)
+	noOverlay            bool     // from InstanceState.NoOverlay
+	noWorktreeDelegation bool     // from InstanceState.NoWorktreeDelegation
+	configSourceURL      string   // original source URL for convention overlay discovery
+	disclosedNotices     []string // workspace-root-level notices already shown to the user
 }
 
 // pipelineResult holds the outputs of the shared pipeline.
@@ -198,10 +358,87 @@ type pipelineResult struct {
 	// into InstanceState.AuthSources by Create/Apply so `niwa status
 	// --audit-auth` can render fully offline. nil/empty when no
 	// vault providers were referenced (e.g., single-org setups).
-	authSources      map[string]AuthSourceRecord
+	authSources map[string]AuthSourceRecord
+	// setupIncomplete names the repos whose setup scripts did not all
+	// finish, in classification order. A sibling of warnings: the pipeline
+	// carries the outcome out as data rather than as an error, so that
+	// Create and Apply can attach a verdict line to their summary without
+	// the failure reaching the pipeline's error path — which on create runs
+	// os.RemoveAll over the instance root.
+	setupIncomplete  []string
 	overlayURL       string   // set when convention discovery succeeds; empty otherwise
 	overlayCommit    string   // HEAD SHA when overlayURL was set; empty otherwise
 	disclosedNotices []string // one-time notices emitted during this run
+	// trustKeys is the record of directory-trust entries niwa has written
+	// into the developer's own agent configuration, this apply or an earlier
+	// one. Persisted into InstanceState.TrustKeys by Create/Apply; it is the
+	// sole authority for what a later apply may retract.
+	trustKeys []string
+	// claudePermissions is the instance's resolved permission posture
+	// ("bypass", "ask", or ""), computed from this run's effective config.
+	// Persisted into InstanceState.ClaudePermissions by Create/Apply.
+	claudePermissions string
+	// procedureErr is a procedure-routed delivery's failure carried out as
+	// data rather than as the pipeline's error return. The record above has to
+	// reach the state file before the failure reaches the user: a run that
+	// wrote entries and then failed must not also forget which entries it
+	// wrote. Create and Apply save state, then surface this.
+	procedureErr error
+	// exemptPaths names the paths this run refused to write because something
+	// niwa did not write occupies them. They are deliberately not in
+	// managedFiles: the state must stop claiming niwa owns them. Only the
+	// deletion is exempted, which is what cleanRemovedFiles reads them for.
+	exemptPaths []string
+}
+
+// logSetupIncomplete prints the counted verdict line naming the repos whose
+// setup did not finish, or nothing at all when every repo's setup completed.
+//
+// Callers place this directly below their summary line and above the deferred
+// warning block. That placement is the substance of the fix rather than the
+// wording: deferred messages print below the summary by contract, so a setup
+// failure that surfaced only there read as trailing noise under a verdict that
+// said the apply succeeded. It is a plain Log rather than a Warn and is not
+// deferred, so it stays attached to the verdict; the per-script warnings still
+// carry the detail below it.
+func (a *Applier) logSetupIncomplete(locations []string) {
+	// Entries are locations rather than repo names, because one repo can fail
+	// in its clone and in each of its worktrees. Naming them all "niwa" would
+	// render as "setup incomplete for 3 repos: niwa, niwa, niwa" and tell the
+	// operator nothing about which tree is unprovisioned.
+	//
+	// The noun follows the contents: a clone-only failure still reads "repo",
+	// which keeps the wording the clone path has always had, and a run
+	// involving worktrees reads "location" because that is what the entries
+	// then are.
+	noun, nounPlural := "repo", "repos"
+	for _, l := range locations {
+		if strings.Contains(l, worktreeLocationMarker) {
+			noun, nounPlural = "location", "locations"
+			break
+		}
+	}
+
+	switch len(locations) {
+	case 0:
+		return
+	case 1:
+		a.Reporter.Log("setup incomplete for 1 %s: %s", noun, locations[0])
+	default:
+		a.Reporter.Log("setup incomplete for %d %s: %s", len(locations), nounPlural, strings.Join(locations, ", "))
+	}
+}
+
+// worktreeLocationMarker distinguishes a worktree entry from a clone entry in
+// the setup-incomplete list. It is a substring rather than a separate field
+// because the list is rendered verbatim into one line; the marker is what
+// logSetupIncomplete keys its noun on.
+const worktreeLocationMarker = " (worktree "
+
+// worktreeSetupLocation labels a repo's worktree for the setup-incomplete
+// verdict, so the operator can tell which of a repo's trees failed.
+func worktreeSetupLocation(repo, worktreePath string) string {
+	return repo + worktreeLocationMarker + filepath.Base(worktreePath) + ")"
 }
 
 // Create creates a new workspace instance under workspaceRoot, runs the full
@@ -210,6 +447,15 @@ type pipelineResult struct {
 // instanceName is the directory name for the new instance (e.g. "myws-2");
 // cfg.Workspace.Name is the config identity and must not be mutated by the
 // caller — it is used for personal overlay scope lookup and InstanceState.ConfigName.
+//
+// CALLER CONTRACT: cfg must have been read AFTER the config snapshot was
+// reconciled from its source. Create refreshes the snapshot itself (below), but
+// it materializes from this cfg, so a caller that read before the refresh gets
+// a run-late materialization — issues #214 and #227. Satisfy this by passing
+// the config ReconcileAndReloadConfig returns.
+// The reconcile is not done here because cfg is the caller's value: the caller
+// also derives instanceName and the resolved agent from it, and silently
+// swapping it underneath would leave those disagreeing with what is written.
 func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, configDir, workspaceRoot, instanceName string) (string, error) {
 	now := time.Now()
 
@@ -218,11 +464,11 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		return "", fmt.Errorf("creating instance directory: %w", err)
 	}
 
-	// Ensure the instance root's .gitignore covers *.local*. The
-	// materializers always emit files with the ".local" infix so
-	// this single pattern is sufficient; running create twice on
-	// the same instance is a no-op after the first run.
-	if err := EnsureInstanceGitignore(instanceRoot); err != nil {
+	// Ensure the instance root's .gitignore covers *.local* and the
+	// generated-configuration names that cannot carry the infix
+	// because they have to sit where their agent reads them; running
+	// create twice on the same instance is a no-op after the first run.
+	if err := EnsureInstanceGitignore(instanceRoot, agentplan.InstanceExcludePatterns()...); err != nil {
 		_ = os.RemoveAll(instanceRoot)
 		return "", fmt.Errorf("preparing instance .gitignore: %w", err)
 	}
@@ -260,21 +506,24 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	var initOverlayURL string
 	var initNoOverlay bool
 	var initSkipGlobal bool
+	var initNoWorktreeDelegation bool
 	var initDisclosedNotices []string
 	if initState != nil {
 		initOverlayURL = initState.OverlayURL
 		initNoOverlay = initState.NoOverlay
 		initSkipGlobal = initState.SkipGlobal
+		initNoWorktreeDelegation = initState.NoWorktreeDelegation
 		initDisclosedNotices = initState.DisclosedNotices
 	}
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
-		existingState:    nil,
-		overlayURL:       initOverlayURL,
-		noOverlay:        initNoOverlay,
-		skipGlobal:       initSkipGlobal,
-		configSourceURL:  a.ConfigSourceURL,
-		disclosedNotices: initDisclosedNotices,
+		existingState:        nil,
+		overlayURL:           initOverlayURL,
+		noOverlay:            initNoOverlay,
+		skipGlobal:           initSkipGlobal,
+		noWorktreeDelegation: initNoWorktreeDelegation,
+		configSourceURL:      a.ConfigSourceURL,
+		disclosedNotices:     initDisclosedNotices,
 	})
 	if err != nil {
 		_ = os.RemoveAll(instanceRoot)
@@ -289,7 +538,11 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 
 	// PRD R10: emit the rank-2 deprecation notice for the team config
 	// once per workspace when the source resolves to the legacy
-	// whole-repo layout, and trigger the niwa plugin auto-install.
+	// whole-repo layout. The notice is all this does now. The plugin carrying
+	// /niwa:migrate-config used to be installed from here; it is a capability
+	// delivery the pipeline makes once per apply, for whichever agents the
+	// contract declares it for, so a workspace on the deprecated layout is no
+	// longer the thing that triggers it.
 	if teamConfigRank == 2 && !sliceContains(initDisclosedNotices, NoticeIDRank2TeamConfig) {
 		identifier := a.ConfigSourceURL
 		if identifier == "" {
@@ -297,9 +550,14 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		}
 		EmitRank2Notice(NoticeIDRank2TeamConfig, identifier, a.Reporter)
 		result.disclosedNotices = append(result.disclosedNotices, NoticeIDRank2TeamConfig)
-		if a.InstallNiwaPlugin != nil {
-			a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
-		}
+	}
+
+	// Resolve the workspace-declared marketplaces/plugins to disk now, while the
+	// just-materialized settings.json is fresh, so the first Claude session in this
+	// instance enumerates them without losing the async-clone race. Runs for every
+	// instance create (dispatch and plain `niwa create` alike); best-effort.
+	if a.PrewarmDeclaredPlugins != nil {
+		a.PrewarmDeclaredPlugins(instanceRoot, a.Reporter, a.SkipPluginInstall)
 	}
 
 	// Use the effective configName (resolved earlier above) for the
@@ -326,6 +584,9 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		OverlayURL:     result.overlayURL,
 		OverlayCommit:  result.overlayCommit,
 		AuthSources:    result.authSources,
+		TrustKeys:      result.trustKeys,
+		// Recomputed from this run's config alone, like Shadows.
+		ClaudePermissions: result.claudePermissions,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -338,16 +599,35 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	} else {
 		a.Reporter.Log("created %s (%d repos) → %s", instanceName, n, instanceRoot)
 	}
+	a.logSetupIncomplete(result.setupIncomplete)
 	for _, w := range result.warnings {
 		a.Reporter.DeferWarn("%s", w)
 	}
 	a.Reporter.FlushDeferred()
+
+	// A procedure-routed delivery that failed is surfaced here rather than
+	// from the pipeline's error return: the instance is prepared and stays on
+	// disk, the record of what niwa wrote outside it is already in the state
+	// file, and the failure still reaches the user as a named error (R20).
+	// Returning it from the pipeline instead would run this path's os.RemoveAll
+	// over an instance whose only problem is outside it.
+	if result.procedureErr != nil {
+		return instanceRoot, result.procedureErr
+	}
 
 	return instanceRoot, nil
 }
 
 // Apply runs the full apply pipeline on an existing instance: discover repos,
 // classify, clone, install content, clean up removed repos, and update state.
+//
+// Same caller contract as Create: cfg must have been read after the config
+// snapshot was reconciled from its source (see ReconcileAndReloadConfig). Apply
+// is called in a loop over the instances of one workspace, so resolving the cfg
+// once above the loop also keeps every instance in a run on the same parsed
+// config. Note this narrows rather than closes cross-instance skew: the
+// EnsureConfigSnapshotWithStatus call below still runs per instance, so the
+// config DIRECTORY runPipeline reads can rotate mid-run if upstream moves.
 func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string) error {
 	now := time.Now()
 
@@ -362,12 +642,12 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		return err
 	}
 
-	// Ensure the instance root's .gitignore covers *.local*. Applier.
-	// Create already runs this during initial scaffolding, but an
-	// instance created before this guard landed won't have the file;
-	// running it here closes the upgrade-path gap. The helper is
-	// idempotent, so no-op on subsequent applies.
-	if err := EnsureInstanceGitignore(instanceRoot); err != nil {
+	// Ensure the instance root's .gitignore covers *.local* and the
+	// generated-configuration names beside it. Applier.Create already runs
+	// this during initial scaffolding, but an instance created before a given
+	// pattern landed won't carry it; running it here closes the upgrade-path
+	// gap. The helper is idempotent, so no-op on subsequent applies.
+	if err := EnsureInstanceGitignore(instanceRoot, agentplan.InstanceExcludePatterns()...); err != nil {
 		return fmt.Errorf("preparing instance .gitignore: %w", err)
 	}
 
@@ -401,12 +681,13 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	}
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
-		existingState:    existingState,
-		skipGlobal:       existingState.SkipGlobal,
-		overlayURL:       existingState.OverlayURL,
-		noOverlay:        existingState.NoOverlay,
-		configSourceURL:  a.ConfigSourceURL,
-		disclosedNotices: wsDisclosedNotices,
+		existingState:        existingState,
+		skipGlobal:           existingState.SkipGlobal,
+		overlayURL:           existingState.OverlayURL,
+		noOverlay:            existingState.NoOverlay,
+		noWorktreeDelegation: existingState.NoWorktreeDelegation,
+		configSourceURL:      a.ConfigSourceURL,
+		disclosedNotices:     wsDisclosedNotices,
 	})
 	if err != nil {
 		return err
@@ -432,13 +713,13 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		}
 		EmitRank2Notice(NoticeIDRank2TeamConfig, identifier, a.Reporter)
 		result.disclosedNotices = append(result.disclosedNotices, NoticeIDRank2TeamConfig)
-		// PRD R16-R20: install the embedded niwa plugin so
-		// /niwa:migrate-config is available. The installer emits its
-		// own notice (installed/up-to-date or skipped); the rank-2
-		// notice above is independent.
-		if a.InstallNiwaPlugin != nil {
-			a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
-		}
+	}
+
+	// Pre-warm the workspace-declared marketplaces/plugins to disk on every apply
+	// too, so a re-applied instance picks up newly declared plugins before its next
+	// Claude session enumerates skills. Best-effort; see Create for the rationale.
+	if a.PrewarmDeclaredPlugins != nil {
+		a.PrewarmDeclaredPlugins(instanceRoot, a.Reporter, a.SkipPluginInstall)
 	}
 
 	// Emit `rotated <path>` to stderr for every managed file whose
@@ -486,21 +767,26 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	// from the caller-supplied instanceName parameter) and keeps the
 	// state file's InstanceName field aligned with the directory.
 	state := &InstanceState{
-		SchemaVersion:  SchemaVersion,
-		ConfigName:     &configName,
-		InstanceName:   filepath.Base(instanceRoot),
-		InstanceNumber: existingState.InstanceNumber,
-		Root:           instanceRoot,
-		Created:        existingState.Created,
-		LastApplied:    now,
-		SkipGlobal:     existingState.SkipGlobal,
-		NoOverlay:      existingState.NoOverlay,
-		OverlayURL:     finalOverlayURL,
-		OverlayCommit:  finalOverlayCommit,
-		ManagedFiles:   result.managedFiles,
-		Repos:          result.repoStates,
-		Shadows:        result.shadows,
-		AuthSources:    result.authSources,
+		SchemaVersion:        SchemaVersion,
+		ConfigName:           &configName,
+		InstanceName:         filepath.Base(instanceRoot),
+		InstanceNumber:       existingState.InstanceNumber,
+		Root:                 instanceRoot,
+		Created:              existingState.Created,
+		LastApplied:          now,
+		SkipGlobal:           existingState.SkipGlobal,
+		NoOverlay:            existingState.NoOverlay,
+		NoWorktreeDelegation: existingState.NoWorktreeDelegation,
+		OverlayURL:           finalOverlayURL,
+		OverlayCommit:        finalOverlayCommit,
+		ManagedFiles:         result.managedFiles,
+		Repos:                result.repoStates,
+		Shadows:              result.shadows,
+		AuthSources:          result.authSources,
+		TrustKeys:            result.trustKeys,
+		// Taken from this run's result, never from existingState: a posture
+		// removed from the config must stop being recorded on the next apply.
+		ClaudePermissions: result.claudePermissions,
 	}
 
 	if err := SaveState(instanceRoot, state); err != nil {
@@ -513,18 +799,49 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	} else {
 		a.Reporter.Log("applied %s (%d repos)", filepath.Base(instanceRoot), n)
 	}
+	a.logSetupIncomplete(result.setupIncomplete)
 	for _, w := range result.warnings {
 		a.Reporter.DeferWarn("%s", w)
 	}
 	a.Reporter.FlushDeferred()
 
-	return nil
+	// Same posture as Create: the record reaches the state file first, then the
+	// failure reaches the user (R20).
+	return result.procedureErr
+}
+
+// contextChainKey identifies one composed context chain inside an apply: one
+// agent's documents in one repository's working tree. It is keyed by both
+// because the chains are per-agent -- two agents compose different layers into
+// different filenames in the same directory -- and the budget one of them
+// declares must be sized from its own.
+type contextChainKey struct {
+	agent agent.Agent
+	dir   string
 }
 
 // runPipeline executes the shared pipeline steps: discover repos, classify,
 // clone, and install content. It returns the pipeline results without writing
 // state.
 func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, configDir, instanceRoot string, now time.Time, opts *pipelineOpts) (*pipelineResult, error) {
+	// Build a redactor for this apply invocation and attach it to ctx so
+	// every secret.Errorf / Wrap call downstream scrubs resolved values
+	// automatically.
+	//
+	// This is the first statement of the pipeline for a reason. It used to
+	// sit next to the resolver stage, which is after the personal-overlay
+	// pre-pass has already resolved the overlay's env — and those values
+	// were therefore never registered. They merge into the effective config,
+	// the later resolution pass skips them because they are already marked
+	// resolved, and they are then materialized into the very working
+	// directory setup scripts run in. So on any workspace using an overlay,
+	// a class of secrets reached the script's cwd having never been seen by
+	// the redactor. Constructing it here closes that: by the time setup
+	// scripts run, the fragment set is the set of values materialized into
+	// the repo working trees.
+	redactor := secret.NewRedactor()
+	ctx = secret.WithRedactor(ctx, redactor)
+
 	// overlayDir is the local clone path of the overlay repo when one is active.
 	// It is local to this pipeline run; downstream steps that need it receive it
 	// as a function argument rather than reading it from the Applier.
@@ -532,6 +849,22 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 	var writtenFiles []string
 	var allWarnings []string
+	// exemptPaths collects the paths this run refused to write because
+	// something niwa did not write occupies them. cleanRemovedFiles consults
+	// them: a refused path is by definition one this apply did not produce, so
+	// without the exemption the deletion pass would remove the very file the
+	// refusal promised to leave alone.
+	var exemptPaths []string
+	// contentExcludes collects, per repository working tree, the git-exclude
+	// patterns the context documents written into it imply. The exclude call
+	// runs in the materializer loop below, after every document has landed, so
+	// the patterns are held here rather than applied where they are produced.
+	contentExcludes := map[string][]string{}
+	// plans accumulates every plan applied during this run. It is what the
+	// bookkeeping steps read: Step 7 takes Managed and Sources off the applied
+	// entries, the per-repo git-exclude call takes the patterns entries in that
+	// repo implied, and the warnings join the pipeline's own.
+	plans := &planRun{}
 	// sourceTuples aggregates per-file source provenance across every
 	// materializer call. The key is the absolute on-disk path of the
 	// written file; the value is the ordered list of SourceEntry
@@ -752,9 +1085,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			if overlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
 				EmitRank2Notice(NoticeIDRank2Overlay, opts.overlayURL, a.Reporter)
 				newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
-				if a.InstallNiwaPlugin != nil {
-					a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
-				}
 			}
 
 		case opts.configSourceURL != "":
@@ -781,9 +1111,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 					if overlayRank == 2 && !sliceContains(opts.disclosedNotices, NoticeIDRank2Overlay) {
 						EmitRank2Notice(NoticeIDRank2Overlay, conventionURL, a.Reporter)
 						newDisclosures = append(newDisclosures, NoticeIDRank2Overlay)
-						if a.InstallNiwaPlugin != nil {
-							a.InstallNiwaPlugin(nil, a.Reporter, a.SkipPluginInstall)
-						}
 					}
 				}
 			}
@@ -807,6 +1134,14 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 				return nil, fmt.Errorf("workspace overlay is missing workspace-overlay.toml")
 			}
 			return nil, fmt.Errorf("parsing workspace overlay: %w", parseErr)
+		}
+
+		// Inert [workspace] settings the overlay declares are announced here
+		// rather than rejected: a stale overlay must keep applying, and the
+		// author who wrote the stanza is the one who needs to hear that it
+		// does nothing. Deferred so it survives the spinner.
+		for _, w := range overlay.TombstoneWarnings() {
+			a.Reporter.DeferWarn("%s", w)
 		}
 
 		// PRD R9 stage 2: post-overlay credential-sync chicken-and-egg
@@ -848,9 +1183,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			Env:   overlay.Env,
 			Repos: overlay.Repos,
 		}
+		// Values that resolve here are secrets and pass through the
+		// second, whole-config resolve untouched; values that do not
+		// come back marked, and the marks are what stop that second
+		// pass re-asking with the wrong bundle. See resolveOne's
+		// already-marked guard.
 		resolvedTmp, resolveErr := resolve.ResolveWorkspace(ctx, tmpCfg, resolve.ResolveOptions{
-			AllowMissing: a.AllowMissingSecrets,
-			TeamBundle:   overlayVaultBundle,
+			TeamBundle: overlayVaultBundle,
 		})
 		if resolveErr != nil {
 			return nil, fmt.Errorf("resolving overlay vault references: %w", resolveErr)
@@ -924,11 +1263,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// carries the merge.
 	effectiveCfg := cfg
 
-	// Build a redactor for this apply invocation and attach it to
-	// ctx so every secret.Errorf / Wrap call downstream scrubs
-	// resolved values automatically.
-	redactor := secret.NewRedactor()
-	ctx = secret.WithRedactor(ctx, redactor)
+	// (The redactor is built at the top of runPipeline — see the comment
+	// there for why it cannot be built here.)
 
 	// R5 enforcement: a workspace with more than one [[sources]] block
 	// AND an active personal overlay must declare [workspace].vault_scope
@@ -1073,51 +1409,47 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
-	// Resolve the team workspace config.
-	resolvedCfg, err := resolve.ResolveWorkspace(ctx, cfg, resolve.ResolveOptions{
-		AllowMissing: a.AllowMissingSecrets,
-		TeamBundle:   teamBundle,
-	})
-	if err != nil {
-		return nil, err
-	}
-	effectiveCfg = resolvedCfg
-
+	// Resolve the team workspace config and merge the personal overlay via
+	// the shared helper. The same helper drives applyContentToWorktree in
+	// internal/cli/session_lifecycle_cmd.go so the two apply paths cannot
+	// drift on "what does an effective WorkspaceConfig look like after
+	// personal overlay resolution"; see effective_config.go for the
+	// drift-invariant rationale.
+	//
 	// globalEnvExamplePolicy is the resolved personal/global .env.example
 	// failure policy for the active workspace, threaded into the materialize
 	// context so the pre-pass can consult the global category rung. It stays
 	// nil when no global override is loaded (skipGlobal or no niwa.toml), which
 	// the resolver treats as "no global rung".
-	var globalEnvExamplePolicy *config.EnvExamplePolicy
-
-	// Resolve the personal overlay, then merge it into the team
-	// workspace. The merge happens AFTER resolution so that R8
-	// team_only enforcement in MergeGlobalOverride sees the
-	// overlay's resolved MaybeSecret values, not pre-resolve URIs.
-	if globalOverride != nil {
-		resolvedOverride, err := resolve.ResolveGlobalOverride(ctx, globalOverride, resolve.ResolveOptions{
-			AllowMissing:   a.AllowMissingSecrets,
-			PersonalBundle: personalBundle,
-		})
-		if err != nil {
-			return nil, err
-		}
-		flattened := ResolveGlobalOverride(resolvedOverride, cfg.Workspace.Name)
-		globalEnvExamplePolicy = flattened.EnvExamplePolicy
-		merged, err := MergeGlobalOverride(resolvedCfg, flattened, a.GlobalConfigDir)
-		if err != nil {
-			return nil, err
-		}
-		effectiveCfg = merged
+	effectiveCfg, globalEnvExamplePolicy, globalEnvOutput, err := ResolveAndMergeEffectiveConfig(
+		ctx, cfg, globalOverride, teamBundle, personalBundle,
+		EffectiveConfigOptions{
+			GlobalConfigDir: a.GlobalConfigDir,
+			Stderr:          a.Reporter.Writer(),
+			Keys:            a.Keys,
+		},
+	)
+	if err != nil {
+		return nil, err
 	}
 
-	// Post-merge required/recommended enforcement (PRD R33/R34). The
-	// required check is NOT downgraded by AllowMissingSecrets; the
-	// resolver already turned missing vault-backed keys into empty
-	// MaybeSecret values when the flag is set, and checkRequiredKeys
-	// catches those empty values via the required list.
+	// Post-merge required/recommended enforcement. This is the single
+	// place fatality is decided: the resolver marks shortfalls rather
+	// than failing, and only a required key that a reachable provider
+	// does not hold stops the apply here.
 	if err := checkRequiredKeys(effectiveCfg, a.Reporter.Writer()); err != nil {
 		return nil, err
+	}
+
+	// Strict mode reads the same picture immediately afterwards: whatever
+	// checkRequiredKeys tolerated is fatal here when the operator asked for
+	// fail-on-shortfall. It runs after, not instead: the strict-when-reachable
+	// error above says which provider was asked and stays the better message
+	// when both would fire.
+	if a.StrictSecrets {
+		if err := strictShortfallError(a.Keys); err != nil {
+			return nil, err
+		}
 	}
 
 	// Step 3: Create group directories and clone repos concurrently.
@@ -1148,7 +1480,11 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		jobs := make(chan cloneJob, total)
 		results := make(chan cloneResult, total)
 
-		workers := min(cloneWorkers, total)
+		workers := a.CloneWorkers
+		if workers <= 0 {
+			workers = cloneWorkers
+		}
+		workers = min(workers, total)
 		for range workers {
 			go a.cloneWorker(ctx, jobs, results)
 		}
@@ -1174,6 +1510,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 				cancel()
 			}
 			if cloneErr == nil {
+				if r.retries > 0 {
+					a.Reporter.DeferWarn("cloned %s after %d transient failure(s)", r.name, r.retries)
+				}
 				if r.syncWarn != "" {
 					a.Reporter.DeferWarn("%s", r.syncWarn)
 				}
@@ -1189,12 +1528,36 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
-	// Step 4: Install workspace-level CLAUDE.md.
-	wsFiles, err := InstallWorkspaceContent(effectiveCfg, configDir, instanceRoot)
-	if err != nil {
-		return nil, fmt.Errorf("installing workspace content: %w", err)
+	// Step 4: Install the instance-root context document, for every agent.
+	//
+	// Every enumerated agent's plan is produced on every apply, here and at each
+	// level below. There is no agent choice at create or apply time: an agent
+	// that receives the document gets it, one that does not gets nothing, and
+	// which is which is the declaration table's answer rather than a flag's. A
+	// workspace prepared for one agent is prepared for the other at the same
+	// time, so switching between them needs no re-apply.
+	// The documents the root context document points at are resolved before it
+	// is written, not after. Their own files land further down, at step 4.5 and
+	// step 5c, in the order the @import lines need -- but an agent with no
+	// import mechanism reads a reference as nothing at all, so the layers have
+	// to be in hand here for the producer that folds them in.
+	globalLayerDir := ""
+	if a.GlobalConfigDir != "" && !opts.skipGlobal {
+		globalLayerDir = a.GlobalConfigDir
 	}
-	writtenFiles = append(writtenFiles, wsFiles...)
+	rootImports, err := InstanceRootImportedLayers(effectiveCfg, classified, overlayDir, globalLayerDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolving instance-root context layers: %w", err)
+	}
+
+	for _, ag := range agent.All() {
+		wsFiles, wsWarnings, err := InstallWorkspaceContent(effectiveCfg, configDir, instanceRoot, ag, rootImports)
+		if err != nil {
+			return nil, fmt.Errorf("installing workspace content: %w", err)
+		}
+		writtenFiles = append(writtenFiles, wsFiles...)
+		allWarnings = append(allWarnings, wsWarnings...)
+	}
 
 	// Build repo name -> on-disk path index (used by marketplace resolution
 	// and materializers).
@@ -1230,7 +1593,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
-	rootSettingsFiles, err := InstallWorkspaceRootSettings(effectiveCfg, configDir, instanceRoot, repoIndex)
+	rootSettings := &RootSettingsMaterializer{}
+	rootSettingsFiles, err := rootSettings.Materialize(&MaterializeContext{
+		Config:    effectiveCfg,
+		ConfigDir: configDir,
+		RepoDir:   instanceRoot,
+		RepoIndex: repoIndex,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("installing workspace root settings: %w", err)
 	}
@@ -1244,11 +1613,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		installedGroups[cr.Group] = true
 
-		groupFiles, err := InstallGroupContent(effectiveCfg, configDir, instanceRoot, cr.Group)
-		if err != nil {
-			return nil, fmt.Errorf("installing group content for %q: %w", cr.Group, err)
+		for _, ag := range agent.All() {
+			groupFiles, err := InstallGroupContent(effectiveCfg, configDir, instanceRoot, cr.Group, ag)
+			if err != nil {
+				return nil, fmt.Errorf("installing group content for %q: %w", cr.Group, err)
+			}
+			writtenFiles = append(writtenFiles, groupFiles...)
 		}
-		writtenFiles = append(writtenFiles, groupFiles...)
 	}
 
 	// Step 5c: Install global CLAUDE.md content if global config is active.
@@ -1260,21 +1631,238 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		writtenFiles = append(writtenFiles, globalFiles...)
 	}
 
-	// Step 6: Install repo-level CLAUDE.local.md files (and subdirectories).
-	// Skip repos with claude = false.
+	// Step 6: Install the repo-level orientation documents (and subdirectories).
+	// Each agent's plan is produced behind that agent's own enabled gate, so a
+	// repository that turns one agent off still receives the other's full
+	// delivery.
+	// What each agent's composed chain came to, per repository. Step 6.3 sizes
+	// that agent's declared context budget from it, and the two steps are
+	// separate loops over the same pairs, so the measurement is carried rather
+	// than recomputed -- the payload producer sees the entries a plan declared,
+	// not the layers they were folded from.
+	contextChains := map[contextChainKey]int{}
 	for _, cr := range classified {
-		if !ClaudeEnabled(effectiveCfg, cr.Repo.Name) {
-			continue
+		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
+		for _, ag := range agent.All() {
+			producer := agentplan.For(ag).Gated(AgentEnabled(effectiveCfg, cr.Repo.Name, string(ag)))
+			result, err := InstallRepoContentTo(effectiveCfg, configDir, overlayDir, instanceRoot, repoDir, cr.Group, cr.Repo.Name, producer)
+			if err != nil {
+				return nil, fmt.Errorf("installing repo content for %q: %w", cr.Repo.Name, err)
+			}
+			for _, w := range result.Warnings {
+				allWarnings = append(allWarnings, w.String())
+			}
+			writtenFiles = append(writtenFiles, result.WrittenFiles...)
+			exemptPaths = append(exemptPaths, result.Exempt...)
+			contentExcludes[repoDir] = append(contentExcludes[repoDir], result.Excludes...)
+			contextChains[contextChainKey{agent: ag, dir: repoDir}] = result.ChainBytes
+		}
+	}
+
+	// Step 6.2: Deliver the workspace's declared plugin skills into each
+	// repository. The configured plugins are resolved to their trees once per
+	// apply -- resolution reads marketplace manifests and fetches a remote
+	// marketplace's content into this instance, neither of which belongs on a
+	// per-repository path -- and the resolved set is then delivered for every
+	// agent whose declaration says its skills arrive that way.
+	fetcher, _ := a.GitHubClient.(FetchClient)
+	pluginTrees, missingPlugins := ResolvePluginTrees(ctx, PluginSkillsInputs{
+		InstanceRoot: instanceRoot,
+		Plugins:      MergeInstanceOverrides(effectiveCfg).Plugins,
+		Marketplaces: effectiveCfg.Claude.Marketplaces,
+		RepoIndex:    repoIndex,
+		Fetcher:      fetcher,
+	})
+	for _, m := range missingPlugins {
+		allWarnings = append(allWarnings, m.String())
+	}
+	for _, cr := range classified {
+		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
+		for _, ag := range agent.All() {
+			producer := agentplan.For(ag).Gated(AgentEnabled(effectiveCfg, cr.Repo.Name, string(ag)))
+			skills, err := InstallRepoSkills(repoDir, pluginTrees, producer)
+			if err != nil {
+				return nil, fmt.Errorf("delivering plugin skills for %q: %w", cr.Repo.Name, err)
+			}
+			allWarnings = append(allWarnings, skills.Warnings...)
+			contentExcludes[repoDir] = append(contentExcludes[repoDir], skills.Excludes...)
+		}
+	}
+
+	// Step 6.2b: Deliver the same resolved trees into the instance root, for
+	// each agent whose declaration says root-started sessions read skills from
+	// there. It is a second delivery of the same bytes one directory higher,
+	// answering to its own capability: who receives a delivery is what the two
+	// rows differ on, and a session started at the instance root is not a
+	// session started inside a repository.
+	//
+	// The gate is the workspace-level one -- the same AgentEnabled lookup asked
+	// with no repository name -- because the instance root belongs to no
+	// repository. Step 6.3's sibling payload call below gates the root the same
+	// way.
+	//
+	// Nothing here feeds contentExcludes. That map is keyed by working tree and
+	// consumed by the repository exclude writer, which searches upward for an
+	// enclosing repository; the instance root has none of its own, so its
+	// coverage is written at the root itself by EnsureInstanceGitignore.
+	for _, ag := range agent.All() {
+		rootSkills := &RootSkillsMaterializer{
+			Plugins:  pluginTrees,
+			Producer: agentplan.For(ag).Gated(AgentEnabled(effectiveCfg, "", string(ag))),
+		}
+		if _, err := rootSkills.Materialize(&MaterializeContext{RepoDir: instanceRoot}); err != nil {
+			return nil, fmt.Errorf("delivering %s at the instance root: %w", agentplan.RootProjectSkills, err)
+		}
+		allWarnings = append(allWarnings, rootSkills.Warnings...)
+	}
+
+	// Step 6.3: Generate the workspace's declared MCP servers and session
+	// environment into each agent's own format. Both declarations are
+	// agent-neutral and workspace-scoped, so each is resolved once and offered
+	// to every producer, which decides whether it takes a configuration at a
+	// given scope, where it goes, which of the declarations it carries, and
+	// whether they can be expressed in its format at all.
+	//
+	// A declaration a producer cannot express fails the apply here rather than
+	// landing as a file: a generated configuration that an agent refuses to
+	// load takes every other server in it down with it, so the loud failure is
+	// the one that leaves a working session behind.
+	mcpServers, mcpWarnings := MCPServersFromConfig(effectiveCfg)
+	allWarnings = append(allWarnings, mcpWarnings...)
+	instanceOverrides := MergeInstanceOverrides(effectiveCfg)
+	mcpDestinations := mcpVerbatimDestinations(instanceOverrides.Files, instanceOverrides.InstanceFiles, instanceOverrides.RootFiles)
+
+	// One resolution of the session environment for the whole apply. The values
+	// reach the generated payloads below and the settings documents at step
+	// 6.5 through the same map, so no agent's session can end up carrying a
+	// different value for a variable the workspace declared once.
+	sessionEnv, sessionEnvSources, err := SessionEnvVars(effectiveCfg, instanceOverrides, configDir)
+	if err != nil {
+		return nil, err
+	}
+
+	// The declared posture, read once for the apply. Nothing resolves and
+	// nothing defaults: a workspace that declares none produces the zero value,
+	// which every producer writes nothing for.
+	sessionPosture := SessionPostureFromConfig(effectiveCfg)
+
+	for _, ag := range agent.All() {
+		// The instance root belongs to no repository, so the gate that applies
+		// here is the workspace-level one -- the same lookup, asked with no
+		// repository name.
+		producer := agentplan.For(ag).Gated(AgentEnabled(effectiveCfg, "", string(ag)))
+
+		// One posture line per agent per apply rather than one per generated
+		// file: what a workspace changed about a session is a fact about the
+		// workspace, and a developer who reads it once has read it. An agent
+		// whose posture this document does not carry, and a workspace that
+		// declared none, both report nothing.
+		if report := producer.PostureReport(sessionPosture); report != "" {
+			allWarnings = append(allWarnings, report)
 		}
 
-		result, err := InstallRepoContent(effectiveCfg, configDir, overlayDir, instanceRoot, cr.Group, cr.Repo.Name)
+		// One read of the developer's own configuration per agent, before any
+		// generation: a name it already defines merges with a generated one
+		// field by field rather than being overridden by it.
+		existingMCP, collisionWarning := ReadDeclaredMCPNames(a.DeveloperHome, producer.MCPCollisionSpec())
+		if collisionWarning != "" {
+			allWarnings = append(allWarnings, collisionWarning)
+		}
+		if report := producer.MCPVerbatimReport(mcpDestinations, len(mcpServers) > 0); report != "" {
+			allWarnings = append(allWarnings, report)
+		}
+
+		rootPayload, err := InstallPayloadConfig(PayloadRequest{
+			Scope:    agentplan.PayloadAtInstanceRoot,
+			Dir:      instanceRoot,
+			Servers:  mcpServers,
+			Env:      sessionEnv,
+			Posture:  sessionPosture,
+			Existing: existingMCP,
+		}, producer)
 		if err != nil {
-			return nil, fmt.Errorf("installing repo content for %q: %w", cr.Repo.Name, err)
+			return nil, fmt.Errorf("generating the payload configuration for the instance root: %w", err)
 		}
-		for _, w := range result.Warnings {
-			allWarnings = append(allWarnings, w.String())
+		writtenFiles = append(writtenFiles, rootPayload.Written...)
+		exemptPaths = append(exemptPaths, rootPayload.Exempt...)
+		allWarnings = append(allWarnings, rootPayload.Warnings...)
+
+		// The per-repository gate is this agent's own, applied to this agent's
+		// producer. A Claude-named switch in front of a loop that produces
+		// every agent's payload would decide for an agent that has never heard
+		// of it, which is why the gate arrives here as a producer input rather
+		// than as a skip around the loop.
+		for _, cr := range classified {
+			repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
+			repoProducer := agentplan.For(ag).Gated(AgentEnabled(effectiveCfg, cr.Repo.Name, string(ag)))
+			repoPayload, err := InstallPayloadConfig(PayloadRequest{
+				Scope:             agentplan.PayloadInRepo,
+				Dir:               repoDir,
+				Servers:           mcpServers,
+				Env:               sessionEnv,
+				Posture:           sessionPosture,
+				Existing:          existingMCP,
+				ContextChainBytes: contextChains[contextChainKey{agent: ag, dir: repoDir}],
+			}, repoProducer)
+			if err != nil {
+				return nil, fmt.Errorf("generating the payload configuration for %q: %w", cr.Repo.Name, err)
+			}
+			writtenFiles = append(writtenFiles, repoPayload.Written...)
+			exemptPaths = append(exemptPaths, repoPayload.Exempt...)
+			allWarnings = append(allWarnings, repoPayload.Warnings...)
+			contentExcludes[repoDir] = append(contentExcludes[repoDir], repoPayload.Excludes...)
 		}
-		writtenFiles = append(writtenFiles, result.WrittenFiles...)
+	}
+
+	// Step 6.4: Decide the worktree-delegation integration ONCE per apply
+	// (design Decisions 4 & 6), then thread it into every repo's
+	// SettingsMaterializer below. Running the probe once — not per repo — keeps
+	// the subprocess off the per-repo path. Hook and deny are mutually exclusive;
+	// the materializer writes one based on Supported.
+	//
+	// Gated on the init-time opt-out (Issue 6, design Decision 5): when
+	// `niwa init --no-worktree-delegation` set InstanceState.NoWorktreeDelegation,
+	// skip the entire block — no probe, no hook, no deny, no disclosure.
+	// worktreeDelegation stays nil, so the SettingsMaterializer writes neither
+	// the hook nor the deny entries. The opt-out is reversible: re-running init
+	// without the flag clears the state field, and the next apply re-enters this
+	// block and installs the integration.
+	var worktreeDelegation *WorktreeDelegation
+	if !opts.noWorktreeDelegation {
+		worktreeSupported := SupportsWorktreeHooks(ctx)
+		niwaPath, niwaPathErr := os.Executable()
+		worktreeDelegation = &WorktreeDelegation{
+			Supported: worktreeSupported,
+			NiwaPath:  niwaPath,
+		}
+		// If we cannot determine niwa's own path, fall back to the deny branch.
+		// Since Decision 7 the hook command resolves `niwa` from PATH first, so a
+		// PATH-only command would still be writable here — but it would be a hook
+		// with no fallback arm, which fails loudly in exactly the environments the
+		// fallback exists for. Deny+steer is the graceful degradation the design
+		// already builds, so we prefer it over a hook that might not resolve.
+		// (os.Executable failing is extremely rare — a removed/renamed binary
+		// mid-run.)
+		if niwaPathErr != nil {
+			a.Reporter.DeferWarn("could not resolve niwa binary path for worktree hooks (%v); installing deny fallback", niwaPathErr)
+			worktreeDelegation.Supported = false
+		}
+
+		// Disclosure (design Decision 4): the deny fallback is a current-state
+		// condition, so its warning fires on EVERY apply; a one-time explainer fires
+		// only on first encounter. The decision is computed by the pure
+		// worktreeFallbackDisclosure helper.
+		warnFallback, explainFallback := worktreeFallbackDisclosure(
+			worktreeDelegation.Supported,
+			noticeDisclosed(opts.existingState, noticeWorktreeFallback),
+		)
+		if warnFallback {
+			a.Reporter.Warn("%s", worktreeFallbackWarning)
+		}
+		if explainFallback {
+			a.Reporter.Log("%s", worktreeFallbackExplainer)
+			newDisclosures = append(newDisclosures, noticeWorktreeFallback)
+		}
 	}
 
 	// Step 6.5: Run materializers (hooks, settings, env) for each repo.
@@ -1297,7 +1885,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 	for _, cr := range classified {
 		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
-		files, err := runRepoMaterializers(a.Materializers, repoMaterializeInputs{
+		files, envOutputs, err := runRepoMaterializers(a.Materializers, repoMaterializeInputs{
 			Cfg:                   effectiveCfg,
 			ConfigDir:             configDir,
 			RepoName:              cr.Repo.Name,
@@ -1310,67 +1898,458 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			Stderr:                a.Reporter.Writer(),
 
 			GlobalEnvExamplePolicy: globalEnvExamplePolicy,
+			GlobalEnvOutput:        globalEnvOutput,
+			WorktreeDelegation:     worktreeDelegation,
+			Keys:                   a.Keys,
+			StrictSecrets:          a.StrictSecrets,
+			SessionEnv:             sessionEnv,
+			SessionEnvSources:      sessionEnvSources,
 		})
 		if err != nil {
 			return nil, err
 		}
 		writtenFiles = append(writtenFiles, files...)
+
+		// Record niwa's ignore coverage in the repo's .git/info/exclude so the
+		// files just materialized stay invisible to the repo's git status,
+		// independent of its committed .gitignore. Custom secret-output target
+		// names (not matched by the base *.local* pattern) are passed so they
+		// are covered too, along with the patterns plan entries written into
+		// this repo declared. Fail closed: a repo we cannot keep clean surfaces
+		// the error rather than leaking niwa-authored files.
+		excludeExtras := make([]string, 0, len(envOutputs))
+		excludeExtras = append(excludeExtras, envOutputs...)
+		excludeExtras = append(excludeExtras, plans.excludesUnder(repoDir)...)
+		excludeExtras = append(excludeExtras, contentExcludes[repoDir]...)
+		if err := gitexclude.EnsureRepoExclude(repoDir, excludeExtras...); err != nil {
+			return nil, fmt.Errorf("recording git exclude coverage for repo %s: %w", cr.Repo.Name, err)
+		}
 	}
 
-	// Step 6.75: Run repo-provided setup scripts.
+	// Step 6.5: Deliver the procedure-routed capabilities -- today, directory
+	// trust. It runs here, after the repositories are on disk, because the
+	// entry is keyed by the canonical path of a directory that has to exist to
+	// be canonicalized. Which agent receives it is a lookup in the declaration
+	// table, not a branch here.
+	repoRoots := make([]string, 0, len(classified))
+	for _, cr := range classified {
+		repoRoots = append(repoRoots, filepath.Join(instanceRoot, cr.Group, cr.Repo.Name))
+	}
+	trustKeys, procErr := a.deliverDirectoryTrust(repoRoots, opts.existingState, &allWarnings)
+
+	// Step 6.5b: Deliver niwa's own plugin, for whichever agents the contract
+	// declares it implemented for. It runs after the root skills delivery
+	// above, so the directory its per-instance half links into has already been
+	// reconciled -- and the reconcile's Keep set carries this tree's name
+	// wherever it is delivered, so the two passes never fight over it.
+	//
+	// Its failure joins the trust failure in the same carried-out error. The
+	// first one wins: what both say is that this apply left something
+	// undelivered, and the instance is on disk either way.
+	//
+	// The notices it emitted join newDisclosures, which is how every other
+	// once-per-workspace notice in this pipeline stops repeating: the caller
+	// persists them, and the next apply hands them back as already told.
+	pluginDisclosures, pluginErr := a.deliverNiwaPlugin(instanceRoot, effectiveCfg, opts.disclosedNotices, &allWarnings)
+	newDisclosures = append(newDisclosures, pluginDisclosures...)
+	if pluginErr != nil && procErr == nil {
+		procErr = pluginErr
+	}
+
+	// Step 6.75: Run repo-provided setup scripts. A script failure is
+	// carried out as data (setupIncomplete) and never returned as an error:
+	// every repo gets its turn, and the pipeline's error path must not be
+	// reached, since on create it deletes the instance root.
+	//
+	// ORDER: this step deliberately runs BEFORE Step 6.6's worktree fan-out
+	// below, despite the numbering, which is historical -- 6.6 was inserted
+	// above an existing 6.75 because its own constraint (after the materializer
+	// loop) was already satisfied there, not because anything required it to
+	// precede setup.
+	//
+	// The order matters once a worktree can run setup of its own: with the
+	// fan-out first, every worktree is provisioned against the state the
+	// PREVIOUS apply's clone setup left behind, so a per-tree step that
+	// consumes something clone setup produces consumes a stale copy. Running
+	// the clone's setup first makes a worktree see this apply's output.
+	//
+	// Nothing in Step 6.6's inputs comes from here: they are produced at or
+	// before Step 6.5, and the load-bearing one -- the clone's materialized env
+	// output that the worktree inherits -- is written by Step 6.5's
+	// EnvMaterializer. Its []ManagedFile result is read once, in Step 7 below,
+	// and exemptPaths has no read between the two steps and is flattened into a
+	// map by its consumer, so the append order is irrelevant.
+	//
+	// TestPipeline_CloneSetupRunsBeforeWorktreeFanOut pins this. Without it the
+	// ordering is established by analysis and held in place by nothing.
+	var setupIncomplete []string
 	for _, cr := range classified {
 		setupDir := ResolveSetupDir(effectiveCfg, cr.Repo.Name)
 		repoDir := filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
-		result := RunSetupScripts(repoDir, setupDir, a.Reporter)
+		// The instance-root anchor goes to clone scripts too, so a script can
+		// stop deriving it by walking up from its working directory. Doing this
+		// only in worktrees would leave the fragile idiom load-bearing here.
+		result := RunSetupScripts(repoDir, setupDir, a.Reporter, redactor,
+			cloneSetupEnv(instanceRoot)...)
 
 		if result.Disabled || result.Skipped {
 			continue
 		}
 
+		repoFailed := false
 		for _, sr := range result.Scripts {
 			if sr.Error != nil {
+				repoFailed = true
 				a.Reporter.DeferWarn("setup script %s/%s failed for %s: %v",
 					setupDir, sr.Name, cr.Repo.Name, sr.Error)
 			}
 		}
+		// Count the repo once however many of its scripts errored. A
+		// non-executable script is skipped rather than stopping the
+		// repo, so a repo with several errors is a real case.
+		if repoFailed {
+			setupIncomplete = append(setupIncomplete, cr.Repo.Name)
+		}
+	}
+	// Step 6.6: Refresh the env of the instance's existing worktrees, sourcing
+	// from the clones just materialized above -- and, now, from the clone setup
+	// that Step 6.75 ran immediately before this. See the ORDER note there for
+	// why this step follows it despite the lower number.
+	//
+	// This is the apply-side fan-out of
+	// the inherit primitive (DESIGN decision B2): after an apply no live worktree
+	// holds a value different from its clone (R6). Locked/detached/missing
+	// worktrees are skipped with a warning (R7); a skipped-but-live worktree's
+	// prior managed-file entries are forward-carried so cleanRemovedFiles does
+	// not delete its live secret file on the next apply.
+	repoGroups := make(map[string]string, len(classified))
+	for _, cr := range classified {
+		repoGroups[cr.Repo.Name] = cr.Group
+	}
+	worktreeManaged, err := a.refreshWorktreeEnvs(worktreeRefreshInputs{
+		instanceRoot:           instanceRoot,
+		cfg:                    effectiveCfg,
+		configDir:              configDir,
+		overlayDir:             overlayDir,
+		globalEnvOutput:        globalEnvOutput,
+		globalEnvExamplePolicy: globalEnvExamplePolicy,
+		repoIndex:              repoIndex,
+		repoGroups:             repoGroups,
+		existingState:          opts.existingState,
+		now:                    now,
+		allowPlaintextSecrets:  a.AllowPlaintextSecrets,
+		worktreeDelegation:     worktreeDelegation,
+		exempt:                 &exemptPaths,
+		redactor:               redactor,
+		setupIncomplete:        &setupIncomplete,
+	})
+	if err != nil {
+		return nil, err
 	}
 
+	// Plan warnings: what the applied plans said the user needs to hear.
+	// Reported alongside the pipeline's other deferred warnings.
+	allWarnings = append(allWarnings, plans.warnings()...)
+	exemptPaths = append(exemptPaths, plans.exempt()...)
+
 	// Step 7: Build managed files with hashes and per-source
-	// provenance. Sources are populated by materializers via
-	// MaterializeContext.SourceTuples; files written outside the
-	// materializer pipeline (content files, workspace CLAUDE.md,
-	// etc.) have no recorded sources, which is fine — their drift
-	// check falls back to the ContentHash-only path.
+	// provenance. Sources come from two places. Materializers report
+	// them out of band via MaterializeContext.SourceTuples, keyed by
+	// the path they wrote; plan entries carry Managed and Sources on
+	// the entry itself, so a plan-produced file needs no side map to
+	// say whether it is recorded or what fed it. Files in neither --
+	// content files, hook scripts -- have no recorded sources, which
+	// is fine: their drift check falls back to the ContentHash-only
+	// path.
 	managedFiles := make([]ManagedFile, 0, len(writtenFiles))
 	for _, path := range writtenFiles {
-		hash, err := HashFile(path)
+		mf, err := hashManagedFile(path, sourceTuples[path], now)
 		if err != nil {
-			return nil, fmt.Errorf("hashing managed file %s: %w", path, err)
+			return nil, err
 		}
-		sources := sourceTuples[path]
-		mf := ManagedFile{
-			Path:        path,
-			ContentHash: hash,
-			Generated:   now,
-			Sources:     sources,
-		}
-		if len(sources) > 0 {
-			mf.SourceFingerprint = ComputeSourceFingerprint(sources)
+		managedFiles = append(managedFiles, mf)
+	}
+	for _, e := range plans.managedEntries() {
+		mf, err := hashManagedFile(e.Path, e.Sources, now)
+		if err != nil {
+			return nil, err
 		}
 		managedFiles = append(managedFiles, mf)
 	}
 
+	// Merge the worktree-refresh managed files (Step 6.6). These are already
+	// fully-formed ManagedFile values: freshly-written worktree env outputs
+	// (hashed here) plus forward-carried entries copied verbatim from the prior
+	// state for skipped-but-live worktrees. Including them keeps cleanRemovedFiles
+	// from pruning a live worktree's secret file.
+	managedFiles = append(managedFiles, worktreeManaged...)
+
+	// Step 8: Automatic dangling plugin-record heal. Both Applier.Create and
+	// Applier.Apply route through runPipeline, so this repairs accumulated
+	// registry damage on every workspace create and update with no separate
+	// command (Decision 2; R3, R5). It is dangling-only (never removes live
+	// records), fail-safe (a malformed/absent registry is reported and
+	// skipped, never failing create or update), and it reports what it
+	// removed so the heal is never silent (R4).
+	a.healDanglingPluginRecords()
+
+	// Step 9: Reconcile the global marketplace registry's autoUpdate flag to
+	// the configured per-marketplace policy. niwa writes the policy into
+	// project settings, but Claude Code does not refresh an already-registered
+	// marketplace's global entry from those, so this closes the gap on every
+	// create and update (R18). Fail-safe like the heal above.
+	a.reconcileMarketplaceRegistry(effectiveCfg, repoIndex)
+
 	return &pipelineResult{
-		classified:       classified,
-		repoStates:       repoStates,
-		managedFiles:     managedFiles,
-		warnings:         allWarnings,
-		shadows:          pipelineShadows,
-		authSources:      credentialPool.AuditLog().AsMap(),
-		overlayURL:       pipelineOverlayURL,
-		overlayCommit:    pipelineOverlayCommit,
-		disclosedNotices: newDisclosures,
+		classified:        classified,
+		repoStates:        repoStates,
+		managedFiles:      managedFiles,
+		warnings:          allWarnings,
+		setupIncomplete:   setupIncomplete,
+		shadows:           pipelineShadows,
+		authSources:       credentialPool.AuditLog().AsMap(),
+		overlayURL:        pipelineOverlayURL,
+		overlayCommit:     pipelineOverlayCommit,
+		disclosedNotices:  newDisclosures,
+		trustKeys:         trustKeys,
+		claudePermissions: instancePermissionsPosture(effectiveCfg),
+		procedureErr:      procErr,
+		exemptPaths:       exemptPaths,
 	}, nil
+}
+
+// deliverDirectoryTrust runs the directory-trust delivery for whichever agents
+// the contract declares it implemented for, and returns the record to persist
+// plus the first failure to surface after materialization finishes.
+//
+// There is no agent named here on purpose. The loop asks the declaration table
+// which agents receive the capability and the binding which registered
+// procedure serves it, so delivering trust to a second agent -- or stopping
+// delivering it to this one -- is an edit to the table rather than to the
+// pipeline. That is the whole difference between a delivery under the contract
+// and a hardcoded second pass beside it (R4, R5).
+//
+// The record is returned on every path, failure included. It is the sole
+// authority for what niwa may later remove from the developer's configuration,
+// so a run that could not write must still carry forward what earlier runs did.
+// It is keyed by the capability rather than by the agent because what it holds
+// is the set of repository paths niwa vouched for; a second agent keeping its
+// own per-directory trust would vouch for the same paths in its own file, and
+// each writer only ever retracts what it finds in the file it owns.
+func (a *Applier) deliverDirectoryTrust(repoRoots []string, existing *InstanceState, warnings *[]string) ([]string, error) {
+	var recorded []string
+	if existing != nil {
+		recorded = existing.TrustKeys
+	}
+
+	// An Applier with no developer home has not been wired to write outside
+	// the instance, which is how every unit suite in this package is built: a
+	// default that resolved the real home would have each of them edit the
+	// developer's own files. The CLI sets the field on every surface that
+	// constructs an Applier.
+	if a.DeveloperHome == "" {
+		return recorded, nil
+	}
+
+	var firstErr error
+	for _, ag := range agent.All() {
+		p, ok := procedureFor(agentplan.DirectoryTrust, ag)
+		if !ok {
+			continue
+		}
+		res, err := p.Deliver(procedureInput{
+			DeveloperHome: a.DeveloperHome,
+			RepoRoots:     repoRoots,
+			Recorded:      recorded,
+		})
+		*warnings = append(*warnings, res.Warnings...)
+		// The returned record replaces the prior one outright, empty included:
+		// a retraction that cleared the last key must leave an empty record,
+		// not the stale one it just withdrew.
+		recorded = res.Recorded
+		if err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("delivering %s to %s: %w", agentplan.DirectoryTrust, ag, err)
+		}
+	}
+	return recorded, firstErr
+}
+
+// deliverNiwaPlugin runs the delivery of niwa's own plugin for whichever agents
+// the contract declares it implemented for, and returns the first failure.
+//
+// It replaces the pass that named the installer directly. There is no agent
+// here and no installer call: the loop asks the declaration table which agents
+// receive the capability and the binding which registered procedure serves it,
+// exactly as deliverDirectoryTrust does. The two agents' deliveries are
+// genuinely different acts -- one writes a global tree under the developer's
+// home, the other extracts a per-instance tree and links it into the root
+// skills directory -- and each is a procedure of its own, which is why nothing
+// here has to know which one it just ran.
+//
+// It runs once per apply rather than off the rank-2 deprecation notice, which
+// is where the previous pass hung. A per-instance tree that arrives only for
+// workspaces on a deprecated config layout would be a capability the table
+// declares and an ordinary apply never delivers.
+//
+// An Applier with no developer home has not been wired to write outside the
+// instance, and the pass does not run at all. That is deliberately the whole
+// gate rather than a per-procedure one: every unit suite in this package builds
+// an Applier without a home, and a pass that ran the inside-the-instance half
+// for them would have those suites extracting trees they never asked for. The
+// CLI sets the field on every surface that constructs an Applier.
+//
+// The record is untouched by both procedures, so nothing is carried back. What
+// a record is for is retraction, and neither delivery leaves an entry that
+// could outlive what asked for it: the global tree owns its install path and
+// replaces it wholesale, and the per-instance tree is reclaimed with the
+// instance.
+//
+// What is carried back is the one-time notices a delivery emitted. The install
+// runs on every apply, so without the disclosure record its notice would print
+// on every apply for every workspace -- orientation the first time, noise
+// forever after. disclosed is what the workspace has already been told; the
+// returned ids are what this run added to that.
+func (a *Applier) deliverNiwaPlugin(instanceRoot string, cfg *config.WorkspaceConfig, disclosed []string, warnings *[]string) ([]string, error) {
+	if a.DeveloperHome == "" {
+		return nil, nil
+	}
+
+	var newDisclosures []string
+	var firstErr error
+	for _, ag := range agent.All() {
+		p, ok := procedureFor(agentplan.NiwaPlugin, ag)
+		if !ok {
+			continue
+		}
+		res, err := p.Deliver(procedureInput{
+			DeveloperHome: a.DeveloperHome,
+			InstanceRoot:  instanceRoot,
+			// The instance root belongs to no repository, so the gate is the
+			// workspace-level lookup -- the same one the root skills delivery
+			// and the root payload ask with no repository name.
+			Producer:          agentplan.For(ag).Gated(AgentEnabled(cfg, "", string(ag))),
+			SkipPluginInstall: a.SkipPluginInstall,
+			Reporter:          a.Reporter,
+			// Notices this run has already emitted count as disclosed for the
+			// agents after it, so two agents delivering the same global tree
+			// report it once between them rather than once each.
+			Disclosed: append(append([]string(nil), disclosed...), newDisclosures...),
+		})
+		*warnings = append(*warnings, res.Warnings...)
+		newDisclosures = append(newDisclosures, res.Disclosed...)
+		if err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("delivering %s to %s: %w", agentplan.NiwaPlugin, ag, err)
+		}
+	}
+	return newDisclosures, firstErr
+}
+
+// hashManagedFile builds one managed-file record: the file's content hash, the
+// sources reported for it, and the fingerprint those sources reduce to. Both of
+// Step 7's inputs -- the materializers' path-keyed side map and the applied
+// plan entries -- go through here so the two cannot record a file differently.
+func hashManagedFile(path string, sources []SourceEntry, now time.Time) (ManagedFile, error) {
+	hash, err := HashFile(path)
+	if err != nil {
+		return ManagedFile{}, fmt.Errorf("hashing managed file %s: %w", path, err)
+	}
+	mf := ManagedFile{
+		Path:        path,
+		ContentHash: hash,
+		Generated:   now,
+		Sources:     sources,
+	}
+	if len(sources) > 0 {
+		mf.SourceFingerprint = ComputeSourceFingerprint(sources)
+	}
+	return mf, nil
+}
+
+// healDanglingPluginRecords prunes records from Claude Code's global plugin
+// install registry whose referenced directories are already gone, then reports
+// what it removed. It is invoked from runPipeline so it runs on every workspace
+// create and update.
+//
+// The step is fail-safe by contract: a nil seam, a malformed registry, or any
+// I/O error is reported via a deferred warning and never propagated, so a
+// damaged or absent registry can never fail a create or update. A successful
+// prune that removed at least one record logs the count and the affected
+// plugin keys; a no-op prune is silent.
+func (a *Applier) healDanglingPluginRecords() {
+	if a.prunePluginRecords == nil {
+		return
+	}
+
+	report, err := a.prunePluginRecords()
+	if err != nil {
+		a.Reporter.DeferWarn("could not heal dangling plugin records: %v", err)
+		return
+	}
+	if report.Removed == 0 {
+		return
+	}
+
+	affected := affectedPlugins(report)
+	if len(affected) > 0 {
+		a.Reporter.Log("healed %d dangling plugin record(s): %s", report.Removed, strings.Join(affected, ", "))
+	} else {
+		a.Reporter.Log("healed %d dangling plugin record(s)", report.Removed)
+	}
+}
+
+// reconcileMarketplaceRegistry sets the autoUpdate flag in Claude Code's global
+// known_marketplaces.json to the configured per-marketplace policy for the
+// marketplaces niwa manages, so an already-registered marketplace adopts the
+// new policy instead of keeping a stale value Claude Code never refreshes from
+// project settings. It runs from runPipeline on every create and update.
+//
+// Like the dangling-record heal, it is fail-safe: a nil seam or any registry
+// error is reported via a deferred warning and never propagated, so a missing
+// or malformed registry can never fail a create or update.
+func (a *Applier) reconcileMarketplaceRegistry(cfg *config.WorkspaceConfig, repoIndex map[string]string) {
+	if a.reconcileMarketplaceAutoUpdate == nil || cfg == nil {
+		return
+	}
+
+	desired := make(map[string]bool, len(cfg.Claude.Marketplaces))
+	for _, mc := range cfg.Claude.Marketplaces {
+		name, err := marketplaceRegistrationName(mc.Source, repoIndex)
+		if err != nil || name == "" {
+			continue
+		}
+		desired[name] = mc.AutoUpdate
+	}
+	if len(desired) == 0 {
+		return
+	}
+
+	report, err := a.reconcileMarketplaceAutoUpdate(desired)
+	if err != nil {
+		a.Reporter.DeferWarn("could not reconcile marketplace auto-update policy: %v", err)
+		return
+	}
+	if len(report.Updated) > 0 {
+		a.Reporter.Log("updated auto-update policy for %d marketplace(s): %s", len(report.Updated), strings.Join(report.Updated, ", "))
+	}
+}
+
+// affectedPlugins returns the sorted, de-duplicated set of plugin keys touched
+// by a prune: every key with at least one record removed, plus every key
+// dropped entirely because its record list became empty.
+func affectedPlugins(report pluginrecord.PruneReport) []string {
+	seen := make(map[string]struct{}, len(report.PerPlugin)+len(report.DroppedKeys))
+	for key := range report.PerPlugin {
+		seen[key] = struct{}{}
+	}
+	for _, key := range report.DroppedKeys {
+		seen[key] = struct{}{}
+	}
+	keys := make([]string, 0, len(seen))
+	for key := range seen {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // cleanRemovedFiles deletes managed files from the previous state that are
@@ -1381,13 +2360,277 @@ func (a *Applier) cleanRemovedFiles(existingState *InstanceState, result *pipeli
 		currentFiles[mf.Path] = true
 	}
 
+	// A path this run refused to write is a path this run did not produce, so
+	// the loop below would delete it. That is exactly backwards: the refusal
+	// happened because the file is the repository's own, and niwa promised to
+	// leave it untouched. The record entry still goes -- the state must stop
+	// claiming niwa owns the path -- and only the deletion is exempted.
+	exempt := make(map[string]bool, len(result.exemptPaths))
+	for _, path := range result.exemptPaths {
+		exempt[filepath.Clean(path)] = true
+	}
+
 	for _, mf := range existingState.ManagedFiles {
-		if !currentFiles[mf.Path] {
-			if err := os.Remove(mf.Path); err != nil && !os.IsNotExist(err) {
-				a.Reporter.DeferWarn("could not remove managed file %s: %v", mf.Path, err)
-			}
+		if currentFiles[mf.Path] || exempt[filepath.Clean(mf.Path)] {
+			continue
+		}
+		if err := os.Remove(mf.Path); err != nil && !os.IsNotExist(err) {
+			a.Reporter.DeferWarn("could not remove managed file %s: %v", mf.Path, err)
 		}
 	}
+}
+
+// worktreeRefreshInputs bundles the inputs the apply-time worktree-refresh step
+// needs. It is a struct (rather than a long argument list) so refreshWorktreeEnvs
+// can be unit-tested in isolation with a fabricated set of sessions and a
+// stubbed git-registration check.
+type worktreeRefreshInputs struct {
+	instanceRoot           string
+	cfg                    *config.WorkspaceConfig
+	configDir              string
+	overlayDir             string
+	globalEnvOutput        config.OutputTargets
+	globalEnvExamplePolicy *config.EnvExamplePolicy
+	// repoIndex maps an in-scope repo name to its on-disk clone path. A worktree
+	// whose repo is absent from this map belongs to a removed repo and is skipped
+	// (no warning: a removed repo is not an edge state, it is out of scope).
+	repoIndex map[string]string
+	// repoGroups maps an in-scope repo name to its group, used to source the
+	// clone dir ApplyToWorktree inherits from.
+	repoGroups map[string]string
+	// existingState supplies the prior managed-file entries used for the
+	// forward-carry invariant. nil is tolerated (treated as no prior entries).
+	existingState         *InstanceState
+	now                   time.Time
+	allowPlaintextSecrets bool
+	// worktreeDelegation is the apply-time worktree-integration decision, passed
+	// through so a refreshed worktree records the same hook or deny entries as
+	// its clone (Decision 9). nil installs neither.
+	worktreeDelegation *WorktreeDelegation
+	// gitRegistered reports whether worktreePath is a worktree git still
+	// registers against cloneDir. nil defaults to gitRegistersWorktree (the real
+	// `git worktree list --porcelain` cross-check); injected in tests.
+	gitRegistered func(cloneDir, worktreePath string) bool
+	// exempt, when non-nil, collects the paths a refreshed worktree refused to
+	// write because the checkout commits its own file at one of niwa's names.
+	// The pipeline passes its own list so cleanRemovedFiles sees them; a test
+	// that only cares about env output may leave it nil.
+	exempt *[]string
+	// redactor is the pipeline's own, threaded so a worktree's setup-script
+	// output is scrubbed to the same standard the clone's is. The standalone
+	// worktree commands cannot borrow it -- they resolve no secrets, so a
+	// redactor built in those processes holds no fragments at all.
+	redactor *secret.Redactor
+	// setupIncomplete, when non-nil, receives a location label for each
+	// worktree whose setup scripts did not all finish. Same output-sink idiom
+	// as exempt above: the pipeline passes one so the failures reach the
+	// counted verdict, and a caller that does not care passes nothing.
+	setupIncomplete *[]string
+}
+
+// refreshWorktreeEnvs enumerates the instance's session-backed worktrees and, for
+// each live worktree, re-runs the inherit primitive (via ApplyToWorktree) so its
+// env matches the just-materialized clone (R6). It implements the inclusion
+// pipeline and the managed-file forward-carry invariant from
+// DESIGN-worktree-env-provisioning.
+//
+// A worktree is REFRESHED only when all hold: the session Status is active, its
+// repo is in repoIndex (in-scope), its working dir exists, it is NOT attached
+// (ReadAttachState with reapStale=false — apply never reaps another process's
+// lock), and git still registers it against the clone. A worktree that is active
+// and dir-present but fails the attach/git check is SKIPPED-BUT-LIVE: it gets a
+// warning naming it and its prior managed-file entries are forward-carried
+// verbatim, so the next cleanRemovedFiles does not delete its live secret file.
+// A worktree whose dir is missing is treated as absent: its entries are NOT
+// forward-carried, so cleanup prunes them.
+//
+// It returns the ManagedFile entries to merge into the pipeline result: the
+// freshly-written worktree env outputs (hashed here) plus the forward-carried
+// entries for skipped-but-live worktrees. It never fails the apply for an
+// individual worktree edge state; only an unexpected enumeration error (which is
+// already tolerated by ListSessionLifecycleStates returning nil) would bubble up.
+func (a *Applier) refreshWorktreeEnvs(in worktreeRefreshInputs) ([]ManagedFile, error) {
+	gitRegistered := in.gitRegistered
+	if gitRegistered == nil {
+		gitRegistered = gitRegistersWorktree
+	}
+
+	sessionsDir := filepath.Join(in.instanceRoot, StateDir, "sessions")
+	sessions, err := worktree.ListSessionLifecycleStates(sessionsDir)
+	if err != nil {
+		// Enumeration failure is non-fatal: warn and refresh nothing. A worktree
+		// that cannot be enumerated also cannot be forward-carried, but a genuine
+		// directory-read error here is rare and apply should still succeed.
+		a.Reporter.DeferWarn("could not enumerate worktrees for env refresh: %v", err)
+		return nil, nil
+	}
+
+	// Index prior managed-file entries by the worktree dir they live under, so a
+	// skipped-but-live worktree can forward-carry exactly its own entries.
+	priorByWorktree := priorManagedFiles(in.existingState)
+
+	var out []ManagedFile
+	for _, s := range sessions {
+		// Out-of-scope: a removed repo is not an edge state. Skip silently; its
+		// entries drop so cleanup prunes them along with the removed clone.
+		group, inScope := in.repoGroups[s.Repo]
+		if s.Status != worktree.SessionStatusActive || !inScope {
+			continue
+		}
+		if _, ok := in.repoIndex[s.Repo]; !ok {
+			continue
+		}
+
+		wtPath := s.WorktreePath
+
+		// Missing working dir -> absent. Warn, skip, do NOT forward-carry: the
+		// files are gone, so cleanup pruning the stale entries is correct.
+		if _, statErr := os.Stat(wtPath); statErr != nil {
+			a.Reporter.DeferWarn("worktree %s (repo %s) directory is missing; skipping content and setup", wtPath, s.Repo)
+			continue
+		}
+
+		// Attached -> another process holds the lock. Skip-but-live: forward-carry.
+		// reapStale MUST be false; apply must never reap another process's lock.
+		if _, avail, _ := worktree.ReadAttachState(wtPath, false); avail == worktree.AttachAttached {
+			a.Reporter.DeferWarn("worktree %s (repo %s) is attached (locked) by another process; skipping content and setup", wtPath, s.Repo)
+			out = append(out, forwardCarry(priorByWorktree, wtPath)...)
+			continue
+		}
+
+		// Detached -> git no longer registers the path against its clone. Skip-but-
+		// live: forward-carry. An undetectable worktree defaults to skip.
+		cloneDir := filepath.Join(in.instanceRoot, group, s.Repo)
+		if !gitRegistered(cloneDir, wtPath) {
+			a.Reporter.DeferWarn("worktree %s (repo %s) is not registered with git (detached); skipping content and setup", wtPath, s.Repo)
+			out = append(out, forwardCarry(priorByWorktree, wtPath)...)
+			continue
+		}
+
+		// Included: refresh via the inherit path. Failure to refresh a single
+		// worktree is non-fatal — warn, forward-carry its prior entries (it is
+		// live), and move on rather than failing the whole apply.
+		var setup SetupResult
+		written, refreshErr := ApplyToWorktree(
+			in.cfg, in.configDir, in.instanceRoot, wtPath, group, s.Repo,
+			s.Purpose, s.EffectiveBranchName(),
+			WorktreeApplyOptions{
+				Exempt:                in.exempt,
+				OverlayDir:            in.overlayDir,
+				AllowPlaintextSecrets: in.allowPlaintextSecrets,
+				Stderr:                a.Reporter.Writer(),
+				// The pipeline's own reporter and redactor, so a worktree's
+				// setup output is announced and scrubbed exactly as the clone's
+				// is, and its failures land in the same deferred-warning stream.
+				Reporter:               a.Reporter,
+				Redactor:               in.redactor,
+				Setup:                  &setup,
+				GlobalEnvExamplePolicy: in.globalEnvExamplePolicy,
+				GlobalEnvOutput:        in.globalEnvOutput,
+				DeveloperHome:          a.DeveloperHome,
+				// Decision 9: give the worktree the same delegation configuration
+				// the clone got on this apply, so the two do not drift.
+				WorktreeDelegation: in.worktreeDelegation,
+			},
+		)
+		if refreshErr != nil {
+			a.Reporter.DeferWarn("could not refresh env for worktree %s (repo %s): %v; retaining prior managed entries", wtPath, s.Repo, refreshErr)
+			out = append(out, forwardCarry(priorByWorktree, wtPath)...)
+			continue
+		}
+
+		// A setup failure in this worktree is data, not an error: it never
+		// reached refreshErr above, so the worktree keeps its content and the
+		// apply keeps going. It is reported here and counted in the verdict,
+		// named by worktree so a repo failing in several trees does not render
+		// as its own name repeated.
+		var worktreeSetupFailed bool
+		for _, sr := range setup.Scripts {
+			if sr.Error != nil {
+				worktreeSetupFailed = true
+				a.Reporter.DeferWarn("setup script %s failed in worktree %s (repo %s): %v",
+					sr.Name, wtPath, s.Repo, sr.Error)
+			}
+		}
+		if worktreeSetupFailed && in.setupIncomplete != nil {
+			*in.setupIncomplete = append(*in.setupIncomplete, worktreeSetupLocation(s.Repo, wtPath))
+		}
+
+		for _, p := range written {
+			hash, hashErr := HashFile(p)
+			if hashErr != nil {
+				a.Reporter.DeferWarn("could not hash refreshed worktree file %s: %v", p, hashErr)
+				continue
+			}
+			out = append(out, ManagedFile{
+				Path:        p,
+				ContentHash: hash,
+				Generated:   in.now,
+			})
+		}
+	}
+
+	return out, nil
+}
+
+// priorManagedFiles returns the prior state's managed-file entries, or nil when
+// no prior state exists. forwardCarry filters this list by worktree dir to carry
+// a skipped-but-live worktree's own entries forward.
+func priorManagedFiles(state *InstanceState) []ManagedFile {
+	if state == nil {
+		return nil
+	}
+	return state.ManagedFiles
+}
+
+// forwardCarry returns the prior managed-file entries that live under
+// worktreePath, copied verbatim (no re-hash, no byte rewrite). This is the
+// data-loss guard for skipped-but-live worktrees: re-adding their entries to the
+// current result keeps cleanRemovedFiles from deleting their live secret files.
+func forwardCarry(prior []ManagedFile, worktreePath string) []ManagedFile {
+	var carried []ManagedFile
+	for _, mf := range prior {
+		if pathUnder(worktreePath, mf.Path) {
+			carried = append(carried, mf)
+		}
+	}
+	return carried
+}
+
+// pathUnder reports whether candidate is at or under dir. Both are cleaned and
+// compared via filepath.Rel; a candidate that escapes dir (rel begins with "..")
+// is not under it.
+func pathUnder(dir, candidate string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(candidate))
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// gitRegistersWorktree reports whether git still registers worktreePath as a
+// worktree of the clone at cloneDir, via a `git worktree list --porcelain`
+// cross-check. A failed git invocation (clone not a git repo, git absent) makes
+// the worktree undetectable; the caller defaults such cases to skip-with-warning.
+func gitRegistersWorktree(cloneDir, worktreePath string) bool {
+	paths, err := listWorktrees(cloneDir)
+	if err != nil {
+		return false
+	}
+	target, err := filepath.Abs(worktreePath)
+	if err != nil {
+		target = worktreePath
+	}
+	for _, p := range paths {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			abs = p
+		}
+		if filepath.Clean(abs) == filepath.Clean(target) {
+			return true
+		}
+	}
+	return false
 }
 
 // cleanRemovedGroupDirs removes empty group directories for repos that
@@ -1444,6 +2687,27 @@ func instanceNumberFromName(configName, instanceName string) int {
 		}
 	}
 	return 0
+}
+
+// worktreeFallbackDisclosure is the pure decision for what to disclose about
+// the worktree-delegation fallback on a given apply. It is the single testable
+// seam for the disclosure policy from design Decision 4:
+//
+//   - When the harness SUPPORTS worktree hooks (supported=true), nothing is
+//     disclosed (warn=false, explain=false): the hooks are installed silently.
+//   - When the harness does NOT support hooks (supported=false), the
+//     every-apply current-state warning ALWAYS fires (warn=true), and the
+//     one-time first-encounter explainer fires only when it has not already
+//     been disclosed (explain = !alreadyDisclosed).
+//
+// alreadyDisclosed is noticeDisclosed(existingState, noticeWorktreeFallback)
+// from the caller; passing the bool keeps this function pure and trivially
+// testable without an InstanceState fixture.
+func worktreeFallbackDisclosure(supported, alreadyDisclosed bool) (warn, explain bool) {
+	if supported {
+		return false, false
+	}
+	return true, !alreadyDisclosed
 }
 
 // sliceContains reports whether s contains elem.
@@ -1571,12 +2835,13 @@ func repoAlreadyCloned(dir string) bool {
 func (a *Applier) cloneWorker(ctx context.Context, jobs <-chan cloneJob, results chan<- cloneResult) {
 	noop := NewReporterWithTTY(io.Discard, false)
 	for job := range jobs {
-		cloned, err := a.Cloner.CloneWithBranch(ctx, job.cloneURL, job.targetDir, job.branch, noop)
+		cloned, retries, err := a.cloneWithRetry(ctx, job, noop)
 		if err != nil {
 			results <- cloneResult{
 				name:      job.cr.Repo.Name,
 				cloneURL:  job.cloneURL,
 				targetDir: job.targetDir,
+				retries:   retries,
 				err:       err,
 			}
 			continue
@@ -1599,9 +2864,45 @@ func (a *Applier) cloneWorker(ctx context.Context, jobs <-chan cloneJob, results
 			cloneURL:  job.cloneURL,
 			targetDir: job.targetDir,
 			cloned:    cloned,
+			retries:   retries,
 			syncWarn:  syncWarn,
 		}
 	}
+}
+
+// cloneWithRetry clones a single repo, retrying transient failures over
+// cloneBackoff. It returns whether a fresh clone was performed, how many
+// retries were spent before success (0 when the first attempt succeeded or the
+// repo already existed), and the final error.
+//
+// A permanent failure (isPermanentCloneError) is not retried. Between attempts
+// the partially-written target directory is removed so the next clone starts
+// clean; a git clone that fails typically leaves a half-populated dir that
+// would otherwise make the retry a no-op or fail on a non-empty target.
+// Context cancellation aborts the wait and returns ctx.Err().
+func (a *Applier) cloneWithRetry(ctx context.Context, job cloneJob, r *Reporter) (cloned bool, retries int, err error) {
+	cloneOnce := a.cloneRepo
+	if cloneOnce == nil {
+		cloneOnce = a.Cloner.CloneWithBranch
+	}
+	attempts := len(cloneBackoff) + 1
+	for i := 0; i < attempts; i++ {
+		cloned, err = cloneOnce(ctx, job.cloneURL, job.targetDir, job.branch, r)
+		if err == nil {
+			return cloned, i, nil
+		}
+		if isPermanentCloneError(err) || i == attempts-1 || ctx.Err() != nil {
+			return false, i, err
+		}
+		// Clear the partial clone so the retry starts from a clean target.
+		_ = os.RemoveAll(job.targetDir)
+		select {
+		case <-time.After(cloneBackoff[i]):
+		case <-ctx.Done():
+			return false, i, ctx.Err()
+		}
+	}
+	return false, attempts - 1, err
 }
 
 // discoverAllRepos collects repos from all sources, enforcing per-source

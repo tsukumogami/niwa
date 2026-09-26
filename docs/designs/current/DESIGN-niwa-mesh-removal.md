@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 problem: |
   niwa's git-worktree creation is implemented inside the internal/mcp package,

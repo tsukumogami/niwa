@@ -23,6 +23,46 @@ type WorkspaceOverlay struct {
 	Env     EnvConfig               `toml:"env"`
 	Files   map[string]string       `toml:"files,omitempty"`
 	Vault   *VaultRegistry          `toml:"vault,omitempty"`
+	// Workspace is a tombstone, not configuration. Nothing reads it into the
+	// merged config -- MergeWorkspaceOverlay never assigns Workspace at all --
+	// so every field under it is inert by construction. It is decoded solely
+	// so an author who writes the stanza is told it does nothing, instead of
+	// watching a security-relevant setting be silently ignored.
+	Workspace OverlayWorkspaceTombstone `toml:"workspace"`
+}
+
+// OverlayWorkspaceTombstone decodes the [workspace] settings an overlay author
+// might reasonably expect to be able to set, for the sole purpose of warning
+// that they are not honored here.
+//
+// Only strict_secrets is listed today because it is the one the placement
+// decision was made against: strict mode changes what a first run does for a
+// contributor, and the contributor cannot read the overlay that would be
+// changing it. Add a field here when a new [workspace] setting is worth the
+// same warning, never to make one take effect.
+type OverlayWorkspaceTombstone struct {
+	StrictSecrets *bool `toml:"strict_secrets,omitempty"`
+}
+
+// TombstoneWarnings returns one warning per inert [workspace] setting the
+// overlay declares, for the caller to surface through whatever diagnostic
+// channel it owns. An overlay that declares none returns nil, which is the
+// common case.
+//
+// The warnings are returned rather than printed because ParseOverlay runs on
+// two paths with different sinks (the apply pipeline's deferred reporter and
+// the worktree path's stderr), and neither is reachable from this package.
+func (o *WorkspaceOverlay) TombstoneWarnings() []string {
+	if o == nil {
+		return nil
+	}
+	var out []string
+	if o.Workspace.StrictSecrets != nil {
+		out = append(out, "workspace overlay sets [workspace] strict_secrets, which is ignored: "+
+			"strict mode is a base-workspace setting so a visibility overlay cannot change what a first run does. "+
+			"Set strict_secrets in the workspace config, or pass --strict-secrets.")
+	}
+	return out
 }
 
 // OverlaySourceConfig defines a GitHub org source in the overlay. Unlike the

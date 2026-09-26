@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/vault"
 )
@@ -19,6 +21,21 @@ type EffectiveConfig struct {
 	Env     config.EnvConfig
 	Files   map[string]string
 	Plugins []string
+
+	// InstanceFiles is the verbatim file-distribution table for the instance
+	// root, sourced ONLY from [instance.files]. It is deliberately kept
+	// separate from Files (which blends the repo-level [files] table with
+	// [instance.files] via the legacy seeding in MergeInstanceOverrides) so the
+	// instance-root materializer never distributes repo-targeted [files]
+	// entries. Populated only by MergeInstanceOverrides; nil on the per-repo
+	// MergeOverrides path.
+	InstanceFiles map[string]string
+
+	// RootFiles is the verbatim file-distribution table for the workspace root,
+	// sourced from [root.files]. Like InstanceFiles it is materialized verbatim
+	// (no .local infix) at a non-git level. Populated only by
+	// MergeInstanceOverrides.
+	RootFiles map[string]string
 }
 
 // MergeOverrides produces the effective configuration for a repo by combining
@@ -42,6 +59,17 @@ func MergeOverrides(ws *config.WorkspaceConfig, repoName string) EffectiveConfig
 			Hooks:    copyHooks(ws.Claude.Hooks),
 			Settings: copySettings(ws.Claude.Settings),
 			Env:      copyClaudeEnv(ws.Claude.Env),
+			// WorkSummaryHooks is the workspace-level off switch for the default-on
+			// work-summary hook injection. It is workspace-scoped (like Marketplaces),
+			// so it is carried straight through and never merged from a per-repo
+			// override. Copy the pointer so the per-repo SettingsMaterializer can read
+			// the resolved preference.
+			WorkSummaryHooks: ws.Claude.WorkSummaryHooks,
+			// PrBodyHook is the workspace-level off switch for the default-on
+			// pr-body PreToolUse hook injection. Workspace-scoped like
+			// WorkSummaryHooks: carried straight through, never merged from a
+			// per-repo override.
+			PrBodyHook: ws.Claude.PrBodyHook,
 		},
 		Env:     copyEnv(ws.Env),
 		Files:   copyStringMap(ws.Files),
@@ -165,6 +193,13 @@ func MergeInstanceOverrides(ws *config.WorkspaceConfig) EffectiveConfig {
 		Env:     copyEnv(ws.Env),
 		Files:   copyStringMap(ws.Files),
 		Plugins: wsPlugins,
+		// Verbatim non-repo file tables, each sourced ONLY from its own table
+		// (not from the repo-level [files] seeding above). Set before the
+		// early-return below so [root.files] still surfaces when there are no
+		// [instance.*] overrides. Empty-valued keys are dropped (no base table
+		// at these single-source levels for an empty value to remove from).
+		InstanceFiles: nonEmptyStringMap(ws.Instance.Files),
+		RootFiles:     nonEmptyStringMap(ws.Root.Files),
 	}
 
 	override := ws.Instance
@@ -313,6 +348,7 @@ func ResolveGlobalOverride(g *config.GlobalConfigOverride, workspaceName string)
 		Env:              copyEnv(base.Env),
 		Files:            copyStringMap(base.Files),
 		EnvExamplePolicy: copyEnvExamplePolicy(base.EnvExamplePolicy),
+		EnvOutput:        copyEnvOutput(base.EnvOutput),
 	}
 
 	// Claude: workspace-specific wins per field.
@@ -422,6 +458,11 @@ func ResolveGlobalOverride(g *config.GlobalConfigOverride, workspaceName string)
 			v := *ws.EnvExamplePolicy.Entropy
 			result.EnvExamplePolicy.Entropy = &v
 		}
+	}
+
+	// EnvOutput: ws wins outright when set (list-level replace, not merge).
+	if len(ws.EnvOutput) > 0 {
+		result.EnvOutput = copyEnvOutput(ws.EnvOutput)
 	}
 
 	return result
@@ -663,14 +704,14 @@ func teamOnlyKeys(vr *config.VaultRegistry) map[string]bool {
 //     for keys not present in the base); tier maps merged additively.
 //   - Files: base wins per key; overlay keys not in base are added, but only
 //     after checking destination is not a protected path.
-//   - Claude.Content.Repos: overlay entries with source= add new content entries
+//   - Content.Repos: overlay entries with source= add new content entries
 //     (base wins on key collision). Overlay entries with overlay= set OverlaySource
 //     on an existing base entry (error if the base entry does not exist).
 func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.WorkspaceOverlay, overlayDir string) (*config.WorkspaceConfig, error) {
 	// Deep-copy the input config.
 	merged := *ws
 	merged.Claude = *copyClaudeConfigFull(&ws.Claude)
-	merged.Claude.Content = copyContentConfig(ws.Claude.Content)
+	merged.Content = copyContentConfig(ws.Content)
 	merged.Env = copyEnv(ws.Env)
 	merged.Files = copyStringMap(ws.Files)
 	merged.Sources = append([]config.SourceConfig(nil), ws.Sources...)
@@ -774,18 +815,22 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 		}
 	}
 
-	// Claude.Marketplaces: append overlay entries not already in base (union).
+	// Claude.Marketplaces: append overlay entries not already in base,
+	// unioning on .Source (base-wins on conflict, carrying base's fields).
 	// Sources that reference overlay-managed repos (via repo: prefix) belong in
-	// the overlay so they are only active when the overlay is accessible.
+	// the overlay so they are only active when the overlay is accessible. The
+	// overlay form is a bare-string list; each new source becomes a
+	// MarketplaceConfig with default policy.
 	if len(overlay.Claude.Marketplaces) > 0 {
 		existing := make(map[string]bool, len(merged.Claude.Marketplaces))
 		for _, m := range merged.Claude.Marketplaces {
-			existing[m] = true
+			existing[m.Source] = true
 		}
-		for _, m := range overlay.Claude.Marketplaces {
-			if !existing[m] {
-				merged.Claude.Marketplaces = append(merged.Claude.Marketplaces, m)
-				existing[m] = true
+		for _, source := range overlay.Claude.Marketplaces {
+			if !existing[source] {
+				merged.Claude.Marketplaces = append(merged.Claude.Marketplaces,
+					config.MarketplaceConfig{Source: source})
+				existing[source] = true
 			}
 		}
 	}
@@ -859,44 +904,44 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 		}
 	}
 
-	// Claude.Content.Repos: process overlay content entries.
+	// Content.Repos: process overlay content entries.
 	for repoName, entry := range overlay.Claude.Content.Repos {
 		if entry.Source != "" {
-			if _, exists := merged.Claude.Content.Repos[repoName]; exists {
+			if _, exists := merged.Content.Repos[repoName]; exists {
 				// R13: source= on a repo already defined in the base config is an error.
 				// Use overlay= to append content to a base-config repo's CLAUDE.local.md.
 				return nil, fmt.Errorf("overlay content entry for repo %q uses source= but %q is already defined in the base config; use overlay= to append content instead", repoName, repoName)
 			}
 			// Overlay-only repo: add a new content entry.
-			if merged.Claude.Content.Repos == nil {
-				merged.Claude.Content.Repos = make(map[string]config.RepoContentEntry)
+			if merged.Content.Repos == nil {
+				merged.Content.Repos = make(map[string]config.RepoContentEntry)
 			}
-			merged.Claude.Content.Repos[repoName] = config.RepoContentEntry{
+			merged.Content.Repos[repoName] = config.RepoContentEntry{
 				Source:        entry.Source,
 				OverlaySource: "",
 			}
 		} else if entry.Overlay != "" {
 			// Overlay appends to an existing base entry via OverlaySource.
-			base, exists := merged.Claude.Content.Repos[repoName]
+			base, exists := merged.Content.Repos[repoName]
 			if !exists {
 				return nil, fmt.Errorf("overlay content entry for repo %q uses overlay= but the repo has no entry in the base config", repoName)
 			}
 			base.OverlaySource = entry.Overlay
-			merged.Claude.Content.Repos[repoName] = base
+			merged.Content.Repos[repoName] = base
 		}
 	}
 
-	// Claude.Content.Groups: overlay entries add new group content; base wins on collision.
+	// Content.Groups: overlay entries add new group content; base wins on collision.
 	// The source path is relative to the overlay directory directly (not the workspace
 	// content_dir), so OverlayDir is recorded on the entry for resolution at install time.
 	for groupName, entry := range overlay.Claude.Content.Groups {
-		if _, exists := merged.Claude.Content.Groups[groupName]; exists {
+		if _, exists := merged.Content.Groups[groupName]; exists {
 			continue // base wins
 		}
-		if merged.Claude.Content.Groups == nil {
-			merged.Claude.Content.Groups = make(map[string]config.ContentEntry)
+		if merged.Content.Groups == nil {
+			merged.Content.Groups = make(map[string]config.ContentEntry)
 		}
-		merged.Claude.Content.Groups[groupName] = config.ContentEntry{
+		merged.Content.Groups[groupName] = config.ContentEntry{
 			Source:     entry.Source,
 			OverlayDir: overlayDir,
 		}
@@ -1011,16 +1056,84 @@ func copyClaudeConfigFull(c *config.ClaudeConfig) *config.ClaudeConfig {
 	return &out
 }
 
-// ClaudeEnabled returns whether Claude content installation (CLAUDE.local.md,
-// hooks, settings, env) should be performed for the given repo. When the
-// repo has no override or the override doesn't set claude.enabled, it
-// defaults to true.
-func ClaudeEnabled(ws *config.WorkspaceConfig, repoName string) bool {
-	override, ok := ws.Repos[repoName]
-	if !ok || override.Claude == nil || override.Claude.Enabled == nil {
+// Gate keys, one per agent block. They are the TOML names, matched against the
+// agent value a caller already holds, which is why no caller has to pick one:
+// the loop that produces every agent's plan asks with the agent it is on.
+const (
+	claudeGateKey = "claude"
+	codexGateKey  = "codex"
+)
+
+// AgentEnabled reports whether niwa produces plans for one agent, in one
+// repository's scope.
+//
+// [claude] enabled filters Claude's plan and only Claude's; [codex] enabled
+// filters Codex's and only Codex's. That is the whole of the restructure this
+// function carries: the shape it replaces read Claude's key in front of a loop
+// over every agent, so disabling Claude on a repository silently disabled every
+// Codex delivery there too. Renaming the key would have left one boolean
+// deciding two agents' deliveries, so the key stayed and the wiring moved --
+// the resolved value goes to that agent's producer through
+// agentplan.Producer.Gated, and nothing downstream of plan production sees a
+// gate at all.
+//
+// Resolution is per-repo override first, then the workspace-level block, then
+// enabled. An agentName niwa has no gate key for is enabled: a gate nobody
+// declared is not a reason to withhold a delivery.
+func AgentEnabled(ws *config.WorkspaceConfig, repoName, agentName string) bool {
+	if ws == nil {
 		return true
 	}
-	return *override.Claude.Enabled
+
+	var repoGate, workspaceGate *bool
+	override, hasOverride := ws.Repos[repoName]
+	switch agentName {
+	case claudeGateKey:
+		if hasOverride && override.Claude != nil {
+			repoGate = override.Claude.Enabled
+		}
+		workspaceGate = ws.Claude.Enabled
+	case codexGateKey:
+		if hasOverride && override.Codex != nil {
+			repoGate = override.Codex.Enabled
+		}
+		workspaceGate = ws.Codex.Enabled
+	}
+
+	switch {
+	case repoGate != nil:
+		return *repoGate
+	case workspaceGate != nil:
+		return *workspaceGate
+	default:
+		return true
+	}
+}
+
+// hookOwningAgentsEnabled reports whether the hooks and settings materializers
+// should run for a repository.
+//
+// Those two write into the file formats of whichever agent receives lifecycle
+// hooks -- a settings document is where niwa registers them -- so their gate is
+// that agent's gate. Which agent that is comes from the declaration table
+// rather than from a name written here: hardcoding one would put a delivery
+// decision inside a writer, and it would silently go wrong the day a second
+// agent grows a hook route. Neither materializer takes a producer, which is why
+// this is a function rather than a Gated call.
+//
+// It is true when any agent that receives hooks has its gate open, and false
+// only when every such agent is turned off.
+func hookOwningAgentsEnabled(ws *config.WorkspaceConfig, repoName string) bool {
+	for _, ag := range agent.All() {
+		d, err := agentplan.Lookup(agentplan.Hooks, ag)
+		if err != nil || d.State != agentplan.StateImplemented {
+			continue
+		}
+		if AgentEnabled(ws, repoName, string(ag)) {
+			return true
+		}
+	}
+	return false
 }
 
 // RepoCloneURL returns the clone URL for a repo, preferring the per-repo
@@ -1143,6 +1256,28 @@ func copyStringMap(m map[string]string) map[string]string {
 	return out
 }
 
+// nonEmptyStringMap copies m, dropping keys whose value is the empty string.
+// The verbatim non-repo file tables (InstanceFiles, RootFiles) are
+// single-source, so an empty value is not "remove a workspace default" (there
+// is none) -- it is simply an entry with no destination, which is skipped.
+// Returns nil when m is nil or yields no non-empty entries.
+func nonEmptyStringMap(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	var out map[string]string
+	for k, v := range m {
+		if v == "" {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string, len(m))
+		}
+		out[k] = v
+	}
+	return out
+}
+
 // copyClaudeEnv returns a deep copy of a ClaudeEnvConfig.
 func copyClaudeEnv(e config.ClaudeEnvConfig) config.ClaudeEnvConfig {
 	return config.ClaudeEnvConfig{
@@ -1181,6 +1316,18 @@ func copyEnvExamplePolicy(p *config.EnvExamplePolicy) *config.EnvExamplePolicy {
 		out.Vars = make(map[string]config.Action, len(p.Vars))
 		maps.Copy(out.Vars, p.Vars)
 	}
+	return out
+}
+
+// copyEnvOutput returns a copy of an OutputTargets slice so the result can be
+// mutated without aliasing the source. OutputTarget fields are immutable
+// strings, so a shallow element copy is sufficient.
+func copyEnvOutput(t config.OutputTargets) config.OutputTargets {
+	if t == nil {
+		return nil
+	}
+	out := make(config.OutputTargets, len(t))
+	copy(out, t)
 	return out
 }
 

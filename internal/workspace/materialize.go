@@ -3,16 +3,22 @@ package workspace
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/envformat"
+	"github.com/tsukumogami/niwa/internal/gitexclude"
+	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/secret/reveal"
 )
 
@@ -26,12 +32,14 @@ const secretFileMode os.FileMode = 0o600
 // maybeSecretString returns the plaintext string of m, revealing
 // the secret bytes when m carries a resolved Secret. This is the
 // materializer counterpart to MaybeSecret.String (which redacts
-// secrets to "***"); it is used only inside the write path where
-// the plaintext must reach the destination file.
+// secrets to "***"); it is used inside the write path where the
+// plaintext must reach the destination file, and by
+// instancePermissionsPosture, which compares the value against fixed
+// literals and returns only those.
 //
 // Callers must not retain the returned string past the short-lived
-// write operation that needs plaintext: it carries a copy of the
-// underlying buffer from reveal.UnsafeReveal.
+// operation that needs plaintext: it carries a copy of the underlying
+// buffer from reveal.UnsafeReveal.
 func maybeSecretString(m config.MaybeSecret) string {
 	if m.IsSecret() {
 		return string(reveal.UnsafeReveal(m.Secret))
@@ -85,6 +93,17 @@ type MaterializeContext struct {
 	// configured (the resolver treats nil as "skip this rung").
 	GlobalEnvExamplePolicy *config.EnvExamplePolicy
 
+	// GlobalEnvOutput is the resolved personal/global secret-output target
+	// declaration (the flattened GlobalOverride EnvOutput). It is the broadest
+	// rung consulted by EffectiveEnvOutput. Empty means no global rung is set.
+	GlobalEnvOutput config.OutputTargets
+
+	// EnvOutputs accumulates the repo-relative paths of the secret-output
+	// targets the EnvMaterializer wrote, so the apply/worktree caller can pass
+	// them to gitexclude.EnsureRepoExclude as ignore coverage for any custom
+	// target name not matched by the base "*.local*" pattern.
+	EnvOutputs []string
+
 	// SourceTuples, when non-nil, is populated by materializers with
 	// the per-file list of SourceEntry tuples describing which inputs
 	// contributed bytes to each written file. apply.go wires a shared
@@ -108,15 +127,72 @@ type MaterializeContext struct {
 	// apply.go wires a.Reporter.Writer() so warnings clear the spinner
 	// before printing.
 	Stderr io.Writer
+
+	// WorktreeDelegation carries the apply-time worktree-integration decision
+	// (probe result + niwa absolute path), computed ONCE per apply and threaded
+	// to every repo's SettingsMaterializer. nil installs neither hook nor deny.
+	// See WorktreeDelegation for the supported/unsupported branch contract.
+	WorktreeDelegation *WorktreeDelegation
+
+	// InheritedEnv, when non-nil, is the clone's already-materialized env used
+	// to resolve [claude.env] promoted keys on the worktree path. The worktree
+	// apply does not re-resolve secrets (see ApplyToWorktree); it inherits the
+	// instance clone's env output. When this is set, resolveClaudeEnvVars looks
+	// promoted keys up here instead of calling ResolveEnvVars, so a promoted key
+	// whose value was sourced from vault or the machine-identity sync — and is
+	// therefore absent from the static config the worktree path sees — is still
+	// found. A non-nil but empty map means "worktree path, no inherited env",
+	// which is distinct from nil ("instance path, resolve from config").
+	InheritedEnv map[string]string
+
+	// Keys collects the declared keys this repo's materialization could not
+	// supply, for the command surface to render once the run returns. A nil
+	// collector disables collection, so a call site that was never wired with
+	// one needs no guard.
+	Keys *keyreport.Collector
+
+	// SessionEnv is the workspace's resolved [session.env] values, the
+	// agent-neutral half of what a session runs with. It is resolved once per
+	// apply (SessionEnvVars) and threaded here rather than re-resolved per
+	// materializer, so every agent's delivery is generated from the same map:
+	// two resolutions could disagree, and a workspace where the two agents'
+	// sessions carry different values for one declared variable is the exact
+	// asymmetry the neutral declaration exists to remove.
+	SessionEnv map[string]string
+
+	// SessionEnvSources is the provenance of the inputs SessionEnv was
+	// resolved from, rolled into the settings document's fingerprint so a
+	// rotation upstream of a neutral variable still invalidates it.
+	SessionEnvSources []SourceEntry
+
+	// UnresolvedEnv is the per-repo set of env keys carrying an Unresolved
+	// mark, keyed by variable name. ResolveEnvVars populates it from the marks
+	// on the effective env tables; the EnvMaterializer writes a record for each
+	// entry in place of the assignment it omits, and the promote branch reads it
+	// to tell an omitted key from a genuinely misconfigured one.
+	UnresolvedEnv map[string]unresolvedEnvKey
+
+	// InheritedUnresolved is the worktree-path counterpart to UnresolvedEnv.
+	// That path never re-resolves secrets, so no mark is in memory for it; the
+	// set is recovered instead from the records in the clone's
+	// already-materialized env file. Records recovered that way are untrusted
+	// input — a repository can write its own env file — and are revalidated by
+	// envformat.ParseRecord before they land here.
+	InheritedUnresolved map[string]unresolvedEnvKey
+
+	// StrictSecrets is the run's resolved strictness. Only the promote branch
+	// reads it: promotion is the one enforcement point that runs per-repo,
+	// after the applier's post-merge gate has already let the run through.
+	// The worktree path never sets it (see repoMaterializeInputs).
+	StrictSecrets bool
 }
 
-// stderr returns the writer to use for diagnostic output, defaulting to
-// os.Stderr when no writer has been wired into the context.
-func (c *MaterializeContext) stderr() io.Writer {
-	if c != nil && c.Stderr != nil {
-		return c.Stderr
-	}
-	return os.Stderr
+// unresolvedEnvKey is one omitted env key: the record written into the
+// generated file, plus the table it was declared in when that is known. Scope
+// is empty for a record recovered from a file, which carries no table name.
+type unresolvedEnvKey struct {
+	Scope  string
+	Record envformat.Record
 }
 
 // recordSources appends the given SourceEntry slice to the context's
@@ -234,11 +310,61 @@ func (h *HooksMaterializer) Materialize(ctx *MaterializeContext) ([]string, erro
 	return written, nil
 }
 
-// permissionsMapping translates niwa permission values to Claude Code
-// settings.local.json permission mode strings.
-var permissionsMapping = map[string]string{
-	"bypass": "bypassPermissions",
-	"ask":    "askPermissions",
+// errUnknownPosture reports a permissions value that is neither "bypass" nor
+// "ask". It carries no copy of the rejected value on purpose: the caller may
+// hold a secret-backed value, and only buildSettingsDoc, which still has the
+// MaybeSecret, can tell whether quoting it is safe. buildSettingsDoc splices
+// this text into its own message as the list of accepted values, so keep it
+// phrased that way.
+var errUnknownPosture = errors.New(`want "` + postureBypass + `" or "` + postureAsk + `"`)
+
+// claudeDefaultMode translates a niwa permission posture into the
+// permissions.defaultMode value written into a generated Claude Code settings
+// document. write reports whether the key is written at all.
+//
+// "bypass" writes nothing. Claude Code 2.1.257 and later ignores
+// bypassPermissions from project scope and falls back to "default", which
+// overrides the developer's own mode, so writing it grants nothing and costs
+// the developer their setting. The posture still reaches Claude workers that
+// niwa dispatch launches: derivePermissionMode in internal/cli reads it from
+// the instance state and passes --permission-mode bypassPermissions unless the
+// operator gave a mode of their own.
+//
+// "ask" writes "default", a mode Claude Code honors from project scope. The
+// old "askPermissions" was never a valid mode, and Claude Code threw out the
+// whole file over it, taking the hooks, deny rules, and plugins with it.
+//
+// Any other value is an error, and the error never contains the value.
+// instancePermissionsPosture relies on this rejection: because an invalid
+// value fails the pipeline here, an empty recorded posture means undeclared.
+// Both switch on the same postureBypass/postureAsk constants; a new posture
+// needs a case in each.
+func claudeDefaultMode(posture string) (mode string, write bool, err error) {
+	switch posture {
+	case postureBypass:
+		return "", false, nil
+	case postureAsk:
+		return "default", true, nil
+	default:
+		return "", false, errUnknownPosture
+	}
+}
+
+// settingValueError formats a rejected Claude settings value without leaking
+// secret material. A plain value is quoted so a typo is easy to spot. A
+// vault-backed value is described by its config key and the secret's origin
+// instead: the resolved plaintext must never reach an error string, because
+// the pipeline's secret redactor doesn't scrub plain fmt.Errorf text.
+//
+// The message names the key but not a table. buildSettingsDoc sees the merged
+// settings, so it can't tell whether the value came from [claude.settings],
+// [instance.claude.settings], a repo's table, or the personal overlay.
+func settingValueError(problem, key string, v config.MaybeSecret, want string) error {
+	if v.IsSecret() {
+		o := v.Secret.Origin()
+		return fmt.Errorf("%s for claude settings key %s (secret-backed: provider %q, key %q): %s", problem, key, o.ProviderName, o.Key, want)
+	}
+	return fmt.Errorf("%s %q for claude settings key %s: %s", problem, v.Plain, key, want)
 }
 
 // hookEventMapping translates snake_case hook event names used in niwa config
@@ -248,6 +374,98 @@ var hookEventMapping = map[string]string{
 	"post_tool_use": "PostToolUse",
 	"stop":          "Stop",
 	"notification":  "Notification",
+}
+
+// Worktree-delegation event and tool names used in the per-repo
+// settings.local.json. These ride the existing snake->Pascal hook event
+// pipeline (the names are already Pascal-cased here, so snakeToPascal is a
+// no-op for them) and the new permissions.deny capability.
+const (
+	// worktreeCreateEvent / worktreeRemoveEvent are the Claude Code hook event
+	// names installed when the harness supports per-repo worktree hooks. Both
+	// run an absolute-path "niwa worktree from-hook" command directly (no shim).
+	worktreeCreateEvent = "WorktreeCreate"
+	worktreeRemoveEvent = "WorktreeRemove"
+
+	// worktreeFromHookCommandSuffix is the niwa subcommand the hook invokes.
+	// guardedNiwaHookCommand composes the full command from it; see that
+	// function for the PATH-first shape.
+	worktreeFromHookCommandSuffix = "worktree from-hook"
+
+	// denyEnterWorktree / denyExitWorktree are the Claude Code tool names denied
+	// when the harness does NOT support the worktree hooks. Denying these steers
+	// agents to `niwa worktree create` instead of a competing bare checkout.
+	denyEnterWorktree = "EnterWorktree"
+	denyExitWorktree  = "ExitWorktree"
+)
+
+// WorktreeDelegation carries the apply-time decision for the per-repo worktree
+// integration, computed once per apply (not per repo) and threaded into each
+// repo's MaterializeContext. Hook and deny are MUTUALLY EXCLUSIVE: when
+// Supported is true the materializer writes the WorktreeCreate/WorktreeRemove
+// hook entries; when false it writes permissions.deny instead. The zero value
+// (nil pointer on the context) installs neither, leaving settings unchanged.
+type WorktreeDelegation struct {
+	// Supported is the harness probe result (SupportsWorktreeHooks). true =>
+	// write hooks; false => write permissions.deny.
+	Supported bool
+	// NiwaPath is the absolute path of the running niwa binary
+	// (os.Executable()). It is the FALLBACK arm of the emitted hook command,
+	// used only when `niwa` is not on the hook subprocess's PATH; see
+	// guardedNiwaHookCommand. Required when Supported is true.
+	NiwaPath string
+}
+
+// worktreeFromHookCommand returns the hook command string Claude invokes for
+// the per-repo WorktreeCreate/WorktreeRemove hooks.
+func worktreeFromHookCommand(niwaPath string) string {
+	return guardedNiwaHookCommand(niwaPath, worktreeFromHookCommandSuffix)
+}
+
+// guardedNiwaHookCommand builds the hook command niwa writes into a settings
+// document: resolve `niwa` from PATH, and fall back to the absolute path
+// recorded at apply time only when PATH does not carry it.
+//
+//	command -v niwa >/dev/null 2>&1 && exec niwa <suffix>; exec '<abs>' <suffix>
+//
+// PATH-first is what makes an installed hook survive a niwa upgrade. Under a
+// versioned install layout os.Executable() resolves to a version-pinned path
+// (on Linux it reads /proc/self/exe, which the kernel has already resolved past
+// every symlink), so an absolute-only command keeps invoking whichever release
+// happened to run `niwa apply` until the workspace is applied again. The
+// absolute arm is kept because a harness launched from a desktop environment
+// rather than a shell inherits the session manager's PATH, which need not carry
+// niwa at all; dropping it would turn those working setups into loud failures.
+//
+// Known limitation: `command -v niwa` proves PRESENCE, not COMPATIBILITY. On a
+// machine with more than one niwa installed, the hook runs whichever one PATH
+// names first, and if that one predates `worktree from-hook` the hook fails
+// rather than falling through to the absolute arm — `exec` has already replaced
+// the shell by then. That is a deliberate trade: the failure is loud (the
+// harness surfaces the hook's stderr in the tool result), whereas the absolute
+// path it replaces went stale silently and permanently. Probing for the
+// subcommand instead of the binary would close it at the cost of a second
+// subprocess on every hook invocation.
+//
+// Two details are load-bearing. The arms are separated by `;` rather than `||`:
+// a failed `exec` terminates a non-interactive shell before `||` would be
+// evaluated, so `||` would read as a fallback it is not. And the absolute path
+// is single-quoted, because the command goes through a shell and an install
+// path containing a space would otherwise split into separate words.
+//
+// The path is slash-normalized so the emitted JSON is stable across platforms.
+// See DESIGN-niwa-default-worktree.md Decision 7.
+func guardedNiwaHookCommand(niwaPath, suffix string) string {
+	normalized := filepath.ToSlash(niwaPath)
+	return "command -v niwa >/dev/null 2>&1 && exec niwa " + suffix +
+		"; exec " + shellSingleQuote(normalized) + " " + suffix
+}
+
+// shellSingleQuote wraps s in single quotes for safe interpolation into a shell
+// command. An embedded single quote is escaped the standard way: close the
+// quoted run, emit a backslash-escaped quote, reopen the run.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // snakeToPascal converts a snake_case string to PascalCase as a fallback when
@@ -270,11 +488,232 @@ type BuildSettingsConfig struct {
 	InstalledHooks         map[string][]InstalledHookEntry
 	ResolvedEnvVars        map[string]string
 	Plugins                []string
-	Marketplaces           []string
+	Marketplaces           []config.MarketplaceConfig
 	RepoIndex              map[string]string
 	BaseDir                string // for computing relative hook paths
 	IncludeGitInstructions *bool
 	UseAbsolutePaths       bool // use absolute paths for hooks (instance root)
+	// Reports, when non-nil, collects human-readable notices produced while
+	// building the document — currently release-tracking fallbacks for github
+	// marketplaces with no stable release. The caller surfaces these to the
+	// user; leaving it nil discards them.
+	Reports *[]string
+
+	// WorktreeDelegation, when non-nil, installs the worktree-delegation
+	// integration into this document. Supported => WorktreeCreate/WorktreeRemove
+	// hook entries (absolute-path "niwa worktree from-hook" commands).
+	// Unsupported => permissions.deny: ["EnterWorktree","ExitWorktree"]. Hook and
+	// deny are mutually exclusive; nil installs neither.
+	WorktreeDelegation *WorktreeDelegation
+
+	// SessionHooks, when non-nil, installs the workspace-root
+	// SessionStart/SessionEnd hook entries (the ephemeral-session integration).
+	// Each is a single command piping the Claude hook JSON on stdin to an
+	// absolute-path "niwa instance from-hook"; both carry a generous timeout so
+	// the clone + vault cost of `niwa create` does not trip the harness timeout.
+	// nil installs neither entry, leaving the hooks block untouched.
+	SessionHooks *SessionHooks
+
+	// WorkSummaryHooks, when non-empty, injects niwa's built-in default
+	// work-summary hook registrations (each a pure `command -v shirabe`-guarded
+	// pass-through to `shirabe work-summary <mode>`) into the hooks block. The
+	// caller (SettingsMaterializer) computes this set: it is empty unless the
+	// instance installs the shirabe plugin and the off switch is on, and it
+	// already excludes any mode a workspace still declares for itself, so this
+	// list is injected as-is with no further dedup.
+	WorkSummaryHooks []WorkSummaryHookMode
+	// PrBodyHook, when true, injects niwa's built-in default pr-body PreToolUse
+	// hook (a Bash-matched `shirabe pr-body-hook` pass-through). The caller
+	// already applied the shirabe-plugin gate, the off switch, and dedup against
+	// a workspace's own declaration.
+	PrBodyHook bool
+}
+
+// SessionHooks carries the inputs for the workspace-root
+// SessionStart/SessionEnd hook entries. Command is the full command string the
+// hook runs (an absolute-path "niwa instance from-hook"); TimeoutSeconds is the
+// per-command timeout (Claude Code's hook `timeout` field, in seconds) chosen
+// large enough to absorb `niwa create`'s clone + vault cost.
+type SessionHooks struct {
+	Command        string
+	TimeoutSeconds int
+}
+
+// Session hook event names written into the workspace-root settings.json. These
+// are the Claude Code SessionStart/SessionEnd events the ephemeral-session
+// integration rides; the names are already Pascal-cased.
+const (
+	sessionStartEvent = "SessionStart"
+	sessionEndEvent   = "SessionEnd"
+)
+
+// shirabePluginName is the plugin name (the part before "@marketplace") that
+// gates the default-on work-summary hook injection. niwa injects the three
+// work-summary hooks only into an instance whose effective [claude] plugins
+// install shirabe; the ambient summary travels with shirabe adoption rather
+// than with every provisioned instance.
+const shirabePluginName = "shirabe"
+
+// WorkSummaryHookMode describes one of the three default work-summary hook
+// registrations niwa injects for a shirabe adopter. Event is the snake_case
+// niwa hook event (mapped to a Claude Pascal event exactly like the installed
+// hooks), Matcher is the optional event matcher, and Mode is the
+// `shirabe work-summary <Mode>` verb the injected command execs.
+type WorkSummaryHookMode struct {
+	Event   string
+	Matcher string
+	Mode    string
+}
+
+// workSummaryHookDefaults is niwa's built-in default set of work-summary hook
+// registrations, injected (subject to the shirabe-plugin gate and the off
+// switch) into every repo that installs the shirabe plugin. Each is a pure
+// pass-through to the on-PATH shirabe binary; see workSummaryHookCommand.
+var workSummaryHookDefaults = []WorkSummaryHookMode{
+	{Event: "post_tool_use", Matcher: "Bash", Mode: "capture"},
+	{Event: "user_prompt_submit", Matcher: "", Mode: "absence"},
+	{Event: "session_start", Matcher: "compact", Mode: "compact"},
+}
+
+// workSummaryHookCommand returns the inline hook command string for a
+// work-summary mode. It is a pure pass-through: the `command -v shirabe` guard
+// makes the hook a fail-safe no-op (exit 0, never aborting a turn) wherever the
+// shirabe binary is absent from PATH, and otherwise execs
+// `shirabe work-summary <mode>`, which owns the ledger, gate, render, and
+// hook-JSON emission. No script file is carried; the command mirrors the
+// direct-command SessionHooks precedent.
+func workSummaryHookCommand(mode string) string {
+	return "command -v shirabe >/dev/null 2>&1 || exit 0; exec shirabe work-summary " + mode
+}
+
+// installsShirabePlugin reports whether the effective plugin list installs the
+// shirabe plugin. Plugin entries take the form "name@marketplace" (or a bare
+// "name"); the gate matches on the plugin name, so "shirabe@shirabe" and a bare
+// "shirabe" both qualify.
+func installsShirabePlugin(plugins []string) bool {
+	for _, p := range plugins {
+		name := p
+		if at := strings.IndexByte(p, '@'); at >= 0 {
+			name = p[:at]
+		}
+		if name == shirabePluginName {
+			return true
+		}
+	}
+	return false
+}
+
+// workSummaryHooksEnabled resolves the off switch: the default-on injection is
+// suppressed only when the workspace explicitly sets [claude] work_summary_hooks
+// = false. A nil pointer (the key absent) means on.
+func workSummaryHooksEnabled(eff EffectiveConfig) bool {
+	if v := eff.Claude.WorkSummaryHooks; v != nil {
+		return *v
+	}
+	return true
+}
+
+// workSummaryModeInstalled reports whether an installed hook for the given
+// snake_case event already registers `shirabe work-summary <mode>`. It reads the
+// materialized hook scripts (populated by the HooksMaterializer, which runs
+// before the SettingsMaterializer) and matches the `work-summary <mode>` marker,
+// so a workspace that still declares these hooks in its own config is not
+// double-registered by the niwa default. A script that cannot be read is treated
+// as "not a work-summary hook" (the default is injected), which is safe: the
+// guard makes a duplicate harmless, but the read normally succeeds.
+func workSummaryModeInstalled(installed map[string][]InstalledHookEntry, event, mode string) bool {
+	marker := "work-summary " + mode
+	for _, entry := range installed[event] {
+		for _, path := range entry.Paths {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			if strings.Contains(string(data), marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// resolveWorkSummaryHooks decides which work-summary hook registrations niwa
+// should inject by default for a repo. It returns nil (inject nothing) unless
+// the effective config installs the shirabe plugin and the off switch is on.
+// When it injects, it drops any mode a workspace already declares for itself so
+// the default never double-registers (coordinates with the dot-niwa cleanup that
+// retires the redundant declaration).
+func resolveWorkSummaryHooks(eff EffectiveConfig, installed map[string][]InstalledHookEntry) []WorkSummaryHookMode {
+	if !installsShirabePlugin(eff.Plugins) || !workSummaryHooksEnabled(eff) {
+		return nil
+	}
+	var modes []WorkSummaryHookMode
+	for _, d := range workSummaryHookDefaults {
+		if workSummaryModeInstalled(installed, d.Event, d.Mode) {
+			continue
+		}
+		modes = append(modes, d)
+	}
+	return modes
+}
+
+// prBodyHookCommand returns the inline PreToolUse hook command that gates a
+// `gh pr create` / `gh pr edit` against the mechanical PR-body rule before it
+// runs. It is a pure pass-through to `shirabe pr-body-hook`, which reads the
+// hook JSON on stdin and prints an allow/deny decision.
+//
+// Unlike the work-summary PostToolUse pass-through it must NOT `exec` and must
+// swallow a non-zero exit: a PreToolUse hook that exits non-zero BLOCKS the tool
+// call, and this hook matches every Bash command. An outdated shirabe that
+// predates the `pr-body-hook` subcommand exits non-zero on the unknown
+// subcommand, so the `command -v shirabe` guard plus the trailing `|| exit 0`
+// fall back to "allow" against a stale or absent binary. The current binary
+// always exits 0, so the guard only ever fires on a stale install.
+func prBodyHookCommand() string {
+	return "command -v shirabe >/dev/null 2>&1 || exit 0; shirabe pr-body-hook 2>/dev/null || exit 0"
+}
+
+// prBodyHookEnabled resolves the off switch: the default-on injection is
+// suppressed only when the workspace explicitly sets [claude] pr_body_hook =
+// false. A nil pointer (the key absent) means on.
+func prBodyHookEnabled(eff EffectiveConfig) bool {
+	if v := eff.Claude.PrBodyHook; v != nil {
+		return *v
+	}
+	return true
+}
+
+// prBodyHookInstalled reports whether an installed pre_tool_use hook already
+// registers `shirabe pr-body-hook`, so a workspace that still declares the hook
+// itself is not double-registered by the niwa default. Mirrors
+// workSummaryModeInstalled; an unreadable script is treated as "not a pr-body
+// hook" (inject the default), which is safe because the guard makes a duplicate
+// harmless.
+func prBodyHookInstalled(installed map[string][]InstalledHookEntry) bool {
+	const marker = "pr-body-hook"
+	for _, entry := range installed["pre_tool_use"] {
+		for _, path := range entry.Paths {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			if strings.Contains(string(data), marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// resolvePrBodyHook decides whether niwa should inject its default pr-body
+// PreToolUse hook for a repo. It returns false unless the effective config
+// installs the shirabe plugin and the off switch is on, and it drops the default
+// when the workspace already declares the hook itself (no double-registration).
+func resolvePrBodyHook(eff EffectiveConfig, installed map[string][]InstalledHookEntry) bool {
+	if !installsShirabePlugin(eff.Plugins) || !prBodyHookEnabled(eff) {
+		return false
+	}
+	return !prBodyHookInstalled(installed)
 }
 
 // buildSettingsDoc produces the map[string]any JSON document for Claude Code
@@ -287,21 +726,73 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 	// reveals secret-backed values (rare for permissions, but a
 	// user may back any SettingsConfig value via vault://) and
 	// returns the literal plaintext otherwise.
+	//
+	// The permissions block may carry two independent keys: defaultMode (from
+	// the declared permissions posture) and deny (from the worktree-delegation
+	// fallback). They
+	// are emitted into the SAME permissions map so a deny fallback never clobbers
+	// a configured defaultMode and vice versa.
+	permissions := make(map[string]any)
 	if perm, ok := cfg.Settings["permissions"]; ok {
-		permStr := maybeSecretString(perm)
-		mapped, known := permissionsMapping[permStr]
-		if !known {
-			return nil, fmt.Errorf("unknown permissions value %q", permStr)
+		mode, write, err := claudeDefaultMode(maybeSecretString(perm))
+		if err != nil {
+			return nil, settingValueError("unknown permissions value", "permissions", perm, err.Error())
 		}
-		doc["permissions"] = map[string]any{
-			"defaultMode": mapped,
+		if write {
+			permissions["defaultMode"] = mode
 		}
 	}
 
-	// Build hooks block from installed hooks.
-	if len(cfg.InstalledHooks) > 0 {
-		hooksDoc := make(map[string]any, len(cfg.InstalledHooks))
+	// Worktree delegation: emit EITHER the hook entries OR the permissions.deny
+	// entries, never both (they are mutually exclusive — a deny blocks the tool
+	// before the hook would run). The hook entries are appended to the hooks
+	// block built below; the deny entries are merged into the permissions map
+	// here so they coexist with any configured defaultMode.
+	if wd := cfg.WorktreeDelegation; wd != nil && !wd.Supported {
+		permissions["deny"] = []any{denyEnterWorktree, denyExitWorktree}
+	}
 
+	// A bypass posture with no deny fallback leaves the map empty. Leaving the
+	// block out then keeps the document identical to an undeclared posture's.
+	if len(permissions) > 0 {
+		doc["permissions"] = permissions
+	}
+
+	// remoteControlAtStartup: a boolean passthrough emitted only when a user
+	// explicitly sets it under [claude.settings]. Nothing turns it on by
+	// default here -- the host-level "remote-control on dispatch" default is
+	// applied at the dispatch launch seam, not via materialization. Carrying
+	// the key here lets a downstream value both reach the worker and be read
+	// back by the dispatch resolver. SettingsConfig values are strings, so the
+	// TOML value is written quoted ("true"/"false") and parsed to a bool.
+	if rc, ok := cfg.Settings[config.RemoteControlAtStartupKey]; ok {
+		raw := maybeSecretString(rc)
+		b, err := strconv.ParseBool(strings.TrimSpace(raw))
+		if err != nil {
+			return nil, settingValueError("invalid value", config.RemoteControlAtStartupKey, rc, `want "true" or "false"`)
+		}
+		doc[config.RemoteControlAtStartupKey] = b
+	}
+
+	// keepAliveOnDispatch: the same boolean passthrough shape as
+	// remoteControlAtStartup, emitted only when a user explicitly sets it under
+	// [claude.settings]. The key is niwa-defined (Claude Code ignores it);
+	// carrying it in settings.json lets a downstream workspace decide dispatch
+	// keep-alive for its own instances, read back by the dispatch resolver the
+	// same way the remote-control downstream value is. Nothing turns it on by
+	// default here -- the host-level default lives at the dispatch launch seam.
+	if ka, ok := cfg.Settings[config.KeepAliveOnDispatchKey]; ok {
+		raw := maybeSecretString(ka)
+		b, err := strconv.ParseBool(strings.TrimSpace(raw))
+		if err != nil {
+			return nil, settingValueError("invalid value", config.KeepAliveOnDispatchKey, ka, `want "true" or "false"`)
+		}
+		doc[config.KeepAliveOnDispatchKey] = b
+	}
+
+	// Build hooks block from installed hooks.
+	hooksDoc := make(map[string]any, len(cfg.InstalledHooks))
+	if len(cfg.InstalledHooks) > 0 {
 		// Sort event names for deterministic output.
 		events := make([]string, 0, len(cfg.InstalledHooks))
 		for event := range cfg.InstalledHooks {
@@ -345,6 +836,121 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 			}
 			hooksDoc[pascalEvent] = eventEntries
 		}
+	}
+
+	// Worktree delegation (supported branch): append the WorktreeCreate and
+	// WorktreeRemove hook entries, each an absolute-path "niwa worktree from-hook"
+	// command Claude invokes directly. These ride the same hooks-block shape as
+	// the installed-script hooks above; the event names are already Pascal-cased.
+	// The deny branch is handled in the permissions block above and is mutually
+	// exclusive with this one.
+	if wd := cfg.WorktreeDelegation; wd != nil && wd.Supported {
+		command := worktreeFromHookCommand(wd.NiwaPath)
+		worktreeEntry := []map[string]any{
+			{
+				"hooks": []map[string]string{
+					{"type": "command", "command": command},
+				},
+			},
+		}
+		hooksDoc[worktreeCreateEvent] = worktreeEntry
+		hooksDoc[worktreeRemoveEvent] = worktreeEntry
+	}
+
+	// Work-summary hooks (default-on for shirabe adopters): inject the built-in
+	// pass-through registrations the caller resolved. Each is an inline
+	// `command -v shirabe`-guarded command (no script file), mirroring the
+	// direct-command SessionHooks precedent. The caller already applied the
+	// shirabe-plugin gate, the off switch, and dedup against a workspace's own
+	// declaration, so the set is injected as-is.
+	//
+	// These are injected BEFORE the SessionHooks block below so a SessionStart
+	// `compact` work-summary entry is present when the ephemeral SessionStart
+	// merge runs: that merge appends the ephemeral entry to the existing
+	// SessionStart block, preserving the compaction re-injection hook (R10) in
+	// ephemeral-session mode.
+	for _, m := range cfg.WorkSummaryHooks {
+		pascalEvent, ok := hookEventMapping[m.Event]
+		if !ok {
+			pascalEvent = snakeToPascal(m.Event)
+		}
+		entry := map[string]any{
+			"hooks": []map[string]string{
+				{"type": "command", "command": workSummaryHookCommand(m.Mode)},
+			},
+		}
+		if m.Matcher != "" {
+			entry["matcher"] = m.Matcher
+		}
+		if existing, ok := hooksDoc[pascalEvent].([]map[string]any); ok {
+			hooksDoc[pascalEvent] = append(existing, entry)
+		} else {
+			hooksDoc[pascalEvent] = []map[string]any{entry}
+		}
+	}
+
+	// Pr-body hook (default-on for shirabe adopters): inject the PreToolUse
+	// pass-through the caller resolved. Like the work-summary hooks it is an
+	// inline `command -v shirabe`-guarded command with no script file, but it
+	// must not exec and swallows a non-zero exit (see prBodyHookCommand) because
+	// a non-zero PreToolUse exit blocks the tool call. It is appended to the
+	// PreToolUse block so it composes with any installed PreToolUse Bash hook
+	// (e.g. a gate-online entry) rather than replacing it.
+	if cfg.PrBodyHook {
+		pascalEvent, ok := hookEventMapping["pre_tool_use"]
+		if !ok {
+			pascalEvent = snakeToPascal("pre_tool_use")
+		}
+		entry := map[string]any{
+			"matcher": "Bash",
+			"hooks": []map[string]string{
+				{"type": "command", "command": prBodyHookCommand()},
+			},
+		}
+		if existing, ok := hooksDoc[pascalEvent].([]map[string]any); ok {
+			hooksDoc[pascalEvent] = append(existing, entry)
+		} else {
+			hooksDoc[pascalEvent] = []map[string]any{entry}
+		}
+	}
+
+	// Session hooks (ephemeral-session integration): emit ONLY the SessionStart
+	// entry -- a single command piping stdin to "niwa instance from-hook" with a
+	// generous timeout. The timeout absorbs niwa create's clone + vault cost so
+	// the harness does not kill the hook mid-provision.
+	//
+	// No SessionEnd entry is installed: teardown is delete-only and owned by the
+	// reaper (DESIGN Decision 6, revised). SessionEnd fires on idle-suspend, not
+	// uniquely on delete, so wiring it would reclaim still-resumable instances;
+	// the `niwa instance from-hook` SessionEnd branch is a defensive no-op for
+	// any pre-existing settings.json that still carries the entry.
+	if sh := cfg.SessionHooks; sh != nil && sh.Command != "" {
+		sessionEntry := []map[string]any{
+			{
+				"hooks": []map[string]any{
+					{
+						"type":    "command",
+						"command": sh.Command,
+						"timeout": sh.TimeoutSeconds,
+					},
+				},
+			},
+		}
+		// Merge, do not overwrite: an installed hook registered on the
+		// session_start event (e.g. dot-niwa's compaction re-injection hook)
+		// already built a SessionStart block above (hooksDoc[pascalEvent], with
+		// pascalEvent == "SessionStart" == sessionStartEvent). A plain assignment
+		// here would silently drop that installed hook, leaving only the ephemeral
+		// entry -- which breaks compaction re-injection (R10) in ephemeral-session
+		// mode. Installed entries come FIRST (stable order), ephemeral appended.
+		if existing, ok := hooksDoc[sessionStartEvent].([]map[string]any); ok {
+			hooksDoc[sessionStartEvent] = append(existing, sessionEntry...)
+		} else {
+			hooksDoc[sessionStartEvent] = sessionEntry
+		}
+	}
+
+	if len(hooksDoc) > 0 {
 		doc["hooks"] = hooksDoc
 	}
 
@@ -379,10 +985,14 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 	// extraKnownMarketplaces from marketplaces list.
 	if len(cfg.Marketplaces) > 0 {
 		mkts := make(map[string]any, len(cfg.Marketplaces))
-		for _, source := range cfg.Marketplaces {
-			name, entry, err := mapMarketplaceSourceWithIndex(source, cfg.RepoIndex)
+		for _, mc := range cfg.Marketplaces {
+			source := mc.Source
+			name, entry, report, err := mapMarketplaceSourceWithIndex(source, cfg.RepoIndex, mc.AutoUpdate, mc.Track)
 			if err != nil {
 				return nil, fmt.Errorf("marketplace %q: %w", source, err)
+			}
+			if report != "" && cfg.Reports != nil {
+				*cfg.Reports = append(*cfg.Reports, report)
 			}
 			if name != "" {
 				mkts[name] = entry
@@ -396,6 +1006,20 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 	return doc, nil
 }
 
+// emitReports writes each report line to w (falling back to os.Stderr when w
+// is nil). Used to surface marketplace release-tracking notices to the user.
+func emitReports(w io.Writer, reports []string) {
+	if len(reports) == 0 {
+		return
+	}
+	if w == nil {
+		w = os.Stderr
+	}
+	for _, r := range reports {
+		fmt.Fprintln(w, "niwa: "+r)
+	}
+}
+
 // resolveClaudeEnvVars resolves the claude.env promote + inline vars into a
 // single map. Returns nil if there are no env vars to resolve. The
 // second return is the ordered list of SourceEntry tuples describing
@@ -403,8 +1027,28 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 // when any keys are promoted, plus inline vars.
 func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, []SourceEntry, error) {
 	claudeEnv := ctx.Effective.Claude.Env
-	hasEnv := len(claudeEnv.Promote) > 0 || len(claudeEnv.Vars.Values) > 0
-	if !hasEnv {
+	vars, sources, err := resolveDeclaredEnvVars(ctx, "claude.env", claudeEnv.Promote, claudeEnv.Vars)
+	if err != nil {
+		return nil, nil, err
+	}
+	merged := mergeSessionEnv(ctx.SessionEnv, vars)
+	if len(merged) == 0 {
+		return nil, nil, nil
+	}
+	return merged, append(slices.Clip(ctx.SessionEnvSources), sources...), nil
+}
+
+// resolveDeclaredEnvVars resolves one promote list plus one inline table into
+// the literal values a session receives. label is the configuration table the
+// declaration came from, and it appears in every error and report this
+// produces, so a workspace with both [session.env] and [claude.env] is told
+// which one it needs to fix.
+//
+// Returns nil when the declaration is empty. The second return is the ordered
+// list of SourceEntry tuples describing the inputs that contributed bytes:
+// forwarded from ResolveEnvVars when any keys are promoted, plus inline vars.
+func resolveDeclaredEnvVars(ctx *MaterializeContext, label string, promote []string, vars config.EnvVarsTable) (map[string]string, []SourceEntry, error) {
+	if len(promote) == 0 && len(vars.Values) == 0 {
 		return nil, nil, nil
 	}
 
@@ -412,20 +1056,57 @@ func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, []SourceE
 	var sources []SourceEntry
 
 	// Step 1: resolve promoted keys from the env pipeline.
-	if len(claudeEnv.Promote) > 0 {
-		resolvedEnv, envSources, err := ResolveEnvVars(ctx)
-		if err != nil {
-			return nil, nil, fmt.Errorf("resolving env for promote: %w", err)
-		}
-		if resolvedEnv == nil {
-			resolvedEnv = map[string]string{}
-		}
-		for _, key := range claudeEnv.Promote {
-			val, found := resolvedEnv[key]
-			if !found {
-				return nil, nil, fmt.Errorf("claude.env: promoted key %q not found in resolved env vars", key)
+	if len(promote) > 0 {
+		var resolvedEnv map[string]string
+		var envSources []SourceEntry
+		if ctx.InheritedEnv != nil {
+			// Worktree path: the config here is unresolved (no vault /
+			// machine-identity sync ran), so a promoted key sourced from a
+			// secret would be absent from ResolveEnvVars. Inherit the value
+			// from the clone's already-materialized env instead, mirroring how
+			// the worktree path inherits env output files rather than
+			// re-resolving them (see inheritEnvOutputs). No source tuples are
+			// recorded: the worktree path does not track SourceFingerprints.
+			resolvedEnv = ctx.InheritedEnv
+		} else {
+			var err error
+			resolvedEnv, envSources, err = ResolveEnvVars(ctx)
+			if err != nil {
+				return nil, nil, fmt.Errorf("resolving env for promote: %w", err)
 			}
-			envResult[key] = val
+			if resolvedEnv == nil {
+				resolvedEnv = map[string]string{}
+			}
+		}
+		// Promotion is three-way, not two-way. Before omission existed an
+		// unresolved key was still present in the resolved map holding an empty
+		// string, so promoting it silently produced "". Now it is absent, and
+		// absence alone no longer distinguishes "we could not supply this" from
+		// "you promoted a key that does not exist". The unresolved set makes
+		// that distinction; the hard error is kept for everything outside it,
+		// which is what still catches a typo in the promote list.
+		unresolved := promoteUnresolvedSet(ctx)
+		for _, key := range promote {
+			val, found := resolvedEnv[key]
+			if found {
+				envResult[key] = val
+				continue
+			}
+			if omitted, ok := unresolved[key]; ok {
+				// The strict arm of the three-way branch. Omission is what
+				// tolerance does with a promoted key that has no value;
+				// under strict mode the same key is a refusal instead. It
+				// lives here rather than at the post-merge gate because
+				// promotion runs later and per-repo, so that gate has
+				// already passed by the time this key is looked up.
+				if ctx.StrictSecrets {
+					return nil, nil, fmt.Errorf("%w: %s promotes %q, which has no value",
+						ErrStrictSecrets, label, key)
+				}
+				reportPromoteOmission(ctx.Keys, key, omitted)
+				continue
+			}
+			return nil, nil, fmt.Errorf("%s: promoted key %q not found in resolved env vars", label, key)
 		}
 		// Every env source contributes to the rollup because any
 		// plaintext-file rotation upstream can change promoted
@@ -442,16 +1123,132 @@ func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, []SourceE
 	// materializer. maybeSecretString reaches through reveal.
 	// UnsafeReveal for secret-bearing entries and returns m.Plain
 	// otherwise.
-	for _, k := range sortedKeys(claudeEnv.Vars.Values) {
-		v := claudeEnv.Vars.Values[k]
+	for _, k := range sortedKeys(vars.Values) {
+		v := vars.Values[k]
+		sources = append(sources, sourceForMaybeSecret("workspace.toml:"+label+".vars."+k, v))
+		// A marked value is omitted here too. The settings document has no
+		// record form (it is a Claude Code file, not a niwa one), so the key
+		// simply does not appear; the run's report is what accounts for it.
+		if v.IsUnresolved() {
+			delete(envResult, k)
+			continue
+		}
 		envResult[k] = maybeSecretString(v)
-		sources = append(sources, sourceForMaybeSecret("workspace.toml:claude.env.vars."+k, v))
 	}
 
 	if len(envResult) == 0 {
 		return nil, nil, nil
 	}
 	return envResult, sources, nil
+}
+
+// promoteUnresolvedSet returns the keys this repo could not supply, from
+// whichever of the two provenances applies, unioned with the keys that were
+// declared in a requirement sub-table and never got a value at all.
+//
+// The union is what makes the set cover both shapes of unresolved key, the way
+// the run's report does. A mark describes a value that was tried and failed; a
+// key listed in a required/recommended/optional sub-table with no entry in the
+// values map was never visited by the resolver, so no mark exists for it. That
+// second shape is the no-provider contributor's exact case, and without it here
+// a promoted key of that shape falls through to the hard error meant to catch a
+// typo in the promote list. Whether the key is spelled anywhere in the
+// declarations is precisely what separates a shortfall from a typo, so a key
+// declared nowhere stays absent from this set and still hard-errors.
+//
+// The instance path reads the marks that ResolveEnvVars just consumed: the mark
+// stays on the value in the effective config, and only the materialized output
+// map omits the key, so nothing new has to be threaded to reach it.
+//
+// The worktree path has no marks at all — it reads an already-materialized file
+// rather than re-resolving — so its set was recovered from that file's records
+// by the caller. A non-nil InheritedEnv is what identifies that path. Those
+// records cover only the marked shape, because they were written from the
+// marks; the declaration walk below is what supplies the other shape there, and
+// it can run on that path because declarations live in the static config the
+// worktree apply reads, not in the resolution it skips.
+func promoteUnresolvedSet(ctx *MaterializeContext) map[string]unresolvedEnvKey {
+	base := ctx.UnresolvedEnv
+	if ctx.InheritedEnv != nil {
+		base = ctx.InheritedUnresolved
+	}
+
+	set := make(map[string]unresolvedEnvKey, len(base))
+	maps.Copy(set, base)
+
+	// Only the tables the promote pipeline actually draws from are walked. A
+	// promoted key resolves out of the [env] pipeline and is then overlaid by
+	// the inline [claude.env] tables, so a declaration anywhere else describes
+	// a key this branch was never going to look up.
+	// Fixed order, not a map range: a key declared in more than one of these
+	// tables would otherwise be attributed to a different scope run to run.
+	tables := []struct {
+		scope string
+		table config.EnvVarsTable
+	}{
+		{"env.vars", ctx.Effective.Env.Vars},
+		{"env.secrets", ctx.Effective.Env.Secrets},
+		{"claude.env.vars", ctx.Effective.Claude.Env.Vars},
+		{"claude.env.secrets", ctx.Effective.Claude.Env.Secrets},
+	}
+	// The neutral session table is workspace-scoped, so it is read off the raw
+	// configuration rather than the per-repo effective one.
+	if ctx.Config != nil {
+		tables = append(tables, struct {
+			scope string
+			table config.EnvVarsTable
+		}{"session.env.vars", ctx.Config.Session.Env.Vars})
+	}
+	for _, tbl := range tables {
+		scope := tbl.scope
+		forEachDeclaredWithNoValue(tbl.table, func(key string, level config.RequirementLevel, desc string) {
+			// An entry already in the set came from a mark or a record, which
+			// carries the true cause of the failure; this walk can only say
+			// that nothing was configured. First provenance wins.
+			if _, ok := set[key]; ok {
+				return
+			}
+			set[key] = unresolvedEnvKey{
+				Scope: scope,
+				Record: envformat.Record{
+					Level:       string(level),
+					Cause:       string(keyreport.CauseNoSource),
+					Description: desc,
+				},
+			}
+		})
+	}
+	return set
+}
+
+// reportPromoteOmission records a promoted key that was omitted rather than
+// promoted, unless the run already recorded the same key elsewhere.
+//
+// The dedup matters because the two producers see the same shortfall from
+// different angles: the post-merge walk records it under the table it was
+// declared in, which is the truer scope, and this records it again under the
+// promote list. R6 asks for one consolidated report, so the first one wins. On
+// the worktree path, where no post-merge walk runs, this is the only producer.
+func reportPromoteOmission(c *keyreport.Collector, key string, omitted unresolvedEnvKey) {
+	if c == nil {
+		return
+	}
+	for _, e := range c.Report() {
+		if e.Key == key {
+			return
+		}
+	}
+	scope := omitted.Scope
+	if scope == "" {
+		scope = "claude.env.promote"
+	}
+	c.Add(keyreport.Entry{
+		Scope:       scope,
+		Key:         key,
+		Cause:       config.UnresolvedCause(omitted.Record.Cause),
+		Level:       config.RequirementLevel(omitted.Record.Level),
+		Description: omitted.Record.Description,
+	})
 }
 
 // SettingsMaterializer generates the .claude/settings.local.json file from
@@ -478,39 +1275,62 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 		return nil, err
 	}
 
+	// Resolve niwa's default-on work-summary hook injection: empty unless this
+	// instance installs the shirabe plugin and the off switch is on, already
+	// deduped against any work-summary hook the workspace still declares itself.
+	workSummaryHooks := resolveWorkSummaryHooks(ctx.Effective, hooks)
+
+	// Resolve niwa's default-on pr-body PreToolUse hook injection: false unless
+	// this instance installs the shirabe plugin and the off switch is on, already
+	// deduped against a pr-body hook the workspace still declares itself.
+	prBodyHook := resolvePrBodyHook(ctx.Effective, hooks)
+
+	// The worktree-delegation decision (computed once per apply, threaded via the
+	// context) is itself enough to require a settings file even when nothing else
+	// is configured: it writes either the WorktreeCreate/WorktreeRemove hooks or
+	// the permissions.deny fallback. The default work-summary hooks are likewise
+	// enough on their own (though in practice a shirabe adopter also carries a
+	// non-empty plugin list, so this rarely decides the outcome).
 	if len(settings) == 0 && len(hooks) == 0 && len(resolvedEnv) == 0 &&
-		len(plugins) == 0 && len(marketplaces) == 0 {
+		len(plugins) == 0 && len(marketplaces) == 0 && ctx.WorktreeDelegation == nil &&
+		len(workSummaryHooks) == 0 && !prBodyHook {
 		return nil, nil
 	}
 
+	var reports []string
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
-		Settings:         settings,
-		InstalledHooks:   hooks,
-		ResolvedEnvVars:  resolvedEnv,
-		Plugins:          plugins,
-		Marketplaces:     marketplaces,
-		RepoIndex:        ctx.RepoIndex,
-		BaseDir:          ctx.RepoDir,
-		UseAbsolutePaths: true,
+		Settings:           settings,
+		InstalledHooks:     hooks,
+		ResolvedEnvVars:    resolvedEnv,
+		Plugins:            plugins,
+		Marketplaces:       marketplaces,
+		RepoIndex:          ctx.RepoIndex,
+		BaseDir:            ctx.RepoDir,
+		UseAbsolutePaths:   true,
+		Reports:            &reports,
+		WorktreeDelegation: ctx.WorktreeDelegation,
+		WorkSummaryHooks:   workSummaryHooks,
+		PrBodyHook:         prBodyHook,
 	})
 	if err != nil {
 		return nil, err
 	}
+	emitReports(ctx.Stderr, reports)
 
-	data, err := json.MarshalIndent(doc, "", "  ")
+	// The document is declared and written as a plan entry, so the file name,
+	// the marshalled bytes, and the file mode are the producer's; this
+	// materializer decides what the document says and what fed it.
+	plan, err := agentplan.SettingsPlan(agentplan.SettingsInputs{
+		Scope: agentplan.SettingsInRepo,
+		Dir:   ctx.RepoDir,
+		Doc:   doc,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("marshaling settings: %w", err)
-	}
-	// Append trailing newline for clean file output.
-	data = append(data, '\n')
-
-	claudeDir := filepath.Join(ctx.RepoDir, ".claude")
-	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating .claude directory: %w", err)
+		return nil, fmt.Errorf("declaring settings: %w", err)
 	}
 
-	target := filepath.Join(claudeDir, "settings.local.json")
-	if err := os.WriteFile(target, data, secretFileMode); err != nil {
+	written, _, err := applyPlan(plan)
+	if err != nil {
 		return nil, fmt.Errorf("writing settings file: %w", err)
 	}
 
@@ -523,16 +1343,11 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 		v := settings[k]
 		sources = append(sources, sourceForMaybeSecret("workspace.toml:claude.settings."+k, v))
 	}
-	ctx.recordSources(target, sources)
-
-	// Check that the repo's .gitignore has a *.local* pattern. Surface any
-	// warnings but do not fail — settings.local.json has already been written.
-	gitignoreWarnings := CheckGitignore(ctx.RepoDir, ctx.RepoName)
-	for _, w := range gitignoreWarnings {
-		fmt.Fprintf(ctx.stderr(), "warning: %s\n", w)
+	for _, target := range written {
+		ctx.recordSources(target, sources)
 	}
 
-	return []string{target}, nil
+	return written, nil
 }
 
 // sortedKeysSettings is the SettingsConfig counterpart to sortedKeys,
@@ -645,16 +1460,37 @@ func ResolveEnvVars(ctx *MaterializeContext) (map[string]string, []SourceEntry, 
 	// vault.VersionToken; plaintext entries synthesize a content-hash
 	// VersionToken from the materialized string so the rollup can
 	// tell inline-plaintext rotations from file-source rotations.
+	// A marked value is omitted rather than written as an empty string.
+	// Blanking is the more dangerous default: a downstream consumer cannot tell
+	// an unconfigured credential from a configured empty one, whereas absence
+	// fails closer to the cause. The key's record is carried on the context so
+	// the writer can put one in the assignment's place.
+	unresolved := make(map[string]unresolvedEnvKey)
 	for _, k := range sortedKeys(envCfg.Vars.Values) {
 		v := envCfg.Vars.Values[k]
-		vars[k] = maybeSecretString(v)
 		sources = append(sources, sourceForMaybeSecret("workspace.toml:env.vars."+k, v))
+		if u := v.Unresolved; u != nil {
+			// Delete rather than skip: a lower-priority layer (a .env.example
+			// seed, an env file) may already have put a placeholder here, and
+			// shipping that in place of the real secret would be a quieter
+			// version of the same confusion omission exists to prevent.
+			delete(vars, k)
+			unresolved[k] = unresolvedEnvKey{Scope: "env.vars", Record: recordForMark(u)}
+			continue
+		}
+		vars[k] = maybeSecretString(v)
 	}
 	for _, k := range sortedKeys(envCfg.Secrets.Values) {
 		v := envCfg.Secrets.Values[k]
-		vars[k] = maybeSecretString(v)
 		sources = append(sources, sourceForMaybeSecret("workspace.toml:env.secrets."+k, v))
+		if u := v.Unresolved; u != nil {
+			delete(vars, k)
+			unresolved[k] = unresolvedEnvKey{Scope: "env.secrets", Record: recordForMark(u)}
+			continue
+		}
+		vars[k] = maybeSecretString(v)
 	}
+	ctx.UnresolvedEnv = unresolved
 
 	if hasRepoFile {
 		repoEnvPath := discovered.RepoFiles[ctx.RepoName]
@@ -676,11 +1512,36 @@ func ResolveEnvVars(ctx *MaterializeContext) (map[string]string, []SourceEntry, 
 		})
 	}
 
-	if len(vars) == 0 {
+	// A discovered repo env file is the highest-priority layer, so a key it
+	// supplies is resolved after all: drop the record rather than write one
+	// beside a real assignment for the same key.
+	for k := range unresolved {
+		if _, ok := vars[k]; ok {
+			delete(unresolved, k)
+		}
+	}
+
+	// "Nothing to write" now means no assignments AND no records. A repo whose
+	// keys are all unresolved reaches here with an empty map and a full record
+	// set, and that is the exact case this work exists to serve: it must still
+	// produce a file.
+	if len(vars) == 0 && len(unresolved) == 0 {
 		return nil, nil, nil
 	}
 
 	return vars, sources, nil
+}
+
+// recordForMark converts a resolver mark into the record shape written into a
+// generated file. It drops the provider kind: the record's audience is someone
+// reading the file for a specific variable, and the run-scoped report is where
+// the provider's identity and its remedy belong.
+func recordForMark(u *config.Unresolved) envformat.Record {
+	return envformat.Record{
+		Level:       string(u.Level),
+		Cause:       string(u.Cause),
+		Description: u.Description,
+	}
 }
 
 // sortedKeys returns the keys of a MaybeSecret map in lexical order.
@@ -740,8 +1601,15 @@ func sourceForMaybeSecret(fallbackLocation string, ms config.MaybeSecret) Source
 }
 
 // Materialize reads env files and inline vars, merges them with discovered env
-// files, and writes the result to {repoDir}/.local.env. Returns the list of
+// files, and writes the result to each resolved secret-output target for the
+// repo (defaulting to {repoDir}/.local.env in dotenv form). Returns the list of
 // written file paths, or nil if there is nothing to write.
+//
+// Ordering is security-load-bearing: for every custom target name (one not
+// matched by the managed "*.local*" base pattern) git-ignore coverage is
+// recorded BEFORE any secret bytes are written, and a custom target on a
+// non-git tree -- where coverage cannot be confirmed -- is a fail-closed
+// refusal rather than a silent unprotected write.
 func (e *EnvMaterializer) Materialize(ctx *MaterializeContext) ([]string, error) {
 	if err := e.runEnvExamplePrePass(ctx); err != nil {
 		return nil, err
@@ -751,48 +1619,186 @@ func (e *EnvMaterializer) Materialize(ctx *MaterializeContext) ([]string, error)
 	if err != nil {
 		return nil, err
 	}
-	if len(vars) == 0 {
+	// Records alone are enough to require a file. A repo whose keys are ALL
+	// unresolved resolves to no assignments at all, and returning early there
+	// would leave the contributor this work serves with no file and no account
+	// of why.
+	if len(vars) == 0 && len(ctx.UnresolvedEnv) == 0 {
 		return nil, nil
 	}
 
-	// Build output with sorted keys for deterministic output.
-	keys := make([]string, 0, len(vars))
+	// Build an ordered item slice (sorted keys) shared by every writer so
+	// output is deterministic and the default dotenv target stays byte-identical
+	// to niwa's historical .local.env. Records are sorted into the same stream
+	// as assignments, so a record sits exactly where the assignment it replaces
+	// would have been — which is where someone scanning the file for that
+	// variable is already looking.
+	keys := make([]string, 0, len(vars)+len(ctx.UnresolvedEnv))
 	for k := range vars {
 		keys = append(keys, k)
 	}
+	for k := range ctx.UnresolvedEnv {
+		keys = append(keys, k)
+	}
 	sort.Strings(keys)
-
-	var buf strings.Builder
-	buf.WriteString("# Generated by niwa - do not edit manually\n")
+	items := make([]envformat.Item, 0, len(keys))
 	for _, k := range keys {
-		buf.WriteString(k)
-		buf.WriteByte('=')
-		buf.WriteString(vars[k])
-		buf.WriteByte('\n')
+		if u, ok := ctx.UnresolvedEnv[k]; ok {
+			rec := u.Record
+			items = append(items, envformat.Item{Key: k, Record: &rec})
+			continue
+		}
+		items = append(items, envformat.Item{Key: k, Value: vars[k]})
 	}
 
-	target := filepath.Join(ctx.RepoDir, ".local.env")
-	if err := os.WriteFile(target, []byte(buf.String()), secretFileMode); err != nil {
-		return nil, fmt.Errorf("writing env file: %w", err)
+	targets := config.EffectiveEnvOutput(ctx.GlobalEnvOutput, ctx.Config, ctx.RepoName)
+
+	// Validate every target path and collect the custom (non-"*.local*") names
+	// up front, then establish coverage for the whole set before any write so
+	// no secret file lands ahead of its exclude line.
+	absTargets := make([]string, len(targets))
+	var customPatterns []string
+	for i, tgt := range targets {
+		abs, err := safeTargetPath(ctx.RepoDir, tgt.Path)
+		if err != nil {
+			return nil, fmt.Errorf("env output target %q for repo %s: %w", tgt.Path, ctx.RepoName, err)
+		}
+		absTargets[i] = abs
+		if !matchedByBasePattern(tgt.Path) {
+			customPatterns = append(customPatterns, tgt.Path)
+		}
+	}
+	if len(customPatterns) > 0 {
+		if !gitexclude.IsGitRepo(ctx.RepoDir) {
+			return nil, fmt.Errorf("repo %s: custom secret-output target requires a git repository to guarantee git invisibility, but %s is not a git repository", ctx.RepoName, ctx.RepoDir)
+		}
+		if err := gitexclude.EnsureRepoExclude(ctx.RepoDir, customPatterns...); err != nil {
+			return nil, fmt.Errorf("repo %s: recording git exclude coverage for custom secret-output targets: %w", ctx.RepoName, err)
+		}
 	}
 
-	ctx.recordSources(target, sources)
+	var written []string
+	for i, tgt := range targets {
+		abs := absTargets[i]
+		if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
+			return nil, fmt.Errorf("creating parent dir for env output %q: %w", tgt.Path, err)
+		}
+		data, err := envformat.MarshalItems(string(tgt.Format), items)
+		if err != nil {
+			return nil, fmt.Errorf("serializing env output %q for repo %s: %w", tgt.Path, ctx.RepoName, err)
+		}
+		if err := os.WriteFile(abs, data, secretFileMode); err != nil {
+			return nil, fmt.Errorf("writing env output %q: %w", tgt.Path, err)
+		}
+		ctx.recordSources(abs, sources)
+		// Only custom names (not already matched by the base "*.local*"
+		// pattern) need an extra exclude entry. Recording the default
+		// .local.env here would add a redundant exclude line and change the
+		// managed block for repos that configured nothing -- so a repo with no
+		// env_output keeps the exact pre-feature exclude coverage.
+		if !matchedByBasePattern(tgt.Path) {
+			ctx.EnvOutputs = append(ctx.EnvOutputs, tgt.Path)
+		}
+		written = append(written, abs)
+	}
 
-	return []string{target}, nil
+	return written, nil
+}
+
+// matchedByBasePattern reports whether a target path is already covered by the
+// managed "*.local*" base exclude pattern (its base name contains ".local").
+// Such targets need no extra ignore entry; everything else is a "custom" name.
+func matchedByBasePattern(p string) bool {
+	return strings.Contains(filepath.Base(p), ".local")
+}
+
+// safeTargetPath validates an operator-supplied, repo-relative target path and
+// returns its absolute location under repoDir. A workspace config is untrusted
+// input, so the guard rejects absolute paths, paths that escape the repo after
+// cleaning, and paths that escape via a symlinked parent directory (resolved
+// with EvalSymlinks). It fails closed -- callers must not write when it errors.
+func safeTargetPath(repoDir, target string) (string, error) {
+	if target == "" {
+		return "", fmt.Errorf("target path is empty")
+	}
+	if filepath.IsAbs(target) {
+		return "", fmt.Errorf("target path must be relative, got absolute path")
+	}
+	clean := filepath.Clean(target)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("target path escapes the repository")
+	}
+	joined := filepath.Join(repoDir, clean)
+
+	rootResolved, err := filepath.EvalSymlinks(repoDir)
+	if err != nil {
+		return "", fmt.Errorf("resolving repo dir: %w", err)
+	}
+	// Resolve symlinks on the deepest existing ancestor of the target (the
+	// target file itself may not exist yet) and assert it stays within the repo.
+	ancestor := joined
+	for {
+		if _, err := os.Lstat(ancestor); err == nil {
+			break
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			break
+		}
+		ancestor = parent
+	}
+	ancestorResolved, err := filepath.EvalSymlinks(ancestor)
+	if err != nil {
+		return "", fmt.Errorf("resolving target ancestor: %w", err)
+	}
+	rel, err := filepath.Rel(rootResolved, ancestorResolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("target path escapes the repository via a symlink")
+	}
+	return joined, nil
 }
 
 // parseEnvFile reads a file and parses KEY=VALUE lines. Lines starting with #
-// and blank lines are skipped.
+// and blank lines are skipped. It is the assignments-only wrapper over
+// parseEnvFileWithRecords, kept so the several callers that have no use for
+// records are untouched.
 func parseEnvFile(path string) (map[string]string, error) {
+	vars, _, err := parseEnvFileWithRecords(path)
+	return vars, err
+}
+
+// parseEnvFileWithRecords reads a dotenv file and returns both its assignments
+// and any unresolved-key records it carries.
+//
+// The comment branch is what makes a record structurally incapable of
+// corrupting a neighbour: a '#' line is discarded before strings.Cut ever sees
+// it, so no assignment before or after a record can change by a byte, wherever
+// in the file the record sits.
+//
+// Records are recovered only from the dotenv form. The json and shell writers
+// emit a record in their own format, but niwa's reader has always been
+// dotenv-only and stays that way; a record in those files is for a person, not
+// for niwa.
+func parseEnvFileWithRecords(path string) (map[string]string, map[string]envformat.Record, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	vars := make(map[string]string)
+	records := make(map[string]envformat.Record)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			// ParseRecord revalidates every field and rejects anything that is
+			// not a well-formed record, so an ordinary comment (including one
+			// that merely starts with the prefix) contributes nothing.
+			if key, rec, ok := envformat.ParseRecord(line); ok {
+				records[key] = rec
+			}
 			continue
 		}
 		key, value, ok := strings.Cut(line, "=")
@@ -801,7 +1807,7 @@ func parseEnvFile(path string) (map[string]string, error) {
 		}
 		vars[key] = value
 	}
-	return vars, nil
+	return vars, records, nil
 }
 
 // localRename inserts ".local" before the file extension. Files without an
@@ -927,7 +1933,40 @@ func (f *FilesMaterializer) Materialize(ctx *MaterializeContext) ([]string, erro
 	return written, nil
 }
 
-// materializeFile copies a single file from the config directory to the repo.
+// writeManagedFile is the shared copy core for distributed files: it validates
+// that targetPath stays within ctx.RepoDir, creates parent directories, writes
+// data with the restrictive secretFileMode, and records (sourceID, content
+// hash) for drift fingerprinting. The per-level rename strategy (the per-repo
+// .local infix vs. verbatim at the non-repo levels) is applied by the caller
+// before it computes targetPath; this helper is rename-agnostic so the repo and
+// non-repo paths share one implementation of the actual file I/O and tracking.
+func (ctx *MaterializeContext) writeManagedFile(targetPath, sourceID string, data []byte) error {
+	if err := checkContainment(targetPath, ctx.RepoDir); err != nil {
+		return fmt.Errorf("file destination %q: %w", targetPath, err)
+	}
+
+	targetDir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return fmt.Errorf("creating directory %s: %w", targetDir, err)
+	}
+
+	if err := os.WriteFile(targetPath, data, secretFileMode); err != nil {
+		return fmt.Errorf("writing file %s: %w", targetPath, err)
+	}
+
+	// Record the source (path + content-hash) for fingerprinting.
+	// Hashing the already-loaded bytes avoids a second file read.
+	sum := sha256.Sum256(data)
+	ctx.recordSources(targetPath, []SourceEntry{{
+		Kind:         SourceKindPlaintext,
+		SourceID:     sourceID,
+		VersionToken: "sha256:" + hex.EncodeToString(sum[:]),
+	}})
+	return nil
+}
+
+// materializeFile copies a single file from the config directory to the repo,
+// applying the per-repo .local rename strategy.
 func (f *FilesMaterializer) materializeFile(ctx *MaterializeContext, src, dest string) ([]string, error) {
 	srcPath := filepath.Join(ctx.ConfigDir, src)
 	if err := checkContainment(srcPath, ctx.ConfigDir); err != nil {
@@ -958,29 +1997,118 @@ func (f *FilesMaterializer) materializeFile(ctx *MaterializeContext, src, dest s
 		targetPath = filepath.Join(ctx.RepoDir, destDir, rewritten)
 	}
 
-	if err := checkContainment(targetPath, ctx.RepoDir); err != nil {
-		return nil, fmt.Errorf("file destination %q: %w", dest, err)
+	if err := ctx.writeManagedFile(targetPath, src, data); err != nil {
+		return nil, err
 	}
-
-	targetDir := filepath.Dir(targetPath)
-	if err := os.MkdirAll(targetDir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating directory %s: %w", targetDir, err)
-	}
-
-	if err := os.WriteFile(targetPath, data, secretFileMode); err != nil {
-		return nil, fmt.Errorf("writing file %s: %w", targetPath, err)
-	}
-
-	// Record the source (path + content-hash) for fingerprinting.
-	// Hashing the already-loaded bytes avoids a second file read.
-	sum := sha256.Sum256(data)
-	ctx.recordSources(targetPath, []SourceEntry{{
-		Kind:         SourceKindPlaintext,
-		SourceID:     src,
-		VersionToken: "sha256:" + hex.EncodeToString(sum[:]),
-	}})
-
 	return []string{targetPath}, nil
+}
+
+// materializeVerbatimFiles copies the given source-to-destination mappings into
+// ctx.RepoDir VERBATIM: the destination name the author wrote is used as-is, with
+// no .local infix inserted. It is the non-repo (workspace-root and instance-root)
+// counterpart to FilesMaterializer's per-repo .local copy, sharing the same
+// containment, write, and source-recording core (writeManagedFile). Source and
+// destination containment are enforced exactly as the repo path enforces them.
+// Empty-string destinations are skipped (removal semantics). Returns the written
+// paths so the caller can track them as managed files.
+func materializeVerbatimFiles(ctx *MaterializeContext, files map[string]string) ([]string, error) {
+	if len(files) == 0 {
+		return nil, nil
+	}
+
+	// Sort source keys for deterministic output.
+	sources := make([]string, 0, len(files))
+	for src := range files {
+		sources = append(sources, src)
+	}
+	sort.Strings(sources)
+
+	var written []string
+	for _, src := range sources {
+		dest := files[src]
+		if dest == "" {
+			continue // removed via empty-string override
+		}
+		var (
+			w   []string
+			err error
+		)
+		if strings.HasSuffix(src, "/") {
+			w, err = materializeVerbatimDir(ctx, src, dest)
+		} else {
+			w, err = materializeVerbatimFile(ctx, src, dest)
+		}
+		if err != nil {
+			return nil, err
+		}
+		written = append(written, w...)
+	}
+	return written, nil
+}
+
+// materializeVerbatimFile copies a single file verbatim (no .local rename).
+func materializeVerbatimFile(ctx *MaterializeContext, src, dest string) ([]string, error) {
+	srcPath := filepath.Join(ctx.ConfigDir, src)
+	if err := checkContainment(srcPath, ctx.ConfigDir); err != nil {
+		return nil, fmt.Errorf("file source %q: %w", src, err)
+	}
+
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading file %s: %w", src, err)
+	}
+
+	// Verbatim: a directory destination (trailing /) places the file under its
+	// own basename unchanged; an explicit destination is used as written.
+	var targetPath string
+	if strings.HasSuffix(dest, "/") {
+		targetPath = filepath.Join(ctx.RepoDir, dest, filepath.Base(src))
+	} else {
+		targetPath = filepath.Join(ctx.RepoDir, dest)
+	}
+
+	if err := ctx.writeManagedFile(targetPath, src, data); err != nil {
+		return nil, err
+	}
+	return []string{targetPath}, nil
+}
+
+// materializeVerbatimDir walks a source directory and copies each file verbatim
+// (no .local rename), preserving directory structure under dest.
+func materializeVerbatimDir(ctx *MaterializeContext, src, dest string) ([]string, error) {
+	srcDir := filepath.Join(ctx.ConfigDir, strings.TrimSuffix(src, "/"))
+	if err := checkContainment(srcDir, ctx.ConfigDir); err != nil {
+		return nil, fmt.Errorf("directory source %q: %w", src, err)
+	}
+
+	var written []string
+	walkErr := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return fmt.Errorf("computing relative path: %w", err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", path, err)
+		}
+		targetPath := filepath.Join(ctx.RepoDir, strings.TrimSuffix(dest, "/"), rel)
+		sourceID := filepath.Join(strings.TrimSuffix(src, "/"), rel)
+		if err := ctx.writeManagedFile(targetPath, sourceID, data); err != nil {
+			return err
+		}
+		written = append(written, targetPath)
+		return nil
+	})
+	if walkErr != nil {
+		return nil, fmt.Errorf("walking directory %s: %w", src, walkErr)
+	}
+	return written, nil
 }
 
 // materializeDir walks a source directory and copies each file to the
@@ -1044,30 +2172,12 @@ func (f *FilesMaterializer) materializeDir(ctx *MaterializeContext, src, dest st
 			}
 		}
 
-		if err := checkContainment(targetPath, ctx.RepoDir); err != nil {
-			return fmt.Errorf("file destination %q: %w", targetPath, err)
-		}
-
-		targetDir := filepath.Dir(targetPath)
-		if err := os.MkdirAll(targetDir, 0o755); err != nil {
-			return fmt.Errorf("creating directory %s: %w", targetDir, err)
-		}
-
-		if err := os.WriteFile(targetPath, data, secretFileMode); err != nil {
-			return fmt.Errorf("writing %s: %w", targetPath, err)
-		}
-
-		// Record (source-rel-path, content-hash) so fingerprinting
-		// treats each file in the walked tree as its own source.
-		// Using the path relative to srcDir keeps the SourceID stable
+		// Record the source relative to srcDir so the SourceID is stable
 		// across platforms and independent of ctx.ConfigDir.
-		sum := sha256.Sum256(data)
 		relFromConfig := filepath.Join(strings.TrimSuffix(src, "/"), rel)
-		ctx.recordSources(targetPath, []SourceEntry{{
-			Kind:         SourceKindPlaintext,
-			SourceID:     relFromConfig,
-			VersionToken: "sha256:" + hex.EncodeToString(sum[:]),
-		}})
+		if err := ctx.writeManagedFile(targetPath, relFromConfig, data); err != nil {
+			return err
+		}
 
 		written = append(written, targetPath)
 		return nil

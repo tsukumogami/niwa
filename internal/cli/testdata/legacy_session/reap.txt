@@ -1,0 +1,7 @@
+== live: runReap stdout ==
+== live: spared report (stderr) ==
+== dead: reapWorkspace count ==
+1
+== dead: destroyed ==
+<INSTANCE>
+== dead: stderr ==

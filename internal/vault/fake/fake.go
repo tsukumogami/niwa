@@ -10,6 +10,7 @@
 //	{
 //	    "values":    map[string]string // key → plaintext
 //	    "fail_open": bool              // when true, unknown keys return ErrProviderUnreachable
+//	    "no_client": bool              // when true, unknown keys return ErrClientNotInstalled
 //	}
 //
 // VersionToken.Token is a deterministic SHA-256 hex digest of the
@@ -54,6 +55,7 @@ func (Factory) Kind() string {
 //	"name"      string                  // provider name (defaults to "")
 //	"values"    map[string]string       // preconfigured values
 //	"fail_open" bool                    // return ErrProviderUnreachable for unknown keys
+//	"no_client" bool                    // return ErrClientNotInstalled for unknown keys
 //
 // Other keys are ignored; malformed types for recognised keys cause
 // Open to return an error.
@@ -100,6 +102,14 @@ func (Factory) Open(_ context.Context, config vault.ProviderConfig) (vault.Provi
 		p.failOpen = failOpen
 	}
 
+	if raw, ok := config["no_client"]; ok {
+		noClient, ok := raw.(bool)
+		if !ok {
+			return nil, fmt.Errorf("fake: config[no_client] must be bool, got %T", raw)
+		}
+		p.noClient = noClient
+	}
+
 	return p, nil
 }
 
@@ -109,6 +119,7 @@ func (Factory) Open(_ context.Context, config vault.ProviderConfig) (vault.Provi
 type Provider struct {
 	name     string
 	failOpen bool
+	noClient bool
 
 	mu     sync.Mutex
 	values map[string]string
@@ -127,7 +138,9 @@ func (p *Provider) Kind() string {
 
 // Resolve looks up ref.Key in the preconfigured values map. A
 // missing key returns vault.ErrKeyNotFound (or
-// vault.ErrProviderUnreachable when fail_open is true). The returned
+// vault.ErrProviderUnreachable when fail_open is true, or
+// vault.ErrClientNotInstalled when no_client is true — no_client wins,
+// since a client that is not there cannot report anything else). The returned
 // VersionToken is a deterministic SHA-256 of the value bytes;
 // Provenance is "fake:<provider-name>:<key>".
 func (p *Provider) Resolve(_ context.Context, ref vault.Ref) (secret.Value, vault.VersionToken, error) {
@@ -138,6 +151,9 @@ func (p *Provider) Resolve(_ context.Context, ref vault.Ref) (secret.Value, vaul
 	}
 	raw, ok := p.values[ref.Key]
 	if !ok {
+		if p.noClient {
+			return secret.Value{}, vault.VersionToken{}, fmt.Errorf("fake: provider %q: %w", p.name, vault.ErrClientNotInstalled)
+		}
 		if p.failOpen {
 			return secret.Value{}, vault.VersionToken{}, fmt.Errorf("fake: provider %q unreachable: %w", p.name, vault.ErrProviderUnreachable)
 		}

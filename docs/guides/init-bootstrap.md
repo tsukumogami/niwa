@@ -209,8 +209,9 @@ visibility = "<vis-value>"
 # no live visibility, so name membership is what places the repo in a group.
 repos = ["<bootstrap-repo>"]
 
-# CLAUDE.md content hierarchy: drop a workspace.md in .niwa/claude/ to populate.
-# [claude.content.workspace]
+# Content hierarchy: drop a workspace.md in .niwa/claude/ to populate. It is
+# agent-neutral -- each agent's session reads it under that agent's own filename.
+# [content.workspace]
 # source = "workspace.md"
 
 # See https://github.com/tsukumogami/niwa/blob/main/docs/guides/workspace-config-sources.md
@@ -232,7 +233,7 @@ scaffold after the fact to broaden the scope.
 
 The `.niwa/claude/.gitkeep` placeholder file (zero bytes) is written
 alongside the scaffold so the content directory pushes cleanly when
-you later uncomment `[claude.content.workspace]`.
+you later uncomment `[content.workspace]`.
 
 ## Related
 

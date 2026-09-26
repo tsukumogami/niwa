@@ -1,4 +1,5 @@
 ---
+schema: prd/v1
 status: Accepted
 problem: |
   niwa workspace config is a team artifact stored in a shared GitHub repo. This
@@ -22,8 +23,7 @@ goals: |
 
 Accepted
 
-## Problem statement
-
+## Problem Statement
 niwa workspaces are backed by a GitHub repo that holds all configuration: hooks, env vars, plugins, managed files, and CLAUDE.md content. Everything in that repo applies to every team member equally. This creates a conflict: user preferences and user-specific credentials belong to the individual, not the team, but there's nowhere else for them to go.
 
 The practical result is that users either commit personal settings to the shared workspace repo (mixing personal and team config in ways that are hard to untangle), keep personal settings off niwa entirely (losing the benefit of managed distribution), or maintain a separate personal workspace that duplicates the team structure. None of these work well when a developer uses the same workspace across multiple machines.
@@ -42,8 +42,7 @@ The gap is most visible in three scenarios: a developer who wants Claude to alwa
 
 5. **Opt-out at workspace creation.** Users can initialize a workspace instance without global config applied -- for automation, shared machines, or environments where user-specific settings shouldn't be present. This choice is made once at init time and persists for the lifetime of the instance.
 
-## User stories
-
+## User Stories
 **US1: Developer registering global config.**
 As a developer, I run `niwa config set global <repo>` on a new machine. On every subsequent `niwa apply`, my global hooks, env vars, and Claude instructions are applied automatically. I only have to register once per machine.
 
@@ -114,8 +113,7 @@ Global config cannot modify workspace source discovery (GitHub org sources), gro
 **R15: Allow-dirty applies to all config sources.**
 The existing `--allow-dirty` flag on `niwa apply` bypasses the dirty-state check for all config sources, including global config.
 
-## Acceptance criteria
-
+## Acceptance Criteria
 - [ ] `niwa config set global <repo>` stores the registration in the machine-level config and clones the repo to a local path derived from the system config directory
 - [ ] Running `niwa config set global <repo>` when global config is already registered updates the registration silently without prompting
 - [ ] After `niwa apply`, changes committed to the global config repo on another machine are reflected on the current machine (global config was pulled)
@@ -138,8 +136,7 @@ The existing `--allow-dirty` flag on `niwa apply` bypasses the dirty-state check
 - [ ] `niwa apply` with a global config repo that has uncommitted local changes fails unless `--allow-dirty` is passed
 - [ ] Workspace config source discovery, group definitions, and workspace metadata are unchanged by global config
 
-## Out of scope
-
+## Out of Scope
 **Machine-specific (host-local) config.** Global config follows the user (user identity, portable via GitHub). Configuration that should differ between machines but not follow the user is a separate concept not covered here.
 
 **New secret storage infrastructure.** Global config stores credentials the same way workspace config does -- in the global config GitHub repo. This PRD does not introduce encrypted secret storage, vaults, or alternative secret backends.

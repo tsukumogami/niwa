@@ -482,6 +482,98 @@ func TestEnsureConfigSnapshot_PreservesInstanceStateAcrossRefresh(t *testing.T) 
 	}
 }
 
+// TestEnsureConfigSnapshot_PreservesDispatchBriefsAcrossRefresh locks the
+// fix for the single-repo dispatch-brief-clobber defect: a drift refresh
+// must not delete <configDir>/dispatch-briefs/. The /dispatch skill writes
+// a task brief to <workspaceRoot>/.niwa/dispatch-briefs/<slug>.md and then
+// runs `niwa dispatch`, whose provision path runs a config-snapshot refresh
+// on the SAME <workspaceRoot>/.niwa directory. In a config-in-repo,
+// single-repo workspace the config source repo is the very repo the worker
+// commits to, so its HEAD advances on every commit and the drift check fires
+// on essentially every dispatch — swapping the whole .niwa directory and,
+// before this fix, taking dispatch-briefs/ (which is niwa-local runtime
+// state, not upstream source content) down with it. The brief vanished
+// before the dispatched worker could read it. See preserveDispatchBriefs.
+func TestEnsureConfigSnapshot_PreservesDispatchBriefsAcrossRefresh(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), ".niwa")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteMarker(t, dir, Provenance{
+		SourceURL: "org/repo", Owner: "org", Repo: "repo",
+		ResolvedCommit: "old-oid", FetchedAt: time.Now(), FetchMechanism: "github-tarball",
+	})
+
+	// Plant a dispatch brief in the existing snapshot dir, exactly where the
+	// /dispatch skill writes it: <configDir>/dispatch-briefs/<slug>.md.
+	briefsDir := filepath.Join(dir, dispatchBriefsDirName)
+	if err := os.Mkdir(briefsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	briefData := []byte("# Task brief\n\nInvestigate the thing.\n")
+	briefPath := filepath.Join(briefsDir, "investigate-thing.md")
+	if err := os.WriteFile(briefPath, briefData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Upstream refresh brings new content. The upstream tarball does NOT
+	// contain dispatch-briefs/ — it's niwa-local runtime state, not source
+	// content. It must be carried across the swap the same way instance.json is.
+	tarball := makeFakeTarball(t, map[string]string{
+		"wrap/":               "",
+		"wrap/workspace.toml": "name = updated",
+	})
+	fetcher := &fakeFetcher{tarball: tarball, commitOID: "new-oid"}
+
+	if err := EnsureConfigSnapshot(context.Background(), dir, fetcher, nil); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	// Upstream content materialized at the new path.
+	if got, err := os.ReadFile(filepath.Join(dir, "workspace.toml")); err != nil {
+		t.Fatalf("workspace.toml missing after refresh: %v", err)
+	} else if string(got) != "name = updated" {
+		t.Errorf("upstream content not refreshed: got %q", got)
+	}
+
+	// The dispatch brief survived byte-for-byte.
+	gotBrief, err := os.ReadFile(briefPath)
+	if err != nil {
+		t.Fatalf("dispatch brief clobbered by snapshot swap: %v", err)
+	}
+	if !bytes.Equal(gotBrief, briefData) {
+		t.Errorf("dispatch brief content changed across refresh\n  was:  %s\n  now:  %s", briefData, gotBrief)
+	}
+}
+
+// TestEnsureConfigSnapshot_NoDispatchBriefsToPreserveIsBenign asserts the
+// carry-over is a no-op when no dispatch-briefs/ directory exists (a
+// workspace that never dispatched): the refresh succeeds and does not
+// spuriously create the directory.
+func TestEnsureConfigSnapshot_NoDispatchBriefsToPreserveIsBenign(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), ".niwa")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteMarker(t, dir, Provenance{
+		SourceURL: "org/repo", Owner: "org", Repo: "repo",
+		ResolvedCommit: "old-oid", FetchedAt: time.Now(), FetchMechanism: "github-tarball",
+	})
+	// No dispatch-briefs/ planted.
+
+	tarball := makeFakeTarball(t, map[string]string{
+		"wrap/":               "",
+		"wrap/workspace.toml": "name = updated",
+	})
+	fetcher := &fakeFetcher{tarball: tarball, commitOID: "new-oid"}
+	if err := EnsureConfigSnapshot(context.Background(), dir, fetcher, nil); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, dispatchBriefsDirName)); err == nil {
+		t.Error("dispatch-briefs/ appeared spuriously after refresh against a workspace that never dispatched")
+	}
+}
+
 // TestEnsureConfigSnapshot_NoStateFileToPreserveIsBenign asserts that
 // the carry-over is a no-op when no instance.json exists yet (fresh init,
 // brand-new workspace).

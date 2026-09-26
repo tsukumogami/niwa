@@ -73,7 +73,7 @@ type Loss struct {
 // empty — callers should treat Skipped as "we don't know what's in
 // here, treat as dirty."
 type RepoScan struct {
-	Name    string  // path relative to the instance dir
+	Name    string // path relative to the instance dir
 	Losses  []Loss
 	Skipped string // non-empty if the scan failed; treat as dirty
 }
@@ -172,7 +172,19 @@ func findPrimaryRepos(instanceDir string) ([]string, error) {
 // primary repo; linked-worktree losses are folded into the same
 // RepoScan with Loss.Path set to the worktree's path.
 func scanRepo(instanceDir, primary string) RepoScan {
-	rel, err := filepath.Rel(instanceDir, primary)
+	// Resolve the instance root and the primary once, up front. `git worktree
+	// list` reports every path with its symlinks already resolved, while these
+	// two are spelled however the caller and the directory walk produced them.
+	// Left unresolved, the two spellings of the same location never compare
+	// equal: the primary is not recognised among its own worktrees (so it gets
+	// scanned twice and every loss in it is double-reported), every worktree
+	// inside the instance is called external, and the relative paths in the
+	// output degenerate into long "../.." escapes. Resolving both sides is what
+	// makes the comparisons below mean what they say.
+	root := resolveForCompare(instanceDir)
+	primary = resolveForCompare(primary)
+
+	rel, err := filepath.Rel(root, primary)
 	if err != nil {
 		rel = primary
 	}
@@ -190,12 +202,13 @@ func scanRepo(instanceDir, primary string) RepoScan {
 		})
 	}
 	for _, wt := range wts {
+		wt = resolveForCompare(wt)
 		if wt == primary {
 			continue
 		}
 		// Differentiate worktrees inside the instance (will be deleted
 		// outright) from those outside (only their admin entry is lost).
-		if isInside(instanceDir, wt) {
+		if isInside(root, wt) {
 			trees = append(trees, wt)
 		} else {
 			scan.Losses = append(scan.Losses, Loss{
@@ -210,7 +223,7 @@ func scanRepo(instanceDir, primary string) RepoScan {
 	for _, tree := range trees {
 		treePath := ""
 		if tree != primary {
-			if r, err := filepath.Rel(instanceDir, tree); err == nil {
+			if r, err := filepath.Rel(root, tree); err == nil {
 				treePath = r
 			} else {
 				treePath = tree
@@ -392,22 +405,36 @@ func gitOutput(treeDir string, args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
-// isInside reports whether candidate is at or under root. Both must be
-// absolute or both relative; mixed inputs are normalized via Abs.
+// isInside reports whether candidate is at or under root. Mixed absolute and
+// relative inputs are fine: both sides go through resolveForCompare first.
 func isInside(root, candidate string) bool {
-	rootAbs, err := filepath.Abs(root)
-	if err != nil {
-		return false
-	}
-	candAbs, err := filepath.Abs(candidate)
-	if err != nil {
-		return false
-	}
-	rel, err := filepath.Rel(rootAbs, candAbs)
+	rel, err := filepath.Rel(resolveForCompare(root), resolveForCompare(candidate))
 	if err != nil {
 		return false
 	}
 	return !strings.HasPrefix(rel, "..") && rel != ".."
+}
+
+// resolveForCompare returns path in a form safe to compare against another
+// path put through the same function: absolute, symlink-resolved, cleaned.
+// Resolving matters because paths reaching this package come from two sources
+// that spell the same location differently -- git resolves symlinks, callers
+// and directory walks do not.
+//
+// It degrades rather than failing. A path that cannot be made absolute, or one
+// that no longer exists on disk (a worktree git still holds an admin entry
+// for), comes back in the best form reached so far, which leaves the caller's
+// comparison no worse off than before resolution was attempted.
+func resolveForCompare(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return abs
+	}
+	return filepath.Clean(resolved)
 }
 
 // ScanInstancesParallel scans multiple instances in parallel, bounded

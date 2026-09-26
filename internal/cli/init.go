@@ -46,22 +46,27 @@ func init() {
 	initCmd.Flags().BoolVar(&initSkipGlobal, "skip-global", false, "disable global config overlay for this instance")
 	initCmd.Flags().StringVar(&initOverlay, "overlay", "", "overlay repo (org/repo or URL) to clone and associate with this workspace")
 	initCmd.Flags().BoolVar(&initNoOverlay, "no-overlay", false, "disable overlay discovery and association for this workspace")
+	initCmd.Flags().BoolVar(&initNoWorktreeDelegation, "no-worktree-delegation", false, "disable the worktree-delegation integration for this workspace (no hook, no deny fallback)")
+	initCmd.Flags().BoolVar(&initNoEphemeralSessions, "no-ephemeral-sessions", false, "skip installing the workspace-root ephemeral-session config (SessionStart/SessionEnd hooks + root CLAUDE.md); re-run init without this flag to install it")
 	initCmd.Flags().BoolVar(&initRebind, "rebind", false, "rebind a registered workspace name to this directory (use only when intentionally moving a workspace)")
 	initCmd.Flags().BoolVar(&initNoInstallPlugins, "no-install-plugins", false, "skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected)")
 	initCmd.Flags().BoolVar(&initBootstrap, "bootstrap", false, "when the source repo has no .niwa/workspace.toml, scaffold a minimal config and stage it on a niwa-bootstrap branch")
 	initCmd.Flags().BoolVar(&initNoBootstrap, "no-bootstrap", false, "explicitly decline bootstrap; equivalent to answering N at the R13 prompt (mutually exclusive with --bootstrap)")
+	registerStrictSecretsFlag(initCmd, &strictSecretsInit)
 	initCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
 var (
-	initFrom             string
-	initSkipGlobal       bool
-	initOverlay          string
-	initNoOverlay        bool
-	initRebind           bool
-	initNoInstallPlugins bool
-	initBootstrap        bool
-	initNoBootstrap      bool
+	initFrom                 string
+	initSkipGlobal           bool
+	initOverlay              string
+	initNoOverlay            bool
+	initNoWorktreeDelegation bool
+	initNoEphemeralSessions  bool
+	initRebind               bool
+	initNoInstallPlugins     bool
+	initBootstrap            bool
+	initNoBootstrap          bool
 )
 
 // materializeFromSource is a package-level seam so unit tests can
@@ -170,7 +175,9 @@ func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot,
 	// Step 4: build the applier and wire seam closures for RunBootstrap.
 	applier := workspace.NewApplier(gh)
 	applier.Reporter = workspace.NewReporter(cmd.ErrOrStderr())
+	configureDeveloperHome(applier)
 	applier.ConfigSourceURL = source
+	defer wireKeyReport(applier, cmd.ErrOrStderr())()
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
 		if gDir, dErr := config.GlobalConfigDir(); dErr == nil {
 			applier.GlobalConfigDir = gDir
@@ -185,6 +192,10 @@ func defaultRunBootstrap(ctx context.Context, cmd *cobra.Command, workspaceRoot,
 		if loadErr != nil {
 			return "", loadErr
 		}
+		// The scaffold this reads was written moments ago at Step 2, so the
+		// setting is resolved here rather than at Step 4: before the scaffold
+		// exists there is no [workspace] table to read it from.
+		applier.StrictSecrets = strictSecretsFor(cmd, strictSecretsInit, result.Config)
 		return applier.Create(ctx, result.Config, configDir, wsRoot, instName)
 	}
 
@@ -688,8 +699,17 @@ func runInit(cmd *cobra.Command, args []string) error {
 			// invokes Claude Code. SkipInstall ORs the per-invocation
 			// --no-install-plugins flag with the persistent
 			// auto_install_plugins = false global-config setting (PRD R19).
+			// The developer home arrives as data now, so it is resolved
+			// here rather than inside the installer, and the notice the
+			// installer used to emit is emitted here too. An
+			// unresolvable home comes back as an error, which this path
+			// treats the way it always has: the plugin is not installed
+			// and the init carries on regardless.
 			skipInstall := initNoInstallPlugins || globalCfg.SkipPluginInstall()
-			plugin.Install(nil, reporter, plugin.InstallOpts{SkipInstall: skipInstall})
+			home, _ := os.UserHomeDir()
+			if action, installErr := plugin.Install(home, plugin.InstallOpts{SkipInstall: skipInstall}); installErr == nil {
+				workspace.EmitPluginInstallNotice(action, reporter)
+			}
 		}
 	}
 
@@ -751,6 +771,20 @@ func runInit(cmd *cobra.Command, args []string) error {
 	if state != nil {
 		if saveErr := workspace.SaveState(workspaceRoot, state); saveErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not write instance state: %v\n", saveErr)
+		}
+	}
+
+	// Install the workspace-root ephemeral-session config by default
+	// (non-interactive, no TTY). The --no-ephemeral-sessions opt-out suppresses
+	// it; re-running init without the flag installs it. Failure is non-fatal:
+	// the workspace is fully usable without the root config, and `niwa apply`
+	// from the root re-converges it.
+	if !initNoEphemeralSessions && rootConfigInstalls(mode) {
+		if _, mErr := workspace.MaterializeWorkspaceRoot(result.Config, workspaceRoot, workspace.RootMaterializeOptions{
+			EphemeralSessionMode: true,
+			ConfigDir:            filepath.Join(workspaceRoot, workspace.StateDir),
+		}); mErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not install workspace-root session config: %v\n", mErr)
 		}
 	}
 
@@ -963,23 +997,42 @@ func bootstrapCommandFor(kind string) string {
 	}
 }
 
+// rootConfigInstalls reports whether the workspace-root ephemeral-session
+// config installs for the given init mode. It installs for the modes that
+// establish a registered workspace (named and clone). The bare no-args
+// scaffold (modeScaffold) is intentionally excluded: it only drops a commented
+// workspace.toml in cwd and writes no state file, so layering a managed root
+// config (and its EphemeralSessionMode state) onto it would break that
+// minimal, state-free contract.
+func rootConfigInstalls(mode initMode) bool {
+	return mode == modeNamed || mode == modeClone
+}
+
 // buildInitState constructs an InstanceState for the flags that require
-// pre-apply state (--skip-global, --no-overlay, --overlay) and for the
-// init-time name override that a positional `niwa init <name>` records.
+// pre-apply state (--skip-global, --no-overlay, --no-worktree-delegation,
+// --overlay) and for the init-time name override that a positional
+// `niwa init <name>` records.
 // Returns (nil, nil) when no state needs to be written. Returns a
 // non-nil error when an explicit --overlay clone fails (hard error by
 // design).
 func buildInitState(cmd *cobra.Command, mode initMode, source, name string) (*workspace.InstanceState, error) {
 	ctx := cmd.Context()
-	needsState := initSkipGlobal || initNoOverlay || initOverlay != "" || (mode == modeClone) || name != ""
+	// The root ephemeral-session config installs by default for every init mode
+	// that already establishes a registered workspace (named or clone). The
+	// bare no-args scaffold stays state-free by design (it only drops a
+	// commented workspace.toml in cwd), so it does not opt in here.
+	ephemeralSessionMode := !initNoEphemeralSessions && rootConfigInstalls(mode)
+	needsState := initSkipGlobal || initNoOverlay || initNoWorktreeDelegation || initOverlay != "" || (mode == modeClone) || name != "" || ephemeralSessionMode
 	if !needsState {
 		return nil, nil
 	}
 
 	state := &workspace.InstanceState{
-		SchemaVersion:      workspace.SchemaVersion,
-		SkipGlobal:         initSkipGlobal,
-		ConfigNameOverride: name,
+		SchemaVersion:        workspace.SchemaVersion,
+		SkipGlobal:           initSkipGlobal,
+		NoWorktreeDelegation: initNoWorktreeDelegation,
+		EphemeralSessionMode: ephemeralSessionMode,
+		ConfigNameOverride:   name,
 	}
 
 	switch {
@@ -1076,7 +1129,8 @@ func printSuccess(cmd *cobra.Command, mode initMode, name, resolvedName, absPath
 	case modeClone:
 		fmt.Fprintf(w, "Workspace %q initialized at %s from remote config.\n", displayName, absPath)
 		fmt.Fprintln(w, "")
-		fmt.Fprintln(w, "Next steps:")
-		fmt.Fprintln(w, "  1. Run niwa apply to set up the workspace")
+		fmt.Fprintln(w, "The workspace root is ready. Create an instance to start working:")
+		fmt.Fprintln(w, "")
+		fmt.Fprintln(w, "  niwa create <name>")
 	}
 }

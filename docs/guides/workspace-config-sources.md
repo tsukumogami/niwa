@@ -15,7 +15,7 @@ materializes the config on disk.
 > code paths in `configsync.go`/`overlaysync.go`/`init.go`; that work
 > is the remaining scope of PR #73 and lands in follow-up commits.
 > User-facing behavior described below reflects the eventual contract
-> per [DESIGN-workspace-config-sources.md](../designs/DESIGN-workspace-config-sources.md).
+> per [DESIGN-workspace-config-sources.md](../designs/current/DESIGN-workspace-config-sources.md).
 
 ## What you get
 
@@ -214,6 +214,44 @@ stale behavior should follow the deferred `--strict-refresh` flag
 (documented as future work in PRD-workspace-config-sources Out of
 Scope).
 
+### Same-run effect
+
+For a workspace in the snapshot model — one whose `.niwa/` carries a
+provenance marker — a refreshed snapshot takes effect on the run that pulls
+it. `apply`, `create`, `reset`, and the `instance from-hook` path behind
+session provisioning, `niwa dispatch`, and `niwa watch` each reconcile the
+config from its source and re-read it before it drives materialization. Push
+a new `[claude.settings]` posture, plugin, hook, or `[env.vars]` /
+`[env.secrets]` key upstream, and the next single command materializes it.
+You never need a second run.
+
+Three cases fall outside that guarantee. Check which one you are in before
+concluding a value is broken — the symptom is identical to a bad reference.
+
+**A config dir that is still a legacy git working tree** (`.niwa/.git`, no
+marker) gets converted to a snapshot on its next command. That one
+conversion run materializes from the pre-conversion config, so an upstream
+change lands on the run after it. Every run from then on is same-run.
+Reconciling ahead of the conversion would cost the one-time notice telling
+you local edits in that directory stop persisting, which is worth more than
+the single late run.
+
+**A workspace with a registered `source_url` but no marker and no `.git`**
+never reconciles — not on the second run, not ever. This is not the same as
+having no source: the registry says the workspace tracks a repo, and it
+does not. The self-contained single-repo bootstrap produces this shape.
+Tracked as issue #215.
+
+**Worktrees** never reconcile, by design. Under the inherit model a worktree
+is a derived view of its instance: it copies the environment its instance
+already materialized, and worktree-scoped `apply` and `niwa worktree` re-read
+the root config themselves to rewrite posture, `[files]`, hooks, and CLAUDE
+content — from whatever is on disk, without refreshing it first. Converge the
+instance to move a worktree forward.
+
+A true local-only workspace has no source to track and is correctly left
+alone.
+
 ## Failure modes
 
 | Trigger | Behavior |
@@ -267,6 +305,7 @@ a one-time coordination cost; subsequent applies behave normally.
 |---------|---------|
 | `niwa init <name> --from <slug>` | Register and clone a new workspace from a source slug. |
 | `niwa config set global <slug>` | Set the personal-overlay source. |
+| `niwa config set default-dispatch-harness <agent>` | Set which coding agent a niwa-launched session runs as, machine-wide. Writes `[global].default_dispatch_harness` in your own `~/.config/niwa/config.toml`, never inside a snapshot. `niwa config unset default-dispatch-harness` removes it. See [codex-agent.md](codex-agent.md). |
 | `niwa apply` | Fetch the latest snapshot and re-materialize. Detects URL changes and refuses without `--force`. |
 | `niwa apply --force` | Discard the on-disk `.niwa/` and re-materialize from the registered source. Required after a registered URL change. |
 | `niwa status` | Display the resolved source slug, the cached `resolved_commit`, and `(default branch)` annotation when no ref is pinned. |
@@ -277,7 +316,7 @@ a one-time coordination cost; subsequent applies behave normally.
 The snapshot pipeline's primary security surface is the GitHub
 tarball + tar extraction path. The defense suite is documented in
 [DESIGN-workspace-config-sources.md §Security
-Considerations](../designs/DESIGN-workspace-config-sources.md#security-considerations);
+Considerations](../designs/current/DESIGN-workspace-config-sources.md#security-considerations);
 in summary:
 
 - Positive type allowlist: only regular files and directories are
@@ -402,6 +441,71 @@ The separate `read_env_example = false` toggle (settable at the
 workspace and per-repo levels) is unchanged: it turns the whole scan
 off for that scope, so no detection — and no policy — runs at all. The
 failure policy applies only when the scan is on.
+
+## Secret-output targets {#env-output}
+
+By default niwa expands each repo's resolved secrets into a single
+`.local.env` file in dotenv (`KEY=value`) form. The `env_output` setting
+makes that destination configurable per repo so each repo gets the file
+its stack actually reads.
+
+### The `env_output` setting
+
+`env_output` declares one or more output targets. It accepts three forms:
+
+```toml
+# a single target (format inferred from the extension)
+env_output = ".env.local"
+
+# a list of targets, each inferred
+env_output = [".env.local", "secrets.json"]
+
+# a list of tables when a target needs an explicit format
+env_output = [{ path = "secrets", format = "shell" }, { path = ".env" }]
+```
+
+A single array MUST NOT mix bare strings and tables; use a list of tables
+when any element needs an explicit `format`. Every declared target
+receives the repo's full resolved secret set.
+
+### Formats and extension inference
+
+Three formats are supported: `dotenv` (`KEY=value`, the default),
+`json` (a flat object), and `shell` (`export KEY='value'`). The format is
+inferred from the target's extension unless an explicit `format` is given:
+
+| Extension | Format |
+|-----------|--------|
+| `.json` | json |
+| `.sh` | shell |
+| `.env`, `.local.env`, `.env.local`, anything else, or no extension | dotenv |
+
+An explicit `format` always wins over inference.
+
+### The three levels and precedence
+
+| Level | Where it's set | Applies to |
+|-------|----------------|------------|
+| User | `env_output` in the personal/global override | All workspaces |
+| Project | `env_output` at the workspace config top level | The whole workspace |
+| Per-repo | `env_output` under `[repos.<name>]` | One repo |
+
+Resolution is most-specific-wins at the list level: a non-empty per-repo
+`env_output` replaces the workspace one, which replaces the user one. An
+unset level inherits the broader one. When nothing is set anywhere, the
+default is a single `.local.env` dotenv target — so a repo that declares
+no `env_output` keeps today's behavior byte-for-byte.
+
+### Git invisibility
+
+Whatever name you choose — including git-tracked-by-default names like
+`.env` — niwa records the target in the repo's git exclude coverage
+before writing it, so a resolved secret never becomes committable and you
+never edit the repo's committed `.gitignore`. A custom-named target in a
+directory niwa cannot confirm is a git repository is refused (fail-closed)
+rather than written unprotected. Target paths are validated: an absolute
+path, a path escaping the repo, or one escaping via a symlinked parent is
+rejected.
 
 ## Source layouts (rank-1, rank-2, rank-3) {#source-layouts}
 
@@ -593,3 +697,109 @@ mid-rename filesystem error) is treated the same as an opt-out
 command and continues — `niwa apply` does not exit non-zero
 because the plugin install couldn't run. The `<install-path>.next/`
 staging directory is cleaned up so the next apply can retry.
+
+## Remote control on dispatch {#remote-control-on-dispatch}
+
+`niwa dispatch` launches a background Claude Code worker you monitor later from
+Agent View, claude.ai, or mobile. Claude Code Remote -- the bridge that makes a
+session steerable from those places -- is off unless turned on, and a dispatched
+worker starts headless, so you cannot enable it after the fact.
+
+Set `remote_control_on_dispatch = true` in your host config's `[global]` section
+(`~/.config/niwa/config.toml`) to make every `niwa dispatch` worker start with
+Claude Code Remote on:
+
+```toml
+[global]
+remote_control_on_dispatch = true
+```
+
+- **Scoped to `niwa dispatch` only.** Interactive sessions, ephemeral
+  SessionStart-hook sessions, and `niwa apply` instances are unaffected. When the
+  key is unset, dispatch behaves exactly as before.
+- **Overridable downstream.** A `remoteControlAtStartup` value under a workspace's
+  `[claude.settings]` (or an instance's `[instance.claude.settings]`) wins over the
+  host default. Because `[claude.settings]` values are strings, write it quoted:
+  `remoteControlAtStartup = "false"`.
+- **Eligibility.** Claude Code Remote also requires a first-party claude.ai login
+  (not an API key) with the right scopes and an account/org where the bridge rollout
+  is enabled. If `ANTHROPIC_API_KEY` is set, niwa prints a one-line reason and still
+  launches the worker without remote-control.
+
+See `docs/guides/remote-control-on-dispatch.md` for the full walkthrough.
+
+## Claude marketplaces {#claude-marketplaces}
+
+The `[claude]` block's `marketplaces` setting lists the Claude Code
+plugin marketplaces niwa registers for the workspace. niwa writes them
+into Claude's `known_marketplaces` / `extraKnownMarketplaces` so the
+plugins in `plugins = [...]` resolve.
+
+### Two authoring forms
+
+The legacy string-list form still works unchanged:
+
+```toml
+[claude]
+marketplaces = ["tsukumogami/shirabe", "repo:tools/.claude-plugin/marketplace.json"]
+plugins = ["shirabe@shirabe"]
+```
+
+The table form adds per-marketplace options:
+
+```toml
+[claude]
+plugins = ["shirabe@shirabe"]
+
+[[claude.marketplaces]]
+source = "tsukumogami/shirabe"
+# auto_update omitted -> false; track omitted -> latest release (github)
+
+[[claude.marketplaces]]
+source = "repo:tools/.claude-plugin/marketplace.json"
+auto_update = true
+```
+
+A bare string is equivalent to a table with that `source` and the
+defaults below.
+
+### `auto_update` (default: `false`)
+
+Whether Claude Code auto-updates the marketplace. **The default is now
+`false`** — previously niwa force-enabled auto-update on every
+marketplace, which churned cached plugin versions and was a contributing
+cause of dangling install records. Set `auto_update = true` per
+marketplace to opt back in. This matches Claude Code's own safer default
+for third-party marketplaces.
+
+### `track` (default: `release` for github sources)
+
+Which version of a github-sourced marketplace to track:
+
+- `release` (default) — niwa resolves the marketplace's latest stable
+  (non-prerelease) release tag.
+- `main` — track the default branch (the prior behavior).
+- an explicit ref/tag — pin to that ref.
+
+Local (`directory` / `repo:`) sources ignore `track`.
+
+> **Known limitation.** Claude Code's github marketplace *source* object
+> currently ignores a ref pin and always clones default-branch HEAD, so
+> a marketplace whose `main` carries an in-development version still
+> installs that `-dev` build today. niwa resolves the release tag and
+> records it best-effort (forward-compatible) and reports when it falls
+> back to the branch, but the effective switch to releases is blocked
+> upstream. Pinning a daily-stable marketplace via a local `repo:`
+> checkout of a release is the current workaround.
+
+### Automatic record healing
+
+On every `niwa create` and `niwa apply`, niwa removes *dangling* Claude
+plugin install records — records whose installed plugin directory or
+project path no longer exists — and reports how many it removed. This
+repairs registries that accumulated stale records over time (a frequent
+cause of skills intermittently failing to register) with no separate
+command. The heal only removes records whose referenced paths are gone;
+it never touches records for live workspaces, backs up the registry
+before the first change, and never fails create/apply on a registry
+error.

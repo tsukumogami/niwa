@@ -12,6 +12,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/workspace"
+	"github.com/tsukumogami/niwa/internal/worktree"
 	"golang.org/x/term"
 )
 
@@ -20,15 +21,19 @@ func init() {
 	applyCmd.Flags().StringVar(&applyInstance, "instance", "", "target a specific instance by name")
 	applyCmd.Flags().BoolVar(&applyAllowDirty, "allow-dirty", false, "apply even if config directory has uncommitted changes")
 	applyCmd.Flags().BoolVar(&applyNoPull, "no-pull", false, "skip pulling latest changes into existing repos")
-	applyCmd.Flags().BoolVar(&applyAllowMissingSecrets, "allow-missing-secrets", false,
-		"downgrade unresolved vault:// references to empty strings with stderr warnings. "+
-			"Does NOT override *.required misses. One-shot -- re-evaluated each invocation.")
 	applyCmd.Flags().BoolVar(&applyAllowPlaintextSecrets, "allow-plaintext-secrets", false,
 		"bypass the public-repo plaintext-secrets guardrail and downgrade all .env.example failure-policy failures to warnings. Strictly one-shot -- no state persistence.")
 	applyCmd.Flags().BoolVar(&applyForce, "force", false,
 		"force apply through a detected URL change against a legacy working tree (PRD R26-R27).")
 	applyCmd.Flags().BoolVar(&applyNoInstallPlugins, "no-install-plugins", false,
 		"skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected).")
+	applyCmd.Flags().BoolVar(&applyNoCascade, "no-cascade", false,
+		"at the workspace root, refresh the root-managed config only and do not re-converge the instances beneath it. Has no effect at an instance (its worktrees refresh with it under the inherit model) or at a worktree (leaf scope).")
+	applyCmd.Flags().IntVar(&applyParallel, "parallel", 0,
+		"maximum repos to clone concurrently (>=1). Lower this on slow or flaky networks; 1 clones serially. Overrides the [global] clone_workers config. 0 (the default) uses clone_workers, else niwa's built-in default.")
+	registerStrictSecretsFlag(applyCmd, &strictSecretsApply)
+	// Last: it declares a mutual-exclusion group against --strict-secrets.
+	registerAllowMissingSecretsFlag(applyCmd)
 	applyCmd.ValidArgsFunction = completeWorkspaceNames
 	_ = applyCmd.RegisterFlagCompletionFunc("instance", completeInstanceNames)
 }
@@ -37,28 +42,44 @@ var (
 	applyInstance              string
 	applyAllowDirty            bool
 	applyNoPull                bool
-	applyAllowMissingSecrets   bool
 	applyAllowPlaintextSecrets bool
 	applyForce                 bool
 	applyNoInstallPlugins      bool
+	applyNoCascade             bool
+	applyParallel              int
 )
 
 var applyCmd = &cobra.Command{
 	Use:   "apply [workspace-name]",
 	Short: "Apply workspace configuration",
-	Long: `Apply discovers the workspace configuration and applies it to one or more
-instances. For each managed repo, apply clones missing repos and pulls latest
-changes into existing repos that are clean and on their configured default branch.
-Repos with uncommitted changes or on non-default branches are skipped with a
-warning. Use --no-pull to skip pulling entirely.
+	Long: `Apply converges the subtree rooted at the current scope. It discovers the
+workspace configuration and converges everything at or below where you run it,
+never climbing above the current scope or touching siblings. For each managed
+repo, apply clones missing repos and pulls latest changes into existing repos
+that are clean and on their configured default branch. Repos with uncommitted
+changes or on non-default branches are skipped with a warning. Use --no-pull to
+skip pulling entirely.
 
 The default branch for each repo is resolved from: per-repo branch config,
 workspace default_branch setting, or "main" as the fallback.
 
 Scope resolution (when no workspace-name argument is given):
-  1. If --instance is set, find the workspace root and apply to that instance.
-  2. If cwd is inside an instance, apply to that single instance.
-  3. If cwd is at the workspace root, apply to all instances.
+  1. If --instance is set, converge that named instance and its worktrees.
+  2. If cwd is inside a worktree, converge that worktree only (never the parent
+     instance or sibling worktrees).
+  3. If cwd is inside an instance, converge that instance and its worktrees.
+  4. If cwd is at the workspace root, materialize the root-managed config, then
+     converge every instance and each instance's worktrees. The workspace root
+     itself is never converged as an instance: apply manages only its root-level
+     config and clones no repos into the root.
+
+Use --no-cascade at the workspace root to refresh only the root-managed config
+(hooks, permission posture, CLAUDE.md) without re-converging the instances
+beneath it. It has no effect at an instance or a worktree: an instance always
+converges together with its worktrees (the inherit model makes a worktree a
+derived view of its instance, not an independently skippable scope), and a
+worktree is a leaf with nothing below it. Apply destroys nothing and is a no-op
+where everything is current.
 
 If a workspace name is given as a positional argument, it is resolved through
 the global registry (~/.config/niwa/config.toml) to find the workspace root
@@ -90,6 +111,18 @@ func runApply(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Worktree scope: converge that worktree alone, never the parent instance
+	// or siblings. This re-syncs the worktree's CLAUDE content through the same
+	// shared helper `niwa worktree apply` uses. Under the inherit model a
+	// worktree is a derived view of its instance: it inherits the instance's
+	// already-materialized environment and does not resolve secrets on the
+	// worktree path itself, so it does not need the instance-level applier setup
+	// below. --no-cascade is a no-op here: a worktree is a leaf scope with no
+	// children to descend into.
+	if scope.Mode == workspace.ApplyWorktree {
+		return runApplyWorktreeScope(cmd, scope)
+	}
+
 	configPath := scope.Config
 	if configPath == "" {
 		return fmt.Errorf("could not locate workspace configuration")
@@ -99,9 +132,6 @@ func runApply(cmd *cobra.Command, args []string) error {
 	result, err := config.Load(configPath)
 	if err != nil {
 		return err
-	}
-	for _, w := range result.Warnings {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
 	cfg := result.Config
 
@@ -116,8 +146,18 @@ func runApply(cmd *cobra.Command, args []string) error {
 	gh := github.NewAPIClient(token)
 	applier := workspace.NewApplier(gh)
 	applier.Reporter = workspace.NewReporterWithTTY(os.Stderr, !noProgress && term.IsTerminal(int(os.Stderr.Fd())))
+	configureDeveloperHome(applier)
 	applier.NoPull = applyNoPull
 	applier.AllowDirty = applyAllowDirty
+	// --parallel wins when > 0; otherwise the [global] clone_workers config
+	// (resolved below when it loads) sets the default; otherwise the Applier
+	// falls back to its built-in default.
+	applier.CloneWorkers = applyParallel
+	// One collector for the whole command, drained once below: apply may
+	// converge several instances, and R6 asks for a single consolidated report
+	// rather than one per instance. The collector deduplicates, so a key
+	// missing in every instance is named once.
+	defer wireKeyReport(applier, cmd.ErrOrStderr())()
 	configurePluginAutoInstall(applier, applyNoInstallPlugins)
 	if applyAllowDirty {
 		// PRD R32: --allow-dirty is meaningless under the snapshot
@@ -125,8 +165,34 @@ func runApply(cmd *cobra.Command, args []string) error {
 		// notice once per process invocation.
 		fmt.Fprintln(os.Stderr, "warning: --allow-dirty is no longer meaningful under the snapshot model and will be removed in v1.1")
 	}
-	applier.AllowMissingSecrets = applyAllowMissingSecrets
 	applier.AllowPlaintextSecrets = applyAllowPlaintextSecrets
+
+	// Reconcile the workspace-root config snapshot from its source BEFORE the
+	// loaded config drives root materialization and the instance loop below
+	// (issue #214). Ordering only: it runs after checkConfigSourceURLChange
+	// above, so the --force gate still sees pre-sync state. It is NOT the
+	// re-materialization that gate's doc describes -- refreshSnapshot refetches
+	// from the source recorded in the provenance marker and never consults the
+	// registry's URL, so a marker-bearing snapshot is not re-pointed at a
+	// changed registry URL by anything on this path.
+	result, err = workspace.ReconcileAndReloadConfig(cmd.Context(), configPath, gh, applier.Reporter, result)
+	if err != nil {
+		return err
+	}
+	cfg = result.Config
+
+	// Surface config-load warnings once, reflecting the effective
+	// (post-reconcile) config.
+	for _, w := range result.Warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
+
+	// No agent is resolved here. Every apply prepares the workspace for every
+	// agent niwa enumerates, so there is nothing to select.
+
+	// Resolved once for the whole command, against the post-reconcile config,
+	// so every instance in the cascade is converged under the same strictness.
+	applier.StrictSecrets = strictSecretsFor(cmd, strictSecretsApply, cfg)
 
 	// Resolve the effective workspace name for registry operations.
 	// configDir is `<workspaceRoot>/.niwa`, so its parent is where
@@ -146,6 +212,11 @@ func runApply(cmd *cobra.Command, args []string) error {
 		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
 			applier.GlobalConfigDir = gDir
 		}
+		// clone_workers is the host-level concurrency default; --parallel (set
+		// above) overrides it when provided.
+		if applyParallel <= 0 {
+			applier.CloneWorkers = globalCfg.CloneWorkers()
+		}
 		// ConfigSourceURL is the original GitHub URL stored at init time.
 		// It enables convention overlay discovery when OverlayURL is not yet
 		// in InstanceState (i.e., overlay was never discovered for this instance).
@@ -154,7 +225,40 @@ func runApply(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Apply to each instance, collecting errors instead of aborting on first failure.
+	// Workspace-root scope: materialize the root-managed config before
+	// cascading into instances. This is the top of the subtree at the root
+	// scope; it runs whether or not --no-cascade is set (--no-cascade caps the
+	// operation HERE, skipping the instance loop below). MaterializeWorkspaceRoot
+	// is content-idempotent — it produces the same bytes when the config is
+	// already current — but it does not skip the write: it rewrites the
+	// root-managed files via unconditional os.WriteFile on every apply.
+	if scope.Mode == workspace.ApplyAll && scope.WorkspaceRoot != "" {
+		if _, mErr := workspace.MaterializeWorkspaceRoot(cfg, scope.WorkspaceRoot, workspace.RootMaterializeOptions{
+			EphemeralSessionMode: workspace.EphemeralSessionMode(scope.WorkspaceRoot),
+			ConfigDir:            configDir,
+		}); mErr != nil {
+			return fmt.Errorf("materializing workspace-root config: %w", mErr)
+		}
+	}
+
+	// --no-cascade at the workspace root caps the operation at the root scope:
+	// refresh root-managed config only, no instance reconvergence.
+	if applyNoCascade && scope.Mode == workspace.ApplyAll {
+		if regErr := updateRegistry(configPath, configDir, effectiveName); regErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: %v\n", regErr)
+		}
+		return nil
+	}
+
+	// Apply to each instance, collecting errors instead of aborting on first
+	// failure. Each instance's live worktrees are refreshed inside the instance
+	// apply pipeline itself (Applier.refreshWorktreeEnvs), so there is no
+	// separate per-instance worktree cascade here.
+	//
+	// A failure is recorded and not printed here. combineInstanceErrors names
+	// every failing instance in the returned error, which Execute prints once;
+	// printing here as well rendered the same multi-line message twice under
+	// two different prefixes.
 	var applyErrors []instanceError
 	for _, instanceRoot := range scope.Instances {
 		if applyErr := applier.Apply(cmd.Context(), cfg, configDir, instanceRoot); applyErr != nil {
@@ -162,7 +266,8 @@ func runApply(cmd *cobra.Command, args []string) error {
 				instance: instanceRoot,
 				err:      applyErr,
 			})
-			fmt.Fprintf(os.Stderr, "error: applying to %s: %v\n", instanceRoot, applyErr)
+			// Skip an instance that failed to converge.
+			continue
 		}
 	}
 
@@ -180,6 +285,52 @@ func runApply(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// runApplyWorktreeScope converges a single worktree (the ApplyWorktree scope):
+// it re-syncs that worktree's CLAUDE content and touches nothing above it. It
+// resolves the worktree's repo/purpose/branch from the enclosing instance's
+// session lifecycle state by matching the worktree path, then runs the same
+// shared content helper `niwa worktree apply` uses.
+func runApplyWorktreeScope(cmd *cobra.Command, scope *workspace.ApplyScope) error {
+	target := scope.Worktree
+	if target.WorktreePath == "" || target.InstanceRoot == "" {
+		return fmt.Errorf("worktree scope resolved without a worktree path")
+	}
+
+	state, err := lookupWorktreeSession(target.InstanceRoot, target.WorktreePath)
+	if err != nil {
+		return err
+	}
+
+	var setup workspace.SetupResult
+	written, err := applyContentToWorktree(target.InstanceRoot, target.WorktreePath, state.Repo, state.Purpose, state.EffectiveBranchName(), &setup, cmd.ErrOrStderr())
+	if err != nil {
+		return fmt.Errorf("re-syncing content into worktree %s: %w", target.WorktreePath, err)
+	}
+	reportWorktreeSetup(cmd.ErrOrStderr(), target.WorktreePath, &setup)
+
+	fmt.Fprintf(cmd.OutOrStdout(), "apply: converged worktree at %s\n", target.WorktreePath)
+	printWorktreeContentFiles(cmd, written)
+	return nil
+}
+
+// lookupWorktreeSession finds the session lifecycle state whose recorded
+// worktree path matches worktreePath, scanning the instance's sessions dir.
+func lookupWorktreeSession(instanceRoot, worktreePath string) (worktree.SessionLifecycleState, error) {
+	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
+	states, err := worktree.ListSessionLifecycleStates(sessionsDir)
+	if err != nil {
+		return worktree.SessionLifecycleState{}, fmt.Errorf("enumerating worktree sessions: %w", err)
+	}
+	absTarget, _ := filepath.Abs(worktreePath)
+	for _, state := range states {
+		absState, _ := filepath.Abs(state.WorktreePath)
+		if absState == absTarget {
+			return state, nil
+		}
+	}
+	return worktree.SessionLifecycleState{}, fmt.Errorf("no session lifecycle state found for worktree %s", worktreePath)
 }
 
 // resolveRegistryScope looks up a workspace name in the global registry and
@@ -209,17 +360,40 @@ func resolveRegistryScope(name string) (*workspace.ApplyScope, error) {
 	// in a child subdirectory). EnumerateInstances only scans children, so
 	// it returns empty for this layout. Fall back to treating workspaceRoot
 	// as the sole instance.
+	//
+	// This deliberately does NOT use workspace.IsSingleInstanceLayout, which
+	// additionally requires a named instance. That helper answers the worktree
+	// commands' question -- "may I create and destroy worktrees in this root?"
+	// -- where a freshly initialized root must say no, or worktrees land inside
+	// the config directory a refresh rotates. Apply's question is different:
+	// "is the root the thing I should apply to?", and for a root with state and
+	// no children the answer is yes precisely when it is freshly initialized.
+	// That is the bootstrap case -- `niwa init` then `niwa apply <name>` --
+	// where instance_name has not been written yet and the per-instance
+	// pipeline still has to run the lazy snapshot conversion and the posture
+	// write. Sharing the stricter predicate here silently skipped both.
+	singleInstanceLayout := false
 	if len(instances) == 0 {
 		if _, statErr := os.Stat(filepath.Join(workspaceRoot, workspace.StateDir, workspace.StateFile)); statErr == nil {
 			instances = []string{workspaceRoot}
+			singleInstanceLayout = true
 		}
 	}
 
-	return &workspace.ApplyScope{
+	scope := &workspace.ApplyScope{
 		Mode:      workspace.ApplyAll,
 		Instances: instances,
 		Config:    configPath,
-	}, nil
+	}
+	// Only treat the directory as a materializable workspace root when it is a
+	// genuine multi-instance root (instances are children). In the single-
+	// instance layout the root IS the instance, so root materialization would
+	// collide with the instance-level managed config; leave WorkspaceRoot empty
+	// there so the root-config step is skipped.
+	if !singleInstanceLayout {
+		scope.WorkspaceRoot = workspaceRoot
+	}
+	return scope, nil
 }
 
 // updateRegistry updates the global registry with the workspace config path,

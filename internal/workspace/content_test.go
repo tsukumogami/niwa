@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
@@ -27,15 +28,13 @@ func TestInstallWorkspaceContent(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Workspace: config.ContentEntry{Source: "ws.md"},
-			},
+		Content: config.ContentConfig{
+			Workspace: config.ContentEntry{Source: "ws.md"},
 		},
 	}
 
 	instanceRoot := filepath.Join(tmpDir, "instance")
-	files, err := InstallWorkspaceContent(cfg, configDir, instanceRoot)
+	files, _, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, agent.AgentClaude, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -60,6 +59,359 @@ func TestInstallWorkspaceContent(t *testing.T) {
 	}
 }
 
+// setupWorkspaceContentFixture builds a minimal workspace config with a
+// workspace, a group, and a repo content source, plus the on-disk content
+// files. It returns the config, the config dir, and the instance root — the
+// inputs the three installers share — so the agent-parameterized tests below can
+// exercise the same fixture under both agents.
+func setupWorkspaceContentFixture(t *testing.T) (cfg *config.WorkspaceConfig, configDir, instanceRoot string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	configDir = filepath.Join(tmpDir, "config")
+	contentDir := filepath.Join(configDir, "claude")
+	if err := os.MkdirAll(filepath.Join(contentDir, "repos"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(contentDir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("ws.md", "# {workspace_name}\n\nWorkspace body\n")
+	write("grp.md", "# group {group_name}\n\nGroup body\n")
+	write(filepath.Join("repos", "myapp.md"), "# repo {repo_name}\n\nRepo body\n")
+
+	cfg = &config.WorkspaceConfig{
+		Workspace: config.WorkspaceMeta{Name: "myws", ContentDir: "claude"},
+		Content: config.ContentConfig{
+			Workspace: config.ContentEntry{Source: "ws.md"},
+			Groups:    map[string]config.ContentEntry{"public": {Source: "grp.md"}},
+			Repos:     map[string]config.RepoContentEntry{"myapp": {Source: "repos/myapp.md"}},
+		},
+	}
+	instanceRoot = filepath.Join(tmpDir, "instance")
+	if err := os.MkdirAll(filepath.Join(instanceRoot, "public", "myapp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return cfg, configDir, instanceRoot
+}
+
+// TestNiwaOwnedContentGoesToTheDeclaredAgentsOnly asserts what the instance
+// root and the group directories receive, which is no longer the same answer at
+// the two levels for the two agents.
+//
+// Both agents get an instance-root document, under their own filename. A
+// session started there is at the last directory of its own discovery whether
+// or not a project-root marker was found above it, so the document is read
+// either way -- which is what row 2's corrected reason says.
+//
+// Only Claude gets a group document. A group directory is above the repository
+// where a project-root walk stops, so a document written there would be bytes a
+// Codex session never opens; the group layer travels to it composed into each
+// repository's own document instead. Two levels, two different answers, and the
+// declaration table carries both.
+func TestNiwaOwnedContentGoesToTheDeclaredAgentsOnly(t *testing.T) {
+	cfg, configDir, instanceRoot := setupWorkspaceContentFixture(t)
+
+	wsFiles, _, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, agent.AgentClaude, nil)
+	if err != nil {
+		t.Fatalf("InstallWorkspaceContent: %v", err)
+	}
+	if len(wsFiles) != 1 || filepath.Base(wsFiles[0]) != "CLAUDE.md" {
+		t.Fatalf("claude workspace files = %v, want one CLAUDE.md", wsFiles)
+	}
+	grpFiles, err := InstallGroupContent(cfg, configDir, instanceRoot, "public", agent.AgentClaude)
+	if err != nil {
+		t.Fatalf("InstallGroupContent: %v", err)
+	}
+	if len(grpFiles) != 1 || filepath.Base(grpFiles[0]) != "CLAUDE.md" {
+		t.Fatalf("claude group files = %v, want one CLAUDE.md", grpFiles)
+	}
+
+	codexWS, _, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, agent.AgentCodex, nil)
+	if err != nil {
+		t.Fatalf("InstallWorkspaceContent: %v", err)
+	}
+	if len(codexWS) != 1 || filepath.Base(codexWS[0]) != "AGENTS.md" {
+		t.Fatalf("codex workspace files = %v, want one AGENTS.md", codexWS)
+	}
+	if body := readFile(t, codexWS[0]); !strings.Contains(body, "Workspace body") {
+		t.Errorf("codex instance-root document does not carry the workspace layer:\n%s", body)
+	}
+
+	codexGrp, err := InstallGroupContent(cfg, configDir, instanceRoot, "public", agent.AgentCodex)
+	if err != nil {
+		t.Fatalf("InstallGroupContent: %v", err)
+	}
+	if len(codexGrp) != 0 {
+		t.Fatalf("codex group files = %v, want none; the group layer travels composed into each repository", codexGrp)
+	}
+	assertNotExist(t, filepath.Join(instanceRoot, "public", "AGENTS.md"))
+}
+
+// TestInstanceRootDocumentFoldsTheImportedLayersForCodex is the delivery a
+// filename check cannot see. At the instance root Claude reaches the generated
+// workspace context, the private overlay and the global layer through @import
+// lines beside its document; Codex has no import mechanism, so those layers are
+// folded into the document itself and a reference would deliver nothing.
+//
+// The Claude assertion is the control. If it ever starts carrying the folded
+// layers, niwa is writing the same content twice into a session that already
+// had it once, against a budget it shares with everything else.
+func TestInstanceRootDocumentFoldsTheImportedLayersForCodex(t *testing.T) {
+	cfg, configDir, instanceRoot := setupWorkspaceContentFixture(t)
+	imported := [][]byte{
+		[]byte("# Repos\n\nthe generated repo listing\n"),
+		[]byte("# Overlay\n\nthe private addendum\n"),
+	}
+
+	codexFiles, _, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, agent.AgentCodex, imported)
+	if err != nil {
+		t.Fatalf("InstallWorkspaceContent(codex): %v", err)
+	}
+	if len(codexFiles) != 1 {
+		t.Fatalf("codex workspace files = %v, want one", codexFiles)
+	}
+	body := readFile(t, codexFiles[0])
+	for _, want := range []string{"Workspace body", "the generated repo listing", "the private addendum"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("codex instance-root document is missing %q:\n%s", want, body)
+		}
+	}
+
+	claudeFiles, _, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, agent.AgentClaude, imported)
+	if err != nil {
+		t.Fatalf("InstallWorkspaceContent(claude): %v", err)
+	}
+	if len(claudeFiles) != 1 {
+		t.Fatalf("claude workspace files = %v, want one", claudeFiles)
+	}
+	claudeBody := readFile(t, claudeFiles[0])
+	if strings.Contains(claudeBody, "the generated repo listing") {
+		t.Errorf("claude instance-root document folded in a layer it already reads by @import:\n%s", claudeBody)
+	}
+}
+
+// TestRepoContentComposesTheChainUnderCodex is the repository level: Claude gets
+// its own document as before, and Codex gets one composed at the name that wins
+// its first-match precedence, carrying the outer layers the same session would
+// otherwise never see.
+func TestRepoContentComposesTheChainUnderCodex(t *testing.T) {
+	t.Run("claude writes CLAUDE.local.md", func(t *testing.T) {
+		cfg, configDir, instanceRoot := setupWorkspaceContentFixture(t)
+		result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp", agent.AgentClaude)
+		if err != nil {
+			t.Fatalf("InstallRepoContent: %v", err)
+		}
+		if len(result.WrittenFiles) != 1 || filepath.Base(result.WrittenFiles[0]) != "CLAUDE.local.md" {
+			t.Fatalf("claude repo files = %v, want one CLAUDE.local.md", result.WrittenFiles)
+		}
+		if body := readFile(t, result.WrittenFiles[0]); strings.Contains(body, "Workspace") {
+			t.Errorf("claude repo document folded in the workspace layer; it reads that document where it is written:\n%s", body)
+		}
+	})
+	t.Run("codex composes the chain", func(t *testing.T) {
+		cfg, configDir, instanceRoot := setupWorkspaceContentFixture(t)
+		result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp", agent.AgentCodex)
+		if err != nil {
+			t.Fatalf("InstallRepoContent: %v", err)
+		}
+		if len(result.WrittenFiles) != 1 || filepath.Base(result.WrittenFiles[0]) != "AGENTS.override.md" {
+			t.Fatalf("codex repo files = %v, want one AGENTS.override.md", result.WrittenFiles)
+		}
+		repoDir := filepath.Join(instanceRoot, "public", "myapp")
+		assertNotExist(t, filepath.Join(repoDir, "CLAUDE.local.md"))
+		// AGENTS.md is the repository's own slot; niwa never writes there.
+		assertNotExist(t, filepath.Join(repoDir, "AGENTS.md"))
+
+		body := readFile(t, result.WrittenFiles[0])
+		if !strings.HasPrefix(body, "Generated by niwa") {
+			t.Errorf("composed document does not open with the generation marker:\n%s", body)
+		}
+		for _, want := range []string{"Workspace", "Group", "myapp"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("composed document is missing the %q layer:\n%s", want, body)
+			}
+		}
+		if len(result.Excludes) != 1 || result.Excludes[0] != "AGENTS.override.md" {
+			t.Errorf("composed document excludes = %v, want the repo-relative name", result.Excludes)
+		}
+	})
+}
+
+// TestComposedDocumentIsRefusedWhenTheNameIsOccupied is the conflict rule end to
+// end: the file niwa did not write is left exactly as it was, nothing is
+// written, the refusal is reported, and the path is carried out so the cleanup
+// pass leaves it alone too.
+func TestComposedDocumentIsRefusedWhenTheNameIsOccupied(t *testing.T) {
+	cfg, configDir, instanceRoot := setupWorkspaceContentFixture(t)
+	repoDir := filepath.Join(instanceRoot, "public", "myapp")
+	target := filepath.Join(repoDir, "AGENTS.override.md")
+
+	const committed = "# the repository's own override\n"
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(committed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp", agent.AgentCodex)
+	if err != nil {
+		t.Fatalf("InstallRepoContent: %v", err)
+	}
+	if len(result.WrittenFiles) != 0 {
+		t.Errorf("wrote %v over a file niwa did not write", result.WrittenFiles)
+	}
+	if got := readFile(t, target); got != committed {
+		t.Errorf("the occupied file was modified: %q", got)
+	}
+	if len(result.Exempt) != 1 || result.Exempt[0] != target {
+		t.Errorf("exempt = %v, want [%s]", result.Exempt, target)
+	}
+	if len(result.Warnings) != 1 {
+		t.Errorf("warnings = %v, want one naming the refusal", result.Warnings)
+	}
+}
+
+// TestComposedDocumentIsRefreshedOnReapply is the other half of the same test:
+// niwa's own prior document is recognized by its marker and rewritten in place,
+// so an instance does not stop updating its own context after the first apply.
+func TestComposedDocumentIsRefreshedOnReapply(t *testing.T) {
+	cfg, configDir, instanceRoot := setupWorkspaceContentFixture(t)
+
+	first, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp", agent.AgentCodex)
+	if err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+	if len(first.WrittenFiles) != 1 {
+		t.Fatalf("first install wrote %v, want one document", first.WrittenFiles)
+	}
+	want := readFile(t, first.WrittenFiles[0])
+
+	if err := os.WriteFile(first.WrittenFiles[0], []byte(want+"\nstale edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp", agent.AgentCodex)
+	if err != nil {
+		t.Fatalf("second install: %v", err)
+	}
+	if len(second.WrittenFiles) != 1 || len(second.Warnings) != 0 {
+		t.Fatalf("re-apply wrote %v with warnings %v; niwa did not recognize its own document", second.WrittenFiles, second.Warnings)
+	}
+	if got := readFile(t, second.WrittenFiles[0]); got != want {
+		t.Errorf("re-applied document = %q, want the freshly composed %q", got, want)
+	}
+}
+
+// TestComposedDocumentInlinesTheCommittedContextFile covers the other side of
+// the same directory slot: the repository commits the file niwa's name
+// outranks, so its content is inlined rather than lost, and the committed file
+// itself is not touched.
+func TestComposedDocumentInlinesTheCommittedContextFile(t *testing.T) {
+	cfg, configDir, instanceRoot := setupWorkspaceContentFixture(t)
+	repoDir := filepath.Join(instanceRoot, "public", "myapp")
+	committedPath := filepath.Join(repoDir, "AGENTS.md")
+
+	const committed = "# committed repository context\n"
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(committedPath, []byte(committed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp", agent.AgentCodex)
+	if err != nil {
+		t.Fatalf("InstallRepoContent: %v", err)
+	}
+	if len(result.WrittenFiles) != 1 {
+		t.Fatalf("repo files = %v, want one composed document", result.WrittenFiles)
+	}
+	if !strings.Contains(readFile(t, result.WrittenFiles[0]), "committed repository context") {
+		t.Error("the committed context file was not inlined; displacing it would have lost it silently")
+	}
+	if got := readFile(t, committedPath); got != committed {
+		t.Errorf("the committed file was modified: %q", got)
+	}
+}
+
+// TestComposedDocumentRefusesToReadASymlinkedContextFile is the narrow security
+// rule the inline read exists for: git reproduces committed symlinks verbatim,
+// so a repository could point its context file at the developer's credentials
+// and have niwa copy them into every session's instruction context.
+func TestComposedDocumentRefusesToReadASymlinkedContextFile(t *testing.T) {
+	cfg, configDir, instanceRoot := setupWorkspaceContentFixture(t)
+	repoDir := filepath.Join(instanceRoot, "public", "myapp")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	secret := filepath.Join(t.TempDir(), "credentials")
+	if err := os.WriteFile(secret, []byte("token=hunter2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(repoDir, "AGENTS.md")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp", agent.AgentCodex)
+	if err != nil {
+		t.Fatalf("InstallRepoContent: %v", err)
+	}
+	if len(result.WrittenFiles) != 1 {
+		t.Fatalf("repo files = %v, want the workspace layers written without the inline", result.WrittenFiles)
+	}
+	if body := readFile(t, result.WrittenFiles[0]); strings.Contains(body, "hunter2") {
+		t.Fatalf("the symlink was read through:\n%s", body)
+	}
+	if len(result.Warnings) != 1 {
+		t.Errorf("warnings = %v, want one naming the refused inline", result.Warnings)
+	}
+}
+
+// TestContentTreesCoexist asserts both agents' documents live in one instance
+// without either clobbering the other: every apply produces every agent's plan,
+// so the two trees are always both current.
+func TestContentTreesCoexist(t *testing.T) {
+	cfg, configDir, instanceRoot := setupWorkspaceContentFixture(t)
+	for _, ag := range agent.All() {
+		if _, _, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, ag, nil); err != nil {
+			t.Fatalf("workspace content for %s: %v", ag, err)
+		}
+		if _, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp", ag); err != nil {
+			t.Fatalf("repo content for %s: %v", ag, err)
+		}
+	}
+	repoDir := filepath.Join(instanceRoot, "public", "myapp")
+	for _, path := range []string{
+		filepath.Join(instanceRoot, "CLAUDE.md"),
+		filepath.Join(repoDir, "CLAUDE.local.md"),
+		filepath.Join(repoDir, "AGENTS.override.md"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s missing after a two-agent apply: %v", path, err)
+		}
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	return string(data)
+}
+
+func assertNotExist(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected %s to not exist, stat err = %v", path, err)
+	}
+}
+
 func TestInstallWorkspaceContentNoSource(t *testing.T) {
 	cfg := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "test"},
@@ -67,7 +419,7 @@ func TestInstallWorkspaceContentNoSource(t *testing.T) {
 	}
 
 	// Should be a no-op, not an error.
-	files, err := InstallWorkspaceContent(cfg, "/tmp", "/tmp/instance")
+	files, _, err := InstallWorkspaceContent(cfg, "/tmp", "/tmp/instance", agent.AgentClaude, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -124,11 +476,9 @@ func TestInstallGroupContent(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Groups: map[string]config.ContentEntry{
-					"public": {Source: "public.md"},
-				},
+		Content: config.ContentConfig{
+			Groups: map[string]config.ContentEntry{
+				"public": {Source: "public.md"},
 			},
 		},
 	}
@@ -139,7 +489,7 @@ func TestInstallGroupContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	files, err := InstallGroupContent(cfg, configDir, instanceRoot, "public")
+	files, err := InstallGroupContent(cfg, configDir, instanceRoot, "public", agent.AgentClaude)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -172,7 +522,7 @@ func TestInstallGroupContentNoEntry(t *testing.T) {
 	}
 
 	// No group content entry -- should be a no-op.
-	files, err := InstallGroupContent(cfg, "/tmp", "/tmp/instance", "public")
+	files, err := InstallGroupContent(cfg, "/tmp", "/tmp/instance", "public", agent.AgentClaude)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -200,11 +550,9 @@ func TestInstallRepoContent(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"myapp": {Source: "repos/myapp.md"},
-				},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"myapp": {Source: "repos/myapp.md"},
 			},
 		},
 	}
@@ -220,7 +568,7 @@ func TestInstallRepoContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp")
+	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp", agent.AgentClaude)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -275,14 +623,12 @@ func TestInstallRepoContentSubdirs(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"tsuku": {
-						Source: "repos/tsuku.md",
-						Subdirs: map[string]string{
-							"website": "repos/tsuku-website.md",
-						},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"tsuku": {
+					Source: "repos/tsuku.md",
+					Subdirs: map[string]string{
+						"website": "repos/tsuku-website.md",
 					},
 				},
 			},
@@ -302,7 +648,7 @@ func TestInstallRepoContentSubdirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "tsuku")
+	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "tsuku", agent.AgentClaude)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -352,10 +698,8 @@ func TestInstallRepoContentAutoDiscovery(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				// No explicit repos entries.
-			},
+		Content: config.ContentConfig{
+			// No explicit repos entries.
 		},
 	}
 
@@ -368,7 +712,7 @@ func TestInstallRepoContentAutoDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp")
+	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp", agent.AgentClaude)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -408,7 +752,7 @@ func TestInstallRepoContentAutoDiscoveryNoFile(t *testing.T) {
 	}
 
 	// No auto-discovery file, no explicit entry -- should be a no-op.
-	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp")
+	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp", agent.AgentClaude)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -439,105 +783,12 @@ func TestInstallRepoContentAutoDiscoveryNoContentDir(t *testing.T) {
 	}
 
 	// Without content_dir, auto-discovery should not attempt anything.
-	result, err := InstallRepoContent(cfg, tmpDir, "", instanceRoot, "public", "myapp")
+	result, err := InstallRepoContent(cfg, tmpDir, "", instanceRoot, "public", "myapp", agent.AgentClaude)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(result.Warnings) != 0 {
 		t.Errorf("unexpected warnings: %v", result.Warnings)
-	}
-}
-
-func TestCheckGitignoreMissingFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	warnings := CheckGitignore(tmpDir, "testrepo")
-	if len(warnings) != 1 {
-		t.Fatalf("expected 1 warning, got %d", len(warnings))
-	}
-	if !strings.Contains(warnings[0].Message, ".gitignore missing") {
-		t.Errorf("unexpected warning message: %s", warnings[0].Message)
-	}
-}
-
-func TestCheckGitignoreMissingPattern(t *testing.T) {
-	tmpDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("*.log\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	warnings := CheckGitignore(tmpDir, "testrepo")
-	if len(warnings) != 1 {
-		t.Fatalf("expected 1 warning, got %d", len(warnings))
-	}
-	if !strings.Contains(warnings[0].Message, "*.local*") {
-		t.Errorf("unexpected warning message: %s", warnings[0].Message)
-	}
-}
-
-func TestCheckGitignoreHasPattern(t *testing.T) {
-	tmpDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("*.log\n*.local*\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	warnings := CheckGitignore(tmpDir, "testrepo")
-	if len(warnings) != 0 {
-		t.Errorf("unexpected warnings: %v", warnings)
-	}
-}
-
-func TestCheckGitignoreWarningOnWrite(t *testing.T) {
-	tmpDir := t.TempDir()
-	configDir := filepath.Join(tmpDir, "config")
-	contentDir := filepath.Join(configDir, "claude")
-	reposDir := filepath.Join(contentDir, "repos")
-	if err := os.MkdirAll(reposDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	source := "# {repo_name}\n"
-	if err := os.WriteFile(filepath.Join(reposDir, "myapp.md"), []byte(source), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &config.WorkspaceConfig{
-		Workspace: config.WorkspaceMeta{
-			Name:       "myws",
-			ContentDir: "claude",
-		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"myapp": {Source: "repos/myapp.md"},
-				},
-			},
-		},
-	}
-
-	instanceRoot := filepath.Join(tmpDir, "instance")
-	repoDir := filepath.Join(instanceRoot, "public", "myapp")
-	if err := os.MkdirAll(repoDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// .gitignore exists but lacks *.local*.
-	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.log\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	result, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(result.Warnings) != 1 {
-		t.Fatalf("expected 1 warning, got %d", len(result.Warnings))
-	}
-	if !strings.Contains(result.Warnings[0].Message, "*.local*") {
-		t.Errorf("unexpected warning message: %s", result.Warnings[0].Message)
-	}
-
-	// File should still be written despite the warning.
-	if _, err := os.Stat(filepath.Join(repoDir, "CLAUDE.local.md")); err != nil {
-		t.Error("CLAUDE.local.md should be written even when gitignore warning is raised")
 	}
 }
 
@@ -639,15 +890,13 @@ func TestInstallContentFileContainment(t *testing.T) {
 			Name:       "test",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Workspace: config.ContentEntry{Source: "../secret.md"},
-			},
+		Content: config.ContentConfig{
+			Workspace: config.ContentEntry{Source: "../secret.md"},
 		},
 	}
 
 	instanceRoot := filepath.Join(tmpDir, "instance")
-	_, err := InstallWorkspaceContent(cfg, configDir, instanceRoot)
+	_, _, err := InstallWorkspaceContent(cfg, configDir, instanceRoot, agent.AgentClaude, nil)
 	if err == nil {
 		t.Fatal("expected error for path traversal, got nil")
 	}
@@ -679,14 +928,12 @@ func TestInstallRepoContentSubdirContainment(t *testing.T) {
 			Name:       "test",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"myrepo": {
-						Source: "repos/myrepo.md",
-						Subdirs: map[string]string{
-							"../../escape": "repos/sub.md",
-						},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"myrepo": {
+					Source: "repos/myrepo.md",
+					Subdirs: map[string]string{
+						"../../escape": "repos/sub.md",
 					},
 				},
 			},
@@ -702,7 +949,7 @@ func TestInstallRepoContentSubdirContainment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myrepo")
+	_, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myrepo", agent.AgentClaude)
 	if err == nil {
 		t.Fatal("expected error for subdirectory escape, got nil")
 	}
@@ -757,13 +1004,11 @@ func TestInstallRepoContentOverlayAppend(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"myapp": {
-						Source:        "repos/myapp.md",
-						OverlaySource: "myapp-overlay.md",
-					},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"myapp": {
+					Source:        "repos/myapp.md",
+					OverlaySource: "myapp-overlay.md",
 				},
 			},
 		},
@@ -778,7 +1023,7 @@ func TestInstallRepoContentOverlayAppend(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := InstallRepoContent(cfg, configDir, overlayDir, instanceRoot, "public", "myapp")
+	result, err := InstallRepoContent(cfg, configDir, overlayDir, instanceRoot, "public", "myapp", agent.AgentClaude)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -825,11 +1070,9 @@ func TestInstallRepoContentOverlayNoRegression(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"myapp": {Source: "repos/myapp.md"},
-				},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"myapp": {Source: "repos/myapp.md"},
 			},
 		},
 	}
@@ -844,7 +1087,7 @@ func TestInstallRepoContentOverlayNoRegression(t *testing.T) {
 	}
 
 	// Pass a non-empty overlayDir — it should be ignored when OverlaySource is empty.
-	result, err := InstallRepoContent(cfg, configDir, "/any/overlay/dir", instanceRoot, "public", "myapp")
+	result, err := InstallRepoContent(cfg, configDir, "/any/overlay/dir", instanceRoot, "public", "myapp", agent.AgentClaude)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -880,13 +1123,11 @@ func TestInstallRepoContentOverlaySourceEmptyOverlayDir(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"myapp": {
-						Source:        "repos/myapp.md",
-						OverlaySource: "myapp-overlay.md",
-					},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"myapp": {
+					Source:        "repos/myapp.md",
+					OverlaySource: "myapp-overlay.md",
 				},
 			},
 		},
@@ -898,7 +1139,7 @@ func TestInstallRepoContentOverlaySourceEmptyOverlayDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp")
+	_, err := InstallRepoContent(cfg, configDir, "", instanceRoot, "public", "myapp", agent.AgentClaude)
 	if err == nil {
 		t.Fatal("expected error when OverlaySource is set but overlayDir is empty")
 	}
@@ -930,13 +1171,11 @@ func TestInstallRepoContentOverlayOnlyNoBase(t *testing.T) {
 			Name:       "myws",
 			ContentDir: "claude",
 		},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"myapp": {
-						// Source is intentionally empty; OverlaySource only.
-						OverlaySource: "myapp-overlay.md",
-					},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"myapp": {
+					// Source is intentionally empty; OverlaySource only.
+					OverlaySource: "myapp-overlay.md",
 				},
 			},
 		},
@@ -951,7 +1190,7 @@ func TestInstallRepoContentOverlayOnlyNoBase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := InstallRepoContent(cfg, configDir, overlayDir, instanceRoot, "public", "myapp")
+	result, err := InstallRepoContent(cfg, configDir, overlayDir, instanceRoot, "public", "myapp", agent.AgentClaude)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -976,17 +1215,15 @@ func TestInstallRepoContentOverlayOnlyNoBase(t *testing.T) {
 func TestInstallRepoContentOverlayOnlyNoBaseEmptyDir(t *testing.T) {
 	cfg := &config.WorkspaceConfig{
 		Workspace: config.WorkspaceMeta{Name: "myws", ContentDir: "claude"},
-		Claude: config.ClaudeConfig{
-			Content: config.ContentConfig{
-				Repos: map[string]config.RepoContentEntry{
-					"myapp": {OverlaySource: "myapp-overlay.md"},
-				},
+		Content: config.ContentConfig{
+			Repos: map[string]config.RepoContentEntry{
+				"myapp": {OverlaySource: "myapp-overlay.md"},
 			},
 		},
 	}
 
 	tmpDir := t.TempDir()
-	_, err := InstallRepoContent(cfg, tmpDir, "", filepath.Join(tmpDir, "instance"), "public", "myapp")
+	_, err := InstallRepoContent(cfg, tmpDir, "", filepath.Join(tmpDir, "instance"), "public", "myapp", agent.AgentClaude)
 	if err == nil {
 		t.Fatal("expected error when OverlaySource is set but overlayDir is empty")
 	}
@@ -995,27 +1232,6 @@ func TestInstallRepoContentOverlayOnlyNoBaseEmptyDir(t *testing.T) {
 	}
 }
 
-func TestHasLocalPattern(t *testing.T) {
-	tests := []struct {
-		name    string
-		content string
-		want    bool
-	}{
-		{"exact match", "*.local*\n", true},
-		{"among other lines", "*.log\n*.local*\nbuild/\n", true},
-		{"with leading whitespace", "  *.local*  \n", true},
-		{"no match", "*.log\nbuild/\n", false},
-		{"empty file", "", false},
-		{"partial match", "*.local\n", false},
-		{"substring", "foo*.local*bar\n", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := hasLocalPattern(strings.NewReader(tt.content))
-			if got != tt.want {
-				t.Errorf("hasLocalPattern(%q) = %v, want %v", tt.content, got, tt.want)
-			}
-		})
-	}
-}
+// gitignore-pattern warnings were removed: niwa now self-guarantees
+// invisibility via .git/info/exclude (see EnsureRepoExclude), so it no longer
+// inspects or warns about the repo's committed .gitignore.

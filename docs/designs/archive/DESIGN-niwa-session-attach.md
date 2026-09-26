@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Superseded
 superseded_by: docs/designs/current/DESIGN-worktree-command-parity.md
 upstream: docs/prds/PRD-niwa-session-attach.md
@@ -41,6 +42,8 @@ rationale: |
 # DESIGN: niwa session attach
 
 ## Status
+
+Superseded
 
 Superseded by [DESIGN-worktree-command-parity.md](docs/designs/current/DESIGN-worktree-command-parity.md)
 

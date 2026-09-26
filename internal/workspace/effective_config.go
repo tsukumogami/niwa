@@ -1,0 +1,111 @@
+package workspace
+
+import (
+	"context"
+	"io"
+
+	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/keyreport"
+	"github.com/tsukumogami/niwa/internal/vault"
+	"github.com/tsukumogami/niwa/internal/vault/resolve"
+)
+
+// EffectiveConfigOptions tunes the resolve+merge helper for a single call site.
+//
+// GlobalConfigDir is forwarded to MergeGlobalOverride so personal-overlay hook
+// scripts can be resolved to absolute paths. Empty when no global config is
+// registered (no override is being merged anyway, in that case).
+//
+// Stderr is the resolver's diagnostic sink. The resolver writes nothing to it
+// today — an unresolved key is marked on the value and reported once, later —
+// so this exists to keep that silence testable rather than to carry output.
+//
+// Keys is the caller-supplied collector the run's unresolved keys accumulate
+// into. It is drained and rendered by the command surface after the run
+// returns, so a nil collector means "this caller does not report" rather than
+// "nothing went wrong": the worktree path passes nil because it re-materializes
+// from an already-written file rather than resolving.
+type EffectiveConfigOptions struct {
+	GlobalConfigDir string
+	Stderr          io.Writer
+	Keys            *keyreport.Collector
+}
+
+// ResolveAndMergeEffectiveConfig runs the vault resolve + personal-overlay
+// merge pipeline shared by the instance apply path
+// (internal/workspace/apply.go) and the worktree apply path
+// (internal/cli/session_lifecycle_cmd.go). It exists to keep those two paths
+// from drifting: every change to "what does an effective WorkspaceConfig look
+// like after personal overlay resolution" must land here, in one place, so
+// both call sites pick it up.
+//
+// The helper takes caller-built bundles. The instance apply call site needs
+// the bundle handles for diagnostic plumbing (R12 collision enforcement,
+// shadow detection, R13.1 unreachable warnings, public-remote secrets
+// guardrail) BEFORE resolution runs, so building bundles outside this helper
+// keeps the diagnostic emits in their established positions and lets the
+// worktree path call this helper with its own minimal bundle pair. The caller
+// is responsible for closing the bundles (defer CloseAll at the call site).
+//
+// globalOverride may be nil (no personal overlay registered); the helper then
+// resolves only the team workspace and returns the resolved cfg with no merge.
+// In that case the returned EnvExamplePolicy is also nil — the resolver treats
+// nil as "no global rung".
+//
+// The returned *config.WorkspaceConfig is the effective config that should
+// drive every downstream materializer (env, settings, files, hooks). The
+// returned *config.EnvExamplePolicy is the flattened personal/global
+// .env.example failure policy for the active workspace, suitable for threading
+// into WorktreeApplyOptions.GlobalEnvExamplePolicy or the
+// repoMaterializeInputs.GlobalEnvExamplePolicy used by the instance pipeline.
+// The returned config.OutputTargets is the flattened personal/global
+// secret-output target declaration, suitable for threading into
+// WorktreeApplyOptions.GlobalEnvOutput or the
+// repoMaterializeInputs.GlobalEnvOutput used by the instance pipeline.
+func ResolveAndMergeEffectiveConfig(
+	ctx context.Context,
+	cfg *config.WorkspaceConfig,
+	globalOverride *config.GlobalConfigOverride,
+	teamBundle *vault.Bundle,
+	personalBundle *vault.Bundle,
+	opts EffectiveConfigOptions,
+) (*config.WorkspaceConfig, *config.EnvExamplePolicy, config.OutputTargets, error) {
+	// Resolve the team workspace config first.
+	resolvedCfg, err := resolve.ResolveWorkspace(ctx, cfg, resolve.ResolveOptions{
+		TeamBundle: teamBundle,
+		Stderr:     opts.Stderr,
+		Keys:       opts.Keys,
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// No overlay registered: return the team-only resolved cfg unchanged.
+	if globalOverride == nil {
+		collectUnresolvedKeys(resolvedCfg, opts.Keys)
+		return resolvedCfg, nil, nil, nil
+	}
+
+	// Resolve the personal overlay, then merge it into the team workspace.
+	// The merge happens AFTER resolution so that R8 team_only enforcement
+	// in MergeGlobalOverride sees the overlay's resolved MaybeSecret values,
+	// not pre-resolve URIs.
+	resolvedOverride, err := resolve.ResolveGlobalOverride(ctx, globalOverride, resolve.ResolveOptions{
+		PersonalBundle: personalBundle,
+		Stderr:         opts.Stderr,
+		Keys:           opts.Keys,
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	flattened := ResolveGlobalOverride(resolvedOverride, cfg.Workspace.Name)
+	merged, err := MergeGlobalOverride(resolvedCfg, flattened, opts.GlobalConfigDir)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	// After the merge, never before it: a key the team layer could not resolve
+	// may be supplied by the personal overlay, and only the merged config knows
+	// which layer won.
+	collectUnresolvedKeys(merged, opts.Keys)
+	return merged, flattened.EnvExamplePolicy, flattened.EnvOutput, nil
+}

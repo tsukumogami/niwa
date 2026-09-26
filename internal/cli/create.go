@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,14 +16,18 @@ import (
 
 func init() {
 	rootCmd.AddCommand(createCmd)
-	createCmd.Flags().StringVar(&createName, "name", "", "custom instance name suffix (e.g., --name=hotfix produces <config>-hotfix)")
+	createCmd.Flags().StringVar(&createName, "name", "", "custom instance name suffix, sanitized into a lowercase slug of letters, digits, and underscores and joined to the config name with '+' (e.g., --name \"My Feature\" produces <config>+my_feature)")
 	createCmd.Flags().StringVarP(&createRepo, "repo", "r", "", "land in this repo after creation")
 	createCmd.Flags().BoolVar(&createNoInstallPlugins, "no-install-plugins", false, "skip auto-installing the embedded niwa Claude Code plugin (otherwise installed once when a rank-2 source is detected)")
-	createCmd.Flags().BoolVar(&createAllowMissingSecrets, "allow-missing-secrets", false,
-		"downgrade unresolved vault:// references to empty strings with stderr warnings. "+
-			"Does NOT override *.required misses. One-shot -- re-evaluated each invocation.")
 	createCmd.Flags().BoolVar(&createAllowPlaintextSecrets, "allow-plaintext-secrets", false,
 		"bypass the public-repo plaintext-secrets guardrail and downgrade all .env.example failure-policy failures to warnings. Strictly one-shot -- no state persistence.")
+	createCmd.Flags().BoolVar(&createJSON, "json", false,
+		"emit a single JSON object {name, number, path} for the created instance and nothing else on stdout")
+	createCmd.Flags().IntVar(&createParallel, "parallel", 0,
+		"maximum repos to clone concurrently (>=1). Lower this on slow or flaky networks; 1 clones serially. Overrides the [global] clone_workers config. 0 (the default) uses clone_workers, else niwa's built-in default.")
+	registerStrictSecretsFlag(createCmd, &strictSecretsCreate)
+	// Last: it declares a mutual-exclusion group against --strict-secrets.
+	registerAllowMissingSecretsFlag(createCmd)
 	createCmd.ValidArgsFunction = completeWorkspaceNames
 }
 
@@ -30,9 +35,17 @@ var (
 	createName                  string
 	createRepo                  string
 	createNoInstallPlugins      bool
-	createAllowMissingSecrets   bool
 	createAllowPlaintextSecrets bool
+	createJSON                  bool
+	createParallel              int
 )
+
+// createResult is the machine-readable shape emitted by `niwa create --json`.
+type createResult struct {
+	Name   string `json:"name"`
+	Number int    `json:"number"`
+	Path   string `json:"path"`
+}
 
 var createCmd = &cobra.Command{
 	Use:   "create [workspace-name]",
@@ -49,16 +62,26 @@ of the instance root.
 Instance naming:
   - First instance uses the config name (e.g., "tsuku")
   - Subsequent instances are numbered: tsuku-2, tsuku-3, ...
-  - With --name=hotfix, produces: tsuku-hotfix`,
+  - With --name, the suffix is sanitized into a lowercase slug (letters,
+    digits, underscores) and joined to the config name with '+', e.g.
+    --name "My Feature" produces: tsuku+my_feature. The '+' marks the
+    config|slug boundary unambiguously (config names may contain '.', '-',
+    and '_', so none of those can serve as the separator).`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runCreate,
 }
 
 // computeInstanceName determines the instance directory name based on the
-// config name, existing instances, and an optional custom name suffix.
-func computeInstanceName(configName, customName, workspaceRoot string) (string, error) {
+// config name, existing instances, and an optional custom name suffix. When a
+// custom name is supplied it is joined to the config name with sep: callers
+// pass "+" for a user-supplied slug (so the config|slug boundary is
+// unambiguous -- "+" is excluded from NamePattern and the slug charset, so it
+// appears exactly once) and "-" for the legacy/internal hook suffix. The
+// numbered-scan branch (customName == "") never uses sep and always joins with
+// "-".
+func computeInstanceName(configName, customName, sep, workspaceRoot string) (string, error) {
 	if customName != "" {
-		return configName + "-" + customName, nil
+		return configName + sep + customName, nil
 	}
 
 	// First instance: use the config name directly.
@@ -83,6 +106,18 @@ func computeInstanceName(configName, customName, workspaceRoot string) (string, 
 }
 
 func runCreate(cmd *cobra.Command, args []string) error {
+	// When --name is provided, sanitize it into a lowercase slug up front
+	// (the same normalization `niwa dispatch` applies) so an unusable value
+	// fails before any side effects. An unset flag (createName == "") keeps
+	// the default numbered naming and is never sanitized or rejected.
+	customName := createName
+	if createName != "" {
+		customName = sanitizeInstanceSlug(createName)
+		if customName == "" {
+			return fmt.Errorf("niwa: error: --name %q does not contain any usable characters for an instance name", createName)
+		}
+	}
+
 	var configPath, configDir string
 
 	if len(args) == 1 {
@@ -117,12 +152,39 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
+	token := resolveGitHubToken()
+	gh := github.NewAPIClient(token)
+
+	// Built here rather than with the rest of the applier wiring below because
+	// the reconcile needs a fetcher and a reporter; everything else it needs
+	// comes from the config that reconcile returns.
+	applier := workspace.NewApplier(gh)
+	applier.Reporter = workspace.NewReporterWithTTY(os.Stderr, !noProgress && term.IsTerminal(int(os.Stderr.Fd())))
+	configureDeveloperHome(applier)
+	// Rendered on every exit from here on, including the failure path where
+	// Create has already removed the instance directory.
+	defer wireKeyReport(applier, cmd.ErrOrStderr())()
+
+	// Reconcile before the config drives materialization (issue #227). Placed
+	// above the name and agent resolution below so those read it too; there is
+	// no second run to recover a create, because the instance is created once.
+	result, err = workspace.ReconcileAndReloadConfig(cmd.Context(), configPath, gh, applier.Reporter, result)
+	if err != nil {
+		return err
+	}
+	// Surface config-load warnings once, against the effective config.
 	for _, w := range result.Warnings {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
 	cfg := result.Config
 
 	workspaceRoot := filepath.Dir(configDir)
+
+	// Opportunistically reclaim orphaned ephemeral instances before creating a
+	// new one, so session fan-out self-bounds. Best-effort: a reap failure must
+	// never block create.
+	reapOpportunistically(workspaceRoot)
 
 	// Resolve the override-aware workspace name (falls back to
 	// cfg.Workspace.Name when no `niwa init <name>` override is set).
@@ -131,7 +193,13 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	instanceName, err := computeInstanceName(configName, createName, workspaceRoot)
+	// A user-supplied --name is joined with "+" so the config|slug boundary is
+	// unambiguous; the default numbered path joins with "-" (sep is unused there).
+	sep := "-"
+	if customName != "" {
+		sep = "+"
+	}
+	instanceName, err := computeInstanceName(configName, customName, sep, workspaceRoot)
 	if err != nil {
 		return err
 	}
@@ -142,18 +210,22 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("instance directory already exists: %s", instanceDir)
 	}
 
-	token := resolveGitHubToken()
-	gh := github.NewAPIClient(token)
-
-	applier := workspace.NewApplier(gh)
-	applier.Reporter = workspace.NewReporterWithTTY(os.Stderr, !noProgress && term.IsTerminal(int(os.Stderr.Fd())))
 	// Wire the plugin auto-installer so the rank-2 overlay notice
 	// fired inside runPipeline can trigger `/niwa:migrate-config`
 	// install. Without this seam the install is a silent no-op even
 	// when the rank-2 notice surfaces.
 	configurePluginAutoInstall(applier, createNoInstallPlugins)
-	applier.AllowMissingSecrets = createAllowMissingSecrets
 	applier.AllowPlaintextSecrets = createAllowPlaintextSecrets
+	// --parallel wins when > 0; otherwise the [global] clone_workers config
+	// (resolved below when it loads) applies; otherwise the Applier default.
+	applier.CloneWorkers = createParallel
+
+	// No agent is resolved here. A created instance is prepared for every agent
+	// niwa enumerates, so there is nothing to select.
+
+	// Read from the reconciled config, so a workspace that turned strict mode
+	// on upstream is honored on the first create that sees the change.
+	applier.StrictSecrets = strictSecretsFor(cmd, strictSecretsCreate, cfg)
 
 	// Wire up the global config overlay so vault resolution and personal-wins
 	// merging work during create. ConfigSourceURL is a fallback for overlay
@@ -163,6 +235,9 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	if globalCfg, gErr := config.LoadGlobalConfig(); gErr == nil {
 		if gDir, gErr := config.GlobalConfigDir(); gErr == nil {
 			applier.GlobalConfigDir = gDir
+		}
+		if createParallel <= 0 {
+			applier.CloneWorkers = globalCfg.CloneWorkers()
 		}
 		if entry := globalCfg.LookupWorkspace(configName); entry != nil {
 			applier.ConfigSourceURL = entry.SourceURL
@@ -192,7 +267,32 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if createJSON {
+		// Emit exactly one JSON object to stdout and nothing else. The
+		// instance number is sourced from the freshly written instance
+		// state so it matches the on-disk record rather than re-deriving
+		// it from the name.
+		number := instanceNumberFromState(instancePath)
+		out := createResult{Name: instanceName, Number: number, Path: instancePath}
+		enc := json.NewEncoder(cmd.OutOrStdout())
+		if err := enc.Encode(out); err != nil {
+			return fmt.Errorf("encoding create JSON: %w", err)
+		}
+		return nil
+	}
+
 	hintShellInit(cmd)
 
 	return nil
+}
+
+// instanceNumberFromState reads the instance number recorded in the instance's
+// state file. A read failure yields 0 rather than aborting the command, since
+// the path is the load-bearing field for callers and the number is advisory.
+func instanceNumberFromState(instancePath string) int {
+	state, err := workspace.LoadState(instancePath)
+	if err != nil {
+		return 0
+	}
+	return state.InstanceNumber
 }

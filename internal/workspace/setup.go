@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/secret"
 )
 
 const defaultSetupDir = "scripts/setup"
@@ -42,8 +43,29 @@ func ResolveSetupDir(ws *config.WorkspaceConfig, repoName string) string {
 // RunSetupScripts scans setupDir within repoDir for executable scripts and
 // runs them in lexical order. Stops on the first script that exits non-zero.
 // Returns nil if the directory doesn't exist or is empty.
-// r receives all script output; pass a non-nil *Reporter.
-func RunSetupScripts(repoDir, setupDir string, r *Reporter) *SetupResult {
+//
+// Each script is announced before it runs and its stdout and stderr are
+// streamed durably, one line at a time, prefixed with `[<repo>/<script>] `.
+// r receives all of it; pass a non-nil *Reporter. red is nil-tolerant; when
+// non-nil, every emitted line is scrubbed of the secrets it has registered.
+// Passing nil means no scrubbing, which is appropriate only where no secret
+// has been resolved into the repo's working tree.
+// extraEnv is appended to the inherited process environment for each script.
+// It is variadic so every existing caller is unchanged: the clone path passes
+// nothing and its scripts see exactly the environment they see today, which is
+// what R15's regression guarantee needs.
+//
+// Go runs a subprocess with the parent's environment when cmd.Env is nil, so
+// appending to os.Environ() produces that identical set plus these entries.
+// DESIGN-post-clone-scripts.md's security section reasons about this function
+// setting no cmd.Env; the claim it actually makes is that secrets reach setup
+// scripts by FILE only, and nothing here carries a resolved secret -- these are
+// paths and names. That claim stays true.
+func RunSetupScripts(repoDir, setupDir string, r *Reporter, red *secret.Redactor, extraEnv ...string) *SetupResult {
+	// The repo name reaches output, and while it comes from workspace config
+	// rather than from the repo, it costs nothing to hold it to the same
+	// standard as the script names below.
+	repoName := stripEscapes(filepath.Base(repoDir))
 	result := &SetupResult{RepoName: filepath.Base(repoDir)}
 
 	if setupDir == "" {
@@ -101,10 +123,20 @@ func RunSetupScripts(repoDir, setupDir string, r *Reporter) *SetupResult {
 			continue // warn and skip, don't stop
 		}
 
+		// Script filenames are repo-controlled and reach the terminal in
+		// both the announcement and the per-line prefix, so they go
+		// through the same sanitizer as the script's own output.
+		display := stripEscapes(name)
+		r.Log("running setup script %s/%s", repoName, display)
+		prefix := fmt.Sprintf("[%s/%s] ", repoName, display)
+
 		cmd := exec.Command(scriptPath)
 		cmd.Dir = repoDir
+		if len(extraEnv) > 0 {
+			cmd.Env = append(os.Environ(), extraEnv...)
+		}
 
-		if err := runCmdWithReporter(r, cmd); err != nil {
+		if err := runCmdWithReporter(r, cmd, prefix, red); err != nil {
 			result.Scripts = append(result.Scripts, ScriptResult{
 				Name:  name,
 				Error: err,

@@ -4,10 +4,12 @@ package functional
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cucumber/godog"
 )
@@ -16,22 +18,90 @@ type stateKeyType struct{}
 
 var stateKey = stateKeyType{}
 
+// processSandboxRoot is the one directory this test process is allowed to
+// write in. TestMain allocates it under the system temp dir and every scenario
+// sandbox is a child of it, so nothing the suite does can touch the checkout
+// it was built from. The git fixture helpers refuse to run outside it; see
+// gitfixture_test.go.
+var processSandboxRoot string
+
+// TestMain allocates the process-wide sandbox before any scenario runs and
+// tears it down afterwards. A fresh MkdirTemp per process is what makes two
+// concurrent runs safe: neither can see, let alone delete, the other's files.
+func TestMain(m *testing.M) {
+	root, err := os.MkdirTemp("", "niwa-func-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "allocating functional test sandbox: %v\n", err)
+		os.Exit(1)
+	}
+	// Resolve symlinks once, here. The sandbox bounds check compares paths
+	// textually and GIT_CEILING_DIRECTORIES needs a real path, and on some
+	// systems the temp dir is reached through a symlink.
+	if resolved, rerr := filepath.EvalSymlinks(root); rerr == nil {
+		root = resolved
+	}
+	if err := checkSandboxIsOutsideAnyRepo(root); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		_ = os.RemoveAll(root)
+		os.Exit(1)
+	}
+	processSandboxRoot = root
+
+	code := m.Run()
+
+	if os.Getenv("NIWA_TEST_KEEP_SANDBOX") != "" {
+		fmt.Fprintf(os.Stderr, "NIWA_TEST_KEEP_SANDBOX set; sandbox kept at %s\n", root)
+	} else if err := os.RemoveAll(root); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: removing sandbox %s: %v\n", root, err)
+	}
+	os.Exit(code)
+}
+
+// checkSandboxIsOutsideAnyRepo fails the run if any ancestor of root is a git
+// repository. Nothing today can trip it -- MkdirTemp("") lands in the system
+// temp dir. It's here for the change that someday re-parents the sandbox back
+// under the checkout "just for debugging": the fixture runs real `git add` and
+// `git push`, so a sandbox inside a repository is how a test suite ends up
+// committing someone's working tree.
+func checkSandboxIsOutsideAnyRepo(root string) error {
+	for dir := root; ; {
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			return fmt.Errorf("functional test sandbox %s sits inside the git repository at %s; "+
+				"the suite runs real git commands and must never be rooted in a repository", root, dir)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil
+		}
+		dir = parent
+	}
+}
+
 // testState holds per-scenario state. The Before hook resets it so each
 // scenario starts from a clean sandbox (fresh $HOME, fresh workspace root).
 type testState struct {
-	binPath       string             // absolute path to the niwa test binary
-	homeDir       string             // sandboxed $HOME for this scenario (holds .niwa/, .bashrc, etc.)
-	tmpDir        string             // scenario-scoped $TMPDIR (writes landed here stay isolated)
-	workspaceRoot string             // sandboxed directory where workspaces live
-	stdout        string             // last command's stdout
-	stderr        string             // last command's stderr
-	exitCode      int                // last command's exit code
-	shellPwd      string             // pwd reported by the last wrapped-shell run
-	shellStartPwd string             // cwd the wrapped shell started in (for "did not change" assertions)
-	envOverrides  map[string]string  // per-scenario env var overrides (win over defaults)
-	gitServer     *localGitServer    // local bare-repo server for offline clone tests
-	repoURLs      map[string]string  // name → file:// URL for repos created by localGitServer
-	githubFake    *tarballFakeServer // GitHub API fake (per-scenario; spawned lazily)
+	binPath         string             // absolute path to the niwa test binary
+	sandbox         string             // this scenario's sandbox dir (parent of homeDir/tmpDir/workspaceRoot)
+	homeDir         string             // sandboxed $HOME for this scenario (holds .niwa/, .bashrc, etc.)
+	tmpDir          string             // scenario-scoped $TMPDIR (writes landed here stay isolated)
+	workspaceRoot   string             // sandboxed directory where workspaces live
+	stdout          string             // last command's stdout
+	stderr          string             // last command's stderr
+	exitCode        int                // last command's exit code
+	shellPwd        string             // pwd reported by the last wrapped-shell run
+	generatedPrompt string             // the oversized prompt a spill scenario dispatched
+	shellStartPwd   string             // cwd the wrapped shell started in (for "did not change" assertions)
+	envOverrides    map[string]string  // per-scenario env var overrides (win over defaults)
+	gitServer       *localGitServer    // local bare-repo server for offline clone tests
+	repoURLs        map[string]string  // name → file:// URL for repos created by localGitServer
+	githubFake      *tarballFakeServer // GitHub API fake (per-scenario; spawned lazily)
+	pathPrefix      string             // dir prepended to $PATH for niwa subprocesses (e.g. a fake claude)
+	sharedBinDir    string             // dir always prepended to $PATH holding hermetic stubs (e.g. a fake infisical)
+
+	// printedWorktreePath records the stdout of the last `niwa worktree
+	// from-hook` create dispatch (the bare absolute worktree path the hook
+	// prints back to Claude), so a later step can assert it exists / is gone.
+	printedWorktreePath string
 
 	// Session scenario state. Carry session lifecycle state between steps
 	// in a single scenario; zeroed per the Before hook's fresh allocation.
@@ -42,6 +112,87 @@ type testState struct {
 	// worktree at snapshot time, so a later step can assert an idempotent
 	// re-apply produced no spurious change. Keyed by worktree-relative path.
 	worktreeFileSnapshots map[string]string
+
+	// lastDispatchInstancePath records the instance directory the last `niwa
+	// dispatch` run created, so later steps can assert on it without
+	// hardcoding the random name suffix. The name is "<config>+-<8 hex>" or
+	// "<config>+<slug>-<8 hex>"; see dispatchInstanceNameRe, recordDispatchInstance
+	// for which steps fill it in, and findDispatchInstance for why "last" is
+	// decided by modification time.
+	lastDispatchInstancePath string
+
+	// Session-message acceptance state. See session_message_steps_test.go.
+
+	// rememberedMachineConfig is the machine config.toml exactly as a scenario
+	// recorded it, so a later step can prove a dispatch that printed the
+	// one-time explanation left the file alone (the notice is remembered in a
+	// marker file beside it, never by rewriting it).
+	rememberedMachineConfig []byte
+
+	// rememberedStdout is a dispatch's standard output, kept so a second
+	// dispatch's can be compared against it.
+	rememberedStdout string
+
+	// personalClaudeSettingsBytes and personalClaudeSettingsModTime snapshot
+	// the developer's own Claude Code user settings at seed time. A dispatch
+	// must leave both alone: the accept-messages decision travels as a launch
+	// flag exactly so one dispatch cannot change what every other session on
+	// the machine does.
+	personalClaudeSettingsBytes   []byte
+	personalClaudeSettingsModTime time.Time
+
+	// parallelRuns holds one entry per command started by the parallel pty
+	// step, in launch order. Each run's transcript and exit code are kept
+	// apart, because the assertions are about individual runs -- "every
+	// transcript has exactly one audit line" is not a statement about their
+	// concatenation.
+	parallelRuns []ptyRun
+
+	// heldLocks are advisory locks a scenario is holding to stand in for a live
+	// worker, kept open because a flock lives on the open file description:
+	// closing the file releases the lock, so the handle has to outlive the step
+	// that took it. Released when the scenario ends.
+	heldLocks []*os.File
+
+	// Codex acceptance state. See codex_agent_steps_test.go.
+
+	// stagedFiles and stagedSymlinks accumulate fixture content (repo-relative
+	// path → content / link target) that the next fixture-repo step commits and
+	// then drains, so a scenario can build up a repository's committed shape one
+	// readable step at a time.
+	stagedFiles    map[string]string
+	stagedSymlinks map[string]string
+
+	// codexConfigSeed is the developer Codex config exactly as the scenario
+	// seeded it, kept so the additivity check can compare what niwa left behind
+	// against what was there before.
+	codexConfigSeed []byte
+
+	// codexCredentialBytes and codexCredentialModTime snapshot the developer's
+	// Codex credential file at seed time; niwa must leave both untouched.
+	codexCredentialBytes   []byte
+	codexCredentialModTime time.Time
+
+	// workspaceRootAlias is the symlinked path the scenario drove niwa through
+	// when the workspace root is reached through a symlink. Empty otherwise.
+	// The trust keys niwa writes must name the resolved path, never this one.
+	workspaceRootAlias string
+
+	// codexSessionOutput holds the combined output of the last live Codex
+	// invocation, for the gated scenarios that inspect what a session printed.
+	codexSessionOutput string
+
+	// codexResolvedSkills is the skills list the last prompt-input render
+	// reported, and codexResolvedSkillsDir the directory that render ran from.
+	// The directory is kept because every assertion about the list is really
+	// an assertion about where the session stood.
+	codexResolvedSkills    []codexPromptInputSkill
+	codexResolvedSkillsDir string
+
+	// restoreOnCleanup are directories a scenario made read-only on purpose.
+	// The After hook puts them back, because a sandbox holding an unwritable
+	// directory cannot be removed with the rest of them.
+	restoreOnCleanup []string
 }
 
 func getState(ctx context.Context) *testState {
@@ -97,14 +248,15 @@ func TestFeatures(t *testing.T) {
 
 func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Before(func(ctx context.Context, sc *godog.Scenario) (context.Context, error) {
-		// Each scenario gets its own sandbox under the binary's directory.
-		// Using t.TempDir() would work but placing it alongside the binary
-		// makes test artifacts easier to inspect on failure.
-		repoRoot := filepath.Dir(binPath)
-		sandbox := filepath.Join(repoRoot, ".niwa-test")
-		_ = os.RemoveAll(sandbox)
-		if err := os.MkdirAll(sandbox, 0o755); err != nil {
-			return ctx, err
+		// Each scenario gets a fresh, uniquely named sandbox under the
+		// process-wide root. MkdirTemp rather than wiping a fixed path: a
+		// fixed path is shared with every other process in the checkout, and
+		// wiping it deletes whatever a concurrent run has live there. Set
+		// NIWA_TEST_KEEP_SANDBOX to keep these around for inspection -- the
+		// After hook prints the path of any scenario that failed.
+		sandbox, err := os.MkdirTemp(processSandboxRoot, "scenario-*")
+		if err != nil {
+			return ctx, fmt.Errorf("allocating scenario sandbox: %w", err)
 		}
 		homeDir := filepath.Join(sandbox, "home")
 		tmpDir := filepath.Join(sandbox, "tmp")
@@ -114,16 +266,26 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 			}
 		}
 
-		// workspaceRoot must live outside any existing niwa instance tree so that
-		// niwa init's CheckInitConflicts check does not fire when the developer's
-		// machine has a niwa workspace ancestor covering the repo root. Using the
-		// system temp dir guarantees a clean parent regardless of repo location.
-		wsParent := filepath.Join(os.TempDir(), "niwa-test-workspaces")
-		_ = os.RemoveAll(wsParent)
-		if err := os.MkdirAll(wsParent, 0o755); err != nil {
+		// sharedBinDir holds hermetic stubs that every scenario needs on PATH
+		// regardless of any per-scenario pathPrefix fake. It carries a fake
+		// `infisical` so a `niwa create` whose config declares an infisical
+		// vault provider never shells out to the real Infisical CLI (which,
+		// on a machine where it is installed, contacts the network / demands a
+		// login and fails the run). See writeFakeInfisical.
+		sharedBinDir := filepath.Join(sandbox, "shared-bin")
+		if err := writeFakeInfisical(sharedBinDir); err != nil {
 			return ctx, err
 		}
-		workspaceRoot := wsParent
+
+		// workspaceRoot must live outside any existing niwa instance tree so that
+		// niwa init's CheckInitConflicts check does not fire when the developer's
+		// machine has a niwa workspace ancestor covering the repo root. The
+		// process-wide temp root already guarantees a clean parent, so this can
+		// just be a child of the scenario sandbox.
+		workspaceRoot := filepath.Join(sandbox, "workspace-root")
+		if err := os.MkdirAll(workspaceRoot, 0o755); err != nil {
+			return ctx, err
+		}
 
 		gitServerDir := filepath.Join(sandbox, "gitserver")
 		gs, err := newLocalGitServer(gitServerDir)
@@ -133,12 +295,17 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 
 		state := &testState{
 			binPath:       binPath,
+			sandbox:       sandbox,
 			homeDir:       homeDir,
 			tmpDir:        tmpDir,
 			workspaceRoot: workspaceRoot,
+			sharedBinDir:  sharedBinDir,
 			envOverrides:  make(map[string]string),
 			gitServer:     gs,
 			repoURLs:      make(map[string]string),
+
+			stagedFiles:    make(map[string]string),
+			stagedSymlinks: make(map[string]string),
 		}
 		return setState(ctx, state), nil
 	})
@@ -149,10 +316,27 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 		if s == nil {
 			return ctx, nil
 		}
+		if scenarioErr != nil && os.Getenv("NIWA_TEST_KEEP_SANDBOX") != "" {
+			fmt.Fprintf(os.Stderr, "scenario %q failed; its sandbox is at %s\n", sc.Name, s.sandbox)
+		}
 		if s.githubFake != nil {
 			s.githubFake.Close()
 			s.githubFake = nil
 		}
+		// Closing releases the flock with it, which is the point: a lock left
+		// held would outlive the scenario that meant it to stand for a live
+		// worker.
+		for _, f := range s.heldLocks {
+			_ = f.Close()
+		}
+		s.heldLocks = nil
+		// A scenario that made a directory read-only to force a delivery
+		// failure has to hand it back, or the sandbox it lives in outlives the
+		// run.
+		for _, dir := range s.restoreOnCleanup {
+			_ = os.Chmod(dir, 0o755)
+		}
+		s.restoreOnCleanup = nil
 		return ctx, nil
 	})
 
@@ -185,6 +369,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// Local git server
 	ctx.Step(`^a local git server is set up$`, aLocalGitServerIsSetUp)
 	ctx.Step(`^a config repo "([^"]*)" exists with body:$`, aConfigRepoExistsWithBody)
+	ctx.Step(`^a config repo "([^"]*)" exists with a "([^"]*)" source file and body:$`, aConfigRepoWithSourceFileAndBody)
 	ctx.Step(`^an overlay repo "([^"]*)" exists with body:$`, anOverlayRepoExistsWithBody)
 	ctx.Step(`^a source repo "([^"]*)" exists$`, aSourceRepoExists)
 	ctx.Step(`^I run niwa init from config repo "([^"]*)"$`, iRunNiwaInitFromConfigRepo)
@@ -195,6 +380,9 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^I pre-create directory "([^"]*)"$`, iPreCreateDirectory)
 	ctx.Step(`^the registry already has workspace "([^"]*)" rooted at "([^"]*)"$`, iRegisterWorkspaceAt)
 	ctx.Step(`^the workspace root "([^"]*)" has a workspace\.toml$`, theWorkspaceRootHasWorkspaceTOML)
+	ctx.Step(`^the file "([^"]*)" exists under workspace root "([^"]*)"$`, theFileExistsUnderWorkspaceRoot)
+	ctx.Step(`^the file "([^"]*)" does not exist under workspace root "([^"]*)"$`, theFileDoesNotExistUnderWorkspaceRoot)
+	ctx.Step(`^the file "([^"]*)" under workspace root "([^"]*)" contains "([^"]*)"$`, theFileUnderWorkspaceRootContains)
 	ctx.Step(`^the registry has workspace "([^"]*)" rooted at "([^"]*)"$`, theRegistryHasWorkspaceRootedAt)
 	ctx.Step(`^the registry entry "([^"]*)" still points at "([^"]*)"$`, theRegistryHasWorkspaceRootedAt)
 	ctx.Step(`^niwa go "([^"]*)" from outside lands in "([^"]*)"$`, niwaGoFromOutsideLandsIn)
@@ -207,8 +395,14 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the config repo "([^"]*)" is force-pushed to:$`, func(ctx context.Context, name string, body *godog.DocString) (context.Context, error) {
 		return theConfigRepoIsForcePushedTo(ctx, name, body.Content)
 	})
+	ctx.Step(`^the config repo "([^"]*)" is unreachable$`, theConfigRepoIsUnreachable)
 	ctx.Step(`^the provenance marker exists$`, theProvenanceMarkerExistsInWorkspaceRoot)
 	ctx.Step(`^the config dir is a git working tree from config repo "([^"]*)"$`, theConfigDirIsAGitWorkingTree)
+	ctx.Step(`^a dispatch brief "([^"]*)" exists in the workspace root$`, aDispatchBriefExistsInWorkspaceRoot)
+	ctx.Step(`^the dispatch brief "([^"]*)" still exists in the workspace root$`, theDispatchBriefStillExistsInWorkspaceRoot)
+	ctx.Step(`^the file "([^"]*)" under the workspace root contains "([^"]*)"$`, theMaterializedFileAtWorkspaceRootContains)
+	ctx.Step(`^the JSON file "([^"]*)" under the workspace root has no key "([^"]*)"$`, theJSONFileAtWorkspaceRootHasNoKey)
+	ctx.Step(`^the JSON file "([^"]*)" under the workspace root has key "([^"]*)" equal to "([^"]*)"$`, theJSONFileAtWorkspaceRootHasKeyEqualTo)
 
 	// Assertions
 	ctx.Step(`^the exit code is (\d+)$`, theExitCodeIs)
@@ -237,6 +431,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 		return iWriteFileToRepoInInstance(ctx, content, relPath, groupRepo, instanceName)
 	})
 	ctx.Step(`^I write to file "([^"]*)" in repo "([^"]*)" of instance "([^"]*)" with body:$`, iWriteFileBodyToRepoInInstance)
+	ctx.Step(`^I write an executable file "([^"]*)" in repo "([^"]*)" of instance "([^"]*)" with body:$`, iWriteExecutableFileToRepoInInstance)
 	ctx.Step(`^the completion output contains "([^"]*)"$`, theCompletionOutputContains)
 	ctx.Step(`^the completion output does not contain "([^"]*)"$`, theCompletionOutputDoesNotContain)
 	ctx.Step(`^the completion description for "([^"]*)" is "([^"]*)"$`, theCompletionDescriptionMatches)
@@ -294,6 +489,48 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// --- @critical: rank-2 deprecation + plugin auto-install ---
 	registerRank2Steps(ctx)
 
+	// --- git invisibility: niwa stays out of managed repos' git status ---
+	registerGitInvisibilitySteps(ctx)
+
+	// --- plugin-record lifecycle: destroy prune, create/update heal,
+	// release-tracking (Issue 8) ---
+	registerPluginRecordSteps(ctx)
+
+	// --- worktree-delegation integration: from-hook create/remove + the
+	// supported/deny/opt-out install branches (deterministic via a fake claude) ---
+	registerWorktreeDelegationSteps(ctx)
+
+	// --- worktree teardown by session id or handle: destroy resolved from the
+	// workspace root against the worktrees of a dispatched session's instance ---
+	registerWorktreeTeardownSteps(ctx)
+
+	// --- ephemeral-session integration: instance from-hook provision/teardown
+	// and the orphan reaper, driven against the offline localGitServer ---
+	registerEphemeralSessionSteps(ctx)
+
+	// --- dispatch lifecycle: niwa dispatch provision/rollback and reaper
+	// reclamation, driven offline against the localGitServer with a fake claude ---
+	registerDispatchSteps(ctx)
+	registerDispatchSpillSteps(ctx)
+	registerKeepAliveSteps(ctx)
+
+	// --- session-message acceptance: the --accept-session-messages flag, the
+	// accept_session_messages_on_dispatch machine key, and what each one puts
+	// in front of the launched worker ---
+	registerSessionMessageSteps(ctx)
+
+	// --- permission posture: the host config a posture scenario needs and the
+	// settings documents a declared posture reaches ---
+	registerPostureSteps(ctx)
+
+	// --- the Codex acceptance bar: what a session in a prepared instance gets
+	// from the capability contract, and what the table says it does not ---
+	registerCodexAgentSteps(ctx)
+
+	// --- plugin pre-warm settings drift (#179): the pre-warm must not dirty
+	// niwa's managed settings.json while still resolving plugins to disk ---
+	registerPrewarmDriftSteps(ctx)
+
 	// --- Init-bootstrap harness extensions (Issue 5) ---
 	// GitHub tarball fake — spun up lazily per scenario; backed by the
 	// existing tarballFakeServer used by unit tests. Wire it into the
@@ -305,7 +542,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the GitHub fake returns HTTP (\d+) for "([^"]*)" repo metadata$`, theGitHubFakeReturnsStatusForRepoMetadata)
 	ctx.Step(`^the GitHub fake serves "([^"]*)" repo metadata with body:$`, theGitHubFakeServesRepoMetadataWithBody)
 
-	// TTY simulation: drive niwa init under util-linux `script -q` so
-	// stdin is a real pty. The supplied input is fed line-by-line.
+	// TTY simulation: run the command under util-linux `script -q` so stdin
+	// and stdout are a real pty, and feed it the supplied input. Defined in
+	// steps_pty_test.go, which holds the harness's terminal primitives; the
+	// session-message steps register two more of them against the same runner.
 	ctx.Step(`^I run "([^"]*)" under a pty with input "([^"]*)"$`, iRunUnderPTYWithInput)
+	ctx.Step(`^I run "([^"]*)" with stdin held open$`, iRunWithStdinHeldOpen)
 }

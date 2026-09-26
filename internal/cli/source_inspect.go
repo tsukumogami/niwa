@@ -81,22 +81,22 @@ var inspectExit = os.Exit
 
 // inspectResult is the schema_version=1 JSON envelope.
 type inspectResult struct {
-	SchemaVersion       int             `json:"schema_version"`
-	Slug                string          `json:"slug"`
-	Host                string          `json:"host"`
-	Owner               string          `json:"owner"`
-	Repo                string          `json:"repo"`
-	ExplicitSubpath     string          `json:"explicit_subpath"`
-	MarkersFoundAtRoot  []string        `json:"markers_found_at_root"`
-	Resolved            *inspectResolve `json:"resolved,omitempty"`
-	Error               *inspectError   `json:"error,omitempty"`
+	SchemaVersion      int             `json:"schema_version"`
+	Slug               string          `json:"slug"`
+	Host               string          `json:"host"`
+	Owner              string          `json:"owner"`
+	Repo               string          `json:"repo"`
+	ExplicitSubpath    string          `json:"explicit_subpath"`
+	MarkersFoundAtRoot []string        `json:"markers_found_at_root"`
+	Resolved           *inspectResolve `json:"resolved,omitempty"`
+	Error              *inspectError   `json:"error,omitempty"`
 }
 
 type inspectResolve struct {
-	Rank           int    `json:"rank"`
-	Subpath        string `json:"subpath"`
-	Deprecated     bool   `json:"deprecated"`
-	MigrationHint  string `json:"migration_hint"`
+	Rank          int    `json:"rank"`
+	Subpath       string `json:"subpath"`
+	Deprecated    bool   `json:"deprecated"`
+	MigrationHint string `json:"migration_hint"`
 }
 
 type inspectError struct {

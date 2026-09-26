@@ -1,0 +1,1405 @@
+Feature: prepare every instance for both agents
+  Every instance niwa prepares serves Claude Code and Codex alike. Nothing
+  narrows that: create and apply take no agent flag, and default_agent --
+  whether a workspace states it or a developer sets it machine-wide -- selects
+  which agent a niwa-launched session runs, not what preparation produces.
+  Which agent gets launched is agent-selection.feature's subject. niwa still
+  writes no AGENTS.md inside a cloned repository, so a repo's own committed
+  AGENTS.md is never clobbered.
+
+  Design: docs/designs/current/DESIGN-agent-capability-contract.md
+  Requirements: docs/prds/PRD-agent-capability-contract.md
+  Guide: docs/guides/codex-agent.md
+
+  What a Codex session "sees" is decided here against the single context file
+  Codex's first-match rule selects for a directory: the walk starts at the
+  nearest ancestor holding a project-root marker (`.git`), reads one file per
+  directory down to the working directory, and takes AGENTS.override.md ahead
+  of AGENTS.md. Every "Codex context at" step below reports that selection, so
+  a scenario fails when a lower-precedence candidate shadows the composed file
+  -- the silent failure the whole override design exists to prevent. No step
+  needs a live session, a network, or a model.
+
+  The project layer niwa writes for Codex splits by scope. The configuration
+  half -- MCP servers, environment, posture, all of it one `.codex/config.toml`
+  -- lands inside a repository and nowhere else, so the payload assertions below
+  are keyed by a working-tree location. Orientation and skills also land at the
+  instance root, because a session started there reads its own working directory
+  whether or not a project-root marker was ever found above it, and skills load
+  from that directory without a trust entry while the configuration keys do not.
+  The walker below models the discovery half: with no marker in the ancestry it
+  treats the starting directory as the root, which is what codex-cli does.
+
+  The scenarios that do need a live session gate on `codex` being on PATH and
+  skip when it is absent, so the @critical set stays offline and fast. They
+  come under two tags, because they cost two different things. @codex-live
+  scenarios run a model turn, so their gate wants a login as well as a binary
+  and they are never the only coverage for a mechanism -- except the
+  interactive start, where a live check carries information nothing else can.
+  The @codex-discovery scenario spends nothing: it renders a session's own
+  prompt and reads it, so its gate is the binary alone and it skips only where
+  Codex is not installed. That one is deliberately the only coverage for what
+  it claims, since what a session resolves is not something an offline check
+  can decide.
+
+  @critical
+  Scenario: a codex-default workspace still materializes the whole Claude tree
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "app" exists
+    And a config repo "ws" exists with a "ws.md" source file and body:
+      """
+      [workspace]
+      name = "ws"
+      default_agent = "codex"
+
+      [groups.tools]
+
+      [content.workspace]
+      source = "ws.md"
+
+      [content.repos.app]
+      source = "ws.md"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    And the instance "ws" exists
+    # The Claude tree is written in full whatever default_agent says.
+    And the file "CLAUDE.md" exists in instance "ws"
+    And the file "CLAUDE.md" in instance "ws" contains "mcpServers"
+    And the file "tools/app/CLAUDE.local.md" exists in instance "ws"
+    # And so is the Codex side, at the only placement a Codex session reads.
+    And the Codex context at "ws/tools/app" selects "AGENTS.override.md"
+    And the Codex context at "ws/tools/app" contains "mcpServers"
+    # niwa writes AGENTS.override.md into repositories, never AGENTS.md: this
+    # assertion guards the repo's own committed file and must stay.
+    And the file "tools/app/AGENTS.md" does not exist in instance "ws"
+    # A config declaring the agent setting re-applies with no migration step.
+    When I run "niwa apply ws"
+    Then the exit code is 0
+    And the file "CLAUDE.md" exists in instance "ws"
+    And the Codex context at "ws/tools/app" selects "AGENTS.override.md"
+    # No agent selection anywhere in create or apply: the flag does not exist.
+    When I run "niwa apply ws --agent codex"
+    Then the exit code is not 0
+    And the error output contains "unknown flag"
+
+  @critical
+  Scenario: dispatch launches a Codex worker in a codex-default workspace
+    # This scenario used to pin dispatch's refusal in a codex-default
+    # workspace, and it is the same scenario rather than a new one beside it:
+    # what changed is the declaration, so what it asserts follows.
+    #
+    # None of it is a rule this scenario knows on its own, and none of it is a
+    # rule the command knows either. Launching a background worker is a
+    # declared capability; the gate is a lookup against that declaration; the
+    # launch flags come from the same declaration; and the guide is generated
+    # from it. The assertions pin the table, the guide, and the binary against
+    # each other, so a delivery cannot end up described three different ways --
+    # which is what happens the moment a hand-written string and a table are
+    # edited separately.
+    #
+    # No agent is named on the command line. The workspace's default_agent is
+    # the whole selection surface, which is the convention every other niwa
+    # command already follows.
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+      default_agent = "codex"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    Given a fake codex for dispatch with session "01a00000-0000-7000-8000-00000000beef"
+    When I run "niwa dispatch some-task --detach" from the workspace root
+    Then the exit code is 0
+    And the capability "dispatch-launch" is declared implemented for Codex
+    And the committed Codex gap list does not mention "Launching a background worker"
+    # The session id came from the record the worker wrote, correlated to the
+    # instance it was launched in, and it keys the durable mapping.
+    And the dispatch mapping for session "01a00000-0000-7000-8000-00000000beef" records agent "codex"
+    # The management hint niwa prints is the agent's own verb, so it is a
+    # command the binary actually has.
+    # This one reads the grant rather than the prefix: the command niwa prints
+    # vouches for the instance the worker was dispatched into, so a developer
+    # who pastes it lands in the posture the launch turn had.
+    And the printed resume command for "01a00000-0000-7000-8000-00000000beef" grants the dispatched instance
+    # The launch flags are a contract with the real binary. Without the
+    # git-repo-check skip the run refuses to start at all, since an instance
+    # root is not a git repository; the trust override is what decides whether
+    # the worker can write, granted for this invocation rather than written
+    # into the developer's own configuration; and --ephemeral would suppress
+    # the very record the capture above read.
+    And the codex launch argv contains "exec"
+    And the codex launch argv contains "--skip-git-repo-check"
+    And the codex launch argv contains "trust_level"
+    And the codex launch argv does not contain "--ephemeral"
+    And the codex launch argv does not contain "--sandbox"
+    # The machine-readable stream flag rides this path, because the output goes
+    # to a file inside the instance and niwa is the one that reads it back.
+    And the codex launch argv contains "--json"
+    # And the worker's own output went there rather than here: a detached
+    # dispatch returns without the turn, so there is nothing to watch.
+    And the output does not contain "fake codex: running the turn"
+
+  @critical
+  Scenario: a plain dispatch runs the turn in the terminal that asked for it
+    # The other half of the flag. This agent's runner executes the whole turn
+    # in the foreground of the process it is started as, so without --detach
+    # niwa runs it here and the developer watches the work -- which for this
+    # runner is what attaching to the session would have been. The same
+    # dispatch with --detach is the scenario above.
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+      default_agent = "codex"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    Given a fake codex for dispatch with session "01a00000-0000-7000-8000-00000000cafe"
+    When I run "niwa dispatch some-task" from the workspace root
+    Then the exit code is 0
+    # The turn ran in front of the caller: its output is on this terminal.
+    And the output contains "fake codex: running the turn"
+    # Capture is indifferent to which way the worker was started -- the session
+    # id comes from the record on disk, not from the stream -- so the durable
+    # mapping is written here exactly as it is for a detached launch. Asserted
+    # rather than assumed, because "it follows" is how a path stops being
+    # covered.
+    And the dispatch mapping for session "01a00000-0000-7000-8000-00000000cafe" records agent "codex"
+    And the printed resume command for "01a00000-0000-7000-8000-00000000cafe" grants the dispatched instance
+    # The developer is the reader here, so the flag that exists to make the
+    # output machine-readable is not sent. Everything else is what the detached
+    # launch sends.
+    And the codex launch argv does not contain "--json"
+    And the codex launch argv contains "exec"
+    And the codex launch argv contains "--skip-git-repo-check"
+    And the codex launch argv contains "trust_level"
+    And the codex launch argv does not contain "--ephemeral"
+    # And nothing apologizes for a session it could not open, because there was
+    # nothing to open: the turn the developer just watched has ended.
+    And the error output does not contain "still running"
+    And the error output contains "turn ended"
+
+  @critical
+  Scenario: a claude-default workspace materializes both agents' context too
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "app" exists
+    And a config repo "ws" exists with a "ws.md" source file and body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [content.workspace]
+      source = "ws.md"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+
+      [mcp.servers.demo]
+      command = "demo-server"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    And the instance "ws" exists
+    And the file "CLAUDE.md" exists in instance "ws"
+    # A config predating the agent setting re-applies unchanged, and still
+    # serves both agents: an instance that serves both is what is asked for,
+    # not merely one that exits zero, so the Codex side is asserted too.
+    When I run "niwa apply ws"
+    Then the exit code is 0
+    And the file "CLAUDE.md" exists in instance "ws"
+    And the Codex context at "ws/tools/app" selects "AGENTS.override.md"
+    And the Codex payload at "ws/tools/app" is niwa's own
+    And the Codex payload at "ws/tools/app" declares MCP server "demo"
+    And the developer Codex config trusts repo "app" in instance "ws"
+
+  # ---------------------------------------------------------------------
+  # One prepared instance, read from three directories deep inside a
+  # repository that ships context files of its own.
+  #
+  # No step here sets NIWA_* or CODEX_HOME, and the selection the assertions
+  # read is a property of the filesystem, so it is the same selection a shell
+  # with no environment preparation would make.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: a prepared instance serves a Codex session from a repository down
+    Given a clean niwa environment
+    And a local git server is set up
+    And a staged file "AGENTS.md" with body:
+      """
+      The app repository's own context. SENTINEL-REPO-COMMITTED
+      """
+    And a staged file "docs/AGENTS.md" with body:
+      """
+      Context for the docs subtree only. SENTINEL-INTERMEDIATE
+      """
+    And a staged directory "docs/deep/deeper"
+    And a source repo "app" exists with the staged files
+    And a staged file ".niwa/content/instance.md" with body:
+      """
+      Instance layer. SENTINEL-INSTANCE
+      """
+    And a staged file ".niwa/content/group.md" with body:
+      """
+      Group layer. SENTINEL-GROUP
+      """
+    And a staged file ".niwa/content/repos/app.md" with body:
+      """
+      Repository layer. SENTINEL-REPO-CONFIGURED
+      """
+    And a config repo "ws" exists with the staged files and body:
+      """
+      [workspace]
+      name = "ws"
+      content_dir = "content"
+
+      [groups.tools]
+
+      [content.workspace]
+      source = "instance.md"
+
+      [content.groups.tools]
+      source = "group.md"
+
+      [content.repos.app]
+      source = "repos/app.md"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+
+      [mcp.servers.demo]
+      command = "demo-server"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    # Three directories deep, with a committed context file in an intermediate
+    # directory. The walk stops at the repository's .git, so every outer layer
+    # has to arrive through the composed override; the intermediate file proves
+    # the check is per-directory and not a repo-root read.
+    And the Codex context at "ws/tools/app/docs/deep/deeper" selects "AGENTS.override.md,docs/AGENTS.md"
+    And the Codex context at "ws/tools/app/docs/deep/deeper" contains "SENTINEL-INSTANCE"
+    And the Codex context at "ws/tools/app/docs/deep/deeper" contains "SENTINEL-GROUP"
+    And the Codex context at "ws/tools/app/docs/deep/deeper" contains "SENTINEL-REPO-CONFIGURED"
+    And the Codex context at "ws/tools/app/docs/deep/deeper" contains "SENTINEL-REPO-COMMITTED"
+    And the Codex context at "ws/tools/app/docs/deep/deeper" contains "SENTINEL-INTERMEDIATE"
+    # The repository's own file coexists with the composed one and comes out of
+    # the apply byte-identical.
+    And the file "AGENTS.md" at "ws/tools/app" matches git HEAD
+    # The payload a session standing here loads is niwa's own generated one.
+    And the Codex payload at "ws/tools/app" is niwa's own
+    And the Codex payload at "ws/tools/app" declares MCP server "demo"
+    # No hook definitions and no hook state anywhere, and no credentials.
+    And instance "ws" declares no Codex hooks
+    And the Codex payload at "ws/tools/app" declares no credentials
+    And the git status of every repo in instance "ws" is clean
+    And the git exclude of repo "app" in instance "ws" carries the Codex patterns
+
+  # ---------------------------------------------------------------------
+  # The other place a session gets started: the instance root itself, which is
+  # where `niwa dispatch` puts a background worker's working directory. This is
+  # the scenario for capability row 2, whose declaration said for a long time
+  # that a Codex session here could receive nothing, on the reasoning that an
+  # instance root holds no project-root marker. It holds none, and it does not
+  # need one.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: a session started at the instance root is oriented
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "app" exists
+    And a staged file ".niwa/content/instance.md" with body:
+      """
+      Instance layer. SENTINEL-INSTANCE
+      """
+    And a staged file ".niwa/content/group.md" with body:
+      """
+      Group layer. SENTINEL-GROUP
+      """
+    And a config repo "ws" exists with the staged files and body:
+      """
+      [workspace]
+      name = "ws"
+      content_dir = "content"
+
+      [groups.tools]
+
+      [content.workspace]
+      source = "instance.md"
+
+      [content.groups.tools]
+      source = "group.md"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    # Both agents get a document, each under its own root filename.
+    And the file "CLAUDE.md" exists in instance "ws"
+    And the file "AGENTS.md" exists in instance "ws"
+    # No marker anywhere above the instance root, so the walk is one directory
+    # long and that directory is the session's own. Selecting AGENTS.md is the
+    # whole claim row 2 used to deny.
+    And the Codex context at "ws" selects "AGENTS.md"
+    And the Codex context at "ws" contains "SENTINEL-INSTANCE"
+    # Claude reads the generated repo listing by following an @import beside
+    # the document; Codex cannot follow one, so it is folded in. Asserting the
+    # listing's own text rather than the file's existence is the point: the
+    # file exists either way, and only one of the two agents has the content.
+    And the Codex context at "ws" contains "each subdirectory under the group folders is a"
+    And the Codex context at "ws" contains "tools/app/"
+    # The group layer stays out. A group directory sits above the repository
+    # where a repo session's walk begins and below the instance root where this
+    # one begins, so a document there would be read by nobody; it travels
+    # composed into each repository instead.
+    And the file "tools/AGENTS.md" does not exist in instance "ws"
+    And the Codex context at "ws" does not contain "SENTINEL-GROUP"
+    # The delivery and the declaration are pinned to each other in both
+    # directions: this scenario would still pass on a table that had quietly
+    # gone back to declaring the row unavailable.
+    And the capability "root-session-orientation" is declared implemented for Codex
+
+  # ---------------------------------------------------------------------
+  # With nothing configured at any layer, niwa writes no file at its own name.
+  # An empty or marker-only override would claim the directory's single context
+  # slot and suppress the repository's own file in silence.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: a workspace with nothing to say leaves the repository's own context in place
+    Given a clean niwa environment
+    And a local git server is set up
+    And a staged file "AGENTS.md" with body:
+      """
+      The app repository's own context. SENTINEL-REPO-COMMITTED
+      """
+    And a source repo "app" exists with the staged files
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    And the file "AGENTS.override.md" does not exist at "ws/tools/app"
+    And the Codex context at "ws/tools/app" selects "AGENTS.md"
+    And the Codex context at "ws/tools/app" contains "SENTINEL-REPO-COMMITTED"
+    And the git status of every repo in instance "ws" is clean
+
+  # ---------------------------------------------------------------------
+  # The byte budget. Codex spends one counter across the whole chain,
+  # outermost-first, and truncates with no marker and nothing on stderr, so an
+  # over-budget chain eats the innermost layer in silence. niwa composes that
+  # chain, so it measures it, and declares a project_doc_max_bytes covering it in
+  # the project-layer configuration it already writes -- a report telling the
+  # developer to raise the budget by hand would only move the silence from Codex
+  # to niwa.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: a context chain past Codex's default budget is covered by a declared one
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "app" exists
+    And a staged file ".niwa/content/instance.md" of 20000 bytes ending with "SENTINEL-INSTANCE-TAIL"
+    And a staged file ".niwa/content/group.md" of 20000 bytes ending with "SENTINEL-GROUP-TAIL"
+    And a staged file ".niwa/content/repos/app.md" with body:
+      """
+      Repository layer, last in the chain and first to be cut.
+      SENTINEL-REPO-TAIL
+      """
+    And a config repo "ws" exists with the staged files and body:
+      """
+      [workspace]
+      name = "ws"
+      content_dir = "content"
+
+      [groups.tools]
+
+      [content.workspace]
+      source = "instance.md"
+
+      [content.groups.tools]
+      source = "group.md"
+
+      [content.repos.app]
+      source = "repos/app.md"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    And the Codex context at "ws/tools/app" selects "AGENTS.override.md"
+    And the Codex context at "ws/tools/app" exceeds the default Codex budget
+    # Nothing is dropped on niwa's side: the innermost layer is on disk whole.
+    And the Codex context at "ws/tools/app" contains "SENTINEL-REPO-TAIL"
+    # And a session reads all of it, because the budget covering the chain is
+    # declared in the project layer rather than left to the developer.
+    And the Codex payload at "ws/tools/app" is niwa's own
+    And the Codex payload at "ws/tools/app" declares a budget covering the composed chain
+    # The configuration a chain this size brings with it is covered like every
+    # other name niwa writes into a working tree.
+    And the git status of every repo in instance "ws" is clean
+
+  # ---------------------------------------------------------------------
+  # The workspace's skills, delivered whole and under the same name Claude
+  # resolves them by. The marketplace is a repository this workspace clones, so
+  # the whole scenario runs offline.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: the workspace's skills reach Codex whole and namespaced
+    Given a clean niwa environment
+    And a local git server is set up
+    And a fake claude for plugin pre-warming
+    And a staged file ".claude-plugin/marketplace.json" with body:
+      """
+      {"name":"demo-market","plugins":[{"name":"demo","source":"./plugins/demo"}]}
+      """
+    And a staged file "plugins/demo/.claude-plugin/plugin.json" with body:
+      """
+      {"name":"demo","version":"0.1.0"}
+      """
+    And a staged file "plugins/demo/skills/greet/SKILL.md" with body:
+      """
+      ---
+      name: greet
+      ---
+      SENTINEL-SKILL-BODY
+      """
+    And a staged file "plugins/demo/references/notes.md" with body:
+      """
+      Reference material the skill points at. SENTINEL-REFERENCE
+      """
+    And a staged file "plugins/demo/scripts/run.sh" with body:
+      """
+      #!/bin/sh
+      echo SENTINEL-SCRIPT
+      """
+    And a source repo "mkt" exists with the staged files
+    And a source repo "app" exists
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [claude]
+      plugins = ["demo@demo-market"]
+
+      [[claude.marketplaces]]
+      source = "repo:mkt/.claude-plugin/marketplace.json"
+
+      [repos.mkt]
+      url = "{repo:mkt}"
+      group = "tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    # The plugin resolves under its own name, and the delivered root is the
+    # whole plugin: manifest, references, and scripts, every file byte-identical.
+    And the Codex skills tree "demo" at "ws/tools/app" mirrors "ws/tools/mkt/plugins/demo"
+    And the file ".codex/skills/demo/.claude-plugin/plugin.json" exists at "ws/tools/app"
+    And the file ".codex/skills/demo/references/notes.md" exists at "ws/tools/app"
+    And the file ".codex/skills/demo/scripts/run.sh" exists at "ws/tools/app"
+    And "ws/tools/app" holds exactly 1 Codex skills tree
+    # Reconciliation, not accumulation: the set is the same after re-applying.
+    When I run "niwa apply ws"
+    Then the exit code is 0
+    When I run "niwa apply ws"
+    Then the exit code is 0
+    And "ws/tools/app" holds exactly 1 Codex skills tree
+    And the Codex skills tree "demo" at "ws/tools/app" mirrors "ws/tools/mkt/plugins/demo"
+    And the git status of every repo in instance "ws" is clean
+
+  # ---------------------------------------------------------------------
+  # The same trees one directory higher, at the instance root -- which is where
+  # `niwa dispatch` puts a background worker's working directory, and the one
+  # place a session stands that belongs to no repository. Beside the plugins the
+  # workspace configures sits the plugin niwa ships itself, extracted out of the
+  # binary into the instance and delivered under its own name.
+  #
+  # Every assertion below is about placement: what niwa wrote, where, and what
+  # it took away again. No session runs here, so none of it says anything about
+  # what a session resolves -- that claim needs the real binary, and it is the
+  # subject of the credential-free live scenario at the end of this file.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: the instance root receives the workspace's skills beside niwa's own
+    Given a clean niwa environment
+    And a local git server is set up
+    And a fake claude for plugin pre-warming
+    And a staged file ".claude-plugin/marketplace.json" with body:
+      """
+      {"name":"demo-market","plugins":[{"name":"demo","source":"./plugins/demo"}]}
+      """
+    And a staged file "plugins/demo/.claude-plugin/plugin.json" with body:
+      """
+      {"name":"demo","version":"0.1.0"}
+      """
+    And a staged file "plugins/demo/skills/greet/SKILL.md" with body:
+      """
+      ---
+      name: greet
+      ---
+      SENTINEL-SKILL-BODY
+      """
+    And a source repo "mkt" exists with the staged files
+    And a source repo "app" exists
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [claude]
+      plugins = ["demo@demo-market"]
+
+      [[claude.marketplaces]]
+      source = "repo:mkt/.claude-plugin/marketplace.json"
+
+      [repos.mkt]
+      url = "{repo:mkt}"
+      group = "tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    # The configured plugin arrives whole, the same bytes it arrives as inside a
+    # repository, and niwa's own arrives beside it from the extraction site the
+    # instance keeps under .niwa/plugin.
+    And the Codex skills tree "demo" at "ws" mirrors "ws/tools/mkt/plugins/demo"
+    And the Codex skills tree "niwa" at "ws" mirrors "ws/.niwa/plugin/niwa"
+    And the file ".codex/skills/niwa/skills/migrate-config/SKILL.md" exists at "ws"
+    And "ws" holds exactly 2 Codex skills trees
+    # And nothing one directory above it. The workspace root holds every other
+    # instance and whatever else the developer keeps there; a tree landing up
+    # here would be niwa writing outside the instance it was asked to prepare.
+    And "." holds exactly 0 Codex skills trees
+    # Reconciliation, not accumulation, at the root as in a repository.
+    When I run "niwa apply ws"
+    Then the exit code is 0
+    When I run "niwa apply ws"
+    Then the exit code is 0
+    And "ws" holds exactly 2 Codex skills trees
+    And the Codex skills tree "demo" at "ws" mirrors "ws/tools/mkt/plugins/demo"
+    And the Codex skills tree "niwa" at "ws" mirrors "ws/.niwa/plugin/niwa"
+    # De-configuring the plugin takes its tree away on the next apply and leaves
+    # niwa's own where it is. The two are delivered by different capabilities
+    # into one directory, so a cleanup built from the configured names alone
+    # would sweep a tree nobody de-configured.
+    When the config repo "ws" is re-pushed with the staged files and body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [[claude.marketplaces]]
+      source = "repo:mkt/.claude-plugin/marketplace.json"
+
+      [repos.mkt]
+      url = "{repo:mkt}"
+      group = "tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    And I run "niwa apply ws"
+    Then the exit code is 0
+    And the file ".codex/skills/demo" does not exist at "ws"
+    And "ws" holds exactly 1 Codex skills tree
+    And the Codex skills tree "niwa" at "ws" mirrors "ws/.niwa/plugin/niwa"
+    And the git status of every repo in instance "ws" is clean
+
+  # ---------------------------------------------------------------------
+  # A workspace is free to call a marketplace `niwa`, and nothing about that
+  # reaches the plugin niwa ships itself. Marketplace content is kept under the
+  # instance's .niwa/marketplaces and niwa's own tree is extracted under
+  # .niwa/plugin, so the two cannot land on each other whatever either is
+  # named; and only a plugin's name ever becomes a delivery name at the root,
+  # never a marketplace's. Both trees arrive, independently, and this scenario
+  # is what keeps that true.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: a marketplace named niwa and niwa's own plugin both land at the root
+    Given a clean niwa environment
+    And a local git server is set up
+    And a fake claude for plugin pre-warming
+    And a staged file ".claude-plugin/marketplace.json" with body:
+      """
+      {"name":"niwa","plugins":[{"name":"demo","source":"./plugins/demo"}]}
+      """
+    And a staged file "plugins/demo/.claude-plugin/plugin.json" with body:
+      """
+      {"name":"demo","version":"0.1.0"}
+      """
+    And a staged file "plugins/demo/skills/greet/SKILL.md" with body:
+      """
+      ---
+      name: greet
+      ---
+      SENTINEL-MARKETPLACE-NAMED-NIWA
+      """
+    And a source repo "mkt" exists with the staged files
+    And a source repo "app" exists
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [claude]
+      plugins = ["demo@niwa"]
+
+      [[claude.marketplaces]]
+      source = "repo:mkt/.claude-plugin/marketplace.json"
+
+      [repos.mkt]
+      url = "{repo:mkt}"
+      group = "tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    # Both trees, each its own source's content: the marketplace's plugin under
+    # the plugin's own name, niwa's under the name only niwa delivers.
+    And "ws" holds exactly 2 Codex skills trees
+    And the Codex skills tree "demo" at "ws" mirrors "ws/tools/mkt/plugins/demo"
+    And the Codex skills tree "niwa" at "ws" mirrors "ws/.niwa/plugin/niwa"
+    And the file ".codex/skills/niwa/skills/migrate-config/SKILL.md" exists at "ws"
+    # Nothing was refused, because nothing collided.
+    And the error output does not contain "is not delivered at the instance root"
+    # The per-repository delivery is the marketplace's plugin and only that.
+    And "ws/tools/app" holds exactly 1 Codex skills tree
+    And the Codex skills tree "demo" at "ws/tools/app" mirrors "ws/tools/mkt/plugins/demo"
+    And the git status of every repo in instance "ws" is clean
+
+  # ---------------------------------------------------------------------
+  # A workspace plugin called `niwa` is the collision that is real: two trees
+  # want one name in one directory, and whichever write ran last would win in
+  # silence. The configured one is refused at the root by stated rule, and the
+  # refusal names both sources, because a developer who configured that plugin
+  # has no other way to tell which tree they are looking at.
+  #
+  # Only the root is affected. Inside a repository there is no niwa tree to
+  # collide with, so the configured plugin is delivered there exactly as any
+  # other -- the refusal is scoped to the one directory that has a conflict,
+  # not to the plugin.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: a workspace plugin named niwa is refused at the root and kept in the repositories
+    Given a clean niwa environment
+    And a local git server is set up
+    And a fake claude for plugin pre-warming
+    And a staged file ".claude-plugin/marketplace.json" with body:
+      """
+      {"name":"demo-market","plugins":[{"name":"niwa","source":"./plugins/niwa"}]}
+      """
+    And a staged file "plugins/niwa/.claude-plugin/plugin.json" with body:
+      """
+      {"name":"niwa","version":"0.1.0"}
+      """
+    And a staged file "plugins/niwa/skills/greet/SKILL.md" with body:
+      """
+      ---
+      name: greet
+      ---
+      SENTINEL-WORKSPACE-PLUGIN-NAMED-NIWA
+      """
+    And a source repo "mkt" exists with the staged files
+    And a source repo "app" exists
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [claude]
+      plugins = ["niwa@demo-market"]
+
+      [[claude.marketplaces]]
+      source = "repo:mkt/.claude-plugin/marketplace.json"
+
+      [repos.mkt]
+      url = "{repo:mkt}"
+      group = "tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    # Reported, and reported with both sources in it: the configured tree that
+    # was skipped, and what holds the name instead.
+    And the error output contains "is not delivered at the instance root"
+    And the error output contains "tools/mkt/plugins/niwa"
+    And the error output contains "that name carries niwa's own plugin there"
+    # The one tree at the root is niwa's own, asserted by content rather than by
+    # name: mirroring is exact, and the configured plugin's tree is not this.
+    And "ws" holds exactly 1 Codex skills tree
+    And the Codex skills tree "niwa" at "ws" mirrors "ws/.niwa/plugin/niwa"
+    And the file ".codex/skills/niwa/skills/migrate-config/SKILL.md" exists at "ws"
+    # And down in the repository, the configured plugin is delivered untouched.
+    And "ws/tools/app" holds exactly 1 Codex skills tree
+    And the Codex skills tree "niwa" at "ws/tools/app" mirrors "ws/tools/mkt/plugins/niwa"
+    And the git status of every repo in instance "ws" is clean
+
+  # ---------------------------------------------------------------------
+  # The one write outside the instance. The workspace root is reached through a
+  # symlink here, so an entry keyed by the path as handed to niwa -- present,
+  # well-formed, and useless -- fails the canonical check.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: trust entries are canonical, one per repository, and additive
+    Given a clean niwa environment
+    And a local git server is set up
+    And the developer Codex config exists with body:
+      """
+      model = "gpt-5-codex"
+
+      [tui]
+      theme = "dark"
+      """
+    And the developer Codex home has a credential file
+    And a source repo "app" exists
+    And a source repo "lib" exists
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+
+      [repos.lib]
+      url = "{repo:lib}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    # From here on every path niwa derives carries a symlinked component.
+    Given the registry entry "ws" is re-pointed through a symlink
+    When I run "niwa create ws"
+    Then the exit code is 0
+    And the developer Codex config has exactly 2 project entries
+    And the developer Codex config trusts repo "app" in instance "ws"
+    And the developer Codex config trusts repo "lib" in instance "ws"
+    # Nothing of the developer's changed, and nothing global was added, so a
+    # repository outside any instance behaves exactly as before.
+    And the developer Codex config grew only by project entries inside the workspace root
+    # The login state is never read or written.
+    And the developer Codex credential file is unchanged
+    # Three applies, same entries.
+    When I run "niwa apply ws"
+    Then the exit code is 0
+    When I run "niwa apply ws"
+    Then the exit code is 0
+    And the developer Codex config has exactly 2 project entries
+    And the developer Codex config trusts repo "app" in instance "ws"
+    And the developer Codex config grew only by project entries inside the workspace root
+    And the developer Codex credential file is unchanged
+
+  # ---------------------------------------------------------------------
+  # niwa never opens the credential file, so one it cannot read fails nothing.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: an unreadable credential file fails neither create nor apply
+    Given a clean niwa environment
+    And a local git server is set up
+    And the developer Codex home has a credential file
+    And the developer Codex credential file is unreadable
+    And a source repo "app" exists
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I run "niwa apply ws"
+    Then the exit code is 0
+    And the developer Codex credential file is unchanged
+    And the developer Codex config trusts repo "app" in instance "ws"
+
+  # ---------------------------------------------------------------------
+  # A niwa-managed worktree is first-class for Codex. The instance-only
+  # sentinel is what a collapse to current-directory-only discovery would lose.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: a worktree carries the workspace context and its own framing
+    Given a clean niwa environment
+    And a local git server is set up
+    And a staged file "README.md" with body:
+      """
+      app
+      """
+    And a source repo "app" exists with the staged files
+    And a staged file ".niwa/content/instance.md" with body:
+      """
+      Instance layer. SENTINEL-INSTANCE
+      """
+    And a config repo "ws" exists with the staged files and body:
+      """
+      [workspace]
+      name = "ws"
+      content_dir = "content"
+
+      [groups.tools]
+
+      [content.workspace]
+      source = "instance.md"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+
+      [mcp.servers.demo]
+      command = "demo-server"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I call niwa worktree create for repo "app" with purpose "ship-the-thing" in instance "ws"
+    Then the last session is active in instance "ws"
+    And the Codex context at "{worktree}" selects "AGENTS.override.md"
+    And the Codex context at "{worktree}" contains "SENTINEL-INSTANCE"
+    And the Codex context at "{worktree}" contains "Worktree Context"
+    And the Codex context at "{worktree}" contains "ship-the-thing"
+    And the Codex context at "{worktree}" contains "- Branch:"
+    And the Codex payload at "{worktree}" is niwa's own
+    And the git status of the last worktree is clean
+    # The repository's own entry covers its worktrees; a per-worktree entry
+    # would leave one behind in the developer's config for every worktree that
+    # ever existed.
+    And the developer Codex config has exactly 1 project entry
+    And the developer Codex config does not trust the last worktree
+
+  # ---------------------------------------------------------------------
+  # Re-applying adds nothing. Every append-shaped surface is checked, since
+  # each accumulates differently when it regresses.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: re-applying three times adds nothing
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "app" exists
+    And a staged file ".niwa/content/instance.md" with body:
+      """
+      Instance layer. SENTINEL-INSTANCE
+      """
+    And a config repo "ws" exists with the staged files and body:
+      """
+      [workspace]
+      name = "ws"
+      content_dir = "content"
+
+      [groups.tools]
+
+      [content.workspace]
+      source = "instance.md"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+
+      [mcp.servers.demo]
+      command = "demo-server"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I run "niwa apply ws"
+    Then the exit code is 0
+    When I run "niwa apply ws"
+    Then the exit code is 0
+    And the git exclude of repo "app" in instance "ws" carries the Codex patterns
+    And "ws/tools/app" holds exactly 1 Codex config file
+    And the developer Codex config has exactly 1 project entry
+    And the Codex context at "ws/tools/app" selects "AGENTS.override.md"
+    And the Codex context at "ws/tools/app" contains "SENTINEL-INSTANCE"
+    And the git status of every repo in instance "ws" is clean
+
+  # ---------------------------------------------------------------------
+  # Refresh, not append. Yesterday's content must be gone from the clone and
+  # from the worktree.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: changed content replaces the previous content everywhere
+    Given a clean niwa environment
+    And a local git server is set up
+    And a staged file "README.md" with body:
+      """
+      app
+      """
+    And a source repo "app" exists with the staged files
+    And a staged file ".niwa/content/instance.md" with body:
+      """
+      Instance layer. SENTINEL-BEFORE
+      """
+    And a config repo "ws" exists with the staged files and body:
+      """
+      [workspace]
+      name = "ws"
+      content_dir = "content"
+
+      [groups.tools]
+
+      [content.workspace]
+      source = "instance.md"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I call niwa worktree create for repo "app" with purpose "refresh-the-thing" in instance "ws"
+    Then the last session is active in instance "ws"
+    And the Codex context at "ws/tools/app" contains "SENTINEL-BEFORE"
+    And the Codex context at "{worktree}" contains "SENTINEL-BEFORE"
+    Given a staged file ".niwa/content/instance.md" with body:
+      """
+      Instance layer. SENTINEL-AFTER
+      """
+    When the config repo "ws" is re-pushed with the staged files and body:
+      """
+      [workspace]
+      name = "ws"
+      content_dir = "content"
+
+      [groups.tools]
+
+      [content.workspace]
+      source = "instance.md"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    And I run "niwa apply ws"
+    Then the exit code is 0
+    And the Codex context at "ws/tools/app" contains "SENTINEL-AFTER"
+    And the Codex context at "ws/tools/app" does not contain "SENTINEL-BEFORE"
+    When I call niwa worktree apply for the last session in instance "ws"
+    Then the exit code is 0
+    And the Codex context at "{worktree}" contains "SENTINEL-AFTER"
+    And the Codex context at "{worktree}" does not contain "SENTINEL-BEFORE"
+    And the git status of the last worktree is clean
+
+  # ---------------------------------------------------------------------
+  # Committed content at either name niwa writes. Each shape degrades
+  # differently and all three are reported, nothing is overwritten, and no
+  # repository is left dirty.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: committed content at niwa's names degrades loudly and is never overwritten
+    Given a clean niwa environment
+    And a local git server is set up
+    And a staged file ".codex/config.toml" with body:
+      """
+      # the repository's own Codex payload
+      sentinel_committed_payload = true
+      """
+    And a source repo "owncodex" exists with the staged files
+    And a staged file "AGENTS.override.md" with body:
+      """
+      The repository's own override. SENTINEL-COMMITTED-OVERRIDE
+      """
+    And a source repo "ownoverride" exists with the staged files
+    And a staged symlink "AGENTS.md" pointing at "{home}/.codex/auth.json"
+    And a source repo "linked" exists with the staged files
+    And the developer Codex home has a credential file
+    And a staged file ".niwa/content/instance.md" with body:
+      """
+      Instance layer. SENTINEL-INSTANCE
+      """
+    And a config repo "ws" exists with the staged files and body:
+      """
+      [workspace]
+      name = "ws"
+      content_dir = "content"
+
+      [groups.tools]
+
+      [content.workspace]
+      source = "instance.md"
+
+      [repos.owncodex]
+      url = "{repo:owncodex}"
+      group = "tools"
+
+      [repos.ownoverride]
+      url = "{repo:ownoverride}"
+      group = "tools"
+
+      [repos.linked]
+      url = "{repo:linked}"
+      group = "tools"
+
+      [mcp.servers.demo]
+      command = "demo-server"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    # A committed payload costs the repository its generated configuration,
+    # reported and not silent, and its own file comes through untouched.
+    And the error output contains "tools/owncodex/.codex/config.toml is occupied by something niwa did not write"
+    And the file ".codex/config.toml" at "ws/tools/owncodex" matches git HEAD
+    # A committed override costs the composed context, also reported.
+    And the error output contains "tools/ownoverride/AGENTS.override.md is occupied by something niwa did not write"
+    And the file "AGENTS.override.md" at "ws/tools/ownoverride" matches git HEAD
+    And the Codex payload at "ws/tools/ownoverride" is niwa's own
+    And the developer Codex config trusts repo "ownoverride" in instance "ws"
+    # A committed context file that is a symlink is refused at the open, so the
+    # target's bytes never reach a session's instruction context.
+    And the error output contains "was not read into the composed context document"
+    And the Codex context at "ws/tools/linked" selects "AGENTS.override.md"
+    And the Codex context at "ws/tools/linked" contains "SENTINEL-INSTANCE"
+    And the Codex context at "ws/tools/linked" does not contain "developer-login-state"
+    And the developer Codex credential file is unchanged
+    And the git status of every repo in instance "ws" is clean
+
+  # ---------------------------------------------------------------------
+  # A delivery the table calls implemented fails the apply by name when it
+  # cannot land. Degrading silently would leave a session missing a capability
+  # the guide promises it, with nothing anywhere saying so.
+  # ---------------------------------------------------------------------
+
+  @critical
+  Scenario: an unwritable Codex delivery target fails the apply by name
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "app" exists
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+
+      [mcp.servers.demo]
+      command = "demo-server"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    And the Codex payload at "ws/tools/app" is niwa's own
+    Given the Codex payload directory of repo "app" in instance "ws" cannot be written
+    When I run "niwa apply ws"
+    Then the exit code is not 0
+    And the error output contains "delivering mcp-servers"
+    And the error output contains "permission denied"
+
+  # ---------------------------------------------------------------------
+  # Live and gated: a session in a freshly prepared repository writes on its
+  # first attempt, with no setup command run first. The gate is `codex` on
+  # PATH, a login the sandbox can use, and a machine whose kernel lets Codex
+  # build its own sandbox -- the last because a container that withholds
+  # unprivileged user namespaces blocks every session write whatever niwa
+  # prepared. Any of the three missing leaves the scenario pending, not failed.
+  # ---------------------------------------------------------------------
+
+  @codex-live
+  Scenario: a live Codex session writes a file on its first attempt
+    Given a clean niwa environment
+    And codex is available
+    And the Codex sandbox can run here
+    And a local git server is set up
+    And a source repo "app" exists
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I run codex exec from "ws/tools/app" with prompt:
+      """
+      Create a file named codex-wrote-this.txt in the current directory containing the single word ready.
+      """
+    Then the exit code is 0
+    And the file "codex-wrote-this.txt" exists at "ws/tools/app"
+
+  # ---------------------------------------------------------------------
+  # Live and gated: the interactive start, which is the one place a live check
+  # carries information nothing offline can, and the git status a session that
+  # only started leaves behind.
+  # ---------------------------------------------------------------------
+
+  @codex-live
+  Scenario: a live interactive Codex session starts clean from the root and from a nested directory
+    Given a clean niwa environment
+    And codex is available
+    And a local git server is set up
+    And a staged directory "src/inner"
+    And a source repo "app" exists with the staged files
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I start an interactive codex session at "ws/tools/app" under a pty
+    Then the codex session reached its ready state
+    And the codex session output shows no trust or approval prompt
+    When I start an interactive codex session at "ws/tools/app/src/inner" under a pty
+    Then the codex session reached its ready state
+    And the codex session output shows no trust or approval prompt
+    And the git status of every repo in instance "ws" is clean
+
+  # ---------------------------------------------------------------------
+  # The only scenario in this file that decides what a session resolves rather
+  # than what niwa wrote. `codex debug prompt-input` renders the developer
+  # message a session opens with, and its skills block names every skill the
+  # session resolved and the file each was read from. It consults no credential
+  # and calls no model, so the gate is the binary on PATH and nothing else: a
+  # machine without Codex skips this, a machine without a login does not.
+  #
+  # The second run is what makes the first one mean anything. It stands one
+  # directory below the instance root, so a real, populated skills tree -- the
+  # very one the first run resolved -- sits immediately above it. Those skills
+  # being absent from the second render is what separates "the session loaded
+  # from where it stands" from "the discovery walk went somewhere else and
+  # found them anyway". A negative control that was merely an empty directory
+  # would not tell the two apart.
+  # ---------------------------------------------------------------------
+
+  @codex-discovery
+  Scenario: a live Codex session at the instance root resolves the skills delivered there
+    Given a clean niwa environment
+    And the codex binary is on PATH
+    And a local git server is set up
+    And a fake claude for plugin pre-warming
+    And a staged file ".claude-plugin/marketplace.json" with body:
+      """
+      {"name":"demo-market","plugins":[{"name":"demo","source":"./plugins/demo"}]}
+      """
+    And a staged file "plugins/demo/.claude-plugin/plugin.json" with body:
+      """
+      {"name":"demo","version":"0.1.0"}
+      """
+    And a staged file "plugins/demo/skills/greet/SKILL.md" with body:
+      """
+      ---
+      name: greet
+      description: Greet somebody, for a scenario that needs a resolvable skill.
+      ---
+      SENTINEL-SKILL-BODY
+      """
+    And a source repo "mkt" exists with the staged files
+    And a source repo "app" exists
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [claude]
+      plugins = ["demo@demo-market"]
+
+      [[claude.marketplaces]]
+      source = "repo:mkt/.claude-plugin/marketplace.json"
+
+      [repos.mkt]
+      url = "{repo:mkt}"
+      group = "tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    # A session started where `niwa dispatch` starts one. Both delivered
+    # plugins resolve, each under the same `<plugin>:<skill>` name a Claude
+    # session invokes it by -- niwa's own included, whose doubled name is what
+    # its own frontmatter says it is called.
+    When I render the skills a Codex session at "ws" resolves
+    Then the resolved skills include "demo:greet"
+    And the resolved skills include "niwa:niwa-migrate-config"
+    # And each came out of the tree niwa delivered, not from a skill of the
+    # same name the machine happened to have elsewhere.
+    And the resolved skill "demo:greet" was read from a file under "ws"
+    And the resolved skill "niwa:niwa-migrate-config" was read from a file under "ws"
+    # The control: one directory down, with that whole tree directly overhead.
+    When I render the skills a Codex session at "ws/tools" resolves
+    Then the resolved skills do not include "demo:greet"
+    And the resolved skills do not include "niwa:niwa-migrate-config"
+
+  @codex-posture
+  Scenario: a dispatched Codex worker keeps its granted posture across a resume
+    # The acceptance evidence for the defect this feature fixes, and it is a
+    # measurement rather than an assertion about arguments. niwa elevates a
+    # dispatched worker by overriding trust for that one process; the bug was
+    # that nothing carried the override to the next one, so every way back into
+    # the session came up read-only with per-command approval -- a command that
+    # runs, reaches the right session, and quietly cannot write.
+    #
+    # Reading the argv niwa built proves nothing about that: the whole defect
+    # lived downstream of a correct-looking command line. So this reads what the
+    # binary itself resolved, out of the record it writes for each turn.
+    #
+    # It spends nothing and needs no login. Codex records a turn's resolved
+    # sandbox policy at turn bootstrap, before its first model request, so an
+    # unreachable model endpoint lets every turn bootstrap, record, and then
+    # fail on connect. That is why the gate here is the binary alone.
+    Given a clean niwa environment
+    And the codex binary is on PATH
+    And an isolated Codex home whose model endpoint is unreachable
+    And a local git server is set up
+    And a config repo "ws" exists with body:
+      """
+      [workspace]
+      name = "ws"
+      default_agent = "codex"
+      """
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I run "niwa dispatch probe --detach" from the workspace root
+    Then the exit code is 0
+    # Turn one, from the launch niwa performed: the grant took effect and the
+    # worker can write in the instance it was dispatched into.
+    And the dispatched session recorded these postures in order:
+      | sandbox         |
+      | workspace-write |
+    # Codex will not hand over a session while its own turn is still running,
+    # which it declares and niwa respects. The worker here never finishes on its
+    # own -- an unreachable endpoint reads as a network problem it keeps
+    # retrying -- so the scenario ends it before stepping back in.
+    When the dispatched worker has finished
+    # The negative control comes first on purpose. This is the command niwa
+    # printed before the fix -- the verb and the handle, nothing else -- and it
+    # is what the defect looked like from the inside.
+    When I resume the dispatched session without the grant
+    Then the dispatched session recorded these postures in order:
+      | sandbox         |
+      | workspace-write |
+      | read-only       |
+    # And the same resume carrying the grant niwa now prints, lifted verbatim
+    # out of its own output: the posture is the launch turn's again.
+    When I resume the dispatched session with the grant niwa printed
+    Then the dispatched session recorded these postures in order:
+      | sandbox         |
+      | workspace-write |
+      | read-only       |
+      | workspace-write |
+    # Measured on the same runs, not separately: the elevation left the Codex
+    # configuration alone, which is the property the per-invocation grant exists
+    # for and the one a persisted trust entry would have traded away.
+    And the sandbox Codex home holds no trust stanza

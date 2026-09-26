@@ -342,7 +342,11 @@ func TestSettingsMaterializerNoopWhenEmpty(t *testing.T) {
 	}
 }
 
-func TestSettingsMaterializerPermissionsOnly(t *testing.T) {
+// TestSettingsMaterializerBypassOnlyWritesNoPermissions declares only a bypass
+// posture. The document is still written, just without a permissions block:
+// rewriting it on every apply is what clears a permissions.defaultMode an
+// earlier niwa left in the file.
+func TestSettingsMaterializerBypassOnlyWritesNoPermissions(t *testing.T) {
 	tmpDir := t.TempDir()
 	repoDir := filepath.Join(tmpDir, "repo")
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
@@ -382,12 +386,10 @@ func TestSettingsMaterializerPermissionsOnly(t *testing.T) {
 		t.Fatalf("parsing settings JSON: %v", err)
 	}
 
-	perms, ok := doc["permissions"].(map[string]any)
-	if !ok {
-		t.Fatal("expected permissions key in output")
-	}
-	if perms["defaultMode"] != "bypassPermissions" {
-		t.Errorf("defaultMode = %v, want %q", perms["defaultMode"], "bypassPermissions")
+	// bypass writes no permission mode, and with no deny fallback the
+	// permissions block is left out entirely.
+	if perms, ok := doc["permissions"]; ok {
+		t.Errorf("permissions = %v, want the block absent for bypass", perms)
 	}
 
 	if _, ok := doc["hooks"]; ok {
@@ -431,8 +433,8 @@ func TestSettingsMaterializerAskPermissions(t *testing.T) {
 	}
 
 	perms := doc["permissions"].(map[string]any)
-	if perms["defaultMode"] != "askPermissions" {
-		t.Errorf("defaultMode = %v, want %q", perms["defaultMode"], "askPermissions")
+	if perms["defaultMode"] != "default" {
+		t.Errorf("defaultMode = %v, want %q", perms["defaultMode"], "default")
 	}
 }
 
@@ -566,10 +568,9 @@ func TestSettingsMaterializerSettingsAndHooks(t *testing.T) {
 		t.Fatalf("parsing JSON: %v", err)
 	}
 
-	// Verify permissions.
-	perms := doc["permissions"].(map[string]any)
-	if perms["defaultMode"] != "bypassPermissions" {
-		t.Errorf("defaultMode = %v, want %q", perms["defaultMode"], "bypassPermissions")
+	// Verify permissions: bypass writes no permission mode.
+	if perms, ok := doc["permissions"]; ok {
+		t.Errorf("permissions = %v, want the block absent for bypass", perms)
 	}
 
 	// Verify hooks.
@@ -885,7 +886,9 @@ func TestSettingsMaterializerAllBlocks(t *testing.T) {
 	ctx := &MaterializeContext{
 		Effective: EffectiveConfig{
 			Claude: config.ClaudeConfig{
-				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "bypass"}},
+				// ask, not bypass: bypass writes no permissions block, and this
+				// test wants every block present.
+				Settings: config.SettingsConfig{"permissions": config.MaybeSecret{Plain: "ask"}},
 				Env:      config.ClaudeEnvConfig{Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"GH_TOKEN": config.MaybeSecret{Plain: "ghp_test"}}}},
 			},
 		},
@@ -1671,7 +1674,7 @@ func TestBuildSettingsDocEmptyPlugins(t *testing.T) {
 
 func TestBuildSettingsDocGitHubMarketplace(t *testing.T) {
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
-		Marketplaces: []string{"tsukumogami/shirabe"},
+		Marketplaces: []config.MarketplaceConfig{{Source: "tsukumogami/shirabe"}},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1706,7 +1709,7 @@ func TestBuildSettingsDocRepoMarketplace(t *testing.T) {
 	repoIndex := map[string]string{"tools": repoDir}
 
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
-		Marketplaces: []string{"repo:tools/.claude-plugin/marketplace.json"},
+		Marketplaces: []config.MarketplaceConfig{{Source: "repo:tools/.claude-plugin/marketplace.json"}},
 		RepoIndex:    repoIndex,
 	})
 	if err != nil {
@@ -1736,7 +1739,7 @@ func TestBuildSettingsDocRepoMarketplaceMissingRepo(t *testing.T) {
 	repoIndex := map[string]string{"other": "/tmp/other"}
 
 	_, err := buildSettingsDoc(BuildSettingsConfig{
-		Marketplaces: []string{"repo:tools/.claude-plugin/marketplace.json"},
+		Marketplaces: []config.MarketplaceConfig{{Source: "repo:tools/.claude-plugin/marketplace.json"}},
 		RepoIndex:    repoIndex,
 	})
 	if err == nil {
@@ -1917,41 +1920,6 @@ func TestEnvMaterializerWritesMode0600(t *testing.T) {
 	}
 }
 
-// TestSettingsMaterializerCheckGitignoreWarning verifies that when
-// settings.local.json is written and the repo .gitignore is missing the
-// *.local* pattern, a warning is emitted to stderr. The materializer must
-// not return an error in this case.
-func TestSettingsMaterializerCheckGitignoreWarning(t *testing.T) {
-	tmpDir := t.TempDir()
-	repoDir := filepath.Join(tmpDir, "repo")
-	if err := os.MkdirAll(repoDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// Write a .gitignore that lacks *.local*.
-	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.log\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	ctx := &MaterializeContext{
-		Effective: EffectiveConfig{
-			Claude:  config.ClaudeConfig{},
-			Plugins: []string{"my-plugin@marketplace"},
-		},
-		RepoName: "testrepo",
-		RepoDir:  repoDir,
-	}
-
-	m := &SettingsMaterializer{}
-	written, err := m.Materialize(ctx)
-	// Must not return an error — warnings are non-fatal.
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(written) != 1 {
-		t.Fatalf("expected 1 file written, got %d", len(written))
-	}
-}
-
 // TestSettingsMaterializerWritesMode0600 asserts the settings
 // materializer writes .claude/settings.local.json with 0o600
 // permissions. Applies regardless of whether settings carry secrets.
@@ -1986,38 +1954,6 @@ func TestSettingsMaterializerWritesMode0600(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Errorf("settings file mode = %o, want 0o600", got)
-	}
-}
-
-// TestSettingsMaterializerCheckGitignoreHasPattern verifies that when the
-// repo .gitignore already contains *.local*, no warning is emitted (the
-// materializer still writes and returns without error).
-func TestSettingsMaterializerCheckGitignoreHasPattern(t *testing.T) {
-	tmpDir := t.TempDir()
-	repoDir := filepath.Join(tmpDir, "repo")
-	if err := os.MkdirAll(repoDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.local*\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	ctx := &MaterializeContext{
-		Effective: EffectiveConfig{
-			Claude:  config.ClaudeConfig{},
-			Plugins: []string{"my-plugin@marketplace"},
-		},
-		RepoName: "testrepo",
-		RepoDir:  repoDir,
-	}
-
-	m := &SettingsMaterializer{}
-	written, err := m.Materialize(ctx)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(written) != 1 {
-		t.Fatalf("expected 1 file written, got %d", len(written))
 	}
 }
 
@@ -2321,5 +2257,136 @@ func TestFilesMaterializerNotifiesOnLocalInfixInjection(t *testing.T) {
 	}
 	if got := buf2.String(); got != "" {
 		t.Errorf("destination already containing .local must not emit a notice, got:\n%s", got)
+	}
+}
+
+// --- materializeVerbatimFiles (non-repo verbatim copy) ---
+
+func TestMaterializeVerbatimFilesSingleFileVerbatim(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	targetDir := filepath.Join(tmpDir, "target")
+	os.MkdirAll(configDir, 0o755)
+	os.MkdirAll(targetDir, 0o755)
+	os.WriteFile(filepath.Join(configDir, "mcp.json"), []byte(`{"mcpServers":{}}`), 0o644)
+
+	ctx := &MaterializeContext{ConfigDir: configDir, RepoDir: targetDir}
+	written, err := materializeVerbatimFiles(ctx, map[string]string{"mcp.json": ".mcp.json"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := filepath.Join(targetDir, ".mcp.json")
+	if len(written) != 1 || written[0] != want {
+		t.Fatalf("written = %v, want [%s]", written, want)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Errorf("expected verbatim file at %s: %v", want, err)
+	}
+	// Crucially: NO .local infix was inserted.
+	if _, err := os.Stat(filepath.Join(targetDir, ".mcp.local.json")); err == nil {
+		t.Error("verbatim copy must not produce a .local-renamed file")
+	}
+}
+
+func TestMaterializeVerbatimFilesDirSourceVerbatim(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	targetDir := filepath.Join(tmpDir, "target")
+	os.MkdirAll(filepath.Join(configDir, "bundle", "sub"), 0o755)
+	os.MkdirAll(targetDir, 0o755)
+	os.WriteFile(filepath.Join(configDir, "bundle", "a.json"), []byte("a"), 0o644)
+	os.WriteFile(filepath.Join(configDir, "bundle", "sub", "b.md"), []byte("b"), 0o644)
+
+	ctx := &MaterializeContext{ConfigDir: configDir, RepoDir: targetDir}
+	written, err := materializeVerbatimFiles(ctx, map[string]string{"bundle/": "cfg/"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 2 {
+		t.Fatalf("expected 2 files, got %d: %v", len(written), written)
+	}
+	expected := map[string]bool{
+		filepath.Join(targetDir, "cfg", "a.json"):      true,
+		filepath.Join(targetDir, "cfg", "sub", "b.md"): true,
+	}
+	for _, w := range written {
+		if !expected[w] {
+			t.Errorf("unexpected/renamed written file: %q (expected verbatim names)", w)
+		}
+	}
+}
+
+func TestMaterializeVerbatimFilesEmptyDestSkipped(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	targetDir := filepath.Join(tmpDir, "target")
+	os.MkdirAll(configDir, 0o755)
+	os.MkdirAll(targetDir, 0o755)
+	os.WriteFile(filepath.Join(configDir, "mcp.json"), []byte("{}"), 0o644)
+
+	ctx := &MaterializeContext{ConfigDir: configDir, RepoDir: targetDir}
+	written, err := materializeVerbatimFiles(ctx, map[string]string{"mcp.json": ""})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(written) != 0 {
+		t.Errorf("empty-dest entry should be skipped, got %v", written)
+	}
+}
+
+func TestMaterializeVerbatimFilesRejectsSourceTraversal(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	targetDir := filepath.Join(tmpDir, "target")
+	os.MkdirAll(configDir, 0o755)
+	os.MkdirAll(targetDir, 0o755)
+
+	ctx := &MaterializeContext{ConfigDir: configDir, RepoDir: targetDir}
+	if _, err := materializeVerbatimFiles(ctx, map[string]string{"../../../etc/passwd": ".mcp.json"}); err == nil {
+		t.Fatal("expected error for source path traversal")
+	}
+}
+
+func TestMaterializeVerbatimFilesRejectsDestEscape(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	targetDir := filepath.Join(tmpDir, "target")
+	os.MkdirAll(configDir, 0o755)
+	os.MkdirAll(targetDir, 0o755)
+	os.WriteFile(filepath.Join(configDir, "mcp.json"), []byte("{}"), 0o644)
+
+	ctx := &MaterializeContext{ConfigDir: configDir, RepoDir: targetDir}
+	if _, err := materializeVerbatimFiles(ctx, map[string]string{"mcp.json": "../escape.json"}); err == nil {
+		t.Fatal("expected error for destination escaping the target root")
+	}
+}
+
+func TestMaterializeVerbatimFilesMode0600AndRecordsSource(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "config")
+	targetDir := filepath.Join(tmpDir, "target")
+	os.MkdirAll(configDir, 0o755)
+	os.MkdirAll(targetDir, 0o755)
+	os.WriteFile(filepath.Join(configDir, "mcp.json"), []byte("{}"), 0o644)
+
+	ctx := &MaterializeContext{
+		ConfigDir:    configDir,
+		RepoDir:      targetDir,
+		SourceTuples: map[string][]SourceEntry{},
+	}
+	written, err := materializeVerbatimFiles(ctx, map[string]string{"mcp.json": ".mcp.json"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	info, err := os.Stat(written[0])
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("verbatim file mode = %o, want 0o600", got)
+	}
+	srcs := ctx.SourceTuples[written[0]]
+	if len(srcs) != 1 || srcs[0].SourceID != "mcp.json" {
+		t.Errorf("source not recorded for fingerprinting: %v", srcs)
 	}
 }

@@ -30,6 +30,8 @@ func deepCopyWorkspaceConfig(in *config.WorkspaceConfig) *config.WorkspaceConfig
 	out.Files = cloneStringMap(in.Files)
 	out.Repos = deepCopyRepos(in.Repos)
 	out.Instance = deepCopyInstance(in.Instance)
+	out.MCP = deepCopyMCP(in.MCP)
+	out.Session = deepCopySession(in.Session)
 	// Vault is not mutated by the resolver: it is the source of
 	// truth for provider selection. Share by pointer.
 	return &out
@@ -62,6 +64,32 @@ func deepCopyClaudeOverride(in *config.ClaudeOverride) *config.ClaudeOverride {
 	return &out
 }
 
+// deepCopyCodexOverride copies a repo's [repos.<name>.codex] block.
+//
+// This was missing from deepCopyRepos entirely until niwa#289: the literal
+// there rebuilds RepoOverride field by field and listed eleven of its twelve
+// fields, with Codex absent while its immediate neighbour Claude was copied two
+// lines above. The consequence was silent and fail-open -- AgentEnabled falls
+// back to the workspace gate when the repo override is nil, and to true when
+// that is unset, so a repo that explicitly set `enabled = false` had that
+// opt-out dropped on the vault-resolved path and Codex content delivered into a
+// repo whose owner had said not to.
+//
+// The field is a *bool inside a pointer struct, so the copy has to allocate a
+// new struct rather than share the pointer, or a later mutation through one
+// config would be visible through the other.
+func deepCopyCodexOverride(in *config.CodexOverride) *config.CodexOverride {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.Enabled != nil {
+		v := *in.Enabled
+		out.Enabled = &v
+	}
+	return &out
+}
+
 func deepCopyEnv(in config.EnvConfig) config.EnvConfig {
 	return config.EnvConfig{
 		Files:   slices.Clone(in.Files),
@@ -90,11 +118,14 @@ func deepCopyRepos(in map[string]config.RepoOverride) map[string]config.RepoOver
 			Branch:           ov.Branch,
 			Scope:            ov.Scope,
 			Claude:           deepCopyClaudeOverride(ov.Claude),
+			Codex:            deepCopyCodexOverride(ov.Codex),
 			Env:              deepCopyEnv(ov.Env),
 			Files:            cloneStringMap(ov.Files),
 			SetupDir:         ov.SetupDir,
 			ReadEnvExample:   ov.ReadEnvExample,
+			WorktreeSetup:    ov.WorktreeSetup,
 			EnvExamplePolicy: deepCopyEnvExamplePolicy(ov.EnvExamplePolicy),
+			EnvOutput:        deepCopyEnvOutput(ov.EnvOutput),
 		}
 	}
 	return out
@@ -106,6 +137,46 @@ func deepCopyInstance(in config.InstanceConfig) config.InstanceConfig {
 		Env:    deepCopyEnv(in.Env),
 		Files:  cloneStringMap(in.Files),
 	}
+}
+
+// deepCopyMCP clones the agent-neutral MCP declaration down to the two maps
+// that carry MaybeSecret values, so the walker can resolve them in place
+// without reaching back into the caller's config.
+func deepCopyMCP(in config.MCPConfig) config.MCPConfig {
+	if in.Servers == nil {
+		return config.MCPConfig{}
+	}
+	out := config.MCPConfig{Servers: make(map[string]config.MCPServerConfig, len(in.Servers))}
+	for name, srv := range in.Servers {
+		cp := srv
+		cp.Args = slices.Clone(srv.Args)
+		cp.Agents = slices.Clone(srv.Agents)
+		cp.Env = cloneMaybeSecretMap(srv.Env)
+		cp.Headers = cloneMaybeSecretMap(srv.Headers)
+		out.Servers[name] = cp
+	}
+	return out
+}
+
+// deepCopySession clones the agent-neutral session declaration down to the
+// value map the walker resolves in place, for the same reason deepCopyMCP
+// does: the resolver returns a new config and never mutates the caller's.
+func deepCopySession(in config.SessionConfig) config.SessionConfig {
+	return config.SessionConfig{
+		Env: config.SessionEnvConfig{
+			Promote: slices.Clone(in.Env.Promote),
+			Vars:    cloneEnvVarsTable(in.Env.Vars),
+		},
+	}
+}
+
+func cloneMaybeSecretMap(in map[string]config.MaybeSecret) map[string]config.MaybeSecret {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]config.MaybeSecret, len(in))
+	maps.Copy(out, in)
+	return out
 }
 
 func deepCopyGlobalConfigOverride(in *config.GlobalConfigOverride) *config.GlobalConfigOverride {
@@ -131,7 +202,20 @@ func deepCopyGlobalOverride(in config.GlobalOverride) config.GlobalOverride {
 		Files:            cloneStringMap(in.Files),
 		Vault:            in.Vault, // shared; resolver does not mutate
 		EnvExamplePolicy: deepCopyEnvExamplePolicy(in.EnvExamplePolicy),
+		EnvOutput:        deepCopyEnvOutput(in.EnvOutput),
 	}
+}
+
+// deepCopyEnvOutput clones an OutputTargets slice so the resolver never shares
+// the backing array with its input. OutputTarget fields are immutable strings,
+// so a shallow element copy is sufficient.
+func deepCopyEnvOutput(in config.OutputTargets) config.OutputTargets {
+	if in == nil {
+		return nil
+	}
+	out := make(config.OutputTargets, len(in))
+	copy(out, in)
+	return out
 }
 
 // deepCopyEnvExamplePolicy clones an *EnvExamplePolicy, including its Vars map

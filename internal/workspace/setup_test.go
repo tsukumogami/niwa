@@ -57,7 +57,7 @@ func TestResolveSetupDirRepoDisable(t *testing.T) {
 }
 
 func TestRunSetupScriptsDisabled(t *testing.T) {
-	result := RunSetupScripts("/tmp", "", NewReporterWithTTY(&bytes.Buffer{}, false))
+	result := RunSetupScripts("/tmp", "", NewReporterWithTTY(&bytes.Buffer{}, false), nil)
 	if !result.Disabled {
 		t.Error("expected disabled")
 	}
@@ -65,7 +65,7 @@ func TestRunSetupScriptsDisabled(t *testing.T) {
 
 func TestRunSetupScriptsMissingDir(t *testing.T) {
 	tmpDir := t.TempDir()
-	result := RunSetupScripts(tmpDir, "nonexistent", NewReporterWithTTY(&bytes.Buffer{}, false))
+	result := RunSetupScripts(tmpDir, "nonexistent", NewReporterWithTTY(&bytes.Buffer{}, false), nil)
 	if !result.Skipped {
 		t.Error("expected skipped for missing directory")
 	}
@@ -74,7 +74,7 @@ func TestRunSetupScriptsMissingDir(t *testing.T) {
 func TestRunSetupScriptsEmptyDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	os.MkdirAll(filepath.Join(tmpDir, "scripts", "setup"), 0o755)
-	result := RunSetupScripts(tmpDir, "scripts/setup", NewReporterWithTTY(&bytes.Buffer{}, false))
+	result := RunSetupScripts(tmpDir, "scripts/setup", NewReporterWithTTY(&bytes.Buffer{}, false), nil)
 	if !result.Skipped {
 		t.Error("expected skipped for empty directory")
 	}
@@ -92,7 +92,7 @@ func TestRunSetupScriptsSuccess(t *testing.T) {
 	script2 := filepath.Join(setupDir, "02-second.sh")
 	os.WriteFile(script2, []byte("#!/bin/sh\ntouch \"$PWD/.second-ran\"\n"), 0o755)
 
-	result := RunSetupScripts(tmpDir, "scripts/setup", NewReporterWithTTY(&bytes.Buffer{}, false))
+	result := RunSetupScripts(tmpDir, "scripts/setup", NewReporterWithTTY(&bytes.Buffer{}, false), nil)
 
 	if len(result.Scripts) != 2 {
 		t.Fatalf("expected 2 scripts, got %d", len(result.Scripts))
@@ -130,7 +130,7 @@ func TestRunSetupScriptsStopOnError(t *testing.T) {
 	script2 := filepath.Join(setupDir, "02-never-runs.sh")
 	os.WriteFile(script2, []byte("#!/bin/sh\ntouch \"$PWD/.should-not-exist\"\n"), 0o755)
 
-	result := RunSetupScripts(tmpDir, "scripts/setup", NewReporterWithTTY(&bytes.Buffer{}, false))
+	result := RunSetupScripts(tmpDir, "scripts/setup", NewReporterWithTTY(&bytes.Buffer{}, false), nil)
 
 	if len(result.Scripts) != 1 {
 		t.Fatalf("expected 1 script result (stopped on error), got %d", len(result.Scripts))
@@ -157,7 +157,7 @@ func TestRunSetupScriptsNonExecutableWarning(t *testing.T) {
 	script2 := filepath.Join(setupDir, "02-runs.sh")
 	os.WriteFile(script2, []byte("#!/bin/sh\ntouch \"$PWD/.runs-after-noexec\"\n"), 0o755)
 
-	result := RunSetupScripts(tmpDir, "scripts/setup", NewReporterWithTTY(&bytes.Buffer{}, false))
+	result := RunSetupScripts(tmpDir, "scripts/setup", NewReporterWithTTY(&bytes.Buffer{}, false), nil)
 
 	if len(result.Scripts) != 2 {
 		t.Fatalf("expected 2 script results, got %d", len(result.Scripts))
@@ -184,7 +184,7 @@ func TestRunSetupScriptsLexicalOrder(t *testing.T) {
 	os.WriteFile(filepath.Join(setupDir, "01-first.sh"), []byte("#!/bin/sh\ntrue\n"), 0o755)
 	os.WriteFile(filepath.Join(setupDir, "05-middle.sh"), []byte("#!/bin/sh\ntrue\n"), 0o755)
 
-	result := RunSetupScripts(tmpDir, "scripts/setup", NewReporterWithTTY(&bytes.Buffer{}, false))
+	result := RunSetupScripts(tmpDir, "scripts/setup", NewReporterWithTTY(&bytes.Buffer{}, false), nil)
 
 	if len(result.Scripts) != 3 {
 		t.Fatalf("expected 3 scripts, got %d", len(result.Scripts))

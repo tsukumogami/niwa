@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -41,32 +42,57 @@ exist and be active.`,
 }
 
 var sessionCreateCmd = &cobra.Command{
-	Use:   "create <repo> <purpose>",
+	Use:   "create [repo] [purpose]",
 	Short: "Create a new git worktree for a repo",
 	Long: `Create a new git worktree for a repo.
 
 Scaffolds a git worktree under .niwa/worktrees/<repo>-<session-id>/ and
 writes the worktree lifecycle state.
 
-On success the shell wrapper navigates to the new worktree directory.`,
+Both arguments are optional. When <repo> is omitted, it is inferred from the
+process working directory (the repo whose checkout contains the cwd). When
+<purpose> is omitted, a generic "session" purpose is used.
+
+On success the shell wrapper navigates to the new worktree directory. Pass
+--json to print a stable JSON object with the worktree path and session id
+instead of the human-readable summary.`,
 	// We don't use cobra.ExactArgs because its default error exits 1 with a
-	// generic "accepts 2 arg(s), received 0" message. RunE validates arg count
-	// itself and returns an *sessionattach.ExitCodeError with Code=2 plus a
-	// usage string naming <repo> and <purpose>.
+	// generic message. RunE validates arg count itself and returns an
+	// *sessionattach.ExitCodeError with Code=2 on overflow. Both positionals
+	// are optional: a bare `niwa worktree create` infers the repo from cwd.
 	Args:              cobra.MaximumNArgs(2),
 	ValidArgsFunction: completeSessionCreateArgs,
 	RunE:              runSessionCreate,
 }
 
 var sessionDestroyCmd = &cobra.Command{
-	Use:   "destroy <session-id>",
-	Short: "Destroy a worktree and its working directory",
+	Use:   "destroy <target>",
+	Short: "Destroy a worktree, or every worktree of a session",
 	Long: `Destroy a worktree: mark its lifecycle state ended, remove the working
 directory, and delete the worktree branch (only if already merged; use
 --force to delete regardless).
 
-Refuses to destroy a worktree that holds uncommitted changes unless --force
-is passed (the worktree analog of the instance-level uncommitted-work guard).`,
+<target> is one of four things. A worktree id, or --by-path <path>, names one
+worktree. A session id, or the short handle niwa list shows, names a session
+and destroys every active worktree of that session's instance, in worktree-id
+order, continuing past a refusal. A session with no recorded handle can also be
+named by the first eight characters of its session id.
+
+A session target never removes the session mapping, the instance directory, or
+the repositories cloned inside it, and it resolves from anywhere in the
+workspace. A worktree id only means something inside the instance that owns it.
+
+Refuses to destroy a worktree that holds uncommitted changes, or one with a
+live attach lock, unless --force is passed. --force applies to one worktree, so
+it is a usage error with a session id or handle: pass a worktree id or
+--by-path to force one at a time.
+
+Exit codes (destroy's own; attach and detach use 3 and 4 for other things):
+  0  destroyed, or nothing left to destroy
+  1  a guard refused at least one worktree, or the session cannot be torn down
+  2  usage error, including --force with a session
+  3  the target matched no worktree and no session
+  4  the target is ambiguous; the message names the matches`,
 	// Same reasoning as sessionCreateCmd: RunE handles missing-arg with a
 	// usage string and exit code 2 via *sessionattach.ExitCodeError.
 	Args:              cobra.MaximumNArgs(1),
@@ -91,17 +117,41 @@ func completeSessionCreateArgs(cmd *cobra.Command, args []string, toComplete str
 	}
 }
 
-var sessionDestroyForce bool
+var (
+	sessionDestroyForce  bool
+	sessionDestroyByPath string
+	sessionCreateJSON    bool
+)
+
+// defaultSessionPurpose is used when `niwa worktree create` is run without an
+// explicit <purpose>. It mirrors the create-flow's existing freeform purpose
+// field; a generic value keeps a bare invocation working without prompting.
+const defaultSessionPurpose = "session"
 
 func init() {
 	sessionDestroyCmd.Flags().BoolVar(&sessionDestroyForce, "force", false, "Destroy even with uncommitted changes, and delete the branch regardless of merge status")
+	sessionDestroyCmd.Flags().StringVar(&sessionDestroyByPath, "by-path", "", "Resolve the worktree at this path to its session and destroy it (instead of passing a session id)")
+	sessionCreateCmd.Flags().BoolVar(&sessionCreateJSON, "json", false, "Print a JSON object with the worktree path and session id instead of the human-readable summary")
+}
+
+// sessionCreateJSONOutput is the stable wire shape emitted by
+// `niwa worktree create --json`. It is deliberately minimal and additive: the
+// absolute worktree path and the niwa session id are the two fields the hook
+// integration (and any scripting caller) depends on. Additional fields may be
+// appended later without breaking consumers that read these two keys.
+type sessionCreateJSONOutput struct {
+	SessionID    string `json:"session_id"`
+	WorktreePath string `json:"worktree_path"`
+	Repo         string `json:"repo"`
+	Purpose      string `json:"purpose"`
+	Branch       string `json:"branch"`
 }
 
 func runSessionCreate(cmd *cobra.Command, args []string) error {
-	if len(args) != 2 {
+	if len(args) > 2 {
 		return &sessionattach.ExitCodeError{
 			Code: 2,
-			Msg: "niwa: usage: niwa worktree create <repo> <purpose>. " +
+			Msg: "niwa: usage: niwa worktree create [repo] [purpose]. " +
 				"Run `niwa worktree create --help` for details.",
 		}
 	}
@@ -109,8 +159,35 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	repo := args[0]
-	purpose := args[1]
+
+	// <repo> is optional: when omitted, infer it from the process working
+	// directory (the repo whose checkout contains cwd). The resolver is the
+	// security boundary — a cwd outside every workspace repo is rejected, so a
+	// bare create cannot fabricate an arbitrary repo name.
+	var repo string
+	if len(args) >= 1 {
+		repo = args[0]
+	} else {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("niwa: error: getting working directory: %w", err)
+		}
+		repo, err = workspace.ResolveRepoNameFromCwd(instanceRoot, cwd)
+		if err != nil {
+			return &sessionattach.ExitCodeError{
+				Code: 2,
+				Msg: fmt.Sprintf("niwa: error: could not infer repo from working directory: %v. "+
+					"Pass the repo explicitly: niwa worktree create <repo> [purpose].", err),
+			}
+		}
+	}
+
+	// <purpose> is optional: a bare create uses a generic purpose so the flow
+	// (which carries purpose into the worktree-context layer) still has a value.
+	purpose := defaultSessionPurpose
+	if len(args) >= 2 {
+		purpose = args[1]
+	}
 
 	sessionID, worktreePath, branch, err := worktree.CreateSession(context.Background(), worktree.CreateSessionParams{
 		InstanceRoot: instanceRoot,
@@ -131,16 +208,38 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	// gets from `niwa apply`. The worktree already exists at this point; an
 	// install failure is surfaced but does not unwind the worktree (it can
 	// be re-synced later).
-	written, err := applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch)
+	var setup workspace.SetupResult
+	written, err := applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch, &setup, cmd.ErrOrStderr())
 	if err != nil {
 		return fmt.Errorf("niwa: error: installing content into worktree %s (the worktree exists; re-sync it later): %w", sessionID, err)
 	}
+	// Reported on stderr so --json mode's stdout object stays the only thing
+	// on stdout, exactly as the content-file lines below are suppressed there.
+	reportWorktreeSetup(cmd.ErrOrStderr(), worktreePath, &setup)
 
-	// Issue 10: success summary on stdout so callers can pipe it.
-	// Landing-path delivery uses NIWA_RESPONSE_FILE separately; the
-	// shell wrapper's stdout-cd target is unaffected.
-	fmt.Fprintf(cmd.OutOrStdout(), "session: created %s at %s\n", sessionID, worktreePath)
-	printWorktreeContentFiles(cmd, written)
+	// --json mode emits a single stable object and suppresses the human
+	// summary / content-file lines. The landing-path side effects below still
+	// run so the shell wrapper's cd target works identically in both modes.
+	if sessionCreateJSON {
+		out := sessionCreateJSONOutput{
+			SessionID:    sessionID,
+			WorktreePath: worktreePath,
+			Repo:         repo,
+			Purpose:      purpose,
+			Branch:       branch,
+		}
+		data, err := json.MarshalIndent(out, "", "  ")
+		if err != nil {
+			return fmt.Errorf("niwa: error: marshaling create output: %w", err)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), string(data))
+	} else {
+		// Issue 10: success summary on stdout so callers can pipe it.
+		// Landing-path delivery uses NIWA_RESPONSE_FILE separately; the
+		// shell wrapper's stdout-cd target is unaffected.
+		fmt.Fprintf(cmd.OutOrStdout(), "session: created %s at %s\n", sessionID, worktreePath)
+		printWorktreeContentFiles(cmd, written)
+	}
 
 	if err := validateLandingPath(worktreePath); err != nil {
 		return err
@@ -148,7 +247,9 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	if err := writeLandingPath(worktreePath); err != nil {
 		return err
 	}
-	hintShellInit(cmd)
+	if !sessionCreateJSON {
+		hintShellInit(cmd)
+	}
 	return nil
 }
 
@@ -191,10 +292,12 @@ func runSessionApply(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	written, err := applyContentToWorktree(instanceRoot, state.WorktreePath, state.Repo, state.Purpose, state.EffectiveBranchName())
+	var setup workspace.SetupResult
+	written, err := applyContentToWorktree(instanceRoot, state.WorktreePath, state.Repo, state.Purpose, state.EffectiveBranchName(), &setup, cmd.ErrOrStderr())
 	if err != nil {
 		return fmt.Errorf("niwa: error: re-syncing content into worktree %s: %w", sessionID, err)
 	}
+	reportWorktreeSetup(cmd.ErrOrStderr(), state.WorktreePath, &setup)
 
 	fmt.Fprintf(cmd.OutOrStdout(), "session: applied %s at %s\n", sessionID, state.WorktreePath)
 	printWorktreeContentFiles(cmd, written)
@@ -208,7 +311,41 @@ func runSessionApply(cmd *cobra.Command, args []string) error {
 // init.go/RunBootstrap composition: the leaf internal/worktree stays a leaf
 // (the content install lives in internal/workspace), and the CLI orchestrates
 // the two.
-func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch string) ([]string, error) {
+//
+// This is the one config reader that deliberately does NOT call
+// reconcileConfigFromSource first, so it is not a fifth site someone forgot
+// (issues #214, #227). A worktree is a derived view of its instance under the
+// inherit model: it takes the environment its instance already materialized,
+// and converging it must not advance it past the instance it belongs to.
+// Reconcile by converging the instance.
+// reportWorktreeSetup writes a setup-script failure to stderr, naming the
+// worktree and the failing script.
+//
+// It is deliberately not on stdout. The delegated WorktreeCreate path's stdout
+// carries ONLY the absolute worktree path, which Claude Code reads as the
+// session working directory -- so a diagnostic printed there would satisfy
+// "report the failure" while breaking the hook contract. Every surface reports
+// through this one function so that property holds on all of them.
+//
+// It names the worktree rather than the repo because a repo can have several
+// worktrees plus its clone, and "setup failed for app" does not say which tree
+// is unprovisioned.
+func reportWorktreeSetup(stderr io.Writer, worktreePath string, result *workspace.SetupResult) {
+	if result == nil {
+		return
+	}
+	for _, s := range result.Scripts {
+		if s.Error != nil {
+			fmt.Fprintf(stderr, "niwa: warning: setup script %s failed in worktree %s: %v\n",
+				s.Name, worktreePath, s.Error)
+		}
+	}
+}
+
+func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch string, setup *workspace.SetupResult, stderr io.Writer) ([]string, error) {
+	if stderr == nil {
+		stderr = os.Stderr
+	}
 	configPath, configDir, err := config.Discover(instanceRoot)
 	if err != nil {
 		return nil, fmt.Errorf("locating workspace config: %w", err)
@@ -224,15 +361,29 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 		return nil, err
 	}
 
-	opts := workspace.WorktreeApplyOptions{Stderr: os.Stderr}
+	// stderr is the caller's stream rather than os.Stderr, so a worktree-hook
+	// or setup diagnostic reaches the same place every other message from the
+	// command does -- and can be observed by a test rather than escaping to the
+	// process's own stderr.
+	opts := workspace.WorktreeApplyOptions{Stderr: stderr, Setup: setup}
 
-	// Thread the resolved personal/global .env.example failure policy so the
-	// worktree pre-pass applies the same policy as `niwa apply`. The global
-	// override snapshot was already synced by apply/create; here we read the
-	// already-present niwa.toml without re-syncing. Any unavailability (no
-	// global config registered, no niwa.toml, or a parse error) leaves the
-	// policy nil, which the resolver treats as "no global rung".
-	opts.GlobalEnvExamplePolicy = resolveGlobalEnvExamplePolicy(cfg.Workspace.Name)
+	// Decision 9: record the same worktree-delegation configuration the clone
+	// carries, so a worktree's settings do not drift from its clone's. The
+	// decision is recomputed here rather than read from state because this path
+	// runs outside an apply -- `niwa worktree create` and the WorktreeCreate hook
+	// both land here. Resolution mirrors the apply pipeline: probe the harness,
+	// take this binary's path as the hook command's fallback arm, and degrade to
+	// the deny branch if that path cannot be resolved.
+	if delegation, dErr := resolveWorktreeDelegation(instanceRoot); dErr != nil {
+		fmt.Fprintf(os.Stderr, "niwa: warning: %v; worktree settings will carry no delegation entries\n", dErr)
+	} else {
+		opts.WorktreeDelegation = delegation
+	}
+
+	// No agent is resolved here. A worktree is prepared for every agent niwa
+	// enumerates, the same way an instance is: which documents each one receives
+	// is the capability declaration table's answer, so there is nothing for a
+	// caller to select between.
 
 	// Resolve and merge the workspace overlay the same way `niwa apply` does, so
 	// a worktree of an overlay-augmented repo gets the overlay-merged CLAUDE
@@ -242,6 +393,14 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 	// overlay dir is recorded in InstanceState.OverlayURL by apply/create.
 	// When no overlay is configured (empty OverlayURL or NoOverlay), opts.OverlayDir
 	// stays empty and the no-overlay path runs exactly as before.
+	//
+	// This runs only the vault-free structural merge: the worktree path no
+	// longer resolves secrets at all. It INHERITS the instance clone's
+	// already-materialized env output by byte-copy (workspace.inheritEnvOutputs),
+	// so there is no need to rebuild vault bundles or re-run
+	// ResolveAndMergeEffectiveConfig here. Removing that fork is the fix for the
+	// failures where a worktree create depended on a reachable/correctly-scoped
+	// secret source the instance had already satisfied at apply time.
 	if cfgWithOverlay, overlayDir, oErr := mergeWorktreeOverlay(cfg, instanceRoot); oErr != nil {
 		return nil, oErr
 	} else if overlayDir != "" {
@@ -249,16 +408,26 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 		opts.OverlayDir = overlayDir
 	}
 
+	// The global env_output rung is plain config (a list of target paths +
+	// formats), not secret-bearing, so it is read directly from the parsed
+	// personal global override rather than from a resolve+merge pass. The
+	// inherit primitive uses it (via config.EffectiveEnvOutput) to resolve which
+	// clone targets to copy. A nil override means no global rung is set.
+	if globalOverride := loadGlobalConfigOverride(); globalOverride != nil {
+		opts.GlobalEnvOutput = globalOverride.Global.EnvOutput
+	}
+
 	return workspace.ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, group, repo, purpose, branch, opts)
 }
 
-// resolveGlobalEnvExamplePolicy reads the already-synced personal global config
+// loadGlobalConfigOverride reads the already-synced personal global config
 // override (niwa.toml under the registered global config dir) and returns the
-// resolved .env.example failure policy for workspaceName. It does NOT sync the
-// snapshot (apply/create already did) and never fails the worktree apply: any
-// unavailability (no global config registered, no niwa.toml, or a parse error)
-// returns nil, which EffectiveEnvExamplePolicy treats as "no global rung".
-func resolveGlobalEnvExamplePolicy(workspaceName string) *config.EnvExamplePolicy {
+// parsed value. It does NOT sync the snapshot (apply/create already did) and
+// never fails the worktree apply: any unavailability (no global config
+// registered, no niwa.toml, or a parse error) returns nil, which the
+// resolve+merge helper treats as "no overlay registered" (team-only resolve,
+// no merge).
+func loadGlobalConfigOverride() *config.GlobalConfigOverride {
 	gDir, err := config.GlobalConfigDir()
 	if err != nil || gDir == "" {
 		return nil
@@ -271,7 +440,7 @@ func resolveGlobalEnvExamplePolicy(workspaceName string) *config.EnvExamplePolic
 	if err != nil {
 		return nil
 	}
-	return workspace.ResolveGlobalOverride(parsed, workspaceName).EnvExamplePolicy
+	return parsed
 }
 
 // printWorktreeContentFiles surfaces the written-files list returned by
@@ -327,20 +496,149 @@ func mergeWorktreeOverlay(cfg *config.WorkspaceConfig, instanceRoot string) (*co
 	return merged, overlayDir, nil
 }
 
+// resolveSessionIDByPath scans the instance's session lifecycle states for the
+// one whose WorktreePath matches wantPath, returning its session id. It is the
+// reverse lookup `niwa worktree destroy --by-path` (and the from-hook remove
+// path) need: a worktree directory -> its owning niwa session.
+//
+// Both the requested path and each recorded WorktreePath are canonicalized
+// (EvalSymlinks + Clean) before comparison, so a path passed with `..`
+// components, a trailing slash, or through a symlink still matches the session
+// that owns the same on-disk directory. A recorded path that no longer exists
+// on disk falls back to a lexical Clean so an already-removed worktree's
+// session can still be resolved (e.g. when destroy is retried).
+//
+// Terminal sessions (ended/abandoned) are skipped: their worktree directory is
+// gone, and matching one would attempt to destroy an already-destroyed session.
+// An unmatched path is an explicit, actionable error (exit code 1).
+func resolveSessionIDByPath(instanceRoot, wantPath string) (string, error) {
+	sessionsDir := filepath.Join(instanceRoot, ".niwa", "sessions")
+	states, err := worktree.ListSessionLifecycleStates(sessionsDir)
+	if err != nil {
+		return "", fmt.Errorf("niwa: error: listing sessions: %w", err)
+	}
+
+	wantCanon := canonicalizeWorktreePath(wantPath)
+	for _, st := range states {
+		if st.WorktreePath == "" {
+			continue
+		}
+		if st.Status == worktree.SessionStatusEnded || st.Status == worktree.SessionStatusAbandoned {
+			continue
+		}
+		if canonicalizeWorktreePath(st.WorktreePath) == wantCanon {
+			return st.SessionID, nil
+		}
+	}
+
+	// Exit 3 is destroy's "nothing matched", shared with the positional form.
+	// Two routes to the same outcome should not differ by which one located the
+	// target: a cleanup script calling --by-path after a reap is exactly the
+	// caller that needs to tell "already gone" from a guard refusal. This moved
+	// from exit 1 and is announced as a behavior change.
+	return "", &sessionattach.ExitCodeError{
+		Code: 3,
+		Msg: fmt.Sprintf("niwa: error: no active worktree found at path %q. "+
+			"Run `niwa worktree list` to see worktrees and their paths.", wantPath),
+	}
+}
+
+// canonicalizeWorktreePath resolves symlinks and cleans path for comparison.
+// When the path does not exist on disk (EvalSymlinks fails), it falls back to
+// the absolute, lexically-cleaned form so an already-removed worktree still
+// compares equal to the same lexical path recorded in its session state.
+func canonicalizeWorktreePath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Clean(resolved)
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(path)
+}
+
 func runSessionDestroy(cmd *cobra.Command, args []string) error {
-	if len(args) != 1 {
+	// Exactly one identifier is required: either a positional <session-id> OR
+	// --by-path <path>, but not both and not neither.
+	if sessionDestroyByPath != "" && len(args) >= 1 {
+		return &sessionattach.ExitCodeError{
+			Code: 2,
+			Msg: "niwa: usage: niwa worktree destroy takes either <session-id> or --by-path <path>, not both. " +
+				"Run `niwa worktree list` to discover existing worktrees.",
+		}
+	}
+	if sessionDestroyByPath == "" && len(args) != 1 {
 		return &sessionattach.ExitCodeError{
 			Code: 2,
 			Msg: "niwa: usage: niwa worktree destroy <session-id> [--force]. " +
 				"Run `niwa worktree list` to discover existing worktrees.",
 		}
 	}
-	instanceRoot, err := resolveInstanceRoot()
+	// --by-path names a directory, not an id, so it keeps its own resolution.
+	// It still needs an instance to resolve against, which at a multi-instance
+	// root is a refusal.
+	if sessionDestroyByPath != "" {
+		instanceRoot, err := resolveInstanceRoot()
+		if err != nil {
+			return err
+		}
+		sessionID, err := resolveSessionIDByPath(instanceRoot, sessionDestroyByPath)
+		if err != nil {
+			return err
+		}
+		return destroyOneWorktree(cmd, instanceRoot, sessionID)
+	}
+
+	// The positional value is resolved against both readings: a worktree id of
+	// the instance we are standing in, and a session in the workspace's mapping
+	// store. Resolution runs from anywhere in the workspace, which is the point
+	// of #292 -- the id a developer holds is a session id or a handle, and
+	// neither appears in the worktree lifecycle store at all.
+	scope, err := resolveDestroyScope()
 	if err != nil {
 		return err
 	}
-	sessionID := args[0]
+	mappings, err := loadMappingsForDestroy(scope.workspaceRoot)
+	if err != nil {
+		return err
+	}
+	target, err := resolveDestroyTarget(scope, args[0], mappings)
+	if err != nil {
+		return err
+	}
 
+	if target.mapping != nil {
+		// --force applies to one worktree. A session can back several, and a
+		// mistyped or prefix-matched id that forced its way through would
+		// discard every uncommitted change and unmerged branch in the instance.
+		if sessionDestroyForce {
+			return &sessionattach.ExitCodeError{
+				Code: 2,
+				Msg:  "niwa: error: --force applies to one worktree; pass a worktree id or --by-path <worktree path>",
+			}
+		}
+		instanceDir, gone, checkErr := checkSessionInstance(scope.workspaceRoot, *target.mapping, mappings)
+		if checkErr != nil {
+			return &sessionattach.ExitCodeError{Code: 1, Msg: checkErr.Error()}
+		}
+		if gone {
+			fmt.Fprintf(cmd.OutOrStdout(),
+				"session: nothing to destroy: instance %s for session %s no longer exists\n",
+				filepath.Clean(target.mapping.InstancePath), target.mapping.SessionID)
+			return nil
+		}
+		return destroySessionWorktrees(cmd, instanceDir, *target.mapping, worktree.StdGitInvoker{})
+	}
+
+	return destroyOneWorktree(cmd, scope.instanceDir, target.worktreeID)
+}
+
+// destroyOneWorktree is the pre-existing single-worktree path, unchanged in
+// behavior and output: a worktree id or a --by-path lookup still prints the
+// bare destroyed line. Only session-resolved teardown prints the enriched one,
+// because only there does a caller need to know which worktrees of which
+// instance were removed.
+func destroyOneWorktree(cmd *cobra.Command, instanceRoot, sessionID string) error {
 	state, err := worktree.DestroySession(context.Background(), instanceRoot, sessionID, sessionDestroyForce, worktree.StdGitInvoker{})
 	if err != nil {
 		// A live attach holds the worktree and --force was not passed: surface
@@ -384,6 +682,18 @@ func runSessionLifecycleList(cmd *cobra.Command, repo, status string, onlyAttach
 	}
 	instanceRoot, err := resolveInstanceRoot()
 	if err != nil {
+		// At a multi-instance root there are no worktrees to list, which is a
+		// fact about where the command ran rather than a failure. Print the
+		// redirect and exit 0, so a script looping over directories is not
+		// derailed by hitting the root. --json still gets a parseable empty
+		// array on stdout, with the redirect kept on stderr.
+		if errors.Is(err, errAtWorkspaceRoot) {
+			fmt.Fprintln(cmd.ErrOrStderr(), "niwa: "+atWorkspaceRootMessage)
+			if sessionListJSON {
+				fmt.Fprintln(cmd.OutOrStdout(), "[]")
+			}
+			return nil
+		}
 		return err
 	}
 
@@ -543,3 +853,52 @@ func writeSessionLifecycleTable(out interface{ Write([]byte) (int, error) }, row
 			s.SessionID, s.Repo, s.Status, availability, created, purpose)
 	}
 }
+
+// resolveWorktreeDelegation computes the worktree-delegation decision for a
+// worktree content install, mirroring what the apply pipeline computes per
+// apply (DESIGN-niwa-default-worktree.md Decisions 4, 5, 7, and 9).
+//
+// It returns (nil, nil) when the instance opted out at init time: the opt-out
+// means no hook AND no deny anywhere, so a worktree must not reintroduce either.
+// It returns an error only when this binary's own path cannot be resolved, in
+// which case the caller warns and installs neither rather than writing a hook
+// whose fallback arm points nowhere.
+func resolveWorktreeDelegation(instanceRoot string) (*workspace.WorktreeDelegation, error) {
+	// Fail CLOSED on an unreadable instance state. LoadState errors on a missing
+	// or corrupt file and on a schema_version newer than this binary
+	// understands, and that last case is reachable here: the hook command
+	// resolves niwa from PATH, so an older niwa can run against state a newer
+	// one wrote. Treating a read failure as "not opted out" would let that older
+	// binary quietly re-enable an integration the workspace disabled with
+	// `niwa init --no-worktree-delegation`. The apply pipeline fails closed on a
+	// state-read error; so does this path.
+	state, err := workspace.LoadState(instanceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("reading instance state to check the worktree-delegation opt-out: %w", err)
+	}
+	if state != nil && state.NoWorktreeDelegation {
+		return nil, nil
+	}
+
+	niwaPath, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolving niwa binary path for worktree hooks: %w", err)
+	}
+
+	// Bound the probe. It runs on every worktree create and apply -- including
+	// inside a hook subprocess -- so a `claude` wrapper that hangs would
+	// otherwise block worktree creation until the harness's own hook timeout
+	// fires, which is a much worse failure than an unprobed harness.
+	ctx, cancel := context.WithTimeout(context.Background(), worktreeProbeTimeout)
+	defer cancel()
+
+	return &workspace.WorktreeDelegation{
+		Supported: workspace.SupportsWorktreeHooks(ctx),
+		NiwaPath:  niwaPath,
+	}, nil
+}
+
+// worktreeProbeTimeout bounds the `claude --version` support probe on the
+// worktree paths. The probe is a single fast subprocess; this is a hang guard,
+// not a performance budget.
+const worktreeProbeTimeout = 5 * time.Second

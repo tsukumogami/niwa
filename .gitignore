@@ -31,11 +31,15 @@ go.work.sum
 /niwa-test
 /test/functional/worker_fake/worker-fake
 
-# Functional test sandbox (per-scenario scratch)
-/.niwa-test/
+# Functional test concurrency lock (see the Makefile's test-functional targets)
+/.functional-test.lock
 
 # niwa session-worktree scaffold (daemon pid/log, roles, sessions); never committed
 /.niwa/
 
 # Claude Code local config
-.claude/
+.claude/*
+# Except the shirabe-extensions directory, which holds niwa's /work-on
+# verification map (work-on.md) and must ship in the repo. The distributed
+# *.local.md extensions in the same directory stay ignored by *.local* above.
+!.claude/shirabe-extensions/

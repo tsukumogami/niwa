@@ -4,12 +4,114 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
+	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 )
+
+// Marketplace track values. Track selects which version of a github
+// marketplace to register against.
+const (
+	// trackRelease registers against the latest stable (non-prerelease)
+	// release tag. It is the default for github sources.
+	trackRelease = "release"
+	// trackMain registers against the default branch (no pin).
+	trackMain = "main"
+)
+
+// resolveLatestStableRelease is the release-resolution SEAM. Given a github
+// "org/repo", it returns the highest non-prerelease semver tag and true, or
+// ("", false) when the repo has no stable release (or cannot be reached).
+//
+// It is a package-level var so unit tests inject a fake and never hit the
+// network. The default implementation shells out to git ls-remote.
+//
+// SPIKE FINDING (Decision 6): Claude Code does NOT honor a ref/tag/commit
+// pin field on a github marketplace SOURCE object — the object niwa writes
+// into known_marketplaces.json / extraKnownMarketplaces only accepts
+// source/repo/sparsePaths, and Claude clones the default-branch HEAD. The
+// `ref` field is honored only inside a marketplace.json catalog entry
+// (git-subdir source), which niwa does not author. We still resolve the
+// release and emit a best-effort "ref" on the github source: it is ignored
+// by Claude today but is forward-compatible if Claude adds source-level
+// pinning, and the resolution itself drives the report surfaced to users.
+var resolveLatestStableRelease = defaultResolveLatestStableRelease
+
+// defaultResolveLatestStableRelease lists the repo's tags via git ls-remote
+// and returns the highest non-prerelease semver tag.
+func defaultResolveLatestStableRelease(repo string) (string, bool) {
+	url := "https://github.com/" + repo
+	out, err := exec.Command("git", "ls-remote", "--tags", "--refs", url).Output()
+	if err != nil {
+		return "", false
+	}
+	var best string
+	var bestParsed [3]int
+	found := false
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		tag := strings.TrimPrefix(fields[1], "refs/tags/")
+		parsed, ok := parseStableSemver(tag)
+		if !ok {
+			continue
+		}
+		if !found || compareSemver(parsed, bestParsed) > 0 {
+			best = tag
+			bestParsed = parsed
+			found = true
+		}
+	}
+	if !found {
+		return "", false
+	}
+	return best, true
+}
+
+// parseStableSemver parses a "vX.Y.Z" (or "X.Y.Z") tag into its numeric
+// components. It rejects prerelease tags (those carrying a "-" suffix such
+// as v1.2.3-rc.1 or v1.2.3-dev) and any tag that is not a clean three-part
+// numeric version, so only stable releases are considered.
+func parseStableSemver(tag string) ([3]int, bool) {
+	var v [3]int
+	s := strings.TrimPrefix(tag, "v")
+	// Reject prerelease and build-metadata suffixes.
+	if strings.ContainsAny(s, "-+") {
+		return v, false
+	}
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return v, false
+	}
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return v, false
+		}
+		v[i] = n
+	}
+	return v, true
+}
+
+// compareSemver returns -1, 0, or 1 comparing two parsed semver triples.
+func compareSemver(a, b [3]int) int {
+	for i := 0; i < 3; i++ {
+		switch {
+		case a[i] < b[i]:
+			return -1
+		case a[i] > b[i]:
+			return 1
+		}
+	}
+	return 0
+}
 
 const workspaceContextFile = "workspace-context.md"
 const workspaceContextImport = "@workspace-context.md"
@@ -53,24 +155,29 @@ func appendToWorkspaceRulesFile(rulesPath, absPath string) error {
 	return os.WriteFile(rulesPath, []byte(content), 0o644)
 }
 
-// removeImportFromCLAUDE removes an old relative @import from CLAUDE.md
-// (migration support). No-op if not present or file does not exist.
-func removeImportFromCLAUDE(claudePath, importLine string) error {
-	data, err := os.ReadFile(claudePath)
-	if os.IsNotExist(err) {
-		return nil
+// removeLegacyImport removes an old relative @import from the instance-root
+// context document earlier niwa versions wrote (migration support). No-op if
+// not present or the document does not exist.
+//
+// Reading is this side's job and rewriting is the producer's: the file to clean
+// is a fact about what niwa used to write rather than about the agent this
+// session prepares for, so agentplan names it and the removal lands as a plan
+// entry the executor applies.
+func removeLegacyImport(instanceRoot, importLine string) error {
+	path := agentplan.LegacyRootContextPath(instanceRoot)
+	data, readErr := os.ReadFile(path)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return readErr
 	}
-	if err != nil {
-		return err
-	}
-	content := string(data)
-	if !strings.Contains(content, importLine) {
-		return nil
-	}
-	// ensureImportInCLAUDE always added "line\n\n"; try that form first.
-	content = strings.Replace(content, importLine+"\n\n", "", 1)
-	content = strings.Replace(content, importLine+"\n", "", 1)
-	return os.WriteFile(claudePath, []byte(content), 0o644)
+
+	plan := agentplan.LegacyImportPlan(agentplan.LegacyImportInputs{
+		Dir:      instanceRoot,
+		Existing: data,
+		Exists:   readErr == nil,
+		Import:   importLine,
+	})
+	_, _, err := applyPlan(plan)
+	return err
 }
 
 // InstallWorkspaceContext generates a workspace context file at the instance
@@ -91,13 +198,85 @@ func InstallWorkspaceContext(cfg *config.WorkspaceConfig, classified []Classifie
 		return nil, fmt.Errorf("writing workspace rules file: %w", err)
 	}
 
-	// Migrate: remove old relative import from CLAUDE.md if present.
-	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
-	if err := removeImportFromCLAUDE(claudePath, workspaceContextImport); err != nil {
+	// Migrate: remove the old relative import from the legacy root context
+	// document if present.
+	if err := removeLegacyImport(instanceRoot, workspaceContextImport); err != nil {
 		return nil, fmt.Errorf("removing old workspace context import: %w", err)
 	}
 
 	return []string{contextPath, rulesPath}, nil
+}
+
+// readOverlayContextLayer reads the private overlay's addendum without writing
+// anything, returning (nil, nil) when the overlay declares none. It is the
+// single resolution of that source: the file beside the instance-root document
+// is copied from it, and so is the layer folded into the document itself for an
+// agent that cannot follow the reference between them.
+func readOverlayContextLayer(overlayDir string) ([]byte, error) {
+	if overlayDir == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(filepath.Join(overlayDir, overlayClaudeFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", overlayClaudeFile, err)
+	}
+	return data, nil
+}
+
+// readGlobalContextLayer is readOverlayContextLayer's counterpart for the
+// global layer, resolved from the developer's global config directory.
+func readGlobalContextLayer(globalConfigDir string) ([]byte, error) {
+	if globalConfigDir == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(filepath.Join(globalConfigDir, globalClaudeFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", globalClaudeFile, err)
+	}
+	return data, nil
+}
+
+// InstanceRootImportedLayers renders, in the order the @import lines establish
+// them, the documents an instance-root session reads only by following a
+// reference out of the root context document: the generated workspace context,
+// the private overlay's addendum, and the global layer.
+//
+// An agent with an import mechanism reads them where they are written and this
+// slice is ignored for it. An agent without one has them folded into the root
+// document, because a reference it cannot follow is content it does not have.
+// Which it is, is the producer's answer, not this function's -- this side only
+// resolves the sources, exactly as it does for every other layer.
+//
+// Every layer is resolved here rather than at the step that writes it, because
+// the root document is written before the files beside it are: the ordering the
+// import lines need is established by writing the workspace context first, and
+// the composed document has to know all three regardless.
+func InstanceRootImportedLayers(cfg *config.WorkspaceConfig, classified []ClassifiedRepo, overlayDir, globalConfigDir string) ([][]byte, error) {
+	layers := [][]byte{[]byte(generateWorkspaceContext(cfg, classified))}
+
+	overlay, err := readOverlayContextLayer(overlayDir)
+	if err != nil {
+		return nil, err
+	}
+	if overlay != nil {
+		layers = append(layers, overlay)
+	}
+
+	global, err := readGlobalContextLayer(globalConfigDir)
+	if err != nil {
+		return nil, err
+	}
+	if global != nil {
+		layers = append(layers, global)
+	}
+
+	return layers, nil
 }
 
 // InstallOverlayClaudeContent copies CLAUDE.overlay.md from the overlay clone
@@ -105,13 +284,12 @@ func InstallWorkspaceContext(cfg *config.WorkspaceConfig, classified []Classifie
 // .claude/rules/workspace-imports.md. Returns the installed path when the file
 // was present, or ("", nil) when it was absent.
 func InstallOverlayClaudeContent(overlayDir, instanceRoot string) (string, error) {
-	srcPath := filepath.Join(overlayDir, overlayClaudeFile)
-	data, err := os.ReadFile(srcPath)
+	data, err := readOverlayContextLayer(overlayDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", fmt.Errorf("reading %s: %w", overlayClaudeFile, err)
+		return "", err
+	}
+	if data == nil {
+		return "", nil
 	}
 
 	destPath := filepath.Join(instanceRoot, overlayClaudeFile)
@@ -124,21 +302,41 @@ func InstallOverlayClaudeContent(overlayDir, instanceRoot string) (string, error
 		return "", fmt.Errorf("adding overlay to workspace rules file: %w", err)
 	}
 
-	// Migrate: remove old relative import from CLAUDE.md if present.
-	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
-	if err := removeImportFromCLAUDE(claudePath, overlayClaudeImport); err != nil {
+	// Migrate: remove the old relative import from the legacy root context
+	// document if present.
+	if err := removeLegacyImport(instanceRoot, overlayClaudeImport); err != nil {
 		return "", fmt.Errorf("removing old overlay import: %w", err)
 	}
 
 	return destPath, nil
 }
 
-// InstallWorkspaceRootSettings generates .claude/settings.json at the instance
+// RootSettingsMaterializer generates .claude/settings.json at the instance
 // root with hooks, permissions, env, plugins, and marketplaces. Uses
 // settings.json (not .local) because the instance root is a non-git directory.
 // Plugins and marketplaces are declared declaratively -- Claude Code's startup
-// reconciler handles materialization.
-func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instanceRoot string, repoIndex map[string]string) ([]string, error) {
+// reconciler handles materialization, which is how root-installed skills reach
+// an agent whose plugins arrive by registration rather than as delivered trees.
+//
+// It carries no fields, and that is the whole of what the conversion from a
+// free function changed: every input it needs -- the config, the config
+// directory, the instance root, the repo index -- is already a
+// MaterializeContext field, so there was nothing left over to carry. What the
+// type buys is the name: the declaration table says which agent receives
+// root-installed skills, and the registry in delivery_binding.go says this is
+// what serves that row. A free function delivers the same bytes with nothing
+// tying it to the row it answers for.
+type RootSettingsMaterializer struct{}
+
+// Name is the delivery name the contract binds this materializer under.
+func (m *RootSettingsMaterializer) Name() string { return string(agentplan.DeliveryRootSettings) }
+
+// Materialize writes the instance root's settings document. ctx.RepoDir is the
+// instance root; the field is named for the repositories most materializers
+// write into, and what it means here is the directory being materialized.
+func (m *RootSettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, error) {
+	cfg, configDir, instanceRoot, repoIndex := ctx.Config, ctx.ConfigDir, ctx.RepoDir, ctx.RepoIndex
+
 	effective := MergeInstanceOverrides(cfg)
 
 	// Merge discovered hooks.
@@ -166,6 +364,12 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 
 	// Copy hook scripts to .claude/hooks/ (no .local rename for instance root).
 	installedHooks := make(map[string][]InstalledHookEntry)
+	// installedHookPaths is the flat list of hook scripts this apply actually
+	// installed. It — not a walk of the output directory — is what gets tracked
+	// in ManagedFiles, so a hook script no longer declared by any config (for
+	// example one synthesized by a since-removed feature) is left out of the
+	// produced set and pruned by cleanRemovedFiles on the next apply.
+	var installedHookPaths []string
 	if len(effective.Claude.Hooks) > 0 {
 		for event, entries := range effective.Claude.Hooks {
 			for _, entry := range entries {
@@ -189,6 +393,7 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 					os.WriteFile(target, data, 0o755)
 
 					installedPaths = append(installedPaths, target)
+					installedHookPaths = append(installedHookPaths, target)
 				}
 				installedHooks[event] = append(installedHooks[event], InstalledHookEntry{
 					Matcher: entry.Matcher,
@@ -222,6 +427,7 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 	}
 
 	includeGit := false
+	var reports []string
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
 		Settings:               effective.Claude.Settings,
 		InstalledHooks:         installedHooks,
@@ -232,34 +438,45 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 		BaseDir:                instanceRoot,
 		IncludeGitInstructions: &includeGit,
 		UseAbsolutePaths:       true,
+		Reports:                &reports,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("building workspace root settings: %w", err)
 	}
+	emitReports(nil, reports)
 
-	data, err := json.MarshalIndent(doc, "", "  ")
+	// The document lands as a plan entry: the executor owns the directory, the
+	// marshalled bytes, and the file mode, and this function owns what the
+	// document says.
+	plan, err := agentplan.SettingsPlan(agentplan.SettingsInputs{
+		Scope: agentplan.SettingsAtInstanceRoot,
+		Dir:   instanceRoot,
+		Doc:   doc,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("marshaling workspace root settings: %w", err)
+		return nil, fmt.Errorf("declaring workspace root settings: %w", err)
 	}
-	data = append(data, '\n')
 
-	claudeDir := filepath.Join(instanceRoot, ".claude")
-	os.MkdirAll(claudeDir, 0o755)
-	settingsPath := filepath.Join(claudeDir, "settings.json")
-	if err := os.WriteFile(settingsPath, data, secretFileMode); err != nil {
+	written, _, err := applyPlan(plan)
+	if err != nil {
 		return nil, fmt.Errorf("writing workspace root settings: %w", err)
 	}
+	// Track only the hook scripts this apply installed, not every file present
+	// in the output directory. Walking .claude/hooks/ here would re-adopt
+	// orphaned scripts left by removed features, marking them as produced and
+	// shielding them from cleanRemovedFiles forever.
+	written = append(written, installedHookPaths...)
 
-	var written []string
-	written = append(written, settingsPath)
-	// Collect hook files.
-	hooksDir := filepath.Join(claudeDir, "hooks")
-	filepath.Walk(hooksDir, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() {
-			written = append(written, path)
-		}
-		return nil
-	})
+	// Distribute [instance.files] verbatim (no .local) to the instance root.
+	// Reuse the MaterializeContext already built above (RepoDir=instanceRoot,
+	// ConfigDir=configDir). Appending to written joins these files to the
+	// instance's ManagedFiles set, so drift detection and cleanRemovedFiles
+	// apply: dropping an [instance.files] entry deletes the file on next apply.
+	instanceFiles, err := materializeVerbatimFiles(mctx, effective.InstanceFiles)
+	if err != nil {
+		return nil, fmt.Errorf("materializing instance-root files: %w", err)
+	}
+	written = append(written, instanceFiles...)
 
 	return written, nil
 }
@@ -269,13 +486,12 @@ func InstallWorkspaceRootSettings(cfg *config.WorkspaceConfig, configDir, instan
 // .claude/rules/workspace-imports.md.
 // Returns nil, nil when CLAUDE.global.md does not exist in globalConfigDir.
 func InstallGlobalClaudeContent(globalConfigDir, instanceRoot string) ([]string, error) {
-	srcPath := filepath.Join(globalConfigDir, globalClaudeFile)
-	data, err := os.ReadFile(srcPath)
+	data, err := readGlobalContextLayer(globalConfigDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("reading %s: %w", globalClaudeFile, err)
+		return nil, err
+	}
+	if data == nil {
+		return nil, nil
 	}
 
 	destPath := filepath.Join(instanceRoot, globalClaudeFile)
@@ -288,57 +504,155 @@ func InstallGlobalClaudeContent(globalConfigDir, instanceRoot string) ([]string,
 		return nil, fmt.Errorf("adding global to workspace rules file: %w", err)
 	}
 
-	// Migrate: remove old relative import from CLAUDE.md if present.
-	claudePath := filepath.Join(instanceRoot, "CLAUDE.md")
-	if err := removeImportFromCLAUDE(claudePath, globalClaudeImport); err != nil {
+	// Migrate: remove the old relative import from the legacy root context
+	// document if present.
+	if err := removeLegacyImport(instanceRoot, globalClaudeImport); err != nil {
 		return nil, fmt.Errorf("removing old global import: %w", err)
 	}
 
 	return []string{destPath}, nil
 }
 
+// readMarketplaceManifestName reads the declared marketplace name from
+// dir/.claude-plugin/marketplace.json. It returns (name, true) when the
+// manifest can be read, parsed, and carries a non-empty "name". It returns
+// ("", false) on any failure (missing/unreadable/malformed manifest or empty
+// name) so callers can fall back to ref-derived keying without crashing.
+func readMarketplaceManifestName(dir string) (string, bool) {
+	manifestPath := filepath.Join(dir, ".claude-plugin", "marketplace.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return "", false
+	}
+	var manifest struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return "", false
+	}
+	if manifest.Name == "" {
+		return "", false
+	}
+	return manifest.Name, true
+}
+
 // mapMarketplaceSourceWithIndex converts a niwa marketplace source string to the
 // Claude Code extraKnownMarketplaces format. Returns the marketplace name,
-// the entry object, and an error. It accepts a repoIndex for resolving repo:
-// references to absolute directory paths.
-func mapMarketplaceSourceWithIndex(source string, repoIndex map[string]string) (string, map[string]any, error) {
+// the entry object, an optional human-readable report (release-tracking
+// notice, empty when there is nothing to report), and an error. It accepts a
+// repoIndex for resolving repo: references to absolute directory paths,
+// autoUpdate to emit the configured per-marketplace auto-update policy, and
+// track to select the version a github source registers against.
+//
+// For local (repo:/directory) sources the registration key is read from the
+// marketplace's declared name in .claude-plugin/marketplace.json, falling back
+// to the repo-ref-derived name when the manifest cannot be read. Local sources
+// ignore track entirely. For github sources the repo name is used as the key.
+//
+// Track interpretation for github sources:
+//   - "" or "release": resolve the highest non-prerelease release tag and emit
+//     it as a best-effort "ref" on the source (see resolveLatestStableRelease
+//     for the SPIKE FINDING on why this is best-effort). When the repo has no
+//     stable release, fall back to the default branch (no ref) and return a
+//     report describing the fallback (R14, R16).
+//   - "main": register against the default branch, no ref (R15).
+//   - any other value: treated as an explicit ref and emitted verbatim (R17).
+func mapMarketplaceSourceWithIndex(source string, repoIndex map[string]string, autoUpdate bool, track string) (string, map[string]any, string, error) {
+	name, err := marketplaceRegistrationName(source, repoIndex)
+	if err != nil {
+		return "", nil, "", err
+	}
+
 	if strings.HasPrefix(source, repoRefPrefix) {
-		// repo:tools/.claude-plugin/marketplace.json -> directory source
+		// repo:tools/.claude-plugin/marketplace.json -> directory source.
+		// Local sources ignore track (no remote version to resolve).
 		resolved, err := ResolveMarketplaceSource(source, repoIndex)
 		if err != nil {
-			return "", nil, err
+			return "", nil, "", err
 		}
 		// The directory source type points to the directory containing
 		// .claude-plugin/marketplace.json. Strip the filename and the
 		// .claude-plugin directory to get the root.
 		dir := filepath.Dir(filepath.Dir(resolved))
-		// Use the repo name as the marketplace name.
-		ref := strings.TrimPrefix(source, repoRefPrefix)
-		slashIdx := strings.IndexByte(ref, '/')
-		name := ref[:slashIdx]
 		return name, map[string]any{
 			"source": map[string]any{
 				"source": "directory",
 				"path":   dir,
 			},
-			"autoUpdate": true,
-		}, nil
+			"autoUpdate": autoUpdate,
+		}, "", nil
 	}
 
 	// GitHub ref: "org/repo" -> {source: {source: "github", repo: "org/repo"}}
 	parts := strings.SplitN(source, "/", 3)
 	if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
-		name := parts[1] // use repo name as marketplace name
+		src := map[string]any{
+			"source": "github",
+			"repo":   source,
+		}
+		report := applyGithubTrack(src, source, track)
 		return name, map[string]any{
-			"source": map[string]any{
-				"source": "github",
-				"repo":   source,
-			},
-			"autoUpdate": true,
-		}, nil
+			"source":     src,
+			"autoUpdate": autoUpdate,
+		}, report, nil
 	}
 
-	return "", nil, nil
+	return "", nil, "", nil
+}
+
+// marketplaceRegistrationName computes the registry key niwa uses for a
+// marketplace source: the manifest-declared name for a local repo:/directory
+// source (falling back to the repo-ref-derived name), or the repo name for a
+// github source. It is the single source of truth for the name shared by
+// mapMarketplaceSourceWithIndex (project-settings materialization) and the
+// global known_marketplaces reconciliation. Returns "" for an unrecognized
+// source.
+func marketplaceRegistrationName(source string, repoIndex map[string]string) (string, error) {
+	if strings.HasPrefix(source, repoRefPrefix) {
+		resolved, err := ResolveMarketplaceSource(source, repoIndex)
+		if err != nil {
+			return "", err
+		}
+		dir := filepath.Dir(filepath.Dir(resolved))
+		ref := strings.TrimPrefix(source, repoRefPrefix)
+		name := ref[:strings.IndexByte(ref, '/')]
+		if declared, ok := readMarketplaceManifestName(dir); ok {
+			name = declared
+		}
+		return name, nil
+	}
+
+	parts := strings.SplitN(source, "/", 3)
+	if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+		return parts[1], nil
+	}
+	return "", nil
+}
+
+// applyGithubTrack mutates a github source map to register against the
+// configured track and returns a report string (empty when nothing needs
+// reporting). repo is the "org/repo" reference used for release resolution.
+func applyGithubTrack(src map[string]any, repo, track string) string {
+	switch track {
+	case "", trackRelease:
+		tag, ok := resolveLatestStableRelease(repo)
+		if !ok {
+			// No stable release: fall back to the default branch and report it.
+			return fmt.Sprintf(
+				"marketplace %q has no stable release; tracking the default branch",
+				repo,
+			)
+		}
+		src["ref"] = tag
+		return ""
+	case trackMain:
+		// Default branch: emit no ref.
+		return ""
+	default:
+		// Explicit ref/tag/version: emit verbatim.
+		src["ref"] = track
+		return ""
+	}
 }
 
 // generateWorkspaceContext produces the markdown content for the workspace

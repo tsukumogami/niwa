@@ -3,7 +3,6 @@ package functional
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 )
 
@@ -26,14 +25,14 @@ func newLocalGitServer(dir string) (*localGitServer, error) {
 // Repo creates a bare repo named <name>.git and returns its file:// URL.
 func (s *localGitServer) Repo(name string) (string, error) {
 	repoPath := filepath.Join(s.root, name+".git")
-	out, err := exec.Command("git", "init", "--bare", repoPath).CombinedOutput()
+	out, err := fixtureGit(s.root, "init", "--bare", repoPath)
 	if err != nil {
 		return "", fmt.Errorf("git init --bare %q: %w\n%s", repoPath, err, out)
 	}
 	// Pin default branch to "main" so clones get "main" regardless of the
 	// system git init.defaultBranch setting (which defaults to "master" on
 	// older git versions used by some CI runners).
-	if out, err = exec.Command("git", "-C", repoPath, "symbolic-ref", "HEAD", "refs/heads/main").CombinedOutput(); err != nil {
+	if out, err = fixtureGitBare(repoPath, "symbolic-ref", "HEAD", "refs/heads/main"); err != nil {
 		return "", fmt.Errorf("setting default branch for %q: %w\n%s", repoPath, err, out)
 	}
 	return "file://" + repoPath, nil
@@ -49,12 +48,21 @@ func (s *localGitServer) createRepoWithFile(name, filename, content string) (str
 // createRepoWithFiles creates a bare repo named <name>.git, commits every file
 // in files (relative path → content), and returns its file:// URL.
 func (s *localGitServer) createRepoWithFiles(name string, files map[string]string) (string, error) {
+	return s.createRepoWithSpec(name, files, nil)
+}
+
+// createRepoWithSpec is createRepoWithFiles plus committed symlinks (relative
+// path → link target). Git reproduces a committed symlink verbatim in every
+// clone, so this is how a fixture repository ships a context file that is a
+// symlink rather than a regular file — the hostile shape the composer's
+// O_NOFOLLOW read exists to refuse.
+func (s *localGitServer) createRepoWithSpec(name string, files, symlinks map[string]string) (string, error) {
 	repoPath := filepath.Join(s.root, name+".git")
-	out, err := exec.Command("git", "init", "--bare", repoPath).CombinedOutput()
+	out, err := fixtureGit(s.root, "init", "--bare", repoPath)
 	if err != nil {
 		return "", fmt.Errorf("git init --bare %q: %w\n%s", repoPath, err, out)
 	}
-	if out, err = exec.Command("git", "-C", repoPath, "symbolic-ref", "HEAD", "refs/heads/main").CombinedOutput(); err != nil {
+	if out, err = fixtureGitBare(repoPath, "symbolic-ref", "HEAD", "refs/heads/main"); err != nil {
 		return "", fmt.Errorf("setting default branch for %q: %w\n%s", repoPath, err, out)
 	}
 	fileURL := "file://" + repoPath
@@ -66,7 +74,7 @@ func (s *localGitServer) createRepoWithFiles(name string, files map[string]strin
 	}
 	defer os.RemoveAll(workDir)
 
-	if out, err = exec.Command("git", "clone", fileURL, workDir).CombinedOutput(); err != nil {
+	if out, err = fixtureGit(s.root, "clone", fileURL, workDir); err != nil {
 		return "", fmt.Errorf("git clone %q: %w\n%s", fileURL, err, out)
 	}
 
@@ -80,31 +88,29 @@ func (s *localGitServer) createRepoWithFiles(name string, files map[string]strin
 		}
 	}
 
-	gitEnv := append(os.Environ(),
-		"GIT_AUTHOR_NAME=niwa-test",
-		"GIT_AUTHOR_EMAIL=niwa-test@example.com",
-		"GIT_COMMITTER_NAME=niwa-test",
-		"GIT_COMMITTER_EMAIL=niwa-test@example.com",
-	)
+	for linkName, target := range symlinks {
+		linkPath := filepath.Join(workDir, linkName)
+		if err = os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
+			return "", fmt.Errorf("creating parent dir for symlink %s: %w", linkName, err)
+		}
+		if err = os.Symlink(target, linkPath); err != nil {
+			return "", fmt.Errorf("creating symlink %s -> %s: %w", linkName, target, err)
+		}
+	}
 
-	addCmd := exec.Command("git", "add", "-A")
-	addCmd.Dir = workDir
-	addCmd.Env = gitEnv
-	if out, err = addCmd.CombinedOutput(); err != nil {
+	// This is the sequence that once escaped: workDir had been deleted out
+	// from under a concurrent run, so git walked up and found the real
+	// checkout. fixtureGitCommit pins GIT_DIR/GIT_WORK_TREE, so a missing
+	// workDir now fails here instead of committing somewhere else.
+	if out, err = fixtureGitCommit(workDir, "add", "-A"); err != nil {
 		return "", fmt.Errorf("git add: %w\n%s", err, out)
 	}
 
-	commitCmd := exec.Command("git", "commit", "-m", "initial")
-	commitCmd.Dir = workDir
-	commitCmd.Env = gitEnv
-	if out, err = commitCmd.CombinedOutput(); err != nil {
+	if out, err = fixtureGitCommit(workDir, "commit", "-m", "initial"); err != nil {
 		return "", fmt.Errorf("git commit: %w\n%s", err, out)
 	}
 
-	pushCmd := exec.Command("git", "push", "-u", "origin", "HEAD")
-	pushCmd.Dir = workDir
-	pushCmd.Env = gitEnv
-	if out, err = pushCmd.CombinedOutput(); err != nil {
+	if out, err = fixtureGitCommit(workDir, "push", "-u", "origin", "HEAD"); err != nil {
 		return "", fmt.Errorf("git push: %w\n%s", err, out)
 	}
 
@@ -116,6 +122,15 @@ func (s *localGitServer) createRepoWithFiles(name string, files map[string]strin
 // produces a non-empty HEAD so git worktree add -b works without --orphan.
 func (s *localGitServer) SourceRepo(name string) (string, error) {
 	return s.createRepoWithFile(name, ".gitkeep", "")
+}
+
+// SourceRepoSpec creates a bare repo named <name>.git carrying committed files
+// and committed symlinks, and returns its file:// URL. Use it for fixtures that
+// must ship real content a clone reproduces — a repository's own AGENTS.md, a
+// context file in an intermediate directory, a marketplace tree, or one of the
+// hostile shapes at a name niwa writes.
+func (s *localGitServer) SourceRepoSpec(name string, files, symlinks map[string]string) (string, error) {
+	return s.createRepoWithSpec(name, files, symlinks)
 }
 
 // ConfigRepo creates a bare repo named <name>.git, commits

@@ -2,6 +2,7 @@ package functional
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -74,13 +75,41 @@ func iSetEnvToTempPath(ctx context.Context, key string) (context.Context, error)
 // HOME, XDG_CONFIG_HOME, and TMPDIR to the sandbox so config, state, and
 // temp files don't leak across scenarios or into the real user environment.
 // Per-scenario overrides win last.
+//
+// ANTHROPIC_API_KEY is dropped rather than overridden. It is not a path, so
+// there is nothing sandboxed to point it at, but niwa branches on it: an
+// ANTHROPIC_API_KEY forces Claude Code into API-key auth, and remote control on
+// dispatch refuses to inject when it is set, because Claude Code Remote needs a
+// claude.ai login. Left inherited, a scenario that exercises remote control
+// passes on CI and fails on the machine of any developer who has the key
+// exported. niwa itself is not quiet about it -- it prints a warning naming the
+// variable -- but the assertion that fails reports only the missing setting and
+// never shows stderr, so the failure reads as niwa being broken rather than as
+// the environment deciding. A scenario that genuinely needs the real key
+// re-appends it after this call; see runClaudeP.
 func (s *testState) buildEnv() []string {
+	// pathDirs are prepended to $PATH for the niwa subprocess, highest
+	// priority first: a per-scenario pathPrefix (e.g. a fake `claude`) wins
+	// over the always-present sharedBinDir (hermetic stubs like a fake
+	// `infisical`), and both win over the inherited PATH. When any prefix is
+	// present the inherited PATH is stripped and rebuilt so the ordering holds.
+	var pathDirs []string
+	if s.pathPrefix != "" {
+		pathDirs = append(pathDirs, s.pathPrefix)
+	}
+	if s.sharedBinDir != "" {
+		pathDirs = append(pathDirs, s.sharedBinDir)
+	}
+	overridePath := len(pathDirs) > 0
+
 	base := os.Environ()
 	filtered := base[:0]
 	for _, kv := range base {
 		if strings.HasPrefix(kv, "HOME=") ||
 			strings.HasPrefix(kv, "XDG_CONFIG_HOME=") ||
-			strings.HasPrefix(kv, "TMPDIR=") {
+			strings.HasPrefix(kv, "TMPDIR=") ||
+			strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") ||
+			(overridePath && strings.HasPrefix(kv, "PATH=")) {
 			continue
 		}
 		filtered = append(filtered, kv)
@@ -90,10 +119,37 @@ func (s *testState) buildEnv() []string {
 		"XDG_CONFIG_HOME="+filepath.Join(s.homeDir, ".config"),
 		"TMPDIR="+s.tmpDir,
 	)
+	if overridePath {
+		parts := append(append([]string{}, pathDirs...), os.Getenv("PATH"))
+		env = append(env, "PATH="+strings.Join(parts, string(os.PathListSeparator)))
+	}
 	for k, v := range s.envOverrides {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+// writeFakeInfisical installs a stub `infisical` executable in dir. niwa only
+// ever invokes `infisical export ... --format json`; the stub emits an empty
+// JSON object so credential resolution finds no keys (vault.ErrKeyNotFound)
+// and apply proceeds offline, and it exits 0 for any other subcommand. This
+// keeps the functional suite from contacting the real Infisical service or
+// depending on a developer login when a scenario's config declares an
+// infisical vault provider.
+func writeFakeInfisical(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir shared-bin: %w", err)
+	}
+	script := `#!/bin/sh
+if [ "$1" = "export" ]; then
+  echo '{}'
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "infisical"), []byte(script), 0o755); err != nil {
+		return fmt.Errorf("writing fake infisical script: %w", err)
+	}
+	return nil
 }
 
 // runNiwa executes the test binary with the given args from cwd and records
@@ -920,6 +976,32 @@ func aConfigRepoExistsWithBody(ctx context.Context, name string, body *godog.Doc
 	return ctx, nil
 }
 
+// aConfigRepoWithSourceFileAndBody creates a config repo carrying both the
+// workspace.toml (from the docstring) and an additional source file the config
+// can distribute (e.g. an mcp.json referenced by [instance.files]/[root.files]).
+// The source file gets a small, recognizable MCP-config body so a materialized
+// copy can be asserted on by content.
+func aConfigRepoWithSourceFileAndBody(ctx context.Context, name, srcFile string, body *godog.DocString) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	content := body.Content
+	for repoName, repoURL := range s.repoURLs {
+		content = strings.ReplaceAll(content, "{repo:"+repoName+"}", repoURL)
+	}
+	files := map[string]string{
+		"workspace.toml": content,
+		srcFile:          `{"mcpServers":{"demo":{"command":"demo"}}}`,
+	}
+	url, err := s.gitServer.ConfigRepoFiles(name, files)
+	if err != nil {
+		return ctx, fmt.Errorf("creating config repo %q with source file %q: %w", name, srcFile, err)
+	}
+	s.repoURLs[name] = url
+	return ctx, nil
+}
+
 // anOverlayRepoExistsWithBody creates a bare repo with a committed
 // workspace-overlay.toml and stores its file:// URL in state keyed by name.
 func anOverlayRepoExistsWithBody(ctx context.Context, name string, body *godog.DocString) (context.Context, error) {
@@ -1075,6 +1157,27 @@ func iWriteFileToRepoInInstance(ctx context.Context, content, relFilePath, group
 // double-quoted form cannot express.
 func iWriteFileBodyToRepoInInstance(ctx context.Context, relFilePath, groupRepo, instanceName string, body *godog.DocString) (context.Context, error) {
 	return iWriteFileToRepoInInstance(ctx, body.Content, relFilePath, groupRepo, instanceName)
+}
+
+// iWriteExecutableFileToRepoInInstance is the executable-mode variant of
+// iWriteFileBodyToRepoInInstance, and it creates intermediate directories.
+// Setup scripts need both: the setup runner correctly skips anything without
+// the executable bit, and the scripts live in a subdirectory the cloned repo
+// does not have.
+func iWriteExecutableFileToRepoInInstance(ctx context.Context, relFilePath, groupRepo, instanceName string, body *godog.DocString) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	repoDir := filepath.Join(s.workspaceRoot, instanceName, filepath.FromSlash(groupRepo))
+	dst := filepath.Join(repoDir, filepath.FromSlash(relFilePath))
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return ctx, fmt.Errorf("creating %s: %w", filepath.Dir(dst), err)
+	}
+	if err := os.WriteFile(dst, []byte(body.Content), 0o755); err != nil {
+		return ctx, fmt.Errorf("writing %s: %w", dst, err)
+	}
+	return ctx, nil
 }
 
 // noNiwaTempFilesRemain scans the scenario's scoped TMPDIR for wrapper
@@ -1272,4 +1375,40 @@ func runClaudeP(s *testState, cwd, prompt string) error {
 	}
 	s.exitCode = 0
 	return nil
+}
+
+// lookupJSONKey parses the JSON file at path and walks a dotted key path
+// ("permissions.defaultMode"). It returns the value and whether every segment
+// was present. A file that is missing or doesn't parse is an error, so a "no
+// key" assertion can't pass on an unreadable document. So is an intermediate
+// segment that is present but isn't an object: "permissions": "bypassPermissions" is a
+// malformed document, not one without a mode. The path splits on ".", so a key
+// that itself contains a dot can't be addressed.
+func lookupJSONKey(path, dottedKey string) (value any, found bool, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false, fmt.Errorf("reading %s: %w", path, err)
+	}
+	var doc any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, false, fmt.Errorf("parsing %s as JSON: %w\n%s", path, err, data)
+	}
+	cur := doc
+	walked := ""
+	for _, seg := range strings.Split(dottedKey, ".") {
+		obj, ok := cur.(map[string]any)
+		if !ok {
+			where := "the document root"
+			if walked != "" {
+				where = fmt.Sprintf("%q", walked)
+			}
+			return nil, false, fmt.Errorf("%s: %s is %v, not an object, so %q can't be looked up", path, where, cur, dottedKey)
+		}
+		cur, ok = obj[seg]
+		if !ok {
+			return nil, false, nil
+		}
+		walked = strings.TrimPrefix(walked+"."+seg, ".")
+	}
+	return cur, true, nil
 }

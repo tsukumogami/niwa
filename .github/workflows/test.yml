@@ -22,14 +22,41 @@ on:
       - '.github/workflows/test.yml'
       - '.tsuku-recipes/**'
 
+# Nothing in this workflow writes to the repository, so it gets no token that
+# could. The functional suite drives real git against its own sandboxes, and a
+# suite that escaped its sandbox once already reached a checkout that had push
+# credentials sitting in .git/config. Read-only here, and persist-credentials:
+# false on the checkout below, mean a future escape has nothing to push with.
+permissions:
+  contents: read
+
 jobs:
   test:
+    # The unit suite runs on both platforms. niwa reads process state and
+    # compares filesystem paths, and both differ enough between Linux and
+    # Darwin that a Linux-only matrix let macOS-specific breakage sit
+    # undetected: /var is a symlink to /private/var on macOS, so paths the
+    # code resolves stopped matching paths it did not, and the /proc-only
+    # start-time probe silently degraded to "assume alive", disabling
+    # PID-recycle detection. Both were invisible to CI and loud on every
+    # macOS developer's machine.
+    #
+    # Steps below the unit suite stay Linux-only, each for its own reason --
+    # see the comment on each. fail-fast is off so one platform's failure
+    # does not hide the other's result, which is the whole point of testing
+    # two platforms.
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
 
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5  # v6.2.0
@@ -37,7 +64,11 @@ jobs:
           go-version-file: 'go.mod'
           cache-dependency-path: go.sum
 
+      # Tidiness is a property of the checked-in go.mod, not of the runner, so
+      # one platform answers it for both.
+      # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
       - name: Verify go.mod is tidy
+        if: matrix.os == 'ubuntu-latest'
         run: |
           go mod tidy
           if ! git diff --exit-code go.mod go.sum; then
@@ -45,17 +76,87 @@ jobs:
             exit 1
           fi
 
+      # Same reasoning as the tidiness check above: gofmt's output is a property
+      # of the checked-in files and does not vary by GOOS, so one platform
+      # answers it for both. Nothing gated formatting before this, and twelve
+      # files had drifted by the time it was added -- which is the real cost of
+      # leaving it ungated, because the next `gofmt -w` sweeps every one of them
+      # into whatever PR happens to run it.
+      # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
+      - name: Verify gofmt
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt-clean. Run 'gofmt -w' and commit."
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # Worth running on both: vet type-checks the files selected by the
+      # current GOOS, so the darwin build-tagged sources are only ever checked
+      # by the macOS job.
+      # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
       - name: Vet
         run: go vet ./...
 
+      # -race on both platforms. The package-level state `niwa dispatch` used
+      # to mutate raced under concurrent dispatch and went unnoticed because
+      # nothing ran the detector; keeping it in the gate is what stops that
+      # recurring.
+      # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
 
+      # Record what the checkout looks like before the functional suite runs, so
+      # the check after it can prove the suite left it alone. rev-parse rather
+      # than symbolic-ref: actions/checkout leaves a detached HEAD, so a
+      # symbolic-ref guard would be red on every run for no reason.
+      # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
+      - name: Snapshot repository state
+        if: matrix.os == 'ubuntu-latest'
+        id: repo-before
+        run: |
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git status --porcelain > /tmp/repo-status-before.txt
+
+      # Linux-only until the godog harness is portable: it fakes a TTY with
+      # `script -c`, which is GNU-only syntax, and several scenarios assume an
+      # unresolved /tmp path. Tracked in tsukumogami/niwa#243.
+      # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
       - name: Functional tests
+        if: matrix.os == 'ubuntu-latest'
         run: make test-functional
 
+      # The tripwire. The suite allocates its sandboxes outside the checkout, so
+      # a run that moved HEAD or dirtied the working tree reached something it
+      # should not have. This catches the shape of tsukumogami/niwa#249 without
+      # needing to know how a future test might escape -- it only asks whether
+      # the checkout changed. `always()` so it still reports when the suite
+      # itself failed, which is exactly when an escape is most likely.
+      # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
+      - name: Verify the suite left the checkout alone
+        if: always() && matrix.os == 'ubuntu-latest' && steps.repo-before.outcome == 'success'
+        run: |
+          after_head=$(git rev-parse HEAD)
+          if [ "$after_head" != "${{ steps.repo-before.outputs.head }}" ]; then
+            echo "::error::The test run moved HEAD from ${{ steps.repo-before.outputs.head }} to $after_head. A test reached the real repository."
+            exit 1
+          fi
+          git status --porcelain > /tmp/repo-status-after.txt
+          if ! diff -u /tmp/repo-status-before.txt /tmp/repo-status-after.txt; then
+            echo "::error::The test run modified the checkout. A test wrote outside its sandbox."
+            exit 1
+          fi
+          echo "OK: HEAD unchanged and the working tree is as the suite found it"
+
+      # Everything from here down is Linux-only: the Infisical CLI installs
+      # from a .deb, the Claude and tsuku integration steps consume shared
+      # credentials and rate limits that gain nothing from a second platform,
+      # and the shell-init check inspects Go string output that does not vary
+      # by OS.
       - name: Install Infisical CLI
-        if: env.INFISICAL_CLIENT_ID != ''
+        if: matrix.os == 'ubuntu-latest' && env.INFISICAL_CLIENT_ID != ''
         run: |
           curl -1sLf 'https://dl.cloudsmith.io/public/infisical/infisical-cli/setup.deb.sh' | sudo -E bash
           sudo apt-get install -y infisical
@@ -63,7 +164,7 @@ jobs:
           INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
 
       - name: Vault integration tests
-        if: env.INFISICAL_CLIENT_ID != ''
+        if: matrix.os == 'ubuntu-latest' && env.INFISICAL_CLIENT_ID != ''
         run: |
           # Authenticate as machine identity; the --plain flag prints the JWT
           INFISICAL_TOKEN=$(infisical login \
@@ -80,21 +181,24 @@ jobs:
           INFISICAL_TEST_PROJECT_ID: ${{ secrets.INFISICAL_TEST_PROJECT_ID }}
 
       - name: Install Claude CLI
-        if: env.ANTHROPIC_API_KEY != ''
+        if: matrix.os == 'ubuntu-latest' && env.ANTHROPIC_API_KEY != ''
         run: npm install -g @anthropic-ai/claude-code
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
       - name: Claude integration tests
-        if: env.ANTHROPIC_API_KEY != ''
+        if: matrix.os == 'ubuntu-latest' && env.ANTHROPIC_API_KEY != ''
         run: make test-functional-claude-integration
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
       - name: Install tsuku
+        if: matrix.os == 'ubuntu-latest'
         run: curl -fsSL https://tsuku.dev/install.sh | bash
 
+      # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
       - name: Verify shell-init output
+        if: matrix.os == 'ubuntu-latest'
         run: |
           go build -o niwa-test ./cmd/niwa
           for shell in bash zsh; do
@@ -116,6 +220,7 @@ jobs:
           rm niwa-test
 
       - name: Verify recipe installs via tsuku
+        if: matrix.os == 'ubuntu-latest'
         run: |
           export PATH="$HOME/.tsuku/bin:$PATH"
           eval "$(tsuku shellenv)"

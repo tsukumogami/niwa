@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/pluginrecord"
 	"github.com/tsukumogami/niwa/internal/vault"
 	"github.com/tsukumogami/niwa/internal/vault/fake"
 )
@@ -1035,7 +1037,9 @@ source = "workspace.md"
 
 	// Verify settings.local.json was generated with permissions and hooks.
 	settingsPath := filepath.Join(repoDir, ".claude", "settings.local.json")
-	assertFileContains(t, settingsPath, `"defaultMode": "bypassPermissions"`)
+	// bypass writes no permission mode; the posture travels on dispatch's
+	// --permission-mode flag instead.
+	assertFileNotContains(t, settingsPath, `"defaultMode"`)
 	assertFileContains(t, settingsPath, `"PreToolUse"`)
 	assertFileContains(t, settingsPath, "lint.local.sh")
 
@@ -1150,6 +1154,123 @@ enabled = false
 	// Env SHOULD still be installed (env is tool-agnostic).
 	envPath := filepath.Join(repoDir, ".local.env")
 	assertFileContains(t, envPath, "MY_VAR=yes")
+}
+
+// TestCreateWorktreeDelegationOptOutGating verifies the Issue 6 gate on the
+// Step 6.4 worktree-delegation block. When NoWorktreeDelegation is set in the
+// workspace-root init state, Create must install NEITHER the worktree hook nor
+// the permissions.deny fallback into the per-repo settings.local.json. Without
+// the opt-out, the integration installs (hook on a supported harness, deny on an
+// unsupported one). Both branches leave a worktree marker, so the non-opt-out
+// case asserts at least one marker is present.
+func TestCreateWorktreeDelegationOptOutGating(t *testing.T) {
+	tests := []struct {
+		name    string
+		optOut  bool
+		present bool // whether a worktree-delegation marker must appear
+	}{
+		{name: "opt-out skips integration", optOut: true, present: false},
+		{name: "no opt-out installs integration", optOut: false, present: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			niwaDir := filepath.Join(tmpDir, ".niwa")
+			if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.public]
+visibility = "public"
+
+[claude.settings]
+permissions = "bypass"
+`
+			if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+			if err != nil {
+				t.Fatalf("loading config: %v", err)
+			}
+			cfg := result.Config
+
+			// Write the workspace-root init state Create reads via
+			// LoadState(workspaceRoot). The opt-out lives here, exactly as
+			// `niwa init --no-worktree-delegation` would have written it.
+			workspaceRoot := tmpDir
+			if tc.optOut {
+				if err := SaveState(workspaceRoot, &InstanceState{
+					SchemaVersion:        SchemaVersion,
+					NoWorktreeDelegation: true,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			mockClient := &mockGitHubClient{
+				repos: map[string][]github.Repo{
+					"testorg": {
+						{Name: "app", Visibility: "public", SSHURL: "git@github.com:testorg/app.git"},
+					},
+				},
+			}
+
+			applier := NewApplier(mockClient)
+			applier.Cloner = &Cloner{}
+
+			instanceRoot := filepath.Join(workspaceRoot, "test-ws")
+			repoDir := filepath.Join(instanceRoot, "public", "app")
+			if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.local*\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := applier.Create(context.Background(), cfg, niwaDir, workspaceRoot, cfg.Workspace.Name); err != nil {
+				t.Fatalf("create failed: %v", err)
+			}
+
+			settingsPath := filepath.Join(repoDir, ".claude", "settings.local.json")
+			// Markers across both branches: supported writes "from-hook" /
+			// "WorktreeCreate"; unsupported writes the "EnterWorktree" deny.
+			markers := []string{"from-hook", "WorktreeCreate", "EnterWorktree"}
+			if tc.present {
+				data, err := os.ReadFile(settingsPath)
+				if err != nil {
+					t.Fatalf("reading settings.local.json: %v", err)
+				}
+				found := false
+				for _, m := range markers {
+					if strings.Contains(string(data), m) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("expected a worktree-delegation marker in settings.local.json, got:\n%s", data)
+				}
+			} else {
+				// Opt-out: settings.local.json may still exist (it carries the
+				// bypass permissions), but it must contain no worktree marker.
+				if _, statErr := os.Stat(settingsPath); statErr == nil {
+					for _, m := range markers {
+						assertFileNotContains(t, settingsPath, m)
+					}
+				}
+			}
+		})
+	}
 }
 
 // setupOverlayDir creates a fake overlay directory with a workspace-overlay.toml
@@ -2104,8 +2225,10 @@ RECOMMENDED_KEY = "Should be present - resolved by overlay vault"
 	envPath := filepath.Join(instanceRoot, "all", "repo1", ".local.env")
 	assertFileContains(t, envPath, "REQUIRED_KEY=")
 
-	// Now verify a missing required key fails the apply.
-	// Use a new workspace with REQUIRED_KEY required but no overlay vault resolution.
+	// Now verify a required key that no configured provider could supply
+	// does NOT fail the apply. Nothing was asked and nothing answered, so
+	// there is no fault here for the reader to fix -- only a value this
+	// environment cannot produce.
 	configTOMLMissing := `
 [workspace]
 name = "test-ws2"
@@ -2138,12 +2261,8 @@ MUST_HAVE = "This key is never provided"
 	// No overlay — MUST_HAVE is never resolved.
 	applier2 := NewApplier(mockClient)
 	applier2.vaultRegistry = newFakeVaultRegistry(t)
-	applyErr := applier2.Apply(context.Background(), result2.Config, niwaDir2, instanceRoot2)
-	if applyErr == nil {
-		t.Fatal("expected error for missing required secret, got nil")
-	}
-	if !strings.Contains(applyErr.Error(), "MUST_HAVE") {
-		t.Errorf("error should name the missing key, got: %v", applyErr)
+	if applyErr := applier2.Apply(context.Background(), result2.Config, niwaDir2, instanceRoot2); applyErr != nil {
+		t.Fatalf("apply must survive a required secret no provider could supply, got: %v", applyErr)
 	}
 }
 
@@ -2382,7 +2501,7 @@ org = "testorg"
 [groups.public]
 visibility = "public"
 
-[claude.content.groups.public]
+[content.groups.public]
 source = "claude/public.md"
 `
 	mockClient := &mockGitHubClient{
@@ -3000,5 +3119,174 @@ func TestOverlayRepoFlowsThroughDiscoveryAndClassify(t *testing.T) {
 	}
 	if classifiedNames["repo1"] != "private" {
 		t.Errorf("regular repo not classified into private group: got %v", classifiedNames)
+	}
+}
+
+// seedPluginRegistry writes a Claude Code plugin registry under baseDir at the
+// canonical ~/.claude/plugins/installed_plugins.json location and returns its
+// path. The content is written verbatim so tests control byte-level shape.
+func seedPluginRegistry(t *testing.T, baseDir, content string) string {
+	t.Helper()
+	regPath := filepath.Join(baseDir, ".claude", "plugins", "installed_plugins.json")
+	if err := os.MkdirAll(filepath.Dir(regPath), 0o755); err != nil {
+		t.Fatalf("creating registry dir: %v", err)
+	}
+	if err := os.WriteFile(regPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("seeding registry: %v", err)
+	}
+	return regPath
+}
+
+// healWithBaseDir builds an Applier whose plugin-record heal seam targets the
+// registry under baseDir (via pluginrecord.WithPruneBaseDir) and whose reporter
+// writes to buf, then runs the heal. It mirrors how runPipeline invokes the
+// heal in production while keeping the prune pointed at a temp HOME.
+func healWithBaseDir(baseDir string, buf *bytes.Buffer) {
+	a := &Applier{
+		Reporter: NewReporter(buf),
+		prunePluginRecords: func() (pluginrecord.PruneReport, error) {
+			return pluginrecord.Prune(pluginrecord.Dangling, pluginrecord.WithPruneBaseDir(baseDir))
+		},
+	}
+	a.healDanglingPluginRecords()
+	a.Reporter.FlushDeferred()
+}
+
+func TestHealDanglingPluginRecords_RemovesDanglingKeepsLive(t *testing.T) {
+	home := t.TempDir()
+
+	// A live project path and install path that exist on disk; the heal must
+	// leave records pointing at these intact.
+	liveProject := filepath.Join(home, "live-project")
+	liveInstall := filepath.Join(home, "live-install")
+	for _, d := range []string{liveProject, liveInstall} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("creating live dir: %v", err)
+		}
+	}
+
+	// Dangling paths: never created, so they are provably missing.
+	deadProject := filepath.Join(home, "gone-project")
+	deadInstall := filepath.Join(home, "gone-install")
+
+	content := fmt.Sprintf(`{
+  "version": 1,
+  "plugins": {
+    "alpha@market": [
+      {"scope": "project", "projectPath": %q, "installPath": %q},
+      {"scope": "project", "projectPath": %q, "installPath": %q}
+    ],
+    "beta@market": [
+      {"scope": "project", "projectPath": %q, "installPath": %q}
+    ]
+  }
+}`, liveProject, liveInstall, deadProject, deadInstall, deadProject, deadInstall)
+
+	regPath := seedPluginRegistry(t, home, content)
+
+	var buf bytes.Buffer
+	healWithBaseDir(home, &buf)
+
+	// Re-load the registry through the package to inspect what survived.
+	reg, err := pluginrecord.Load(pluginrecord.WithBaseDir(home))
+	if err != nil {
+		t.Fatalf("loading post-heal registry: %v", err)
+	}
+
+	// alpha@market keeps exactly the one live record; its dead record is gone.
+	alpha := reg.Plugins["alpha@market"]
+	if len(alpha) != 1 {
+		t.Fatalf("alpha@market: want 1 live record, got %d", len(alpha))
+	}
+	if alpha[0].ProjectPath != liveProject {
+		t.Errorf("alpha@market survivor: want projectPath %q, got %q", liveProject, alpha[0].ProjectPath)
+	}
+
+	// beta@market had only a dead record, so the key is dropped entirely.
+	if _, ok := reg.Plugins["beta@market"]; ok {
+		t.Errorf("beta@market: want key dropped (all records dangling), still present")
+	}
+
+	// The heal reports the count and the affected plugins.
+	out := buf.String()
+	if !strings.Contains(out, "healed 2 dangling plugin record(s)") {
+		t.Errorf("missing heal report line, got: %q", out)
+	}
+	if !strings.Contains(out, "alpha@market") || !strings.Contains(out, "beta@market") {
+		t.Errorf("heal report omits affected plugins, got: %q", out)
+	}
+
+	// A backup of the pre-heal registry exists alongside the original.
+	entries, err := os.ReadDir(filepath.Dir(regPath))
+	if err != nil {
+		t.Fatalf("reading registry dir: %v", err)
+	}
+	var sawBackup bool
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".niwa-bak.") {
+			sawBackup = true
+		}
+	}
+	if !sawBackup {
+		t.Errorf("expected a .niwa-bak backup after heal, dir entries: %v", entries)
+	}
+}
+
+func TestHealDanglingPluginRecords_MalformedRegistryDoesNotFail(t *testing.T) {
+	home := t.TempDir()
+	regPath := seedPluginRegistry(t, home, "{ this is not valid json")
+	before, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatalf("reading seeded registry: %v", err)
+	}
+
+	var buf bytes.Buffer
+	// Must not panic and must not propagate an error (the helper returns void;
+	// fail-safe means create/update never fail). The malformed file is left
+	// untouched and the failure is reported as a deferred warning.
+	healWithBaseDir(home, &buf)
+
+	after, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatalf("reading post-heal registry: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("malformed registry was modified; before=%q after=%q", before, after)
+	}
+	if !strings.Contains(buf.String(), "could not heal dangling plugin records") {
+		t.Errorf("expected a fail-safe warning for malformed registry, got: %q", buf.String())
+	}
+}
+
+func TestHealDanglingPluginRecords_AbsentRegistryIsNoop(t *testing.T) {
+	home := t.TempDir() // no registry seeded
+
+	var buf bytes.Buffer
+	healWithBaseDir(home, &buf)
+
+	if out := strings.TrimSpace(buf.String()); out != "" {
+		t.Errorf("absent registry should produce no output, got: %q", out)
+	}
+	// No registry file should have been created by the heal.
+	regPath := filepath.Join(home, ".claude", "plugins", "installed_plugins.json")
+	if _, err := os.Stat(regPath); !os.IsNotExist(err) {
+		t.Errorf("absent registry should stay absent, stat err = %v", err)
+	}
+}
+
+func TestHealDanglingPluginRecords_NilSeamIsNoop(t *testing.T) {
+	var buf bytes.Buffer
+	a := &Applier{Reporter: NewReporter(&buf)}
+	// No seam wired: must be a silent no-op rather than a nil-call panic.
+	a.healDanglingPluginRecords()
+	if out := strings.TrimSpace(buf.String()); out != "" {
+		t.Errorf("nil seam should produce no output, got: %q", out)
+	}
+}
+
+func TestNewApplierWiresPluginRecordHeal(t *testing.T) {
+	a := NewApplier(&mockGitHubClient{})
+	if a.prunePluginRecords == nil {
+		t.Fatal("NewApplier must wire a default plugin-record heal seam")
 	}
 }

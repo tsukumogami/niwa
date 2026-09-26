@@ -1,0 +1,696 @@
+package cli
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/tsukumogami/niwa/internal/agentplan"
+	"github.com/tsukumogami/niwa/internal/workspace"
+)
+
+// Canonical dispatch-shaped instance names: "<config>+-<8hex>" (no-name
+// dispatch, where "+" is the end-of-config marker and the suffix is the
+// mandatory "-<8hex>"). The backstop keys eligibility on this NAME's purely
+// structural signature (isDispatchInstanceName, "\+[a-z0-9_]*-[0-9a-f]{8}$" --
+// no "disp" literal), so the fixtures must use the real shape dispatch produces.
+const (
+	dispInstOld    = "test-ws+-0000aa11" // marked/aged old -> reapable
+	dispInstYoung  = "test-ws+-0000bb22" // young -> spared
+	dispInstMapped = "test-ws+-0000cc33" // mapped -> not touched
+	dispInstBad    = "test-ws+-0000dd44" // malformed marker -> mtime fallback
+	dispInstNoMark = "test-ws+-0000ee55" // no marker (SIGKILL-before-marker) -> mtime fallback
+	dispInstOrphan = "test-ws+-0000ff66" // marked/aged old -> reapable (combined test)
+	devInstName    = "test-ws-2"         // developer instance -> never matched
+	hookInstName   = "test-ws-aabbccdd"  // hook-created instance, no "+" -> never matched
+)
+
+// writeDispatchMarkerAt writes a dispatch pending-marker inside the instance at
+// instancePath carrying the given RFC3339 timestamp, mirroring what the dispatch
+// command drops at create time.
+func writeDispatchMarkerAt(t *testing.T, instancePath string, ts time.Time) {
+	t.Helper()
+	marker := filepath.Join(instancePath, dispatchPendingMarker)
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte(ts.UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeRawDispatchMarker writes arbitrary bytes as the pending-marker, for the
+// malformed-timestamp case.
+func writeRawDispatchMarker(t *testing.T, instancePath, contents string) {
+	t.Helper()
+	marker := filepath.Join(instancePath, dispatchPendingMarker)
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// touchInstanceMtime sets the instance directory's modification time, used to
+// simulate an old instance whose age must be read from the directory mtime
+// (the SIGKILL-before-marker and malformed-marker fallback cases).
+func touchInstanceMtime(t *testing.T, instancePath string, ts time.Time) {
+	t.Helper()
+	if err := os.Chtimes(instancePath, ts, ts); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestBackstop_MarkedUnmappedOld_Reclaimed: a dispatch-named, unmapped instance
+// whose marker timestamp is older than the TTL is reclaimed by the backstop --
+// the SIGKILL-orphan case the backstop exists to close.
+func TestBackstop_MarkedUnmappedOld_Reclaimed(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, dispInstOld)
+	// No mapping written (unmapped). Marker older than the TTL.
+	writeDispatchMarkerAt(t, inst, now.Add(-2*dispatchBackstopTTL))
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, t.TempDir(), now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reaped count = %d, want 1", n)
+	}
+	if len(*destroyed) != 1 || (*destroyed)[0] != inst {
+		t.Fatalf("destroyed = %v, want [%s]", *destroyed, inst)
+	}
+}
+
+// TestBackstop_DispNamedUnmappedOldNoMarker_ReclaimedViaMtime: a dispatch-named,
+// unmapped instance with NO marker file at all (the SIGKILL-before-marker race:
+// the instance dir was created but the process died before the marker write)
+// whose directory mtime is older than the TTL is reclaimed via the mtime
+// fallback. This is the orphan the name-keyed backstop exists to close -- it was
+// previously unreclaimable because it was both unmapped AND unmarked.
+func TestBackstop_DispNamedUnmappedOldNoMarker_ReclaimedViaMtime(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, dispInstNoMark)
+	// No marker, no mapping. Age it by stamping the directory mtime past the TTL.
+	touchInstanceMtime(t, inst, now.Add(-2*dispatchBackstopTTL))
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, t.TempDir(), now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reaped count = %d, want 1 (SIGKILL-before-marker orphan must be reaped via mtime)", n)
+	}
+	if len(*destroyed) != 1 || (*destroyed)[0] != inst {
+		t.Fatalf("destroyed = %v, want [%s]", *destroyed, inst)
+	}
+}
+
+// TestBackstop_MarkedUnmappedYoung_Spared: a dispatch-named, unmapped instance
+// whose marker is younger than the TTL is SPARED -- this is the R38 in-flight
+// dispatch protection.
+func TestBackstop_MarkedUnmappedYoung_Spared(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, dispInstYoung)
+	// Marker just one minute old: comfortably within the TTL.
+	writeDispatchMarkerAt(t, inst, now.Add(-1*time.Minute))
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, t.TempDir(), now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("reaped count = %d, want 0 (young in-flight instance must be spared)", n)
+	}
+	if len(*destroyed) != 0 {
+		t.Fatalf("destroyed = %v, want [] (young instance must not be destroyed)", *destroyed)
+	}
+}
+
+// TestBackstop_MappedInstance_NotTouched: a dispatch-named instance that has a
+// mapping is owned by the primary sweep and is NEVER touched by the backstop,
+// even when it still carries a stale marker and the marker is past the TTL.
+func TestBackstop_MappedInstance_NotTouched(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, dispInstMapped)
+	mapEphemeral(t, root, reapLiveSessionID, inst, true)
+	// A stale marker past the TTL that was never cleaned up: the backstop must
+	// still ignore it because the instance is mapped.
+	writeDispatchMarkerAt(t, inst, now.Add(-2*dispatchBackstopTTL))
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, t.TempDir(), now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("reaped count = %d, want 0 (mapped instance must not be touched by the backstop)", n)
+	}
+	if len(*destroyed) != 0 {
+		t.Fatalf("destroyed = %v, want [] (mapped instance must not be destroyed by the backstop)", *destroyed)
+	}
+	if _, err := workspace.ReadSessionMapping(root, reapLiveSessionID); err != nil {
+		t.Errorf("mapping was deleted by the backstop; want retained: %v", err)
+	}
+}
+
+// TestBackstop_NonDispatchName_NeverTouched: an instance whose name is NOT a
+// dispatch name -- a developer instance ("<config>-2") or a hook-created instance
+// ("<config>-<sessionhex>", no "+" marker) -- is never touched, even when
+// it is unmapped and arbitrarily old. The name predicate is the load-bearing
+// guard that keeps the backstop off non-dispatch instances.
+func TestBackstop_NonDispatchName_NeverTouched(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	now := time.Now()
+
+	dev := makeReapInstance(t, root, devInstName)   // no "+" marker
+	hook := makeReapInstance(t, root, hookInstName) // <config>-<sessionhex>, no "+"
+	// Age both past the TTL via mtime and even drop a marker on one: still must
+	// not be touched, because the NAME does not match.
+	touchInstanceMtime(t, dev, now.Add(-2*dispatchBackstopTTL))
+	writeDispatchMarkerAt(t, hook, now.Add(-2*dispatchBackstopTTL))
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, t.TempDir(), now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("reaped count = %d, want 0 (non-dispatch-named instances must never be touched)", n)
+	}
+	if len(*destroyed) != 0 {
+		t.Fatalf("destroyed = %v, want []", *destroyed)
+	}
+}
+
+// TestBackstop_MalformedMarker_FallsBackToMtime: a dispatch-named, unmapped
+// instance whose marker timestamp is malformed/unparseable does NOT spare the
+// instance forever -- it falls back to the directory mtime. With an old mtime it
+// is reaped; with a young mtime it is spared.
+func TestBackstop_MalformedMarker_FallsBackToMtime(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	now := time.Now()
+
+	// Malformed marker but an OLD directory mtime: reaped via the mtime fallback.
+	oldInst := makeReapInstance(t, root, dispInstBad)
+	writeRawDispatchMarker(t, oldInst, "not-a-timestamp\n")
+	touchInstanceMtime(t, oldInst, now.Add(-2*dispatchBackstopTTL))
+
+	// Malformed marker but a YOUNG directory mtime: spared via the mtime fallback.
+	youngInst := makeReapInstance(t, root, "test-ws+-00009977")
+	writeRawDispatchMarker(t, youngInst, "garbage")
+	touchInstanceMtime(t, youngInst, now.Add(-1*time.Minute))
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, t.TempDir(), now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reaped count = %d, want 1 (malformed marker falls back to mtime: old reaped, young spared)", n)
+	}
+	if len(*destroyed) != 1 || (*destroyed)[0] != oldInst {
+		t.Fatalf("destroyed = %v, want [%s]", *destroyed, oldInst)
+	}
+}
+
+// TestBackstop_RunsViaReapWorkspace: the backstop is wired into reapWorkspace,
+// so a dead mapped instance (primary sweep) and a dispatch-named-unmapped-old
+// instance (backstop) are both reclaimed in a single reapWorkspace call, while
+// the primary path's behavior for the mapped instance is unchanged.
+func TestBackstop_RunsViaReapWorkspace(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir() // empty: the mapped session reads as dead
+	now := time.Now()
+
+	dead := makeReapInstance(t, root, "test-ws-dead")
+	mapEphemeral(t, root, reapDeadSessionID, dead, true)
+
+	orphan := makeReapInstance(t, root, dispInstOrphan)
+	writeDispatchMarkerAt(t, orphan, now.Add(-2*dispatchBackstopTTL))
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapWorkspace(root, jobsDir, now)
+	if err != nil {
+		t.Fatalf("reapWorkspace error: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("reaped count = %d, want 2 (one primary + one backstop)", n)
+	}
+
+	gotDead, gotOrphan := false, false
+	for _, p := range *destroyed {
+		switch p {
+		case dead:
+			gotDead = true
+		case orphan:
+			gotOrphan = true
+		default:
+			t.Errorf("unexpected destroyed path: %s", p)
+		}
+	}
+	if !gotDead || !gotOrphan {
+		t.Fatalf("destroyed = %v, want both %s and %s", *destroyed, dead, orphan)
+	}
+
+	// The primary path still deletes the dead mapping.
+	if _, err := workspace.ReadSessionMapping(root, reapDeadSessionID); err == nil {
+		t.Errorf("dead mapping retained after reapWorkspace; want deleted")
+	}
+}
+
+// TestSelectBackstopTargets_Matrix exercises the pure selection logic across the
+// full spare/reap matrix in one workspace and asserts the exact target set,
+// independent of the destroy path.
+func TestSelectBackstopTargets_Matrix(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	now := time.Now()
+
+	old := makeReapInstance(t, root, dispInstOld)       // dispatch-named, marked, unmapped, old -> target
+	young := makeReapInstance(t, root, dispInstYoung)   // dispatch-named, marked, unmapped, young -> spared
+	mapped := makeReapInstance(t, root, dispInstMapped) // dispatch-named, marked, mapped, old -> spared
+	noMark := makeReapInstance(t, root, dispInstNoMark) // dispatch-named, NO marker, mtime old -> target
+	bad := makeReapInstance(t, root, dispInstBad)       // dispatch-named, malformed marker, mtime old -> target
+	dev := makeReapInstance(t, root, devInstName)       // non-disp name, old -> spared
+	hook := makeReapInstance(t, root, hookInstName)     // hook name, marked old -> spared
+
+	writeDispatchMarkerAt(t, old, now.Add(-2*dispatchBackstopTTL))
+	writeDispatchMarkerAt(t, young, now.Add(-1*time.Minute))
+	writeDispatchMarkerAt(t, mapped, now.Add(-2*dispatchBackstopTTL))
+	mapEphemeral(t, root, reapLiveSessionID, mapped, true)
+	touchInstanceMtime(t, noMark, now.Add(-2*dispatchBackstopTTL))
+	writeRawDispatchMarker(t, bad, "garbage")
+	touchInstanceMtime(t, bad, now.Add(-2*dispatchBackstopTTL))
+	touchInstanceMtime(t, dev, now.Add(-2*dispatchBackstopTTL))
+	writeDispatchMarkerAt(t, hook, now.Add(-2*dispatchBackstopTTL))
+
+	targets, _, err := selectBackstopTargets(root, t.TempDir(), now)
+	if err != nil {
+		t.Fatalf("selectBackstopTargets error: %v", err)
+	}
+
+	want := map[string]bool{old: true, noMark: true, bad: true}
+	got := make(map[string]bool, len(targets))
+	for _, tg := range targets {
+		got[tg.InstancePath] = true
+	}
+	if len(got) != len(want) {
+		t.Fatalf("targets = %v, want %v", got, want)
+	}
+	for p := range want {
+		if !got[p] {
+			t.Fatalf("missing expected target %s; got %v", p, got)
+		}
+	}
+}
+
+// writeJobStateCwd writes a present job-state entry under jobsDir/<dirName>
+// whose recorded cwd is cwd. It models a live Claude Code worker rooted in an
+// instance directory (a dispatched worker launches with cmd.Dir == its
+// instance, so its job-state cwd is that instance path). The reaper's
+// mapping-independent liveness guard (instanceHasLiveJob) keys on this cwd.
+func writeJobStateCwd(t *testing.T, jobsDir, dirName, cwd string) {
+	t.Helper()
+	dir := filepath.Join(jobsDir, dirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"template":"` + bgJobTemplate + `","cwd":"` + cwd + `"}`)
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestBackstop_LiveWorkerRooted_Spared is the regression guard for the
+// data-loss bug: a dispatch-named, UNMAPPED, past-TTL instance that a live
+// Claude Code worker is currently rooted in (its job-state cwd is the instance
+// directory) must NOT be reaped by the backstop. Before the fix the backstop
+// keyed on name + age alone and reaped exactly this shape -- including the
+// caller's own instance mid-dispatch. It also encodes "dispatch cannot reap its
+// own caller": the caller is precisely a live worker rooted in its instance.
+func TestBackstop_LiveWorkerRooted_Spared(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, dispInstOld)
+	// Unmapped and well past the TTL -- the exact shape the backstop would
+	// otherwise reclaim.
+	writeDispatchMarkerAt(t, inst, now.Add(-2*dispatchBackstopTTL))
+	// But a live worker is rooted in it: its job-state cwd is the instance dir.
+	writeJobStateCwd(t, jobsDir, "0000aa11", inst)
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, jobsDir, now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("reaped count = %d, want 0 (a live worker's instance must never be reaped)", n)
+	}
+	if len(*destroyed) != 0 {
+		t.Fatalf("destroyed = %v, want [] (live instance must not be destroyed)", *destroyed)
+	}
+}
+
+// TestBackstop_RetainedInstance_Spared closes the gap between "kept" meaning
+// kept for the length of one command and kept at all.
+//
+// A foreground turn that finishes and produces work but yields no discoverable
+// session record leaves an instance with no mapping. Dispatch disarms its own
+// rollback so the work survives the command -- but the backstop runs
+// out-of-process at the top of the next create, dispatch or watch, and its
+// eligibility signal is the directory NAME. Unmapped, dispatch-named and past
+// the TTL is exactly the abandoned-dispatch shape it exists to reclaim, so the
+// directory the developer was told was being kept is deleted half an hour later
+// by an unrelated command.
+//
+// Removing the pending marker does not help: the age check falls back to the
+// directory mtime, which TestBackstop_DispNamedUnmappedOldNoMarker_ReclaimedViaMtime
+// pins. Keeping the work needs a signal the sweep honors rather than the
+// absence of one, and this is that signal.
+func TestBackstop_RetainedInstance_Spared(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, dispInstOld)
+	// Old enough to be reaped on every other count, and unmapped, which is the
+	// state the keep path leaves behind.
+	touchInstanceMtime(t, inst, now.Add(-2*dispatchBackstopTTL))
+	const reason = "a codex turn finished here but no session record was found, so niwa could not identify the session"
+	if err := writeDispatchRetainMarker(inst, reason); err != nil {
+		t.Fatalf("writing the retain marker: %v", err)
+	}
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, t.TempDir(), now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 0 || len(*destroyed) != 0 {
+		t.Fatalf("reaped %d (%v); an instance marked to be kept must survive the sweep that was told to keep it", n, *destroyed)
+	}
+
+	// And the developer is told, because nothing will ever reclaim it on its
+	// own and an instance that accumulates silently is the other half of this
+	// failure.
+	_, spared, err := selectBackstopTargets(root, t.TempDir(), now)
+	if err != nil {
+		t.Fatalf("selectBackstopTargets error: %v", err)
+	}
+	if len(spared) != 1 {
+		t.Fatalf("spared %d instance(s), want 1", len(spared))
+	}
+	if spared[0].Reason != reason {
+		t.Errorf("spared reason = %q, want the marker's own words %q", spared[0].Reason, reason)
+	}
+}
+
+// TestBackstop_LiveWorkerOfEveryAgent_Spared is the data-loss case the backstop
+// had no coverage for, and it is the one this feature made reachable.
+//
+// The backstop exists for the orphan the deferred rollback cannot clean up: a
+// worker started detached survives a niwa killed before the mapping is written,
+// leaving a live worker in an unmapped instance. Thirty minutes later the next
+// opportunistic sweep -- which runs at the top of every create and every
+// dispatch -- finds it unmapped and past the TTL. The only thing between that
+// and destroying the directory a worker is working in is the live-session
+// guard, and while niwa launched one agent that guard could read one store.
+//
+// So this runs the same scenario once per launchable agent, planting a session
+// record in *that agent's* declared store rather than in one agent's harness
+// state, and asserts the instance survives. It fails for any agent whose store
+// the guard cannot read.
+//
+// Not every subtest carries the same weight, and it is worth saying which does
+// what. For the agent whose declared store is the jobs directory, the two
+// guards read one tree and ask one question, so its subtest is a control: it
+// passes with the new guard removed, and what it proves is that generalizing
+// the read did not break the case that already worked. The subtest that fails
+// without the new guard is the one for an agent whose sessions live somewhere
+// the jobs-directory read has never looked -- and that is the case detaching a
+// second agent's worker created. The loop is written over LaunchableAgents()
+// rather than around either of them because a third agent should arrive
+// already covered, and land in whichever of those two roles its declaration
+// puts it in.
+func TestBackstop_LiveWorkerOfEveryAgent_Spared(t *testing.T) {
+	for _, ag := range agentplan.LaunchableAgents() {
+		t.Run(string(ag), func(t *testing.T) {
+			spec, ok := agentplan.For(ag).LaunchSpec()
+			if !ok {
+				t.Fatalf("no launch spec for %s", ag)
+			}
+
+			root := setupHookWorkspace(t, true)
+			now := time.Now()
+
+			// Every record store resolves under a fixture home, so this reads
+			// nothing the developer running the suite happens to have on disk.
+			home := t.TempDir()
+			prevHome := userHomeDir
+			userHomeDir = func() string { return home }
+			t.Cleanup(func() { userHomeDir = prevHome })
+
+			inst := makeReapInstance(t, root, dispInstOld)
+			writeDispatchMarkerAt(t, inst, now.Add(-2*dispatchBackstopTTL))
+			writeSessionRecordFor(t, spec.Records, home, inst)
+
+			destroyed := stubDestroyAll(t)
+
+			// jobsDir is the one production derives (defaultJobsDir: the same
+			// path under home), rather than an empty fixture directory. It
+			// matters, and getting it wrong is what would make this test read
+			// as more coverage than it is. For one agent the declared record
+			// store IS the jobs directory, so both guards read the same tree
+			// and ask the same question of it; handing that subtest an empty
+			// jobsDir would separate two roots that are one directory in
+			// practice, and the subtest would then "fail without the new
+			// guard" for a reason that cannot happen. Wired this way, the
+			// subtest asserts the property rather than the mechanism -- a live
+			// worker's instance survives -- and which guard supplies it is the
+			// agent's own business.
+			//
+			// It comes from defaultJobsDir rather than from a path written
+			// here, so the claim that the two roots coincide is demonstrated by
+			// the production accessor instead of asserted by a fixture.
+			t.Setenv("HOME", home)
+			n, err := reapBackstop(root, defaultJobsDir(), now)
+			if err != nil {
+				t.Fatalf("reapBackstop error: %v", err)
+			}
+			if n != 0 {
+				t.Fatalf("reaped count = %d, want 0 (a live %s worker's instance must never be reaped)", n, ag)
+			}
+			if len(*destroyed) != 0 {
+				t.Fatalf("destroyed = %v, want []", *destroyed)
+			}
+
+			// Only a permanent spare is reported, and which of the three kinds
+			// is permanent is the whole distinction. An agent whose records
+			// disappear with the session needs no notice: the instance goes
+			// when the session does. An agent answered by activity needs none
+			// either, for a different reason -- the record here was just
+			// written, so the sparing is real but temporary, and it ends on its
+			// own once nobody has touched the session for the grace period.
+			// Only an agent that offers no readable signal at all is spared
+			// forever, and that developer has to be told in words that their
+			// disk is not going to get emptier on its own.
+			_, spared, err := selectBackstopTargets(root, defaultJobsDir(), now)
+			if err != nil {
+				t.Fatalf("selectBackstopTargets error: %v", err)
+			}
+			// Worth knowing what this arm is currently worth: no launchable
+			// agent declares LivenessNone any more, so this resolves to false
+			// for every subtest and the branch below asserts only absence. It
+			// is kept as the statement of the rule rather than deleted,
+			// because the kind is still declarable and an agent adopting it
+			// should arrive covered -- but nobody should read a green run here
+			// as evidence that the permanent-spare report works.
+			wantSpared := spec.Records.Liveness == agentplan.LivenessNone
+			if got := len(spared) > 0; got != wantSpared {
+				t.Fatalf("reported spared = %v (%v), want %v for a %s record store", got, spared, wantSpared, ag)
+			}
+			if wantSpared {
+				if spared[0].Name != filepath.Base(inst) {
+					t.Errorf("spared name = %q, want the instance name %q; the report has to name what niwa destroy takes", spared[0].Name, filepath.Base(inst))
+				}
+				if !strings.Contains(spared[0].Reason, string(ag)) {
+					t.Errorf("spared reason = %q, want it to name %s", spared[0].Reason, ag)
+				}
+			}
+		})
+	}
+}
+
+// writeSessionRecordFor plants one session record in an agent's own declared
+// store, rooted at cwd. It writes whatever shape the declaration describes --
+// a named file inside a per-session directory, or a glob-matched transcript
+// whose first line is its metadata -- so the fixture follows the declaration
+// rather than restating one agent's layout.
+func writeSessionRecordFor(t *testing.T, r agentplan.SessionRecords, home, cwd string) {
+	t.Helper()
+	root := recordStoreRoot(r, home, func(string) string { return "" })
+	if root == "" {
+		t.Fatal("the session records resolve to no root under the fixture home")
+	}
+
+	dir := root
+	for i := 0; i < r.Depth; i++ {
+		dir = filepath.Join(dir, fmt.Sprintf("d%d", i))
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir record dir: %v", err)
+	}
+
+	const sid = "01a00000-0000-7000-8000-0000000000aa"
+	doc := map[string]any{}
+	setAtPath(doc, r.IDPath, sid)
+	setAtPath(doc, r.CwdPath, cwd)
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("encoding the record: %v", err)
+	}
+
+	name := r.FileName
+	if name == "" {
+		name = strings.ReplaceAll(r.FileGlob, "*", sid)
+	}
+	body := string(encoded)
+	if r.FirstLineOnly {
+		// A second line, because a store whose records are transcripts would
+		// have one, and a reader that swallowed the whole file must fail rather
+		// than quietly succeed.
+		body += "\n{\"ordinal\":1}"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body+"\n"), 0o600); err != nil {
+		t.Fatalf("write record: %v", err)
+	}
+}
+
+// setAtPath writes value at a dotted field path, creating the objects along the
+// way. It is the fixture side of the reader's own path walk, so a declaration
+// that nests its fields is exercised rather than flattened.
+func setAtPath(doc map[string]any, path []string, value string) {
+	cur := doc
+	for _, key := range path[:len(path)-1] {
+		next, ok := cur[key].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			cur[key] = next
+		}
+		cur = next
+	}
+	cur[path[len(path)-1]] = value
+}
+
+// TestBackstop_LiveWorkerInWorktree_Spared: a worker whose cwd is a
+// subdirectory of the instance (e.g. a per-repo worktree) still counts as live,
+// so the instance is spared. The guard matches at-or-below the instance path,
+// not just an exact cwd.
+func TestBackstop_LiveWorkerInWorktree_Spared(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, dispInstOld)
+	writeDispatchMarkerAt(t, inst, now.Add(-2*dispatchBackstopTTL))
+	writeJobStateCwd(t, jobsDir, "0000aa11", filepath.Join(inst, "public", "tsuku"))
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, jobsDir, now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("reaped count = %d, want 0 (a worker rooted in a subdir is still live)", n)
+	}
+	if len(*destroyed) != 0 {
+		t.Fatalf("destroyed = %v, want [] (live instance must not be destroyed)", *destroyed)
+	}
+}
+
+// TestBackstop_DeadWorkerSiblingCwd_StillReaped: a genuinely orphaned
+// dispatch instance (unmapped, past TTL, NO live job rooted in it) is still
+// reclaimed. A live job whose cwd sits beside the instance -- a sibling path
+// sharing a name prefix -- must not be mistaken for one inside it. This pins
+// that the liveness guard narrows reaping to live instances only and does not
+// disable the backstop.
+func TestBackstop_DeadWorkerSiblingCwd_StillReaped(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	now := time.Now()
+
+	inst := makeReapInstance(t, root, dispInstOld)
+	writeDispatchMarkerAt(t, inst, now.Add(-2*dispatchBackstopTTL))
+	// A live job, but rooted in a SIBLING directory that shares the instance's
+	// path as a string prefix without the separator boundary. It must not spare
+	// the instance.
+	writeJobStateCwd(t, jobsDir, "0000bb22", inst+"-other")
+
+	destroyed := stubDestroyAll(t)
+
+	n, err := reapBackstop(root, jobsDir, now)
+	if err != nil {
+		t.Fatalf("reapBackstop error: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reaped count = %d, want 1 (a genuine orphan must still be reaped)", n)
+	}
+	if len(*destroyed) != 1 || (*destroyed)[0] != inst {
+		t.Fatalf("destroyed = %v, want [%s]", *destroyed, inst)
+	}
+}
+
+// TestInstanceHasLiveJob exercises the mapping-independent liveness helper
+// directly across its spare/reclaim cases.
+func TestInstanceHasLiveJob(t *testing.T) {
+	jobsDir := t.TempDir()
+	inst := "/ws/test-ws+-0000aa11"
+
+	if instanceHasLiveJob(jobsDir, inst) {
+		t.Fatal("empty jobs dir must report no live job")
+	}
+	if instanceHasLiveJob("", inst) {
+		t.Fatal("empty jobsDir must report no live job (fail safe)")
+	}
+
+	writeJobStateCwd(t, jobsDir, "0000aa11", inst)
+	if !instanceHasLiveJob(jobsDir, inst) {
+		t.Fatal("a job whose cwd is the instance must count as live")
+	}
+	if !instanceHasLiveJob(jobsDir, inst+"/") {
+		t.Fatal("a trailing separator on instancePath must still match (cleaned)")
+	}
+	if instanceHasLiveJob(jobsDir, inst+"-other") {
+		t.Fatal("a sibling path sharing a prefix must not match")
+	}
+	if instanceHasLiveJob(jobsDir, "/ws/test-ws+-0000bb22") {
+		t.Fatal("an unrelated instance must not match")
+	}
+}
