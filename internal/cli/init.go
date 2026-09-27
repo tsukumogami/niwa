@@ -40,6 +40,25 @@ func parseInitSource(input string) (sourcepkg.Source, error) {
 	return workspace.ParseSourceURL(input)
 }
 
+// describeCloneSource renders the clone location of an already-parsed
+// source for progress output, with the ref (if any) shown separately.
+// URL-shaped input is echoed as given. Slug input is rendered from the
+// parsed fields rather than re-parsed from the raw string: a slug's
+// `@ref` may contain `/` and is not part of the repo name.
+func describeCloneSource(raw string, src sourcepkg.Source, protocol string) (string, error) {
+	if looksLikeURL(raw) {
+		return raw, nil
+	}
+	cloneURL, err := src.CloneURL(protocol)
+	if err != nil {
+		return "", err
+	}
+	if src.Ref != "" {
+		return fmt.Sprintf("%s (ref %s)", cloneURL, src.Ref), nil
+	}
+	return cloneURL, nil
+}
+
 func init() {
 	rootCmd.AddCommand(initCmd)
 	initCmd.Flags().StringVar(&initFrom, "from", "", "org/repo or URL to clone workspace config from")
@@ -630,12 +649,12 @@ func runInit(cmd *cobra.Command, args []string) error {
 			src = parsed
 		}
 
-		cloneURL, err := workspace.ResolveCloneURL(source, globalCfg.CloneProtocol())
+		cloneDisplay, err := describeCloneSource(source, src, globalCfg.CloneProtocol())
 		if err != nil {
 			return fmt.Errorf("resolving clone URL: %w", err)
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "Initializing from: %s\n", cloneURL)
+		fmt.Fprintf(cmd.OutOrStdout(), "Initializing from: %s\n", cloneDisplay)
 
 		niwaDir := filepath.Join(workspaceRoot, workspace.StateDir)
 		fetcher := github.NewAPIClient(resolveGitHubToken())
