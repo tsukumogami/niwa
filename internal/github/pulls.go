@@ -283,3 +283,110 @@ func ownerRepoFromAPIURL(apiURL string) (owner, repo string, ok bool) {
 	}
 	return parts[0], parts[1], true
 }
+
+// RepoForkInfo reports whether owner/repo is a fork, and of what
+// (GET /repos/{owner}/{repo}). Parent is "owner/repo" of the parent, or ""
+// when the repository isn't a fork.
+func (c *APIClient) RepoForkInfo(ctx context.Context, owner, repo string) (fork bool, parent string, err error) {
+	if owner == "" || repo == "" {
+		return false, "", fmt.Errorf("RepoForkInfo: invalid coordinates %q/%q", owner, repo)
+	}
+	reqURL := fmt.Sprintf("%s/repos/%s/%s", c.BaseURL, url.PathEscape(owner), url.PathEscape(repo))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return false, "", fmt.Errorf("creating request: %w", err)
+	}
+	c.applyAuth(req)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return false, "", fmt.Errorf("querying repository: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, "", fmt.Errorf("GitHub repository GET returned status %d", resp.StatusCode)
+	}
+	var body struct {
+		Fork   bool `json:"fork"`
+		Parent *struct {
+			FullName string `json:"full_name"`
+		} `json:"parent"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return false, "", fmt.Errorf("decoding repository: %w", err)
+	}
+	if body.Parent != nil {
+		parent = body.Parent.FullName
+	}
+	return body.Fork, parent, nil
+}
+
+// PullByHead is the part of a pull request ListPullsByHead reports.
+type PullByHead struct {
+	Number   int
+	State    string // "open" or "closed"
+	MergedAt string // non-empty when the PR merged
+	HeadSHA  string
+}
+
+// ListPullsByHead returns every pull request, in any state, whose head is
+// branch in owner/repo (GET /repos/{owner}/{repo}/pulls?state=all&head=owner:branch).
+// Merged PRs are listed even after their head branch has been deleted.
+//
+// The head filter must carry the owner prefix: GitHub silently ignores a bare
+// branch name and returns unfiltered PRs, which would attribute some other
+// PR's state to this branch. Results are also filtered on head.ref here, so an
+// ignored filter can't do that either.
+func (c *APIClient) ListPullsByHead(ctx context.Context, owner, repo, branch string) ([]PullByHead, error) {
+	if owner == "" || repo == "" || branch == "" {
+		return nil, fmt.Errorf("ListPullsByHead: invalid coordinates %q/%q head %q", owner, repo, branch)
+	}
+	var all []PullByHead
+	for page := 1; ; page++ {
+		reqURL := fmt.Sprintf("%s/repos/%s/%s/pulls?state=all&per_page=100&page=%d&head=%s",
+			c.BaseURL, url.PathEscape(owner), url.PathEscape(repo), page, url.QueryEscape(owner+":"+branch))
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("creating request: %w", err)
+		}
+		c.applyAuth(req)
+		req.Header.Set("Accept", "application/vnd.github+json")
+
+		resp, err := c.HTTPClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("querying pull requests: %w", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("GitHub pull request list returned status %d", resp.StatusCode)
+		}
+		var body []struct {
+			Number   int     `json:"number"`
+			State    string  `json:"state"`
+			MergedAt *string `json:"merged_at"`
+			Head     struct {
+				Ref string `json:"ref"`
+				SHA string `json:"sha"`
+			} `json:"head"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("decoding pull request list: %w", err)
+		}
+		for _, p := range body {
+			if p.Head.Ref != branch {
+				continue
+			}
+			pr := PullByHead{Number: p.Number, State: p.State, HeadSHA: p.Head.SHA}
+			if p.MergedAt != nil {
+				pr.MergedAt = *p.MergedAt
+			}
+			all = append(all, pr)
+		}
+		if len(body) < 100 {
+			return all, nil
+		}
+	}
+}

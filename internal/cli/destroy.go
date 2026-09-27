@@ -106,7 +106,7 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, landingPath string, for
 	}
 
 	if !force {
-		scan, err := workspace.ScanInstance(instanceDir)
+		scan, err := workspace.ScanInstance(instanceDir, workspace.WithForge(newDestroyForge()))
 		if err != nil {
 			return fmt.Errorf("scanning instance for unpushed work: %w", err)
 		}
@@ -298,7 +298,7 @@ func runDestroyWorkspace(cmd *cobra.Command, workspaceRoot string, instances []s
 	}
 
 	// Scan for non-pushed work.
-	scans, scanErr := workspace.ScanInstancesParallel(workspaceRoot, instances, 0)
+	scans, scanErr := workspace.ScanInstancesParallel(workspaceRoot, instances, 0, workspace.WithForge(newDestroyForge()))
 	if scanErr != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: scan reported errors: %v\n", scanErr)
 		// Continue — individual repo errors are surfaced in scans[*].Skipped
