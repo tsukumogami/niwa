@@ -14,6 +14,7 @@ package workspace
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -37,18 +38,36 @@ const (
 	// Could be junk or new code; presented as a count to avoid noise.
 	LossUntracked LossKind = "untracked"
 
-	// LossUnpushedCommits: branch with commits ahead of its upstream.
+	// LossUnpushedCommits: branch whose commits were pushed once, but the
+	// remote no longer holds them all: there are local commits beyond the
+	// remote branch, or the remote branch was deleted or diverged. The
+	// branch's content isn't on any remote default branch either.
 	LossUnpushedCommits LossKind = "unpushed"
 
-	// LossLocalOnlyBranch: branch with no upstream tracking ref. The
-	// branch's commits are unique to this clone.
+	// LossLocalOnlyBranch: branch whose commits no remote branch holds and
+	// no remote default branch contains, by ancestry or by content.
 	LossLocalOnlyBranch LossKind = "local-only"
+
+	// LossUnlanded: branch whose commits are on a live remote branch, but
+	// that branch's pull request merged or was closed, so the branch is due
+	// for deletion, and the commits aren't on the default branch.
+	LossUnlanded LossKind = "unlanded"
+
+	// LossUnverified: branch whose durability couldn't be established
+	// because a check couldn't run: a remote was unreachable, the forge
+	// couldn't be asked, or a remote branch has commits this clone lacks.
+	// Treated as at risk; the detail says what couldn't be checked.
+	LossUnverified LossKind = "unverified"
+
+	// LossScanError: a git command the scan relies on failed, so this part
+	// of the repo couldn't be checked at all. Treated as at risk.
+	LossScanError LossKind = "scan-error"
 
 	// LossStash: git stash entries.
 	LossStash LossKind = "stash"
 
-	// LossDetachedOrphan: detached HEAD with commits not reachable from
-	// any local branch or remote-tracking ref.
+	// LossDetachedOrphan: detached HEAD with commits no local branch holds
+	// and that aren't durable by the same test branches get.
 	LossDetachedOrphan LossKind = "detached"
 
 	// LossExternalWorktree: linked worktree whose path is outside the
@@ -107,7 +126,12 @@ func (s InstanceScan) HasLoss() bool {
 //
 // Skips paths matching <instanceDir>/.niwa (workspace metadata) since
 // that's not a git repo and contains files we expect to delete.
-func ScanInstance(instanceDir string) (InstanceScan, error) {
+//
+// The scan contacts each repo's remotes (ls-remote, and a fetch of the
+// default branch) and, through WithForge, the forge. See durable.go for the
+// test a branch has to pass.
+func ScanInstance(instanceDir string, opts ...ScanOption) (InstanceScan, error) {
+	cfg := newScanConfig(opts)
 	state, err := LoadState(instanceDir)
 	scan := InstanceScan{InstanceDir: instanceDir}
 	if err != nil {
@@ -127,9 +151,21 @@ func ScanInstance(instanceDir string) (InstanceScan, error) {
 		return scan, fmt.Errorf("walking %s: %w", instanceDir, err)
 	}
 
-	for _, primary := range primaries {
-		scan.Repos = append(scan.Repos, scanRepo(instanceDir, primary))
+	// Repos are scanned concurrently: each one waits on its remotes, so a
+	// serial scan of a many-repo instance would stack those round trips.
+	scan.Repos = make([]RepoScan, len(primaries))
+	sem := make(chan struct{}, repoScanWorkers)
+	var wg sync.WaitGroup
+	for i, primary := range primaries {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			scan.Repos[i] = scanRepo(instanceDir, primary, cfg)
+		}()
 	}
+	wg.Wait()
 	sort.Slice(scan.Repos, func(i, j int) bool {
 		return scan.Repos[i].Name < scan.Repos[j].Name
 	})
@@ -167,11 +203,25 @@ func findPrimaryRepos(instanceDir string) ([]string, error) {
 	return primaries, err
 }
 
+// repoScanWorkers bounds how many repos of one instance are scanned at once.
+const repoScanWorkers = 4
+
+// worktreeEntry is one working tree from `git worktree list --porcelain`.
+type worktreeEntry struct {
+	path   string
+	branch string // checked-out branch, short name; "" when detached
+}
+
 // scanRepo runs the loss detector against a single primary working tree
 // and any linked worktrees the repo owns. Returns one RepoScan per
 // primary repo; linked-worktree losses are folded into the same
 // RepoScan with Loss.Path set to the worktree's path.
-func scanRepo(instanceDir, primary string) RepoScan {
+//
+// Working-tree state (uncommitted and untracked files, a detached HEAD) is
+// checked in every working tree. Branches and stashes belong to the repo, not
+// to a working tree, so they are checked once; a branch finding carries the
+// path of the worktree that has the branch checked out, if any.
+func scanRepo(instanceDir, primary string, cfg scanConfig) RepoScan {
 	// Resolve the instance root and the primary once, up front. `git worktree
 	// list` reports every path with its symlinks already resolved, while these
 	// two are spelled however the caller and the directory walk produced them.
@@ -190,105 +240,131 @@ func scanRepo(instanceDir, primary string) RepoScan {
 	}
 	scan := RepoScan{Name: rel}
 
+	relPath := func(tree string) string {
+		if tree == primary {
+			return ""
+		}
+		if r, err := filepath.Rel(root, tree); err == nil {
+			return r
+		}
+		return tree
+	}
+
 	// Working trees to inspect: the primary plus any linked worktrees
 	// the repo's gitdir knows about.
 	trees := []string{primary}
+	branchPath := map[string]string{} // branch -> relative path of its worktree
 	wts, listErr := listWorktrees(primary)
 	if listErr != nil {
-		// Couldn't enumerate worktrees; not fatal, but record it.
+		// Couldn't enumerate worktrees, so any linked worktree inside the
+		// instance goes unchecked.
 		scan.Losses = append(scan.Losses, Loss{
-			Kind:   LossExternalWorktree,
+			Kind:   LossScanError,
 			Detail: fmt.Sprintf("worktree enumeration failed: %v", listErr),
 		})
 	}
 	for _, wt := range wts {
-		wt = resolveForCompare(wt)
-		if wt == primary {
+		wt.path = resolveForCompare(wt.path)
+		if wt.path == primary {
+			if wt.branch != "" {
+				branchPath[wt.branch] = ""
+			}
 			continue
 		}
 		// Differentiate worktrees inside the instance (will be deleted
 		// outright) from those outside (only their admin entry is lost).
-		if isInside(root, wt) {
-			trees = append(trees, wt)
+		if isInside(root, wt.path) {
+			trees = append(trees, wt.path)
+			if wt.branch != "" {
+				branchPath[wt.branch] = relPath(wt.path)
+			}
 		} else {
 			scan.Losses = append(scan.Losses, Loss{
 				Kind:   LossExternalWorktree,
-				Path:   wt,
+				Path:   wt.path,
 				Detail: "linked worktree outside instance",
 			})
 		}
 	}
 
+	remotes, remoteErr := repoRemotes(primary, cfg)
+	if remoteErr != nil {
+		scan.Losses = append(scan.Losses, Loss{
+			Kind:   LossScanError,
+			Detail: fmt.Sprintf("listing remotes failed: %v", remoteErr),
+		})
+	}
+
 	// For each working tree (primary + included linked), collect losses.
 	for _, tree := range trees {
-		treePath := ""
-		if tree != primary {
-			if r, err := filepath.Rel(root, tree); err == nil {
-				treePath = r
-			} else {
-				treePath = tree
-			}
-		}
-		scan.Losses = append(scan.Losses, scanWorkingTree(tree, treePath)...)
+		scan.Losses = append(scan.Losses, scanWorkingTree(tree, relPath(tree), remotes, cfg)...)
+	}
+
+	// Branches and stashes, once per repo.
+	scan.Losses = append(scan.Losses, scanBranches(primary, remotes, branchPath, cfg)...)
+	if n, err := scanStashes(primary); err != nil {
+		scan.Losses = append(scan.Losses, Loss{Kind: LossScanError, Detail: fmt.Sprintf("listing stashes failed: %v", err)})
+	} else if n > 0 {
+		scan.Losses = append(scan.Losses, Loss{
+			Kind:   LossStash,
+			Detail: fmt.Sprintf("%d stash entries", n),
+		})
 	}
 	return scan
 }
 
-// scanWorkingTree runs the loss detector for a single working tree
-// (primary or linked worktree). treePath is "" for the primary; for
-// linked worktrees it is the path relative to the instance dir.
-func scanWorkingTree(treeDir, treePath string) []Loss {
+// scanWorkingTree runs the per-working-tree checks for a single working tree
+// (primary or linked worktree). treePath is "" for the primary; for linked
+// worktrees it is the path relative to the instance dir. A check that can't
+// run is reported as LossScanError rather than skipped, so a broken or
+// unreadable tree never reads as clean.
+func scanWorkingTree(treeDir, treePath string, remotes []*remoteInfo, cfg scanConfig) []Loss {
 	var losses []Loss
 
 	// 1. status --porcelain: dirty + untracked.
-	if dirty, untracked, err := scanStatus(treeDir); err == nil {
-		if dirty > 0 {
-			losses = append(losses, Loss{
-				Kind:   LossWorkingTreeDirty,
-				Detail: fmt.Sprintf("%d modified or staged", dirty),
-				Path:   treePath,
-			})
-		}
-		if untracked > 0 {
-			losses = append(losses, Loss{
-				Kind:   LossUntracked,
-				Detail: fmt.Sprintf("%d untracked", untracked),
-				Path:   treePath,
-			})
-		}
-	}
-
-	// 2. for-each-ref refs/heads: branches ahead of upstream + local-only branches.
-	branchLosses, err := scanBranches(treeDir, treePath)
-	if err == nil {
-		losses = append(losses, branchLosses...)
-	}
-
-	// 3. stash list.
-	if n, err := scanStashes(treeDir); err == nil && n > 0 {
+	dirty, untracked, err := scanStatus(treeDir)
+	if err != nil {
 		losses = append(losses, Loss{
-			Kind:   LossStash,
-			Detail: fmt.Sprintf("%d stash entries", n),
+			Kind:   LossScanError,
+			Detail: fmt.Sprintf("git status failed: %v", err),
+			Path:   treePath,
+		})
+	}
+	if dirty > 0 {
+		losses = append(losses, Loss{
+			Kind:   LossWorkingTreeDirty,
+			Detail: fmt.Sprintf("%d modified or staged", dirty),
+			Path:   treePath,
+		})
+	}
+	if untracked > 0 {
+		losses = append(losses, Loss{
+			Kind:   LossUntracked,
+			Detail: fmt.Sprintf("%d untracked", untracked),
 			Path:   treePath,
 		})
 	}
 
-	// 4. Detached HEAD with orphan commits.
-	if orphan, err := scanDetachedOrphan(treeDir); err == nil && orphan > 0 {
+	// 2. Detached HEAD holding commits no local branch has.
+	if loss, err := scanDetachedOrphan(treeDir, remotes, cfg); err != nil {
 		losses = append(losses, Loss{
-			Kind:   LossDetachedOrphan,
-			Detail: fmt.Sprintf("%d commits not on any branch or remote", orphan),
+			Kind:   LossScanError,
+			Detail: fmt.Sprintf("checking detached HEAD failed: %v", err),
 			Path:   treePath,
 		})
+	} else if loss != nil {
+		loss.Path = treePath
+		losses = append(losses, *loss)
 	}
 
 	return losses
 }
 
 // scanStatus parses `git status --porcelain=v1` output, counting modified/
-// staged lines and untracked lines separately.
+// staged lines and untracked lines separately. Untracked files are asked for
+// explicitly so a repo's status.showUntrackedFiles=no can't hide them.
 func scanStatus(treeDir string) (dirty, untracked int, err error) {
-	out, err := gitOutput(treeDir, "status", "--porcelain=v1")
+	out, err := gitOutput(treeDir, "status", "--porcelain=v1", "--untracked-files=normal")
 	if err != nil {
 		return 0, 0, err
 	}
@@ -305,14 +381,14 @@ func scanStatus(treeDir string) (dirty, untracked int, err error) {
 	return dirty, untracked, nil
 }
 
-// scanBranches parses `git for-each-ref --format='%(refname:short) %(upstream:track) %(upstream)' refs/heads`.
-// Branches with non-empty upstream-track containing "ahead" → unpushed.
-// Branches with empty upstream → local-only.
-func scanBranches(treeDir, treePath string) ([]Loss, error) {
-	const fmtSpec = "%(refname:short)|%(upstream:track)|%(upstream)"
-	out, err := gitOutput(treeDir, "for-each-ref", "--format="+fmtSpec, "refs/heads")
+// scanBranches judges every local branch with judgeTip and reports the ones
+// whose commits aren't durable. branchPath maps a checked-out branch to the
+// relative path of its worktree, so the finding points at it.
+func scanBranches(dir string, remotes []*remoteInfo, branchPath map[string]string, cfg scanConfig) []Loss {
+	const fmtSpec = "%(refname:short)|%(objectname)|%(upstream:short)"
+	out, err := gitOutput(dir, "for-each-ref", "--format="+fmtSpec, "refs/heads")
 	if err != nil {
-		return nil, err
+		return []Loss{{Kind: LossScanError, Detail: fmt.Sprintf("listing branches failed: %v", err)}}
 	}
 	var losses []Loss
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
@@ -323,26 +399,19 @@ func scanBranches(treeDir, treePath string) ([]Loss, error) {
 		if len(parts) != 3 {
 			continue
 		}
-		branch, track, upstream := parts[0], parts[1], parts[2]
-		if upstream == "" {
-			losses = append(losses, Loss{
-				Kind:   LossLocalOnlyBranch,
-				Branch: branch,
-				Detail: "no upstream",
-				Path:   treePath,
-			})
+		branch, tip, upstream := parts[0], parts[1], parts[2]
+		v := judgeTip(context.Background(), dir, tip, branch, upstream, remotes, cfg)
+		if v.durable {
 			continue
 		}
-		if strings.Contains(track, "ahead") {
-			losses = append(losses, Loss{
-				Kind:   LossUnpushedCommits,
-				Branch: branch,
-				Detail: strings.TrimSpace(strings.Trim(track, "[]")),
-				Path:   treePath,
-			})
-		}
+		losses = append(losses, Loss{
+			Kind:   v.kind,
+			Branch: branch,
+			Detail: v.reason,
+			Path:   branchPath[branch],
+		})
 	}
-	return losses, nil
+	return losses
 }
 
 // scanStashes returns the count of `git stash list` entries.
@@ -354,41 +423,54 @@ func scanStashes(treeDir string) (int, error) {
 	if strings.TrimSpace(out) == "" {
 		return 0, nil
 	}
-	return strings.Count(out, "\n") + 1, nil
+	return strings.Count(strings.TrimRight(out, "\n"), "\n") + 1, nil
 }
 
-// scanDetachedOrphan returns the count of commits at HEAD that are not
-// reachable from any local branch or remote-tracking ref. Returns 0
-// when HEAD is on a branch or when the count is zero.
-func scanDetachedOrphan(treeDir string) (int, error) {
-	// Is HEAD detached? `symbolic-ref -q HEAD` returns non-zero when detached.
+// scanDetachedOrphan checks a detached HEAD. Commits a local branch also
+// holds are judged with that branch; otherwise HEAD is judged like a branch
+// tip. Returns nil when HEAD is on a branch or its commits are durable.
+func scanDetachedOrphan(treeDir string, remotes []*remoteInfo, cfg scanConfig) (*Loss, error) {
+	// Is HEAD detached? `symbolic-ref -q HEAD` exits 1 when detached.
 	if _, err := gitOutput(treeDir, "symbolic-ref", "-q", "HEAD"); err == nil {
-		return 0, nil // on a branch
+		return nil, nil // on a branch
 	}
-	out, err := gitOutput(treeDir, "rev-list", "--count", "HEAD", "--not", "--branches", "--remotes")
+	headOut, err := gitOutput(treeDir, "rev-parse", "--verify", "HEAD")
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	var n int
-	_, _ = fmt.Sscanf(strings.TrimSpace(out), "%d", &n)
-	return n, nil
+	head := strings.TrimSpace(headOut)
+	out, err := gitOutput(treeDir, "rev-list", "--count", head, "--not", "--branches")
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(out) == "0" {
+		return nil, nil
+	}
+	v := judgeTip(context.Background(), treeDir, head, "", "", remotes, cfg)
+	if v.durable {
+		return nil, nil
+	}
+	return &Loss{Kind: LossDetachedOrphan, Detail: v.reason}, nil
 }
 
-// listWorktrees parses `git worktree list --porcelain` and returns the
-// absolute paths of every worktree the repo knows about (including the
-// primary). Returns nil when the command fails.
-func listWorktrees(primary string) ([]string, error) {
+// listWorktrees parses `git worktree list --porcelain` and returns every
+// worktree the repo knows about (including the primary) with its checked-out
+// branch.
+func listWorktrees(primary string) ([]worktreeEntry, error) {
 	out, err := gitOutput(primary, "worktree", "list", "--porcelain")
 	if err != nil {
 		return nil, err
 	}
-	var paths []string
+	var entries []worktreeEntry
 	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(line, "worktree ") {
-			paths = append(paths, strings.TrimPrefix(line, "worktree "))
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			entries = append(entries, worktreeEntry{path: strings.TrimPrefix(line, "worktree ")})
+		case strings.HasPrefix(line, "branch ") && len(entries) > 0:
+			entries[len(entries)-1].branch = strings.TrimPrefix(strings.TrimPrefix(line, "branch "), "refs/heads/")
 		}
 	}
-	return paths, nil
+	return entries, nil
 }
 
 // gitOutput runs git -C treeDir <args...> and returns stdout. Combined
@@ -444,7 +526,7 @@ func resolveForCompare(path string) string {
 //
 // `workers` defaults to 8 (mirroring cloneWorkers in apply.go) when 0 is
 // passed.
-func ScanInstancesParallel(workspaceRoot string, instanceDirs []string, workers int) ([]InstanceScan, error) {
+func ScanInstancesParallel(workspaceRoot string, instanceDirs []string, workers int, opts ...ScanOption) ([]InstanceScan, error) {
 	if workers <= 0 {
 		workers = 8
 	}
@@ -474,7 +556,7 @@ func ScanInstancesParallel(workspaceRoot string, instanceDirs []string, workers 
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
-				s, err := ScanInstance(j.dir)
+				s, err := ScanInstance(j.dir, opts...)
 				results <- result{idx: j.idx, scan: s, err: err}
 			}
 		}()

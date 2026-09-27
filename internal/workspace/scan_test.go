@@ -180,6 +180,11 @@ func TestScanInstance_UnpushedCommits(t *testing.T) {
 func TestScanInstance_LocalOnlyBranch(t *testing.T) {
 	instanceDir, repoDir := setupInstanceWithRepo(t, "alpha", "myrepo")
 	gitRun(t, repoDir, "checkout", "-b", "feature/local-only")
+	if err := os.WriteFile(filepath.Join(repoDir, "local.txt"), []byte("local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repoDir, "add", "local.txt")
+	gitRun(t, repoDir, "commit", "-m", "local")
 
 	scan, err := ScanInstance(instanceDir)
 	if err != nil {

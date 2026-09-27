@@ -1,36 +1,68 @@
-// Package infisical implements the v1 Infisical vault backend for
-// niwa. It shells out to the user-installed `infisical` CLI (R20 — no
-// Go SDK dependency) and exposes both vault.Provider and the optional
-// vault.BatchResolver interfaces.
+// Package infisical serves two distinct, deliberately separate
+// purposes against the Infisical secrets manager.
 //
-// The backend is lazy: Factory.Open does NOT invoke any subprocess.
-// The first call to Resolve or ResolveBatch triggers a single
-// `infisical export --format json` invocation per (project, env,
-// path) triple; results are cached in-process for the lifetime of the
-// Provider. Close clears the cache.
+// The first is the v1 Infisical vault backend for niwa's ordinary
+// secret resolution: it shells out to the user-installed `infisical`
+// CLI (R20 — no Go SDK dependency) and exposes both vault.Provider and
+// the optional vault.BatchResolver interfaces (this file, subprocess.go).
 //
-// Auth model: niwa does NOT attempt to authenticate. The Infisical
-// CLI reads its own credentials (`INFISICAL_TOKEN`, the `~/.infisical`
-// config the user creates via `infisical login`, etc.). niwa passes
-// `cmd.Env = nil` to inherit the parent environment unchanged — this
-// keeps auth transparent to the user and avoids the anti-pattern of
-// niwa itself handling Infisical tokens.
+// The second, added for `niwa onboard` (DESIGN-niwa-onboard.md
+// Decision 4), is a net-new Universal Auth identity management REST
+// client plus session/org detection (management.go, session.go): read
+// an identity's client_id, mint or revoke a client secret, and read an
+// environment as the R9 two-hop mint-time verification proof. Both
+// purposes authenticate as the operator's own live session — never an
+// admin token niwa custodies — and NEITHER management.go's functions
+// nor session.go's DetectSessionStatus are reachable through
+// vault.Provider, vault.BatchResolver, or vault.DefaultRegistry: they
+// are plain package-level functions the onboard wizard calls directly.
+// vault.Provider is deliberately read-shaped and must never bend into
+// a management interface, so this second purpose is homed here
+// specifically because it shares no interface surface with the first —
+// only the wire-format knowledge (REST JSON shapes, CLI argv shapes,
+// the redaction/scrubbing discipline) that makes this package the
+// single place niwa speaks every dialect of "talking to Infisical."
+//
+// The vault-backend half is lazy: Factory.Open does NOT invoke any
+// subprocess. The first call to Resolve or ResolveBatch triggers a
+// single `infisical export --format json` invocation per (project,
+// env, path) triple; results are cached in-process for the lifetime of
+// the Provider. Close clears the cache.
+//
+// Auth model (vault-backend half): niwa does NOT attempt to
+// authenticate. The Infisical CLI reads its own credentials
+// (`INFISICAL_TOKEN`, the `~/.infisical` config the user creates via
+// `infisical login`, etc.). niwa passes `cmd.Env = nil` to inherit the
+// parent environment unchanged — this keeps auth transparent to the
+// user and avoids the anti-pattern of niwa itself handling Infisical
+// tokens.
 //
 // Argv hygiene (R21): `--projectId`, `--env`, `--path` are passed on
 // argv because they are NOT secrets (they identify, they are not
-// stored values). No secret value ever reaches argv.
+// stored values). No secret value ever reaches argv — this holds for
+// the management REST client too, which carries every credential in
+// an HTTP Authorization header, never on argv or in an environment
+// variable.
 //
 // Stderr hygiene (R22): subprocess stderr is fully captured (never
 // streamed to the parent process's stderr) and scrubbed through
 // vault.ScrubStderr before being interpolated into any returned
 // error. Errors are wrapped via secret.Errorf so subsequent re-wraps
-// by callers continue to scrub any late-registered fragments.
+// by callers continue to scrub any late-registered fragments. The
+// management REST client applies the analogous discipline to response
+// bodies: every secret.Value parameter is registered on the context's
+// redactor before use, and every non-2xx response body is scrubbed
+// before being interpolated into an error.
 //
 // Registration: this package's init() registers a Factory with
 // vault.DefaultRegistry. Production code (any caller that looks up
 // via DefaultRegistry) can open Infisical providers without an
 // explicit import of this package — but the binary must import it
-// somewhere so init() runs. The niwa main package does so.
+// somewhere so init() runs. The niwa main package does so. This
+// registration covers ONLY the vault-backend half; the management
+// surface has no registry entry and no factory — it is reached only
+// by a direct import and a direct function call, which is what makes
+// the AC-10 static call-site check in lint_test.go meaningful.
 package infisical
 
 import (
