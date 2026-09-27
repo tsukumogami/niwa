@@ -150,18 +150,43 @@ jobs:
           fi
           echo "OK: HEAD unchanged and the working tree is as the suite found it"
 
-      # Everything from here down is Linux-only: the Infisical CLI installs
-      # from a .deb, the Claude and tsuku integration steps consume shared
-      # credentials and rate limits that gain nothing from a second platform,
-      # and the shell-init check inspects Go string output that does not vary
-      # by OS.
+      # Everything from here down is Linux-only: the Claude and tsuku
+      # integration steps consume shared credentials and rate limits that
+      # gain nothing from a second platform, and the shell-init check inspects
+      # Go string output that does not vary by OS.
+      #
+      # tsuku comes from tsukumogami/tsuku's setup-tsuku action, pinned by
+      # commit. The action checks the release's checksums.txt against a sha256
+      # committed in the action, checks the binary against that file, and only
+      # then installs it to $HOME/.tsuku/bin and puts bin and tools/current on
+      # PATH, so what executes here is decided by committed content rather
+      # than by an install script fetched at run time. A mismatch fails the
+      # step. The recipe-install check below relies on that install location.
+      - name: Install tsuku
+        if: matrix.os == 'ubuntu-latest'
+        uses: tsukumogami/tsuku/.github/actions/setup-tsuku@9ca44882568a29f9208493695b1f7bdb61e30fee  # installs tsuku 0.14.0
+
+      # The Infisical CLI comes through tsuku, pinned. The version carries the
+      # release tag's leading v because tsuku 0.14.0 doesn't match a bare
+      # version against v-prefixed tags (tsukumogami/tsuku#2693). tsuku checks
+      # the download against the checksums.txt Infisical publishes with the
+      # release; the step fails if the installed CLI isn't the pinned version.
       - name: Install Infisical CLI
         if: matrix.os == 'ubuntu-latest' && env.INFISICAL_CLIENT_ID != ''
         run: |
-          curl -1sLf 'https://dl.cloudsmith.io/public/infisical/infisical-cli/setup.deb.sh' | sudo -E bash
-          sudo apt-get install -y infisical
+          set -euo pipefail
+          tsuku install "infisical@v${INFISICAL_CLI_VERSION}"
+          version_line=$(infisical --version)
+          echo "$version_line"
+          if [ "$version_line" != "infisical version ${INFISICAL_CLI_VERSION}" ]; then
+            echo "::error::expected infisical ${INFISICAL_CLI_VERSION}, got: $version_line"
+            exit 1
+          fi
         env:
           INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLI_VERSION: 0.43.132
+          GITHUB_TOKEN: ${{ github.token }}
+          TSUKU_NO_TELEMETRY: "1"
 
       - name: Vault integration tests
         if: matrix.os == 'ubuntu-latest' && env.INFISICAL_CLIENT_ID != ''
@@ -191,10 +216,6 @@ jobs:
         run: make test-functional-claude-integration
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-
-      - name: Install tsuku
-        if: matrix.os == 'ubuntu-latest'
-        uses: tsukumogami/tsuku/.github/actions/setup-tsuku@9ca44882568a29f9208493695b1f7bdb61e30fee  # installs tsuku 0.14.0
 
       # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
       - name: Verify shell-init output
