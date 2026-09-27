@@ -93,12 +93,13 @@ func prewarmDeclaredPlugins(instanceRoot string, reporter *workspace.Reporter, s
 		if mkt.Source.Source != "github" || mkt.Source.Repo == "" {
 			continue
 		}
-		// Only the repo is needed: pre-warming clones the marketplace to disk to
-		// remove the network step from the session's startup. The exact ref/version
-		// pin stays governed by the instance settings.json read at startup --
-		// `claude plugin marketplace add` has no ref option anyway.
-		if err := runClaudePluginCmd(context.Background(), instanceRoot, "marketplace", "add", mkt.Source.Repo); err != nil {
-			warnPrewarm(reporter, "pre-warming marketplace %q (%s): %v; it will install on startup instead", name, mkt.Source.Repo, err)
+		// This registration decides which commit the plugins below install from,
+		// so it must carry the ref niwa resolved (the release pin, or none for
+		// track = "main"). `claude plugin marketplace add` takes it as
+		// `<repo>#<ref>`; a bare repo registers the default branch.
+		target := marketplaceAddTarget(mkt.Source)
+		if err := runClaudePluginCmd(context.Background(), instanceRoot, "marketplace", "add", target); err != nil {
+			warnPrewarm(reporter, "pre-warming marketplace %q (%s): %v; it will install on startup instead", name, target, err)
 		}
 	}
 
@@ -203,13 +204,23 @@ type marketplaceEntry struct {
 
 // marketplaceSource is the subset of the Claude Code marketplace source shape (emitted
 // by mapMarketplaceSourceWithIndex in internal/workspace) that pre-warming needs:
-// Source is the kind ("github", "directory", ...) and Repo is set for github sources.
-// The ref/path fields the emitter also writes are intentionally omitted -- pre-warming
-// only clones github marketplaces to disk; everything else is governed by the
-// settings.json the worker reads at startup.
+// Source is the kind ("github", "directory", ...), Repo is set for github sources,
+// and Ref is the pin niwa resolved for them (empty when the marketplace tracks its
+// default branch). The path field directory sources carry is omitted: those are
+// already on disk and are never pre-warmed.
 type marketplaceSource struct {
 	Source string `json:"source"`
 	Repo   string `json:"repo"`
+	Ref    string `json:"ref"`
+}
+
+// marketplaceAddTarget is the argument `claude plugin marketplace add` takes for a
+// github source: `<repo>#<ref>` when a ref is pinned, the bare repo otherwise.
+func marketplaceAddTarget(src marketplaceSource) string {
+	if src.Ref == "" {
+		return src.Repo
+	}
+	return src.Repo + "#" + src.Ref
 }
 
 // readInstanceSettings reads the dispatched instance's Claude settings from

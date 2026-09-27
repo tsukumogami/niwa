@@ -44,7 +44,7 @@ func recordPluginCalls(t *testing.T, err error) *[][]string {
 
 // The settings fixtures below mirror the shape niwa emits in
 // mapMarketplaceSourceWithIndex (internal/workspace): github sources carry
-// source+repo (+ref, which pre-warming ignores), directory sources carry
+// source+repo (+ref when pinned), directory sources carry
 // source+path. If that emitted shape changes, these fixtures (and the reader in
 // dispatch_plugins.go) must change together.
 
@@ -61,9 +61,35 @@ func TestPrewarm_GithubMarketplacesAndPlugins(t *testing.T) {
 	prewarmDeclaredPlugins(instance, nil, false)
 
 	want := [][]string{
-		{instance, "marketplace", "add", "tsukumogami/shirabe"},
+		{instance, "marketplace", "add", "tsukumogami/shirabe#v0.13.0"},
 		{instance, "install", "shirabe@shirabe", "--scope", "local"},
 		{instance, "install", "tsukumogami@tsukumogami", "--scope", "local"},
+	}
+	if !reflect.DeepEqual(*calls, want) {
+		t.Errorf("calls =\n  %v\nwant\n  %v", *calls, want)
+	}
+}
+
+// TestPrewarm_MarketplaceAddCarriesResolvedRef guards #327: the marketplace
+// registration decides which commit the plugins install from, so a pinned ref in
+// settings.json must reach `claude plugin marketplace add` as `<repo>#<ref>`, and
+// an unpinned entry (track = "main" writes no ref) must register the bare repo.
+func TestPrewarm_MarketplaceAddCarriesResolvedRef(t *testing.T) {
+	instance := writeInstanceSettings(t, `{
+	  "extraKnownMarketplaces": {
+	    "koto": {"source": {"source": "github", "repo": "tsukumogami/koto", "ref": "v0.13.0"}},
+	    "shirabe": {"source": {"source": "github", "repo": "tsukumogami/shirabe"}},
+	    "slashy": {"source": {"source": "github", "repo": "acme/slashy", "ref": "release/2.x"}}
+	  }
+	}`)
+	calls := recordPluginCalls(t, nil)
+
+	prewarmDeclaredPlugins(instance, nil, false)
+
+	want := [][]string{
+		{instance, "marketplace", "add", "tsukumogami/koto#v0.13.0"},
+		{instance, "marketplace", "add", "tsukumogami/shirabe"},
+		{instance, "marketplace", "add", "acme/slashy#release/2.x"},
 	}
 	if !reflect.DeepEqual(*calls, want) {
 		t.Errorf("calls =\n  %v\nwant\n  %v", *calls, want)
