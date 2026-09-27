@@ -164,18 +164,16 @@ jobs:
       # step. The recipe-install check below relies on that install location.
       - name: Install tsuku
         if: matrix.os == 'ubuntu-latest'
-        uses: tsukumogami/tsuku/.github/actions/setup-tsuku@49b2d262f54c6c06f3f1936e344c85a9bba4ab57  # installs tsuku 0.14.0
+        uses: tsukumogami/tsuku/.github/actions/setup-tsuku@377de20d99e3b219c7c408eeec76311b97990840  # installs tsuku 0.15.0
 
-      # The Infisical CLI comes through tsuku, pinned. The version carries the
-      # release tag's leading v because tsuku 0.14.0 doesn't match a bare
-      # version against v-prefixed tags (tsukumogami/tsuku#2693). tsuku checks
-      # the download against the checksums.txt Infisical publishes with the
+      # The Infisical CLI comes through tsuku, pinned. tsuku checks the
+      # download against the checksums.txt Infisical publishes with the
       # release; the step fails if the installed CLI isn't the pinned version.
       - name: Install Infisical CLI
         if: matrix.os == 'ubuntu-latest' && env.INFISICAL_CLIENT_ID != ''
         run: |
           set -euo pipefail
-          tsuku install "infisical@v${INFISICAL_CLI_VERSION}"
+          tsuku install "infisical@${INFISICAL_CLI_VERSION}"
           version_line=$(infisical --version)
           echo "$version_line"
           if [ "$version_line" != "infisical version ${INFISICAL_CLI_VERSION}" ]; then
