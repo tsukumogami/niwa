@@ -61,8 +61,9 @@ func TestPrewarm_GithubMarketplacesAndPlugins(t *testing.T) {
 	prewarmDeclaredPlugins(instance, nil, false)
 
 	want := [][]string{
-		{instance, "marketplace", "add", "tsukumogami/shirabe#v0.13.0"},
+		{instance, "marketplace", "add", "tsukumogami/shirabe#v0.13.0", "--scope", "local"},
 		{instance, "install", "shirabe@shirabe", "--scope", "local"},
+		{instance, "update", "shirabe@shirabe", "--scope", "local"},
 		{instance, "install", "tsukumogami@tsukumogami", "--scope", "local"},
 	}
 	if !reflect.DeepEqual(*calls, want) {
@@ -87,12 +88,150 @@ func TestPrewarm_MarketplaceAddCarriesResolvedRef(t *testing.T) {
 	prewarmDeclaredPlugins(instance, nil, false)
 
 	want := [][]string{
-		{instance, "marketplace", "add", "tsukumogami/koto#v0.13.0"},
-		{instance, "marketplace", "add", "tsukumogami/shirabe"},
-		{instance, "marketplace", "add", "acme/slashy#release/2.x"},
+		{instance, "marketplace", "add", "tsukumogami/koto#v0.13.0", "--scope", "local"},
+		{instance, "marketplace", "add", "tsukumogami/shirabe", "--scope", "local"},
+		{instance, "marketplace", "add", "acme/slashy#release/2.x", "--scope", "local"},
 	}
 	if !reflect.DeepEqual(*calls, want) {
 		t.Errorf("calls =\n  %v\nwant\n  %v", *calls, want)
+	}
+}
+
+// TestPrewarm_NeverTouchesUserScope guards the scope half of #327. Claude Code
+// keeps one registration per marketplace name for the whole HOME and refuses any
+// source that differs from a user-scope declaration, so a user-scope write by one
+// instance would lock every other workspace on the machine to that source. Every
+// command the pre-install issues must name --scope local, none may name user, and
+// nothing may be written under $HOME.
+func TestPrewarm_NeverTouchesUserScope(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	instance := writeInstanceSettings(t, `{
+	  "enabledPlugins": {"koto-skills@koto": true, "shirabe@shirabe": true, "tools@tools": true},
+	  "extraKnownMarketplaces": {
+	    "koto": {"source": {"source": "github", "repo": "tsukumogami/koto", "ref": "v0.13.0"}},
+	    "shirabe": {"source": {"source": "github", "repo": "tsukumogami/shirabe"}},
+	    "tools": {"source": {"source": "directory", "path": "/local/tools"}}
+	  }
+	}`)
+	calls := recordPluginCalls(t, nil)
+
+	prewarmDeclaredPlugins(instance, nil, false)
+
+	if len(*calls) == 0 {
+		t.Fatal("pre-warm issued no commands; the scope assertions below would pass vacuously")
+	}
+	for _, c := range *calls {
+		args := c[1:]
+		scope := ""
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "--scope" {
+				scope = args[i+1]
+			}
+		}
+		if scope != "local" {
+			t.Errorf("command %v: --scope = %q, want \"local\" (the CLI's default is user)", args, scope)
+		}
+		for _, a := range args {
+			if a == "user" || a == "--scope=user" {
+				t.Errorf("command %v names user scope", args)
+			}
+		}
+	}
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		t.Fatalf("reading HOME: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("pre-warm wrote under HOME: %v", entries)
+	}
+}
+
+// TestPrewarm_UpdatesOnlyPinnedMarketplacesAfterASuccessfulAdd: `install` is a
+// no-op for a plugin the instance already has, so a pinned marketplace's plugins
+// get a follow-up `update` that moves them to the pin on re-apply. Unpinned
+// (track = "main") marketplaces keep install-only behaviour, and a refused add
+// gets no update: the registered source is not the pin, and updating would move
+// the instance to whatever that source currently offers.
+func TestPrewarm_UpdatesOnlyPinnedMarketplacesAfterASuccessfulAdd(t *testing.T) {
+	instance := writeInstanceSettings(t, `{
+	  "enabledPlugins": {"koto-skills@koto": true, "shirabe@shirabe": true, "held@held": true},
+	  "extraKnownMarketplaces": {
+	    "koto": {"source": {"source": "github", "repo": "tsukumogami/koto", "ref": "v0.13.0"}},
+	    "shirabe": {"source": {"source": "github", "repo": "tsukumogami/shirabe"}},
+	    "held": {"source": {"source": "github", "repo": "acme/held", "ref": "v2.0.0"}}
+	  }
+	}`)
+	var calls [][]string
+	prev := runClaudePluginCmd
+	runClaudePluginCmd = func(_ context.Context, _ string, args ...string) error {
+		calls = append(calls, args)
+		if len(args) > 2 && args[0] == "marketplace" && args[2] == "acme/held#v2.0.0" {
+			return errors.New("exit status 1: Cannot add marketplace \"held\": its network source differs from the one declared for it in settings")
+		}
+		return nil
+	}
+	t.Cleanup(func() { runClaudePluginCmd = prev })
+
+	prewarmDeclaredPlugins(instance, nil, false)
+
+	var updates []string
+	for _, c := range calls {
+		if c[0] == "update" {
+			updates = append(updates, c[1])
+		}
+	}
+	if want := []string{"koto-skills@koto"}; !reflect.DeepEqual(updates, want) {
+		t.Errorf("updated plugins = %v, want %v", updates, want)
+	}
+}
+
+// TestPrewarm_RefusedPinIsReportedByName: when the HOME already declares the
+// marketplace with another source, Claude Code refuses the pinned add. That must
+// never be silent: the warning names the marketplace and the pin not applied.
+func TestPrewarm_RefusedPinIsReportedByName(t *testing.T) {
+	cases := []struct {
+		name     string
+		addErr   string
+		wantText []string
+	}{
+		{
+			name:     "declared-source conflict",
+			addErr:   "exit status 1: Cannot add marketplace \"koto\": its network source differs from the one declared for it in settings",
+			wantText: []string{`marketplace "koto"`, "pin v0.13.0 not applied", "already declares"},
+		},
+		{
+			name:     "any other failure",
+			addErr:   "exit status 128: could not resolve host",
+			wantText: []string{`marketplace "koto"`, "pin v0.13.0 not applied", "could not resolve host"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			instance := writeInstanceSettings(t, `{
+			  "enabledPlugins": {"koto-skills@koto": true},
+			  "extraKnownMarketplaces": {
+			    "koto": {"source": {"source": "github", "repo": "tsukumogami/koto", "ref": "v0.13.0"}}
+			  }
+			}`)
+			prev := runClaudePluginCmd
+			runClaudePluginCmd = func(_ context.Context, _ string, args ...string) error {
+				if args[0] == "marketplace" {
+					return errors.New(tc.addErr)
+				}
+				return nil
+			}
+			t.Cleanup(func() { runClaudePluginCmd = prev })
+			var buf bytes.Buffer
+
+			prewarmDeclaredPlugins(instance, workspace.NewReporter(&buf), false)
+
+			for _, want := range tc.wantText {
+				if !strings.Contains(buf.String(), want) {
+					t.Errorf("warning missing %q:\n%s", want, buf.String())
+				}
+			}
+		})
 	}
 }
 

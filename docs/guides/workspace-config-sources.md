@@ -783,14 +783,25 @@ Which version of a github-sourced marketplace to track:
 
 Local (`directory` / `repo:`) sources ignore `track`.
 
-> **Known limitation.** Claude Code's github marketplace *source* object
-> currently ignores a ref pin and always clones default-branch HEAD, so
-> a marketplace whose `main` carries an in-development version still
-> installs that `-dev` build today. niwa resolves the release tag and
-> records it best-effort (forward-compatible) and reports when it falls
-> back to the branch, but the effective switch to releases is blocked
-> upstream. Pinning a daily-stable marketplace via a local `repo:`
-> checkout of a release is the current workaround.
+niwa writes the resolved ref into the instance's `.claude/settings.json`,
+and the plugin pre-install on `niwa create` and `niwa apply` registers
+the marketplace at that ref (`claude plugin marketplace add
+<repo>#<ref> --scope local`) before installing the declared plugins. Each
+instance keeps the version it was pinned to. A later `niwa apply` moves
+that instance, and only that instance, to the ref it resolves then.
+
+> **When the pin doesn't apply.** Claude Code keeps one registration per
+> marketplace name for the whole machine. It refuses to add a source that
+> differs from a declaration of the same name in the user's
+> `~/.claude/settings.json`. Earlier niwa versions wrote exactly such a
+> declaration (without a ref) on every pre-install. On a machine that
+> has one, the pinned registration is refused and the plugins install
+> from the source already declared, usually the default branch. niwa
+> prints a warning naming the marketplace and the pin it couldn't apply.
+> niwa never writes to the user's settings and never removes the
+> declaration itself. Removing it with `claude plugin marketplace remove
+> <name>` lets instances pin. It also uninstalls that marketplace's
+> plugins from every project until each instance is re-applied.
 
 ### Automatic record healing
 

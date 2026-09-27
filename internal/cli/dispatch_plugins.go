@@ -88,17 +88,41 @@ func prewarmDeclaredPlugins(instanceRoot string, reporter *workspace.Reporter, s
 	// 1. Clone the github-sourced marketplaces -- the ones that require a network
 	// fetch and therefore race. Directory/local sources are already on disk and
 	// never race, so they are skipped.
+	//
+	// The registration decides which commit the plugins below install from, so it
+	// carries the ref niwa resolved: `<repo>#<ref>` for a release or explicit pin,
+	// the bare repo for track = "main".
+	//
+	// Scope is local, and must never be user (the CLI's default). Claude Code keeps
+	// one registration and one clone per marketplace name for the whole HOME, and it
+	// refuses to add a network source that differs from a user-scope declaration of
+	// the same name. A user-scope pin written by one instance would therefore block
+	// every later release and every bare add, from any workspace, until someone edits
+	// ~/.claude/settings.json by hand. Local-scope declarations are per project and
+	// are not compared against each other, so instances can hold different pins; the
+	// plugin cache is split by version, so each keeps its own installed version.
+	//
+	// When the HOME already declares the marketplace at user scope (every pre-warm
+	// before this change wrote such a declaration), a pinned add is refused at any
+	// scope. niwa does not remove or rewrite that declaration -- `marketplace remove`
+	// uninstalls the marketplace's plugins from every project in the HOME -- so it
+	// reports the pin it could not apply and installs from the existing registration.
+	pinned := map[string]bool{}
 	for _, name := range sortedKeys(marketplaceNames(settings.ExtraKnownMarketplaces)) {
 		mkt := settings.ExtraKnownMarketplaces[name]
 		if mkt.Source.Source != "github" || mkt.Source.Repo == "" {
 			continue
 		}
-		// This registration decides which commit the plugins below install from,
-		// so it must carry the ref niwa resolved (the release pin, or none for
-		// track = "main"). `claude plugin marketplace add` takes it as
-		// `<repo>#<ref>`; a bare repo registers the default branch.
 		target := marketplaceAddTarget(mkt.Source)
-		if err := runClaudePluginCmd(context.Background(), instanceRoot, "marketplace", "add", target); err != nil {
+		err := runClaudePluginCmd(context.Background(), instanceRoot, "marketplace", "add", target, "--scope", "local")
+		switch {
+		case err == nil:
+			pinned[name] = mkt.Source.Ref != ""
+		case mkt.Source.Ref != "" && isDeclaredSourceConflict(err):
+			warnPrewarm(reporter, "marketplace %q: pin %s not applied: this HOME already declares %q in ~/.claude/settings.json with a different source, and Claude Code refuses a per-instance pin while that declaration exists. Plugins install from the registered source instead. Removing that declaration lets instances pin, but it also uninstalls %q's plugins from every project until each is re-applied", name, mkt.Source.Ref, name, name)
+		case mkt.Source.Ref != "":
+			warnPrewarm(reporter, "marketplace %q: pin %s not applied: pre-warming %s failed: %v; plugins install from whatever is registered, or on startup", name, mkt.Source.Ref, target, err)
+		default:
 			warnPrewarm(reporter, "pre-warming marketplace %q (%s): %v; it will install on startup instead", name, target, err)
 		}
 	}
@@ -118,11 +142,43 @@ func prewarmDeclaredPlugins(instanceRoot string, reporter *workspace.Reporter, s
 	// enablement into the user's other projects -- the reason #178 avoided `--scope
 	// user`. The plugin cache and the installed_plugins record (keyed on the instance
 	// projectPath) are populated identically to project scope, so the race fix holds.
+	//
+	// `install` does nothing for a plugin this instance already has, so for a
+	// marketplace just pinned above the install is followed by `update`, which moves
+	// the instance's copy to the pinned version (a no-op when it is already there).
+	// It runs straight after this instance's own add because the marketplace clone
+	// is shared: another instance's add can move it between runs. track = "main"
+	// marketplaces keep install-only behaviour, so an apply does not start silently
+	// upgrading them to the branch tip.
 	for _, plugin := range sortedKeys(pluginNames(settings.EnabledPlugins)) {
 		if err := runClaudePluginCmd(context.Background(), instanceRoot, "install", plugin, "--scope", "local"); err != nil {
 			warnPrewarm(reporter, "pre-warming plugin %q: %v; it will install on startup instead", plugin, err)
+			continue
+		}
+		if !pinned[pluginMarketplace(plugin)] {
+			continue
+		}
+		if err := runClaudePluginCmd(context.Background(), instanceRoot, "update", plugin, "--scope", "local"); err != nil {
+			warnPrewarm(reporter, "moving plugin %q to its pinned version: %v", plugin, err)
 		}
 	}
+}
+
+// isDeclaredSourceConflict reports whether a failed `marketplace add` was Claude
+// Code refusing a source that differs from the one already declared for that
+// marketplace name. It keys on the CLI's wording, so a rewording degrades the
+// warning to the generic "pin not applied" form rather than hiding it.
+func isDeclaredSourceConflict(err error) bool {
+	return strings.Contains(err.Error(), "differs from the one declared")
+}
+
+// pluginMarketplace returns the marketplace half of a `<plugin>@<marketplace>`
+// identifier, or "" when there is none.
+func pluginMarketplace(plugin string) string {
+	if i := strings.LastIndexByte(plugin, '@'); i >= 0 {
+		return plugin[i+1:]
+	}
+	return ""
 }
 
 // warnPrewarm emits a best-effort warning, tolerating a nil reporter (the seam
