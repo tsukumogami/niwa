@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
 
 	"github.com/tsukumogami/niwa/internal/secret"
 )
@@ -14,6 +16,10 @@ import (
 // defaultAPIURL is the Infisical cloud API endpoint used when the
 // credential entry does not specify api_url.
 const defaultAPIURL = "https://app.infisical.com/api"
+
+// apiURLEnvOverride is the test/CI override variable, mirroring the
+// proven NIWA_GITHUB_API_URL pattern in internal/github/client.go.
+const apiURLEnvOverride = "NIWA_INFISICAL_API_URL"
 
 // universalAuthPath is the API path for machine-identity login.
 const universalAuthPath = "/v1/auth/universal-auth/login"
@@ -47,12 +53,71 @@ func Authenticate(ctx context.Context, entry map[string]any) (string, error) {
 		r.Register([]byte(clientSecret))
 	}
 
-	apiURL := defaultAPIURL
-	if raw, ok := entry["api_url"].(string); ok && raw != "" {
-		apiURL = raw
-	}
+	configVal, _ := entry["api_url"].(string)
+	apiURL := resolveAPIURL(configVal)
 
 	return authenticateHTTP(ctx, apiURL, clientID, clientSecret)
+}
+
+// resolveAPIURL implements the single api_url precedence rule shared
+// by Authenticate and every management.go call: an explicit
+// config-declared value wins; otherwise the NIWA_INFISICAL_API_URL
+// environment override (mirroring the proven NIWA_GITHUB_API_URL
+// pattern in internal/github/client.go, intended primarily for tests
+// against infisicalFakeServer); otherwise the Infisical cloud default.
+//
+// Consolidating this into one function (rather than letting
+// Authenticate and management.go each read entry["api_url"] /
+// os.Getenv independently) is what makes "exactly one precedence
+// rule in the package" true rather than aspirational.
+func resolveAPIURL(configVal string) string {
+	if configVal != "" {
+		return configVal
+	}
+	if envVal := os.Getenv(apiURLEnvOverride); envVal != "" {
+		return envVal
+	}
+	return defaultAPIURL
+}
+
+// ResolveAPIURL is the exported form of resolveAPIURL, for callers
+// outside this package that need the same precedence ahead of any
+// bearer-carrying call -- currently the onboard wizard's entry-time
+// api_url gate (internal/onboard/wizard.go), which must resolve the
+// api_url before Detect's first privileged call, using whatever
+// [vault.provider] api_url the workspace config declares (empty when
+// not yet loaded).
+func ResolveAPIURL(configVal string) string {
+	return resolveAPIURL(configVal)
+}
+
+// ValidateAPIURL checks a resolved api_url against the two-rule
+// supply-chain guard Decision 4 requires, run at wizard entry right
+// after resolveAPIURL and before any bearer-carrying call.
+//
+// Rule 1 (unconditional hard reject): a non-https scheme -- including
+// a malformed URL that fails to parse -- is rejected in every mode,
+// before any request is built. There is no override for this rule;
+// "warn and proceed" would be silent acceptance in a scripted run.
+//
+// Rule 2 (flagged, not rejected here): a well-formed https URL that
+// differs from the Infisical cloud default is returned with
+// nonDefault=true. This function does not itself gate on that flag --
+// it hands the decision to the caller, which is the entry-time gate
+// (onboard.CheckAPIURL: an interactive confirm, or --accept-api-url /
+// exit 2 in a non-TTY run). R14 permits a workspace to declare a
+// non-default api_url for a self-hosted instance; this function's job
+// is only to make that declaration visible and scheme-checked, never
+// to forbid it.
+func ValidateAPIURL(apiURL string) (nonDefault bool, err error) {
+	u, err := url.Parse(apiURL)
+	if err != nil {
+		return false, secret.Errorf("infisical: api_url %q is not a valid URL: %w", apiURL, err)
+	}
+	if u.Scheme != "https" {
+		return false, secret.Errorf("infisical: api_url %q must use https (got scheme %q)", apiURL, u.Scheme)
+	}
+	return apiURL != defaultAPIURL, nil
 }
 
 // authenticateHTTP performs the HTTP POST to the universal-auth login
@@ -74,7 +139,7 @@ func authenticateHTTP(ctx context.Context, apiURL, clientID, clientSecret string
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := HTTPClient.Do(req)
 	if err != nil {
 		return "", secret.Errorf("infisical auth: HTTP POST failed: %w", err)
 	}
@@ -87,7 +152,7 @@ func authenticateHTTP(ctx context.Context, apiURL, clientID, clientSecret string
 
 	if resp.StatusCode != http.StatusOK {
 		// Scrub response body -- Infisical may echo credentials in error payloads.
-		scrubbed := scrubResponseBody(ctx, string(respBody), clientSecret)
+		scrubbed := scrubCtx(ctx, string(respBody))
 		return "", secret.Errorf(
 			"infisical auth: universal-auth login returned HTTP %d: %s",
 			resp.StatusCode, scrubbed,
@@ -105,15 +170,4 @@ func authenticateHTTP(ctx context.Context, apiURL, clientID, clientSecret string
 	}
 
 	return result.AccessToken, nil
-}
-
-// scrubResponseBody removes the client_secret from a response body
-// string. Uses the context's redactor if available, plus a direct
-// string replacement as a belt-and-suspenders measure.
-func scrubResponseBody(ctx context.Context, body, clientSecret string) string {
-	out := body
-	if r := secret.RedactorFrom(ctx); r != nil {
-		out = r.Scrub(out)
-	}
-	return out
 }
