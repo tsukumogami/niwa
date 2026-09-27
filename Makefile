@@ -34,7 +34,8 @@ test-functional-critical: build-test
 	NIWA_TEST_TAGS=@critical \
 	go test -v ./test/functional/... $(LOCK_HELD)
 
-# Run only scenarios tagged @claude-integration — requires claude CLI and ANTHROPIC_API_KEY.
+# Run only scenarios tagged @claude-integration — requires the claude CLI. Locally
+# it uses the CLI's existing login; under CI it also requires ANTHROPIC_API_KEY.
 test-functional-claude-integration: build-test
 	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_TAGS=@claude-integration go test -v ./test/functional/... $(LOCK_HELD)
 
