@@ -799,9 +799,11 @@ that instance, and only that instance, to the ref it resolves then.
 > from the source already declared, usually the default branch. niwa
 > prints a warning naming the marketplace and the pin it couldn't apply.
 > niwa never writes to the user's settings and never removes the
-> declaration itself. Removing it with `claude plugin marketplace remove
-> <name>` lets instances pin. It also uninstalls that marketplace's
-> plugins from every project until each instance is re-applied.
+> declaration itself. The one-time fix is `claude plugin marketplace
+> remove <name>`, then `niwa apply` in each instance. The remove
+> uninstalls that marketplace's plugins from every project on the
+> machine, and each project gets them back, pinned, when it's
+> re-applied.
 
 ### Automatic record healing
 

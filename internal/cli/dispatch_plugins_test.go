@@ -198,7 +198,7 @@ func TestPrewarm_RefusedPinIsReportedByName(t *testing.T) {
 		{
 			name:     "declared-source conflict",
 			addErr:   "exit status 1: Cannot add marketplace \"koto\": its network source differs from the one declared for it in settings",
-			wantText: []string{`marketplace "koto"`, "pin v0.13.0 not applied", "already declares"},
+			wantText: []string{`marketplace "koto"`, "pin v0.13.0 not applied", "already declares", "claude plugin marketplace remove koto", "niwa apply", "uninstalls"},
 		},
 		{
 			name:     "any other failure",
