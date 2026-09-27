@@ -284,6 +284,44 @@ func ownerRepoFromAPIURL(apiURL string) (owner, repo string, ok bool) {
 	return parts[0], parts[1], true
 }
 
+// RepoForkInfo reports whether owner/repo is a fork, and of what
+// (GET /repos/{owner}/{repo}). Parent is "owner/repo" of the parent, or ""
+// when the repository isn't a fork.
+func (c *APIClient) RepoForkInfo(ctx context.Context, owner, repo string) (fork bool, parent string, err error) {
+	if owner == "" || repo == "" {
+		return false, "", fmt.Errorf("RepoForkInfo: invalid coordinates %q/%q", owner, repo)
+	}
+	reqURL := fmt.Sprintf("%s/repos/%s/%s", c.BaseURL, url.PathEscape(owner), url.PathEscape(repo))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return false, "", fmt.Errorf("creating request: %w", err)
+	}
+	c.applyAuth(req)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return false, "", fmt.Errorf("querying repository: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, "", fmt.Errorf("GitHub repository GET returned status %d", resp.StatusCode)
+	}
+	var body struct {
+		Fork   bool `json:"fork"`
+		Parent *struct {
+			FullName string `json:"full_name"`
+		} `json:"parent"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return false, "", fmt.Errorf("decoding repository: %w", err)
+	}
+	if body.Parent != nil {
+		parent = body.Parent.FullName
+	}
+	return body.Fork, parent, nil
+}
+
 // PullByHead is the part of a pull request ListPullsByHead reports.
 type PullByHead struct {
 	Number   int

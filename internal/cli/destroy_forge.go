@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/tsukumogami/niwa/internal/github"
@@ -25,6 +26,19 @@ func (f *githubForge) HeadPR(ctx context.Context, owner, repo, branch string) (w
 	f.once.Do(func() {
 		f.client = github.NewAPIClient(resolveGitHubToken())
 	})
+	// A branch in a fork is proposed to the parent repository, so its pull
+	// requests live there, and asking the fork finds none. "No PR" would then
+	// read as "nothing will delete this branch", which is exactly the wrong
+	// answer when the parent merged the PR and the branch is due for deletion.
+	// Until fork PRs are looked up in the parent, a fork gets no answer, and
+	// the scan treats the branch as unverified.
+	fork, parent, err := f.client.RepoForkInfo(ctx, owner, repo)
+	if err != nil {
+		return workspace.HeadPR{}, err
+	}
+	if fork {
+		return workspace.HeadPR{}, fmt.Errorf("%s/%s is a fork of %s, whose pull requests aren't checked", owner, repo, parent)
+	}
 	pulls, err := f.client.ListPullsByHead(ctx, owner, repo, branch)
 	if err != nil {
 		return workspace.HeadPR{}, err
