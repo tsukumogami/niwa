@@ -194,7 +194,7 @@ jobs:
 
       - name: Install tsuku
         if: matrix.os == 'ubuntu-latest'
-        run: curl -fsSL https://tsuku.dev/install.sh | bash
+        uses: tsukumogami/tsuku/.github/actions/setup-tsuku@9ca44882568a29f9208493695b1f7bdb61e30fee  # installs tsuku 0.14.0
 
       # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
       - name: Verify shell-init output
