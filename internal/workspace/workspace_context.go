@@ -31,15 +31,15 @@ const (
 // It is a package-level var so unit tests inject a fake and never hit the
 // network. The default implementation shells out to git ls-remote.
 //
-// SPIKE FINDING (Decision 6): Claude Code does NOT honor a ref/tag/commit
-// pin field on a github marketplace SOURCE object — the object niwa writes
-// into known_marketplaces.json / extraKnownMarketplaces only accepts
-// source/repo/sparsePaths, and Claude clones the default-branch HEAD. The
-// `ref` field is honored only inside a marketplace.json catalog entry
-// (git-subdir source), which niwa does not author. We still resolve the
-// release and emit a best-effort "ref" on the github source: it is ignored
-// by Claude today but is forward-compatible if Claude adds source-level
-// pinning, and the resolution itself drives the report surfaced to users.
+// The resolved tag is emitted as "ref" on the github source. An earlier spike
+// (Decision 6) concluded Claude Code ignored a source-level ref; that no longer
+// holds. Measured with Claude Code 2.1.283: `claude plugin marketplace add
+// <repo>#<ref>` registers and clones at the ref, and a session starting in a
+// project re-points the marketplace clone to the ref that project declares.
+// The pin is applied per instance by the plugin pre-install
+// (prewarmDeclaredPlugins in internal/cli), which registers at local scope; it
+// does not apply on a machine whose user settings already declare the
+// marketplace with another source.
 var resolveLatestStableRelease = defaultResolveLatestStableRelease
 
 // defaultResolveLatestStableRelease lists the repo's tags via git ls-remote
@@ -551,8 +551,8 @@ func readMarketplaceManifestName(dir string) (string, bool) {
 //
 // Track interpretation for github sources:
 //   - "" or "release": resolve the highest non-prerelease release tag and emit
-//     it as a best-effort "ref" on the source (see resolveLatestStableRelease
-//     for the SPIKE FINDING on why this is best-effort). When the repo has no
+//     it as "ref" on the source (see resolveLatestStableRelease for how the
+//     pin is applied and when it can't be). When the repo has no
 //     stable release, fall back to the default branch (no ref) and return a
 //     report describing the fallback (R14, R16).
 //   - "main": register against the default branch, no ref (R15).
