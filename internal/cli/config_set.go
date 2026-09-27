@@ -47,7 +47,7 @@ func runConfigSetGlobal(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("parsing global config source %q: %w", repo, err)
 	}
-	cloneURL, err := workspace.ResolveCloneURL(repo, globalCfg.CloneProtocol())
+	cloneURL, err := describeCloneSource(repo, src, globalCfg.CloneProtocol())
 	if err != nil {
 		return fmt.Errorf("resolving clone URL: %w", err)
 	}
