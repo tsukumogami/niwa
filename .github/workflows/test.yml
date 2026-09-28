@@ -164,7 +164,7 @@ jobs:
       # step. The recipe-install check below relies on that install location.
       - name: Install tsuku
         if: matrix.os == 'ubuntu-latest'
-        uses: tsukumogami/tsuku/.github/actions/setup-tsuku@377de20d99e3b219c7c408eeec76311b97990840  # installs tsuku 0.15.0
+        uses: tsukumogami/tsuku/.github/actions/setup-tsuku@d45bd520886554384942a6e017908bdf6b8cf0b9  # installs tsuku 0.15.2
 
       # The Infisical CLI comes through tsuku, pinned. tsuku checks the
       # download against the checksums.txt Infisical publishes with the
