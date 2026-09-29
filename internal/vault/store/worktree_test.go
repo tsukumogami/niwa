@@ -45,6 +45,17 @@ func TestWorkTreeGuard(t *testing.T) {
 			}
 			return filepath.Join(tmp, "link", "niwa", "secret-cache")
 		},
+		// Only the walk over the path as configured catches this one: the
+		// symlink leads out of the work tree, so the resolved path has no
+		// .git above it.
+		"configured path in a work tree, symlink out": func(t *testing.T, tmp string) string {
+			mkdir(t, filepath.Join(tmp, "repo", ".git"))
+			mkdir(t, filepath.Join(tmp, "outside"))
+			if err := os.Symlink(filepath.Join(tmp, "outside"), filepath.Join(tmp, "repo", "link")); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join(tmp, "repo", "link", "secret-cache")
+		},
 		"symlink into a .git directory": func(t *testing.T, tmp string) string {
 			mkdir(t, filepath.Join(tmp, "repo", ".git", "modules"))
 			if err := os.Symlink(filepath.Join(tmp, "repo", ".git", "modules"), filepath.Join(tmp, "link")); err != nil {

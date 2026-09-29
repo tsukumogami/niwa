@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -250,10 +251,13 @@ func TestRoundTripKeepsBytesExactly(t *testing.T) {
 		"BINARY": {Value: []byte{0xff, 0xfe, 0x00, 'a', 0x80}, ResolvedAt: at, VersionToken: "v1", Provenance: "p1"},
 		"EMPTY":  {Value: []byte{}, ResolvedAt: at, VersionToken: "v2", Provenance: "p2"},
 		"NOTOK":  {Value: []byte("plain"), ResolvedAt: at},
+		// An empty secret revealed as nil is stored as JSON null and
+		// comes back empty.
+		"NIL": {Value: nil, ResolvedAt: at, VersionToken: "v3"},
 	}
 	mustUpdate(t, dir, id, puts, nil, false)
 	got := mustLoad(t, dir, id)
-	assertKeys(t, got, "BINARY", "EMPTY", "NOTOK")
+	assertKeys(t, got, "BINARY", "EMPTY", "NOTOK", "NIL")
 	for k, want := range puts {
 		g := got[k]
 		if !bytes.Equal(g.Value, want.Value) || !g.ResolvedAt.Equal(want.ResolvedAt) ||
@@ -305,10 +309,35 @@ func TestDataFileFormat(t *testing.T) {
 		t.Errorf("token fields = %v", k)
 	}
 
-	// The name is the SHA-256 of the normalised five fields as a JSON array.
-	stem, _ := fileStem(vault.Identity{Kind: "infisical", APIDomain: "https://app.infisical.com", ProjectID: "p", Environment: "dev", FolderPath: "/team"})
-	if filepath.Base(dataPath(dir, id)) != stem+".json" || len(stem) != 64 {
-		t.Errorf("unexpected data file name %s", filepath.Base(dataPath(dir, id)))
+}
+
+// The file names are the SHA-256 of the normalised five fields encoded as
+// a JSON array. The digest is computed outside the package
+// (printf '%s' '["infisical","https://app.infisical.com","p","dev","/team"]' | sha256sum),
+// so a change of encoding, field order or normalisation fails here
+// instead of silently orphaning every stored file.
+func TestFileNamesAreTheIdentityHash(t *testing.T) {
+	dir := isolate(t)
+	const golden = "6f6a47515934ea641cc80779cd4675dc80ac9e55cfdab542ebb5b75ef9d297f9"
+	id := vault.Identity{Kind: "infisical", APIDomain: "HTTPS://App.Infisical.com/api/", ProjectID: "p", Environment: "dev", FolderPath: "team/"}
+
+	mustUpdate(t, dir, id, map[string]Entry{"K": entry("v", time.Now(), "t")}, nil, false)
+	testHookBeforeRename = func() error { return errors.New("abort") }
+	_ = Update(dir, id, map[string]Entry{"K": entry("v2", time.Now(), "t")}, nil, false)
+	testHookBeforeRename = nil
+
+	names, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, n := range names {
+		got = append(got, n.Name())
+	}
+	sort.Strings(got)
+	if len(got) != 3 || !strings.HasPrefix(got[0], "."+golden+".json.tmp-") ||
+		got[1] != golden+".json" || got[2] != golden+".lock" {
+		t.Fatalf("store files = %v, want .%s.json.tmp-*, %s.json and %s.lock", got, golden, golden, golden)
 	}
 }
 

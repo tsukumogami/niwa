@@ -229,6 +229,23 @@ func TestSymlinkedLockFileIsUntrusted(t *testing.T) {
 	}
 }
 
+func TestLockFileWithLooseModeIsUntrusted(t *testing.T) {
+	dir := isolate(t)
+	id := testIdentity()
+	mustUpdate(t, dir, id, map[string]Entry{"K": entry("stored", time.Now(), "t")}, nil, false)
+	before, _ := os.ReadFile(dataPath(dir, id))
+	if err := os.Chmod(lockPath(dir, id), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(dir, id)
+	assertLoadEmpty(t, got)
+	assertUnwritable(t, err)
+	assertUnwritable(t, Update(dir, id, map[string]Entry{"K": entry("new", time.Now(), "t")}, nil, false))
+	if after, _ := os.ReadFile(dataPath(dir, id)); !bytes.Equal(before, after) {
+		t.Fatal("data file changed behind an untrusted lock file")
+	}
+}
+
 func TestDataFileWithLooseModeIsUntrusted(t *testing.T) {
 	dir := isolate(t)
 	id := testIdentity()

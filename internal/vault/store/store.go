@@ -110,9 +110,12 @@ func Dir() (string, error) {
 // Load returns the entries stored for id in dir, without taking a lock.
 // A missing store, and a data file that can't be read or parsed, has an
 // unknown format version or names another identity, yield an empty map
-// and a nil error. A store directory or data file that fails the
-// ownership checks also yields an empty map, with an error wrapping
-// ErrUnwritable that callers may ignore. The map is never nil.
+// and a nil error. A store directory, data file or lock file that fails
+// the ownership checks also yields an empty map, with an error wrapping
+// ErrUnwritable. That error never stops a caller from carrying on as if
+// nothing were stored, but it is the only sign of an untrusted store in
+// a run that has nothing to write, so callers should report it the way
+// they report Update's ErrUnwritable. The map is never nil.
 func Load(dir string, id vault.Identity) (map[string]Entry, error) {
 	empty := map[string]Entry{}
 	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
