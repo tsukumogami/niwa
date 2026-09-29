@@ -163,8 +163,9 @@ func (sd *storeDir) openLockFile(name string) (*os.File, error) {
 // openChecked opens the existing store file name with flag, and only when
 // it's a regular file owned by the effective user with no group or other
 // bits. A file that fails those checks returns an error wrapping
-// ErrUnwritable; a missing file or a failed open returns the os error
-// as is, so callers can tell "untrusted" from "absent or unreadable".
+// ErrUnwritable; any other failure (a missing file, a failed open or
+// Fstat) returns the os error as is, so callers can tell "untrusted"
+// from "absent or unreadable".
 //
 // O_NOFOLLOW alone doesn't keep a symlink out here: os.Root resolves a
 // final-component symlink whose target stays inside the root even when

@@ -122,6 +122,9 @@ func Dir() (string, error) {
 // nothing were stored, but it is the only sign of an untrusted store in
 // a run that has nothing to write, so callers should report it the way
 // they report Update's ErrUnwritable. The map is never nil.
+//
+// Load writes nothing, with one exception: like Update, it removes group
+// and other permission bits from a store directory the user owns.
 func Load(dir string, id vault.Identity) (map[string]Entry, error) {
 	empty := map[string]Entry{}
 	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
