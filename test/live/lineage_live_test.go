@@ -82,6 +82,9 @@ func TestLineageAttributesReachBackgroundWorker(t *testing.T) {
 
 	userKeys, userValue := userResourceAttributes(t)
 	t.Logf("user settings attributes: %d key(s) to carry", len(userKeys))
+	if len(userKeys) == 0 {
+		t.Log("user settings set no attributes, so this run checks the lineage keys only, not that the user's keys are carried alongside them")
+	}
 
 	sink := newKeySink()
 	server := httptest.NewServer(sink)
@@ -91,10 +94,6 @@ func TestLineageAttributesReachBackgroundWorker(t *testing.T) {
 	doc := lineageSettingsDocument(t, server.URL, composeProbeValue(userValue))
 
 	shortID := launchProbeWorker(t, claudeBin, probeDir, doc)
-	t.Cleanup(func() {
-		stopSession(t, claudeBin, shortID)
-		deleteSession(t, claudeBin, shortID)
-	})
 
 	checkArrivals(t, "first run", sink, userKeys)
 
@@ -114,9 +113,10 @@ func TestLineageAttributesReachBackgroundWorker(t *testing.T) {
 // keySink is the OTLP/HTTP JSON listener. It keeps a set of the attribute keys
 // it has seen and whether any export arrived at all.
 type keySink struct {
-	mu       sync.Mutex
-	keys     map[string]bool
-	requests int
+	mu         sync.Mutex
+	keys       map[string]bool
+	requests   int
+	unreadable int
 }
 
 func newKeySink() *keySink { return &keySink{keys: map[string]bool{}} }
@@ -126,37 +126,42 @@ func (s *keySink) reset() {
 	defer s.mu.Unlock()
 	s.keys = map[string]bool{}
 	s.requests = 0
+	s.unreadable = 0
 }
 
-func (s *keySink) snapshot() (map[string]bool, int) {
+func (s *keySink) snapshot() (map[string]bool, int, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make(map[string]bool, len(s.keys))
 	for k := range s.keys {
 		out[k] = true
 	}
-	return out, s.requests
+	return out, s.requests, s.unreadable
 }
 
 // ServeHTTP reads only the resource attribute keys out of an OTLP JSON
-// metrics or logs export. Headers are never read, and nothing is stored but
-// the key names.
+// metrics or logs export. No header but Content-Encoding is read, bodies are
+// capped, and nothing is stored but the key names. A request it can't decode is
+// counted, so an exporter speaking a format it doesn't expect shows up in the
+// report instead of reading as silence.
 func (s *keySink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer w.WriteHeader(http.StatusOK)
-	var body io.Reader = r.Body
+	var body io.Reader = http.MaxBytesReader(w, r.Body, 8<<20)
 	if r.Header.Get("Content-Encoding") == "gzip" {
-		zr, err := gzip.NewReader(r.Body)
+		zr, err := gzip.NewReader(body)
 		if err != nil {
+			s.countUnreadable()
 			return
 		}
 		defer zr.Close()
-		body = zr
+		body = io.LimitReader(zr, 32<<20)
 	}
 	var payload struct {
 		ResourceMetrics []otlpResource `json:"resourceMetrics"`
 		ResourceLogs    []otlpResource `json:"resourceLogs"`
 	}
 	if err := json.NewDecoder(body).Decode(&payload); err != nil {
+		s.countUnreadable()
 		return
 	}
 	s.mu.Lock()
@@ -169,6 +174,12 @@ func (s *keySink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func (s *keySink) countUnreadable() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.unreadable++
 }
 
 type otlpResource struct {
@@ -300,6 +311,9 @@ func launchProbeWorker(t *testing.T, claudeBin, dir, settings string) string {
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err := cmd.Run(); err != nil {
+		if strings.Contains(out.String(), "not trusted") {
+			t.Fatalf("claude --bg refused an untrusted directory; set NIWA_LIVE_PROBE_PARENT to a directory Claude Code trusts: %v\n%s", err, out.String())
+		}
 		t.Fatalf("claude --bg: %v\n%s", err, out.String())
 	}
 	deadline := time.Now().Add(30 * time.Second)
@@ -308,6 +322,10 @@ func launchProbeWorker(t *testing.T, claudeBin, dir, settings string) string {
 			cwd, _ := rec["cwd"].(string)
 			if cwd != "" && samePath(cwd, dir) {
 				if short, _ := rec["id"].(string); short != "" {
+					t.Cleanup(func() {
+						stopSession(t, claudeBin, short)
+						deleteSession(t, claudeBin, short)
+					})
 					return short
 				}
 			}
@@ -331,9 +349,9 @@ func checkArrivals(t *testing.T, arm string, sink *keySink, userKeys []string) {
 	}
 	deadline := time.Now().Add(lineageArrivalBudget)
 	var seen map[string]bool
-	var requests int
+	var requests, unreadable int
 	for {
-		seen, requests = sink.snapshot()
+		seen, requests, unreadable = sink.snapshot()
 		missing := 0
 		for k := range want {
 			if !seen[k] {
@@ -345,7 +363,7 @@ func checkArrivals(t *testing.T, arm string, sink *keySink, userKeys []string) {
 		}
 		time.Sleep(2 * time.Second)
 	}
-	t.Logf("%s: %d export request(s) received", arm, requests)
+	t.Logf("%s: %d export request(s) received, %d unreadable", arm, requests, unreadable)
 	failed := false
 	names := make([]string, 0, len(lineageProbeKeys))
 	for _, kv := range lineageProbeKeys {
