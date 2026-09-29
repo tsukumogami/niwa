@@ -15,6 +15,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/fallbacknotice"
 	"github.com/tsukumogami/niwa/internal/gitexclude"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/guardrail"
@@ -23,6 +24,8 @@ import (
 	"github.com/tsukumogami/niwa/internal/secret"
 	"github.com/tsukumogami/niwa/internal/vault"
 	"github.com/tsukumogami/niwa/internal/vault/resolve"
+	"github.com/tsukumogami/niwa/internal/vault/store"
+	"github.com/tsukumogami/niwa/internal/vault/storefallback"
 	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
@@ -69,6 +72,14 @@ type Applier struct {
 	// stack would be dropped on exactly the path where the user most
 	// needs every key enumerated. A nil collector disables collection.
 	Keys *keyreport.Collector
+
+	// Notices collects what the store fallback did this run: values it
+	// served from the store of last-resolved values, identities it had
+	// nothing stored for, and store writes it could not make. Like Keys it
+	// is caller-supplied, so the notices survive a failed Create, and a
+	// nil collector disables collection. Nothing in it counts toward
+	// strict mode or the required-key check, which read only Keys.
+	Notices *fallbacknotice.Collector
 
 	// StrictSecrets is the run's resolved strictness: the --strict-secrets
 	// flag when it was explicitly present, else the workspace's
@@ -820,6 +831,21 @@ type contextChainKey struct {
 	dir   string
 }
 
+// provisioningBundle builds one of the vault bundles provisioning resolves
+// through (the workspace overlay, team and personal layers) with its
+// providers wrapped in the run's store fallback. It is the only place
+// apply.go may call resolve.BuildBundle, so no provisioning layer can
+// miss the fallback; a test scans this file to hold that. Credential
+// sync builds its provider elsewhere and stays unwrapped. CloseAll on
+// the returned bundle closes the underlying providers.
+func provisioningBundle(ctx context.Context, session *storefallback.Session, registry *vault.Registry, vaultCfg *config.VaultRegistry, label string) (*vault.Bundle, error) {
+	bundle, err := resolve.BuildBundle(ctx, registry, vaultCfg, label)
+	if err != nil {
+		return nil, err
+	}
+	return bundle.Wrap(session.Wrap), nil
+}
+
 // runPipeline executes the shared pipeline steps: discover repos, classify,
 // clone, and install content. It returns the pipeline results without writing
 // state.
@@ -841,6 +867,19 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// the repo working trees.
 	redactor := secret.NewRedactor()
 	ctx = secret.WithRedactor(ctx, redactor)
+
+	// The run state lets a vault backend replay an earlier verdict on an
+	// unreachable domain or a logged-out principal instead of failing the
+	// same way again. The store-fallback session wraps the providers of
+	// the three provisioning bundles below; its deferred Flush writes what
+	// they resolved once the pipeline ends, on success and on every error
+	// return alike. A store directory that can't be located comes back
+	// empty, and the session reports that as an unwritable store when it
+	// first needs one.
+	ctx = vault.WithRunState(ctx)
+	storeDir, _ := store.Dir()
+	fallbackSession := storefallback.NewSession(storeDir, a.Notices, nil)
+	defer fallbackSession.Flush()
 
 	// overlayDir is the local clone path of the overlay repo when one is active.
 	// It is local to this pipeline run; downstream steps that need it receive it
@@ -1168,7 +1207,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		// empty bundle, which is still valid — overlay env without vault:// refs
 		// passes through unchanged; any vault:// ref without a declared provider
 		// fails with a clear "provider not declared" error.
-		overlayVaultBundle, bundleErr := resolve.BuildBundle(ctx, a.vaultRegistry, overlay.Vault, "workspace-overlay.toml")
+		overlayVaultBundle, bundleErr := provisioningBundle(ctx, fallbackSession, a.vaultRegistry, overlay.Vault, "workspace-overlay.toml")
 		if bundleErr != nil {
 			return nil, fmt.Errorf("building overlay vault bundle: %w", bundleErr)
 		}
@@ -1332,7 +1371,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Build provider bundles from each layer independently. Bundle
 	// lifetime is scoped to this apply: defer CloseAll so providers
 	// shut down cleanly even on error paths (R29 no-disk-cache).
-	teamBundle, err := resolve.BuildBundle(ctx, a.vaultRegistry, cfg.Vault, "workspace config")
+	teamBundle, err := provisioningBundle(ctx, fallbackSession, a.vaultRegistry, cfg.Vault, "workspace config")
 	if err != nil {
 		return nil, err
 	}
@@ -1345,7 +1384,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	if globalOverride != nil {
 		overlayRegistry = globalOverride.Global.Vault
 	}
-	personalBundle, err := resolve.BuildBundle(ctx, a.vaultRegistry, overlayRegistry, "global overlay")
+	personalBundle, err := provisioningBundle(ctx, fallbackSession, a.vaultRegistry, overlayRegistry, "global overlay")
 	if err != nil {
 		return nil, err
 	}

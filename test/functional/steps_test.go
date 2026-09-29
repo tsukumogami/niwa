@@ -74,7 +74,8 @@ func iSetEnvToTempPath(ctx context.Context, key string) (context.Context, error)
 // buildEnv returns the environment for invoking the niwa binary. It overrides
 // HOME, XDG_CONFIG_HOME, and TMPDIR to the sandbox so config, state, and
 // temp files don't leak across scenarios or into the real user environment.
-// Per-scenario overrides win last.
+// XDG_STATE_HOME is dropped, so the secret store lands under the sandboxed
+// HOME. Per-scenario overrides win last.
 //
 // ANTHROPIC_API_KEY is dropped rather than overridden. It is not a path, so
 // there is nothing sandboxed to point it at, but niwa branches on it: an
@@ -107,6 +108,7 @@ func (s *testState) buildEnv() []string {
 	for _, kv := range base {
 		if strings.HasPrefix(kv, "HOME=") ||
 			strings.HasPrefix(kv, "XDG_CONFIG_HOME=") ||
+			strings.HasPrefix(kv, "XDG_STATE_HOME=") ||
 			strings.HasPrefix(kv, "TMPDIR=") ||
 			strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") ||
 			(overridePath && strings.HasPrefix(kv, "PATH=")) {

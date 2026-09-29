@@ -11,6 +11,10 @@
 //	    "values":    map[string]string // key → plaintext
 //	    "fail_open": bool              // when true, unknown keys return ErrProviderUnreachable
 //	    "no_client": bool              // when true, unknown keys return ErrClientNotInstalled
+//	    "identity":  map[string]string // store identity (see Factory.Open)
+//	    "fail_class": string           // classified failure for unknown keys (see Factory.Open)
+//	    "fail_status": int             // HTTP status carried by fail_class
+//	    "fail_plain": bool             // unknown keys return an unclassified error
 //	}
 //
 // VersionToken.Token is a deterministic SHA-256 hex digest of the
@@ -56,6 +60,19 @@ func (Factory) Kind() string {
 //	"values"    map[string]string       // preconfigured values
 //	"fail_open" bool                    // return ErrProviderUnreachable for unknown keys
 //	"no_client" bool                    // return ErrClientNotInstalled for unknown keys
+//	"identity"  map[string]string       // api_domain, project_id, environment, folder_path
+//	"fail_class" string                 // unauthenticated | unreachable | timed_out | answered
+//	"fail_status" int                   // FailureClass.HTTPStatus for fail_class
+//	"fail_plain" bool                   // return an error with no sentinel and no class
+//
+// With "identity" set the provider answers StoreIdentity with kind
+// "fake" and the given fields, taking the folder path from the
+// reference when it names one; without it StoreIdentity reports no
+// identity. "fail_class" makes unknown keys fail with a
+// vault.ClassifiedError: "unauthenticated" (reason logged out),
+// "unreachable" (reason unreachable), "timed_out" (unreachable, reason
+// timed out) or "answered". For unknown keys no_client wins, then
+// fail_plain, fail_class and fail_open; otherwise ErrKeyNotFound.
 //
 // Other keys are ignored; malformed types for recognised keys cause
 // Open to return an error.
@@ -110,16 +127,93 @@ func (Factory) Open(_ context.Context, config vault.ProviderConfig) (vault.Provi
 		p.noClient = noClient
 	}
 
+	if raw, ok := config["identity"]; ok {
+		fields, err := stringMap(raw)
+		if err != nil {
+			return nil, fmt.Errorf("fake: config[identity]: %w", err)
+		}
+		p.identity = &vault.Identity{
+			Kind:        Kind,
+			APIDomain:   fields["api_domain"],
+			ProjectID:   fields["project_id"],
+			Environment: fields["environment"],
+			FolderPath:  fields["folder_path"],
+		}
+	}
+
+	if raw, ok := config["fail_class"]; ok {
+		name, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("fake: config[fail_class] must be string, got %T", raw)
+		}
+		class, ok := failClasses[name]
+		if !ok {
+			return nil, fmt.Errorf("fake: config[fail_class] %q is not one of unauthenticated, unreachable, timed_out, answered", name)
+		}
+		p.failClass = &class
+	}
+
+	if raw, ok := config["fail_status"]; ok {
+		switch status := raw.(type) {
+		case int:
+			p.failStatus = status
+		case int64:
+			p.failStatus = int(status)
+		default:
+			return nil, fmt.Errorf("fake: config[fail_status] must be an integer, got %T", raw)
+		}
+	}
+
+	if raw, ok := config["fail_plain"]; ok {
+		failPlain, ok := raw.(bool)
+		if !ok {
+			return nil, fmt.Errorf("fake: config[fail_plain] must be bool, got %T", raw)
+		}
+		p.failPlain = failPlain
+	}
+
 	return p, nil
+}
+
+// failClasses maps fail_class names to the class and reason they return.
+var failClasses = map[string]vault.FailureClass{
+	"unauthenticated": {Class: vault.ClassUnauthenticated, Reason: vault.ReasonLoggedOut},
+	"unreachable":     {Class: vault.ClassUnreachable, Reason: vault.ReasonUnreachable},
+	"timed_out":       {Class: vault.ClassUnreachable, Reason: vault.ReasonTimedOut},
+	"answered":        {Class: vault.ClassAnswered},
+}
+
+// stringMap accepts a map[string]string, or a map[string]any whose
+// values are all strings (the TOML decoder's shape).
+func stringMap(raw any) (map[string]string, error) {
+	switch m := raw.(type) {
+	case map[string]string:
+		return m, nil
+	case map[string]any:
+		out := make(map[string]string, len(m))
+		for k, v := range m {
+			s, ok := v.(string)
+			if !ok {
+				return nil, fmt.Errorf("[%q] must be string, got %T", k, v)
+			}
+			out[k] = s
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("must be map[string]string or map[string]any, got %T", raw)
 }
 
 // Provider is the fake backend's vault.Provider implementation.
 // Safe for concurrent Resolve/ResolveBatch calls. Close is one-shot:
 // subsequent Resolve calls after Close return an error.
 type Provider struct {
-	name     string
-	failOpen bool
-	noClient bool
+	name       string
+	failOpen   bool
+	noClient   bool
+	failPlain  bool
+	failClass  *vault.FailureClass
+	failStatus int
+	identity   *vault.Identity
 
 	mu     sync.Mutex
 	values map[string]string
@@ -154,6 +248,15 @@ func (p *Provider) Resolve(_ context.Context, ref vault.Ref) (secret.Value, vaul
 		if p.noClient {
 			return secret.Value{}, vault.VersionToken{}, fmt.Errorf("fake: provider %q: %w", p.name, vault.ErrClientNotInstalled)
 		}
+		if p.failPlain {
+			return secret.Value{}, vault.VersionToken{}, fmt.Errorf("fake: provider %q key %q failed", p.name, ref.Key)
+		}
+		if p.failClass != nil {
+			class := *p.failClass
+			class.HTTPStatus = p.failStatus
+			return secret.Value{}, vault.VersionToken{}, vault.Classify(
+				fmt.Errorf("fake: provider %q key %q failed %s", p.name, ref.Key, class.Class), class)
+		}
 		if p.failOpen {
 			return secret.Value{}, vault.VersionToken{}, fmt.Errorf("fake: provider %q unreachable: %w", p.name, vault.ErrProviderUnreachable)
 		}
@@ -168,6 +271,20 @@ func (p *Provider) Resolve(_ context.Context, ref vault.Ref) (secret.Value, vaul
 		Token:      tokenFor(raw),
 		Provenance: fmt.Sprintf("fake:%s:%s", p.name, ref.Key),
 	}, nil
+}
+
+// StoreIdentity implements vault.StoreIdentifier. It reports no
+// identity unless the provider was configured with one; the folder
+// path is ref.Path when the reference names one.
+func (p *Provider) StoreIdentity(ref vault.Ref) (vault.Identity, bool) {
+	if p.identity == nil {
+		return vault.Identity{}, false
+	}
+	id := *p.identity
+	if ref.Path != "" {
+		id.FolderPath = ref.Path
+	}
+	return vault.NormalizeIdentity(id), true
 }
 
 // ResolveBatch satisfies vault.BatchResolver. It resolves every ref

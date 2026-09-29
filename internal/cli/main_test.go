@@ -71,6 +71,13 @@ func runWithAgentStubs(m *testing.M) int {
 		fmt.Fprintf(os.Stderr, "prepending the agent stubs to PATH: %v\n", err)
 		return 1
 	}
+	// Provisioning writes resolved vault values to the store of
+	// last-resolved values under $XDG_STATE_HOME. Point it into the stub
+	// directory so no test reaches the developer's real store.
+	if err := os.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state")); err != nil {
+		fmt.Fprintf(os.Stderr, "setting XDG_STATE_HOME: %v\n", err)
+		return 1
+	}
 
 	code := m.Run()
 
