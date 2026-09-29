@@ -231,10 +231,11 @@ func (p *Provider) Kind() string {
 }
 
 // Resolve looks up ref.Key in the preconfigured values map. A
-// missing key returns vault.ErrKeyNotFound (or
-// vault.ErrProviderUnreachable when fail_open is true, or
-// vault.ErrClientNotInstalled when no_client is true — no_client wins,
-// since a client that is not there cannot report anything else). The returned
+// missing key returns vault.ErrKeyNotFound, unless a failure knob is
+// set: no_client (vault.ErrClientNotInstalled; it wins, since a client
+// that is not there cannot report anything else), then fail_plain (an
+// unclassified error), fail_class (a vault.ClassifiedError) and
+// fail_open (vault.ErrProviderUnreachable). The returned
 // VersionToken is a deterministic SHA-256 of the value bytes;
 // Provenance is "fake:<provider-name>:<key>".
 func (p *Provider) Resolve(_ context.Context, ref vault.Ref) (secret.Value, vault.VersionToken, error) {

@@ -135,8 +135,10 @@ func (s *Session) lookup(id vault.Identity, key string) (store.Entry, bool) {
 		var err error
 		entries, err = store.Load(s.dir, id)
 		if err != nil {
-			// Load reports only a store that fails the ownership
-			// checks. That store is unusable for the whole run.
+			// Load errs only when the directory, or this identity's
+			// data or lock file, fails the ownership checks. Any
+			// such failure makes the store untrusted for the whole
+			// run, as the design has it, not just for this identity.
 			s.disableLocked()
 			return store.Entry{}, false
 		}
@@ -180,6 +182,10 @@ func (s *Session) Flush() {
 		s.disableLocked()
 		return
 	}
+	// store.Update refuses a work-tree store on its own, and that guard
+	// is the one that counts. Checking here first gives the run its one
+	// walk before the first write, so a work-tree store costs one walk
+	// rather than one per identity.
 	if store.InWorkTree(s.dir) {
 		s.notices.StoreInWorkTree(s.dir)
 		return
@@ -197,6 +203,9 @@ func (s *Session) Flush() {
 		switch {
 		case err == nil:
 		case errors.Is(err, store.ErrLockTimeout):
+			// A held lock is about this identity alone; the others
+			// can still be written. A work-tree or unwritable store
+			// is about the whole directory, so those stop the flush.
 			s.notices.LockTimeout(noticeIdentity(id))
 		case errors.Is(err, store.ErrInWorkTree):
 			s.notices.StoreInWorkTree(s.dir)

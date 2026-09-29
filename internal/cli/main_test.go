@@ -41,7 +41,8 @@ func TestMain(m *testing.M) {
 }
 
 // runWithAgentStubs runs the package's tests with the agent binaries stubbed
-// and fails the run if any stub was invoked.
+// and fails the run if any stub was invoked. It also points XDG_STATE_HOME
+// into its temp directory, so no test writes the real secret store.
 //
 // The invocation log, not the stub's exit status, is the signal. Only a
 // backgrounded launch waits for the process and reports its exit; a foreground

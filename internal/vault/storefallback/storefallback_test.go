@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -552,6 +553,32 @@ func TestNoStoreDirectory(t *testing.T) {
 	NewSession("", quiet, nil).Flush()
 	if !quiet.Empty() {
 		t.Fatal("an unused session without a store directory produced a notice")
+	}
+}
+
+// fallbacknotice.Identity mirrors vault.Identity by hand, since the
+// collector imports nothing from vault. A field added to one and not the
+// other would silently merge distinct identities into one notice.
+func TestNoticeIdentityCopiesEveryField(t *testing.T) {
+	vt := reflect.TypeOf(vault.Identity{})
+	nt := reflect.TypeOf(fallbacknotice.Identity{})
+	if vt.NumField() != nt.NumField() {
+		t.Fatalf("vault.Identity has %d fields, fallbacknotice.Identity %d", vt.NumField(), nt.NumField())
+	}
+	id := vault.Identity{}
+	iv := reflect.ValueOf(&id).Elem()
+	for i := 0; i < vt.NumField(); i++ {
+		if _, ok := nt.FieldByName(vt.Field(i).Name); !ok {
+			t.Fatalf("fallbacknotice.Identity lacks %s", vt.Field(i).Name)
+		}
+		iv.Field(i).SetString("value-of-" + vt.Field(i).Name)
+	}
+	got := reflect.ValueOf(noticeIdentity(id))
+	for i := 0; i < vt.NumField(); i++ {
+		name := vt.Field(i).Name
+		if got.FieldByName(name).String() != "value-of-"+name {
+			t.Errorf("noticeIdentity dropped %s", name)
+		}
 	}
 }
 

@@ -1370,7 +1370,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 	// Build provider bundles from each layer independently. Bundle
 	// lifetime is scoped to this apply: defer CloseAll so providers
-	// shut down cleanly even on error paths (R29 no-disk-cache).
+	// shut down cleanly even on error paths. The providers themselves
+	// keep nothing on disk; what these bundles resolve reaches the store
+	// of last-resolved values only through fallbackSession's Flush.
 	teamBundle, err := provisioningBundle(ctx, fallbackSession, a.vaultRegistry, cfg.Vault, "workspace config")
 	if err != nil {
 		return nil, err

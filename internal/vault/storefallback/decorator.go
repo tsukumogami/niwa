@@ -115,6 +115,8 @@ func policy(err error) decision {
 	if err == nil {
 		return decision{action: actionRecord}
 	}
+	// A missing key is an answer about that key alone, whatever else
+	// the error carries, so it's decided before the class.
 	if errors.Is(err, vault.ErrKeyNotFound) {
 		return decision{action: actionEvictKey}
 	}

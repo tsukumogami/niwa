@@ -71,11 +71,13 @@ func TestProvisioningBundlesAreBuiltThroughTheWrappingHelper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsing credentialsync.go: %v", err)
 	}
+	found := false
 	for _, decl := range sync.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Name.Name != "openCredentialSyncProvider" {
 			continue
 		}
+		found = true
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			switch x := n.(type) {
 			case *ast.SelectorExpr:
@@ -89,5 +91,8 @@ func TestProvisioningBundlesAreBuiltThroughTheWrappingHelper(t *testing.T) {
 			}
 			return true
 		})
+	}
+	if !found {
+		t.Error("credentialsync.go has no openCredentialSyncProvider; update this scan to the function that builds the credential-sync provider")
 	}
 }
