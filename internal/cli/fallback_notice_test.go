@@ -394,19 +394,29 @@ func TestDispatchNothingToFallBackOn(t *testing.T) {
 // hookNotices records one of each R21 condition.
 func hookNotices() *fallbacknotice.Collector {
 	c := servedNotices()
-	miss := noticeID
-	miss.ProjectID = "proj-miss"
+	// Every field differs from the served identity, so a field found in
+	// one sentence can't stand in for the other's.
+	miss := fallbacknotice.Identity{
+		Kind:        "infisical",
+		APIDomain:   "https://eu.infisical.com",
+		ProjectID:   "proj-miss",
+		Environment: "staging",
+		FolderPath:  "/other",
+	}
 	c.NothingToFallBackOn(miss)
 	c.StoreInWorkTree("/state/secret-cache")
 	c.StoreUnwritable("/state/secret-cache")
 	return c
 }
 
+// hookNoticeMarkers checks each notice's fields inside its own sentence:
+// the served warning's project, env, path, domain, reason, age and login
+// instruction as one span, and the miss line's identity joined to its
+// wording.
 var hookNoticeMarkers = []string{
-	servedMarker,
-	servedLogin,
-	"proj-123", "env prod", "path /backend", "https://app.infisical.com", "logged out or expired", "5 days",
-	"infisical project proj-miss (env prod, path /backend, https://app.infisical.com)", missMarker,
+	"using stored values that may be stale for infisical project proj-123 (env prod, path /backend, https://app.infisical.com): " +
+		"the provider is logged out or expired; the oldest value is 5 days old. " + servedLogin + ".",
+	"infisical project proj-miss (env staging, path /other, https://eu.infisical.com) could not be used and " + missMarker,
 	"/state/secret-cache is inside a git work tree",
 	"/state/secret-cache could not be read or written",
 	"Ask the operator to run `infisical login`",

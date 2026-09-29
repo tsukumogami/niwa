@@ -35,7 +35,7 @@ const (
 	textPrefix = "warning: "
 
 	// contextLead opens the agent-context rendering.
-	contextLead = "While provisioning, niwa's store of last-resolved secret values reported the following:"
+	contextLead = "While provisioning, niwa's store of last-resolved secret values reported the following. Any command these messages name is for the operator to run, not for you:"
 
 	// contextLogin follows every provider notice in the agent-context
 	// rendering. An interactive login from the agent's shell would prompt
