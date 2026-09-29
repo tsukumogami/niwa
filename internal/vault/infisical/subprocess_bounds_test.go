@@ -264,6 +264,32 @@ func TestRunInfisicalExport_CallerCancellationIsNotATimeout(t *testing.T) {
 	}
 }
 
+// A caller that cancels while a forked child keeps the pipes open past
+// WaitDelay gets neither a timeout nor "client not installed": the
+// client started and exited, so its exit code decides.
+func TestRunInfisicalExport_CallerCancelWithLeftoverChild(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	t.Setenv("STUB_CHILD_PID_FILE", pidFile)
+	putStubOnPath(t, writeInfisicalStub(t, `echo '{"API_KEY":"value"}'
+sleep 600 &
+echo $! > "$STUB_CHILD_PID_FILE"
+exit 0`))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel)
+	values, _, err := runInfisicalExport(ctx, nil, "proj", "dev", "/", "")
+	if errors.Is(err, vault.ErrClientNotInstalled) {
+		t.Fatalf("started client reported as not installed: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "timed out") {
+		t.Errorf("caller cancellation reported as a timeout: %v", err)
+	}
+	if err == nil && values["API_KEY"] != "value" {
+		t.Errorf("values = %v, want the stub's output", values)
+	}
+	assertProcessGone(t, readPID(t, pidFile))
+}
+
 // A fake commander that simulates a hang by blocking on its context
 // is cut off by the export's own deadline.
 func TestRunInfisicalExport_HangingFakeTimesOut(t *testing.T) {

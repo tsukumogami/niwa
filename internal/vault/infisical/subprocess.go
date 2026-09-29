@@ -206,7 +206,10 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 		// generic failure, and a start failure can't time out.
 		return nil, vault.VersionToken{}, exportTimedOutError(bound)
 	}
-	if err != nil {
+	// ErrWaitDelay means the process started and exited; it only
+	// lands here when the caller's context was done, and the exit
+	// code is the result to go on.
+	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		// Process failed to start: the binary is missing, or is
 		// present but not executable. Either way the client is not
 		// usable on this host, which is a different remedy from an
