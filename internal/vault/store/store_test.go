@@ -414,6 +414,24 @@ func TestUpdateEvicts(t *testing.T) {
 			t.Fatal("data file was rewritten by an update that changed nothing")
 		}
 	})
+	t.Run("a put differing only in metadata rewrites the entry", func(t *testing.T) {
+		later := now.Add(time.Hour)
+		for field, e := range map[string]Entry{
+			"resolved_at":   {Value: []byte("a"), ResolvedAt: later, VersionToken: "1", Provenance: "prov-1"},
+			"version_token": {Value: []byte("a"), ResolvedAt: now, VersionToken: "9", Provenance: "prov-1"},
+			"provenance":    {Value: []byte("a"), ResolvedAt: now, VersionToken: "1", Provenance: "other"},
+		} {
+			t.Run(field, func(t *testing.T) {
+				dir := isolate(t)
+				id := testIdentity()
+				mustUpdate(t, dir, id, seed, nil, false)
+				mustUpdate(t, dir, id, map[string]Entry{"A": e}, nil, false)
+				if got := mustLoad(t, dir, id)["A"]; !sameEntry(got, e) {
+					t.Fatalf("A = %+v, want %+v", got, e)
+				}
+			})
+		}
+	})
 	t.Run("evicting from an absent identity writes nothing", func(t *testing.T) {
 		dir := isolate(t)
 		mustUpdate(t, dir, testIdentity(), nil, []string{"A"}, true)
