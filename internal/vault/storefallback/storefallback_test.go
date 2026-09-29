@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -579,6 +580,20 @@ func TestNoticeIdentityCopiesEveryField(t *testing.T) {
 		if got.FieldByName(name).String() != "value-of-"+name {
 			t.Errorf("noticeIdentity dropped %s", name)
 		}
+	}
+}
+
+// R20: the reasons this package maps from vault.ReasonLoggedOut and then
+// vault.ReasonTimedOut, recorded for one identity in that order, render as
+// "is logged out or expired": the first reason wins.
+func TestMappedFirstReasonWinsInTheRendering(t *testing.T) {
+	c := fallbacknotice.New(nil)
+	id := fallbacknotice.Identity{Kind: "infisical", APIDomain: "https://app.infisical.com", ProjectID: "p", Environment: "dev", FolderPath: "/"}
+	now := time.Now()
+	c.Served(id, noticeReason(vault.FailureClass{Class: vault.ClassUnauthenticated, Reason: vault.ReasonLoggedOut}), now)
+	c.Served(id, noticeReason(vault.FailureClass{Class: vault.ClassUnreachable, Reason: vault.ReasonTimedOut}), now)
+	if got := c.RenderText(); !strings.Contains(got, "the provider is logged out or expired;") {
+		t.Errorf("rendered reason is not the first one:\n%s", got)
 	}
 }
 

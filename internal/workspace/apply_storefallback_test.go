@@ -608,3 +608,19 @@ func TestStoreFallbackCredentialSyncIsNotWrapped(t *testing.T) {
 		}
 	})
 }
+
+// R19/R20: a value stored 30 days before the run is served (stored values
+// have no age ceiling), and the warning's age reads "30 days".
+func TestStoreFallbackServesAThirtyDayOldValue(t *testing.T) {
+	e := newFBEnv(t, false)
+	e.seed("proj", map[string]store.Entry{"OLD_KEY": {
+		Value: []byte("stored-old-value-1"), ResolvedAt: time.Now().Add(-30 * 24 * time.Hour), VersionToken: "v-old",
+	}})
+	e.setTeam(fakeProvider("vault.provider", "proj", nil, `fail_class = "unauthenticated"`) + secretsTable("env.secrets", "", "OLD_KEY"))
+	run := e.mustApply(false)
+	assertEnvHas(t, e.envFile(), "OLD_KEY=stored-old-value-1")
+	text := run.notices.RenderText()
+	if !strings.Contains(text, "may be stale") || !strings.Contains(text, "the oldest value is 30 days old") {
+		t.Errorf("served warning does not read 30 days:\n%s", text)
+	}
+}

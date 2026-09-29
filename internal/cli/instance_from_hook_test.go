@@ -304,7 +304,7 @@ func TestSessionStart_PassingWorker_Provisions(t *testing.T) {
 // tolerated; the path + cd instruction still inject.
 func TestBuildSessionStartInjection_NoClaudeMD(t *testing.T) {
 	dir := t.TempDir() // no CLAUDE.md
-	out, err := buildSessionStartInjection(dir, nil)
+	out, err := buildSessionStartInjection(dir, nil, nil)
 	if err != nil {
 		t.Fatalf("buildSessionStartInjection: %v", err)
 	}

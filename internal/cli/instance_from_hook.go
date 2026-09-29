@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/fallbacknotice"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/workspace"
@@ -99,6 +100,12 @@ type provisionResult struct {
 	// non-zero emits no structured output at all, so a report written anywhere
 	// else on a partial provision reaches nobody.
 	Keys []keyreport.Entry
+
+	// Notices is what the run's store fallback served, missed or could not
+	// write. It travels the same way Keys does, on success and on a Create
+	// failure, and for the same reason. Nil when the run never reached
+	// provisioning; a nil collector renders nothing.
+	Notices *fallbacknotice.Collector
 }
 
 // provisionInstanceFunc provisions an ephemeral instance for the given session
@@ -194,16 +201,21 @@ func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsD
 		// the report as context, exit 0. No mapping is written, because there
 		// is no instance to map to. Every other provisioning failure is still
 		// a failure and still exits non-zero.
-		out, buildErr := buildStrictFailureInjection(res.Keys)
+		out, buildErr := buildStrictFailureInjection(res.Keys, res.Notices)
 		if buildErr != nil {
+			renderNotices(cmd.ErrOrStderr(), res.Notices)
 			return fmt.Errorf("niwa: error: assembling session context: %w", buildErr)
 		}
 		if _, wErr := cmd.OutOrStdout().Write(out); wErr != nil {
+			renderNotices(cmd.ErrOrStderr(), res.Notices)
 			return fmt.Errorf("niwa: error: writing session context: %w", wErr)
 		}
 		return nil
 	}
+	// From here on, a failure return writes no payload, so the fallback
+	// notices go to stderr instead: it is the only channel left.
 	if err != nil {
+		renderNotices(cmd.ErrOrStderr(), res.Notices)
 		return fmt.Errorf("niwa: error: provisioning instance for session %s: %w", payload.SessionID, err)
 	}
 
@@ -215,14 +227,17 @@ func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsD
 		Ephemeral:      true,
 	}
 	if err := workspace.WriteSessionMapping(workspaceRoot, mapping); err != nil {
+		renderNotices(cmd.ErrOrStderr(), res.Notices)
 		return fmt.Errorf("niwa: error: writing session mapping for %s: %w", payload.SessionID, err)
 	}
 
-	out, err := buildSessionStartInjection(res.Path, res.Keys)
+	out, err := buildSessionStartInjection(res.Path, res.Keys, res.Notices)
 	if err != nil {
+		renderNotices(cmd.ErrOrStderr(), res.Notices)
 		return fmt.Errorf("niwa: error: assembling session context: %w", err)
 	}
 	if _, err := cmd.OutOrStdout().Write(out); err != nil {
+		renderNotices(cmd.ErrOrStderr(), res.Notices)
 		return fmt.Errorf("niwa: error: writing session context: %w", err)
 	}
 	return nil
@@ -336,8 +351,10 @@ type sessionStartInjection struct {
 // state of the instance the agent is about to work in, and below the cd
 // instruction because that instruction is what makes the instance reachable at
 // all. It is placed here rather than emitted as a warning because this JSON is
-// the only channel from this process that reaches the session.
-func buildSessionStartInjection(instancePath string, keys []keyreport.Entry) ([]byte, error) {
+// the only channel from this process that reaches the session. The fallback
+// notices follow the key report for the same reason; on this path they go
+// only here, not also to stderr, so each is delivered once.
+func buildSessionStartInjection(instancePath string, keys []keyreport.Entry, notices *fallbacknotice.Collector) ([]byte, error) {
 	claudeMD := ""
 	if data, err := os.ReadFile(filepath.Join(instancePath, "CLAUDE.md")); err == nil {
 		claudeMD = string(data)
@@ -351,6 +368,10 @@ func buildSessionStartInjection(instancePath string, keys []keyreport.Entry) ([]
 	b = append(b, "\n\n"...)
 	if report := keyreport.RenderContext(keys); report != "" {
 		b = append(b, report...)
+		b = append(b, '\n')
+	}
+	if text := notices.RenderContext(); text != "" {
+		b = append(b, text...)
 		b = append(b, '\n')
 	}
 	if claudeMD != "" {
@@ -377,7 +398,11 @@ func buildSessionStartInjection(instancePath string, keys []keyreport.Entry) ([]
 // It is a separate builder rather than a flag on buildSessionStartInjection
 // because almost nothing is shared. That function's payload is a cd
 // instruction and the instance's CLAUDE.md, and both would be wrong here.
-func buildStrictFailureInjection(keys []keyreport.Entry) ([]byte, error) {
+//
+// The fallback notices follow the report: a refusal can follow a run that
+// served some keys from the store and had nothing stored for others, and the
+// agent needs both to explain it.
+func buildStrictFailureInjection(keys []keyreport.Entry, notices *fallbacknotice.Collector) ([]byte, error) {
 	const lead = "No niwa instance was provisioned for this session. The workspace runs with strict " +
 		"secret resolution, which refuses to create an instance missing any environment key it declares. " +
 		"You are working at the launch directory with no instance: report this and stop, rather than " +
@@ -389,6 +414,10 @@ func buildStrictFailureInjection(keys []keyreport.Entry) ([]byte, error) {
 	} else {
 		b = append(b, lead...)
 		b = append(b, '\n')
+	}
+	if text := notices.RenderContext(); text != "" {
+		b = append(b, '\n')
+		b = append(b, text...)
 	}
 
 	var inj sessionStartInjection
@@ -443,10 +472,12 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 	applier.Reporter = workspace.NewReporter(os.Stderr)
 	configureDeveloperHome(applier)
 	// Collected rather than rendered: this path has no terminal. The caller
-	// decides where the report goes — into the hook's injected context, or onto
-	// dispatch's stderr.
+	// decides where the report and the fallback notices go — into the hook's
+	// injected context, or onto dispatch's or watch's stderr.
 	keys := keyreport.New()
 	applier.Keys = keys
+	notices := fallbacknotice.New(nil)
+	applier.Notices = notices
 
 	// Reconcile before the config drives materialization (issue #227). Every
 	// dispatched session's instance comes up through here, once, with no apply
@@ -503,10 +534,10 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 		// The keys collected before the failure travel with it. A strict
 		// refusal is the one failure whose explanation is the report, and the
 		// hook caller cannot read it off disk: Create removed the instance.
-		return provisionResult{Keys: keys.Report()}, err
+		return provisionResult{Keys: keys.Report(), Notices: notices}, err
 	}
 
-	return provisionResult{Name: instanceName, Path: instancePath, Keys: keys.Report()}, nil
+	return provisionResult{Name: instanceName, Path: instancePath, Keys: keys.Report(), Notices: notices}, nil
 }
 
 // realDestroyInstance is the production teardown: it force-destroys the
