@@ -128,9 +128,8 @@ session-start hook invocation, or the provisioning of one instance within a `niw
 reconcile cycle. A provider's **API URL** is resolved with the precedence niwa already uses for
 its own Infisical API calls: the provider's configured `api_url`, else the
 `NIWA_INFISICAL_API_URL` environment variable, else the Infisical cloud default. The **API
-domain** is the scheme and host of a URL, lower-cased, with no path or trailing slash; the same
-normalisation applies to a provider's API URL and to the `domain` field of a probe session
-before they are compared. A provider's **kind** is its configured backend (`infisical`). Its
+domain** is the scheme and host of a URL, lower-cased, with no path or trailing slash. It is
+used only in the store identity and in messages; classification never compares domains. A provider's **kind** is its configured backend (`infisical`). Its
 **effective folder path** is the folder the export reads: the reference's own folder when it
 names one, else the provider's configured folder, else `/`, normalised to a leading `/` with no
 trailing `/`. A **provider identity** is the tuple of kind, API domain, project ID, environment,
@@ -158,8 +157,10 @@ A **server response** is an export whose standard output or standard error conta
   reads the fields of the reported sessions, not the probe's exit code (the probe exits 0 when it
   cannot reach the service). The **deciding session** is chosen this way: when `INFISICAL_TOKEN`
   is set in niwa's environment, the first session whose `tokenSource` names that variable (and
-  no session decides if none does); when it is not set, the first session whose `domain`
-  matches the provider's API domain. The probe is **conclusive** when a deciding session exists
+  no session decides if none does); when it is not set, the first session listed. The probe
+  runs with the export's environment and reports the principal the CLI itself will use, so the
+  deciding session is the one the failed export ran as, whatever domain niwa derives for the
+  store identity. The probe is **conclusive** when a deciding session exists
   and has `status` `authenticated` with `verification.state` `verified`. Then, in order, the
   first matching rule decides:
   1. The export was a server response with any status other than 401 or 403 (404, 5xx, and so
@@ -347,11 +348,12 @@ changes, and the criteria compare against those fixtures.
       `rejected`, each falls back with reason "logged out or expired". (R2)
 - [ ] A probe exiting 0 with `verification.state` `unknown` falls back with reason
       "unreachable". A probe whose stderr contains "token is malformed" falls back with reason
-      "logged out or expired". A probe whose only session has a `domain` other than the
-      provider's falls back with reason "logged out or expired". A probe listing two matching
+      "logged out or expired". A probe whose only session is `authenticated` and `verified` on a
+      `domain` other than the provider's API domain, with an export failing "Response Code: 403",
+      produces today's tolerated mark and serves nothing. A probe listing two
       sessions, first `expired` then one with `status` `authenticated` and `verification.state`
       `verified`, is classified *unauthenticated*; with the order reversed, the same export (no
-      server response) is classified *unreachable*. A matching session with `status` `pending`
+      server response) is classified *unreachable*. A deciding session with `status` `pending`
       falls back with reason "unreachable". (R2)
 - [ ] With `INFISICAL_TOKEN` set and the probe listing a stored-login session (`authenticated`,
       `verified`) first and the environment-token session (`rejected`) second, the run falls back
@@ -445,9 +447,8 @@ changes, and the criteria compare against those fixtures.
 - [ ] A credential-sync lookup that succeeds writes nothing to the store, and one that fails as
       *unauthenticated* reads nothing from it. (R10)
 - [ ] Folder paths `/a/b`, `a/b` and `/a/b/` map to the same store file. API domains
-      `https://App.Infisical.com/api` and `https://app.infisical.com` map to the same store file, and a
-      probe session whose `domain` differs from the provider's only in case or path matches it.
-      (R2, R12)
+      `https://App.Infisical.com/api` and `https://app.infisical.com` map to the same store file.
+      (R12)
 - [ ] With `XDG_STATE_HOME` unset, set to the empty string, and set to a relative path, the store
       is under
       `$HOME/.local/state/niwa/secret-cache/`. With the working directory, `XDG_CONFIG_HOME` and the
@@ -553,6 +554,9 @@ changes, and the criteria compare against those fixtures.
 - **An outage still stops machine-identity providers.** niwa's own universal-auth login runs
   before any export, and when the service is unreachable it fails as it does today (R8). The
   fallback covers an outage only for providers that use the CLI session or an ambient token.
+- **"First listed" as the CLI's principal is measured on one session only.** On this host the
+  probe listed exactly one session, the CLI's default profile. That the probe lists the effective
+  principal first when several profiles exist is inferred from the CLI's behaviour, not measured.
 - **The store is empty until a run succeeds on the new version.** A host upgraded and then left
   unattended before any successful provisioning has nothing to fall back on. R25 puts the
   priming step in the release notes; nothing enforces it.
@@ -608,6 +612,13 @@ changes, and the criteria compare against those fixtures.
   export failure exits 1, and a 403 is ambiguous between a broken session and a real denial.
   The probe exits 0 when offline, so only its fields separate "logged out" from "offline".
   Text markers stay as a secondary signal.
+- **The deciding session is the CLI's own principal, not a domain match.** An earlier draft
+  picked the probe session whose domain matched the domain niwa derives for the provider. The
+  export, though, runs as whatever principal the CLI is configured for, and the probe reports
+  exactly that principal. On a host whose CLI is logged in to a domain niwa doesn't derive (a
+  self-hosted instance with no `api_url` declared), domain matching found no session, rule 5
+  classified every 403 as a lapse, and a revoked grant was served on every run. Taking the
+  first listed session removes the comparison, and with it that failure.
 - **Only a 401 or 403 server response can become a fallback, and only when the probe doesn't
   vouch for the session.** When the service answered with anything else, the safe reading is
   that it meant what it said: a 404 or a 5xx is never served from the store, whatever the probe
