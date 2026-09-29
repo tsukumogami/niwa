@@ -56,6 +56,14 @@ win, the worker ends up with the same list. The daemon keeps the settings
 document with the worker's launch flags, so the attributes come back when the
 daemon resumes the worker.
 
+The tests hold this without depending on which order Claude Code picks. The
+`internal/otelprecedence` package works out the worker's value from a recorded
+launch and the user settings file three ways: settings first, launch
+environment first, and no launch environment. The dispatch tests and the
+scenarios in `test/functional/features/dispatch-lineage.feature` require every
+niwa attribute and every seeded user entry under all three, and a launch that
+drops either copy fails at least one of them.
+
 ## Your own resource attributes are kept
 
 If your Claude Code user settings (`settings.json` under `CLAUDE_CONFIG_DIR`,

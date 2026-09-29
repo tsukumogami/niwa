@@ -1,0 +1,18 @@
+{
+  "sessions": [
+    {
+      "launched_by_niwa": true,
+      "session_record": {
+        "dispatch_id": "<dispatch-id>",
+        "parent_session_id": "caller-session"
+      },
+      "resource_attributes": {
+        "niwa.brief.id": "sha256:176712590dbfcda6b7082ab2be8bff292f7e3015082ba05a229172f9971b93c2",
+        "niwa.dispatch.id": "<dispatch-id>",
+        "niwa.dispatch.slug": "fixture",
+        "niwa.parent.session.id": "caller-session",
+        "niwa.workspace": "test-ws"
+      }
+    }
+  ]
+}

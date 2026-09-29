@@ -1,0 +1,22 @@
+{
+  "sessions": [
+    {
+      "launched_by_niwa": true,
+      "session_record": {
+        "dispatch_id": "<dispatch-id>",
+        "parent_session_id": "caller-session"
+      },
+      "resource_attributes": {
+        "niwa.brief.id": "sha256:703092a7bcdc339d1eca73db990906d0d7eb6ad825cd65abb590ce86e5d5be6e",
+        "niwa.dispatch.id": "<dispatch-id>",
+        "niwa.dispatch.slug": "fixture",
+        "niwa.parent.session.id": "caller-session",
+        "niwa.workspace": "test-ws"
+      }
+    },
+    {
+      "launched_by_niwa": false,
+      "resource_attributes": {}
+    }
+  ]
+}
