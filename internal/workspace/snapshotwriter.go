@@ -403,6 +403,14 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 			redirectNotice.OldOwner, redirectNotice.OldRepo, redirectNotice.NewOwner, redirectNotice.NewRepo)
 	}
 
+	// Record what upstream supplied before anything local is written into
+	// staging, so the next swap can tell upstream's paths from everyone
+	// else's. See carryUnclaimedPaths.
+	if err := writeSnapshotManifest(staging); err != nil {
+		_ = safeRemoveAll(staging)
+		return rank, fmt.Errorf("EnsureConfigSnapshot: %w", err)
+	}
+
 	prov := Provenance{
 		SourceURL:      sourceURL,
 		Host:           src.Host,
@@ -464,6 +472,21 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 	if err := preserveSessionMappings(configDir, staging); err != nil {
 		_ = safeRemoveAll(staging)
 		return rank, fmt.Errorf("EnsureConfigSnapshot: preserve session mappings: %w", err)
+	}
+
+	// Carry everything else upstream did not supply. The three steps above
+	// name the state niwa itself writes; this one covers what anyone else
+	// keeps under the config dir, such as notes and scripts a session at the
+	// workspace root keeps next to dispatch-briefs/. Without it the swap
+	// deletes them whenever the source has moved, at any apply scope.
+	carried, haveManifest, err := carryUnclaimedPaths(configDir, staging)
+	if err != nil {
+		_ = safeRemoveAll(staging)
+		return rank, fmt.Errorf("EnsureConfigSnapshot: keep local paths under %s: %w", configDir, err)
+	}
+	if !haveManifest && len(carried) > 0 && reporter != nil {
+		reporter.Warn("kept %d path(s) under %s that the config source does not provide: %s; delete any that upstream removed on purpose",
+			len(carried), configDir, strings.Join(carried, ", "))
 	}
 
 	if err := SwapSnapshotAtomic(configDir, staging); err != nil {

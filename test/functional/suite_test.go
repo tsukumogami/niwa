@@ -405,6 +405,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the config dir is a git working tree from config repo "([^"]*)"$`, theConfigDirIsAGitWorkingTree)
 	ctx.Step(`^a dispatch brief "([^"]*)" exists in the workspace root$`, aDispatchBriefExistsInWorkspaceRoot)
 	ctx.Step(`^the dispatch brief "([^"]*)" still exists in the workspace root$`, theDispatchBriefStillExistsInWorkspaceRoot)
+	ctx.Step(`^a local file "([^"]*)" with content "([^"]*)" exists under the workspace root$`, aLocalFileExistsUnderWorkspaceRoot)
 	ctx.Step(`^the file "([^"]*)" under the workspace root contains "([^"]*)"$`, theMaterializedFileAtWorkspaceRootContains)
 	ctx.Step(`^the JSON file "([^"]*)" under the workspace root has no key "([^"]*)"$`, theJSONFileAtWorkspaceRootHasNoKey)
 	ctx.Step(`^the JSON file "([^"]*)" under the workspace root has key "([^"]*)" equal to "([^"]*)"$`, theJSONFileAtWorkspaceRootHasKeyEqualTo)
