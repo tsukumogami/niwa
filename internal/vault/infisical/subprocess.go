@@ -235,6 +235,11 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 			timedOut: true,
 			minted:   minted,
 		})
+		if ctx.Err() != nil {
+			// The caller ended the call during the probe, so its answer
+			// can't be trusted: don't classify or remember it.
+			return nil, vault.VersionToken{}, exportTimedOutError(bound)
+		}
 		return nil, vault.VersionToken{}, vault.Classify(exportTimedOutError(bound), class)
 	}
 	// ErrWaitDelay means the process started and exited; it only
@@ -285,6 +290,10 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 			stderr: scrubbed,
 			minted: minted,
 		})
+		if ctx.Err() != nil {
+			// Ended by the caller during the probe: same as above.
+			return nil, vault.VersionToken{}, exportErr
+		}
 		return nil, vault.VersionToken{}, vault.Classify(exportErr, class)
 	}
 

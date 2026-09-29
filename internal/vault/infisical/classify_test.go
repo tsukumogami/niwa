@@ -147,6 +147,10 @@ func TestClassifyExportFailure(t *testing.T) {
 		{name: "403 with a timed-out probe", stderr: stderrResponse403, probeHang: true, want: withStatus(loggedOut, 403), wantProbes: 1, text: toleratedAuthFailureText(stderrResponse403)},
 		{name: "403 with an expired session", stderr: stderrResponse403, probe: probeExpired, want: withStatus(loggedOut, 403), wantProbes: 1, text: toleratedAuthFailureText(stderrResponse403)},
 		{name: "403 with no sessions", stderr: stderrResponse403, probe: probeNoSessions, want: withStatus(loggedOut, 403), wantProbes: 1, text: toleratedAuthFailureText(stderrResponse403)},
+		// A probe answer without a sessions list is no answer.
+		{name: "403 with a null probe", stderr: stderrResponse403, probe: "null", want: withStatus(loggedOut, 403), wantProbes: 1, text: toleratedAuthFailureText(stderrResponse403)},
+		{name: "connection refused, probe {}", stderr: stderrConnRefused, probe: "{}", want: unreachable, wantProbes: 1, fixture: "connection-refused"},
+		{name: "logged out, probe {}", stderr: stderrNoValidSession, probe: "{}", want: loggedOut, wantProbes: 1, fixture: "logged-out-no-valid-session"},
 		// R2: no server response.
 		{name: "connection refused, verified", stderr: stderrConnRefused, probe: probeVerified, want: unreachable, wantProbes: 1, fixture: "connection-refused"},
 		{name: "logged out, no sessions", stderr: stderrNoValidSession, probe: probeNoSessions, want: loggedOut, wantProbes: 1, fixture: "logged-out-no-valid-session"},
@@ -555,19 +559,47 @@ func TestCallerCancellationIsNotClassified(t *testing.T) {
 }
 
 // cancellingCommander cancels the caller's context during the export,
-// which then comes back killed.
+// which then comes back killed; with duringProbe, the export fails
+// normally and the cancel lands during the probe instead.
 type cancellingCommander struct {
-	cancel context.CancelFunc
-	probes int
+	cancel      context.CancelFunc
+	duringProbe bool
+	probes      int
 }
 
 func (c *cancellingCommander) Run(_ context.Context, _ string, args []string) ([]byte, []byte, int, error) {
 	if args[0] == "login" {
 		c.probes++
+		if c.duringProbe {
+			c.cancel()
+		}
 		return []byte(probeNoSessions), nil, 0, nil
+	}
+	if c.duringProbe {
+		return nil, []byte(stderrNoValidSession), 1, nil
 	}
 	c.cancel()
 	return nil, nil, -1, nil
+}
+
+// A cancel that lands while the probe runs leaves the export's own error
+// unclassified too, with its text unchanged and nothing recorded.
+func TestCallerCancellationDuringProbeIsNotClassified(t *testing.T) {
+	t.Setenv(tokenEnvVar, "")
+	ctx, cancel := context.WithCancel(vault.WithRunState(context.Background()))
+	c := &cancellingCommander{cancel: cancel, duringProbe: true}
+	p := openScript(t, c, nil)
+	_, _, err := p.Resolve(ctx, vault.Ref{Key: "K"})
+	var fc *vault.FailureClass
+	if err == nil || errors.As(err, &fc) {
+		t.Fatalf("err = %v, want the export's unclassified error", err)
+	}
+	if want := "infisical: export exited 1: " + strings.TrimSpace(stderrNoValidSession); err.Error() != want {
+		t.Errorf("text = %q, want %q", err.Error(), want)
+	}
+	if _, ok := vault.RunStateFrom(ctx).Check(p.apiDomain, false); ok {
+		t.Error("a cancelled classification recorded a run-state verdict")
+	}
 }
 
 // Without a run state (status checks, onboarding) nothing is skipped.

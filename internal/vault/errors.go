@@ -144,7 +144,7 @@ func (e *ClassifiedError) Unwrap() []error { return []error{e.Err, &e.Class} }
 // credential sync and the key report, keep doing so), but its text must
 // stay what the backend said: when err doesn't already carry the
 // sentinel, Classify adds it without touching the text. An answered
-// failure keeps exactly the sentinels err has.
+// failure keeps exactly the sentinels err has. err must not be nil.
 func Classify(err error, class FailureClass) error {
 	if class.Class != ClassAnswered && !errors.Is(err, ErrProviderUnreachable) {
 		err = &unreachableError{err: err}

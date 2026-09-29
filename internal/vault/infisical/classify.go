@@ -100,10 +100,15 @@ func runProbe(ctx context.Context, c commander) probeResult {
 		return r
 	}
 	r.malformedToken = strings.Contains(strings.ToLower(vault.ScrubStderr(ctx, stderr)), malformedTokenMarker)
-	var out loginStatusOutput
-	if json.Unmarshal(stdout, &out) == nil {
+	// Only a JSON object with a sessions list is an answer. Anything
+	// else (null, {}, a bare value) says nothing about the session, and
+	// treating it as "no session" would call a real refusal a lapse.
+	var out struct {
+		Sessions *[]loginStatusSession `json:"sessions"`
+	}
+	if json.Unmarshal(stdout, &out) == nil && out.Sessions != nil {
 		r.parsed = true
-		r.sessions = out.Sessions
+		r.sessions = *out.Sessions
 	}
 	return r
 }
