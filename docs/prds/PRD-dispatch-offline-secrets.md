@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: In Progress
 problem: |
   niwa resolves vault secrets at provisioning time by running the Infisical CLI under the
   operator's login. When that login is missing or expired, the CLI's message matches none of
@@ -21,7 +21,7 @@ absorbed:
 
 ## Status
 
-Accepted
+In Progress
 
 Absorbed [BRIEF-dispatch-offline-secrets](docs/briefs/BRIEF-dispatch-offline-secrets.md); carried in Absorbed Brief.
 
