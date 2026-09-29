@@ -135,10 +135,11 @@ func (s *Session) lookup(id vault.Identity, key string) (store.Entry, bool) {
 		var err error
 		entries, err = store.Load(s.dir, id)
 		if err != nil {
-			// Load errs only when the directory, or this identity's
-			// data or lock file, fails the ownership checks. Any
-			// such failure makes the store untrusted for the whole
-			// run, as the design has it, not just for this identity.
+			// Load errs (always with store.ErrUnwritable) when the
+			// directory, or this identity's data or lock file, fails
+			// its checks or can't be opened. The design makes any
+			// such failure disable the store for the whole run, not
+			// just for this identity.
 			s.disableLocked()
 			return store.Entry{}, false
 		}
@@ -159,9 +160,11 @@ func (s *Session) disableLocked() {
 }
 
 // Flush writes the buffered changes: one store.Update per identity that
-// has any, and nothing for an identity that only served values. It
-// checks once, before the first write, that the store isn't inside a git
-// work tree. Failures become notices; none is returned, and none stops
+// has any, and nothing for an identity that only served values. Each
+// Update checks that the store isn't inside a git work tree before it
+// writes, and a store that is ends the flush, so the check that stops a
+// run's writes happens before its first one. Failures become notices;
+// none is returned, and none stops
 // provisioning. The buffer is cleared, so a second Flush writes nothing.
 func (s *Session) Flush() {
 	s.mu.Lock()
@@ -182,15 +185,6 @@ func (s *Session) Flush() {
 		s.disableLocked()
 		return
 	}
-	// store.Update refuses a work-tree store on its own, and that guard
-	// is the one that counts. Checking here first gives the run its one
-	// walk before the first write, so a work-tree store costs one walk
-	// rather than one per identity.
-	if store.InWorkTree(s.dir) {
-		s.notices.StoreInWorkTree(s.dir)
-		return
-	}
-
 	sort.Slice(ids, func(i, j int) bool { return lessIdentity(ids[i], ids[j]) })
 	for _, id := range ids {
 		c := changes[id]
@@ -204,8 +198,10 @@ func (s *Session) Flush() {
 		case err == nil:
 		case errors.Is(err, store.ErrLockTimeout):
 			// A held lock is about this identity alone; the others
-			// can still be written. A work-tree or unwritable store
-			// is about the whole directory, so those stop the flush.
+			// can still be written. A work-tree store stops every
+			// write, and an unwritable one disables the store for the
+			// run (even when only this identity's files failed), so
+			// those end the flush.
 			s.notices.LockTimeout(noticeIdentity(id))
 		case errors.Is(err, store.ErrInWorkTree):
 			s.notices.StoreInWorkTree(s.dir)
