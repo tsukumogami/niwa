@@ -67,9 +67,9 @@ type Declaration struct {
 // The Codex column states what niwa delivers today and nothing more. Directory
 // trust is the first row it delivers: the entry that makes every later
 // trust-gated row possible arrives with the writer that produces it, in the
-// same change. Fifteen Codex rows are implemented and ten are unavailable, and
-// all ten are inherent to the agent -- no Codex row carries the not-built kind
-// any more, which is to say niwa owes this column nothing a route exists for.
+// same change. Fifteen Codex rows are implemented and eleven are unavailable:
+// ten inherent to the agent, and one, row 26, carrying the not-built kind --
+// the one row where niwa owes this column something a route exists for.
 // Every implemented row flipped in the change that delivered it, never before:
 // writing a future state down early would make the table a plan rather than a
 // record, which is the failure this contract exists to prevent.

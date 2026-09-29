@@ -109,13 +109,12 @@ func TestLookupAnswersEachDeclaredPair(t *testing.T) {
 // rows that stay unavailable once every Codex delivery has landed, each with
 // the reason kind the PRD's matrix gives it.
 //
-// Every one of them is now inherent to the agent -- five its own mechanics put
-// out of reach, five naming surface that exists only in the other harness. The
-// not-built kind, the one category a developer could act on, is empty for this
-// column: niwa owes Codex nothing that a route exists for. That is a fact about
-// today rather than a rule, which is why the kind survives in the checks below
-// and in the guide's renderer; a capability added tomorrow with a route and no
-// delivery lands there again.
+// Every one of them is inherent to the agent -- five its own mechanics put out
+// of reach, five naming surface that exists only in the other harness. The
+// not-built kind, the one category a developer could act on, stays out of this
+// map: a row of that kind is pending, not final. Row 26, dispatch resource
+// attributes, is such a row today, which is why the kind survives in the checks
+// below and in the guide's renderer.
 //
 // Writing the rows out here is what makes an accidental flip fail with a name
 // in the message. A row missing from this map is one whose delivery is still

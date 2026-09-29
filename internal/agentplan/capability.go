@@ -37,7 +37,7 @@ package agentplan
 import "fmt"
 
 // Capability names one thing a workspace preparation can deliver to an agent
-// session. The set is closed: the constants below are the 25 rows of the
+// session. The set is closed: the constants below are the 26 rows of the
 // capability matrix in docs/prds/PRD-agent-capability-contract.md, in matrix
 // order, and adding a member is a product decision rather than an
 // implementation detail.
@@ -239,7 +239,7 @@ func (c Capability) Route() Route {
 	return 0
 }
 
-// row finds the catalog entry for c. The scan is linear over 25 entries, which
+// row finds the catalog entry for c. The scan is linear over 26 entries, which
 // costs less than the map plus init needed to avoid it.
 func (c Capability) row() (capabilityRow, bool) {
 	for _, row := range catalog {
