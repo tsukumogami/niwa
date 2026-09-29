@@ -117,23 +117,25 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 	if cmd.Process != nil && (ctx.Err() != nil || errors.Is(err, exec.ErrWaitDelay)) {
 		// Something may have forked after Cancel's kill, or outlived
 		// the child with the pipes open: sweep the group once more.
-		// Only when ctx is done (Cancel has already signalled the
-		// group, whether our deadline or the caller ended it) or the
-		// pipes had to be cut, because after a normal exit the group
-		// ID may already belong to an unrelated process. "No such
-		// process" is the expected answer and is ignored.
+		// Only when ctx is done (our deadline or the caller ended the
+		// call) or the pipes had to be cut, because after a normal
+		// exit the group ID may already belong to an unrelated
+		// process. "No such process" is the expected answer and is
+		// ignored.
 		_ = killProcessGroup(cmd.Process.Pid)
 	}
 	if err != nil {
 		if errors.Is(err, exec.ErrWaitDelay) {
 			return stdout.Bytes(), stderr.Bytes(), cmd.ProcessState.ExitCode(), err
 		}
-		// exec.ExitError holds the exit code. Any other error type
-		// (e.g., exec.ErrNotFound wrapped in *fs.PathError) means
-		// the process never started.
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return stdout.Bytes(), stderr.Bytes(), exitErr.ExitCode(), nil
+		// A ProcessState means the process started and was waited on,
+		// so its exit code is the answer (-1 if it was killed). That
+		// covers an *exec.ExitError, and also the ctx.Err() Wait
+		// returns when ctx ended just as the child exited 0. Without
+		// one (e.g., exec.ErrNotFound wrapped in *fs.PathError) the
+		// process never started.
+		if cmd.ProcessState != nil {
+			return stdout.Bytes(), stderr.Bytes(), cmd.ProcessState.ExitCode(), nil
 		}
 		return stdout.Bytes(), stderr.Bytes(), -1, err
 	}
