@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/agentplan"
+	"github.com/tsukumogami/niwa/internal/config"
 )
 
 // Lineage resource attributes: what niwa puts on a dispatched worker's
@@ -61,7 +62,7 @@ const lineageNamespace = "niwa."
 var lineageValuePattern = regexp.MustCompile(`^[A-Za-z0-9._:/@-]{1,128}$`)
 
 // parentSessionPattern is the shape niwa accepts for a calling session's id,
-// the same one it already accepts for Claude session ids elsewhere.
+// the same one it already accepts for an agent's session ids elsewhere.
 var parentSessionPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,128}$`)
 
 // requestedSkillPattern is `<plugin>:<name>`.
@@ -132,6 +133,20 @@ func newDispatchID(r io.Reader) (string, error) {
 // collapses every other character to '_'), so the mapping is one-to-one.
 func lineageSlug(slug string) string {
 	return strings.ReplaceAll(slug, "_", "-")
+}
+
+// lineageWorkspace is the workspace attribute's value: the name in the
+// workspace's own configuration, the same for every instance and every
+// machine -- not the instance's directory name, and not a local alias a
+// workspace was initialized under, which only names the instance directories.
+// A configuration that couldn't be read leaves the attribute out, and warn
+// says so.
+func lineageWorkspace(cfg *config.WorkspaceConfig, warn io.Writer) string {
+	if cfg == nil {
+		fmt.Fprintf(warn, "niwa dispatch: %s left out: the workspace configuration couldn't be read\n", attrWorkspace)
+		return ""
+	}
+	return cfg.Workspace.Name
 }
 
 // lineageParentSessionID is the calling session's id, read from the variable

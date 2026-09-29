@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/agentplan"
+	"github.com/tsukumogami/niwa/internal/config"
 )
 
 // TestLineageAttributeNamesArePinned pins the six names and their order. Other
@@ -386,5 +387,43 @@ func TestComposeRefusesAnInheritedValueTheParserWouldReject(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLineageWorkspace(t *testing.T) {
+	var warn bytes.Buffer
+	cfg := &config.WorkspaceConfig{Workspace: config.WorkspaceMeta{Name: "acme"}}
+	if got := lineageWorkspace(cfg, &warn); got != "acme" || warn.Len() != 0 {
+		t.Fatalf("configured name: %q, warning %q", got, warn.String())
+	}
+	if got := lineageWorkspace(nil, &warn); got != "" {
+		t.Fatalf("an unreadable configuration must leave the attribute out, got %q", got)
+	}
+	if !strings.Contains(warn.String(), "niwa.workspace") {
+		t.Fatalf("the notice must name the attribute, got %q", warn.String())
+	}
+}
+
+func TestReadBriefFileRejectsASiblingWithTheRootAsPrefix(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "ws")
+	sibling := filepath.Join(parent, "ws2")
+	for _, d := range []string{root, sibling} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	brief := filepath.Join(sibling, "b.md")
+	if err := os.WriteFile(brief, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readBriefFile(brief, root); err == nil {
+		t.Fatal("a directory whose name only starts with the root's must be refused")
+	}
+}
+
+func TestComposeRefusesAKeyOverTheLimit(t *testing.T) {
+	if _, err := composeResourceAttributes(strings.Repeat("k", 256)+"=v", "", nil); err == nil {
+		t.Fatal("a key over 255 characters must be refused")
 	}
 }
