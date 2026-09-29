@@ -201,6 +201,17 @@ func annotateFromSessionMappings(records []workspace.InstanceRecord, workspaceRo
 		if m, ok := newest[records[i].Path]; ok && dispatchSessionNameRe.MatchString(m.SessionName) {
 			records[i].SessionName = m.SessionName
 		}
+		// The dispatch identity and caller come from the same newest mapping,
+		// each checked against the shape niwa writes, for the same reason the
+		// name is: a mapping file is writable by any same-user process.
+		if m, ok := newest[records[i].Path]; ok {
+			if dispatchIDPattern.MatchString(m.DispatchID) {
+				records[i].DispatchID = m.DispatchID
+			}
+			if parentSessionPattern.MatchString(m.ParentSessionID) {
+				records[i].ParentSessionID = m.ParentSessionID
+			}
+		}
 	}
 	return resume
 }

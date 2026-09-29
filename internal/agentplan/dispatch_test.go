@@ -280,6 +280,7 @@ func launchDescriptionTypes() []reflect.Type {
 		reflect.TypeOf(LaunchSpec{}),
 		reflect.TypeOf(SessionRecords{}),
 		reflect.TypeOf(LaunchFlags{}),
+		reflect.TypeOf(Lineage{}),
 	}
 }
 

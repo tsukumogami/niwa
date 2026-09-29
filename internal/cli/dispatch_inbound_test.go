@@ -575,7 +575,7 @@ func TestDispatch_Inbound_LaunchFailurePrintsNoLine(t *testing.T) {
 			_, f, pass := setupInboundMode(t, mode)
 			dispatchLaunch = func(_ context.Context, req launchRequest) error {
 				f.launchCalled++
-				*pass = req.Passthrough
+				*pass = withoutLineageSettings(t, req.Passthrough)
 				return errors.New("launch refused")
 			}
 

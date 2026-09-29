@@ -102,7 +102,7 @@ Run `niwa dispatch` from the workspace root, pointing the worker at the brief:
 
 ```bash
 niwa dispatch "Read <abs-path-to-brief> for your complete task brief, then implement it. <one-line summary>" \
-  --name "<short topic>" --detach
+  --name "<short topic>" --brief <abs-path-to-brief> --detach
 ```
 
 - **`--detach`** is important here: without it the command attaches THIS terminal to the new
@@ -121,6 +121,12 @@ niwa dispatch "Read <abs-path-to-brief> for your complete task brief, then imple
   user named a specific model, since categories stay correct as concrete models change. Omit the
   flag to use the workspace default (the `[global] dispatch_model` host setting, if any). Example:
   `niwa dispatch "..." --name "<topic>" --model powerful --detach`.
+- **`--brief`** names the brief file you wrote in step 2. niwa records its content digest,
+  never its path, as the dispatch's brief identity on the worker's telemetry, so always pass
+  it. The file must be inside the workspace, which `.niwa/dispatch-briefs/` is.
+- **`--skill <plugin>:<name>`** (when it applies) names the skill the brief asks the worker to
+  run, such as `--skill shirabe:work-on`, and is recorded as the dispatch's requested skill.
+  Pass it only when the brief names one; leave it out otherwise rather than guessing.
 - Pass the brief's absolute path in the prompt and keep the inline summary short. The prompt
   rides a single argv element and is never passed through a shell, so quoting and
   metacharacters are not a hazard.

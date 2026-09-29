@@ -143,6 +143,29 @@ const (
 	LivenessRecordActivity
 )
 
+// Lineage describes, for one agent, the two inputs to a dispatched worker's
+// lineage resource attributes that live outside niwa: the developer's own user
+// settings file, whose env block may already set resource attributes niwa has
+// to carry forward, and the variable through which a calling session exposes
+// its id. It is a description rather than a reader: internal/cli reads.
+type Lineage struct {
+	// SettingsHomeEnv is the environment variable that relocates the agent's
+	// own configuration directory, empty when it has none.
+	SettingsHomeEnv string
+
+	// SettingsHomePath is that directory under the developer's home, as path
+	// components, used when SettingsHomeEnv is unset or empty.
+	SettingsHomePath []string
+
+	// SettingsFile is the user settings file's name within that directory,
+	// empty when the agent has no settings file niwa reads.
+	SettingsFile string
+
+	// ParentSessionEnv is the variable the agent sets, in the commands its
+	// sessions run, to the running session's id. Empty when there is none.
+	ParentSessionEnv string
+}
+
 // SessionRecords describes where an agent writes the record that says which
 // session a launched worker became, and how to read one. It is a description
 // rather than a reader: this package names the paths and the fields, and
@@ -313,6 +336,10 @@ type LaunchSpec struct {
 	// Records describes where the session identity is written.
 	Records SessionRecords
 
+	// Lineage says where the inputs to a dispatched worker's lineage resource
+	// attributes live for this agent. The zero value means none do.
+	Lineage Lineage
+
 	// ResumeArgs are the arguments that precede the handle when stepping back
 	// into a session interactively.
 	ResumeArgs []string
@@ -382,6 +409,12 @@ var launchSpecs = map[agent.Agent]LaunchSpec{
 			// The job entry is present while the session exists -- running or
 			// idle-but-resumable -- and gone once the developer deletes it.
 			Liveness: LivenessRecordPresence,
+		},
+		Lineage: Lineage{
+			SettingsHomeEnv:  "CLAUDE_CONFIG_DIR",
+			SettingsHomePath: []string{".claude"},
+			SettingsFile:     "settings.json",
+			ParentSessionEnv: "CLAUDE_CODE_SESSION_ID",
 		},
 		ResumeArgs: []string{"attach"},
 		// A backgrounded session is meant to be attached to while it works;

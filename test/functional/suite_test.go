@@ -517,6 +517,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// reclamation, driven offline against the localGitServer with a fake claude ---
 	registerDispatchSteps(ctx)
 	registerDispatchSpillSteps(ctx)
+	registerDispatchLineageSteps(ctx)
 	registerKeepAliveSteps(ctx)
 
 	// --- session-message acceptance: the --accept-session-messages flag, the

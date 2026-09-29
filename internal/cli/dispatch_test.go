@@ -160,6 +160,8 @@ func resetDispatchFlags(t *testing.T) {
 	prevDetach := dispatchDetach
 	prevKeepAlive := dispatchKeepAlive
 	prevAcceptSessionMessages := dispatchAcceptSessionMessages
+	prevBrief := dispatchBrief
+	prevSkill := dispatchSkill
 
 	dispatchLabel = ""
 	dispatchName = ""
@@ -170,6 +172,11 @@ func resetDispatchFlags(t *testing.T) {
 	dispatchDetach = false
 	dispatchKeepAlive = nil
 	dispatchAcceptSessionMessages = nil
+	dispatchBrief = ""
+	dispatchSkill = ""
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 
 	t.Cleanup(func() {
 		dispatchLabel = prevLabel
@@ -181,6 +188,8 @@ func resetDispatchFlags(t *testing.T) {
 		dispatchDetach = prevDetach
 		dispatchKeepAlive = prevKeepAlive
 		dispatchAcceptSessionMessages = prevAcceptSessionMessages
+		dispatchBrief = prevBrief
+		dispatchSkill = prevSkill
 	})
 }
 
@@ -632,7 +641,7 @@ func TestDispatch_PassthroughFlags_DiscreteArgv(t *testing.T) {
 
 	var gotPass []string
 	dispatchLaunch = func(_ context.Context, req launchRequest) error {
-		gotPass = req.Passthrough
+		gotPass = withoutLineageSettingsQuiet(req.Passthrough)
 		return nil
 	}
 
@@ -749,7 +758,7 @@ func TestDispatch_Name_SlugInInstanceAndSession(t *testing.T) {
 	var gotPass []string
 	dispatchLaunch = func(_ context.Context, req launchRequest) error {
 		f.launchCalled++
-		gotPass = req.Passthrough
+		gotPass = withoutLineageSettingsQuiet(req.Passthrough)
 		return nil
 	}
 	dispatchDetach = true
@@ -825,7 +834,7 @@ func TestDispatch_NoName_NoSlugNoNameFlag(t *testing.T) {
 	var gotPass []string
 	dispatchLaunch = func(_ context.Context, req launchRequest) error {
 		f.launchCalled++
-		gotPass = req.Passthrough
+		gotPass = withoutLineageSettingsQuiet(req.Passthrough)
 		return nil
 	}
 	dispatchDetach = true
@@ -867,7 +876,7 @@ func TestDispatch_NameSanitizesEmpty_FallsBack(t *testing.T) {
 	var gotPass []string
 	dispatchLaunch = func(_ context.Context, req launchRequest) error {
 		f.launchCalled++
-		gotPass = req.Passthrough
+		gotPass = withoutLineageSettingsQuiet(req.Passthrough)
 		return nil
 	}
 	dispatchDetach = true

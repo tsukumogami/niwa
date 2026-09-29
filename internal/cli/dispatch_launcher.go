@@ -44,12 +44,11 @@ type launchRequest struct {
 	// argv elements by the caller.
 	Passthrough []string
 
-	// Env is the worker's environment. No caller sets it today: every dispatch
-	// leaves it nil, so the worker inherits the full parent environment
-	// (os.Environ()). It is an extension point the launcher honors rather than
-	// a seam anything currently goes through -- a non-nil Env is used
-	// verbatim, so a caller that needs to hand the worker an allowlisted or
-	// credential-scrubbed environment has one place to put it.
+	// Env is the worker's environment. A nil Env means the worker inherits the
+	// full parent environment (os.Environ()); a non-nil Env is used verbatim.
+	// A Claude dispatch that carries lineage attributes sets it to the parent
+	// environment with OTEL_RESOURCE_ATTRIBUTES replaced by the composed value
+	// (see lineageWorkerEnv); every other dispatch leaves it nil.
 	Env []string
 
 	// Stdout and Stderr are where a foreground worker's output goes: the

@@ -25,6 +25,15 @@ import (
 // settings files, so anything a caller could influence here would let that
 // caller rewrite the worker's configuration.
 //
+// One value is the exception, and it is named here so it stays the only one:
+// the lineage contributor's "env" key, a resourceAttributesEnv that can
+// marshal to nothing but {"OTEL_RESOURCE_ATTRIBUTES": "<value>"}. Its value is
+// composed in dispatch_lineage.go from niwa's own entries, each checked
+// against an alphabet that has no ',' or '=', and from attributes the
+// developer's own settings and environment already set, each checked against
+// the attribute parser's own rule. It is one string under one fixed key, so
+// nothing in it can add a settings key.
+//
 // An empty or nil map returns ("", false), and the caller then appends no
 // settings flag at all. A value encoding/json can't encode panics, since only
 // a contributor breaking the constants rule can cause one.
