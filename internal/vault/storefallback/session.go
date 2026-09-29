@@ -111,11 +111,19 @@ func (s *Session) evictAll(id vault.Identity) {
 
 // lookup returns the stored entry for key under id. The identity's
 // entries are loaded on first use and cached for the run. A store that
-// can't be read counts as holding nothing.
+// can't be read counts as holding nothing. Once the store is disabled,
+// entries cached before that are not served either: an untrusted store
+// is untrusted for every identity, whichever was read first.
 func (s *Session) lookup(id vault.Identity, key string) (store.Entry, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.disabled {
+		return store.Entry{}, false
+	}
+	// An eviction buffered earlier in this run already says the stored
+	// value is gone or denied upstream; it must not be served before
+	// Flush writes the eviction.
+	if c, ok := s.changes[id]; ok && (c.evictAll || c.evictKeys[key]) {
 		return store.Entry{}, false
 	}
 	entries, ok := s.loaded[id]

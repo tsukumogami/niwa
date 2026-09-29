@@ -410,6 +410,34 @@ func TestLoadIsCachedPerIdentity(t *testing.T) {
 	}
 }
 
+// An eviction buffered earlier in the run stops the evicted keys being
+// served later in the same run.
+func TestBufferedEvictionIsNotServed(t *testing.T) {
+	dir := storeDir(t)
+	seed(t, dir, sessionID, map[string]store.Entry{"A": {Value: []byte("stored-a")}, "B": {Value: []byte("stored-b")}, "C": {Value: []byte("stored-c")}})
+	lapsed := classified(vault.ClassUnauthenticated, vault.ReasonLoggedOut, 0)
+	stub := &stubProvider{id: sessionID, results: map[string]result{
+		"A": {err: fmt.Errorf("x: %w", vault.ErrKeyNotFound)},
+		"B": {err: lapsed},
+		"C": {err: lapsed},
+	}}
+	s := NewSession(dir, nil, nil)
+	w := s.Wrap(stub)
+	_, _, _ = resolve(t, w, "A")
+	stub.results["A"] = result{err: lapsed}
+	if _, _, err := resolve(t, w, "A"); err != lapsed {
+		t.Fatalf("A was served after its eviction (err %v)", err)
+	}
+	if _, _, err := resolve(t, w, "B"); err != nil {
+		t.Fatalf("B: %v", err)
+	}
+
+	s.evictAll(sessionID)
+	if _, _, err := resolve(t, w, "C"); err != lapsed {
+		t.Fatalf("C was served after the identity was evicted (err %v)", err)
+	}
+}
+
 func TestFlushNothingToWriteMakesNoStore(t *testing.T) {
 	dir := storeDir(t)
 	notices := fallbacknotice.New(nil)

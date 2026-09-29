@@ -15,13 +15,15 @@ import (
 // A held lock skips that identity's update with a notice, and the flush
 // goes on to the next identity. flock belongs to the open file
 // description, so holding it here contends with Update exactly as
-// another process would. The wait takes the store's full 2 s bound.
+// another process would. The locked identity (proj-minted) sorts before
+// the other, so a flush that stopped at the timeout would leave the
+// other unwritten. The wait takes the store's full 2 s bound.
 func TestFlushLockTimeoutNotesAndContinues(t *testing.T) {
 	if testing.Short() {
 		t.Skip("waits out the store's lock bound")
 	}
 	dir := storeDir(t)
-	seed(t, dir, sessionID, map[string]store.Entry{"A": {Value: []byte("stored-a")}})
+	seed(t, dir, mintedID, map[string]store.Entry{"A": {Value: []byte("stored-a")}})
 	locks, _ := filepath.Glob(filepath.Join(dir, "*.lock"))
 	if len(locks) != 1 {
 		t.Fatalf("lock files = %v", locks)
@@ -37,17 +39,17 @@ func TestFlushLockTimeoutNotesAndContinues(t *testing.T) {
 
 	notices := fallbacknotice.New(nil)
 	s := NewSession(dir, notices, nil)
-	s.put(sessionID, "A", store.Entry{Value: []byte("a-2")})
-	s.put(mintedID, "B", store.Entry{Value: []byte("b-1")})
+	s.put(mintedID, "A", store.Entry{Value: []byte("a-2")})
+	s.put(sessionID, "B", store.Entry{Value: []byte("b-1")})
 	s.Flush()
 
-	if got := notices.LockTimeouts(); len(got) != 1 || got[0] != noticeIdentity(sessionID) {
+	if got := notices.LockTimeouts(); len(got) != 1 || got[0] != noticeIdentity(mintedID) {
 		t.Fatalf("lock timeouts = %+v", got)
 	}
-	if string(load(t, dir, sessionID)["A"].Value) != "stored-a" {
+	if string(load(t, dir, mintedID)["A"].Value) != "stored-a" {
 		t.Fatal("the locked identity was written")
 	}
-	if string(load(t, dir, mintedID)["B"].Value) != "b-1" {
+	if string(load(t, dir, sessionID)["B"].Value) != "b-1" {
 		t.Fatal("the flush stopped at the locked identity")
 	}
 	if _, unwritable := notices.UnwritableDir(); unwritable {

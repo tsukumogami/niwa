@@ -1,8 +1,9 @@
 Feature: vault failure handling baseline
   These scenarios pin what provisioning does today when the Infisical CLI
-  fails, and how many CLI calls a successful run makes. They were recorded
-  before the vault-offline work changed any of it, alongside the golden
-  fixtures in internal/vault/resolve/testdata/golden. The shared infisical
+  fails, and how many CLI calls a successful run makes. They were first
+  recorded before the vault-offline work changed any of it, alongside the
+  golden fixtures in internal/vault/resolve/testdata/golden, and each
+  scenario's comment says what has changed since. The shared infisical
   stub stands in for the real CLI: INFISICAL_STUB_EXPORT_FAIL selects a fixed
   export failure, and its invocation log counts the calls.
 
