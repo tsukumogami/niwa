@@ -26,11 +26,13 @@
 //	NIWA_LIVE_PROBE_PARENT=<trusted dir> go test -tags live -count=1 \
 //	  -run TestLineageAttributesReachBackgroundWorker -v ./test/live/
 //
-// Setting NIWA_LIVE_RESTART_DAEMON=1 adds a second arm that stops and restarts
-// the background daemon and checks again. The restart keeps workers running,
-// but every live background session on the machine is supervised by that one
-// daemon while it restarts, so the arm refuses to run while any other
-// background session is listed.
+// Setting NIWA_LIVE_RESTART_DAEMON=1 adds a second arm: it stops the background
+// daemon, which stops every background session on the machine, the probe
+// included, then resumes the probe without passing settings and checks again.
+// That shows whether the daemon keeps a worker's launch settings across a
+// restart. Because it interrupts every other background session, the arm
+// refuses while any other is listed; NIWA_LIVE_RESTART_DAEMON=force runs it
+// anyway, for a window the machine's owner has cleared.
 package live
 
 import (
@@ -94,15 +96,16 @@ func TestLineageAttributesReachBackgroundWorker(t *testing.T) {
 	probeDir := lineageProbeDir(t)
 	doc := lineageSettingsDocument(t, server.URL, composeProbeValue(userValue))
 
-	shortID := launchProbeWorker(t, claudeBin, probeDir, doc)
+	shortID, sessionID := launchProbeWorker(t, claudeBin, probeDir, doc)
 
 	checkArrivals(t, "first run", sink, userKeys)
 
-	if os.Getenv("NIWA_LIVE_RESTART_DAEMON") != "1" {
+	restart := os.Getenv("NIWA_LIVE_RESTART_DAEMON")
+	if restart != "1" && restart != "force" {
 		t.Log("daemon restart arm: not requested (set NIWA_LIVE_RESTART_DAEMON=1)")
 		return
 	}
-	if others := otherBackgroundSessions(t, claudeBin, shortID); others > 0 {
+	if others := otherBackgroundSessions(t, claudeBin, shortID); others > 0 && restart != "force" {
 		// A log rather than a skip, so a first arm that passed still reads as a
 		// pass: the refusal is the arm doing its job, not the test giving up.
 		t.Logf("daemon restart arm: refused, %d other background session(s) are running and a restart would disturb them", others)
@@ -110,7 +113,7 @@ func TestLineageAttributesReachBackgroundWorker(t *testing.T) {
 	}
 	restartDaemon(t, claudeBin)
 	sink.reset()
-	resumeProbeWorker(t, claudeBin, shortID)
+	resumeProbeWorker(t, claudeBin, probeDir, sessionID)
 	checkArrivals(t, "after daemon restart", sink, userKeys)
 }
 
@@ -305,8 +308,9 @@ func lineageProbeDir(t *testing.T) string {
 	return dir
 }
 
-// launchProbeWorker starts the background worker and returns its short handle.
-func launchProbeWorker(t *testing.T, claudeBin, dir, settings string) string {
+// launchProbeWorker starts the background worker and returns its short handle
+// and its full session id.
+func launchProbeWorker(t *testing.T, claudeBin, dir, settings string) (string, string) {
 	t.Helper()
 	cmd := exec.Command(claudeBin, "--bg", "--settings", settings, "--", lineageProbePrompt)
 	cmd.Dir = dir
@@ -325,19 +329,21 @@ func launchProbeWorker(t *testing.T, claudeBin, dir, settings string) string {
 		for _, rec := range claudeAgentRecords(t, claudeBin) {
 			cwd, _ := rec["cwd"].(string)
 			if cwd != "" && samePath(cwd, dir) {
-				if short, _ := rec["id"].(string); short != "" {
+				short, _ := rec["id"].(string)
+				session, _ := rec["sessionId"].(string)
+				if short != "" {
 					t.Cleanup(func() {
 						stopSession(t, claudeBin, short)
 						deleteSession(t, claudeBin, short)
 					})
-					return short
+					return short, session
 				}
 			}
 		}
 		time.Sleep(time.Second)
 	}
 	t.Fatalf("no background session appeared for the probe directory")
-	return ""
+	return "", ""
 }
 
 // checkArrivals waits for every lineage key and every user key, then reports
@@ -444,24 +450,29 @@ func otherBackgroundSessions(t *testing.T, claudeBin, probeID string) int {
 	return n
 }
 
-// restartDaemon stops the background daemon; the next `claude` call that needs
-// it starts a fresh one, which adopts the still-running worker.
+// restartDaemon stops the background daemon and the sessions it supervises,
+// the probe worker included. The resume that follows starts a fresh daemon,
+// which has to bring the worker back from its own saved launch flags.
 func restartDaemon(t *testing.T, claudeBin string) {
 	t.Helper()
-	if out, err := exec.Command(claudeBin, "daemon", "stop", "--keep-workers").CombinedOutput(); err != nil {
+	if out, err := exec.Command(claudeBin, "daemon", "stop").CombinedOutput(); err != nil {
 		t.Fatalf("claude daemon stop: %v\n%s", err, out)
 	}
-	if out, err := exec.Command(claudeBin, "daemon", "status").CombinedOutput(); err != nil {
-		t.Logf("claude daemon status after stop: %v\n%s", err, out)
-	}
+	t.Log("daemon restart arm: daemon stopped")
 }
 
-// resumeProbeWorker gives the idle worker one more short turn through the
-// daemon, so its telemetry is exported again from the adopted process.
-func resumeProbeWorker(t *testing.T, claudeBin, shortID string) {
+// resumeProbeWorker continues the probe session in the background through the
+// fresh daemon. It passes no settings of its own, so lineage keys arriving
+// afterwards can only have come from the launch flags the daemon kept.
+func resumeProbeWorker(t *testing.T, claudeBin, dir, sessionID string) {
 	t.Helper()
-	cmd := exec.Command(claudeBin, "--bg", "--resume", shortID, "--", fmt.Sprintf("%s again", lineageProbePrompt))
+	if sessionID == "" {
+		t.Fatal("daemon restart arm: the probe's session id is unknown, so it can't be resumed")
+	}
+	cmd := exec.Command(claudeBin, "--bg", "--resume", sessionID, "--", fmt.Sprintf("%s again", lineageProbePrompt))
+	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("resuming the probe worker through the daemon: %v\n%s", err, out)
 	}
+	t.Log("daemon restart arm: probe resumed through a fresh daemon, without settings of its own")
 }
