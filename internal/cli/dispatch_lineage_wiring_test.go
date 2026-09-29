@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -214,6 +215,13 @@ func TestDispatch_Lineage_RefusalsLeaveNothingBehind(t *testing.T) {
 		{"brief outside the workspace", func(string) { dispatchBrief = outside }},
 		{"brief is a directory", func(root string) { dispatchBrief = root }},
 		{"brief is missing", func(root string) { dispatchBrief = filepath.Join(root, "nope.md") }},
+		{"brief is larger than the cap", func(root string) {
+			big := filepath.Join(root, "big.md")
+			if err := os.WriteFile(big, make([]byte, maxLineageFileBytes+1), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			dispatchBrief = big
+		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -301,5 +309,39 @@ func TestDispatch_Lineage_CodexUnchanged(t *testing.T) {
 		if a == "--settings" || strings.Contains(a, "OTEL_RESOURCE_ATTRIBUTES") {
 			t.Fatalf("a Codex launch changed: %v", got.pass)
 		}
+	}
+}
+
+// tokenThenFail serves the instance token's bytes and then fails, so the
+// dispatch id -- read next, from the same source -- is the read that breaks.
+type tokenThenFail struct{ served bool }
+
+func (r *tokenThenFail) Read(p []byte) (int, error) {
+	if r.served {
+		return 0, errors.New("random source exhausted")
+	}
+	r.served = true
+	for i := range p {
+		p[i] = 0xab
+	}
+	return len(p), nil
+}
+
+func TestDispatch_Lineage_DispatchIDReadFailureProvisionsNothing(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	f := installDispatchFakes(t, root)
+	stubDispatchRand(t, &tokenThenFail{})
+	dispatchDetach = true
+
+	_, _, err := runDispatchCmd(t, "do a thing")
+	if err == nil || !strings.Contains(err.Error(), "dispatch id") {
+		t.Fatalf("err = %v, want the dispatch id failure", err)
+	}
+	if f.provisionCalled != 0 || f.launchCalled != 0 {
+		t.Errorf("a failed id read must come before anything is created: provisioned %d, launched %d", f.provisionCalled, f.launchCalled)
+	}
+	if files := sessionMappingFiles(t, root); len(files) != 0 {
+		t.Errorf("a failed id read must leave no session mapping, found %v", files)
 	}
 }

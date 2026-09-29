@@ -204,6 +204,9 @@ func readBriefFile(path, workspaceRoot string) ([]byte, error) {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return nil, fmt.Errorf("--brief %s: the file must be inside the workspace", path)
 	}
+	// Stat before opening, so a FIFO is refused rather than blocking the
+	// open; then check the opened handle again and read through a limit, so
+	// a file swapped or grown after the first check can't slip past either.
 	info, err := os.Stat(resolved)
 	if err != nil {
 		return nil, fmt.Errorf("--brief %s: %w", path, err)
@@ -211,10 +214,25 @@ func readBriefFile(path, workspaceRoot string) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("--brief %s: not a regular file", path)
 	}
-	if info.Size() > maxLineageFileBytes {
+	f, err := os.Open(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("--brief %s: %w", path, err)
+	}
+	defer f.Close()
+	if info, err = f.Stat(); err != nil {
+		return nil, fmt.Errorf("--brief %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("--brief %s: not a regular file", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxLineageFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("--brief %s: %w", path, err)
+	}
+	if len(data) > maxLineageFileBytes {
 		return nil, fmt.Errorf("--brief %s: larger than %d bytes", path, maxLineageFileBytes)
 	}
-	return os.ReadFile(resolved)
+	return data, nil
 }
 
 // errInheritedAttributes is returned when an inherited value can't be carried
