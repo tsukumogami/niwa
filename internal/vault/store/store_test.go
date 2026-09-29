@@ -143,6 +143,15 @@ func TestDir(t *testing.T) {
 	}
 }
 
+func TestDirRefusesARelativeHome(t *testing.T) {
+	isolate(t)
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("HOME", "relative/home")
+	if dir, err := Dir(); err == nil {
+		t.Fatalf("Dir() = %q, want an error for a relative HOME", dir)
+	}
+}
+
 // The store's location follows XDG_STATE_HOME alone: a working directory
 // and XDG_CONFIG_HOME inside a git work tree don't pull it in.
 func TestDirIgnoresWorkTreeCwdAndConfig(t *testing.T) {

@@ -43,7 +43,8 @@ type Entry struct {
 }
 
 // Update reports why it didn't write through exactly one of these
-// sentinels, matched with errors.Is.
+// sentinels, matched with errors.Is. Load also returns ErrUnwritable, for
+// a store that fails the ownership checks.
 var (
 	// ErrLockTimeout means another process held the identity's lock
 	// for longer than the lock wait allows.
@@ -101,6 +102,11 @@ func Dir() (string, error) {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("locating the secret store: %w", err)
+		}
+		// A relative HOME would make the store follow the working
+		// directory.
+		if !filepath.IsAbs(home) {
+			return "", fmt.Errorf("locating the secret store: HOME %q is not an absolute path", home)
 		}
 		base = filepath.Join(home, ".local", "state")
 	}
@@ -264,32 +270,19 @@ func sameEcho(a, b map[string]string) bool {
 // current, and reports whether the result differs from it.
 func merge(current map[string]Entry, puts map[string]Entry, evictKeys []string, evictAll bool) (map[string]Entry, bool) {
 	next := make(map[string]Entry, len(current)+len(puts))
-	changed := false
-	if evictAll {
-		changed = len(current) > 0
-	} else {
+	if !evictAll {
 		for k, e := range current {
 			next[k] = e
 		}
 		for _, k := range evictKeys {
-			if _, ok := next[k]; ok {
-				delete(next, k)
-				changed = true
-			}
+			delete(next, k)
 		}
 	}
 	for k, e := range puts {
 		e.ResolvedAt = e.ResolvedAt.UTC()
-		if old, ok := next[k]; !ok || !sameEntry(old, e) {
-			changed = true
-		}
 		next[k] = e
 	}
-	// A put that restores exactly what an eviction removed is no change.
-	if changed && sameEntries(current, next) {
-		changed = false
-	}
-	return next, changed
+	return next, !sameEntries(current, next)
 }
 
 func sameEntry(a, b Entry) bool {
@@ -329,8 +322,9 @@ func createDir(dir string) error {
 }
 
 // removeLeftovers deletes temp files an earlier update left behind when
-// it died before its rename. Failures are ignored: a leftover costs
-// only disk space.
+// it died before its rename. The caller must hold the identity's lock:
+// without it, this could remove the temp file of a live update. Failures
+// are ignored: a leftover costs only disk space.
 func (sd *storeDir) removeLeftovers(prefix string) {
 	d, err := sd.root.Open(".")
 	if err != nil {

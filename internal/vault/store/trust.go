@@ -54,6 +54,9 @@ func openTrustedDir(path string) (*storeDir, error) {
 		}
 	}
 
+	// os.OpenRoot takes a path and follows symlinks, so it could land on
+	// a directory swapped in since the checks above. Comparing it with the
+	// descriptor those checks verified ties the root to that directory.
 	root, err := os.OpenRoot(path)
 	if err != nil {
 		_ = dir.Close()
@@ -80,27 +83,17 @@ func (sd *storeDir) close() {
 // contents, or a symlink's target, are never read.
 func (sd *storeDir) readData(name string, echo map[string]string) (map[string]Entry, error) {
 	empty := map[string]Entry{}
-	fi, err := sd.root.Lstat(name)
-	if err != nil {
-		return empty, nil
+	f, err := sd.openChecked(name, os.O_RDONLY)
+	if errors.Is(err, ErrUnwritable) {
+		return nil, err
 	}
-	if reason := checkFile(fi); reason != "" {
-		return nil, untrusted(sd.path+"/"+name, reason)
-	}
-	f, err := sd.root.OpenFile(name, os.O_RDONLY|oNoFollow, 0)
 	if err != nil {
-		return empty, nil
+		return empty, nil // missing or unreadable
 	}
 	defer f.Close()
 	ffi, err := f.Stat()
 	if err != nil {
 		return empty, nil
-	}
-	if !os.SameFile(fi, ffi) {
-		return nil, untrusted(sd.path+"/"+name, "changed while it was being checked")
-	}
-	if reason := checkFile(ffi); reason != "" {
-		return nil, untrusted(sd.path+"/"+name, reason)
 	}
 	if ffi.Size() > maxDataFileSize {
 		return empty, nil
@@ -137,53 +130,74 @@ func (sd *storeDir) lock(name string) (func(), error) {
 	}, nil
 }
 
-// openLockFile opens the lock file name without following a symlink,
-// creating it exclusively at 0600 when it doesn't exist. An existing
-// lock file must pass the same checks as a data file.
+// openLockFile opens the lock file name through openChecked, or creates
+// it exclusively at 0600 when it doesn't exist. O_CREATE|O_EXCL never
+// follows a symlink, so creation needs no further check.
 func (sd *storeDir) openLockFile(name string) (*os.File, error) {
-	path := sd.path + "/" + name
 	for range 2 {
-		fi, err := sd.root.Lstat(name)
-		if errors.Is(err, fs.ErrNotExist) {
-			f, err := sd.root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL|oNoFollow, 0o600)
-			if errors.Is(err, fs.ErrExist) {
-				continue // created by another process since the Lstat
-			}
-			if err != nil {
-				return nil, sd.unwritable("creating "+name, err)
-			}
-			if err := f.Chmod(0o600); err != nil {
-				_ = f.Close()
-				return nil, sd.unwritable("setting the mode of "+name, err)
-			}
+		f, err := sd.openChecked(name, os.O_RDWR)
+		switch {
+		case err == nil:
 			return f, nil
-		}
-		if err != nil {
-			return nil, sd.unwritable("checking "+name, err)
-		}
-		if reason := checkFile(fi); reason != "" {
-			return nil, untrusted(path, reason)
-		}
-		f, err := sd.root.OpenFile(name, os.O_RDWR|oNoFollow, 0)
-		if err != nil {
+		case errors.Is(err, ErrUnwritable):
+			return nil, err
+		case !errors.Is(err, fs.ErrNotExist):
 			return nil, sd.unwritable("opening "+name, err)
 		}
-		ffi, err := f.Stat()
+		f, err = sd.root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL|oNoFollow, 0o600)
+		if errors.Is(err, fs.ErrExist) {
+			continue // created by another process since the check
+		}
 		if err != nil {
-			_ = f.Close()
-			return nil, sd.unwritable("checking "+name, err)
+			return nil, sd.unwritable("creating "+name, err)
 		}
-		if !os.SameFile(fi, ffi) {
+		if err := f.Chmod(0o600); err != nil {
 			_ = f.Close()
-			return nil, untrusted(path, "changed while it was being checked")
-		}
-		if reason := checkFile(ffi); reason != "" {
-			_ = f.Close()
-			return nil, untrusted(path, reason)
+			return nil, sd.unwritable("setting the mode of "+name, err)
 		}
 		return f, nil
 	}
-	return nil, untrusted(path, "keeps changing")
+	return nil, untrusted(sd.path+"/"+name, "keeps changing")
+}
+
+// openChecked opens the existing store file name with flag, and only when
+// it's a regular file owned by the effective user with no group or other
+// bits. A file that fails those checks returns an error wrapping
+// ErrUnwritable; a missing file or a failed open returns the os error
+// as is, so callers can tell "untrusted" from "absent or unreadable".
+//
+// O_NOFOLLOW alone doesn't keep a symlink out here: os.Root resolves a
+// final-component symlink whose target stays inside the root even when
+// the caller passes O_NOFOLLOW. The Lstat before the open is what refuses
+// a symlink, and the SameFile check after it refuses one swapped in
+// between the two. Both must stay.
+func (sd *storeDir) openChecked(name string, flag int) (*os.File, error) {
+	path := sd.path + "/" + name
+	fi, err := sd.root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if reason := checkFile(fi); reason != "" {
+		return nil, untrusted(path, reason)
+	}
+	f, err := sd.root.OpenFile(name, flag|oNoFollow, 0)
+	if err != nil {
+		return nil, err
+	}
+	ffi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !os.SameFile(fi, ffi) {
+		_ = f.Close()
+		return nil, untrusted(path, "changed while it was being checked")
+	}
+	if reason := checkFile(ffi); reason != "" {
+		_ = f.Close()
+		return nil, untrusted(path, reason)
+	}
+	return f, nil
 }
 
 // checkLockFile fails when the lock file name exists and fails the file

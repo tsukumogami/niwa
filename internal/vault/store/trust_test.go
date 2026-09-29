@@ -163,6 +163,8 @@ func TestStoreDirectoryNotOwnedIsUntrusted(t *testing.T) {
 	})
 }
 
+// The "inside the store" case is the one that guards openChecked's Lstat
+// pre-check: os.Root would follow that link despite O_NOFOLLOW.
 func TestSymlinkedDataFileIsUntrusted(t *testing.T) {
 	for _, where := range []string{"inside the store", "outside the store"} {
 		t.Run(where, func(t *testing.T) {
