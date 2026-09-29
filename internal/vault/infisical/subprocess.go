@@ -9,9 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/tsukumogami/niwa/internal/secret"
 	"github.com/tsukumogami/niwa/internal/vault"
@@ -41,11 +44,29 @@ type commander interface {
 //   - Stdout and stderr are fully captured into buffers — neither is
 //     streamed to the parent process's stdio. This upholds R22: no
 //     raw CLI stderr ever reaches niwa's own stderr unfiltered.
+//   - Stdin is the null device and the child leads a new session
+//     (Setsid), so it has no controlling terminal. A CLI that decides
+//     to prompt reads EOF instead of waiting on a keyboard nobody is
+//     at, and it can't open /dev/tty behind niwa's back.
+//   - When the context is done, the whole process group is killed,
+//     not just the direct child, so a helper the CLI forked can't
+//     keep the output pipes open. WaitDelay then bounds how long Run
+//     waits for those pipes after the child is gone.
 //
 // Constants (command name, argv flag names) live on the type so
 // tests that want to probe argv hygiene can do so via the commander
 // indirection.
 type defaultCommander struct{}
+
+// commandWaitDelay is how long Run waits for the output pipes to
+// close after the child exits or is killed, before cutting them.
+const commandWaitDelay = 3 * time.Second
+
+// killProcessGroup sends SIGKILL to every process in the group pgid.
+// A variable so tests can observe when a group is signalled.
+var killProcessGroup = func(pgid int) error {
+	return syscall.Kill(-pgid, syscall.SIGKILL)
+}
 
 // Run executes `infisical <args...>` and returns its captured output.
 //
@@ -53,18 +74,52 @@ type defaultCommander struct{}
 // code; callers inspect exitCode to branch on success vs failure.
 // If the process cannot be started at all (binary missing, permission
 // denied), Run returns a non-nil err and an exitCode of -1.
+//
+// Two outcomes need checking before any of that (see callTimedOut): a
+// child killed because ctx was done comes back as exit code -1 with a
+// nil error, and a child whose output pipes stayed open past
+// WaitDelay comes back with its exit code and exec.ErrWaitDelay.
 func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]byte, []byte, int, error) {
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		return nil, nil, -1, err
+	}
+	defer devNull.Close()
+
 	cmd := exec.CommandContext(ctx, name, args...)
 	// R28: never extend Env with secrets. Default behavior of
 	// exec.Cmd is Env = nil which inherits the parent's environment
 	// — exactly what we want so the Infisical CLI sees
 	// INFISICAL_TOKEN (or equivalent) unchanged.
 	cmd.Env = nil
+	cmd.Stdin = devNull
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Cancel = func() error {
+		// Setsid makes the child's PID its process group ID.
+		err := killProcessGroup(cmd.Process.Pid)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	cmd.WaitDelay = commandWaitDelay
+
+	err = cmd.Run()
+	if cmd.Process != nil && (ctx.Err() != nil || errors.Is(err, exec.ErrWaitDelay)) {
+		// Something may have forked after Cancel's kill, or outlived
+		// the child with the pipes open: sweep the group once more.
+		// Only on these paths, because after a normal exit the group
+		// ID may already belong to an unrelated process. "No such
+		// process" is the expected answer and is ignored.
+		_ = killProcessGroup(cmd.Process.Pid)
+	}
 	if err != nil {
+		if errors.Is(err, exec.ErrWaitDelay) {
+			return stdout.Bytes(), stderr.Bytes(), cmd.ProcessState.ExitCode(), err
+		}
 		// exec.ExitError holds the exit code. Any other error type
 		// (e.g., exec.ErrNotFound wrapped in *fs.PathError) means
 		// the process never started.
@@ -83,8 +138,13 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 // and returns the map together with a VersionToken derived from the
 // payload.
 //
+// The export runs under callBound(exportTimeout), derived from ctx.
+//
 // Error handling:
 //
+//   - A timeout (the bound elapsed, or the output pipes stayed open
+//     past WaitDelay) maps to vault.ErrProviderUnreachable, with an
+//     error naming the export and the bound.
 //   - A start failure (binary missing) maps to
 //     vault.ErrClientNotInstalled, which itself wraps
 //     vault.ErrProviderUnreachable.
@@ -136,7 +196,16 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 	if token != "" {
 		args = append(args, "--token", token)
 	}
-	stdout, stderrBytes, exitCode, err := c.Run(ctx, "infisical", args)
+	bound := callBound(exportTimeout)
+	callCtx, cancel := withCallDeadline(ctx, bound)
+	defer cancel()
+	stdout, stderrBytes, exitCode, err := c.Run(callCtx, "infisical", args)
+	if callTimedOut(callCtx, err) {
+		// Checked first: a killed child comes back as exit -1 with no
+		// error, which the branches below would misreport as a
+		// generic failure, and a start failure can't time out.
+		return nil, vault.VersionToken{}, exportTimedOutError(bound)
+	}
 	if err != nil {
 		// Process failed to start: the binary is missing, or is
 		// present but not executable. Either way the client is not
@@ -177,6 +246,14 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 	}
 
 	return values, buildVersionToken(project, values), nil
+}
+
+// exportTimedOutError is the error for an export that ran out of
+// time. It wraps vault.ErrProviderUnreachable (a timeout says nothing
+// about whether the key exists) and never ErrClientNotInstalled,
+// since the client started.
+func exportTimedOutError(bound time.Duration) error {
+	return secret.Errorf("infisical: export timed out after %s: %w", bound, vault.ErrProviderUnreachable)
 }
 
 // parseExportJSON accepts either of the two shapes the Infisical CLI

@@ -124,7 +124,20 @@ func ValidateAPIURL(apiURL string) (nonDefault bool, err error) {
 // endpoint. Separated from Authenticate for testability (callers can
 // override the HTTP client via a custom transport on the context, or
 // tests can provide an httptest.Server URL as apiURL).
+//
+// The request, including reading the response body, runs under
+// callBound(loginTimeout). The bound lives on this request's context
+// rather than on the shared HTTPClient, so the interactive onboarding
+// calls that share the client stay unbounded. A timeout is an
+// ordinary login error: provisioning stops as it does for any other.
 func authenticateHTTP(ctx context.Context, apiURL, clientID, clientSecret string) (string, error) {
+	bound := callBound(loginTimeout)
+	ctx, cancel := withCallDeadline(ctx, bound)
+	defer cancel()
+	timedOut := func() error {
+		return secret.Errorf("infisical: universal-auth login to %s timed out after %s", apiURL, bound)
+	}
+
 	body, err := json.Marshal(map[string]string{
 		"clientId":     clientID,
 		"clientSecret": clientSecret,
@@ -141,12 +154,18 @@ func authenticateHTTP(ctx context.Context, apiURL, clientID, clientSecret string
 
 	resp, err := HTTPClient.Do(req)
 	if err != nil {
+		if callTimedOut(ctx, err) {
+			return "", timedOut()
+		}
 		return "", secret.Errorf("infisical auth: HTTP POST failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if callTimedOut(ctx, err) {
+			return "", timedOut()
+		}
 		return "", secret.Errorf("infisical auth: reading response body: %w", err)
 	}
 
