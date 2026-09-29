@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -57,7 +58,10 @@ func TestCallBound(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			buf := captureOverrideWarning(t)
 			if tc.unset {
+				// t.Setenv records the old value for restore; then
+				// remove the variable outright.
 				t.Setenv(testTimeoutEnv, "")
+				os.Unsetenv(testTimeoutEnv)
 			} else {
 				t.Setenv(testTimeoutEnv, tc.value)
 			}

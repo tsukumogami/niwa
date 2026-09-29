@@ -66,6 +66,9 @@ func DetectSessionStatus(ctx context.Context, c commander) (SessionStatus, error
 
 	stdout, stderrBytes, exitCode, err := c.Run(ctx, "infisical", []string{"login", "status", "--json"})
 	if err != nil {
+		// Includes exec.ErrWaitDelay (the CLI exited but left its
+		// pipes held open), which is folded into "no usable session"
+		// like every other failure of this advisory call.
 		return SessionStatus{}, nil
 	}
 	if exitCode != 0 {

@@ -129,10 +129,13 @@ func ValidateAPIURL(apiURL string) (nonDefault bool, err error) {
 // callBound(loginTimeout). The bound lives on this request's context
 // rather than on the shared HTTPClient, so the interactive onboarding
 // calls that share the client stay unbounded. A timeout is an
-// ordinary login error: provisioning stops as it does for any other.
+// ordinary login error and deliberately does not wrap
+// vault.ErrProviderUnreachable: the provider-auth layer treats any
+// login error as fatal, so provisioning stops as it does for an HTTP
+// 500, rather than quietly carrying on without the machine identity.
 func authenticateHTTP(ctx context.Context, apiURL, clientID, clientSecret string) (string, error) {
 	bound := callBound(loginTimeout)
-	ctx, cancel := withCallDeadline(ctx, bound)
+	callCtx, cancel := withCallDeadline(ctx, bound)
 	defer cancel()
 	timedOut := func() error {
 		return secret.Errorf("infisical: universal-auth login to %s timed out after %s", apiURL, bound)
@@ -146,7 +149,7 @@ func authenticateHTTP(ctx context.Context, apiURL, clientID, clientSecret string
 		return "", secret.Errorf("infisical auth: marshalling request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL+universalAuthPath, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, apiURL+universalAuthPath, bytes.NewReader(body))
 	if err != nil {
 		return "", secret.Errorf("infisical auth: creating request: %w", err)
 	}
@@ -154,7 +157,7 @@ func authenticateHTTP(ctx context.Context, apiURL, clientID, clientSecret string
 
 	resp, err := HTTPClient.Do(req)
 	if err != nil {
-		if callTimedOut(ctx, err) {
+		if callTimedOut(callCtx, err) {
 			return "", timedOut()
 		}
 		return "", secret.Errorf("infisical auth: HTTP POST failed: %w", err)
@@ -163,7 +166,7 @@ func authenticateHTTP(ctx context.Context, apiURL, clientID, clientSecret string
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		if callTimedOut(ctx, err) {
+		if callTimedOut(callCtx, err) {
 			return "", timedOut()
 		}
 		return "", secret.Errorf("infisical auth: reading response body: %w", err)

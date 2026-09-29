@@ -24,10 +24,25 @@ import (
 // deterministic stub without forking a real `infisical` binary.
 //
 // Run executes the named command with the given args and returns the
-// combined stdout bytes, stderr bytes, the process exit code, and an
-// error describing any failure to start/run the process (as distinct
-// from a non-zero exit: exit code is the authoritative signal for
-// that).
+// captured stdout and stderr, an exit code and an error, in one of
+// these shapes:
+//
+//   - The process ran and exited: its exit code and a nil error. The
+//     exit code, not the error, says whether it succeeded.
+//   - The process could not be started (binary missing, not
+//     executable): -1 and a non-nil error.
+//   - The process was killed because ctx was done: -1 and a nil error.
+//   - The process exited but something it left behind held the output
+//     pipes open until they were cut: its real exit code and
+//     exec.ErrWaitDelay. So a non-nil error does not always mean the
+//     process never started.
+//
+// Call sites that bound the call check callTimedOut before branching
+// on anything else; it catches the last two shapes when they come
+// from the call's own deadline.
+//
+// A fake that simulates a hang should block on <-ctx.Done(), so the
+// caller's deadline is what ends it.
 //
 // Production callers use defaultCommander, which shells out via
 // os/exec with Env = nil (inherit the parent environment).
@@ -68,17 +83,8 @@ var killProcessGroup = func(pgid int) error {
 	return syscall.Kill(-pgid, syscall.SIGKILL)
 }
 
-// Run executes `infisical <args...>` and returns its captured output.
-//
-// On successful start, the returned error is nil regardless of exit
-// code; callers inspect exitCode to branch on success vs failure.
-// If the process cannot be started at all (binary missing, permission
-// denied), Run returns a non-nil err and an exitCode of -1.
-//
-// Two outcomes need checking before any of that (see callTimedOut): a
-// child killed because ctx was done comes back as exit code -1 with a
-// nil error, and a child whose output pipes stayed open past
-// WaitDelay comes back with its exit code and exec.ErrWaitDelay.
+// Run executes `infisical <args...>` and returns its captured output,
+// in the shapes the commander interface lists.
 func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]byte, []byte, int, error) {
 	devNull, err := os.Open(os.DevNull)
 	if err != nil {
@@ -111,7 +117,9 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 	if cmd.Process != nil && (ctx.Err() != nil || errors.Is(err, exec.ErrWaitDelay)) {
 		// Something may have forked after Cancel's kill, or outlived
 		// the child with the pipes open: sweep the group once more.
-		// Only on these paths, because after a normal exit the group
+		// Only when ctx is done (Cancel has already signalled the
+		// group, whether our deadline or the caller ended it) or the
+		// pipes had to be cut, because after a normal exit the group
 		// ID may already belong to an unrelated process. "No such
 		// process" is the expected answer and is ignored.
 		_ = killProcessGroup(cmd.Process.Pid)
@@ -154,6 +162,9 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 //   - A non-zero exit without auth markers is treated as a generic
 //     provider error (wrapped via secret.Errorf, stderr scrubbed).
 //   - Malformed JSON stdout is a generic provider error.
+//   - When the caller's own ctx ends the call, that is not a timeout:
+//     the killed child comes back as the generic "export exited -1"
+//     error.
 //
 // All returned errors are wrapped via secret.Errorf so that later
 // re-wraps by the resolver continue to scrub any late-registered

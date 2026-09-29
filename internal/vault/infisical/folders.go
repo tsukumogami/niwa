@@ -84,6 +84,9 @@ func CreateSecretsFolder(ctx context.Context, c commander, projectID, env, path 
 	}
 	_, stderrBytes, exitCode, err := c.Run(ctx, "infisical", args)
 	if err != nil {
+		// Also taken, deliberately, for exec.ErrWaitDelay (the CLI
+		// exited but left its pipes held open): the create is
+		// idempotent, so reporting it unreachable just means a re-run.
 		return secret.Errorf(
 			"infisical: running secrets folders create: %w: %w",
 			vault.ErrProviderUnreachable, err,
