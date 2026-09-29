@@ -516,8 +516,8 @@ func TestSessionStartProvisionFailurePrintsNoticesToStderr(t *testing.T) {
 
 // One of the hook's other failure returns: a file where the sessions
 // directory belongs makes the mapping write fail after a successful
-// provision. (The payload build and write failures print the same way but
-// have no easy trigger in a test.)
+// provision. (The payload write failures are covered below; the build
+// failure prints the same way but has no easy trigger in a test.)
 func TestSessionStartMappingFailurePrintsNoticesToStderr(t *testing.T) {
 	root := setupHookWorkspace(t, true)
 	jobsDir := t.TempDir()

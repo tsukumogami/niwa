@@ -109,7 +109,9 @@ type provisionResult struct {
 	// stderr on every failure return that writes no payload: its messages
 	// tell the operator to run `infisical login`, and a failing hook's stderr
 	// is where the operator looks, which PRD R21 requires. The key report
-	// keeps its original behaviour there. Nil when the run failed before
+	// keeps its original behaviour there on purpose: nothing asks for it on
+	// stderr, and a run with no fallback must print exactly what it did
+	// before the store existed. Nil when the run failed before
 	// Create; a nil collector renders nothing.
 	Notices *fallbacknotice.Collector
 }
