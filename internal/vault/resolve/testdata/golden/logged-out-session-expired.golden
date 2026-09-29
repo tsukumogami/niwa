@@ -1,0 +1,5 @@
+scenario: logged-out-session-expired
+error:
+vault: env.secrets.GOLDEN_KEY: resolving "GOLDEN_KEY" via provider "(anonymous)": infisical: export exited 1: error: Your login session has expired, please run [infisical login] and try again
+key report:
+<empty>

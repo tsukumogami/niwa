@@ -1,0 +1,8 @@
+scenario: client-not-installed
+error:
+<nil>
+key report:
+niwa: 1 declared key has no value.
+  the infisical provider could not be reached, because its client is not installed on this host:
+    - GOLDEN_KEY (env.secrets)
+    remedy: install the infisical client, then run this command again.

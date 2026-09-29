@@ -519,6 +519,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	registerDispatchSpillSteps(ctx)
 	registerKeepAliveSteps(ctx)
 
+	// --- vault failure handling: seeding and counting the shared infisical
+	// stub's exports ---
+	registerVaultFailureSteps(ctx)
+
 	// --- session-message acceptance: the --accept-session-messages flag, the
 	// accept_session_messages_on_dispatch machine key, and what each one puts
 	// in front of the launched worker ---

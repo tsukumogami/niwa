@@ -1,0 +1,3 @@
+scenario: universal-auth-http-401
+error:
+infisical auth: universal-auth login returned HTTP 401: {"statusCode":401,"message":"Invalid credentials for client secret ***","error":"UnauthorizedError"}

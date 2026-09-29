@@ -1,0 +1,8 @@
+scenario: missing-key
+error:
+<nil>
+key report:
+niwa: 1 declared key has no value.
+  the infisical provider was reached and does not hold these keys:
+    - GOLDEN_KEY (env.secrets)
+    remedy: add each key to the provider, supply it from your personal overlay, or drop it from the requirement sub-table.

@@ -1,0 +1,8 @@
+scenario: personal-response-403
+error:
+<nil>
+key report:
+niwa: 1 declared key has no value.
+  the infisical provider could not be reached:
+    - GOLDEN_KEY (global.env.secrets)
+    remedy: check that this host can reach the infisical provider and that its credentials are current, then run this command again.

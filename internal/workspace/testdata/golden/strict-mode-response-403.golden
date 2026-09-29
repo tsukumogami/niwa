@@ -1,0 +1,13 @@
+scenario: strict-mode-response-403
+strict mode: true
+required-key check:
+<nil>
+strict-mode gate:
+strict secrets: strict mode is enabled and 1 declared env key has no value; supply them, or turn strict mode off with --strict-secrets=false
+stderr:
+<empty>
+key report:
+niwa: 1 declared key has no value.
+  the infisical provider could not be reached:
+    - GOLDEN_KEY (env.secrets)
+    remedy: check that this host can reach the infisical provider and that its credentials are current, then run this command again.
