@@ -398,8 +398,8 @@ func TestDispatchNothingToFallBackOn(t *testing.T) {
 // hookNotices records one of each R21 condition.
 func hookNotices() *fallbacknotice.Collector {
 	c := servedNotices()
-	// Every field differs from the served identity, so a field found in
-	// one sentence can't stand in for the other's.
+	// Every field but the kind differs from the served identity, so a
+	// field found in one sentence can't stand in for the other's.
 	miss := fallbacknotice.Identity{
 		Kind:        "infisical",
 		APIDomain:   "https://eu.infisical.com",
@@ -576,5 +576,47 @@ func TestEmptyNoticesRenderLikeNoCollector(t *testing.T) {
 	renderNotices(&buf, nil)
 	if buf.Len() != 0 {
 		t.Errorf("an empty collector rendered %q", buf.String())
+	}
+}
+
+// failingWriter refuses every write, standing in for a closed stdout.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("stdout closed") }
+
+// The payload write failures, on the success path and on the strict path,
+// write no payload, so the notices go to stderr.
+func TestSessionStartPayloadWriteFailurePrintsNoticesToStderr(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		t.Run(fmt.Sprintf("strict=%v", strict), func(t *testing.T) {
+			root := setupHookWorkspace(t, true)
+			jobsDir := t.TempDir()
+			writeJobState(t, jobsDir, testSessionID[:8], testSessionID, "bg")
+			// stubProvision registered the restore of provisionInstanceFunc.
+			stubProvision(t, "")
+			inner := provisionInstanceFunc
+			provisionInstanceFunc = func(ctx context.Context, r, cwd, p, sep string, n int) (provisionResult, error) {
+				res, err := inner(ctx, r, cwd, p, sep, n)
+				res.Notices = servedNotices()
+				if strict {
+					return provisionResult{Notices: res.Notices}, fmt.Errorf("%w: strict mode is enabled", workspace.ErrStrictSecrets)
+				}
+				return res, err
+			}
+			var errBuf bytes.Buffer
+			instanceFromHookCmd.SetOut(failingWriter{})
+			instanceFromHookCmd.SetErr(&errBuf)
+			t.Cleanup(func() {
+				instanceFromHookCmd.SetOut(os.Stdout)
+				instanceFromHookCmd.SetErr(os.Stderr)
+			})
+			payload := instanceHookPayload{HookEventName: hookEventSessionStart, SessionID: testSessionID, Cwd: root}
+			if err := runInstanceHookStart(instanceFromHookCmd, payload, jobsDir); err == nil {
+				t.Fatal("a failed payload write must fail the hook")
+			}
+			if n := strings.Count(errBuf.String(), servedMarker); n != 1 {
+				t.Errorf("stderr holds %d served warnings, want 1:\n%s", n, errBuf.String())
+			}
+		})
 	}
 }
