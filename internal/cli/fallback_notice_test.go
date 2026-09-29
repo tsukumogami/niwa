@@ -302,6 +302,7 @@ func TestDispatchRendersNoticesAfterKeyReport(t *testing.T) {
 			root := setupDispatchWorkspace(t)
 			chdir(t, root)
 			f := installDispatchFakes(t, root)
+			// The install*Fakes helper registered the restore of provisionInstanceFunc.
 			inner := provisionInstanceFunc
 			provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string, n int) (provisionResult, error) {
 				if fail {
@@ -333,6 +334,7 @@ func TestWatchRendersNoticesAfterKeyReport(t *testing.T) {
 			root, home := setupWatchCharEnv(t)
 			installWatchCharFakes(t)
 			stubAskPostureSeams(t, home, nil)
+			// The install*Fakes helper registered the restore of provisionInstanceFunc.
 			inner := provisionInstanceFunc
 			provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string, n int) (provisionResult, error) {
 				if fail {
@@ -358,8 +360,9 @@ func TestWatchRendersNoticesAfterKeyReport(t *testing.T) {
 // A required key in a strict workspace fails the dispatch through Create's
 // failure path and the nothing-to-fall-back-on line is on stderr; an
 // optional key with strict mode off lets it succeed and still prints the
-// line. (Without strict mode a required key behind an unreachable provider
-// is reported, not fatal, as it was before the fallback.)
+// line. (Without strict mode a required key behind a logged-out or
+// unreachable provider is reported, not fatal, as it was before the
+// fallback.)
 func TestDispatchNothingToFallBackOn(t *testing.T) {
 	for _, required := range []bool{true, false} {
 		t.Run(fmt.Sprintf("required=%v", required), func(t *testing.T) {
@@ -370,6 +373,7 @@ func TestDispatchNothingToFallBackOn(t *testing.T) {
 			}
 			chdir(t, root)
 			installDispatchFakes(t, root)
+			// installDispatchFakes registered the restore of provisionInstanceFunc.
 			provisionInstanceFunc = realProvisionInstance
 
 			_, stderr, err := runDispatchCmd(t, "do a thing")
@@ -438,6 +442,7 @@ func TestSessionStartNoticesGoIntoThePayload(t *testing.T) {
 	jobsDir := t.TempDir()
 	writeJobState(t, jobsDir, testSessionID[:8], testSessionID, "bg")
 	stubProvision(t, "# guidance\n")
+	// stubProvision registered the restore of provisionInstanceFunc.
 	inner := provisionInstanceFunc
 	provisionInstanceFunc = func(ctx context.Context, r, cwd, p, sep string, n int) (provisionResult, error) {
 		res, err := inner(ctx, r, cwd, p, sep, n)
@@ -509,14 +514,16 @@ func TestSessionStartProvisionFailurePrintsNoticesToStderr(t *testing.T) {
 	}
 }
 
-// The mapping write is the other failure return reachable from a test: a
-// file where the sessions directory belongs makes it fail after a successful
-// provision.
+// One of the hook's other failure returns: a file where the sessions
+// directory belongs makes the mapping write fail after a successful
+// provision. (The payload build and write failures print the same way but
+// have no easy trigger in a test.)
 func TestSessionStartMappingFailurePrintsNoticesToStderr(t *testing.T) {
 	root := setupHookWorkspace(t, true)
 	jobsDir := t.TempDir()
 	writeJobState(t, jobsDir, testSessionID[:8], testSessionID, "bg")
 	stubProvision(t, "")
+	// stubProvision registered the restore of provisionInstanceFunc.
 	inner := provisionInstanceFunc
 	provisionInstanceFunc = func(ctx context.Context, r, cwd, p, sep string, n int) (provisionResult, error) {
 		res, err := inner(ctx, r, cwd, p, sep, n)
@@ -541,9 +548,10 @@ func TestSessionStartMappingFailurePrintsNoticesToStderr(t *testing.T) {
 	}
 }
 
-// A run with no fallback changes nothing: the payload builders produce
-// the bytes they produce without a collector.
-func TestEmptyNoticesLeavePayloadsUnchanged(t *testing.T) {
+// An empty collector renders exactly like no collector at all. With the
+// existing payload and key-report golden tests passing unchanged, that is
+// what keeps a run with no fallback byte-for-byte what it was.
+func TestEmptyNoticesRenderLikeNoCollector(t *testing.T) {
 	dir := t.TempDir()
 	empty := fallbacknotice.New(nil)
 	keys := []keyreport.Entry{missingKey}

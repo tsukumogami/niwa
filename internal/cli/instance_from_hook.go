@@ -86,10 +86,11 @@ const (
 	sessionNamePrefixLen = 12
 )
 
-// provisionResult carries the outcome of a successful instance provision: the
-// instance directory name and its absolute path. It mirrors the machine
-// surface of `niwa create --json` ({name, path}), which the real provisioner
-// reuses.
+// provisionResult carries the outcome of an instance provision. On success it
+// holds the instance directory name and its absolute path, mirroring the
+// machine surface of `niwa create --json` ({name, path}), which the real
+// provisioner reuses. When Create fails, Name and Path are empty but Keys and
+// Notices still carry what the run recorded, so the caller can report it.
 type provisionResult struct {
 	Name string
 	Path string
@@ -102,9 +103,14 @@ type provisionResult struct {
 	Keys []keyreport.Entry
 
 	// Notices is what the run's store fallback served, missed or could not
-	// write. It travels the same way Keys does, on success and on a Create
-	// failure, and for the same reason. Nil when the run never reached
-	// provisioning; a nil collector renders nothing.
+	// write. Like Keys, it is returned on success and on a Create failure,
+	// and on the hook's payload paths (success and strict refusal) it goes
+	// into the injected context. Unlike Keys, the hook also prints it to
+	// stderr on every failure return that writes no payload: its messages
+	// tell the operator to run `infisical login`, and a failing hook's stderr
+	// is where the operator looks, which PRD R21 requires. The key report
+	// keeps its original behaviour there. Nil when the run failed before
+	// Create; a nil collector renders nothing.
 	Notices *fallbacknotice.Collector
 }
 
@@ -213,7 +219,8 @@ func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsD
 		return nil
 	}
 	// From here on, a failure return writes no payload, so the fallback
-	// notices go to stderr instead: it is the only channel left.
+	// notices go to stderr instead (see provisionResult.Notices for why the
+	// key report does not).
 	if err != nil {
 		renderNotices(cmd.ErrOrStderr(), res.Notices)
 		return fmt.Errorf("niwa: error: provisioning instance for session %s: %w", payload.SessionID, err)

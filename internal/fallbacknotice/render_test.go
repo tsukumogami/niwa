@@ -88,9 +88,9 @@ func TestRenderTextStoreWarningsGolden(t *testing.T) {
 	}
 }
 
-// R20, first reason wins: the session maps vault.ReasonLoggedOut to
-// ReasonLoggedOut and vault.ReasonTimedOut to ReasonTimedOut; a later
-// timed-out record for the same identity never overrides a logged-out one.
+// R20, first reason wins: a later reason recorded for the same identity
+// never overrides the first. The mapping from vault.Reason is covered by
+// storefallback's TestMappedFirstReasonWinsInTheRendering.
 func TestRenderFirstReasonWins(t *testing.T) {
 	cases := []struct {
 		name  string
