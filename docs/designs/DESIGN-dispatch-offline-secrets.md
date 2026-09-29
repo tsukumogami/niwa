@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 upstream: docs/prds/PRD-dispatch-offline-secrets.md
 problem: |
   Vault resolution runs `infisical export` with no time bound and treats every failure it
@@ -24,7 +24,7 @@ rationale: |
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
@@ -548,8 +548,8 @@ succeeds, beyond one buffered record per resolved key.
 
 ```
 internal/vault
-  errors.go          + FailureClass{Class, Reason, HTTPStatus}; Class = Unauthenticated|Unreachable|Answered
-                       Reason = LoggedOut|TimedOut|Unreachable
+  errors.go          + FailureClass{Class, Reason, HTTPStatus}; Class = ClassUnauthenticated|ClassUnreachable|ClassAnswered
+                       Reason = ReasonLoggedOut|ReasonTimedOut|ReasonUnreachable
   provider.go        + StoreIdentifier interface: StoreIdentity(ref Ref) (Identity, bool)
                        + Identity{Kind, APIDomain, ProjectID, Environment, FolderPath}
     registry.go        + (*Bundle).Wrap(wrap func(Provider) Provider) *Bundle: a new bundle over wrapped
@@ -599,8 +599,8 @@ internal/cli
 ```go
 // internal/vault
 type FailureClass struct {
-    Class      FailureKind // Unauthenticated, Unreachable, Answered
-    Reason     Reason      // LoggedOut, TimedOut, Unreachable (meaningful for the first two)
+    Class      FailureKind // ClassUnauthenticated, ClassUnreachable, ClassAnswered
+    Reason     Reason      // ReasonLoggedOut, ReasonTimedOut, ReasonUnreachable (meaningful for the first two)
     HTTPStatus int         // parsed from "Response Code: <n>", 0 when none
 }
 func (f *FailureClass) Error() string // never displayed
@@ -625,7 +625,7 @@ type Entry struct {
 
 // internal/vault/storefallback
 func NewSession(dir string, notices *fallbacknotice.Collector, now func() time.Time) *Session
-func (s *Session) Wrap(p vault.Provider) vault.Provider // returns p unchanged if not a StoreIdentifier
+func (s *Session) Wrap(p vault.Provider) vault.Provider // returns p unchanged unless p implements vault.StoreIdentifier (type assertion; no ref needed)
                                                         // used as bundle.Wrap(session.Wrap)
 func (s *Session) Flush()                               // per identity: one Update; notes failures
 ```
@@ -652,10 +652,10 @@ A lapsed login:
 1. The export exits 1 with a logged-out message.
 2. The provider sees no timeout and no server response, and runs the probe. The probe prints
    `{"sessions": []}`.
-3. The classifier returns *unauthenticated*, reason LoggedOut, wrapping `ErrProviderUnreachable`,
+3. The classifier returns *unauthenticated*, reason ReasonLoggedOut, wrapping `ErrProviderUnreachable`,
    and the run state records the principal for that domain.
 4. The wrapper finds the class, loads the identity's entries, and returns the stored value with its
-   token. It notes `Served(identity, LoggedOut, resolvedAt)`.
+   token. It notes `Served(identity, ReasonLoggedOut, resolvedAt)`.
 5. Later keys and identities on the same domain for a CLI-session principal find the run state's
    verdict, so no subprocess runs.
 6. `Flush` has nothing to put for served keys, so it doesn't write.
@@ -663,7 +663,7 @@ A lapsed login:
    which print the warning.
 
 A dead route: the export reaches its 30 s bound. The call site sees its own deadline and classifies
-the failure as *unreachable*, reason TimedOut, without a probe for a minted principal. For a
+the failure as *unreachable*, reason ReasonTimedOut, without a probe for a minted principal. For a
 CLI-session principal it runs the probe, bounded at 15 s, whose answer can only confirm
 *unreachable*, move the failure to *unauthenticated*, or leave it unchanged. The run state marks the
 domain unreachable, and every later call on that domain returns at once.
