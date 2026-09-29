@@ -33,6 +33,7 @@ init → create → apply workflow, add a `@critical` Gherkin scenario in
 
 ## Contributor Guides
 
+- `docs/guides/dispatch-lineage.md` — the lineage resource attributes a dispatched Claude worker carries on its telemetry: the six `niwa.` attributes, the `--brief` and `--skill` flags, how the value reaches a background worker through the `--settings` document and the launch environment, how the developer's own `OTEL_RESOURCE_ATTRIBUTES` is carried forward, what sessions niwa doesn't launch get, and the live check with the Claude Code version it last passed on
 - `docs/guides/codex-agent.md` — running Codex in a prepared workspace: choosing which agent harnesses a dispatch (`--harness`, `NIWA_DISPATCH_HARNESS`, `[workspace].default_agent`, and `[global].default_dispatch_harness`), background dispatch and its costs, what a Codex session gets, the generated gap list of what it doesn't, and what niwa writes into the developer's own Codex configuration
 - `docs/guides/ephemeral-session-instances.md` — one ephemeral instance per Claude Code background session: SessionStart/SessionEnd hooks, mapping store, `niwa reap`, context-aware `niwa apply`, opt-out
 - `docs/guides/file-distribution.md` — the three file tables (`[files]`, `[instance.files]`, `[root.files]`): repo `.local` rewrite vs verbatim non-repo distribution, the `.mcp.json` use case, tracking/cleanup, and limitations

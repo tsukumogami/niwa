@@ -65,6 +65,10 @@ var lineageValuePattern = regexp.MustCompile(`^[A-Za-z0-9._:/@-]{1,128}$`)
 // the same one it already accepts for an agent's session ids elsewhere.
 var parentSessionPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,128}$`)
 
+// dispatchIDPattern is the shape newDispatchID produces: a lowercase
+// version-4 UUID.
+var dispatchIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
 // requestedSkillPattern is `<plugin>:<name>`.
 var requestedSkillPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*:[a-z0-9][a-z0-9-]*$`)
 
@@ -348,4 +352,50 @@ func composeResourceAttributes(settingsValue, envValue string, own []string) (st
 	}
 	out = append(out, own...)
 	return strings.Join(out, ","), nil
+}
+
+// resourceAttributesEnv is the launch settings document's "env" entry for
+// lineage. Its one field is unexported and it marshals to exactly one key, so
+// this contributor can't be used to set any other environment variable.
+type resourceAttributesEnv struct{ value string }
+
+// MarshalJSON renders {"OTEL_RESOURCE_ATTRIBUTES": "<value>"}.
+func (e resourceAttributesEnv) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]string{"OTEL_RESOURCE_ATTRIBUTES": e.value})
+}
+
+// composeDispatchLineage builds the value a dispatched worker gets: the user
+// settings attributes and the dispatching environment's, carried forward,
+// then niwa's own. When an inherited value can't be carried it says so on
+// warn, quoting nothing, and returns "": the dispatch goes ahead and the
+// worker keeps exactly the attributes it would have had without niwa.
+func composeDispatchLineage(warn io.Writer, spec agentplan.LaunchSpec, in lineageInputs) string {
+	own := lineageEntries(in, warn)
+	settingsValue, _, err := userSettingsAttributes(spec, userHomeDir(), os.Getenv)
+	if err == nil {
+		var value string
+		value, err = composeResourceAttributes(settingsValue, os.Getenv("OTEL_RESOURCE_ATTRIBUTES"), own)
+		if err == nil {
+			return value
+		}
+	}
+	fmt.Fprintf(warn, "niwa dispatch: %v\n", err)
+	return ""
+}
+
+// lineageWorkerEnv is the launched process's environment: base, with
+// OTEL_RESOURCE_ATTRIBUTES set to value. With no value it is nil, which the
+// launcher reads as "inherit this process's environment unchanged".
+func lineageWorkerEnv(base []string, value string) []string {
+	if value == "" {
+		return nil
+	}
+	out := make([]string, 0, len(base)+1)
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "OTEL_RESOURCE_ATTRIBUTES=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "OTEL_RESOURCE_ATTRIBUTES="+value)
 }

@@ -419,6 +419,13 @@ type InstanceRecord struct {
 	// from the session mappings. It has no omitempty, so every record carries
 	// the key and a consumer never has to treat a missing key as false.
 	AcceptsSessionMessages bool `json:"accepts_session_messages"`
+	// DispatchID and ParentSessionID are the dispatch identity and the caller
+	// session id recorded on the newest session mapping for the instance.
+	// EnumerateInstanceRecords leaves them empty; the list command fills them
+	// in, only when each value has the shape niwa writes. omitempty keeps
+	// instances that weren't dispatched, or predate these fields, unchanged.
+	DispatchID      string `json:"dispatch_id,omitempty"`
+	ParentSessionID string `json:"parent_session_id,omitempty"`
 	// SessionName is the display name the instance's dispatch forwarded to
 	// the agent and recorded on its session mapping. Like KeepAlive,
 	// EnumerateInstanceRecords leaves it empty and the list command fills it

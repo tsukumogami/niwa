@@ -23,7 +23,7 @@ func captureLaunchPrompt(f *dispatchFakes, gotPrompt *string, gotPass *[]string)
 		f.launchCalled++
 		*gotPrompt = req.Prefix + req.Body
 		if gotPass != nil {
-			*gotPass = req.Passthrough
+			*gotPass = withoutLineageSettingsQuiet(req.Passthrough)
 		}
 		return nil
 	}

@@ -57,7 +57,7 @@ func provisionWithInstanceSettings(t *testing.T, f *dispatchFakes, settingsBody 
 func captureLaunchPassthrough(f *dispatchFakes, got *[]string) {
 	dispatchLaunch = func(_ context.Context, req launchRequest) error {
 		f.launchCalled++
-		*got = req.Passthrough
+		*got = withoutLineageSettingsQuiet(req.Passthrough)
 		return nil
 	}
 }
