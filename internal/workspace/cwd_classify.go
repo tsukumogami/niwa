@@ -1,9 +1,11 @@
 package workspace
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/tsukumogami/niwa/internal/config"
 )
@@ -19,9 +21,9 @@ const (
 	// WorkspaceRoot and InstanceDir are populated.
 	CwdInsideInstance CwdClass = iota
 
-	// CwdAtWorkspaceRoot: cwd is the workspace root (or the workspace
-	// dir if cwd is a sibling of an instance directory). WorkspaceRoot
-	// is populated; InstanceDir is empty.
+	// CwdAtWorkspaceRoot: cwd is the workspace root, or a directory inside
+	// it that is neither an instance nor a worktree (then BelowRoot is set).
+	// WorkspaceRoot is populated; InstanceDir is empty.
 	CwdAtWorkspaceRoot
 
 	// CwdInsideWorktree: cwd is inside one of an instance's session
@@ -65,6 +67,58 @@ type CwdClassification struct {
 	WorkspaceRoot string // populated for CwdInsideInstance, CwdAtWorkspaceRoot, CwdInsideWorktree
 	InstanceDir   string // populated for CwdInsideInstance and CwdInsideWorktree
 	WorktreeDir   string // populated for CwdInsideWorktree only (the worktree root)
+
+	// BelowRoot is set for CwdAtWorkspaceRoot when cwd is a directory inside
+	// the workspace root rather than the root itself: a directory that is not
+	// an instance or a worktree, such as a half-provisioned instance left by
+	// an interrupted create. The root's own .niwa/ subtree counts as the root
+	// (see isBelowRoot). Read-only commands treat it as the root. Commands that act on every
+	// instance must refuse it; see RefuseBelowRoot.
+	BelowRoot bool
+}
+
+// RefuseBelowRoot is the scope rule for commands that can act on every
+// instance in a workspace (apply, destroy). Such a command runs from exactly
+// three kinds of directory: an instance, a worktree, or the workspace root
+// itself (including the root's own .niwa/). From any other directory under the root it returns an error naming
+// that directory, and it never falls back to the root's scope: a script that
+// loops over directories under the root and lands in one that isn't an
+// instance would otherwise act on the whole workspace. It returns nil for
+// every other classification, including CwdOutside, which callers report in
+// their own words.
+func (c CwdClassification) RefuseBelowRoot(cwd, command string) error {
+	if c.Class != CwdAtWorkspaceRoot || !c.BelowRoot {
+		return nil
+	}
+	msg := fmt.Sprintf("%s: %s is inside workspace %s but is not an instance, a worktree, or the workspace root; "+
+		"refusing to act from here, because from this directory the command would take the whole workspace's scope. "+
+		"Run it inside an instance, or at %s itself",
+		command, cwd, c.WorkspaceRoot, c.WorkspaceRoot)
+	if top := topLevelEntry(c.WorkspaceRoot, cwd); !strings.HasPrefix(top, ".") {
+		msg += fmt.Sprintf(". If %s is an instance whose creation was interrupted, it has no %s and niwa does not manage it; remove it by hand",
+			filepath.Join(c.WorkspaceRoot, top), filepath.Join(StateDir, StateFile))
+	}
+	return errors.New(msg)
+}
+
+// isBelowRoot reports whether abs is a directory under root that does not
+// count as the root. The root's own config dir (<root>/.niwa and anything in
+// it) counts as the root: it holds the root's configuration, and editing it
+// there and then applying is ordinary use. Everything else under the root
+// that is not an instance or a worktree does not.
+func isBelowRoot(root, abs string) bool {
+	top := topLevelEntry(root, abs)
+	return top != "" && top != StateDir
+}
+
+// topLevelEntry returns the first path element of path below root, or "" when
+// path is not strictly below root.
+func topLevelEntry(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return ""
+	}
+	return strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
 }
 
 // ClassifyCwd discriminates a cwd into one of four classes:
@@ -138,9 +192,11 @@ func ClassifyCwd(cwd string) (CwdClassification, error) {
 	// At or inside a workspace root? config.Discover succeeds when
 	// .niwa/workspace.toml exists at or above cwd.
 	if _, configDir, err := config.Discover(abs); err == nil {
+		root := filepath.Dir(configDir)
 		return CwdClassification{
 			Class:         CwdAtWorkspaceRoot,
-			WorkspaceRoot: filepath.Dir(configDir),
+			WorkspaceRoot: root,
+			BelowRoot:     isBelowRoot(root, abs),
 		}, nil
 	}
 

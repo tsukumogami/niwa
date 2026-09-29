@@ -74,21 +74,29 @@ type WorktreeTarget struct {
 //     alone (never the parent instance or siblings).
 //  3. If cwd is inside an instance, return ApplySingle targeting that instance
 //     (its worktrees are cascaded by the apply caller).
-//  4. If cwd is at/inside a workspace root, enumerate all instances and return
+//  4. If cwd is the workspace root itself, enumerate all instances and return
 //     ApplyAll (the caller materializes root config and cascades).
-//  5. Error if none of the above applies.
+//  5. Error if none of the above applies, including a cwd inside the root that
+//     is not an instance or a worktree (checked before step 1, so --instance
+//     does not bypass it).
 //
 // Note: this is an intentional pre-1.0 change. Previously apply from anywhere
 // inside an instance (including a worktree) converged the whole instance; now a
 // worktree cwd converges only that worktree.
 func ResolveApplyScope(cwd, instanceFlag string) (*ApplyScope, error) {
-	if instanceFlag != "" {
-		return resolveNamed(cwd, instanceFlag)
-	}
-
 	classification, err := ClassifyCwd(cwd)
 	if err != nil {
 		return nil, fmt.Errorf("classifying working directory: %w", err)
+	}
+	// A directory under the root that is neither an instance nor a worktree
+	// gets no scope at all, with or without --instance, rather than the
+	// root's. See RefuseBelowRoot.
+	if err := classification.RefuseBelowRoot(cwd, "niwa apply"); err != nil {
+		return nil, err
+	}
+
+	if instanceFlag != "" {
+		return resolveNamed(cwd, instanceFlag)
 	}
 
 	// config.Discover resolves the workspace.toml path for any in-workspace
