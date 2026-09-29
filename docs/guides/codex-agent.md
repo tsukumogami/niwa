@@ -403,6 +403,15 @@ the session would never read it, so these move only if the agent changes.
   niwa learns that a session it did not launch has started only from the
   agent's own session-start hook, which Codex cannot receive.
 
+### What niwa hasn't built yet
+
+A route exists on Codex's side and niwa hasn't wired it up. This is niwa's own
+debt, and it's the one group that can shrink without the agent changing.
+
+- **Lineage resource attributes on a dispatched worker's telemetry.** A Codex
+  launch has no settings document to carry the attributes, and whether its
+  telemetry reads them from the launch environment is unverified.
+
 ### What doesn't apply to Codex
 
 Nothing is missing here. Each one names something that exists only in the

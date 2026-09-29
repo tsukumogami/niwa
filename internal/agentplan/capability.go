@@ -140,6 +140,11 @@ const (
 	// appended rather than placed beside the other dispatch rows so rows 23 and
 	// 24 keep the numbers comments and the capability-contract PRD cite.
 	DispatchInboundAcceptance
+
+	// DispatchResourceAttributes is a dispatched background worker carrying
+	// niwa's lineage resource attributes on its telemetry, beside the ones the
+	// developer's own settings set (row 26).
+	DispatchResourceAttributes
 )
 
 // Route names how a capability's delivery reaches a session. It is a property
@@ -201,6 +206,7 @@ var catalog = []capabilityRow{
 	{DirectoryTrust, "directory-trust", RouteProcedure},
 	{GitExcludeBookkeeping, "git-exclude-bookkeeping", RouteProcedure},
 	{DispatchInboundAcceptance, "dispatch-inbound-acceptance", RouteLaunch},
+	{DispatchResourceAttributes, "dispatch-resource-attributes", RouteLaunch},
 }
 
 // All returns every capability in matrix order. The result is a fresh slice, so

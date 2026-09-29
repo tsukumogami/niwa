@@ -384,6 +384,18 @@ var declarations = []Declaration{
 		Kind:   ReasonNoSuchConcept,
 		Reason: "Codex has no setting for accepting messages from other sessions.",
 	},
+
+	// Row 26: a dispatched worker carrying niwa's lineage resource attributes.
+	// The delivery is the environment key in the launch settings document niwa
+	// dispatch already builds, so it exists only where niwa launches the
+	// worker, which is the edge to row 22.
+	{Capability: DispatchResourceAttributes, Agent: agent.AgentClaude, State: StateImplemented, Requires: []Capability{DispatchLaunch}},
+	{
+		Capability: DispatchResourceAttributes, Agent: agent.AgentCodex,
+		State:  StateUnavailable,
+		Kind:   ReasonNotBuilt,
+		Reason: "A Codex launch has no settings document to carry the attributes, and whether its telemetry reads them from the launch environment is unverified.",
+	},
 }
 
 // Lookup returns the declaration for one (capability, agent) pair.
