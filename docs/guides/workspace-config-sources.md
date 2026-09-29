@@ -728,6 +728,23 @@ remote_control_on_dispatch = true
 
 See `docs/guides/remote-control-on-dispatch.md` for the full walkthrough.
 
+## Commit and PR attribution {#claude-attribution}
+
+Claude Code asks its sessions to end commit messages and pull request
+descriptions with attribution lines. A workspace that doesn't want them sets
+`attribution = "false"` under `[claude.settings]`:
+
+```toml
+[claude.settings]
+attribution = "false"
+```
+
+niwa writes it into every settings file it materializes as
+`"attribution": {"commit": "", "pr": "", "sessionUrl": false}`, the object form.
+Recent Claude Code also accepts a bare `false`, but older versions reject that
+and then ignore the whole settings file. `"true"` is Claude Code's default and
+writes nothing. Any other value fails the apply.
+
 ## Claude marketplaces {#claude-marketplaces}
 
 The `[claude]` block's `marketplaces` setting lists the Claude Code

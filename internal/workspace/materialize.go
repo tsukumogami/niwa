@@ -790,6 +790,22 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 		doc[config.KeepAliveOnDispatchKey] = b
 	}
 
+	// attribution: "false" hides every commit and PR attribution line Claude
+	// Code would otherwise ask for. It is written in the object form rather
+	// than as a bare boolean because Claude Code versions that predate the
+	// boolean form reject it and then ignore the whole settings file. "true"
+	// is Claude Code's default and emits nothing.
+	if at, ok := cfg.Settings[config.AttributionKey]; ok {
+		raw := maybeSecretString(at)
+		b, err := strconv.ParseBool(strings.TrimSpace(raw))
+		if err != nil {
+			return nil, settingValueError("invalid value", config.AttributionKey, at, `want "true" or "false"`)
+		}
+		if !b {
+			doc[config.AttributionKey] = map[string]any{"commit": "", "pr": "", "sessionUrl": false}
+		}
+	}
+
 	// Build hooks block from installed hooks.
 	hooksDoc := make(map[string]any, len(cfg.InstalledHooks))
 	if len(cfg.InstalledHooks) > 0 {

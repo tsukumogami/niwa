@@ -476,6 +476,16 @@ const CrossSessionInboundKey = "crossSessionInbound"
 // reader (the reader's struct tag cannot reference a const, so a test pins it).
 const KeepAliveOnDispatchKey = "keepAliveOnDispatch"
 
+// AttributionKey is the Claude Code settings key that controls the attribution
+// Claude Code asks sessions to add to commits and pull requests (a co-author or
+// session trailer on commits, a session link in PR descriptions). Under
+// [claude.settings] it accepts only "true" (Claude Code's default, emitted as
+// nothing) or "false", which the materializer writes as the object form with
+// every field emptied. Claude Code also accepts a bare `false` here, but
+// versions older than that form reject it and skip the whole settings file, so
+// the object form is the one that is safe across versions.
+const AttributionKey = "attribution"
+
 // EnvConfig defines environment configuration under [env]. It carries a list
 // of env files, a non-sensitive var map ([env.vars]) and a sensitive var map
 // ([env.secrets]), plus the three requirement-description sub-tables under
