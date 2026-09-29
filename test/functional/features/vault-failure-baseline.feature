@@ -33,14 +33,26 @@ Feature: vault failure handling baseline
   # the auth-failure markers, so the export failure was a hard resolver error
   # and apply failed with "infisical: export exited 1: error: No valid login
   # session found". The session probe now lists no session, the failure is
-  # classified unauthenticated, and the key it blocked is a tolerated mark.
+  # classified unauthenticated, and with nothing stored to fall back on the
+  # key it blocked is a tolerated mark.
   Scenario: a logged-out export leaves a tolerated mark and niwa apply succeeds
-    Given I set env "INFISICAL_STUB_EXPORT_FAIL" to "no-valid-session"
+    Given the secret store is empty
+    And I set env "INFISICAL_STUB_EXPORT_FAIL" to "no-valid-session"
     And I set env "INFISICAL_STUB_LOGIN_STATUS" to "none"
     When I run "niwa apply myws"
     Then the exit code is 0
     And the error output does not contain "export exited 1"
     And the error output contains "the infisical provider could not be reached"
+
+  # The create above stored what it resolved, so a logged-out apply is served
+  # from the store and no key is reported missing.
+  Scenario: a logged-out export after a successful create is served from the store
+    Given I set env "INFISICAL_STUB_EXPORT_FAIL" to "no-valid-session"
+    And I set env "INFISICAL_STUB_LOGIN_STATUS" to "none"
+    When I run "niwa apply myws"
+    Then the exit code is 0
+    And the error output does not contain "export exited 1"
+    And the error output does not contain "could not be reached"
 
   # A successful resolution reads each folder once and never asks the CLI
   # about its login session.

@@ -90,7 +90,20 @@ func theInfisicalStubHoldsSecret(ctx context.Context, key, value, project, folde
 	return os.WriteFile(filepath.Join(dir, key), []byte(value), 0o600)
 }
 
+// theSecretStoreIsEmpty removes the store of last-resolved values from the
+// scenario's sandboxed HOME (buildEnv drops XDG_STATE_HOME, so the store
+// lives under $HOME/.local/state), so a failing export has nothing to fall
+// back on.
+func theSecretStoreIsEmpty(ctx context.Context) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	return os.RemoveAll(filepath.Join(s.homeDir, ".local", "state", "niwa", "secret-cache"))
+}
+
 func registerVaultFailureSteps(ctx *godog.ScenarioContext) {
+	ctx.Step(`^the secret store is empty$`, theSecretStoreIsEmpty)
 	ctx.Step(`^the infisical stub logs its invocations$`, theInfisicalStubLogsItsInvocations)
 	ctx.Step(`^the infisical stub logged (\d+) "([^"]*)" invocations?$`, theInfisicalStubLoggedInvocations)
 	ctx.Step(`^the infisical stub holds "([^"]*)" = "([^"]*)" in project "([^"]*)" at path "([^"]*)"$`, theInfisicalStubHoldsSecret)
