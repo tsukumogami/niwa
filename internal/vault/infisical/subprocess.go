@@ -175,7 +175,8 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 // unchanged. An unauthenticated or unreachable failure also matches
 // vault.ErrProviderUnreachable; an answered one keeps exactly the
 // sentinel listed above. A start failure carries no class, and neither
-// does a non-zero exit the caller's own ctx caused.
+// does any failure the caller's own ctx ended, during the export or
+// during the probe that classifies it.
 //
 // All returned errors are wrapped via secret.Errorf so that later
 // re-wraps by the resolver continue to scrub any late-registered

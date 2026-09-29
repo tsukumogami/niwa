@@ -31,7 +31,11 @@ type loginStatusSession struct {
 }
 
 // loginStatusOutput is the top-level shape of `infisical login
-// status --json`.
+// status --json`, as DetectSessionStatus reads it: output without a
+// sessions list simply has no authenticated session. The classifier's
+// runProbe decodes the same JSON more strictly on purpose, treating
+// output without a sessions list as no answer at all; keep the two
+// apart.
 type loginStatusOutput struct {
 	Sessions []loginStatusSession `json:"sessions"`
 }

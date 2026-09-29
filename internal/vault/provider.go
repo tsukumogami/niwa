@@ -51,8 +51,14 @@ type Provider interface {
 	//
 	// Resolve must return ErrKeyNotFound when the key does not exist
 	// and ErrProviderUnreachable when the backend cannot be contacted
-	// (auth failure, network error, CLI not installed). Other errors
-	// may be wrapped with secret.Errorf.
+	// (auth failure, network error), narrowed to ErrClientNotInstalled
+	// when its client binary is missing. Other errors may be wrapped
+	// with secret.Errorf.
+	//
+	// A backend that can tell why a call failed returns the failure
+	// as a *ClassifiedError built with Classify, so callers can act on
+	// the class (errors.As with *FailureClass) while the text stays
+	// the backend's own. A missing client carries no class.
 	Resolve(ctx context.Context, ref Ref) (secret.Value, VersionToken, error)
 
 	// Close releases any resources held by the provider (subprocess
