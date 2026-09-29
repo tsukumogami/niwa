@@ -142,7 +142,10 @@ type Bundle struct {
 // CloseAll on the returned bundle closes b's providers (through
 // b.CloseAll), never the wrappers, so the underlying providers are
 // closed exactly once whether the caller closes the wrapped bundle,
-// the original, or both.
+// the original, or both. A wrapper's own Close is never called, so a
+// wrap func must return providers with nothing to release; anything a
+// wrapper buffers has to be flushed some other way. wrap runs while b
+// is locked and must not call back into b.
 func (b *Bundle) Wrap(wrap func(Provider) Provider) *Bundle {
 	b.mu.Lock()
 	defer b.mu.Unlock()

@@ -1,5 +1,9 @@
 package infisical
 
+// Tests for failure classification. Comments such as "R2" or "R9" name
+// requirements in docs/prds/PRD-dispatch-offline-secrets.md; the
+// "rules" classify.go numbers are the ordered rules inside its R2.
+
 import (
 	"context"
 	"errors"
@@ -91,9 +95,9 @@ func goldenErrorText(t *testing.T, name string) string {
 	return text
 }
 
-// todaysTolerated is the text a 401/403 export failure has always
+// toleratedAuthFailureText is the text a 401/403 export failure has always
 // produced: the auth-failure wording wrapping ErrProviderUnreachable.
-func todaysTolerated(stderr string) string {
+func toleratedAuthFailureText(stderr string) string {
 	return "infisical: export exited 1 (auth failure): " + strings.TrimSpace(stderr) + ": " + vault.ErrProviderUnreachable.Error()
 }
 
@@ -128,21 +132,21 @@ func TestClassifyExportFailure(t *testing.T) {
 		// R2: other probe answers.
 		{name: "verification unknown", stderr: stderrNoValidSession, probe: probeUnverified, want: unreachable, wantProbes: 1, fixture: "logged-out-no-valid-session"},
 		{name: "malformed token", stderr: stderrConnRefused, probeErr: "error: token is malformed\n", want: loggedOut, wantProbes: 1, fixture: "connection-refused"},
-		{name: "403 verified on another domain", stderr: stderrResponse403, probe: probeOtherDomain, want: withStatus(answered, 403), wantProbes: 1, text: todaysTolerated(stderrResponse403)},
+		{name: "403 verified on another domain", stderr: stderrResponse403, probe: probeOtherDomain, want: withStatus(answered, 403), wantProbes: 1, text: toleratedAuthFailureText(stderrResponse403)},
 		{name: "expired first then verified", stderr: stderrNoValidSession, probe: probeExpiredThen, want: loggedOut, wantProbes: 1, fixture: "logged-out-no-valid-session"},
 		{name: "verified first then expired", stderr: stderrConnRefused, probe: probeVerifiedThe, want: unreachable, wantProbes: 1, fixture: "connection-refused"},
 		{name: "pending session", stderr: stderrConnRefused, probe: probePending, want: unreachable, wantProbes: 1, fixture: "connection-refused"},
 		{name: "env token session rejected, stored login listed first", stderr: stderrConnRefused, probe: probeEnvRejected, envToken: "t", want: loggedOut, wantProbes: 1, fixture: "connection-refused"},
-		{name: "env token session rejected with a 401", stderr: stderrResponse401, probe: probeEnvRejected, envToken: "t", want: withStatus(loggedOut, 401), wantProbes: 1, text: todaysTolerated(stderrResponse401)},
+		{name: "env token session rejected with a 401", stderr: stderrResponse401, probe: probeEnvRejected, envToken: "t", want: withStatus(loggedOut, 401), wantProbes: 1, text: toleratedAuthFailureText(stderrResponse401)},
 		{name: "env token set, no session names it", stderr: stderrConnRefused, probe: probeVerified, envToken: "t", want: loggedOut, wantProbes: 1, fixture: "connection-refused"},
 		// R2, R11: server responses.
 		{name: "404 with a probe that would time out", stderr: stderrResponse404, probeHang: true, want: withStatus(answered, 404), fixture: "response-404"},
 		{name: "404 with no sessions", stderr: stderrResponse404, probe: probeNoSessions, want: withStatus(answered, 404), fixture: "response-404"},
 		{name: "404 with an expired session", stderr: stderrResponse404, probe: probeExpired, want: withStatus(answered, 404), fixture: "response-404"},
-		{name: "401 with a timed-out probe", stderr: stderrResponse401, probeHang: true, want: withStatus(loggedOut, 401), wantProbes: 1, text: todaysTolerated(stderrResponse401)},
-		{name: "403 with a timed-out probe", stderr: stderrResponse403, probeHang: true, want: withStatus(loggedOut, 403), wantProbes: 1, text: todaysTolerated(stderrResponse403)},
-		{name: "403 with an expired session", stderr: stderrResponse403, probe: probeExpired, want: withStatus(loggedOut, 403), wantProbes: 1, text: todaysTolerated(stderrResponse403)},
-		{name: "403 with no sessions", stderr: stderrResponse403, probe: probeNoSessions, want: withStatus(loggedOut, 403), wantProbes: 1, text: todaysTolerated(stderrResponse403)},
+		{name: "401 with a timed-out probe", stderr: stderrResponse401, probeHang: true, want: withStatus(loggedOut, 401), wantProbes: 1, text: toleratedAuthFailureText(stderrResponse401)},
+		{name: "403 with a timed-out probe", stderr: stderrResponse403, probeHang: true, want: withStatus(loggedOut, 403), wantProbes: 1, text: toleratedAuthFailureText(stderrResponse403)},
+		{name: "403 with an expired session", stderr: stderrResponse403, probe: probeExpired, want: withStatus(loggedOut, 403), wantProbes: 1, text: toleratedAuthFailureText(stderrResponse403)},
+		{name: "403 with no sessions", stderr: stderrResponse403, probe: probeNoSessions, want: withStatus(loggedOut, 403), wantProbes: 1, text: toleratedAuthFailureText(stderrResponse403)},
 		// R2: no server response.
 		{name: "connection refused, verified", stderr: stderrConnRefused, probe: probeVerified, want: unreachable, wantProbes: 1, fixture: "connection-refused"},
 		{name: "logged out, no sessions", stderr: stderrNoValidSession, probe: probeNoSessions, want: loggedOut, wantProbes: 1, fixture: "logged-out-no-valid-session"},
@@ -157,12 +161,12 @@ func TestClassifyExportFailure(t *testing.T) {
 		// R2, R4, R6: a server response beats the wording.
 		{name: "wording and 404, verified", stderr: stderrLoggedOutAnd404, probe: probeVerified, want: withStatus(answered, 404), fixture: "logged-out-and-response-404"},
 		// R6: answered failures keep today's handling.
-		{name: "403 verified", stderr: stderrResponse403, probe: probeVerified, want: withStatus(answered, 403), wantProbes: 1, text: todaysTolerated(stderrResponse403)},
+		{name: "403 verified", stderr: stderrResponse403, probe: probeVerified, want: withStatus(answered, 403), wantProbes: 1, text: toleratedAuthFailureText(stderrResponse403)},
 		{name: "500 verified", stderr: stderrResponse500, probe: probeVerified, want: withStatus(answered, 500), fixture: "response-500"},
 		// Only a line that begins with "Response Code: " is a response.
-		{name: "status digits elsewhere", stderr: "error: upstream said 404 Response Code: 404 at 10.0.0.1:403\n", probe: probeVerified, want: unreachable, wantProbes: 1, text: todaysTolerated("error: upstream said 404 Response Code: 404 at 10.0.0.1:403")},
+		{name: "status digits elsewhere", stderr: "error: upstream said 404 Response Code: 404 at 10.0.0.1:403\n", probe: probeVerified, want: unreachable, wantProbes: 1, text: toleratedAuthFailureText("error: upstream said 404 Response Code: 404 at 10.0.0.1:403")},
 		// R3: a minted principal is never probed.
-		{name: "minted 401", stderr: stderrResponse401, minted: true, want: withStatus(answered, 401), text: todaysTolerated(stderrResponse401)},
+		{name: "minted 401", stderr: stderrResponse401, minted: true, want: withStatus(answered, 401), text: toleratedAuthFailureText(stderrResponse401)},
 		{name: "minted 404", stderr: stderrResponse404, minted: true, want: withStatus(answered, 404), fixture: "response-404"},
 		{name: "minted connection refused", stderr: stderrConnRefused, minted: true, want: unreachable, fixture: "connection-refused"},
 		{name: "minted timeout", exportHang: true, minted: true, want: timedOut, text: "infisical: export timed out after 100ms: vault: provider unreachable"},

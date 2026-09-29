@@ -218,7 +218,11 @@ type Provider struct {
 	path    string // Factory.Open-time default path (used when Ref.Path is empty)
 	token   string // optional JWT for multi-org auth; passed via --token to subprocess
 	// apiDomain is the normalised scheme and host of the provider's
-	// API URL: the store identity's domain and the run-state key.
+	// API URL: the store identity's domain and the run-state key. It
+	// comes from niwa's configuration, not from the CLI, which picks
+	// its own server; the two can differ (a CLI logged in to another
+	// region with no api_url in niwa's config), so a verdict keyed on it
+	// is per configured domain, not per server the CLI talked to.
 	apiDomain string
 
 	commander commander
@@ -300,8 +304,12 @@ func (p *Provider) minted() bool {
 // hit the cache.
 //
 // Returns vault.ErrKeyNotFound when the requested key is not present
-// in the exported payload, and vault.ErrProviderUnreachable when the
-// CLI exits non-zero with an auth-failure marker in stderr.
+// in the exported payload. A failed export returns a
+// *vault.ClassifiedError (see runInfisicalExport); it matches
+// vault.ErrProviderUnreachable when classified unauthenticated or
+// unreachable, when an export skipped because of an earlier verdict in
+// the run, and for an answered failure whose stderr carries an
+// auth-failure marker.
 func (p *Provider) Resolve(ctx context.Context, ref vault.Ref) (secret.Value, vault.VersionToken, error) {
 	effPath := p.effectivePath(ref)
 	if err := p.ensureLoaded(ctx, effPath); err != nil {
@@ -481,9 +489,9 @@ func skippedExportError(domain string, class vault.FailureClass) error {
 	case class.Reason == vault.ReasonTimedOut:
 		what = "timed out"
 	}
-	return classified(
+	return vault.Classify(
 		fmt.Errorf("infisical: export for %s skipped: an earlier call in this run %s", domain, what),
-		vault.FailureClass{Class: class.Class, Reason: class.Reason},
+		class,
 	)
 }
 

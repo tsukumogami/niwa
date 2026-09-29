@@ -177,6 +177,9 @@ type goldenScenario struct {
 	// classification changed on purpose: its fixture still records the
 	// hard error it produced before, and the test asserts the new
 	// outcome (a tolerated mark carrying want) instead of matching it.
+	// Those fixtures are snapshots of the pre-classification behaviour,
+	// not of what the code does now; -update leaves them alone on
+	// purpose, since the test returns before checkGolden.
 	reclassified bool
 	want         vault.FailureClass
 }

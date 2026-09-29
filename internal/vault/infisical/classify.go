@@ -132,6 +132,11 @@ func decidingSession(sessions []loginStatusSession) *loginStatusSession {
 // timed out. For a minted principal it needs nothing but the export.
 // For a CLI-session principal it runs the probe, unless the export's
 // own server response already decides.
+//
+// The numbered rules below are the six ordered rules of requirement R2
+// in docs/prds/PRD-dispatch-offline-secrets.md, applied first match
+// wins; the minted branch is that PRD's R3, and the wording fallback
+// its R4.
 func classifyExportFailure(ctx context.Context, c commander, f exportFailure) vault.FailureClass {
 	status := f.responseStatus()
 	answered := vault.FailureClass{Class: vault.ClassAnswered, HTTPStatus: status}
@@ -176,7 +181,9 @@ func classifyExportFailure(ctx context.Context, c commander, f exportFailure) va
 	case probe.parsed && deciding == nil:
 		return unauthenticated
 	// Wording fallback: the probe gave no usable answer, so the CLI's
-	// own logged-out message decides.
+	// own logged-out message decides. It must stay below rules 1, 3
+	// and 4: they have already taken every export with a server
+	// response, and the wording must never override one.
 	case !probe.parsed && hasLoggedOutWording(f.stderr):
 		return unauthenticated
 	}
@@ -203,27 +210,4 @@ func hasLoggedOutWording(stderr string) bool {
 		}
 	}
 	return false
-}
-
-// unreachableError keeps an error's text exactly while adding
-// vault.ErrProviderUnreachable to its chain. An unauthenticated or
-// unreachable failure must match that sentinel (credential sync and
-// the key report soften it), but its text must stay what the export
-// error said before classification existed.
-type unreachableError struct{ err error }
-
-func (e *unreachableError) Error() string { return e.err.Error() }
-
-func (e *unreachableError) Unwrap() []error {
-	return []error{e.err, vault.ErrProviderUnreachable}
-}
-
-// classified attaches class to err. An unauthenticated or unreachable
-// class makes sure err matches vault.ErrProviderUnreachable without
-// changing its text.
-func classified(err error, class vault.FailureClass) error {
-	if class.Class != vault.ClassAnswered && !errors.Is(err, vault.ErrProviderUnreachable) {
-		err = &unreachableError{err: err}
-	}
-	return &vault.ClassifiedError{Err: err, Class: class}
 }

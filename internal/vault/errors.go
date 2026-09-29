@@ -137,3 +137,25 @@ func (e *ClassifiedError) Error() string { return e.Err.Error() }
 
 // Unwrap returns the inner error and the class.
 func (e *ClassifiedError) Unwrap() []error { return []error{e.Err, &e.Class} }
+
+// Classify attaches class to err and is how a backend should build a
+// ClassifiedError. An unauthenticated or unreachable failure must match
+// ErrProviderUnreachable (callers that soften that condition, such as
+// credential sync and the key report, keep doing so), but its text must
+// stay what the backend said: when err doesn't already carry the
+// sentinel, Classify adds it without touching the text. An answered
+// failure keeps exactly the sentinels err has.
+func Classify(err error, class FailureClass) error {
+	if class.Class != ClassAnswered && !errors.Is(err, ErrProviderUnreachable) {
+		err = &unreachableError{err: err}
+	}
+	return &ClassifiedError{Err: err, Class: class}
+}
+
+// unreachableError keeps an error's text exactly while adding
+// ErrProviderUnreachable to its chain.
+type unreachableError struct{ err error }
+
+func (e *unreachableError) Error() string { return e.err.Error() }
+
+func (e *unreachableError) Unwrap() []error { return []error{e.err, ErrProviderUnreachable} }

@@ -26,7 +26,8 @@ type domainVerdict struct {
 	unreachableReason Reason
 	unauthenticated   bool
 	// unauthFirst is true when the unauthenticated verdict was
-	// recorded before any unreachable one.
+	// recorded before any unreachable one (so also whenever there is
+	// no unreachable verdict at all).
 	unauthFirst bool
 }
 
@@ -111,7 +112,7 @@ func (s *RunState) Check(domain string, minted bool) (FailureClass, bool) {
 	unauth := FailureClass{Class: ClassUnauthenticated, Reason: ReasonLoggedOut}
 	unreach := FailureClass{Class: ClassUnreachable, Reason: v.unreachableReason}
 	switch {
-	case !minted && v.unauthenticated && (v.unauthFirst || !v.unreachable):
+	case !minted && v.unauthenticated && v.unauthFirst:
 		return unauth, true
 	case v.unreachable:
 		return unreach, true

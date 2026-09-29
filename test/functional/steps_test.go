@@ -143,7 +143,12 @@ func (s *testState) buildEnv() []string {
 //   - `login status --json` -- emits the shape confirmed in
 //     NOTE-onboard-rest-verification.md. Controlled by INFISICAL_STUB_LOGIN_STATUS
 //     ("authenticated" [default] or anything else for "no session") and
-//     INFISICAL_STUB_LOGIN_ORG (org id, default "test-org").
+//     INFISICAL_STUB_LOGIN_ORG (org id, default "test-org"). The default
+//     session carries no verification state, so niwa's export-failure
+//     classifier never treats it as vouched for: a failed export under it
+//     classifies unreachable (or unauthenticated for a 401/403), never as
+//     a refusal the server answered. "no session" classifies a failed
+//     export as a lapsed login.
 //   - `secrets folders create` -- exits 0 by default; INFISICAL_STUB_PLAN_GATE=1
 //     or INFISICAL_STUB_FOLDER_CREATE_FAIL=1 forces a non-zero exit with a
 //     recognisable stderr message, so a scenario can seed a plan-gate or a

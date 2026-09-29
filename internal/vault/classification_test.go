@@ -50,6 +50,36 @@ func TestClassifiedError(t *testing.T) {
 	}
 }
 
+// Classify adds ErrProviderUnreachable to an unauthenticated or
+// unreachable failure without changing its text, and leaves an answered
+// failure's sentinels alone.
+func TestClassify(t *testing.T) {
+	plain := errors.New("infisical: export exited 1: error: No valid login session found")
+	for _, kind := range []vault.FailureKind{vault.ClassUnauthenticated, vault.ClassUnreachable} {
+		err := vault.Classify(plain, vault.FailureClass{Class: kind})
+		if err.Error() != plain.Error() {
+			t.Errorf("%s: text = %q, want %q", kind, err.Error(), plain.Error())
+		}
+		if !errors.Is(err, vault.ErrProviderUnreachable) || !errors.Is(err, plain) {
+			t.Errorf("%s: want both ErrProviderUnreachable and the inner error in the chain", kind)
+		}
+		var fc *vault.FailureClass
+		if !errors.As(err, &fc) || fc.Class != kind {
+			t.Errorf("%s: class not found", kind)
+		}
+	}
+	answered := vault.Classify(plain, vault.FailureClass{Class: vault.ClassAnswered})
+	if errors.Is(answered, vault.ErrProviderUnreachable) || answered.Error() != plain.Error() {
+		t.Errorf("answered: %v gained a sentinel or changed text", answered)
+	}
+	// An error that already carries the sentinel isn't wrapped again.
+	already := fmt.Errorf("x: %w", vault.ErrProviderUnreachable)
+	ce := vault.Classify(already, vault.FailureClass{Class: vault.ClassUnreachable}).(*vault.ClassifiedError)
+	if ce.Err != already {
+		t.Errorf("inner error rewrapped: %T", ce.Err)
+	}
+}
+
 func TestNormalizeIdentity(t *testing.T) {
 	cases := []struct {
 		in, wantDomain, wantPath string

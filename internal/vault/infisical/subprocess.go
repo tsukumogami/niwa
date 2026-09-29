@@ -161,8 +161,10 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 //   - A non-zero exit with recognisable auth markers in (scrubbed)
 //     stderr maps to vault.ErrProviderUnreachable and NOT to
 //     vault.ErrClientNotInstalled: the client ran, so it is present.
-//   - A non-zero exit without auth markers is treated as a generic
-//     provider error (wrapped via secret.Errorf, stderr scrubbed).
+//   - A non-zero exit without auth markers is a generic provider
+//     error (wrapped via secret.Errorf, stderr scrubbed), which also
+//     matches vault.ErrProviderUnreachable when it is classified
+//     unauthenticated or unreachable (below).
 //   - Malformed JSON stdout is a generic provider error.
 //   - When the caller's own ctx ends the call, that is not a timeout:
 //     the killed child comes back as the generic "export exited -1"
@@ -173,7 +175,7 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 // unchanged. An unauthenticated or unreachable failure also matches
 // vault.ErrProviderUnreachable; an answered one keeps exactly the
 // sentinel listed above. A start failure carries no class, and neither
-// does a failure the caller's own ctx caused.
+// does a non-zero exit the caller's own ctx caused.
 //
 // All returned errors are wrapped via secret.Errorf so that later
 // re-wraps by the resolver continue to scrub any late-registered
@@ -233,7 +235,7 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 			timedOut: true,
 			minted:   minted,
 		})
-		return nil, vault.VersionToken{}, classified(exportTimedOutError(bound), class)
+		return nil, vault.VersionToken{}, vault.Classify(exportTimedOutError(bound), class)
 	}
 	// ErrWaitDelay means the process started and exited; it only
 	// lands here when the caller's context was done, and the exit
@@ -283,7 +285,7 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 			stderr: scrubbed,
 			minted: minted,
 		})
-		return nil, vault.VersionToken{}, classified(exportErr, class)
+		return nil, vault.VersionToken{}, vault.Classify(exportErr, class)
 	}
 
 	values, parseErr := parseExportJSON(stdout)
@@ -291,7 +293,7 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 		// The export exited 0, so the service answered; output niwa
 		// can't read is not a lapse and needs no probe.
 		scrubbed := vault.ScrubStderr(ctx, stderrBytes)
-		return nil, vault.VersionToken{}, classified(secret.Errorf(
+		return nil, vault.VersionToken{}, vault.Classify(secret.Errorf(
 			"infisical: parsing export output (stderr=%q): %w",
 			strings.TrimSpace(scrubbed), parseErr,
 		), vault.FailureClass{Class: vault.ClassAnswered})
