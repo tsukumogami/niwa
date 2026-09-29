@@ -1,7 +1,6 @@
 ---
 schema: prd/v1
 status: Accepted
-upstream: docs/briefs/BRIEF-dispatch-offline-secrets.md
 problem: |
   niwa resolves vault secrets at provisioning time by running the Infisical CLI under the
   operator's login. When that login is missing or expired, the CLI's message matches none of
@@ -14,6 +13,8 @@ goals: |
   on the last values that resolved for that provider, and says so
   on every run with the provider, the age of the values and the re-login command. Apart from
   new time bounds on vault calls, everything outside that fallback behaves as it does today.
+absorbed:
+  - docs/briefs/BRIEF-dispatch-offline-secrets.md
 ---
 
 # PRD: Provisioning keeps working when the vault login lapses
@@ -21,6 +22,21 @@ goals: |
 ## Status
 
 Accepted
+
+Absorbed [BRIEF-dispatch-offline-secrets](docs/briefs/BRIEF-dispatch-offline-secrets.md); carried in Absorbed Brief.
+
+## Absorbed Brief
+
+The feature exists because provisioning depends on a vault login being alive at the moment it
+runs, and on an unattended host that login lapses with nobody there to renew it. The brief
+framed the outcome from the owner's side: sessions left running keep starting workers after
+the login lapses, on the last values that resolved, and every such run says plainly which
+provider was unavailable, how old the values are and how to log back in. Configuration
+changes that a stale value would hide still reach the owner, and logging back in ends the
+fallback with nothing to clear by hand. This document's Problem Statement, Goals and User
+Stories carry that framing in full, and its Out of Scope carries the brief's exclusions:
+keyring storage, changes to how instances are written, logging in on the owner's behalf,
+other vault backends and offline provisioning.
 
 ## Problem Statement
 
@@ -569,7 +585,7 @@ changes, and the criteria compare against those fixtures.
   today and added a new way for unattended runs to fail. The rule adopted instead: outside the
   fallback, behaviour stays exactly as it is.
 - **With nothing stored, missing keys keep today's handling rather than always failing.** The
-  brief framed a first run with nothing stored as a failure. R17 fails only where today's rules
+  framing this PRD absorbed treated a first run with nothing stored as a failure. R17 fails only where today's rules
   already fail (a required key, or strict mode) and otherwise adds a message. Always failing
   would make optional keys fatal on a logged-out host, a new unattended failure that today's
   behaviour doesn't have.
