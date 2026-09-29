@@ -34,6 +34,13 @@ func writeInfisicalStub(t *testing.T, body string) string {
 	return path
 }
 
+// probeAnswersAtOnce is a stub prefix that answers the session probe
+// (`infisical login status`) immediately with no sessions, so a test
+// timing an export measures the export's bound and not the probe's
+// that classifies it afterwards.
+const probeAnswersAtOnce = `if [ "$1" = login ]; then echo '{"sessions":[]}'; exit 0; fi
+`
+
 // putStubOnPath makes the stub the first "infisical" on PATH for the
 // rest of the test, ahead of any real client the host has installed.
 func putStubOnPath(t *testing.T, stub string) {
@@ -152,7 +159,7 @@ func assertExportTimeout(t *testing.T, err error, bound string) {
 func TestRunInfisicalExport_HangingStubTimesOut(t *testing.T) {
 	quietOverride(t, "500ms")
 	kills := countGroupKills(t)
-	putStubOnPath(t, writeInfisicalStub(t, "sleep 600"))
+	putStubOnPath(t, writeInfisicalStub(t, probeAnswersAtOnce+"sleep 600"))
 
 	start := time.Now()
 	_, _, err := runInfisicalExport(context.Background(), nil, "proj", "dev", "/", "")
@@ -185,7 +192,7 @@ func TestRunInfisicalExport_ForkedChildHoldingStdout(t *testing.T) {
 			quietOverride(t, "500ms")
 			pidFile := filepath.Join(t.TempDir(), "child.pid")
 			t.Setenv("STUB_CHILD_PID_FILE", pidFile)
-			putStubOnPath(t, writeInfisicalStub(t, `sleep 600 &
+			putStubOnPath(t, writeInfisicalStub(t, probeAnswersAtOnce+`sleep 600 &
 echo $! > "$STUB_CHILD_PID_FILE"
 `+tc.tail))
 
@@ -308,7 +315,7 @@ func TestRunInfisicalExport_RealBound(t *testing.T) {
 	if os.Getenv(testTimeoutEnv) != "" {
 		t.Skipf("%s is set in the environment; this test needs the real bound", testTimeoutEnv)
 	}
-	c := stubCommander{path: writeInfisicalStub(t, "sleep 600")}
+	c := stubCommander{path: writeInfisicalStub(t, probeAnswersAtOnce+"sleep 600")}
 
 	start := time.Now()
 	_, _, err := runInfisicalExport(context.Background(), c, "proj", "dev", "/", "")

@@ -24,6 +24,8 @@ package vault
 
 import (
 	"context"
+	"net/url"
+	"strings"
 
 	"github.com/tsukumogami/niwa/internal/secret"
 )
@@ -175,4 +177,53 @@ type ProviderSpec struct {
 	// error messages for user orientation (e.g., "provider 'team'
 	// declared in /path/to/niwa.toml").
 	Source string
+}
+
+// Identity names the store of values one reference resolves from: the
+// backend kind, the API domain, the project, the environment and the
+// effective folder path. Two references with the same Identity read
+// the same folder of the same project. None of the fields is secret.
+type Identity struct {
+	Kind        string
+	APIDomain   string
+	ProjectID   string
+	Environment string
+	FolderPath  string
+}
+
+// StoreIdentifier is an optional Provider extension for backends whose
+// resolved values can be remembered per Identity. ok is false when the
+// provider cannot name one for ref.
+type StoreIdentifier interface {
+	StoreIdentity(ref Ref) (id Identity, ok bool)
+}
+
+// NormalizeIdentity returns id in the one canonical form every
+// consumer compares and hashes: the API domain as lower-cased scheme
+// and host (no userinfo, path or trailing slash), and the folder path
+// with a leading "/" and no trailing "/". It is the only normalisation
+// of an Identity in niwa, so a provider's StoreIdentity and anything
+// keyed on its result always agree.
+func NormalizeIdentity(id Identity) Identity {
+	id.APIDomain = normalizeAPIDomain(id.APIDomain)
+	id.FolderPath = normalizeFolderPath(id.FolderPath)
+	return id
+}
+
+// normalizeAPIDomain reduces a URL to its lower-cased scheme and host.
+// A value that doesn't parse as an absolute URL is only lower-cased
+// and stripped of trailing slashes.
+func normalizeAPIDomain(raw string) string {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return strings.ToLower(strings.TrimRight(raw, "/"))
+	}
+	return strings.ToLower(u.Scheme + "://" + u.Host)
+}
+
+// normalizeFolderPath gives p a leading "/" and drops trailing ones.
+// The empty path is the root, "/".
+func normalizeFolderPath(p string) string {
+	return "/" + strings.Trim(strings.TrimSpace(p), "/")
 }

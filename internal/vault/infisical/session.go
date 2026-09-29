@@ -10,12 +10,24 @@ import (
 // loginStatusSession models one entry of the "sessions" array emitted
 // by `infisical login status --json`, per the shape confirmed in
 // NOTE-onboard-rest-verification.md (Assumption C). Only the fields
-// the wizard's detection funnel needs are modeled; the CLI may emit
-// additional fields (authMethod, tokenSource, verification.state,
-// etc.) which are ignored here.
+// the wizard's detection funnel and the export-failure classifier
+// (classify.go) need are modeled; the CLI emits others (authMethod,
+// domain, etc.) which are ignored here.
+//
+// The struct deliberately has no field for the session's token: the
+// probe output carries one, and a field that never exists can't be
+// logged or echoed by mistake.
 type loginStatusSession struct {
 	Status       string `json:"status"`
 	Organization string `json:"organization"`
+	// TokenSource says where the CLI got the session's credential,
+	// e.g. the stored login or an environment variable.
+	TokenSource  string `json:"tokenSource"`
+	Verification struct {
+		// State is "verified" when the CLI confirmed the session
+		// with the server during this call.
+		State string `json:"state"`
+	} `json:"verification"`
 }
 
 // loginStatusOutput is the top-level shape of `infisical login

@@ -168,6 +168,12 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 //     the killed child comes back as the generic "export exited -1"
 //     error.
 //
+// Every failure of an export that started comes back as a
+// *vault.ClassifiedError (classify.go) around the error text above,
+// unchanged. An unauthenticated or unreachable failure also matches
+// vault.ErrProviderUnreachable; an answered one keeps exactly the
+// sentinel listed above. A start failure carries no class.
+//
 // All returned errors are wrapped via secret.Errorf so that later
 // re-wraps by the resolver continue to scrub any late-registered
 // fragments.
@@ -213,11 +219,20 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 	callCtx, cancel := withCallDeadline(ctx, bound)
 	defer cancel()
 	stdout, stderrBytes, exitCode, err := c.Run(callCtx, "infisical", args)
+	minted := token != ""
 	if callTimedOut(callCtx, err) {
 		// Checked first: a killed child comes back as exit -1 with no
 		// error, which the branches below would misreport as a
-		// generic failure, and a start failure can't time out.
-		return nil, vault.VersionToken{}, exportTimedOutError(bound)
+		// generic failure, and a start failure can't time out. The
+		// classifier gets the caller's ctx, not callCtx, which has
+		// expired by now.
+		class := classifyExportFailure(ctx, c, exportFailure{
+			stdout:   vault.ScrubStderr(ctx, stdout),
+			stderr:   vault.ScrubStderr(ctx, stderrBytes),
+			timedOut: true,
+			minted:   minted,
+		})
+		return nil, vault.VersionToken{}, classified(exportTimedOutError(bound), class)
 	}
 	// ErrWaitDelay means the process started and exited; it only
 	// lands here when the caller's context was done, and the exit
@@ -240,25 +255,39 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 	}
 	if exitCode != 0 {
 		scrubbed := vault.ScrubStderr(ctx, stderrBytes)
+		// The error text and sentinel are the ones niwa has always
+		// returned; the class rides alongside them. The auth markers
+		// still pick the sentinel for an answered failure, but no
+		// longer decide whether the failure is a lapse.
+		var exportErr error
 		if looksLikeAuthFailure(scrubbed) {
-			return nil, vault.VersionToken{}, secret.Errorf(
+			exportErr = secret.Errorf(
 				"infisical: export exited %d (auth failure): %s: %w",
 				exitCode, strings.TrimSpace(scrubbed), vault.ErrProviderUnreachable,
 			)
+		} else {
+			exportErr = secret.Errorf(
+				"infisical: export exited %d: %s",
+				exitCode, strings.TrimSpace(scrubbed),
+			)
 		}
-		return nil, vault.VersionToken{}, secret.Errorf(
-			"infisical: export exited %d: %s",
-			exitCode, strings.TrimSpace(scrubbed),
-		)
+		class := classifyExportFailure(ctx, c, exportFailure{
+			stdout: vault.ScrubStderr(ctx, stdout),
+			stderr: scrubbed,
+			minted: minted,
+		})
+		return nil, vault.VersionToken{}, classified(exportErr, class)
 	}
 
 	values, parseErr := parseExportJSON(stdout)
 	if parseErr != nil {
+		// The export exited 0, so the service answered; output niwa
+		// can't read is not a lapse and needs no probe.
 		scrubbed := vault.ScrubStderr(ctx, stderrBytes)
-		return nil, vault.VersionToken{}, secret.Errorf(
+		return nil, vault.VersionToken{}, classified(secret.Errorf(
 			"infisical: parsing export output (stderr=%q): %w",
 			strings.TrimSpace(scrubbed), parseErr,
-		)
+		), vault.FailureClass{Class: vault.ClassAnswered})
 	}
 
 	return values, buildVersionToken(project, values), nil
@@ -343,6 +372,11 @@ func parseExportJSON(raw []byte) (map[string]string, error) {
 // looksLikeAuthFailure scans a scrubbed stderr string for common
 // markers of an auth / login failure. The match is case-insensitive
 // and substring-based.
+//
+// It only chooses the sentinel and the "(auth failure)" wording of a
+// failed export's error, which stay what they have always been. It
+// does not decide whether the failure is a lapse: classify.go does
+// that from the server response and the session probe.
 //
 // The marker set is deliberately specific: broad tokens like "auth"
 // or "token" were removed in a v1 tightening because they

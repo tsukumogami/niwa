@@ -333,12 +333,15 @@ func TestAuthFailureMapsToUnreachable(t *testing.T) {
 }
 
 // TestGenericFailureDoesNotMapToUnreachable covers the non-zero-exit
-// + no-auth-marker path: generic errors must not be misclassified
-// as auth failures.
+// + no-auth-marker path: a failure the server answered must not be
+// misclassified as an auth failure. The stderr carries the CLI's
+// "Response Code:" line; without one, the failure would be classified
+// unreachable (the server never answered), which does match
+// ErrProviderUnreachable.
 func TestGenericFailureDoesNotMapToUnreachable(t *testing.T) {
 	cmd := &fakeCommander{
 		exitCode: 1,
-		stderr:   []byte("Error: project not found: proj-1"),
+		stderr:   []byte("Error: project not found: proj-1\nResponse Code: 404\n"),
 	}
 	p := openWithCommander(t, nil, cmd)
 	defer p.Close()
@@ -623,6 +626,14 @@ func TestTokenChangesOnRotation(t *testing.T) {
 // "auth" and "token" were removed because they misclassified
 // transient network errors (e.g., "token refresh pending") as auth
 // failures. The cases below exercise the current tighter list.
+//
+// Since failures are classified (classify.go), the markers no longer
+// decide whether a failure is a lapse: a 401 or 403 can be answered or
+// unauthenticated depending on the session probe. They only choose the
+// "(auth failure)" wording and the sentinel an answered failure has
+// always carried, so the set stays exactly as it was and so do these
+// cases; the CLI's "Response Code: 403" line still matches through
+// "403".
 func TestLooksLikeAuthFailure(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -646,6 +657,11 @@ func TestLooksLikeAuthFailure(t *testing.T) {
 		{"Error: auth scheme mismatch", false},
 		{"please run infisical login", false},
 		{"invalid token", false},
+		{"error: CallGetRawSecretsV3: Unsuccessful response.\nResponse Code: 403\n", true},
+		{"error: CallGetRawSecretsV3: Unsuccessful response.\nResponse Code: 404\n", false},
+		// A logged-out wording is not an auth marker: it only counts
+		// as a lapse through the classifier's wording fallback.
+		{"error: No valid login session found, cannot perform this action", false},
 	}
 	for _, c := range cases {
 		if got := looksLikeAuthFailure(c.in); got != c.want {
@@ -654,13 +670,19 @@ func TestLooksLikeAuthFailure(t *testing.T) {
 	}
 }
 
-// TestTransientErrorDoesNotMapToUnreachable guards the tightening
+// TestTransientErrorIsUnreachableNotAuthFailure guards the tightening
 // of looksLikeAuthFailure: a transient network error whose stderr
-// mentions "token refresh pending" must NOT be classified as an
-// auth failure. Under --allow-missing-secrets (Issue 10) that
-// classification would silently downgrade the result to empty,
-// masking a retriable fault.
-func TestTransientErrorDoesNotMapToUnreachable(t *testing.T) {
+// mentions "token refresh pending" must NOT be worded as an auth
+// failure.
+//
+// It used to also assert the error did not match
+// ErrProviderUnreachable. That changed on purpose with failure
+// classification: an export that got no server response and whose
+// session probe gave no usable answer is unreachable, and unreachable
+// failures match ErrProviderUnreachable so they become a tolerated
+// mark rather than a hard error. The text keeps today's plain
+// "export exited" wording.
+func TestTransientErrorIsUnreachableNotAuthFailure(t *testing.T) {
 	cmd := &fakeCommander{
 		exitCode: 1,
 		stderr:   []byte("Error: token refresh pending, please retry"),
@@ -672,8 +694,15 @@ func TestTransientErrorDoesNotMapToUnreachable(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Resolve should have failed")
 	}
-	if errors.Is(err, vault.ErrProviderUnreachable) {
-		t.Fatalf("transient error should NOT map to ErrProviderUnreachable: %v", err)
+	if strings.Contains(err.Error(), "auth failure") {
+		t.Fatalf("transient error worded as an auth failure: %v", err)
+	}
+	var class *vault.FailureClass
+	if !errors.As(err, &class) || class.Class != vault.ClassUnreachable || class.Reason != vault.ReasonUnreachable {
+		t.Fatalf("class = %+v, want unreachable / unreachable", class)
+	}
+	if !errors.Is(err, vault.ErrProviderUnreachable) {
+		t.Fatalf("an unreachable failure must match ErrProviderUnreachable: %v", err)
 	}
 }
 

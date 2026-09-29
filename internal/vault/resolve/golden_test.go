@@ -73,6 +73,10 @@ type goldenCommander struct {
 	stderr   string
 	exitCode int
 	startErr error
+	// probe, when set, is the stdout of `infisical login status --json`
+	// (exit 0). Unset, the probe fails like any unexpected invocation,
+	// which the classifier reads as no usable answer.
+	probe string
 
 	mu    sync.Mutex
 	calls [][]string
@@ -85,11 +89,21 @@ func (c *goldenCommander) Run(_ context.Context, _ string, args []string) ([]byt
 	if c.startErr != nil {
 		return nil, nil, -1, c.startErr
 	}
+	if c.probe != "" && len(args) >= 2 && args[0] == "login" && args[1] == "status" {
+		return []byte(c.probe), nil, 0, nil
+	}
 	if len(args) == 0 || args[0] != "export" {
 		return nil, []byte("golden stub: unexpected invocation\n"), 1, nil
 	}
 	return []byte(c.stdout), []byte(c.stderr), c.exitCode, nil
 }
+
+// Probe answers. The logged-out answer lists no session; the verified
+// one vouches for the session the export ran as.
+const (
+	probeNoSession = `{"sessions":[]}`
+	probeVerified  = `{"sessions":[{"status":"authenticated","tokenSource":"keyring","verification":{"state":"verified"}}]}`
+)
 
 // count reports how many invocations started with the given subcommand.
 func (c *goldenCommander) count(sub string) int {
@@ -157,35 +171,57 @@ type goldenScenario struct {
 	personal bool
 	// required declares the key in the required sub-table.
 	required bool
+	// probe is the session probe's answer (see goldenCommander.probe).
+	probe string
+	// reclassified marks a scenario whose outcome failure
+	// classification changed on purpose: its fixture still records the
+	// hard error it produced before, and the test asserts the new
+	// outcome (a tolerated mark carrying want) instead of matching it.
+	reclassified bool
+	want         vault.FailureClass
 }
 
 func goldenScenarios() []goldenScenario {
 	// The start error the provider sees when the binary is not on PATH.
 	notInstalled := &exec.Error{Name: "infisical", Err: exec.ErrNotFound}
+	loggedOut := vault.FailureClass{Class: vault.ClassUnauthenticated, Reason: vault.ReasonLoggedOut}
+	unreachable := vault.FailureClass{Class: vault.ClassUnreachable, Reason: vault.ReasonUnreachable}
 	return []goldenScenario{
-		{name: "logged-out-no-valid-session", stderr: stderrNoValidSession, exitCode: 1},
-		{name: "logged-out-could-not-find-login", stderr: stderrCouldNotFindLogin, exitCode: 1},
-		{name: "logged-out-session-expired", stderr: stderrSessionExpired, exitCode: 1},
+		{name: "logged-out-no-valid-session", stderr: stderrNoValidSession, exitCode: 1,
+			probe: probeNoSession, reclassified: true, want: loggedOut},
+		{name: "logged-out-could-not-find-login", stderr: stderrCouldNotFindLogin, exitCode: 1,
+			probe: probeNoSession, reclassified: true, want: loggedOut},
+		{name: "logged-out-session-expired", stderr: stderrSessionExpired, exitCode: 1,
+			probe: probeNoSession, reclassified: true, want: loggedOut},
 		{name: "response-401", stderr: stderrResponse401, exitCode: 1},
 		{name: "response-403", stderr: stderrResponse403, exitCode: 1},
 		{name: "response-404", stderr: stderrResponse404, exitCode: 1},
 		{name: "response-500", stderr: stderrResponse500, exitCode: 1},
 		{name: "logged-out-and-response-404", stderr: stderrLoggedOutAnd404, exitCode: 1},
-		{name: "connection-refused", stderr: stderrConnRefused, exitCode: 1},
+		// With no server response and a session the probe vouches for,
+		// the only explanation left is the network.
+		{name: "connection-refused", stderr: stderrConnRefused, exitCode: 1,
+			probe: probeVerified, reclassified: true, want: unreachable},
 		{name: "client-not-installed", startErr: notInstalled},
 		{name: "missing-key", stdout: fmt.Sprintf(`{"OTHER_KEY":%q}`, markerOther)},
 		{name: "required-key-response-403", stderr: stderrResponse403, exitCode: 1, required: true},
 		{name: "personal-response-403", stderr: stderrResponse403, exitCode: 1, personal: true},
-		{name: "personal-logged-out-no-valid-session", stderr: stderrNoValidSession, exitCode: 1, personal: true},
+		{name: "personal-logged-out-no-valid-session", stderr: stderrNoValidSession, exitCode: 1, personal: true,
+			probe: probeNoSession, reclassified: true, want: loggedOut},
 	}
 }
 
-// TestGoldenVaultFailureHandling pins today's error text and key report for
-// every stub scenario.
+// TestGoldenVaultFailureHandling pins the error text and key report for
+// every stub scenario: a scenario whose outcome never changed must match
+// its fixture, and a reclassified one must show its new outcome (see
+// checkReclassified).
 func TestGoldenVaultFailureHandling(t *testing.T) {
+	// The deciding probe session depends on INFISICAL_TOKEN; keep the
+	// host's value out of it.
+	t.Setenv("INFISICAL_TOKEN", "")
 	for _, sc := range goldenScenarios() {
 		t.Run(sc.name, func(t *testing.T) {
-			c := &goldenCommander{stdout: sc.stdout, stderr: sc.stderr, exitCode: sc.exitCode, startErr: sc.startErr}
+			c := &goldenCommander{stdout: sc.stdout, stderr: sc.stderr, exitCode: sc.exitCode, startErr: sc.startErr, probe: sc.probe}
 			var required []string
 			if sc.required {
 				required = []string{goldenKey}
@@ -224,9 +260,92 @@ func TestGoldenVaultFailureHandling(t *testing.T) {
 			if got := c.count("export"); got != 1 {
 				t.Fatalf("export invocations = %d, want 1", got)
 			}
+			if sc.reclassified {
+				checkReclassified(t, sc, err, keys)
+				return
+			}
 			checkGolden(t, sc.name, renderOutcome(sc.name, err, keys))
 		})
 	}
+}
+
+// checkReclassified asserts a reclassified scenario's new outcome against
+// the fixtures, without rewriting any of them:
+//
+//   - its own fixture still records the hard "export exited 1" error it
+//     produced before classification, so the change stays pinned;
+//   - the resolver now tolerates the failure as a mark, and the key report
+//     reads exactly as the fixture of the 403 scenario in the same layer
+//     (the tolerated mark recorded before the change);
+//   - the provider's own error is a ClassifiedError with the expected class,
+//     matching ErrProviderUnreachable, whose text is byte for byte the text
+//     the fixture recorded behind the resolver's prefix.
+func checkReclassified(t *testing.T, sc goldenScenario, err error, keys *keyreport.Collector) {
+	t.Helper()
+	before := readGolden(t, sc.name)
+	beforeErr, beforeReport := splitOutcome(t, before)
+	if !strings.Contains(beforeErr, "infisical: export exited 1: ") || beforeReport != "<empty>\n" {
+		t.Fatalf("fixture %s no longer records the pre-classification hard error:\n%s", sc.name, before)
+	}
+
+	if err != nil {
+		t.Fatalf("resolver error = %v, want the failure tolerated as a mark", err)
+	}
+	markFixture := "response-403"
+	if sc.personal {
+		markFixture = "personal-response-403"
+	}
+	_, wantReport := splitOutcome(t, readGolden(t, markFixture))
+	gotReport := keyreport.RenderText(keys.Report())
+	if gotReport != wantReport {
+		t.Errorf("key report differs from %s's tolerated mark\n--- want\n%s--- got\n%s", markFixture, wantReport, gotReport)
+	}
+
+	c := &goldenCommander{stdout: sc.stdout, stderr: sc.stderr, exitCode: sc.exitCode, probe: sc.probe}
+	p, openErr := infisical.NewFactory().Open(context.Background(), vault.ProviderConfig{"project": "golden-project", "_commander": c})
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	defer p.Close()
+	_, _, perr := p.Resolve(context.Background(), vault.Ref{Key: goldenKey})
+	var ce *vault.ClassifiedError
+	if !errors.As(perr, &ce) {
+		t.Fatalf("provider error = %v (%T), want a *vault.ClassifiedError", perr, perr)
+	}
+	if ce.Class.Class != sc.want.Class || ce.Class.Reason != sc.want.Reason {
+		t.Errorf("class = %s / %s, want %s / %s", ce.Class.Class, ce.Class.Reason, sc.want.Class, sc.want.Reason)
+	}
+	if !errors.Is(perr, vault.ErrProviderUnreachable) {
+		t.Errorf("provider error does not match ErrProviderUnreachable: %v", perr)
+	}
+	if !strings.HasSuffix(beforeErr, `via provider "(anonymous)": `+perr.Error()) {
+		t.Errorf("provider error text changed\nfixture: %s\ngot:     %s", beforeErr, perr.Error())
+	}
+}
+
+// readGolden returns a fixture's contents.
+func readGolden(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "golden", name+".golden"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// splitOutcome splits a renderOutcome body into its error line and its
+// key report.
+func splitOutcome(t *testing.T, body string) (errText, report string) {
+	t.Helper()
+	_, rest, ok := strings.Cut(body, "error:\n")
+	if !ok {
+		t.Fatalf("fixture has no error section:\n%s", body)
+	}
+	errText, report, ok = strings.Cut(rest, "\nkey report:\n")
+	if !ok {
+		t.Fatalf("fixture has no key report section:\n%s", body)
+	}
+	return errText, report
 }
 
 // TestGoldenSuccessfulRunInvocations records how many subprocesses a

@@ -67,6 +67,7 @@ package infisical
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -110,6 +111,8 @@ func (Factory) Kind() string {
 //	"env"        string     // optional. Environment slug, default "dev".
 //	"path"       string     // optional. Folder path inside the project, default "/".
 //	"name"       string     // optional. Provider handle for Registry bookkeeping.
+//	"api_url"    string     // optional. Read only to name the store identity's API domain.
+//	"token"      string     // optional. A token niwa minted; passed to export via --token.
 //	"_commander" commander  // test-only. Swaps the subprocess runner for a fake.
 //
 // Unknown keys are ignored — forward compatibility for future
@@ -179,6 +182,20 @@ func (Factory) Open(_ context.Context, config vault.ProviderConfig) (vault.Provi
 		p.token = s
 	}
 
+	// The API URL, with the precedence niwa's own Infisical calls use,
+	// only to name the provider's store identity and the domain the
+	// run state keys on. Nothing new is passed to the CLI, which keeps
+	// finding its server the way it always has.
+	var configAPIURL string
+	if raw, ok := config["api_url"]; ok {
+		s, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("infisical: config[api_url] must be string, got %T", raw)
+		}
+		configAPIURL = s
+	}
+	p.apiDomain = vault.NormalizeIdentity(vault.Identity{APIDomain: resolveAPIURL(configAPIURL)}).APIDomain
+
 	// Test-only hook: allow a caller to inject a fake commander.
 	if raw, ok := config["_commander"]; ok {
 		c, ok := raw.(commander)
@@ -200,6 +217,9 @@ type Provider struct {
 	env     string
 	path    string // Factory.Open-time default path (used when Ref.Path is empty)
 	token   string // optional JWT for multi-org auth; passed via --token to subprocess
+	// apiDomain is the normalised scheme and host of the provider's
+	// API URL: the store identity's domain and the run-state key.
+	apiDomain string
 
 	commander commander
 
@@ -253,6 +273,25 @@ func (p *Provider) effectivePath(ref vault.Ref) string {
 		return ref.Path
 	}
 	return p.path
+}
+
+// StoreIdentity implements vault.StoreIdentifier: the folder ref
+// resolves from, in this provider's project, environment and API
+// domain, normalised.
+func (p *Provider) StoreIdentity(ref vault.Ref) (vault.Identity, bool) {
+	return vault.NormalizeIdentity(vault.Identity{
+		Kind:        Kind,
+		APIDomain:   p.apiDomain,
+		ProjectID:   p.project,
+		Environment: p.env,
+		FolderPath:  p.effectivePath(ref),
+	}), true
+}
+
+// minted reports whether exports run with a token niwa minted from a
+// machine identity, rather than the CLI's own session.
+func (p *Provider) minted() bool {
+	return p.token != ""
 }
 
 // Resolve fetches a single secret by key. Triggers an
@@ -393,8 +432,25 @@ func (p *Provider) ensureLoaded(ctx context.Context, effPath string) error {
 	// swallow the second-caller race.
 	p.mu.Unlock()
 
+	// An earlier call in this run already found the domain unreachable,
+	// or this principal logged out on it: don't start a subprocess that
+	// would only fail the same way.
+	runState := vault.RunStateFrom(ctx)
+	if class, ok := runState.Check(p.apiDomain, p.minted()); ok {
+		return skippedExportError(p.apiDomain, class)
+	}
+
 	values, token, err := runInfisicalExport(ctx, p.commander, p.project, p.env, effPath, p.token)
 	if err != nil {
+		var class *vault.FailureClass
+		if errors.As(err, &class) {
+			switch {
+			case class.Class == vault.ClassUnreachable:
+				runState.MarkUnreachable(p.apiDomain, class.Reason)
+			case class.Class == vault.ClassUnauthenticated && !p.minted():
+				runState.MarkUnauthenticated(p.apiDomain)
+			}
+		}
 		return err
 	}
 
@@ -412,6 +468,23 @@ func (p *Provider) ensureLoaded(ctx context.Context, effPath string) error {
 		p.paths[effPath] = &pathCache{values: values, versionToken: token}
 	}
 	return nil
+}
+
+// skippedExportError is returned instead of running an export that an
+// earlier verdict in the run already decided. It carries that verdict's
+// class and reason and matches vault.ErrProviderUnreachable.
+func skippedExportError(domain string, class vault.FailureClass) error {
+	what := "was unreachable"
+	switch {
+	case class.Class == vault.ClassUnauthenticated:
+		what = "was logged out or expired"
+	case class.Reason == vault.ReasonTimedOut:
+		what = "timed out"
+	}
+	return classified(
+		fmt.Errorf("infisical: export for %s skipped: an earlier call in this run %s", domain, what),
+		vault.FailureClass{Class: class.Class, Reason: class.Reason},
+	)
 }
 
 // init registers a shared Factory with vault.DefaultRegistry so that

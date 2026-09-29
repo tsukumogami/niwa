@@ -29,13 +29,18 @@ Feature: vault failure handling baseline
     When I run "niwa create myws"
     Then the exit code is 0
 
-  # Today the logged-out wording matches none of the auth-failure markers, so
-  # the export failure is a hard resolver error and apply fails.
-  Scenario: a logged-out export fails niwa apply with the export error
+  # Before failures were classified, the logged-out wording matched none of
+  # the auth-failure markers, so the export failure was a hard resolver error
+  # and apply failed with "infisical: export exited 1: error: No valid login
+  # session found". The session probe now lists no session, the failure is
+  # classified unauthenticated, and the key it blocked is a tolerated mark.
+  Scenario: a logged-out export leaves a tolerated mark and niwa apply succeeds
     Given I set env "INFISICAL_STUB_EXPORT_FAIL" to "no-valid-session"
+    And I set env "INFISICAL_STUB_LOGIN_STATUS" to "none"
     When I run "niwa apply myws"
-    Then the exit code is not 0
-    And the error output contains "infisical: export exited 1: error: No valid login session found"
+    Then the exit code is 0
+    And the error output does not contain "export exited 1"
+    And the error output contains "the infisical provider could not be reached"
 
   # A successful resolution reads each folder once and never asks the CLI
   # about its login session.
