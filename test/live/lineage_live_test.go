@@ -455,7 +455,9 @@ func otherBackgroundSessions(t *testing.T, claudeBin, probeID string) int {
 // which has to bring the worker back from its own saved launch flags.
 func restartDaemon(t *testing.T, claudeBin string) {
 	t.Helper()
-	if out, err := exec.Command(claudeBin, "daemon", "stop").CombinedOutput(); err != nil {
+	// --any: without an installed service the daemon runs on demand, and a
+	// plain stop refuses to touch one started that way.
+	if out, err := exec.Command(claudeBin, "daemon", "stop", "--any").CombinedOutput(); err != nil {
 		t.Fatalf("claude daemon stop: %v\n%s", err, out)
 	}
 	t.Log("daemon restart arm: daemon stopped")
