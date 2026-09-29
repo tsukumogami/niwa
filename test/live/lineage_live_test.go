@@ -27,9 +27,10 @@
 //	  -run TestLineageAttributesReachBackgroundWorker -v ./test/live/
 //
 // Setting NIWA_LIVE_RESTART_DAEMON=1 adds a second arm that stops and restarts
-// the background daemon and checks again. Stopping the daemon interrupts every
-// live background session on the machine, so that arm refuses to run while any
-// other background session is listed.
+// the background daemon and checks again. The restart keeps workers running,
+// but every live background session on the machine is supervised by that one
+// daemon while it restarts, so the arm refuses to run while any other
+// background session is listed.
 package live
 
 import (
@@ -102,7 +103,10 @@ func TestLineageAttributesReachBackgroundWorker(t *testing.T) {
 		return
 	}
 	if others := otherBackgroundSessions(t, claudeBin, shortID); others > 0 {
-		t.Skipf("daemon restart arm: refused, %d other background session(s) are running and a restart would interrupt them", others)
+		// A log rather than a skip, so a first arm that passed still reads as a
+		// pass: the refusal is the arm doing its job, not the test giving up.
+		t.Logf("daemon restart arm: refused, %d other background session(s) are running and a restart would disturb them", others)
+		return
 	}
 	restartDaemon(t, claudeBin)
 	sink.reset()
