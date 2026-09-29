@@ -70,6 +70,10 @@ func TestNormalizeIdentity(t *testing.T) {
 			}
 		}
 	}
+	// A value that isn't an absolute URL keeps no credentials.
+	if got := vault.NormalizeIdentity(vault.Identity{APIDomain: "user:secret@Vault.Example.com/"}).APIDomain; got != "vault.example.com" {
+		t.Errorf("scheme-less domain normalised to %q, want vault.example.com", got)
+	}
 	for _, root := range []string{"", "/", "//"} {
 		if got := vault.NormalizeIdentity(vault.Identity{FolderPath: root}).FolderPath; got != "/" {
 			t.Errorf("folder %q normalised to %q, want /", root, got)

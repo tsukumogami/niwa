@@ -172,7 +172,8 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 // *vault.ClassifiedError (classify.go) around the error text above,
 // unchanged. An unauthenticated or unreachable failure also matches
 // vault.ErrProviderUnreachable; an answered one keeps exactly the
-// sentinel listed above. A start failure carries no class.
+// sentinel listed above. A start failure carries no class, and neither
+// does a failure the caller's own ctx caused.
 //
 // All returned errors are wrapped via secret.Errorf so that later
 // re-wraps by the resolver continue to scrub any late-registered
@@ -270,6 +271,12 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 				"infisical: export exited %d: %s",
 				exitCode, strings.TrimSpace(scrubbed),
 			)
+		}
+		if ctx.Err() != nil {
+			// The caller ended the call, so the failure says nothing
+			// about the vault: it is neither classified nor
+			// remembered in the run state.
+			return nil, vault.VersionToken{}, exportErr
 		}
 		class := classifyExportFailure(ctx, c, exportFailure{
 			stdout: vault.ScrubStderr(ctx, stdout),

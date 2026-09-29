@@ -193,8 +193,11 @@ func goldenScenarios() []goldenScenario {
 			probe: probeNoSession, reclassified: true, want: loggedOut},
 		{name: "logged-out-session-expired", stderr: stderrSessionExpired, exitCode: 1,
 			probe: probeNoSession, reclassified: true, want: loggedOut},
-		{name: "response-401", stderr: stderrResponse401, exitCode: 1},
-		{name: "response-403", stderr: stderrResponse403, exitCode: 1},
+		// A 401 or 403 stays the answered, tolerated mark it always was
+		// only while the probe vouches for the session, so these
+		// scenarios answer it with a verified one.
+		{name: "response-401", stderr: stderrResponse401, exitCode: 1, probe: probeVerified},
+		{name: "response-403", stderr: stderrResponse403, exitCode: 1, probe: probeVerified},
 		{name: "response-404", stderr: stderrResponse404, exitCode: 1},
 		{name: "response-500", stderr: stderrResponse500, exitCode: 1},
 		{name: "logged-out-and-response-404", stderr: stderrLoggedOutAnd404, exitCode: 1},
@@ -204,8 +207,8 @@ func goldenScenarios() []goldenScenario {
 			probe: probeVerified, reclassified: true, want: unreachable},
 		{name: "client-not-installed", startErr: notInstalled},
 		{name: "missing-key", stdout: fmt.Sprintf(`{"OTHER_KEY":%q}`, markerOther)},
-		{name: "required-key-response-403", stderr: stderrResponse403, exitCode: 1, required: true},
-		{name: "personal-response-403", stderr: stderrResponse403, exitCode: 1, personal: true},
+		{name: "required-key-response-403", stderr: stderrResponse403, exitCode: 1, required: true, probe: probeVerified},
+		{name: "personal-response-403", stderr: stderrResponse403, exitCode: 1, personal: true, probe: probeVerified},
 		{name: "personal-logged-out-no-valid-session", stderr: stderrNoValidSession, exitCode: 1, personal: true,
 			probe: probeNoSession, reclassified: true, want: loggedOut},
 	}

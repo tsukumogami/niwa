@@ -211,12 +211,17 @@ func NormalizeIdentity(id Identity) Identity {
 }
 
 // normalizeAPIDomain reduces a URL to its lower-cased scheme and host.
-// A value that doesn't parse as an absolute URL is only lower-cased
-// and stripped of trailing slashes.
+// A value that doesn't parse as an absolute URL is lower-cased and
+// stripped of trailing slashes and of anything up to an "@", so
+// credentials written into a malformed URL never reach a message or a
+// file name.
 func normalizeAPIDomain(raw string) string {
 	raw = strings.TrimSpace(raw)
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme == "" || u.Host == "" {
+		if i := strings.LastIndex(raw, "@"); i >= 0 {
+			raw = raw[i+1:]
+		}
 		return strings.ToLower(strings.TrimRight(raw, "/"))
 	}
 	return strings.ToLower(u.Scheme + "://" + u.Host)

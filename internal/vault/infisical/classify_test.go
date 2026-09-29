@@ -527,6 +527,45 @@ func TestRunStateRecordsOnlyLapsesAndOutages(t *testing.T) {
 	}
 }
 
+// A failure the caller's own cancellation caused says nothing about the
+// vault: it is not classified, runs no probe and records no verdict.
+func TestCallerCancellationIsNotClassified(t *testing.T) {
+	t.Setenv(tokenEnvVar, "")
+	ctx, cancel := context.WithCancel(vault.WithRunState(context.Background()))
+	c := &cancellingCommander{cancel: cancel}
+	p := openScript(t, c, nil)
+	_, _, err := p.Resolve(ctx, vault.Ref{Key: "K"})
+	if err == nil {
+		t.Fatal("cancelled export returned no error")
+	}
+	var fc *vault.FailureClass
+	if errors.As(err, &fc) {
+		t.Errorf("a cancelled export was classified %+v", *fc)
+	}
+	if c.probes != 0 {
+		t.Errorf("probes = %d, want 0", c.probes)
+	}
+	if _, ok := vault.RunStateFrom(ctx).Check(p.apiDomain, false); ok {
+		t.Error("a cancelled export recorded a run-state verdict")
+	}
+}
+
+// cancellingCommander cancels the caller's context during the export,
+// which then comes back killed.
+type cancellingCommander struct {
+	cancel context.CancelFunc
+	probes int
+}
+
+func (c *cancellingCommander) Run(_ context.Context, _ string, args []string) ([]byte, []byte, int, error) {
+	if args[0] == "login" {
+		c.probes++
+		return []byte(probeNoSessions), nil, 0, nil
+	}
+	c.cancel()
+	return nil, nil, -1, nil
+}
+
 // Without a run state (status checks, onboarding) nothing is skipped.
 func TestNoRunStateNeverSkips(t *testing.T) {
 	t.Setenv(tokenEnvVar, "")
