@@ -14,6 +14,17 @@
 // of the key report rather than part of it, so strict mode and the
 // required-key check, which read only the key report, can never count a
 // notice as a shortfall.
+//
+// The tests in internal/cli/fallback_notice_test.go pin delivery on every
+// surface: TestProvisioningCommandsRenderNoticesThroughWireKeyReport keeps
+// create, apply, init and reset rendering through wireKeyReport, and the
+// Dispatch, Watch and SessionStart tests there cover the other surfaces.
+// A caller that leaves Applier.Notices nil still gets a rendering on the
+// reporter (TestStoreFallbackUnwiredNoticesStillRender in
+// internal/workspace).
+//
+// The package map in the vault package doc shows where this package
+// sits among the others the store fallback spans.
 package fallbacknotice
 
 import (

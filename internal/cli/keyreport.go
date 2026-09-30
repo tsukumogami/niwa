@@ -16,6 +16,11 @@ import (
 // keys missing and one that fails outright both leave the user with the same
 // enumeration, and on the failure path the instance directory is already gone
 // by the time anything could have been read back off disk.
+//
+// create, apply, init and reset must each call it with cmd.ErrOrStderr();
+// TestProvisioningCommandsRenderNoticesThroughWireKeyReport fails when one
+// doesn't. Dispatch, watch and the SessionStart hook deliver notices their
+// own way, pinned by the other tests in fallback_notice_test.go.
 func wireKeyReport(applier *workspace.Applier, w io.Writer) func() {
 	keys := keyreport.New()
 	applier.Keys = keys

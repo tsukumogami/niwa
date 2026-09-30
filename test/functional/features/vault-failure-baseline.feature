@@ -1,9 +1,12 @@
-Feature: vault failure handling baseline
-  These scenarios pin what provisioning does today when the Infisical CLI
-  fails, and how many CLI calls a successful run makes. They were first
-  recorded before the vault-offline work changed any of it, alongside the
-  golden fixtures in internal/vault/resolve/testdata/golden, and each
-  scenario's comment says what has changed since. The shared infisical
+Feature: logged-out exports and the CLI call count of a successful run
+  These scenarios started as a baseline of provisioning before the store
+  fallback existed, recorded alongside the golden fixtures in
+  internal/vault/resolve/testdata/golden. They no longer describe that
+  baseline. Two of them now pin the fallback's behaviour for a logged-out
+  export: a tolerated mark when nothing is stored, and a served value when
+  an earlier run stored one. Only the third, the number of CLI calls a
+  successful apply makes, is unchanged from the baseline. The comments on
+  the first two say what the baseline recorded there. The shared infisical
   stub stands in for the real CLI: INFISICAL_STUB_EXPORT_FAIL selects a fixed
   export failure, and its invocation log counts the calls.
 

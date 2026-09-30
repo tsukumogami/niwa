@@ -5,6 +5,11 @@
 // secret resolution: it shells out to the user-installed `infisical`
 // CLI (R20 — no Go SDK dependency) and exposes both vault.Provider and
 // the optional vault.BatchResolver interfaces (this file, subprocess.go).
+// bounds.go puts a deadline and an output cap on every CLI call on that
+// path, and classify.go classifies a failed export (unauthenticated,
+// unreachable or answered) from its server response and an
+// `infisical login status` probe, which is what decides whether the
+// store fallback may serve stored values for it.
 //
 // The second, added for `niwa onboard` (DESIGN-niwa-onboard.md
 // Decision 4), is a net-new Universal Auth identity management REST

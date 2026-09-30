@@ -26,7 +26,50 @@ const (
 	loginTimeout = 30 * time.Second
 )
 
-// testTimeoutEnv names the test-only override for every bound above.
+// Output caps for every subprocess defaultCommander runs. The deadline
+// alone bounds how long a CLI can write, not how much it writes in that
+// time, so without these a runaway CLI could fill memory before its
+// deadline. Variables only so tests can shrink them.
+var (
+	// maxStdoutBytes caps the captured stdout. Past it, the rest is
+	// discarded and Run reports errOutputTooLarge.
+	maxStdoutBytes = 32 << 20
+	// maxStderrBytes caps the captured stderr. Past it, the rest is
+	// discarded silently: stderr only feeds messages and the
+	// classifier's markers, which a truncated tail doesn't change in
+	// any way that matters.
+	maxStderrBytes = 1 << 20
+)
+
+// errOutputTooLarge is the error Run returns, alongside the process's
+// real exit code and the truncated stdout, when stdout passed
+// maxStdoutBytes.
+var errOutputTooLarge = errors.New("infisical: CLI output exceeded the size cap")
+
+// cappedBuffer keeps the first limit bytes written to it and discards
+// the rest, recording that it did. Write never fails, so the child
+// never sees a broken pipe and exits the way it would have otherwise.
+type cappedBuffer struct {
+	limit     int
+	buf       []byte
+	truncated bool
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	room := b.limit - len(b.buf)
+	if room >= len(p) {
+		b.buf = append(b.buf, p...)
+		return len(p), nil
+	}
+	if room > 0 {
+		b.buf = append(b.buf, p[:room]...)
+	}
+	b.truncated = true
+	return len(p), nil
+}
+
+// testTimeoutEnv names the test-only override for every deadline in
+// the const block above.
 // It exists so functional tests can exercise a timeout without
 // waiting 30 seconds per scenario.
 const testTimeoutEnv = "NIWA_TEST_VAULT_TIMEOUT"

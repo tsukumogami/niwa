@@ -15,6 +15,17 @@ var ErrKeyNotFound = errors.New("vault: key not found")
 // Factory.Open) when the backend cannot be contacted: auth failure,
 // network error, missing CLI binary, expired session. Callers check
 // via errors.Is.
+//
+// Matching it does NOT mean a failure is one the secret store may serve
+// stale values for. Every unauthenticated or unreachable failure wraps
+// it, but so do some answered ones: a 401 or 403 the backend returned
+// for a session it vouches for still carries the "(auth failure)"
+// wording and this sentinel, so the callers that have always tolerated
+// it keep doing so (the resolver marks the key unresolved with
+// CauseProviderUnreachable instead of failing the run, and credential
+// sync reports it as an unreachable vault). Only the
+// FailureClass on a ClassifiedError decides whether a failure is
+// servable; read it with errors.As.
 var ErrProviderUnreachable = errors.New("vault: provider unreachable")
 
 // ErrClientNotInstalled narrows ErrProviderUnreachable to the case

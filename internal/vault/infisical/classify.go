@@ -96,7 +96,8 @@ func runProbe(ctx context.Context, c commander) probeResult {
 		return r
 	}
 	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
-		// The probe didn't start: no answer at all.
+		// The probe didn't start, or its stdout passed the size cap
+		// (errOutputTooLarge): no answer at all.
 		return r
 	}
 	r.malformedToken = strings.Contains(strings.ToLower(vault.ScrubStderr(ctx, stderr)), malformedTokenMarker)
@@ -178,7 +179,12 @@ func classifyExportFailure(ctx context.Context, c commander, f exportFailure) va
 	// real refusal.
 	case authStatus && conclusive:
 		return answered
-	// Rule 4: a 401 or 403 the probe can't vouch for is a lapse.
+	// Rule 4: a 401 or 403 the probe can't vouch for is a lapse. That
+	// includes a probe that timed out, didn't start, or printed output
+	// that doesn't parse (or passed the size cap), not only one that
+	// lists an unverified session. So a real revocation that coincides
+	// with an inconclusive probe is served stale, with the fallback
+	// warning, until a probe can vouch for the session again.
 	case authStatus:
 		return unauthenticated
 	// Rule 5: the probe answered, and lists no session the export

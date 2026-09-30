@@ -20,6 +20,28 @@
 // via init(). The fake backend deliberately does NOT auto-register
 // — tests that need it construct a fresh Registry via NewRegistry and
 // Register the fake factory explicitly.
+//
+// # Serving last-resolved values when a vault can't be asked
+//
+// Five packages share that job; each owns one step:
+//
+//   - vault (errors.go, runstate.go): the vocabulary. FailureClass says
+//     whether a failure is unauthenticated, unreachable or answered,
+//     ClassifiedError carries it on the backend's error, and RunState
+//     remembers a domain's verdict for the rest of one run. Identity
+//     names a store of values.
+//   - vault/infisical (bounds.go, classify.go): the backend's side. It
+//     puts deadlines and output caps on every CLI call and classifies a
+//     failed export from its server response and a session probe.
+//   - vault/store: the files on disk, one per Identity, holding the
+//     last value each key resolved to.
+//   - vault/storefallback: the decorator on a provisioning run's
+//     providers. It records every resolution, evicts deleted keys, and
+//     serves stored values for unauthenticated or unreachable failures
+//     only, reading the FailureClass rather than any sentinel.
+//   - fallbacknotice: the stdlib-only collector and renderer for what
+//     the fallback served, missed or couldn't write, which each command
+//     surface prints.
 package vault
 
 import (
@@ -189,6 +211,16 @@ type ProviderSpec struct {
 // backend kind, the API domain, the project, the environment and the
 // effective folder path. Two references with the same Identity read
 // the same folder of the same project. None of the fields is secret.
+//
+// Several places list these fields by hand, and each must change when a
+// field is added: store.fileStem (the hashed canonical form and the
+// identity echo in the data file), storefallback.noticeIdentity and
+// storefallback.lessIdentity, fallbacknotice.Identity (which mirrors
+// this struct) with fallbacknotice's lessIdentity and fields helpers,
+// the fake provider's "identity" config, and the infisical
+// provider's StoreIdentity. TestFileStemCoversEveryIdentityField and
+// TestNoticeIdentityCopiesEveryField fail when a new field is missing
+// from the store key or the notice copy.
 type Identity struct {
 	Kind        string
 	APIDomain   string

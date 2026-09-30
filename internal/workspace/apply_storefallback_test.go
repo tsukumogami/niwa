@@ -99,6 +99,9 @@ type fbEnv struct {
 	storeDir     string
 	globalDir    string // empty until setGlobal
 	overlay      string // empty until setOverlay; set before the first run
+	// unwired leaves Applier.Notices nil, as a caller that never wires
+	// a collector would.
+	unwired bool
 }
 
 func newFBEnv(t *testing.T, withOverlay bool) *fbEnv {
@@ -156,6 +159,8 @@ type fbRun struct {
 	err     error
 	notices *fallbacknotice.Collector
 	keys    *keyreport.Collector
+	// output is everything the run wrote through its reporter.
+	output *syncBuffer
 }
 
 func (e *fbEnv) apply(strict bool) fbRun {
@@ -177,9 +182,11 @@ func (e *fbEnv) apply(strict bool) fbRun {
 		return false, 0, os.WriteFile(filepath.Join(dir, "workspace-overlay.toml"), []byte(overlay), 0o644)
 	}
 	applier.headSHA = func(string) (string, error) { return "abc123", nil }
-	applier.Reporter = NewReporterWithTTY(&syncBuffer{}, false)
-	run := fbRun{notices: fallbacknotice.New(nil), keys: keyreport.New()}
-	applier.Notices = run.notices
+	run := fbRun{notices: fallbacknotice.New(nil), keys: keyreport.New(), output: &syncBuffer{}}
+	applier.Reporter = NewReporterWithTTY(run.output, false)
+	if !e.unwired {
+		applier.Notices = run.notices
+	}
 	applier.Keys = run.keys
 	applier.StrictSecrets = strict
 	run.err = applier.Apply(context.Background(), loaded.Config, e.niwaDir, e.instanceRoot)
@@ -622,5 +629,22 @@ func TestStoreFallbackServesAThirtyDayOldValue(t *testing.T) {
 	text := run.notices.RenderText()
 	if !strings.Contains(text, "may be stale") || !strings.Contains(text, "the oldest value is 30 days old") {
 		t.Errorf("served warning does not read 30 days:\n%s", text)
+	}
+}
+
+// A caller that leaves Applier.Notices nil still hears about a served
+// value: the run collects the notices itself and writes them through
+// the reporter.
+func TestStoreFallbackUnwiredNoticesStillRender(t *testing.T) {
+	e := newFBEnv(t, false)
+	e.unwired = true
+	e.seed("proj", map[string]store.Entry{"API_KEY": {
+		Value: []byte("stored-api-value-1"), ResolvedAt: time.Now().Add(-time.Hour), VersionToken: "v-stored-7",
+	}})
+	e.setTeam(fakeProvider("vault.provider", "proj", nil, `fail_class = "unauthenticated"`) + secretsTable("env.secrets", "", "API_KEY"))
+	run := e.mustApply(false)
+	assertEnvHas(t, e.envFile(), "API_KEY=stored-api-value-1")
+	if got := run.output.String(); !strings.Contains(got, "using stored values that may be stale for fake project proj") {
+		t.Errorf("reporter output has no served warning:\n%s", got)
 	}
 }

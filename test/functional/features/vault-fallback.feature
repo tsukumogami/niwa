@@ -10,7 +10,7 @@ Feature: provisioning falls back on stored secret values
   plus the 5 s the requirements allow.
 
   PRD: docs/prds/PRD-dispatch-offline-secrets.md
-  Design: docs/designs/DESIGN-dispatch-offline-secrets.md
+  Design: docs/designs/current/DESIGN-dispatch-offline-secrets.md
 
   Background:
     Given a clean niwa environment

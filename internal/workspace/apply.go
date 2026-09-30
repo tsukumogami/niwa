@@ -76,8 +76,11 @@ type Applier struct {
 	// Notices collects what the store fallback did this run: values it
 	// served from the store of last-resolved values, identities it had
 	// nothing stored for, and store writes it could not make. Like Keys it
-	// is caller-supplied, so the notices survive a failed Create, and a
-	// nil collector disables collection. Nothing in it counts toward
+	// is caller-supplied, so the notices survive a failed Create. Unlike
+	// Keys, nil does not disable it: the run collects into a collector of
+	// its own and writes the rendering through Reporter (stderr when
+	// Reporter is nil) as it ends, so a caller that forgets to wire one
+	// can't have stale values served silently. Nothing in it counts toward
 	// strict mode or the required-key check, which read only Keys.
 	Notices *fallbacknotice.Collector
 
@@ -846,6 +849,22 @@ func provisioningBundle(ctx context.Context, session *storefallback.Session, reg
 	return bundle.Wrap(session.Wrap), nil
 }
 
+// renderUnwiredNotices writes the fallback notices runPipeline collected
+// for a caller that left Notices nil: through the reporter when there is
+// one, else straight to stderr. It writes nothing when the run needed no
+// fallback.
+func (a *Applier) renderUnwiredNotices(c *fallbacknotice.Collector) {
+	text := c.RenderText()
+	if text == "" {
+		return
+	}
+	if a.Reporter != nil {
+		fmt.Fprint(a.Reporter.Writer(), text)
+		return
+	}
+	fmt.Fprint(os.Stderr, text)
+}
+
 // runPipeline executes the shared pipeline steps: discover repos, classify,
 // clone, and install content. It returns the pipeline results without writing
 // state.
@@ -878,7 +897,17 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// first needs one.
 	ctx = vault.WithRunState(ctx)
 	storeDir, _ := store.Dir()
-	fallbackSession := storefallback.NewSession(storeDir, a.Notices, nil)
+	notices := a.Notices
+	if notices == nil {
+		// A caller that wired no collector would otherwise have stale
+		// values served with nobody told. Collect them here and write
+		// the rendering through the reporter once the run ends. This
+		// defer is registered before Flush's, so it runs after Flush
+		// and sees the store writes Flush couldn't make.
+		notices = fallbacknotice.New(nil)
+		defer a.renderUnwiredNotices(notices)
+	}
+	fallbackSession := storefallback.NewSession(storeDir, notices, nil)
 	defer fallbackSession.Flush()
 
 	// overlayDir is the local clone path of the overlay repo when one is active.

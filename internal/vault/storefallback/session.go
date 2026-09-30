@@ -11,6 +11,9 @@
 // buffered in the session and written by Flush, at most one store update
 // per identity, when the run ends. What was served, missed or couldn't be
 // written goes to a fallbacknotice.Collector.
+//
+// The vault package doc maps how this package fits with vault,
+// vault/infisical, vault/store and fallbacknotice.
 package storefallback
 
 import (

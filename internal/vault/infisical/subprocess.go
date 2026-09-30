@@ -36,6 +36,10 @@ import (
 //     pipes open until they were cut: its real exit code and
 //     exec.ErrWaitDelay. So a non-nil error does not always mean the
 //     process never started.
+//   - The process ran and exited, but wrote more than maxStdoutBytes
+//     to stdout: its real exit code, the stdout truncated to the cap,
+//     and an error wrapping errOutputTooLarge. (Stderr past
+//     maxStderrBytes is truncated with no error.)
 //
 // Call sites that bound the call check callTimedOut before branching
 // on anything else; it catches the last two shapes when they come
@@ -56,7 +60,8 @@ type commander interface {
 //   - cmd.Env = nil (inherit the parent's environment unchanged).
 //     niwa never filters or extends; the Infisical CLI reads its own
 //     auth from INFISICAL_TOKEN / ~/.infisical config.
-//   - Stdout and stderr are fully captured into buffers — neither is
+//   - Stdout and stderr are captured into buffers capped at
+//     maxStdoutBytes and maxStderrBytes (bounds.go) — neither is
 //     streamed to the parent process's stdio. This upholds R22: no
 //     raw CLI stderr ever reaches niwa's own stderr unfiltered.
 //   - Stdin is the null device and the child leads a new session
@@ -99,9 +104,10 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 	// INFISICAL_TOKEN (or equivalent) unchanged.
 	cmd.Env = nil
 	cmd.Stdin = devNull
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := &cappedBuffer{limit: maxStdoutBytes}
+	stderr := &cappedBuffer{limit: maxStderrBytes}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Cancel = func() error {
 		// Setsid makes the child's PID its process group ID.
@@ -124,22 +130,26 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 		// ignored.
 		_ = killProcessGroup(cmd.Process.Pid)
 	}
-	if err != nil {
-		if errors.Is(err, exec.ErrWaitDelay) {
-			return stdout.Bytes(), stderr.Bytes(), cmd.ProcessState.ExitCode(), err
-		}
+	var code int
+	switch {
+	case err == nil:
+	case errors.Is(err, exec.ErrWaitDelay):
+		code = cmd.ProcessState.ExitCode()
+	case cmd.ProcessState != nil:
 		// A ProcessState means the process started and was waited on,
 		// so its exit code is the answer (-1 if it was killed). That
 		// covers an *exec.ExitError, and also the ctx.Err() Wait
-		// returns when ctx ended just as the child exited 0. Without
-		// one (e.g., exec.ErrNotFound wrapped in *fs.PathError) the
-		// process never started.
-		if cmd.ProcessState != nil {
-			return stdout.Bytes(), stderr.Bytes(), cmd.ProcessState.ExitCode(), nil
-		}
-		return stdout.Bytes(), stderr.Bytes(), -1, err
+		// returns when ctx ended just as the child exited 0.
+		code, err = cmd.ProcessState.ExitCode(), nil
+	default:
+		// No ProcessState (e.g., exec.ErrNotFound wrapped in
+		// *fs.PathError): the process never started.
+		return stdout.buf, stderr.buf, -1, err
 	}
-	return stdout.Bytes(), stderr.Bytes(), 0, nil
+	if stdout.truncated && err == nil {
+		err = fmt.Errorf("%w (%d bytes)", errOutputTooLarge, maxStdoutBytes)
+	}
+	return stdout.buf, stderr.buf, code, err
 }
 
 // runInfisicalExport invokes `infisical export --projectId <proj>
@@ -166,6 +176,10 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 //     matches vault.ErrProviderUnreachable when it is classified
 //     unauthenticated or unreachable (below).
 //   - Malformed JSON stdout is a generic provider error.
+//   - Stdout past maxStdoutBytes on a zero exit is a generic provider
+//     error too, classified answered like malformed output. On a
+//     non-zero exit it changes nothing: the truncated output is
+//     classified as usual.
 //   - When the caller's own ctx ends the call, that is not a timeout:
 //     the killed child comes back as the generic "export exited -1"
 //     error.
@@ -243,6 +257,13 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 		}
 		return nil, vault.VersionToken{}, vault.Classify(exportTimedOutError(bound), class)
 	}
+	// An export whose stdout passed the cap exited on its own; the
+	// exit code decides below, and a zero exit is refused as output
+	// too large to read.
+	oversized := errors.Is(err, errOutputTooLarge)
+	if oversized {
+		err = nil
+	}
 	// ErrWaitDelay means the process started and exited; it only
 	// lands here when the caller's context was done, and the exit
 	// code is the result to go on.
@@ -296,6 +317,15 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 			return nil, vault.VersionToken{}, exportErr
 		}
 		return nil, vault.VersionToken{}, vault.Classify(exportErr, class)
+	}
+
+	if oversized {
+		// Like unparseable output below: the export exited 0, so the
+		// service answered, and nothing it printed can be trusted
+		// once the tail is gone.
+		return nil, vault.VersionToken{}, vault.Classify(secret.Errorf(
+			"infisical: export output exceeded %d bytes", maxStdoutBytes,
+		), vault.FailureClass{Class: vault.ClassAnswered})
 	}
 
 	values, parseErr := parseExportJSON(stdout)
