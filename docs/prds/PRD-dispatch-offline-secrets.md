@@ -149,9 +149,12 @@ A **server response** is an export whose standard output or standard error conta
   from the store: the remedy is to install the client, not to log in. R1 to R4 apply only to an
   export that started.
 - **R1.** When an `infisical export` fails, niwa classifies the failure as exactly one of
-  *unauthenticated*, *unreachable*, or *answered*, using R2 to R4. Every failure that R2 to R4
-  do not classify as unauthenticated or unreachable is *answered*. The export's exit code is not
-  used, because it is 1 for every failure.
+  *unauthenticated*, *unreachable*, or *answered*, using R2 to R4. For a CLI-session principal
+  the order of R2's rules decides, with R4's wording check applied just before rule 6: the
+  first rule that matches wins, and a failure that no
+  earlier rule classifies as *unauthenticated* or *answered* is *unreachable* (R2 rule 6). For a
+  minted principal R3 decides the same way: a server response is *answered*, and anything else
+  is *unreachable*. The export's exit code is not used, because it is 1 for every failure.
 - **R2.** For a CLI-session principal, after the export fails, or reaches its time bound, niwa
   runs `infisical login status --json` (the probe) with the same environment as the export. It
   reads the fields of the reported sessions, not the probe's exit code (the probe exits 0 when it
@@ -336,18 +339,18 @@ changes, and the criteria compare against those fixtures.
 
 **Classification and fallback**
 
-- [ ] With a stub CLI whose export exits 1 with "No valid login session found" and whose probe
+- [x] With a stub CLI whose export exits 1 with "No valid login session found" and whose probe
       reports `{"sessions": []}`, a store holding the referenced keys, and `niwa dispatch` run
       end to end through real provisioning: dispatch exits 0, the instance's materialized env
       holds the stored values, and standard error holds the R20 warning with reason "logged out
       or expired". A companion test asserts that the golden fixture for the same stub output is
       today's hard "export exited 1" error, so the criterion pins a change in behaviour. (R2, R16,
-      R20)
+      R20) Tests: "niwa dispatch serves stored values while logged out" (vault-fallback.feature); `TestGoldenVaultFailureHandling/logged-out-no-valid-session`.
 - [ ] The previous criterion passes for each of `niwa create`, `niwa apply`, `niwa init`, `niwa
-      reset`, and one `niwa watch` reconcile cycle. (R16, R21)
-- [ ] With the same stub, a probe reporting a session `status` of `expired`, and separately one of
-      `rejected`, each falls back with reason "logged out or expired". (R2)
-- [ ] A probe exiting 0 with `verification.state` `unknown` falls back with reason
+      reset`, and one `niwa watch` reconcile cycle. (R16, R21) Deferred: create, apply and reset run end to end ("niwa create serves stored values while logged out", "niwa apply serves stored values while logged out", "niwa reset serves stored values while logged out" in vault-fallback.feature); watch is covered through real provisioning with the fake backend (`TestWatchServesStoredValuesThroughRealProvisioning`), but init is only checked by a source scan (`TestProvisioningCommandsRenderNoticesThroughWireKeyReport`), and neither init nor watch runs end to end against the stub.
+- [x] With the same stub, a probe reporting a session `status` of `expired`, and separately one of
+      `rejected`, each falls back with reason "logged out or expired". (R2) Tests: `TestClassifyExportFailure/expired_session`, `TestClassifyExportFailure/rejected_session`, `TestServedForEveryServingClassAndReason`.
+- [x] A probe exiting 0 with `verification.state` `unknown` falls back with reason
       "unreachable". A probe whose stderr contains "token is malformed" falls back with reason
       "logged out or expired". A probe whose only session is `authenticated` and `verified` on a
       `domain` other than the provider's API domain, with an export failing "Response Code: 403",
@@ -355,66 +358,66 @@ changes, and the criteria compare against those fixtures.
       sessions, first `expired` then one with `status` `authenticated` and `verification.state`
       `verified`, is classified *unauthenticated*; with the order reversed, the same export (no
       server response) is classified *unreachable*. A deciding session with `status` `pending`
-      falls back with reason "unreachable". (R2)
-- [ ] With `INFISICAL_TOKEN` set and the probe listing a stored-login session (`authenticated`,
+      falls back with reason "unreachable". (R2) Tests: `TestClassifyExportFailure/verification_unknown`, `TestClassifyExportFailure/malformed_token`, `TestClassifyExportFailure/403_verified_on_another_domain`, `TestClassifyExportFailure/expired_first_then_verified`, `TestClassifyExportFailure/verified_first_then_expired,_same_export`, `TestClassifyExportFailure/pending_session`, `TestServedForEveryServingClassAndReason`.
+- [x] With `INFISICAL_TOKEN` set and the probe listing a stored-login session (`authenticated`,
       `verified`) first and the environment-token session (`rejected`) second, the run falls back
-      with reason "logged out or expired". (R2)
-- [ ] An export that is a server response ("Response Code: 404") with a probe that reaches its
+      with reason "logged out or expired". (R2) Tests: `TestClassifyExportFailure/env_token_session_rejected,_stored_login_listed_first`.
+- [x] An export that is a server response ("Response Code: 404") with a probe that reaches its
       bound, and separately with a probe listing no sessions, produces today's error and serves
       nothing from the store. An export failing "Response Code: 401", and separately "Response
       Code: 403", with a probe that reaches its bound falls back with the warning reason "logged
       out or expired". An export failing "Response Code: 403" with a probe reporting the deciding
       session as `expired` falls back with the same reason. An export failing "Response Code: 404"
       with a probe reporting the deciding session as `expired` produces today's error and serves
-      nothing. A 403 classified as a lapsed login leaves the store entry unchanged. (R2, R11)
-- [ ] With `INFISICAL_TOKEN` set in the environment and the probe reporting that token's session
-      as `rejected`, the run falls back with reason "logged out or expired". (R2)
-- [ ] A verified probe with an export failure that has no `Response Code:` line (a connection
-      refused error) falls back with reason "unreachable". (R2)
-- [ ] A probe that prints non-JSON output, with an export whose stderr contains each of the three
+      nothing. A 403 classified as a lapsed login leaves the store entry unchanged. (R2, R11) Tests: `TestClassifyExportFailure/404_with_a_probe_that_would_time_out`, `TestClassifyExportFailure/404_with_no_sessions`, `TestClassifyExportFailure/401_with_a_timed-out_probe`, `TestClassifyExportFailure/403_with_a_timed-out_probe`, `TestClassifyExportFailure/403_with_an_expired_session`, `TestClassifyExportFailure/404_with_an_expired_session`, `TestEviction/unauthenticated_403_evicts_nothing`, `TestNonServedPathsReturnTheInnerErrorValue/answered_404`.
+- [x] With `INFISICAL_TOKEN` set in the environment and the probe reporting that token's session
+      as `rejected`, the run falls back with reason "logged out or expired". (R2) Tests: `TestClassifyExportFailure/env_token_session_rejected_with_a_401`, `TestClassifyExportFailure/env_token_session_rejected,_stored_login_listed_first`.
+- [x] A verified probe with an export failure that has no `Response Code:` line (a connection
+      refused error) falls back with reason "unreachable". (R2) Tests: `TestClassifyExportFailure/connection_refused,_verified`.
+- [x] A probe that prints non-JSON output, with an export whose stderr contains each of the three
       logged-out wordings in turn, falls back with reason "logged out or expired". A probe stub that
       never exits, with an export stderr containing "Your login session has expired", falls back
       with reason "logged out or expired". A probe reporting a matching `authenticated`, `verified`
       session with an export stderr containing "No valid login session found" and no `Response
       Code:` line falls back with reason "unreachable", not "logged out or expired". A probe that prints non-JSON output with an
       export stderr lacking any logged-out wording falls back with reason "unreachable", and a probe
-      that reaches its bound with the same export falls back with reason "timed out". (R2, R4, R20)
-- [ ] A probe reporting `verified` with an export stderr containing both "No valid login session
+      that reaches its bound with the same export falls back with reason "timed out". (R2, R4, R20) Tests: `TestClassifyExportFailure/no_valid_session_wording,_probe_not_JSON`, `TestClassifyExportFailure/could_not_find_login_wording,_probe_not_JSON`, `TestClassifyExportFailure/session_expired_wording,_probe_not_JSON`, `TestClassifyExportFailure/session_expired_wording,_probe_timed_out`, `TestClassifyExportFailure/wording_with_a_verified_session`, `TestClassifyExportFailure/no_wording,_probe_not_JSON`, `TestClassifyExportFailure/no_wording,_probe_timed_out`.
+- [x] A probe reporting `verified` with an export stderr containing both "No valid login session
       found" and "Response Code: 404" produces today's error and does not use the stored value.
-      (R2, R4, R6)
-- [ ] A verified probe with an export failing "Response Code: 403" produces today's tolerated mark
+      (R2, R4, R6) Tests: `TestClassifyExportFailure/wording_and_404,_verified`, `TestClassifyAnsweredKeepsSentinel`, `TestPolicy`.
+- [x] A verified probe with an export failing "Response Code: 403" produces today's tolerated mark
       and does not use the stored value. A verified probe with an export failing "Response Code:
-      500" produces today's error and does not use the stored value. (R6)
-- [ ] With no `infisical` binary on `PATH` and a populated store, the run produces today's "client
-      not installed" handling and serves nothing from the store. (R0)
-- [ ] With a minted principal, an export failing "Response Code: 401" produces today's handling
+      500" produces today's error and does not use the stored value. (R6) Tests: `TestClassifyExportFailure/403_verified`, `TestClassifyExportFailure/500_verified`, `TestClassifyAnsweredKeepsSentinel`, `TestPolicy`, `an answered <failure> evicts the folder's stored keys` (vault-fallback.feature).
+- [x] With no `infisical` binary on `PATH` and a populated store, the run produces today's "client
+      not installed" handling and serves nothing from the store. (R0) Tests: `TestClassifyClientNotInstalled`, `TestGoldenVaultFailureHandling/client-not-installed`, `TestDefaultCommander_StartFailure`, `TestPolicy`, `TestNonServedPathsReturnTheInnerErrorValue/client_not_installed`.
+- [x] With a minted principal, an export failing "Response Code: 401" produces today's handling
       without running the probe, and an export failing with a connection-refused network error
-      falls back with reason "unreachable" without running the probe. (R3)
+      falls back with reason "unreachable" without running the probe. (R3) Tests: `TestClassifyExportFailure/minted_401`, `TestClassifyExportFailure/minted_connection_refused`.
 - [ ] With the credential-sync source provider's export failing as in the first criterion,
       provisioning does not abort in the credential-sync lookup and prints the existing
-      credential-sync warning. (R5)
-- [ ] A vault-sourced key in the personal global configuration, and separately one in the
+      credential-sync warning. (R5) Deferred: `TestCredentialSync_LapsedLoginTakesSoftPath` pins the soft path (no abort, the unreachable observation recorded), but the printed credential-sync warning is checked only for a hanging export, not for the logged-out stub.
+- [x] A vault-sourced key in the personal global configuration, and separately one in the
       workspace overlay, is served from the store under the logged-out stub and appears in the
-      instance's materialized env. (R16)
-- [ ] One identity with two stored keys and two further, unstored, non-required keys: the run
+      instance's materialized env. (R16) Tests: `TestStoreFallbackServesEveryLayer/overlay`, `TestStoreFallbackServesEveryLayer/personal` (fake backend through the real apply pipeline).
+- [x] One identity with two stored keys and two further, unstored, non-required keys: the run
       serves the two, omits the other two, and prints one R20 warning and one R17 line for that
-      identity. (R16, R17, R20)
+      identity. (R16, R17, R20) Tests: `TestStoreFallbackPerKeyWithinOneIdentity`, `TestRenderOneWarningPerIdentityWithTheOldestAge`.
 - [ ] With an empty store, a required key, strict mode on and the logged-out stub: `niwa
       dispatch` exits non-zero and standard error holds the R17 line. With strict mode off, whether
       or not the key is declared required: provisioning succeeds without the key, lists it in the
-      key report and prints the R17 line. (R17)
-- [ ] A strict-mode workspace whose every declared key is served from the store provisions
-      successfully. (R18)
-- [ ] A value stored 30 days before the run is served, and the warning's age reads "30 days". Ages
+      key report and prints the R17 line. (R17) Deferred: the pieces are pinned separately (`TestDispatchNothingToFallBackOn/required=true`, `TestDispatchNothingToFallBackOn/required=false`, "the hook's payload says when nothing is stored to fall back on" in vault-fallback.feature, "a logged-out export leaves a tolerated mark and niwa apply succeeds" in vault-failure-baseline.feature), but no dispatch test checks the key report and the R17 line together with strict mode off and the key declared required.
+- [x] A strict-mode workspace whose every declared key is served from the store provisions
+      successfully. (R18) Tests: `TestStoreFallbackServedKeysAreSupplied`, `TestStrictRunWithServedKeysIsNotRefused`.
+- [x] A value stored 30 days before the run is served, and the warning's age reads "30 days". Ages
       of 30 seconds, 59 minutes, 47 hours and 48 hours read "less than a minute", "59 minutes",
-      "47 hours" and "2 days". (R19, R20)
-- [ ] After a fallback run, a run with a stub that exports successfully prints no R20 warning and
+      "47 hours" and "2 days". (R19, R20) Tests: `TestStoreFallbackServesAThirtyDayOldValue`, `TestFormatAge`.
+- [x] After a fallback run, a run with a stub that exports successfully prints no R20 warning and
       the store holds the newly exported values with new resolution times. After a fallback run, the
       instance state records the version token that was stored with each served value, and the store
-      file's resolution times are unchanged. (R10, R16)
-- [ ] Two providers on the same API domain with different project IDs, one stored and one not: under
+      file's resolution times are unchanged. (R10, R16) Tests: `TestStoreFallbackRecovery`.
+- [x] Two providers on the same API domain with different project IDs, one stored and one not: under
       the logged-out stub the unstored provider's keys are not served from the other's entry, and
-      two providers served from the store print two warnings. (R12, R20)
+      two providers served from the store print two warnings. (R12, R20) Tests: `TestStoreFallbackIdentitySeparation`.
 
 **Timeouts**
 
@@ -424,38 +427,38 @@ changes, and the criteria compare against those fixtures.
       back with reason "timed out". A probe stub that never exits, and one that spawns a child that
       keeps its output open, are each terminated within 20 seconds and classified *unreachable*.
       With a minted principal, an export that never exits is terminated within 35 seconds and falls
-      back with reason "timed out". (R3, R7)
-- [ ] With a hanging export stub, a credential-sync source and two further provider folders on the
+      back with reason "timed out". (R3, R7) Deferred: every case runs under the shortened test bound ("a hanging export for a CLI session times out and falls back", "a hanging export whose child holds stdout open is killed with its child", "a hanging export for a minted principal times out without a probe", "a hanging probe after a quick export failure times out and falls back", "a hanging probe whose child holds stdout open is killed with its child" in vault-fallback.feature; `TestRunInfisicalExport_HangingStubTimesOut`, `TestRunInfisicalExport_ForkedChildHoldingStdout`), and the real 30-second export bound is pinned by `TestRunInfisicalExport_RealBound`, but no test runs the probe against its real 15-second bound.
+- [x] With a hanging export stub, a credential-sync source and two further provider folders on the
       same domain, all stored: the stub records exactly one export invocation and at most one probe
       invocation for that domain in the run, every key is served from the store, and the warnings
       give the reason "timed out". With a minted-principal provider on the same domain, its export
-      is skipped too, while niwa's universal-auth login request for it is still made. (R9, R20)
-- [ ] With the logged-out stub and three provider folders on one domain, all stored: the stub
-      records one export invocation and one probe invocation for that domain in the run. (R9)
-- [ ] A universal-auth login request to a server that accepts the connection and never responds
+      is skipped too, while niwa's universal-auth login request for it is still made. (R9, R20) Tests: "one hanging domain is tried once per run" (vault-fallback.feature), `TestRunStateSkipsAfterTimeout`.
+- [x] With the logged-out stub and three provider folders on one domain, all stored: the stub
+      records one export invocation and one probe invocation for that domain in the run. (R9) Tests: "one logged-out domain is tried once per run" (vault-fallback.feature), `TestRunStateSkipsAfterLoggedOut`.
+- [x] A universal-auth login request to a server that accepts the connection and never responds
       fails within 35 seconds with an error naming the universal-auth login and the timeout, and
-      provisioning stops as it does today for any other login error. (R8)
+      provisioning stops as it does today for any other login error. (R8) Tests: `TestAuthenticate_LoginTimesOut`, `TestAuthenticate_LoginRealBound`, `TestAuthenticate_TimeoutFollowsLoginErrorPath`.
 
 **The store**
 
-- [ ] After a successful resolution of two keys from a folder holding three, the store file for
+- [x] After a successful resolution of two keys from a folder holding three, the store file for
       that identity exists under `$XDG_STATE_HOME/niwa/secret-cache/` with mode 0600 in a directory
       with mode 0700, and holds exactly the two keys, each with a resolution time and the version
-      token the export returned. (R10, R12)
-- [ ] Two identities differing only in API domain, two differing only in environment, and two
-      differing only in folder path, each produce two separate store files. (R12)
-- [ ] A value resolved with an empty version token is stored with an empty token and served back
-      with an empty token. (R10, R16)
-- [ ] A credential-sync lookup that succeeds writes nothing to the store, and one that fails as
-      *unauthenticated* reads nothing from it. (R10)
-- [ ] Folder paths `/a/b`, `a/b` and `/a/b/` map to the same store file. API domains
+      token the export returned. (R10, R12) Tests: `TestStoreFallbackStoresOnlyRequestedKeys`, `TestModesUnderPermissiveUmask`.
+- [x] Two identities differing only in API domain, two differing only in environment, and two
+      differing only in folder path, each produce two separate store files. (R12) Tests: `TestIdentitiesThatDifferGetSeparateFiles`.
+- [x] A value resolved with an empty version token is stored with an empty token and served back
+      with an empty token. (R10, R16) Tests: `TestStoreFallbackEmptyToken`, `TestFlushRecordsSuccessesWithTokens`.
+- [x] A credential-sync lookup that succeeds writes nothing to the store, and one that fails as
+      *unauthenticated* reads nothing from it. (R10) Tests: `TestStoreFallbackCredentialSyncIsNotWrapped`.
+- [x] Folder paths `/a/b`, `a/b` and `/a/b/` map to the same store file. API domains
       `https://App.Infisical.com/api` and `https://app.infisical.com` map to the same store file.
-      (R12)
+      (R12) Tests: `TestIdentitySpellingsShareAFile`.
 - [ ] With `XDG_STATE_HOME` unset, set to the empty string, and set to a relative path, the store
       is under
       `$HOME/.local/state/niwa/secret-cache/`. With the working directory, `XDG_CONFIG_HOME` and the
       instance root inside a git work tree and `XDG_STATE_HOME` outside one, no file is written
-      inside the work tree. (R12)
+      inside the work tree. (R12) Deferred: `TestDir` covers the unset, empty and relative `XDG_STATE_HOME` cases and `TestDirIgnoresWorkTreeCwdAndConfig` the working directory and `XDG_CONFIG_HOME`, but no test puts the instance root inside a work tree during a run.
 - [ ] Workspace A resolves keys X and Y from a folder, then workspace B resolves only X from the same
       folder: the store still holds Y. Two concurrent processes resolving X and Y respectively for one
       identity, with a test hook that pauses each writer between reading the file and renaming its
@@ -464,56 +467,56 @@ changes, and the criteria compare against those fixtures.
       identity's lock, a run's store update waits, and it completes once the test releases the
       lock within 2 seconds. A lock held for longer than 2 seconds makes the run skip the update,
       print one warning, and provision successfully. While a test holds the lock, a logged-out run that
-      serves from the store completes without waiting. (R10, R13)
-- [ ] A successful export that lacks requested key X removes X from the store, and a following
+      serves from the store completes without waiting. (R10, R13) Deferred: merging, the race and the lock are pinned at store and session level (`TestUpdateMergesPerKey`, `TestConcurrentWritersKeepBothKeys`, `TestConcurrentWritersWithoutTheLockLoseAKey`, `TestUpdateWaitsForTheLock`, `TestUpdateGivesUpOnALockHeldTooLong`, `TestFlushLockTimeoutNotesAndContinues`, `TestLoadTakesNoLock`), not in a provisioning run that prints the warning and succeeds.
+- [x] A successful export that lacks requested key X removes X from the store, and a following
       logged-out run does not serve X. A verified probe with an export failing "Response Code: 403",
       and separately "Response Code: 404", removes every key that run requested from that identity,
-      and a following logged-out run serves none of them. (R11)
+      and a following logged-out run serves none of them. (R11) Tests: `TestStoreFallbackEviction/missing_key`, `TestStoreFallbackEviction/answered_403`, `TestStoreFallbackEviction/answered_404`, `an answered <failure> evicts the folder's stored keys` (vault-fallback.feature).
 - [ ] With a test hook that aborts an update after the temporary file is written and before the
       rename, the store file still holds its previous valid contents, and a following fallback serves
-      them. (R13)
+      them. (R13) Deferred: `TestAbortBeforeRenameKeepsThePreviousFile` shows the previous contents survive, but no following fallback run serves them.
 - [ ] With `XDG_STATE_HOME` inside a directory that has a `.git` directory, and separately inside
       one that has a `.git` file (a linked worktree), a successful run creates no store file and
       prints one warning naming the directory, and a counting stub on `PATH` for the version-control
-      tool records no invocation. (R14)
-- [ ] A store file with invalid JSON, and one with an unknown format version, are each treated as
+      tool records no invocation. (R14) Deferred: `TestWorkTreeGuard` (a `.git` directory and a `.git` file, with a counting stub) and `TestFlushInWorkTreeNotesOnceAndWritesNothing` pin it below the run, and "the hook's payload warns that the store is inside a git work tree" (vault-fallback.feature) covers a `.git` directory end to end; no full run covers the `.git` file case.
+- [x] A store file with invalid JSON, and one with an unknown format version, are each treated as
       empty (the run behaves as with an empty store) and are rewritten by the next successful
       resolution. A store file with mode 0000, in a test running as a non-root user, is treated as
       empty. A store directory that cannot be
-      written produces one warning and provisioning succeeds. (R15)
+      written produces one warning and provisioning succeeds. (R15) Tests: `TestUnreadableDataFilesAreEmptyAndReplaced`, `TestDataFileWithNoPermissionsIsEmpty`, `TestUnwritableStoreDirectory`, `TestUnwritableStoreNotesOnceAndDisablesTheStore`, "the hook's payload warns that the store is unwritable" (vault-fallback.feature).
 
 **Output and safety**
 
-- [ ] The R20 warning contains the provider kind, the API domain, the project ID, the reason, "may be
+- [x] The R20 warning contains the provider kind, the API domain, the project ID, the reason, "may be
       stale", the age and `infisical login`. Ages of 1 minute and 1 hour read "1 minute" and "1 hour";
       ages of exactly 60 seconds and exactly 60 minutes read "1 minute" and "1 hour". With two keys
       stored 3 days and 5 days ago served for one identity, one warning prints and reads "5 days".
       When one identity's first failure in a run was unauthenticated and a later one timed out, the
-      reason reads "logged out or expired". (R20)
-- [ ] Under the session-start hook, the R14, R15, R17 and R20 messages each appear in the
+      reason reads "logged out or expired". (R20) Tests: `TestRenderServedCarriesEveryR20Field`, `TestFormatAge`, `TestRenderOneWarningPerIdentityWithTheOldestAge`, `TestRenderFirstReasonWins`, `TestMappedFirstReasonWinsInTheRendering`.
+- [x] Under the session-start hook, the R14, R15, R17 and R20 messages each appear in the
       `additionalContext` payload on standard output when their condition is set up and the hook
       provisions successfully. When a required key has no stored value, the hook provisions
       without it and the R17 line is in the payload; with strict mode on, the hook writes its
-      strict-refusal payload, as today, and the R17 line is in that payload. (R21)
-- [ ] A test using distinct marker secret values captures standard output, standard error and every
+      strict-refusal payload, as today, and the R17 line is in that payload. (R21) Tests: "the hook's payload carries the stale-value warning", "the hook's payload says when nothing is stored to fall back on", "the hook's payload warns that the store is inside a git work tree", "the hook's payload warns that the store is unwritable" (vault-fallback.feature); `TestSessionStartNoticesGoIntoThePayload`, `TestSessionStartStrictRefusalCarriesNotices`.
+- [x] A test using distinct marker secret values captures standard output, standard error and every
       file written during a fallback run, a successful run, a run that fails in strict mode with
       an empty store, and a run with a 404 answer. The markers appear only in the
       store files and the instance's materialized files, and no captured stream or file contains a
-      `token` field taken from probe output. (R22)
+      `token` field taken from probe output. (R22) Tests: "secret values and the probe's token never leak" (vault-fallback.feature).
 - [ ] Every export and probe subprocess started in the tests above has standard input connected to
       the null device and has no controlling terminal. The test runs niwa under a pseudo-terminal it
-      allocates, and the stub records its standard input's device and fails to open `/dev/tty`. (R23)
+      allocates, and the stub records its standard input's device and fails to open `/dev/tty`. (R23) Deferred: `TestDefaultCommander_NoTerminalAccess` (Linux only) runs the subprocess runner under a pseudo-terminal with one stub; niwa itself is not run under one, and the functional stub does not record its standard input or try `/dev/tty`.
 - [ ] `PRD-vault-integration`, the vault-integration design document and the guide each contain
       "Superseded by PRD-dispatch-offline-secrets." within the R29 and D-7 passages (between their
       headings and the next heading), and a search of the Go sources for "INV-NO-DISK-CACHE" or
-      "vault-integration R29" finds only lines that also name this PRD. (R24)
+      "vault-integration R29" finds only lines that also name this PRD. (R24) Deferred: no test; the notes and the source search were checked by hand.
 - [ ] The vault-integration guide committed with this feature contains the R25 sentence verbatim.
-      (R25)
-- [ ] With a counting stub, a successful provisioning run makes the same number of export
-      invocations as the code before this change, and no probe invocation. (R26)
+      (R25) Deferred: no test; the sentence was checked by hand.
+- [x] With a counting stub, a successful provisioning run makes the same number of export
+      invocations as the code before this change, and no probe invocation. (R26) Tests: `TestGoldenSuccessfulRunInvocations`, `TestClassifySuccessRunsNoProbe`, "a successful apply makes one export per folder and no login status call" (vault-failure-baseline.feature).
 - [ ] The full unit and functional suites are run with `HOME` and `XDG_STATE_HOME` pointing at two
       sentinel directories that do not exist and with no `infisical` binary on `PATH`; they pass,
-      and afterwards neither sentinel directory exists. (R27)
+      and afterwards neither sentinel directory exists. (R27) Deferred: enforced by the Linux CI job's sentinel steps rather than a test, and not run on macOS.
 
 ## Out of Scope
 
@@ -549,8 +552,16 @@ changes, and the criteria compare against those fixtures.
   session has expired" and a probe status of "expired" were read from the Infisical CLI binary
   and from machine-token experiments. A real expired user session wasn't reproduced. If the
   real wording differs, R2's probe still classifies it, since the probe reports session state
-  rather than wording. If the probe also reported it unexpectedly, the run would fail as it
-  does today rather than serve stale values.
+  rather than wording. If the probe also reported it unexpectedly, classification still fails
+  open, toward serving stored values: rule 6 sends every failure without a usable answer (no
+  server response, a timeout, a probe that doesn't parse) to *unreachable*, which is served,
+  and rule 4 sends every 401 or 403 the probe can't vouch for to *unauthenticated*, which is
+  served and evicts nothing. The store is bypassed only for a server response other than 401 or
+  403, or for a 401 or 403 backed by a verified session.
+- **Classification errs toward serving stale values.** The same rules mean that a mistake in
+  the reasoning behind them shows up as a stored value served with a warning, not as a failed
+  run. A real refusal that coincides with a probe that times out or prints output niwa can't
+  parse is served stale for that run (rule 4), as recorded below for permission denials.
 - **Stored values can be arbitrarily old.** With no age ceiling (R19), a value rotated upstream
   keeps being served until the owner logs back in. The warning's age makes this visible but
   does not stop it.
@@ -579,6 +590,20 @@ changes, and the criteria compare against those fixtures.
   probe carries the classification when wording changes.
 - **The work-tree check cannot see every setup.** A home directory managed as a bare-repository
   dotfiles checkout has no `.git` directory in its parent chain, so R14 cannot detect it.
+- **CLI output is capped, not streamed.** niwa keeps at most 32 MiB of an export's or probe's
+  standard output and 1 MiB of its standard error; the rest is discarded. An export that exits
+  0 with more output than that is *answered* (like output niwa can't parse) and serves
+  nothing. A probe that passes the cap gives no usable answer, so R2's later rules decide. A
+  truncated standard error only loses its tail, which feeds messages and wording checks.
+- **The store key has no principal.** A provider identity is kind, API domain, project,
+  environment and folder path. Two principals that read the same folder share one store file,
+  so when one principal's login lapses, niwa can serve values that another principal recorded
+  for the same identity, including values the lapsed principal was never allowed to read.
+- **A caller that doesn't collect notices falls back to the reporter.** The command surfaces
+  each hand the run a notice collector. A caller of the provisioning code that doesn't still
+  gets the warnings: the run collects them itself and writes them through its progress
+  reporter (standard error by default) when it ends, rather than serving stale values
+  silently.
 
 ## Decisions and Trade-offs
 

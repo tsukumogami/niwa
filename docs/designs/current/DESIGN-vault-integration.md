@@ -126,7 +126,10 @@ without breaking v0.6 configs that don't use vaults at all.
   infix, no CLAUDE.md interpolation, no status content, no `os.Setenv`,
   no disk cache, public-repo guardrail one-shot override, override-
   visibility diagnostics. The no-disk-cache rule (R29) and decision D-7
-  no longer hold. Superseded by PRD-dispatch-offline-secrets.
+  no longer hold. Superseded by PRD-dispatch-offline-secrets. As of
+  2026-09-30, that PRD's requirements R10 to R19 (the store of
+  last-resolved values and the fallback on it) supersede
+  PRD-vault-integration R29 INV-NO-DISK-CACHE and decision D-7.
 - **File-local provider scoping (R3, D-9).** The parser must track which
   file declared which providers; per-file resolution must use the
   right provider table; merging cannot mix provider names across layers.
@@ -1346,7 +1349,7 @@ implementers must keep in mind.
 | R26 (no CLAUDE.md interpolation) | Parser rejects `vault://` URIs in `[claude.content.*]` at load time. |
 | R27 (no status content) | `niwa status` reads `state.json` only; renders `path + status` plus non-secret `Provenance` strings. |
 | R28 (no process env publication) | No `os.Setenv` call in any code path. Secrets flow into the materializer's file-write path and nowhere else. |
-| R29 (no disk cache) | Superseded by PRD-dispatch-offline-secrets. `Resolver.CloseAll` still runs at pipeline step 12, but the last value each requested key resolved to is now kept in a store under `$XDG_STATE_HOME/niwa/secret-cache/` and served when the provider is logged out or unreachable. |
+| R29 (no disk cache) | Superseded by PRD-dispatch-offline-secrets. (2026-09-30: its R10 to R19 supersede R29 INV-NO-DISK-CACHE and decision D-7.) `Resolver.CloseAll` still runs at pipeline step 12, but the last value each requested key resolved to is now kept in a store under `$XDG_STATE_HOME/niwa/secret-cache/` and served when the provider is logged out or unreachable. |
 | R30 (public-repo guardrail) | `guardrail.CheckGitHubPublicRemoteSecrets` at pipeline step 7; one-shot `--allow-plaintext-secrets` flag with no state persistence. |
 | R31 (override-visibility) | `DetectShadows` + `DetectProviderShadows` persist shadow records in `state.json`; stderr diagnostic at apply time; `niwa status` summary line; `--audit-secrets` SHADOWED column. |
 

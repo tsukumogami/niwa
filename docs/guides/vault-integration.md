@@ -726,6 +726,8 @@ CLAUDE.md interpolation refusal, status-content redaction, no
 process-env publication, the public-repo guardrail, and
 override-visibility diagnostics. The original list also had "no disk
 cache" (R29, decision D-7). Superseded by PRD-dispatch-offline-secrets.
+As of 2026-09-30, requirements R10 to R19 of that PRD supersede
+PRD-vault-integration R29 INV-NO-DISK-CACHE and decision D-7.
 See [PRD-dispatch-offline-secrets](../prds/PRD-dispatch-offline-secrets.md):
 niwa now stores the last resolved values so provisioning can keep going
 while the login has lapsed, as described in

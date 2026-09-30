@@ -135,6 +135,9 @@ func TestClassifyExportFailure(t *testing.T) {
 		{name: "403 verified on another domain", stderr: stderrResponse403, probe: probeOtherDomain, want: withStatus(answered, 403), wantProbes: 1, text: toleratedAuthFailureText(stderrResponse403)},
 		{name: "expired first then verified", stderr: stderrNoValidSession, probe: probeExpiredThen, want: loggedOut, wantProbes: 1, fixture: "logged-out-no-valid-session"},
 		{name: "verified first then expired", stderr: stderrConnRefused, probe: probeVerifiedThe, want: unreachable, wantProbes: 1, fixture: "connection-refused"},
+		// The same export as "expired first then verified": only the
+		// session order differs, and it alone flips the class.
+		{name: "verified first then expired, same export", stderr: stderrNoValidSession, probe: probeVerifiedThe, want: unreachable, wantProbes: 1},
 		{name: "pending session", stderr: stderrConnRefused, probe: probePending, want: unreachable, wantProbes: 1, fixture: "connection-refused"},
 		{name: "env token session rejected, stored login listed first", stderr: stderrConnRefused, probe: probeEnvRejected, envToken: "t", want: loggedOut, wantProbes: 1, fixture: "connection-refused"},
 		{name: "env token session rejected with a 401", stderr: stderrResponse401, probe: probeEnvRejected, envToken: "t", want: withStatus(loggedOut, 401), wantProbes: 1, text: toleratedAuthFailureText(stderrResponse401)},

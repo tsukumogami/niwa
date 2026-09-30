@@ -26,6 +26,8 @@ rationale: |
 
 Current
 
+Implemented by pull request tsukumogami/niwa#346.
+
 ## Context and Problem Statement
 
 Every provisioning command resolves `vault://` references in one place. `realProvisionInstance`
@@ -375,7 +377,9 @@ it after the key report. The hook's two payload builders append its context rend
 to standard error at each of its six other failure returns: a provisioning error, a failed
 session-mapping write, a failed payload build or write on the success path, and a failed payload
 build or write on the strict-refusal path. Strict mode reads only `a.Keys`, so
-nothing in the notice collector can ever count as a shortfall.
+nothing in the notice collector can ever count as a shortfall. A caller that leaves `Notices` nil
+isn't silent: `runPipeline` makes a collector of its own and writes its text rendering through
+the applier's reporter when the run ends.
 
 #### Alternatives Considered
 
@@ -572,7 +576,8 @@ internal/vault/infisical
                        struct) with tokenSource, verification.state; still no token field
   classify.go        + bounded probe call using that decoder, ordered rules, wording markers,
                        ClassifiedError construction
-  bounds.go          + exportTimeout/probeTimeout/loginTimeout, callBound (NIWA_TEST_VAULT_TIMEOUT)
+  bounds.go          + exportTimeout/probeTimeout/loginTimeout, callBound (NIWA_TEST_VAULT_TIMEOUT),
+                       stdout/stderr output caps (cappedBuffer)
     infisical.go       + StoreIdentity(ref); api_url read at Open for the identity only;
                        consults run state before starting a subprocess
   auth.go            authenticateHTTP: request ctx bounded by loginTimeout, timeout error text
@@ -818,7 +823,10 @@ run it itself, since an interactive login from an agent's shell would prompt or 
 
 **Subprocess containment.** Every export and probe runs with stdin on the null device, in a new
 session with no controlling terminal, within a deadline (export 30 s, probe 15 s, universal-auth
-login 30 s). On timeout the whole process group is killed. A final group kill after the call
+login 30 s), and with its captured output capped at 32 MiB of standard output and 1 MiB of
+standard error, so a runaway CLI can't fill memory before its deadline. An export that exits 0
+past the standard-output cap is *answered*, like unparseable output; a probe past it gives no
+answer. On timeout the whole process group is killed. A final group kill after the call
 returns is sent only when the deadline fired or the output pipes had to be cut, so a recycled
 process group ID is never signalled on the normal path. The `infisical` binary is looked up on
 `PATH` as today, and the probe adds no trust beyond what the export already has.
