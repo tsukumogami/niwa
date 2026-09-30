@@ -43,7 +43,7 @@ import (
 //     exec.ErrWaitDelay and the truncation isn't reported. Stderr past
 //     maxStderrBytes is truncated with no error, and its cut last line
 //     is dropped so a half-written secret never escapes the scrubber.
-//     The first server status line past the cap is still returned, as
+//     The last server status line past the cap is still returned, as
 //     one line after the kept prefix.
 //
 // Call sites that bound the call check callTimedOut before branching

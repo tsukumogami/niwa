@@ -609,9 +609,11 @@ changes, and the criteria compare against those fixtures.
   0 with more output than that is *answered* (like output niwa can't parse) and serves
   nothing. A probe that passes the cap gives no usable answer, so R2's later rules decide. A
   truncated standard error only loses its tail, which feeds messages and wording checks: niwa
-  keeps reading past the cap for the first line that starts with `Response Code:` and keeps that
-  one status line, so a server's answer still decides the class however much the CLI printed
-  before it.
+  keeps reading past the cap, including the line the cap cut, for lines that start with
+  `Response Code:` and keeps the last one. The classifier also takes the last status line it
+  sees, because the CLI prints its own after everything else. So the server's answer decides
+  the class however much the CLI printed before it, as long as the CLI's status line comes
+  last. A status-shaped line printed after it would be read instead.
 - **The store key has no principal.** A provider identity is kind, API domain, project,
   environment and folder path. Two principals that read the same folder share one store file,
   so when one principal's login lapses, niwa can serve values that another principal recorded

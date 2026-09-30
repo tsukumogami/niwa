@@ -37,7 +37,7 @@ var (
 	maxStdoutBytes = 32 << 20
 	// maxStderrBytes caps the captured stderr. Past it, the rest is
 	// discarded silently, along with the line the cap cut (see
-	// wholeLines), except for the first server status line, which the
+	// wholeLines), except for the last server status line, which the
 	// buffer keeps looking for past the cap (see keepStatusLine):
 	// otherwise a status pushed past the cap would read as no server
 	// response and a refusal could be served stale.
@@ -54,10 +54,14 @@ var errOutputTooLarge = errors.New("infisical: CLI output exceeded the size cap"
 // never sees a broken pipe and exits the way it would have otherwise.
 //
 // With keepStatusLine set, the buffer also reads every line past the
-// cap, retaining none of it, and remembers the first one that is a
-// server status line (`Response Code: <n>`). wholeLines appends that
-// line, rebuilt from the parsed number, so the classifier still sees
-// the server's answer however much the CLI printed before it.
+// cap, retaining none of it, and remembers the last one that is a
+// server status line (`Response Code: <n>`). The line the cap cut is
+// read whole: its kept start seeds the scan. wholeLines appends the
+// status, rebuilt from the parsed number, so the classifier still sees
+// the server's answer however much the CLI printed before it. The last
+// status wins because the CLI prints its own status line after
+// everything else, so a status-shaped line of program output earlier
+// in the stream can't stand in for it.
 type cappedBuffer struct {
 	limit     int
 	buf       []byte
@@ -69,7 +73,7 @@ type cappedBuffer struct {
 	// is skipped to its end (skipping).
 	pending  []byte
 	skipping bool
-	// status is the first status past the cap, 0 until one is seen.
+	// status is the last status past the cap, 0 until one is seen.
 	status int
 }
 
@@ -90,18 +94,16 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 	}
 	if !b.truncated {
 		b.truncated = true
-		// The line the cap cut continues past it: skip its rest
-		// unless the cap fell exactly on a line boundary.
-		b.skipping = len(b.buf) > 0 && b.buf[len(b.buf)-1] != '\n'
-		if b.skipping && p[0] == '\n' {
-			// The cap fell just before a newline, so the last kept
-			// line is whole. wholeLines still drops its text, but
-			// the scanner gets to read it as a status line.
-			last := b.buf[bytes.LastIndexByte(b.buf, '\n')+1:]
-			if len(last) <= maxStatusLineLen {
-				b.pending = append(b.pending[:0], last...)
-				b.skipping = false
-			}
+		// The line the cap cut continues past it. wholeLines drops
+		// its kept start, but the scanner reads the line whole by
+		// starting from that kept part, unless it is already too
+		// long to be a status line. On a line boundary the kept
+		// part is empty.
+		last := b.buf[bytes.LastIndexByte(b.buf, '\n')+1:]
+		if len(last) <= maxStatusLineLen {
+			b.pending = append(b.pending[:0], last...)
+		} else {
+			b.skipping = true
 		}
 	}
 	if b.keepStatusLine {
@@ -112,7 +114,7 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 
 // scanPastCap feeds bytes past the cap through the status-line search.
 func (b *cappedBuffer) scanPastCap(p []byte) {
-	for len(p) > 0 && b.status == 0 {
+	for len(p) > 0 {
 		i := bytes.IndexByte(p, '\n')
 		chunk := p
 		if i >= 0 {
@@ -129,7 +131,9 @@ func (b *cappedBuffer) scanPastCap(p []byte) {
 			return
 		}
 		if !b.skipping {
-			b.status = parseStatusLine(string(b.pending))
+			if n := parseStatusLine(string(b.pending)); n > 0 {
+				b.status = n
+			}
 		}
 		b.pending, b.skipping = b.pending[:0], false
 		p = p[i+1:]
@@ -150,9 +154,11 @@ func (b *cappedBuffer) wholeLines() []byte {
 		out = b.buf[:i+1]
 	}
 	status := b.status
-	if status == 0 && b.keepStatusLine && !b.skipping {
+	if b.keepStatusLine && !b.skipping {
 		// The stream ended without a newline after its last line.
-		status = parseStatusLine(string(b.pending))
+		if n := parseStatusLine(string(b.pending)); n > 0 {
+			status = n
+		}
 	}
 	if status > 0 {
 		out = append(out[:len(out):len(out)], fmt.Sprintf("%s%d\n", responseCodePrefix, status)...)
