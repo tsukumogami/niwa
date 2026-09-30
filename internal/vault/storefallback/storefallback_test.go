@@ -583,6 +583,29 @@ func TestNoticeIdentityCopiesEveryField(t *testing.T) {
 	}
 }
 
+// lessIdentity must compare every vault.Identity field. One it skipped
+// would leave two identities that differ only there unordered, and the
+// order they come out in would depend on map iteration.
+func TestLessIdentityOrdersByEveryField(t *testing.T) {
+	vt := reflect.TypeOf(vault.Identity{})
+	for i := 0; i < vt.NumField(); i++ {
+		name := vt.Field(i).Name
+		t.Run(name, func(t *testing.T) {
+			var lo, hi vault.Identity
+			lv, hv := reflect.ValueOf(&lo).Elem(), reflect.ValueOf(&hi).Elem()
+			for j := 0; j < vt.NumField(); j++ {
+				lv.Field(j).SetString("same")
+				hv.Field(j).SetString("same")
+			}
+			lv.Field(i).SetString("a")
+			hv.Field(i).SetString("b")
+			if !lessIdentity(lo, hi) || lessIdentity(hi, lo) {
+				t.Errorf("lessIdentity ignores %s", name)
+			}
+		})
+	}
+}
+
 // R20: the reasons this package maps from vault.ReasonLoggedOut and then
 // vault.ReasonTimedOut, recorded for one identity in that order, render as
 // "is logged out or expired": the first reason wins.
