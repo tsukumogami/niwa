@@ -41,8 +41,13 @@ Claude integration), the tsuku network install and the macOS leg are left out on
   would fail this change; an empty list fails rather than passing over nothing)
 - `go vet ./...`
 - `go test -race ./...`
+  (unlike CI's Linux "Test (sentinel HOME)" step, which runs this with `HOME` and
+  `XDG_STATE_HOME` at two sentinel directories that must not exist afterwards: here they keep
+  the developer's values, and the cli and workspace `TestMain`s keep those packages' tests out
+  of them)
 - `H=$(git rev-parse HEAD) && S=$(git status --porcelain) && NIWA_TEST_TAGS='~@codex-discovery && ~@codex-live && ~@claude-integration' make test-functional && [ "$(git rev-parse HEAD)" = "$H" ] && [ "$(git status --porcelain)" = "$S" ]`
-  (CI's checkout tripwire around the functional suite; "another functional test run holds" the
+  (CI's checkout tripwire around the functional suite; CI also runs the suite under the
+  sentinel `HOME` and `XDG_STATE_HOME` and checks them afterwards, which this line doesn't; "another functional test run holds" the
   lock means a run is already going in this checkout: cannot-verify, not a failed change.
   Unlike CI, three tags are skipped, for two different reasons. `@codex-live` and
   `@claude-integration` stay out for good: with a Codex login or `ANTHROPIC_API_KEY` they make
