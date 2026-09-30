@@ -219,9 +219,9 @@ type ProviderSpec struct {
 // this struct) with fallbacknotice's lessIdentity and fields helpers,
 // the fake provider's "identity" config, and the infisical
 // provider's StoreIdentity. TestFileStemCoversEveryIdentityField,
-// TestNoticeIdentityCopiesEveryField, TestLessIdentityOrdersByEveryField
-// (storefallback) and TestLessIdentityCoversEveryVaultIdentityField
-// (fallbacknotice) fail when a new field is missing from the store key,
+// TestNoticeIdentityCopiesEveryField and the two
+// TestLessIdentityCoversEveryVaultIdentityField tests (storefallback
+// and fallbacknotice) fail when a new field is missing from the store key,
 // the notice copy, fallbacknotice.Identity or either ordering.
 type Identity struct {
 	Kind        string

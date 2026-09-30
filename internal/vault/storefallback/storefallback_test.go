@@ -586,7 +586,7 @@ func TestNoticeIdentityCopiesEveryField(t *testing.T) {
 // lessIdentity must compare every vault.Identity field. One it skipped
 // would leave two identities that differ only there unordered, and the
 // order they come out in would depend on map iteration.
-func TestLessIdentityOrdersByEveryField(t *testing.T) {
+func TestLessIdentityCoversEveryVaultIdentityField(t *testing.T) {
 	vt := reflect.TypeOf(vault.Identity{})
 	for i := 0; i < vt.NumField(); i++ {
 		name := vt.Field(i).Name

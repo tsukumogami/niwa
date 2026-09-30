@@ -177,10 +177,10 @@ func (r *Reporter) FlushDeferred() {
 // diagnostics (the required-key check, the plaintext-secrets guardrail,
 // fallback notices a caller didn't collect itself), so that output
 // clears the spinner and lands in the same stream as the rest of the
-// run's progress instead of interleaving with it. The bytes go to the
-// writer the Reporter was built with: standard error for every Reporter
-// the CLI commands and NewApplier construct, or whatever writer a caller
-// passed to NewReporter or NewReporterWithTTY.
+// run's progress instead of writing over the spinner line. The bytes go
+// to the writer the Reporter was built with: standard error for every
+// Reporter the CLI commands and NewApplier construct, or whatever writer
+// a caller passed to NewReporter or NewReporterWithTTY.
 func (r *Reporter) Writer() io.Writer {
 	return &logWriter{r: r}
 }
