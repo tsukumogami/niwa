@@ -107,6 +107,14 @@ type SessionMapping struct {
 	// flag. It is display-only and never used to find or reclaim the session.
 	// omitempty keeps unnamed and legacy mappings byte-identical.
 	SessionName string `json:"session_name,omitempty"`
+	// DispatchID is the dispatch's own identity, the value its worker carries
+	// as a lineage resource attribute. ParentSessionID is the id of the
+	// session that ran the dispatch, when it was run from one. Both are
+	// informational: they power `niwa list --json` and are never read by the
+	// reaper. omitempty keeps mappings written before these fields existed,
+	// and dispatches with no caller session, byte-identical.
+	DispatchID      string `json:"dispatch_id,omitempty"`
+	ParentSessionID string `json:"parent_session_id,omitempty"`
 }
 
 // sessionsDirName is the directory under the config dir that holds the session

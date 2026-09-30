@@ -106,6 +106,13 @@ func SwapSnapshotAtomic(target, staging string) error {
 // the target). For a directory, RemoveAll handles the recursion;
 // because RemoveAll itself doesn't follow symlinks during traversal,
 // any symlinks inside the dir are removed without their targets.
+//
+// When RemoveAll fails with a permission error, it makes every directory
+// under path owner-writable and retries once. That covers the read-only
+// directories local paths can bring into a snapshot. It is best-effort:
+// chmod errors are swallowed, so a directory it can't make writable still
+// leaves path behind and the retry's error is returned. Callers point it
+// only at niwa-owned trees (staging, .prev), never at user data.
 func safeRemoveAll(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -117,5 +124,21 @@ func safeRemoveAll(path string) error {
 	if info.Mode()&os.ModeSymlink != 0 {
 		return os.Remove(path)
 	}
+	if err := os.RemoveAll(path); err == nil || !errors.Is(err, fs.ErrPermission) {
+		return err
+	}
+	// A read-only directory refuses the removal of its entries. The config
+	// dir can hold one now that local paths ride across the swap, and a
+	// leftover .prev would fail every later swap's preflight, so make the
+	// directories owner-writable and try again. WalkDir does not follow
+	// symlinks, so only directories inside path are touched.
+	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			if info, statErr := d.Info(); statErr == nil {
+				_ = os.Chmod(p, info.Mode().Perm()|0o700)
+			}
+		}
+		return nil
+	})
 	return os.RemoveAll(path)
 }

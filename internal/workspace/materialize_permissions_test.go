@@ -67,7 +67,7 @@ func TestBuildSettingsDoc_InvalidPermissionsPlainIsQuoted(t *testing.T) {
 	}
 }
 
-// TestBuildSettingsDoc_InvalidSettingSecretIsNotLeaked covers all three keys
+// TestBuildSettingsDoc_InvalidSettingSecretIsNotLeaked covers every key
 // buildSettingsDoc validates. A vault-backed value that fails validation must
 // be described by its key and origin, never by its resolved plaintext.
 func TestBuildSettingsDoc_InvalidSettingSecretIsNotLeaked(t *testing.T) {
@@ -79,6 +79,7 @@ func TestBuildSettingsDoc_InvalidSettingSecretIsNotLeaked(t *testing.T) {
 		{key: "permissions", wantText: []string{`"bypass"`, `"ask"`}},
 		{key: config.RemoteControlAtStartupKey, wantText: []string{`"true"`, `"false"`}},
 		{key: config.KeepAliveOnDispatchKey, wantText: []string{`"true"`, `"false"`}},
+		{key: config.AttributionKey, wantText: []string{`"true"`, `"false"`}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.key, func(t *testing.T) {
@@ -101,9 +102,9 @@ func TestBuildSettingsDoc_InvalidSettingSecretIsNotLeaked(t *testing.T) {
 }
 
 // TestBuildSettingsDoc_BooleanKeysPlainIsQuoted pins that the plain-value
-// form of the two boolean keys still quotes the rejected value.
+// form of the boolean keys still quotes the rejected value.
 func TestBuildSettingsDoc_BooleanKeysPlainIsQuoted(t *testing.T) {
-	for _, key := range []string{config.RemoteControlAtStartupKey, config.KeepAliveOnDispatchKey} {
+	for _, key := range []string{config.RemoteControlAtStartupKey, config.KeepAliveOnDispatchKey, config.AttributionKey} {
 		t.Run(key, func(t *testing.T) {
 			settings := config.SettingsConfig{key: plainSetting("maybe")}
 			_, err := buildSettingsDoc(BuildSettingsConfig{Settings: settings})

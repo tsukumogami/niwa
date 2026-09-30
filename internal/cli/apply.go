@@ -71,7 +71,13 @@ Scope resolution (when no workspace-name argument is given):
   4. If cwd is at the workspace root, materialize the root-managed config, then
      converge every instance and each instance's worktrees. The workspace root
      itself is never converged as an instance: apply manages only its root-level
-     config and clones no repos into the root.
+     config and clones no repos into the root. The root's own .niwa/ counts as
+     the root.
+
+From any other directory under the workspace root (one that is not an instance,
+a worktree, or the root itself, such as a directory an interrupted create left
+behind), apply refuses, with or without --instance. It never falls back to the
+root's scope.
 
 Use --no-cascade at the workspace root to refresh only the root-managed config
 (hooks, permission posture, CLAUDE.md) without re-converging the instances
@@ -79,7 +85,9 @@ beneath it. It has no effect at an instance or a worktree: an instance always
 converges together with its worktrees (the inherit model makes a worktree a
 derived view of its instance, not an independently skippable scope), and a
 worktree is a leaf with nothing below it. Apply destroys nothing and is a no-op
-where everything is current.
+where everything is current, apart from config files the source supplied: a
+refresh of .niwa/ replaces those and removes the ones the source dropped. Files
+under .niwa/ that the source does not supply are kept.
 
 If a workspace name is given as a positional argument, it is resolved through
 the global registry (~/.config/niwa/config.toml) to find the workspace root

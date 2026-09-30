@@ -25,11 +25,12 @@ materializes the config on disk.
   to the `.niwa/` subdirectory inside `org/brain-repo`. The whole-
   repo case is the degenerate `subpath = "/"` form, so existing
   `org/dot-niwa` registries continue to work unchanged.
-- **Snapshot materialization.** `<workspace>/.niwa/` is a pure file
-  tree containing only the resolved subpath's content plus a single
-  provenance marker (`.niwa-snapshot.toml`). No `.git/`. Refresh
-  replaces the directory atomically; manual edits inside `.niwa/`
-  do not persist.
+- **Snapshot materialization.** `<workspace>/.niwa/` holds the
+  resolved subpath's content plus a provenance marker
+  (`.niwa-snapshot.toml`) and a manifest of what the source supplied
+  (`.niwa-snapshot-manifest`). No `.git/`. Refresh replaces the
+  directory atomically; edits to source-supplied files don't persist,
+  but files you add that the source doesn't supply are kept.
 - **Convention-based discovery.** `niwa init --from
   org/brain-repo` (no subpath) probes the source repo's root for a
   fixed marker vocabulary and resolves the subpath automatically.
@@ -127,17 +128,66 @@ opt in to "the whole brain repo is content."
 
 ## Snapshot model
 
-The materialized `<workspace>/.niwa/` directory is a pure file tree
-containing exactly:
+The materialized `<workspace>/.niwa/` directory contains:
 
 1. Every regular file from the resolved subpath in the source
    commit, with directory structure preserved.
 2. One provenance marker file: `.niwa-snapshot.toml`.
+3. One manifest file, `.niwa-snapshot-manifest`, listing every path
+   in item 1.
+4. Anything else that was already there and that the source didn't
+   supply: niwa's own local state (`instance.json`, `dispatch-briefs/`,
+   `sessions/`) and whatever else you or a session keep there.
 
 No `.git/` directory exists. `git status` inside the snapshot
-returns "not a git repository." Manual edits to files inside
-`.niwa/` survive only until the next `niwa apply`, which replaces
-the directory atomically from the upstream source.
+returns "not a git repository." Manual edits to files the source
+supplies survive only until the next refresh, which replaces them
+from the upstream source.
+
+### Local files under `.niwa/`
+
+A refresh removes only paths the previous snapshot's manifest says the
+source supplied. Every other path under `.niwa/`, at any depth, is
+carried into the new snapshot with its mode, and symlinks stay
+symlinks. So it's safe to keep notes, scripts or other state that has
+to outlive any one instance under the workspace root's `.niwa/`; no
+apply, create, dispatch or reset deletes it, at any scope. The same
+rule covers every snapshot niwa keeps: the workspace overlay's and the
+personal global config's, not only the workspace root's.
+
+A few cases need a decision from you, or are worth knowing:
+
+- If the source starts supplying a path you already created locally,
+  the refresh refuses, names every such path, and leaves `.niwa/`
+  untouched. Until you move or rename the local copies, every apply,
+  create, dispatch and reset in the workspace fails the same way,
+  including an unattended dispatch. Move your copies aside, or merge
+  them into the source, and re-run.
+- A snapshot written before the manifest existed has no record of what
+  the source supplied. On its first refresh, every path the new source
+  content lacks is kept, and apply prints a `warning:` listing them.
+  If the source deleted one of those files on purpose, delete it by
+  hand. A local file at a path the new source content does supply is
+  replaced by the source's copy on that refresh, since nothing says it
+  wasn't the source's. After that refresh the manifest exists and
+  removals are exact.
+- A top-level `.niwa/.git` is never kept, at any refresh, silently.
+  That is how converting a legacy working tree to a snapshot drops its
+  git metadata, and it means a repository you `git init` directly in
+  `.niwa/` is lost at the next source move. Keep a tracked repository
+  in a subdirectory instead; a `.git` below the top level is carried
+  like any other path.
+- A socket, FIFO or device file under `.niwa/` can't be copied. The
+  refresh drops it for good and prints a `warning:` naming it; the
+  warning is the only record.
+- A refresh refuses a source file whose name contains a line break,
+  because the manifest couldn't record it faithfully. Every apply in
+  the workspace fails until the source renames it.
+- A local file niwa can't read (mode 000, say) fails the refresh,
+  naming it, until its permissions are fixed or it's moved.
+- Local files are copied on every refresh, so keep large data
+  elsewhere, and a write into `.niwa/` that lands while a refresh is
+  copying can be lost.
 
 ### Provenance marker
 
@@ -727,6 +777,23 @@ remote_control_on_dispatch = true
   launches the worker without remote-control.
 
 See `docs/guides/remote-control-on-dispatch.md` for the full walkthrough.
+
+## Commit and PR attribution {#claude-attribution}
+
+Claude Code asks its sessions to end commit messages and pull request
+descriptions with attribution lines. A workspace that doesn't want them sets
+`attribution = "false"` under `[claude.settings]`:
+
+```toml
+[claude.settings]
+attribution = "false"
+```
+
+niwa writes it into every settings file it materializes as
+`"attribution": {"commit": "", "pr": "", "sessionUrl": false}`, the object form.
+Recent Claude Code also accepts a bare `false`, but older versions reject that
+and then ignore the whole settings file. `"true"` is Claude Code's default and
+writes nothing. Any other value fails the apply.
 
 ## Claude marketplaces {#claude-marketplaces}
 

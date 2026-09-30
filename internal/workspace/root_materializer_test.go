@@ -286,6 +286,35 @@ func TestMaterializeWorkspaceRoot_DispatchSkillReportsSessionName(t *testing.T) 
 	}
 }
 
+// TestMaterializeWorkspaceRoot_DispatchSkillPassesLineageFlags pins the
+// installed /dispatch skill's launch step to the lineage flags: the command
+// it shows passes --brief with the brief file it wrote, and the step says to
+// pass --skill only when the brief names one.
+func TestMaterializeWorkspaceRoot_DispatchSkillPassesLineageFlags(t *testing.T) {
+	cfg := &config.WorkspaceConfig{Workspace: config.WorkspaceMeta{Name: "ws"}}
+	root := t.TempDir()
+	if _, err := MaterializeWorkspaceRoot(cfg, root, RootMaterializeOptions{
+		NiwaPath:             "/abs/niwa",
+		EphemeralSessionMode: true,
+	}); err != nil {
+		t.Fatalf("MaterializeWorkspaceRoot: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, rootClaudeDir, "skills", "dispatch", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("reading dispatch SKILL.md: %v", err)
+	}
+	launch := markdownSection(t, string(data), "### 3. Launch the worker")
+	if !strings.Contains(launch, "--brief <abs-path-to-brief>") {
+		t.Errorf("launch command does not pass --brief with the brief file; got:\n%s", launch)
+	}
+	if !strings.Contains(launch, "- **`--skill <plugin>:<name>`**") {
+		t.Errorf("launch step has no --skill bullet; got:\n%s", launch)
+	}
+	if !strings.Contains(launch, "only when the brief names one") {
+		t.Errorf("--skill bullet does not limit the flag to briefs that name a skill; got:\n%s", launch)
+	}
+}
+
 // markdownSection returns the text after heading up to the next line that
 // starts a heading. A missing heading fails the test, so a renamed step can't
 // pass silently.

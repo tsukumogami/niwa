@@ -9,8 +9,8 @@ import (
 
 func TestAllIsTheClosedSet(t *testing.T) {
 	all := All()
-	if len(all) != 25 {
-		t.Fatalf("All() returned %d capabilities, want the matrix's 25", len(all))
+	if len(all) != 26 {
+		t.Fatalf("All() returned %d capabilities, want the matrix's 26", len(all))
 	}
 	seen := map[Capability]bool{}
 	for _, c := range all {
@@ -109,13 +109,12 @@ func TestLookupAnswersEachDeclaredPair(t *testing.T) {
 // rows that stay unavailable once every Codex delivery has landed, each with
 // the reason kind the PRD's matrix gives it.
 //
-// Every one of them is now inherent to the agent -- five its own mechanics put
-// out of reach, five naming surface that exists only in the other harness. The
-// not-built kind, the one category a developer could act on, is empty for this
-// column: niwa owes Codex nothing that a route exists for. That is a fact about
-// today rather than a rule, which is why the kind survives in the checks below
-// and in the guide's renderer; a capability added tomorrow with a route and no
-// delivery lands there again.
+// Every one of them is inherent to the agent -- five its own mechanics put out
+// of reach, five naming surface that exists only in the other harness. The
+// not-built kind, the one category a developer could act on, stays out of this
+// map: a row of that kind is pending, not final. Row 26, dispatch resource
+// attributes, is such a row today, which is why the kind survives in the checks
+// below and in the guide's renderer.
 //
 // Writing the rows out here is what makes an accidental flip fail with a name
 // in the message. A row missing from this map is one whose delivery is still
@@ -149,8 +148,8 @@ var codexFinalGaps = map[Capability]ReasonKind{
 }
 
 // codexDelivered is what niwa delivers to Codex today: fifteen rows against the
-// ten final gaps in codexFinalGaps, which is the whole column with nothing
-// pending between them. Directory trust is the first, and deliberately so --
+// ten final gaps in codexFinalGaps, with one row pending between them (row 26,
+// dispatch resource attributes, declared as niwa's own debt). Directory trust is the first, and deliberately so --
 // every trust-gated row downstream names it in Requires, and the closure test
 // refuses such an edge while it is unavailable. The list grew one entry per
 // delivery, in the change that landed the delivery, never before it.
@@ -191,7 +190,7 @@ var codexDelivered = []Capability{
 // per-row check by moving a name from one list to the other -- still has to
 // face a number somebody wrote down on purpose.
 func TestCodexColumnTotals(t *testing.T) {
-	const wantImplemented, wantUnavailable = 15, 10
+	const wantImplemented, wantUnavailable = 15, 11
 
 	implemented, unavailable := 0, 0
 	for _, c := range All() {
@@ -218,11 +217,9 @@ func TestCodexColumnTotals(t *testing.T) {
 // a row whose final reason kind is edited away from the one the matrix settled
 // on -- which is the drift the reason kinds exist to make visible.
 //
-// Today those two things coincide: every Codex row is either delivered or an
-// inherent gap, so the pending branch below matches nothing. It is kept because
-// what it guards is the next capability added to the closed set, not the last
-// one removed from the pending side -- a new row with a route and no delivery
-// must declare niwa's own debt rather than borrow an inherent reason.
+// The pending branch below is what a new row with a route and no delivery goes
+// through: it must declare niwa's own debt rather than borrow an inherent
+// reason. Row 26, dispatch resource attributes, is the one row in it today.
 func TestCodexColumnStatesWhatIsDelivered(t *testing.T) {
 	for _, c := range All() {
 		d, err := Lookup(c, agent.AgentCodex)

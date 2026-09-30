@@ -47,6 +47,17 @@ rationale: |
 
 Current
 
+Amended since this design: the workspace wipe no longer rides on `--force`.
+A bare `niwa destroy --force` at the workspace root now refuses, because one
+missing instance name turned "force-destroy this instance" into "delete every
+instance". The wipe is `niwa destroy --workspace`, and it always requires the
+workspace name, typed at the prompt or passed as `--confirm <workspace-name>`
+without a terminal, whether or not the scan finds unpushed work. And destroy,
+like apply, refuses from a directory under the workspace root that is not an
+instance, a worktree, or the root itself (the root's own `.niwa/` counts as
+the root), instead of classifying it as the root. The routing matrix and flow
+below describe the original `--force` form.
+
 ## Context and Problem Statement
 
 `niwa destroy [instance]` (`internal/cli/destroy.go`,

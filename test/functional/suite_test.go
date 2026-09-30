@@ -407,6 +407,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the config dir is a git working tree from config repo "([^"]*)"$`, theConfigDirIsAGitWorkingTree)
 	ctx.Step(`^a dispatch brief "([^"]*)" exists in the workspace root$`, aDispatchBriefExistsInWorkspaceRoot)
 	ctx.Step(`^the dispatch brief "([^"]*)" still exists in the workspace root$`, theDispatchBriefStillExistsInWorkspaceRoot)
+	ctx.Step(`^a local file "([^"]*)" with content "([^"]*)" exists under the workspace root$`, aLocalFileExistsUnderWorkspaceRoot)
 	ctx.Step(`^the file "([^"]*)" under the workspace root contains "([^"]*)"$`, theMaterializedFileAtWorkspaceRootContains)
 	ctx.Step(`^the JSON file "([^"]*)" under the workspace root has no key "([^"]*)"$`, theJSONFileAtWorkspaceRootHasNoKey)
 	ctx.Step(`^the JSON file "([^"]*)" under the workspace root has key "([^"]*)" equal to "([^"]*)"$`, theJSONFileAtWorkspaceRootHasKeyEqualTo)
@@ -434,6 +435,8 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the wrapped shell did not change directory$`, theWrappedShellDidNotChangeDirectory)
 	ctx.Step(`^no niwa temp files remain in the system temp directory$`, noNiwaTempFilesRemain)
 	ctx.Step(`^a foreign directory "([^"]*)" exists in the workspace root$`, aForeignDirectoryExistsAtInstancePath)
+	ctx.Step(`^I run "([^"]*)" from directory "([^"]*)" under workspace "([^"]*)"$`, iRunFromDirectoryUnderWorkspace)
+	ctx.Step(`^I remove "([^"]*)" under workspace root "([^"]*)"$`, iRemovePathUnderWorkspaceRoot)
 	ctx.Step(`^I write "([^"]*)" to file "([^"]*)" in repo "([^"]*)" of instance "([^"]*)"$`, func(ctx context.Context, content, relPath, groupRepo, instanceName string) (context.Context, error) {
 		return iWriteFileToRepoInInstance(ctx, content, relPath, groupRepo, instanceName)
 	})
@@ -519,6 +522,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// reclamation, driven offline against the localGitServer with a fake claude ---
 	registerDispatchSteps(ctx)
 	registerDispatchSpillSteps(ctx)
+	registerDispatchLineageSteps(ctx)
 	registerKeepAliveSteps(ctx)
 
 	// --- vault failure handling: seeding and counting the shared infisical

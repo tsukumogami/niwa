@@ -61,7 +61,7 @@ func recordPassthrough(f *dispatchFakes) *[]string {
 	var got []string
 	dispatchLaunch = func(_ context.Context, req launchRequest) error {
 		f.launchCalled++
-		got = req.Passthrough
+		got = withoutLineageSettingsQuiet(req.Passthrough)
 		return nil
 	}
 	return &got

@@ -112,6 +112,13 @@ func (s *testState) buildEnv() []string {
 			strings.HasPrefix(kv, "XDG_STATE_HOME=") ||
 			strings.HasPrefix(kv, "TMPDIR=") ||
 			strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") ||
+			// A dispatch reads these three for its lineage attributes: the
+			// Claude settings home, the developer's own resource attributes
+			// and the calling session. Inherited, they would put the real
+			// ones into every scenario's launch.
+			strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR=") ||
+			strings.HasPrefix(kv, "OTEL_RESOURCE_ATTRIBUTES=") ||
+			strings.HasPrefix(kv, "CLAUDE_CODE_SESSION_ID=") ||
 			(overridePath && strings.HasPrefix(kv, "PATH=")) {
 			continue
 		}

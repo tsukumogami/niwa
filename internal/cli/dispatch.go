@@ -24,6 +24,8 @@ import (
 
 func init() {
 	dispatchCmd.Flags().StringVar(&dispatchLabel, "label", "", "optional human-friendly alias recorded on the session mapping")
+	dispatchCmd.Flags().StringVar(&dispatchBrief, "brief", "", "the file holding the worker's brief, inside the workspace. Its content digest, never its path, is recorded as the dispatch's brief identity on the worker's telemetry; without it, the prompt's digest is")
+	dispatchCmd.Flags().StringVar(&dispatchSkill, "skill", "", "the skill the brief asks the worker to run, as <plugin>:<name>, recorded as the dispatch's requested skill on the worker's telemetry; without it none is recorded")
 	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session, sanitized into a slug. The session name is the slug plus the instance's random suffix (<slug>-<id>), and the instance is <config>+<slug>-<id>; with no name the instance is <config>+-<id> and no session name is forwarded -- '+' always marks the end of the config name. An agent with no display-name flag gets no session name, though the slug still names the instance")
 	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", dispatchModelFlagHelp())
 	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker; dropped for an agent that has no such flag")
@@ -55,6 +57,11 @@ var (
 	dispatchHarness        string
 	dispatchDetach         bool
 	dispatchParallel       int
+	// dispatchBrief and dispatchSkill feed the worker's lineage resource
+	// attributes (see dispatch_lineage.go): the brief file whose content
+	// digest identifies the brief, and the skill the brief asks for.
+	dispatchBrief string
+	dispatchSkill string
 	// dispatchKeepAlive holds the tri-state --keep-alive value: nil when the
 	// flag was not given, otherwise a pointer to the explicit true/false (see
 	// triBoolValue in dispatch_keepalive.go).
@@ -454,6 +461,24 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		prompt = captured
 	}
 
+	// (3d) The lineage inputs that can refuse the dispatch, checked before
+	// anything is created: a malformed --skill, and a --brief that isn't a
+	// readable regular file inside the workspace. The brief identity is that
+	// file's content digest, or the prompt's when there is no brief file; either
+	// way it is taken here, from exactly what was received, before any prefix is
+	// added or the prompt spills to a file.
+	if err := validateRequestedSkill(dispatchSkill); err != nil {
+		return fmt.Errorf("niwa: error: %w", err)
+	}
+	briefID := briefDigest([]byte(prompt))
+	if dispatchBrief != "" {
+		content, err := readBriefFile(dispatchBrief, workspaceRoot)
+		if err != nil {
+			return fmt.Errorf("niwa: error: %w", err)
+		}
+		briefID = briefDigest(content)
+	}
+
 	// (4) Mint one random 8-hex token for this dispatch and derive both names
 	// from it. The instance suffix is passed as the customName branch of the
 	// existing provision path, sidestepping the racy numbered scan (DESIGN
@@ -469,6 +494,16 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("niwa: error: generating instance name: %w", err)
 	}
+	// The dispatch's own identity, for its lineage attributes and its session
+	// mapping. It comes from the same random source as the token but is
+	// independent of it: the token only has to be unique among this
+	// workspace's instance directories, and the identity has to be unique
+	// everywhere the worker's telemetry ends up.
+	dispatchID, err := newDispatchID(dispatchRandReader)
+	if err != nil {
+		return fmt.Errorf("niwa: error: generating the dispatch id: %w", err)
+	}
+	parentSessionID := lineageParentSessionID(spec, os.Getenv)
 	namePrefix := dispatchInstancePrefix(slug, token)
 	// The session name shares the instance's token, so it is unique for the
 	// same reason the directory is. It is forwarded only to an agent that
@@ -650,10 +685,12 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	rcDecl, rcErr := agentplan.Lookup(agentplan.RemoteControl, dispatchedAgent)
 	rcDeliverable := rcErr == nil && rcDecl.State == agentplan.StateImplemented && spec.Flags.Settings != ""
 	if gcErr == nil && rcDeliverable {
-		// The eligibility check must inspect the SAME environment the worker
-		// inherits -- realDispatchLaunch launches with cmd.Env = os.Environ() -- so
-		// the warning describes the worker's actual auth context. Keep these two
-		// env sources identical if either ever stops using os.Environ().
+		// The eligibility check must inspect the environment the worker
+		// inherits, so the warning describes the worker's actual auth context.
+		// That is os.Environ(), except that the lineage contributor below may
+		// set OTEL_RESOURCE_ATTRIBUTES in it, which has no bearing on
+		// eligibility. Any other divergence between the two must be mirrored
+		// here.
 		inject, warning := resolveDispatchRemoteControl(gc.Global, inst, os.Environ())
 		if warning != "" {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", warning)
@@ -686,6 +723,28 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	default:
 		launchSettings[config.CrossSessionInboundKey] = crossSessionInboundAccept
 		inboundApplied = true
+	}
+	// Lineage resource attributes are the third contributor, and their value
+	// is the one non-constant value this document carries (see
+	// renderLaunchSettings). They go in only where the declaration says the
+	// agent receives them and it has a settings flag. The same string is handed
+	// to the launched process's environment below, so whichever of a settings
+	// env block and the launch environment the agent lets win, the worker ends
+	// up with it.
+	lineageValue := ""
+	lineageDecl, lineageErr := agentplan.Lookup(agentplan.DispatchResourceAttributes, dispatchedAgent)
+	if lineageErr == nil && lineageDecl.State == agentplan.StateImplemented && spec.Flags.Settings != "" {
+		lineageValue = composeDispatchLineage(cmd.ErrOrStderr(), spec, lineageInputs{
+			DispatchID:      dispatchID,
+			Slug:            lineageSlug(slug),
+			ParentSessionID: parentSessionID,
+			RequestedSkill:  dispatchSkill,
+			BriefID:         briefID,
+			Workspace:       lineageWorkspace(wsConfig, cmd.ErrOrStderr()),
+		})
+		if lineageValue != "" {
+			launchSettings["env"] = resourceAttributesEnv{value: lineageValue}
+		}
 	}
 	// Two discrete argv elements, and none at all when no contributor added a
 	// key. An agent with no settings flag has nowhere for the document to go,
@@ -774,6 +833,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		Prefix:      promptPrefix,
 		Body:        prompt,
 		Passthrough: passthrough,
+		Env:         lineageWorkerEnv(os.Environ(), lineageValue),
 		Stdout:      cmd.OutOrStdout(),
 		Stderr:      cmd.ErrOrStderr(),
 	}); err != nil {
@@ -870,6 +930,11 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		Label:        dispatchLabel,
 		KeepAlive:    keepAliveArmed,
 		SessionName:  forwardedName,
+		// The dispatch's identity and its caller, for `niwa list --json`: the
+		// same values the worker's lineage attributes carry, on a surface a
+		// developer can read while the session exists.
+		DispatchID:      dispatchID,
+		ParentSessionID: parentSessionID,
 		// The same boolean that gates the audit line at (12a), so the record
 		// and the line can never disagree about this session.
 		AcceptsSessionMessages: inboundApplied,

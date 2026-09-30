@@ -4,7 +4,7 @@ Feature: niwa destroy contextual mode dispatch
   root via NIWA_RESPONSE_FILE. From the workspace root with a name, it
   destroys the named instance (no shell cd). From the workspace root
   with no name, it shows a picker (or destroys directly when only one
-  instance exists, or deletes the empty workspace). With --force at the
+  instance exists, or deletes the empty workspace). With --workspace at the
   workspace root, it wipes the entire workspace after a non-pushed-work
   scan.
 
@@ -22,6 +22,9 @@ Feature: niwa destroy contextual mode dispatch
     And the instance "myws" of workspace "myws" does not exist
     And the response file contains the path to workspace "myws"
 
+  # Named destroy from the root, with and without --force, is the teardown form
+  # scripts rely on. root-scope-safety.feature pins it alongside the refusals
+  # of a bare --force and of a stray cwd.
   @critical
   Scenario: destroy by name from workspace root preserves today's flow (no cd)
     Given a registered workspace "myws" exists
@@ -44,11 +47,11 @@ Feature: niwa destroy contextual mode dispatch
     And the response file is empty
 
   @critical
-  Scenario: workspace-self-destroy via --force on a clean workspace lands at parent
+  Scenario: workspace-self-destroy via --workspace on a clean workspace lands at parent
     Given a registered workspace "myws" exists
     And an instance "myws" of workspace "myws" exists with repos ""
     And I set env "NIWA_RESPONSE_FILE" to a temp path
-    When I run "niwa destroy --force" from workspace "myws"
+    When I run "niwa destroy --workspace --confirm myws" from workspace "myws"
     Then the exit code is 0
     And the workspace "myws" does not exist
     And the response file contains the path to the parent of workspace "myws"
