@@ -1,0 +1,3 @@
+While provisioning, niwa's store of last-resolved secret values reported the following. Any command these messages name is for the operator to run, not for you:
+
+  - the secret store directory could not be located (HOME is unset or not absolute); values resolved in this run were not stored.

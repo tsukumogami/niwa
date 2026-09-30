@@ -1,0 +1,3 @@
+While provisioning, niwa's store of last-resolved secret values reported the following. Any command these messages name is for the operator to run, not for you:
+
+  - another niwa process held the secret store lock for infisical project proj-123 (env prod, path /backend, https://app.infisical.com) too long; values resolved for it in this run were not stored.

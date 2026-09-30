@@ -784,6 +784,7 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	// nothing recorded. Rendered before the error returns, so a strict refusal
 	// leaves the same enumeration behind that a partial provision does.
 	fmt.Fprint(cmd.ErrOrStderr(), keyreport.RenderText(provRes.Keys))
+	renderNotices(cmd.ErrOrStderr(), provRes.Notices)
 	if err != nil {
 		return fmt.Errorf("provisioning contained instance: %w", err)
 	}

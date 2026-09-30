@@ -10,16 +10,32 @@ import (
 // loginStatusSession models one entry of the "sessions" array emitted
 // by `infisical login status --json`, per the shape confirmed in
 // NOTE-onboard-rest-verification.md (Assumption C). Only the fields
-// the wizard's detection funnel needs are modeled; the CLI may emit
-// additional fields (authMethod, tokenSource, verification.state,
-// etc.) which are ignored here.
+// the wizard's detection funnel and the export-failure classifier
+// (classify.go) need are modeled; the CLI emits others (authMethod,
+// domain, etc.) which are ignored here.
+//
+// The struct deliberately has no field for the session's token: the
+// probe output carries one, and a field that never exists can't be
+// logged or echoed by mistake.
 type loginStatusSession struct {
 	Status       string `json:"status"`
 	Organization string `json:"organization"`
+	// TokenSource says where the CLI got the session's credential,
+	// e.g. the stored login or an environment variable.
+	TokenSource  string `json:"tokenSource"`
+	Verification struct {
+		// State is "verified" when the CLI confirmed the session
+		// with the server during this call.
+		State string `json:"state"`
+	} `json:"verification"`
 }
 
 // loginStatusOutput is the top-level shape of `infisical login
-// status --json`.
+// status --json`, as DetectSessionStatus reads it: output without a
+// sessions list simply has no authenticated session. The classifier's
+// runProbe decodes the same JSON more strictly on purpose, treating
+// output without a sessions list as no answer at all; keep the two
+// apart.
 type loginStatusOutput struct {
 	Sessions []loginStatusSession `json:"sessions"`
 }
@@ -66,6 +82,9 @@ func DetectSessionStatus(ctx context.Context, c commander) (SessionStatus, error
 
 	stdout, stderrBytes, exitCode, err := c.Run(ctx, "infisical", []string{"login", "status", "--json"})
 	if err != nil {
+		// Includes exec.ErrWaitDelay (the CLI exited but left its
+		// pipes held open), which is folded into "no usable session"
+		// like every other failure of this advisory call.
 		return SessionStatus{}, nil
 	}
 	if exitCode != 0 {

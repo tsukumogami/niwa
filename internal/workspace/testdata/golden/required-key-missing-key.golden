@@ -1,0 +1,15 @@
+scenario: required-key-missing-key
+strict mode: false
+required-key check:
+required env keys not supplied:
+  [env.secrets] GOLDEN_KEY: golden required key
+the provider was reached and does not hold these keys: add each key to the provider, supply it via the personal overlay, or remove it from the required sub-table
+strict-mode gate:
+<nil>
+stderr:
+<empty>
+key report:
+niwa: 1 declared key has no value.
+  the infisical provider was reached and does not hold these keys:
+    - GOLDEN_KEY [required] (env.secrets): golden required key
+    remedy: add each key to the provider, supply it from your personal overlay, or drop it from the requirement sub-table.

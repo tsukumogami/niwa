@@ -57,7 +57,9 @@ func runCheckVault(cmd *cobra.Command, cwd string) error {
 	}
 
 	// Build the team bundle. The caller owns bundle lifetime; close
-	// on function exit even on error paths (R29 no-disk-cache).
+	// on function exit even on error paths. This check queries the
+	// provider directly and never reads or writes the store of
+	// last-resolved values (PRD-dispatch-offline-secrets R10).
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()

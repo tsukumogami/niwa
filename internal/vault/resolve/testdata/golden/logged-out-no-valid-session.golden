@@ -1,0 +1,5 @@
+scenario: logged-out-no-valid-session
+error:
+vault: env.secrets.GOLDEN_KEY: resolving "GOLDEN_KEY" via provider "(anonymous)": infisical: export exited 1: error: No valid login session found, cannot perform this action. Please run [infisical login] manually
+key report:
+<empty>

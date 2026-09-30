@@ -88,6 +88,8 @@ type testState struct {
 	stdout          string               // last command's stdout
 	stderr          string               // last command's stderr
 	exitCode        int                  // last command's exit code
+	lastRunDuration time.Duration        // last command's wall time (runNiwa, runNiwaWithStdin)
+	sandboxFiles    sandboxSnapshot      // files under the sandbox as last recorded (vault fallback leak checks)
 	shellPwd        string               // pwd reported by the last wrapped-shell run
 	generatedPrompt string               // the oversized prompt a spill scenario dispatched
 	shellStartPwd   string               // cwd the wrapped shell started in (for "did not change" assertions)
@@ -522,6 +524,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	registerDispatchSpillSteps(ctx)
 	registerDispatchLineageSteps(ctx)
 	registerKeepAliveSteps(ctx)
+
+	// --- vault failure handling: seeding and counting the shared infisical
+	// stub's exports ---
+	registerVaultFailureSteps(ctx)
 
 	// --- session-message acceptance: the --accept-session-messages flag, the
 	// accept_session_messages_on_dispatch machine key, and what each one puts

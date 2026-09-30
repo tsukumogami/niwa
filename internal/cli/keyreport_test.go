@@ -65,7 +65,7 @@ func TestSessionStartInjectionCarriesKeyReport(t *testing.T) {
 		Cause:       keyreport.CauseNoSource,
 		Level:       config.LevelRequired,
 		Description: "key the agent uses to reach the model",
-	}})
+	}}, nil)
 	if err != nil {
 		t.Fatalf("buildSessionStartInjection: %v", err)
 	}

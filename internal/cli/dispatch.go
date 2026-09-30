@@ -535,6 +535,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// a strict refusal fails here carrying the keys that caused it, and those
 	// keys are the whole explanation of what just happened.
 	fmt.Fprint(cmd.ErrOrStderr(), keyreport.RenderText(res.Keys))
+	renderNotices(cmd.ErrOrStderr(), res.Notices)
 	if err != nil {
 		return fmt.Errorf("niwa: error: provisioning dispatch instance: %w", err)
 	}

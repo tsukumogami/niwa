@@ -104,9 +104,43 @@ jobs:
       # to mutate raced under concurrent dispatch and went unnoticed because
       # nothing ran the detector; keeping it in the gate is what stops that
       # recurring.
-      # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
       - name: Test
+        if: matrix.os != 'ubuntu-latest'
         run: go test -race ./...
+
+      # On Linux the unit and functional suites run with HOME and
+      # XDG_STATE_HOME pointing at two directories that don't exist, and the
+      # step after the functional suite fails if either one appeared. niwa
+      # keeps a store of last-resolved secret values under XDG_STATE_HOME,
+      # and no test may read or write the developer's store or home
+      # directory; a test that forgets to isolate itself shows up here as a
+      # sentinel that got created. Go's own caches are pinned to where they
+      # already are, and XDG_CONFIG_HOME to a scratch directory for Go's
+      # telemetry files, so the toolchain itself never touches HOME; niwa's
+      # own config directory must not appear there either. macOS
+      # keeps its config directory under HOME with no override, so it runs
+      # the plain step above. The Infisical CLI is only installed further
+      # down, so no infisical binary is on PATH here; the step checks that.
+      - name: Point HOME and XDG_STATE_HOME at sentinels
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          if command -v infisical >/dev/null 2>&1; then
+            echo "::error::an infisical binary is on PATH before the suites run: $(command -v infisical)"
+            exit 1
+          fi
+          {
+            echo "GOCACHE=$(go env GOCACHE)"
+            echo "GOMODCACHE=$(go env GOMODCACHE)"
+            echo "GOPATH=$(go env GOPATH)"
+            echo "SENTINEL_HOME=$RUNNER_TEMP/sentinel-home"
+            echo "SENTINEL_STATE=$RUNNER_TEMP/sentinel-state"
+            echo "SENTINEL_CONFIG=$RUNNER_TEMP/scratch-config"
+          } >> "$GITHUB_ENV"
+
+      # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
+      - name: Test (sentinel HOME)
+        if: matrix.os == 'ubuntu-latest'
+        run: HOME="$SENTINEL_HOME" XDG_STATE_HOME="$SENTINEL_STATE" XDG_CONFIG_HOME="$SENTINEL_CONFIG" go test -race ./...
 
       # Record what the checkout looks like before the functional suite runs, so
       # the check after it can prove the suite left it alone. rev-parse rather
@@ -126,7 +160,19 @@ jobs:
       # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
       - name: Functional tests
         if: matrix.os == 'ubuntu-latest'
-        run: make test-functional
+        run: HOME="$SENTINEL_HOME" XDG_STATE_HOME="$SENTINEL_STATE" XDG_CONFIG_HOME="$SENTINEL_CONFIG" make test-functional
+
+      - name: Verify the suites left the sentinels alone
+        if: always() && matrix.os == 'ubuntu-latest' && env.SENTINEL_HOME != ''
+        run: |
+          for d in "$SENTINEL_HOME" "$SENTINEL_STATE" "$SENTINEL_CONFIG/niwa"; do
+            if [ -e "$d" ]; then
+              find "$d" -maxdepth 4 | head -50
+              echo "::error::$d exists: something wrote under HOME, XDG_STATE_HOME or niwa's config directory instead of its own sandbox"
+              exit 1
+            fi
+          done
+          echo "OK: neither sentinel directory exists, and nothing wrote niwa config"
 
       # The tripwire. The suite allocates its sandboxes outside the checkout, so
       # a run that moved HEAD or dirtied the working tree reached something it

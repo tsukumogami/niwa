@@ -1,5 +1,6 @@
 ---
-status: Delivered
+schema: prd/v1
+status: Done
 problem: |
   niwa's team-shared workspace config repos (e.g., tsukumogami/dot-niwa) are
   private today primarily because they store plaintext API tokens and
@@ -27,7 +28,7 @@ goals: |
 
 ## Status
 
-Delivered
+Done
 
 ## Glossary
 
@@ -463,7 +464,8 @@ doc, but the contract is PRD-fixed):
 
 A provider MAY hold authenticated state across `Resolve` calls within
 a single niwa command invocation. It MUST NOT persist state across
-command invocations (no disk cache; R29).
+command invocations (no disk cache; R29, since superseded by
+PRD-dispatch-offline-secrets).
 
 **R2. Vault provider declaration: anonymous singular or named
 multiple.** The workspace config MUST support a top-level `[vault]`
@@ -784,6 +786,14 @@ the materializer, not niwa's process-level state.
 disk between commands. Provider CLIs may cache their own auth sessions
 (out of scope); niwa does not store secret values beyond the lifetime
 of a single command invocation.
+
+Superseded by PRD-dispatch-offline-secrets. (2026-09-30: requirements
+R10 to R19 of PRD-dispatch-offline-secrets, which define the store of
+last-resolved values and the fallback on it, supersede this R29
+INV-NO-DISK-CACHE and decision D-7.) niwa now keeps the last
+value each requested key resolved to in a store under
+`$XDG_STATE_HOME/niwa/secret-cache/`, and serves it only when the
+provider's login has lapsed or the provider can't be reached.
 
 **R30 (INV-PUBLIC-REPO-GUARDRAIL).** The R14 guardrail is a hard
 block: `niwa apply` on a public-remote config repo with plaintext
@@ -1268,6 +1278,13 @@ does it live? at what perms? invalidated how?). Vault provider CLIs
 already solve this. If niwa performance becomes an issue at apply
 time, the next optimization is a process-lifetime in-memory cache only
 — never disk.
+
+Superseded by PRD-dispatch-offline-secrets. (2026-09-30: requirements
+R10 to R19 of PRD-dispatch-offline-secrets supersede this decision D-7
+and R29 INV-NO-DISK-CACHE.) A lapsed login on an
+unattended host stopped every provisioning run, so niwa now stores the
+last resolved values on disk and falls back on them, with a warning,
+when the provider is logged out or unreachable.
 
 ### D-9. File-local provider scoping; team and personal overlays can't cross-reference each other's provider names
 

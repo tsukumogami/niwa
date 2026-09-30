@@ -9,9 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/tsukumogami/niwa/internal/secret"
 	"github.com/tsukumogami/niwa/internal/vault"
@@ -21,10 +24,32 @@ import (
 // deterministic stub without forking a real `infisical` binary.
 //
 // Run executes the named command with the given args and returns the
-// combined stdout bytes, stderr bytes, the process exit code, and an
-// error describing any failure to start/run the process (as distinct
-// from a non-zero exit: exit code is the authoritative signal for
-// that).
+// captured stdout and stderr, an exit code and an error, in one of
+// these shapes:
+//
+//   - The process ran and exited: its exit code and a nil error. The
+//     exit code, not the error, says whether it succeeded.
+//   - The process could not be started (binary missing, not
+//     executable): -1 and a non-nil error.
+//   - The process was killed because ctx was done: -1 and a nil error.
+//   - The process exited but something it left behind held the output
+//     pipes open until they were cut: its real exit code and
+//     exec.ErrWaitDelay. So a non-nil error does not always mean the
+//     process never started.
+//   - The process ran and exited, or was killed, having written more
+//     than maxStdoutBytes to stdout: its exit code (-1 if killed), the
+//     stdout truncated to the cap, and an error wrapping
+//     errOutputTooLarge. When the pipes were cut the error stays
+//     exec.ErrWaitDelay and the truncation isn't reported. Stderr past
+//     maxStderrBytes is truncated with no error, and its cut last line
+//     is dropped so a half-written secret never escapes the scrubber.
+//
+// Call sites that bound the call check callTimedOut before branching
+// on anything else; it catches the last two shapes when they come
+// from the call's own deadline.
+//
+// A fake that simulates a hang should block on <-ctx.Done(), so the
+// caller's deadline is what ends it.
 //
 // Production callers use defaultCommander, which shells out via
 // os/exec with Env = nil (inherit the parent environment).
@@ -38,43 +63,96 @@ type commander interface {
 //   - cmd.Env = nil (inherit the parent's environment unchanged).
 //     niwa never filters or extends; the Infisical CLI reads its own
 //     auth from INFISICAL_TOKEN / ~/.infisical config.
-//   - Stdout and stderr are fully captured into buffers — neither is
+//   - Stdout and stderr are captured into buffers capped at
+//     maxStdoutBytes and maxStderrBytes (bounds.go) — neither is
 //     streamed to the parent process's stdio. This upholds R22: no
 //     raw CLI stderr ever reaches niwa's own stderr unfiltered.
+//   - Stdin is the null device and the child leads a new session
+//     (Setsid), so it has no controlling terminal. A CLI that decides
+//     to prompt reads EOF instead of waiting on a keyboard nobody is
+//     at, and it can't open /dev/tty behind niwa's back.
+//   - When the context is done, the whole process group is killed,
+//     not just the direct child, so a helper the CLI forked can't
+//     keep the output pipes open. WaitDelay then bounds how long Run
+//     waits for those pipes after the child is gone.
 //
 // Constants (command name, argv flag names) live on the type so
 // tests that want to probe argv hygiene can do so via the commander
 // indirection.
 type defaultCommander struct{}
 
-// Run executes `infisical <args...>` and returns its captured output.
-//
-// On successful start, the returned error is nil regardless of exit
-// code; callers inspect exitCode to branch on success vs failure.
-// If the process cannot be started at all (binary missing, permission
-// denied), Run returns a non-nil err and an exitCode of -1.
+// commandWaitDelay is how long Run waits for the output pipes to
+// close after the child exits or is killed, before cutting them.
+const commandWaitDelay = 3 * time.Second
+
+// killProcessGroup sends SIGKILL to every process in the group pgid.
+// A variable so tests can observe when a group is signalled.
+var killProcessGroup = func(pgid int) error {
+	return syscall.Kill(-pgid, syscall.SIGKILL)
+}
+
+// Run executes `infisical <args...>` and returns its captured output,
+// in the shapes the commander interface lists.
 func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]byte, []byte, int, error) {
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		return nil, nil, -1, err
+	}
+	defer devNull.Close()
+
 	cmd := exec.CommandContext(ctx, name, args...)
 	// R28: never extend Env with secrets. Default behavior of
 	// exec.Cmd is Env = nil which inherits the parent's environment
 	// — exactly what we want so the Infisical CLI sees
 	// INFISICAL_TOKEN (or equivalent) unchanged.
 	cmd.Env = nil
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if err != nil {
-		// exec.ExitError holds the exit code. Any other error type
-		// (e.g., exec.ErrNotFound wrapped in *fs.PathError) means
-		// the process never started.
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return stdout.Bytes(), stderr.Bytes(), exitErr.ExitCode(), nil
+	cmd.Stdin = devNull
+	stdout := &cappedBuffer{limit: maxStdoutBytes}
+	stderr := &cappedBuffer{limit: maxStderrBytes}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Cancel = func() error {
+		// Setsid makes the child's PID its process group ID.
+		err := killProcessGroup(cmd.Process.Pid)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
 		}
-		return stdout.Bytes(), stderr.Bytes(), -1, err
+		return err
 	}
-	return stdout.Bytes(), stderr.Bytes(), 0, nil
+	cmd.WaitDelay = commandWaitDelay
+
+	err = cmd.Run()
+	if cmd.Process != nil && (ctx.Err() != nil || errors.Is(err, exec.ErrWaitDelay)) {
+		// Something may have forked after Cancel's kill, or outlived
+		// the child with the pipes open: sweep the group once more.
+		// Only when ctx is done (our deadline or the caller ended the
+		// call) or the pipes had to be cut, because after a normal
+		// exit the group ID may already belong to an unrelated
+		// process. "No such process" is the expected answer and is
+		// ignored.
+		_ = killProcessGroup(cmd.Process.Pid)
+	}
+	var code int
+	switch {
+	case err == nil:
+	case errors.Is(err, exec.ErrWaitDelay):
+		code = cmd.ProcessState.ExitCode()
+	case cmd.ProcessState != nil:
+		// A ProcessState means the process started and was waited on,
+		// so its exit code is the answer (-1 if it was killed). That
+		// covers an *exec.ExitError, and also the ctx.Err() Wait
+		// returns when ctx ended just as the child exited 0.
+		code, err = cmd.ProcessState.ExitCode(), nil
+	default:
+		// No ProcessState (e.g., exec.ErrNotFound wrapped in
+		// *fs.PathError): the process never started.
+		return stdout.buf, stderr.wholeLines(), -1, err
+	}
+	if stdout.truncated && err == nil {
+		err = fmt.Errorf("%w (%d bytes)", errOutputTooLarge, maxStdoutBytes)
+	}
+	return stdout.buf, stderr.wholeLines(), code, err
 }
 
 // runInfisicalExport invokes `infisical export --projectId <proj>
@@ -83,17 +161,39 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 // and returns the map together with a VersionToken derived from the
 // payload.
 //
+// The export runs under callBound(exportTimeout), derived from ctx.
+//
 // Error handling:
 //
+//   - A timeout (the bound elapsed, or the output pipes stayed open
+//     past WaitDelay) maps to vault.ErrProviderUnreachable, with an
+//     error naming the export and the bound.
 //   - A start failure (binary missing) maps to
 //     vault.ErrClientNotInstalled, which itself wraps
 //     vault.ErrProviderUnreachable.
 //   - A non-zero exit with recognisable auth markers in (scrubbed)
 //     stderr maps to vault.ErrProviderUnreachable and NOT to
 //     vault.ErrClientNotInstalled: the client ran, so it is present.
-//   - A non-zero exit without auth markers is treated as a generic
-//     provider error (wrapped via secret.Errorf, stderr scrubbed).
+//   - A non-zero exit without auth markers is a generic provider
+//     error (wrapped via secret.Errorf, stderr scrubbed), which also
+//     matches vault.ErrProviderUnreachable when it is classified
+//     unauthenticated or unreachable (below).
 //   - Malformed JSON stdout is a generic provider error.
+//   - Stdout past maxStdoutBytes on a zero exit is a generic provider
+//     error too, classified answered like malformed output. On a
+//     non-zero exit it changes nothing: the truncated output is
+//     classified as usual.
+//   - When the caller's own ctx ends the call, that is not a timeout:
+//     the killed child comes back as the generic "export exited -1"
+//     error.
+//
+// Every failure of an export that started comes back as a
+// *vault.ClassifiedError (classify.go) around the error text above,
+// unchanged. An unauthenticated or unreachable failure also matches
+// vault.ErrProviderUnreachable; an answered one keeps exactly the
+// sentinel listed above. A start failure carries no class, and neither
+// does any failure the caller's own ctx ended, during the export or
+// during the probe that classifies it.
 //
 // All returned errors are wrapped via secret.Errorf so that later
 // re-wraps by the resolver continue to scrub any late-registered
@@ -136,8 +236,41 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 	if token != "" {
 		args = append(args, "--token", token)
 	}
-	stdout, stderrBytes, exitCode, err := c.Run(ctx, "infisical", args)
-	if err != nil {
+	bound := callBound(exportTimeout)
+	callCtx, cancel := withCallDeadline(ctx, bound)
+	defer cancel()
+	stdout, stderrBytes, exitCode, err := c.Run(callCtx, "infisical", args)
+	minted := token != ""
+	if callTimedOut(callCtx, err) {
+		// Checked first: a killed child comes back as exit -1 with no
+		// error, which the branches below would misreport as a
+		// generic failure, and a start failure can't time out. The
+		// classifier gets the caller's ctx, not callCtx, which has
+		// expired by now.
+		class := classifyExportFailure(ctx, c, exportFailure{
+			stdout:   vault.ScrubStderr(ctx, stdout),
+			stderr:   vault.ScrubStderr(ctx, stderrBytes),
+			timedOut: true,
+			minted:   minted,
+		})
+		if ctx.Err() != nil {
+			// The caller ended the call during the probe, so its answer
+			// can't be trusted: don't classify or remember it.
+			return nil, vault.VersionToken{}, exportTimedOutError(bound)
+		}
+		return nil, vault.VersionToken{}, vault.Classify(exportTimedOutError(bound), class)
+	}
+	// An export whose stdout passed the cap exited on its own; the
+	// exit code decides below, and a zero exit is refused as output
+	// too large to read.
+	oversized := errors.Is(err, errOutputTooLarge)
+	if oversized {
+		err = nil
+	}
+	// ErrWaitDelay means the process started and exited; it only
+	// lands here when the caller's context was done, and the exit
+	// code is the result to go on.
+	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		// Process failed to start: the binary is missing, or is
 		// present but not executable. Either way the client is not
 		// usable on this host, which is a different remedy from an
@@ -155,28 +288,69 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 	}
 	if exitCode != 0 {
 		scrubbed := vault.ScrubStderr(ctx, stderrBytes)
+		// The error text and sentinel are the ones niwa has always
+		// returned; the class rides alongside them. The auth markers
+		// still pick the sentinel for an answered failure, but no
+		// longer decide whether the failure is a lapse.
+		var exportErr error
 		if looksLikeAuthFailure(scrubbed) {
-			return nil, vault.VersionToken{}, secret.Errorf(
+			exportErr = secret.Errorf(
 				"infisical: export exited %d (auth failure): %s: %w",
 				exitCode, strings.TrimSpace(scrubbed), vault.ErrProviderUnreachable,
 			)
+		} else {
+			exportErr = secret.Errorf(
+				"infisical: export exited %d: %s",
+				exitCode, strings.TrimSpace(scrubbed),
+			)
 		}
-		return nil, vault.VersionToken{}, secret.Errorf(
-			"infisical: export exited %d: %s",
-			exitCode, strings.TrimSpace(scrubbed),
-		)
+		if ctx.Err() != nil {
+			// The caller ended the call, so the failure says nothing
+			// about the vault: it is neither classified nor
+			// remembered in the run state.
+			return nil, vault.VersionToken{}, exportErr
+		}
+		class := classifyExportFailure(ctx, c, exportFailure{
+			stdout: vault.ScrubStderr(ctx, stdout),
+			stderr: scrubbed,
+			minted: minted,
+		})
+		if ctx.Err() != nil {
+			// Ended by the caller during the probe: same as above.
+			return nil, vault.VersionToken{}, exportErr
+		}
+		return nil, vault.VersionToken{}, vault.Classify(exportErr, class)
+	}
+
+	if oversized {
+		// Like unparseable output below: the export exited 0, so the
+		// service answered, and nothing it printed can be trusted
+		// once the tail is gone.
+		return nil, vault.VersionToken{}, vault.Classify(secret.Errorf(
+			"infisical: export output exceeded %d bytes", maxStdoutBytes,
+		), vault.FailureClass{Class: vault.ClassAnswered})
 	}
 
 	values, parseErr := parseExportJSON(stdout)
 	if parseErr != nil {
+		// The export exited 0, so the service answered; output niwa
+		// can't read is not a lapse and needs no probe.
 		scrubbed := vault.ScrubStderr(ctx, stderrBytes)
-		return nil, vault.VersionToken{}, secret.Errorf(
+		return nil, vault.VersionToken{}, vault.Classify(secret.Errorf(
 			"infisical: parsing export output (stderr=%q): %w",
 			strings.TrimSpace(scrubbed), parseErr,
-		)
+		), vault.FailureClass{Class: vault.ClassAnswered})
 	}
 
 	return values, buildVersionToken(project, values), nil
+}
+
+// exportTimedOutError is the error for an export that ran out of
+// time. It wraps vault.ErrProviderUnreachable (a timeout says nothing
+// about whether the key exists) and never ErrClientNotInstalled,
+// since the client started.
+func exportTimedOutError(bound time.Duration) error {
+	return secret.Errorf("infisical: export timed out after %s: %w", bound, vault.ErrProviderUnreachable)
 }
 
 // parseExportJSON accepts either of the two shapes the Infisical CLI
@@ -250,6 +424,11 @@ func parseExportJSON(raw []byte) (map[string]string, error) {
 // looksLikeAuthFailure scans a scrubbed stderr string for common
 // markers of an auth / login failure. The match is case-insensitive
 // and substring-based.
+//
+// It only chooses the sentinel and the "(auth failure)" wording of a
+// failed export's error, which stay what they have always been. It
+// does not decide whether the failure is a lapse: classify.go does
+// that from the server response and the session probe.
 //
 // The marker set is deliberately specific: broad tokens like "auth"
 // or "token" were removed in a v1 tightening because they

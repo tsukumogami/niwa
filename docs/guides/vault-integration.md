@@ -577,6 +577,117 @@ the env-example failure policy section of
 [workspace-config-sources.md](workspace-config-sources.md) for that
 policy.
 
+## When the vault login lapses
+
+An `infisical login` session expires, and a host left alone for days
+has nobody to log back in. So niwa keeps the last value each requested
+key resolved to, and when the provider can't be used it provisions from
+those stored values instead of stopping. Every run that does so says
+which provider it fell back for and how old the values are:
+
+```
+warning: using stored values that may be stale for infisical project <project> (env <env>, path <folder>, <api domain>): the provider is logged out or expired; the oldest value is 3 days old. Run `infisical login` to refresh them.
+```
+
+The reason reads "is logged out or expired", "timed out" or "is
+unreachable". After you log back in, the next run resolves fresh
+values, replaces the stored ones and prints no warning. There is
+nothing to clear by hand.
+
+The store starts empty. Run one provisioning command while logged in after upgrading, so the store holds values to fall back on.
+Until a run has resolved a key successfully there's nothing to serve,
+and the run prints this line for each provider folder it couldn't use:
+
+```
+warning: infisical project <project> (env <env>, path <folder>, <api domain>) could not be used and no previously resolved value exists to fall back on. Run `infisical login`.
+```
+
+The missing keys are then handled as they always were for a provider
+that can't be reached: each is listed in the key report, and the run
+fails only in strict mode.
+
+### What falls back and what doesn't
+
+Only two kinds of failure are served from the store: the CLI isn't
+authenticated (logged out, expired, rejected), or the service couldn't
+be reached or didn't answer in time. niwa asks `infisical login status`
+which one it is when an export fails. A failure the server answered
+for a valid login, such as a missing folder, a server error, or a
+permission denial confirmed by a verified session, is handled exactly
+as before and is never masked by a stored value. A denied or missing
+folder also removes that folder's stored keys, and a key an export no
+longer contains is removed too, so a later lapse can't bring either
+back.
+
+Each export is bounded at 30 seconds and each session check at 15
+seconds, and once a service times out or can't be reached, the rest of
+that run's calls to the same service go straight to the stored values.
+A failed machine-identity login (universal auth from
+`provider-auth.toml`) isn't covered: it fails as it did before, now
+within 30 seconds.
+
+### Where the values live
+
+The store is `$XDG_STATE_HOME/niwa/secret-cache/`, or
+`~/.local/state/niwa/secret-cache/` when `XDG_STATE_HOME` is unset or
+not an absolute path. The directory is created with mode 0700 and each
+file with mode 0600, one file per provider identity (kind, API domain,
+project, environment and folder).
+
+Know what it holds before you rely on it:
+
+- The last resolved value of every key a provisioning run requested,
+  in plain text, across all your workspaces and your personal
+  configuration. Only requested keys are stored, never a whole folder.
+- Values have no age limit, and the store outlives the instances that
+  used them: reaping an instance doesn't touch it.
+- While your CLI session is lapsed, a secret revoked or rotated
+  upstream isn't seen until you log back in; niwa keeps serving the
+  stored value with its age in the warning. Providers whose
+  credentials come from a machine identity in the local
+  `provider-auth.toml` don't have this gap, because niwa logs in for
+  them on every run and their denials reach it. A machine identity
+  whose credentials come through credential sync doesn't help, since
+  credential sync itself uses the lapsed session.
+- On a shared or managed host, exclude the directory from backups.
+
+niwa only trusts the store when it's yours alone. The directory must
+be owned by you (niwa removes any group or other permissions it finds
+on it), and each file must be owned by you with no group or other
+permissions at all. If either doesn't hold, the store is disabled for
+the run and a warning names the directory; provisioning carries on as
+if nothing were stored.
+
+niwa also never writes the store inside a git work tree: before each
+write it looks for a `.git` entry in the directory and every parent.
+If it finds one, nothing is written that run and a warning names the
+directory. Values already stored there can still be served.
+
+To purge the store, delete the directory:
+
+```bash
+rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/niwa/secret-cache"
+```
+
+`niwa status --check-vault`, credential sync and `niwa onboard` never
+read or write the store.
+
+### Sessions started by the hook
+
+For a session that the SessionStart hook provisions, the operator
+never sees the hook's standard error, so these messages go into the
+context the hook hands the agent. That context asks the agent to tell
+you to run `infisical login` rather than run it itself: the login is
+interactive and would hang the session.
+
+### Testing with shorter timeouts
+
+`NIWA_TEST_VAULT_TIMEOUT` (a Go duration such as `1s`) shortens the
+export, session-check and universal-auth bounds so tests don't wait 30
+seconds. It's meant for tests only and can't lengthen a bound: a value
+that doesn't parse, is below 50 ms or isn't shorter than the default is
+ignored. Whenever it does shorten a bound, niwa prints a warning.
+
 ## CLI reference
 
 | Surface | Purpose |
@@ -612,14 +723,21 @@ formatters), the pipeline (`secret.Error` + context-scoped
 (`0o600` materialization, `.local` + `.gitignore` maintenance).
 The complete list covers argv rejection, log/stderr redaction,
 CLAUDE.md interpolation refusal, status-content redaction, no
-process-env publication, no disk cache, the public-repo guardrail,
-and override-visibility diagnostics.
+process-env publication, the public-repo guardrail, and
+override-visibility diagnostics. The original list also had "no disk
+cache" (R29, decision D-7). Superseded by PRD-dispatch-offline-secrets.
+As of 2026-09-30, requirements R10 to R19 of that PRD supersede
+PRD-vault-integration R29 INV-NO-DISK-CACHE and decision D-7.
+See [PRD-dispatch-offline-secrets](../prds/PRD-dispatch-offline-secrets.md):
+niwa now stores the last resolved values so provisioning can keep going
+while the login has lapsed, as described in
+[When the vault login lapses](#when-the-vault-login-lapses).
 
 For the full threat model (what's trusted, what's out of scope,
 what the invariants defend), see
 [PRD-vault-integration §Threat Model](../prds/PRD-vault-integration.md).
 For how each invariant is realized in code, see
-[DESIGN-vault-integration §Security Considerations](../designs/DESIGN-vault-integration.md).
+[DESIGN-vault-integration §Security Considerations](../designs/current/DESIGN-vault-integration.md).
 
 ## Acceptance coverage
 

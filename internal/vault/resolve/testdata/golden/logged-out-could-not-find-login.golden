@@ -1,0 +1,5 @@
+scenario: logged-out-could-not-find-login
+error:
+vault: env.secrets.GOLDEN_KEY: resolving "GOLDEN_KEY" via provider "(anonymous)": infisical: export exited 1: error: we couldn't find your logged in details, try running [infisical login] then try again
+key report:
+<empty>

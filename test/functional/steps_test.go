@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cucumber/godog"
 )
@@ -74,7 +75,8 @@ func iSetEnvToTempPath(ctx context.Context, key string) (context.Context, error)
 // buildEnv returns the environment for invoking the niwa binary. It overrides
 // HOME, XDG_CONFIG_HOME, and TMPDIR to the sandbox so config, state, and
 // temp files don't leak across scenarios or into the real user environment.
-// Per-scenario overrides win last.
+// XDG_STATE_HOME is dropped, so the secret store lands under the sandboxed
+// HOME. Per-scenario overrides win last.
 //
 // ANTHROPIC_API_KEY is dropped rather than overridden. It is not a path, so
 // there is nothing sandboxed to point it at, but niwa branches on it: an
@@ -107,6 +109,7 @@ func (s *testState) buildEnv() []string {
 	for _, kv := range base {
 		if strings.HasPrefix(kv, "HOME=") ||
 			strings.HasPrefix(kv, "XDG_CONFIG_HOME=") ||
+			strings.HasPrefix(kv, "XDG_STATE_HOME=") ||
 			strings.HasPrefix(kv, "TMPDIR=") ||
 			strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") ||
 			// A dispatch reads these three for its lineage attributes: the
@@ -124,6 +127,9 @@ func (s *testState) buildEnv() []string {
 	env := append(filtered,
 		"HOME="+s.homeDir,
 		"XDG_CONFIG_HOME="+filepath.Join(s.homeDir, ".config"),
+		// The secret store lives here, so no scenario reads or writes the
+		// operator's store; a scenario may point it elsewhere with iSetEnv.
+		"XDG_STATE_HOME="+sandboxStateHome(s),
 		"TMPDIR="+s.tmpDir,
 	)
 	if overridePath {
@@ -150,7 +156,21 @@ func (s *testState) buildEnv() []string {
 //   - `login status --json` -- emits the shape confirmed in
 //     NOTE-onboard-rest-verification.md. Controlled by INFISICAL_STUB_LOGIN_STATUS
 //     ("authenticated" [default] or anything else for "no session") and
-//     INFISICAL_STUB_LOGIN_ORG (org id, default "test-org").
+//     INFISICAL_STUB_LOGIN_ORG (org id, default "test-org"). The default
+//     session carries no verification state, so niwa's export-failure
+//     classifier never treats it as vouched for: a failed export under it
+//     classifies unreachable (or unauthenticated for a 401/403), never as
+//     a refusal the server answered. "none" (or any unknown value) lists no
+//     session, which classifies a failed export as a lapsed login. The
+//     other values: "verified" (one authenticated session the CLI verified,
+//     on INFISICAL_STUB_LOGIN_DOMAIN, default the cloud domain, which makes
+//     a 401/403 a real refusal), "json" (prints INFISICAL_STUB_LOGIN_STATUS_JSON
+//     as given), "non-json", "hang" (sleeps 60 s, far past any test bound)
+//     and "hang-fork" (forks a child that keeps stdout open, appends its PID
+//     to INFISICAL_STUB_CHILD_PID_FILE, and waits on it).
+//     INFISICAL_STUB_PROBE_TOKEN adds a "token" field to the authenticated
+//     and verified sessions, as the real CLI's output has; nothing else the
+//     stub prints or logs ever carries it.
 //   - `secrets folders create` -- exits 0 by default; INFISICAL_STUB_PLAN_GATE=1
 //     or INFISICAL_STUB_FOLDER_CREATE_FAIL=1 forces a non-zero exit with a
 //     recognisable stderr message, so a scenario can seed a plan-gate or a
@@ -168,7 +188,21 @@ func (s *testState) buildEnv() []string {
 //     persisted, so an induced failure leaves no stored entry).
 //   - `export --projectId --env --path --format json` -- returns the
 //     persisted entries for that (project, env, path) as a flat JSON object,
-//     or `{}` when none were ever stored there.
+//     or `{}` when none were ever stored there. INFISICAL_STUB_EXPORT_FAIL
+//     names a fixed failure instead: export prints that failure's stderr text
+//     and exits 1. The names and texts match the stub outputs the vault golden
+//     fixtures in internal/vault/resolve were recorded against:
+//     no-valid-session, could-not-find-login, session-expired, response-401,
+//     response-403, response-404, response-500, connection-refused. Two
+//     more hang for 60 s: "hang", and "hang-fork", which forks a child that
+//     keeps stdout open and appends its PID to INFISICAL_STUB_CHILD_PID_FILE.
+//     INFISICAL_STUB_EXPORT_FAIL_PATH limits the failure to exports of that
+//     --path; exports of other folders behave normally.
+//
+// INFISICAL_STUB_INVOCATION_LOG, when set, names a file the stub appends one
+// line to per invocation: the argv, space-joined, with the value after
+// --token masked. Stdin is never logged, so no stored value reaches the log.
+// Scenarios count export and `login status` calls from it.
 //
 // All INFISICAL_STUB_* variables are ordinary env vars: since the stub
 // inherits the niwa subprocess's environment unchanged (cmd.Env = nil per the
@@ -182,6 +216,20 @@ func writeFakeInfisical(dir string) error {
 	}
 	script := `#!/bin/sh
 storeDir="${INFISICAL_STUB_STORE_DIR:-$TMPDIR/infisical-stub-store}"
+
+if [ -n "$INFISICAL_STUB_INVOCATION_LOG" ]; then
+  logLine=""
+  maskNext=0
+  for arg in "$@"; do
+    if [ "$maskNext" = "1" ]; then arg="***"; maskNext=0; fi
+    case "$arg" in
+      --token) maskNext=1 ;;
+      --token=*) arg="--token=***" ;;
+    esac
+    logLine="$logLine${logLine:+ }$arg"
+  done
+  printf '%s\n' "$logLine" >> "$INFISICAL_STUB_INVOCATION_LOG"
+fi
 
 # parse_pej scans the remaining argv for --projectId/--env/--path and
 # sets projectId/envName/secretPath. Shared by export and secrets-set
@@ -216,6 +264,40 @@ case "$1" in
   export)
     shift
     parse_pej "$@"
+    failHere="$INFISICAL_STUB_EXPORT_FAIL"
+    if [ -n "$INFISICAL_STUB_EXPORT_FAIL_PATH" ] && [ "$secretPath" != "$INFISICAL_STUB_EXPORT_FAIL_PATH" ]; then
+      failHere=""
+    fi
+    if [ -n "$failHere" ]; then
+      responseLead="error: CallGetRawSecretsV3: Unsuccessful response. Please make sure your secret path, workspace and environment name are all correct"
+      case "$INFISICAL_STUB_EXPORT_FAIL" in
+        no-valid-session)
+          echo "error: No valid login session found, cannot perform this action. Please run [infisical login] manually" >&2 ;;
+        could-not-find-login)
+          echo "error: we couldn't find your logged in details, try running [infisical login] then try again" >&2 ;;
+        session-expired)
+          echo "error: Your login session has expired, please run [infisical login] and try again" >&2 ;;
+        response-401)
+          printf '%s\nResponse Code: 401\nMessage: Token missing or invalid\n' "$responseLead" >&2 ;;
+        response-403)
+          printf '%s\nResponse Code: 403\nMessage: You do not have permission to read secrets in this environment\n' "$responseLead" >&2 ;;
+        response-404)
+          printf '%s\nResponse Code: 404\nMessage: Folder with path '"'"'/golden'"'"' in environment with slug '"'"'dev'"'"' not found\n' "$responseLead" >&2 ;;
+        response-500)
+          printf '%s\nResponse Code: 500\nMessage: Something went wrong\n' "$responseLead" >&2 ;;
+        connection-refused)
+          echo 'error: CallGetRawSecretsV3: Unable to complete api request [err=Get "https://app.infisical.com/api/v3/secrets/raw": dial tcp 127.0.0.1:443: connect: connection refused]' >&2 ;;
+        hang)
+          sleep 60 ;;
+        hang-fork)
+          sleep 60 &
+          echo $! >> "$INFISICAL_STUB_CHILD_PID_FILE"
+          wait ;;
+        *)
+          echo "infisical stub: unknown INFISICAL_STUB_EXPORT_FAIL value $INFISICAL_STUB_EXPORT_FAIL" >&2 ;;
+      esac
+      exit 1
+    fi
     entryDir="$storeDir/secrets/$projectId/$envName$secretPath"
     if [ -d "$entryDir" ] && [ -n "$(ls -A "$entryDir" 2>/dev/null)" ]; then
       printf '{'
@@ -236,12 +318,30 @@ case "$1" in
   login)
     if [ "$2" = "status" ]; then
       status="${INFISICAL_STUB_LOGIN_STATUS:-authenticated}"
-      if [ "$status" = "authenticated" ]; then
-        org="${INFISICAL_STUB_LOGIN_ORG:-test-org}"
-        printf '{"sessions":[{"principalType":"user","status":"authenticated","organization":"%s"}]}\n' "$org"
-      else
-        printf '{"sessions":[]}\n'
+      org="${INFISICAL_STUB_LOGIN_ORG:-test-org}"
+      # The token is spliced in unescaped: scenarios pass a plain marker.
+      tokenField=""
+      if [ -n "$INFISICAL_STUB_PROBE_TOKEN" ]; then
+        tokenField=',"token":"'"$INFISICAL_STUB_PROBE_TOKEN"'"'
       fi
+      case "$status" in
+        authenticated)
+          printf '{"sessions":[{"principalType":"user","status":"authenticated","organization":"%s"%s}]}\n' "$org" "$tokenField" ;;
+        verified)
+          printf '{"sessions":[{"principalType":"user","status":"authenticated","organization":"%s","domain":"%s","verification":{"state":"verified"}%s}]}\n' "$org" "${INFISICAL_STUB_LOGIN_DOMAIN:-https://app.infisical.com}" "$tokenField" ;;
+        json)
+          printf '%s\n' "$INFISICAL_STUB_LOGIN_STATUS_JSON" ;;
+        non-json)
+          echo "infisical stub: this is not JSON" ;;
+        hang)
+          sleep 60 ;;
+        hang-fork)
+          sleep 60 &
+          echo $! >> "$INFISICAL_STUB_CHILD_PID_FILE"
+          wait ;;
+        *)
+          printf '{"sessions":[]}\n' ;;
+      esac
       exit 0
     fi
     exit 0
@@ -309,7 +409,9 @@ func runNiwa(s *testState, cwd, command string) error {
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	start := time.Now()
 	err := cmd.Run()
+	s.lastRunDuration = time.Since(start)
 	s.stdout = stdout.String()
 	s.stderr = stderr.String()
 	s.shellPwd = ""

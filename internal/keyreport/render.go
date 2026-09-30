@@ -248,6 +248,9 @@ func capitalize(s string) string {
 // newline and carriage return, since every rendered field is one line), DEL,
 // C1, and the unicode line and paragraph separators, which terminate a line for
 // several consumers without being C0.
+//
+// internal/fallbacknotice's clean() strips the same classes (it can't import
+// this package), so change both together.
 func sanitize(s string) string {
 	return strings.Map(func(r rune) rune {
 		switch {

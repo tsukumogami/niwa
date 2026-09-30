@@ -1,0 +1,5 @@
+scenario: connection-refused
+error:
+vault: env.secrets.GOLDEN_KEY: resolving "GOLDEN_KEY" via provider "(anonymous)": infisical: export exited 1: error: CallGetRawSecretsV3: Unable to complete api request [err=Get "https://app.infisical.com/api/v3/secrets/raw": dial tcp 127.0.0.1:443: connect: connection refused]
+key report:
+<empty>

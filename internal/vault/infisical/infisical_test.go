@@ -18,26 +18,48 @@ import (
 //
 // Each instance records the argv passed to it so argv-hygiene tests
 // can assert that no secret values reach argv.
+//
+// A session probe (`infisical login status --json`, which follows
+// every failed export for a CLI-session principal) is counted in
+// probeCount, not callCount, and never captured. It is answered with
+// probeStdout and exit 0 when that is set; otherwise with the same
+// canned output as an export, which is what DetectSessionStatus's
+// tests rely on. For a failing export that canned output is the
+// export's error (empty stdout, exit 1), which the classifier reads as
+// no usable answer.
 type fakeCommander struct {
 	stdout   []byte
 	stderr   []byte
 	exitCode int
 	runErr   error
 
-	// capturedArgs is the most recent argv. Inspect after a Run to
-	// assert secrets never appear there.
+	// probeStdout, when set, is the session probe's answer.
+	probeStdout []byte
+
+	// capturedArgs is the most recent export argv. Inspect after a
+	// Run to assert secrets never appear there.
 	capturedArgs []string
 	// capturedName is the subprocess name (always "infisical" for
 	// this backend).
 	capturedName string
-	// callCount counts invocations. The backend promises at most one
-	// export per project+env+path per Provider; tests assert this.
+	// callCount counts export invocations. The backend promises at
+	// most one successful export per project+env+path per Provider;
+	// tests assert this.
 	callCount int32
+	// probeCount counts session probes.
+	probeCount int32
 }
 
 // Run implements the commander interface. Captures arguments and
 // returns the preconfigured output.
 func (f *fakeCommander) Run(_ context.Context, name string, args []string) ([]byte, []byte, int, error) {
+	if len(args) >= 2 && args[0] == "login" && args[1] == "status" {
+		atomic.AddInt32(&f.probeCount, 1)
+		if f.probeStdout != nil {
+			return f.probeStdout, nil, 0, nil
+		}
+		return f.stdout, f.stderr, f.exitCode, f.runErr
+	}
 	atomic.AddInt32(&f.callCount, 1)
 	f.capturedName = name
 	// Copy args to a fresh slice so later mutations do not racily
@@ -294,7 +316,10 @@ func TestArgvHygiene(t *testing.T) {
 // TestAuthFailureMapsToUnreachable covers the non-zero-exit + auth-
 // marker path across the tightened marker set. Each sub-case feeds
 // a different marker through stderr; all must map to
-// ErrProviderUnreachable.
+// ErrProviderUnreachable. None of the inputs has a "Response Code:"
+// line, so the classifier would also make them match as unreachable;
+// the "(auth failure)" wording is what shows the marker itself was
+// recognised.
 func TestAuthFailureMapsToUnreachable(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -322,6 +347,9 @@ func TestAuthFailureMapsToUnreachable(t *testing.T) {
 			if !errors.Is(err, vault.ErrProviderUnreachable) {
 				t.Fatalf("expected ErrProviderUnreachable, got: %v", err)
 			}
+			if !strings.Contains(err.Error(), "(auth failure)") {
+				t.Fatalf("auth marker not recognised: %v", err)
+			}
 			// The client ran and reported an auth problem, so it is
 			// present. Reporting an absent binary here would send the
 			// reader off to install something they already have.
@@ -332,13 +360,16 @@ func TestAuthFailureMapsToUnreachable(t *testing.T) {
 	}
 }
 
-// TestGenericFailureDoesNotMapToUnreachable covers the non-zero-exit
-// + no-auth-marker path: generic errors must not be misclassified
-// as auth failures.
-func TestGenericFailureDoesNotMapToUnreachable(t *testing.T) {
+// TestAnsweredFailureDoesNotMapToUnreachable covers the non-zero-exit
+// + no-auth-marker path: a failure the server answered must not be
+// misclassified as an auth failure. The stderr carries the CLI's
+// "Response Code:" line; without one, the failure would be classified
+// unreachable (the server never answered), which does match
+// ErrProviderUnreachable.
+func TestAnsweredFailureDoesNotMapToUnreachable(t *testing.T) {
 	cmd := &fakeCommander{
 		exitCode: 1,
-		stderr:   []byte("Error: project not found: proj-1"),
+		stderr:   []byte("Error: project not found: proj-1\nResponse Code: 404\n"),
 	}
 	p := openWithCommander(t, nil, cmd)
 	defer p.Close()
@@ -623,6 +654,14 @@ func TestTokenChangesOnRotation(t *testing.T) {
 // "auth" and "token" were removed because they misclassified
 // transient network errors (e.g., "token refresh pending") as auth
 // failures. The cases below exercise the current tighter list.
+//
+// Since failures are classified (classify.go), the markers no longer
+// decide whether a failure is a lapse: a 401 or 403 can be answered or
+// unauthenticated depending on the session probe. They only choose the
+// "(auth failure)" wording and the sentinel an answered failure has
+// always carried, so the set stays exactly as it was and so do these
+// cases; the CLI's "Response Code: 403" line still matches through
+// "403".
 func TestLooksLikeAuthFailure(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -646,6 +685,11 @@ func TestLooksLikeAuthFailure(t *testing.T) {
 		{"Error: auth scheme mismatch", false},
 		{"please run infisical login", false},
 		{"invalid token", false},
+		{"error: CallGetRawSecretsV3: Unsuccessful response.\nResponse Code: 403\n", true},
+		{"error: CallGetRawSecretsV3: Unsuccessful response.\nResponse Code: 404\n", false},
+		// A logged-out wording is not an auth marker: it only counts
+		// as a lapse through the classifier's wording fallback.
+		{"error: No valid login session found, cannot perform this action", false},
 	}
 	for _, c := range cases {
 		if got := looksLikeAuthFailure(c.in); got != c.want {
@@ -654,13 +698,19 @@ func TestLooksLikeAuthFailure(t *testing.T) {
 	}
 }
 
-// TestTransientErrorDoesNotMapToUnreachable guards the tightening
+// TestTransientErrorIsUnreachableNotAuthFailure guards the tightening
 // of looksLikeAuthFailure: a transient network error whose stderr
-// mentions "token refresh pending" must NOT be classified as an
-// auth failure. Under --allow-missing-secrets (Issue 10) that
-// classification would silently downgrade the result to empty,
-// masking a retriable fault.
-func TestTransientErrorDoesNotMapToUnreachable(t *testing.T) {
+// mentions "token refresh pending" must NOT be worded as an auth
+// failure.
+//
+// It used to also assert the error did not match
+// ErrProviderUnreachable. That changed on purpose with failure
+// classification: an export that got no server response and whose
+// session probe gave no usable answer is unreachable, and unreachable
+// failures match ErrProviderUnreachable so they become a tolerated
+// mark rather than a hard error. The text keeps today's plain
+// "export exited" wording.
+func TestTransientErrorIsUnreachableNotAuthFailure(t *testing.T) {
 	cmd := &fakeCommander{
 		exitCode: 1,
 		stderr:   []byte("Error: token refresh pending, please retry"),
@@ -672,8 +722,18 @@ func TestTransientErrorDoesNotMapToUnreachable(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Resolve should have failed")
 	}
-	if errors.Is(err, vault.ErrProviderUnreachable) {
-		t.Fatalf("transient error should NOT map to ErrProviderUnreachable: %v", err)
+	if strings.Contains(err.Error(), "auth failure") {
+		t.Fatalf("transient error worded as an auth failure: %v", err)
+	}
+	var class *vault.FailureClass
+	if !errors.As(err, &class) || class.Class != vault.ClassUnreachable || class.Reason != vault.ReasonUnreachable {
+		t.Fatalf("class = %+v, want unreachable / unreachable", class)
+	}
+	if !errors.Is(err, vault.ErrProviderUnreachable) {
+		t.Fatalf("an unreachable failure must match ErrProviderUnreachable: %v", err)
+	}
+	if cmd.callCount != 1 || cmd.probeCount != 1 {
+		t.Errorf("exports=%d probes=%d, want 1 and 1", cmd.callCount, cmd.probeCount)
 	}
 }
 

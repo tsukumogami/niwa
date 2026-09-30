@@ -5,6 +5,11 @@
 // secret resolution: it shells out to the user-installed `infisical`
 // CLI (R20 — no Go SDK dependency) and exposes both vault.Provider and
 // the optional vault.BatchResolver interfaces (this file, subprocess.go).
+// bounds.go puts a deadline and an output cap on every CLI call on that
+// path, and classify.go classifies a failed export (unauthenticated,
+// unreachable or answered) from its server response and an
+// `infisical login status` probe, which is what decides whether the
+// store fallback may serve stored values for it.
 //
 // The second, added for `niwa onboard` (DESIGN-niwa-onboard.md
 // Decision 4), is a net-new Universal Auth identity management REST
@@ -67,6 +72,7 @@ package infisical
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -110,6 +116,8 @@ func (Factory) Kind() string {
 //	"env"        string     // optional. Environment slug, default "dev".
 //	"path"       string     // optional. Folder path inside the project, default "/".
 //	"name"       string     // optional. Provider handle for Registry bookkeeping.
+//	"api_url"    string     // optional. Read only to name the store identity's API domain.
+//	"token"      string     // optional. A token niwa minted; passed to export via --token.
 //	"_commander" commander  // test-only. Swaps the subprocess runner for a fake.
 //
 // Unknown keys are ignored — forward compatibility for future
@@ -179,6 +187,20 @@ func (Factory) Open(_ context.Context, config vault.ProviderConfig) (vault.Provi
 		p.token = s
 	}
 
+	// The API URL, with the precedence niwa's own Infisical calls use,
+	// only to name the provider's store identity and the domain the
+	// run state keys on. Nothing new is passed to the CLI, which keeps
+	// finding its server the way it always has.
+	var configAPIURL string
+	if raw, ok := config["api_url"]; ok {
+		s, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("infisical: config[api_url] must be string, got %T", raw)
+		}
+		configAPIURL = s
+	}
+	p.apiDomain = vault.NormalizeIdentity(vault.Identity{APIDomain: resolveAPIURL(configAPIURL)}).APIDomain
+
 	// Test-only hook: allow a caller to inject a fake commander.
 	if raw, ok := config["_commander"]; ok {
 		c, ok := raw.(commander)
@@ -200,6 +222,13 @@ type Provider struct {
 	env     string
 	path    string // Factory.Open-time default path (used when Ref.Path is empty)
 	token   string // optional JWT for multi-org auth; passed via --token to subprocess
+	// apiDomain is the normalised scheme and host of the provider's
+	// API URL: the store identity's domain and the run-state key. It
+	// comes from niwa's configuration, not from the CLI, which picks
+	// its own server; the two can differ (a CLI logged in to another
+	// region with no api_url in niwa's config), so a verdict keyed on it
+	// is per configured domain, not per server the CLI talked to.
+	apiDomain string
 
 	commander commander
 
@@ -255,14 +284,37 @@ func (p *Provider) effectivePath(ref vault.Ref) string {
 	return p.path
 }
 
+// StoreIdentity implements vault.StoreIdentifier: the folder ref
+// resolves from, in this provider's project, environment and API
+// domain, normalised.
+func (p *Provider) StoreIdentity(ref vault.Ref) (vault.Identity, bool) {
+	return vault.NormalizeIdentity(vault.Identity{
+		Kind:        Kind,
+		APIDomain:   p.apiDomain,
+		ProjectID:   p.project,
+		Environment: p.env,
+		FolderPath:  p.effectivePath(ref),
+	}), true
+}
+
+// minted reports whether exports run with a token niwa minted from a
+// machine identity, rather than the CLI's own session.
+func (p *Provider) minted() bool {
+	return p.token != ""
+}
+
 // Resolve fetches a single secret by key. Triggers an
 // `infisical export --path <effective-path>` the first time a given
 // effective path is seen; subsequent resolves against the same path
 // hit the cache.
 //
 // Returns vault.ErrKeyNotFound when the requested key is not present
-// in the exported payload, and vault.ErrProviderUnreachable when the
-// CLI exits non-zero with an auth-failure marker in stderr.
+// in the exported payload. A failed export returns a
+// *vault.ClassifiedError (see runInfisicalExport); it matches
+// vault.ErrProviderUnreachable when classified unauthenticated or
+// unreachable, when an export skipped because of an earlier verdict in
+// the run, and for an answered failure whose stderr carries an
+// auth-failure marker.
 func (p *Provider) Resolve(ctx context.Context, ref vault.Ref) (secret.Value, vault.VersionToken, error) {
 	effPath := p.effectivePath(ref)
 	if err := p.ensureLoaded(ctx, effPath); err != nil {
@@ -393,8 +445,25 @@ func (p *Provider) ensureLoaded(ctx context.Context, effPath string) error {
 	// swallow the second-caller race.
 	p.mu.Unlock()
 
+	// An earlier call in this run already found the domain unreachable,
+	// or this principal logged out on it: don't start a subprocess that
+	// would only fail the same way.
+	runState := vault.RunStateFrom(ctx)
+	if class, ok := runState.Check(p.apiDomain, p.minted()); ok {
+		return skippedExportError(p.apiDomain, class)
+	}
+
 	values, token, err := runInfisicalExport(ctx, p.commander, p.project, p.env, effPath, p.token)
 	if err != nil {
+		var class *vault.FailureClass
+		if errors.As(err, &class) {
+			switch {
+			case class.Class == vault.ClassUnreachable:
+				runState.MarkUnreachable(p.apiDomain, class.Reason)
+			case class.Class == vault.ClassUnauthenticated && !p.minted():
+				runState.MarkUnauthenticated(p.apiDomain)
+			}
+		}
 		return err
 	}
 
@@ -412,6 +481,23 @@ func (p *Provider) ensureLoaded(ctx context.Context, effPath string) error {
 		p.paths[effPath] = &pathCache{values: values, versionToken: token}
 	}
 	return nil
+}
+
+// skippedExportError is returned instead of running an export that an
+// earlier verdict in the run already decided. It carries that verdict's
+// class and reason and matches vault.ErrProviderUnreachable.
+func skippedExportError(domain string, class vault.FailureClass) error {
+	what := "was unreachable"
+	switch {
+	case class.Class == vault.ClassUnauthenticated:
+		what = "was logged out or expired"
+	case class.Reason == vault.ReasonTimedOut:
+		what = "timed out"
+	}
+	return vault.Classify(
+		fmt.Errorf("infisical: export for %s skipped: an earlier call in this run %s", domain, what),
+		class,
+	)
 }
 
 // init registers a shared Factory with vault.DefaultRegistry so that

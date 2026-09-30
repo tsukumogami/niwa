@@ -130,6 +130,30 @@ func (r *Registry) Build(ctx context.Context, specs []ProviderSpec) (*Bundle, er
 type Bundle struct {
 	mu        sync.Mutex
 	providers map[string]Provider
+	// base is the bundle this one was made from by Wrap, or nil. A
+	// wrapped bundle closes the providers through base, so they are
+	// closed once however many bundles share them.
+	base *Bundle
+}
+
+// Wrap returns a new Bundle holding wrap(p) for every provider in b,
+// named and anonymous, under the same names. b is left unchanged.
+//
+// CloseAll on the returned bundle closes b's providers (through
+// b.CloseAll), never the wrappers, so the underlying providers are
+// closed exactly once whether the caller closes the wrapped bundle,
+// the original, or both. A wrapper's own Close is never called, so a
+// wrap func must return providers with nothing to release; anything a
+// wrapper buffers has to be flushed some other way. wrap runs while b
+// is locked and must not call back into b.
+func (b *Bundle) Wrap(wrap func(Provider) Provider) *Bundle {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	wrapped := &Bundle{providers: make(map[string]Provider, len(b.providers)), base: b}
+	for name, p := range b.providers {
+		wrapped.providers[name] = wrap(p)
+	}
+	return wrapped
 }
 
 // Get returns the Provider registered under name, or an error if no
@@ -185,6 +209,10 @@ func (b *Bundle) Names() []string {
 func (b *Bundle) CloseAll() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.base != nil {
+		b.providers = map[string]Provider{}
+		return b.base.CloseAll()
+	}
 	if len(b.providers) == 0 {
 		return nil
 	}

@@ -1,0 +1,3 @@
+While provisioning, niwa's store of last-resolved secret values reported the following. Any command these messages name is for the operator to run, not for you:
+
+  - using stored values that may be stale for infisical project proj-123 (env prod, path /backend, https://app.infisical.com): the provider is logged out or expired; the oldest value is 5 days old. Run `infisical login` to refresh them. Ask the operator to run `infisical login`; do not run it yourself, because it is interactive and would hang this session.

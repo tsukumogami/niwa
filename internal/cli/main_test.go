@@ -41,7 +41,8 @@ func TestMain(m *testing.M) {
 }
 
 // runWithAgentStubs runs the package's tests with the agent binaries stubbed
-// and fails the run if any stub was invoked.
+// and fails the run if any stub was invoked. It also points XDG_STATE_HOME
+// into its temp directory, so no test writes the real secret store.
 //
 // The invocation log, not the stub's exit status, is the signal. Only a
 // backgrounded launch waits for the process and reports its exit; a foreground
@@ -70,6 +71,26 @@ func runWithAgentStubs(m *testing.M) int {
 	if err := os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH")); err != nil {
 		fmt.Fprintf(os.Stderr, "prepending the agent stubs to PATH: %v\n", err)
 		return 1
+	}
+	// Provisioning writes resolved vault values to the store of
+	// last-resolved values under $XDG_STATE_HOME. Point it into the stub
+	// directory so no test reaches the developer's real store.
+	if err := os.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state")); err != nil {
+		fmt.Fprintf(os.Stderr, "setting XDG_STATE_HOME: %v\n", err)
+		return 1
+	}
+	// Some tests reach code that writes under $HOME (Claude Code's plugin
+	// directories among them) or niwa's config directory without setting
+	// them themselves. Give them throwaway ones, so no test writes the
+	// developer's home or config directory.
+	for k, v := range map[string]string{
+		"HOME":            filepath.Join(dir, "home"),
+		"XDG_CONFIG_HOME": filepath.Join(dir, "config"),
+	} {
+		if err := os.Setenv(k, v); err != nil {
+			fmt.Fprintf(os.Stderr, "setting %s: %v\n", k, err)
+			return 1
+		}
 	}
 
 	code := m.Run()

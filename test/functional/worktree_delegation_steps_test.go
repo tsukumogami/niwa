@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/cucumber/godog"
 )
@@ -155,7 +156,9 @@ func runNiwaWithStdin(s *testState, cwd, command, stdin string) error {
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	start := time.Now()
 	err := cmd.Run()
+	s.lastRunDuration = time.Since(start)
 	s.stdout = stdout.String()
 	s.stderr = stderr.String()
 	s.shellPwd = ""
