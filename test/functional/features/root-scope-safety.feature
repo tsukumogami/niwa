@@ -88,3 +88,16 @@ Feature: apply and destroy never take the whole workspace's scope by accident
     When I run "niwa destroy --workspace --confirm team" from directory "." under workspace "team"
     Then the exit code is 0
     And the workspace "team" does not exist
+
+  # The teardown form scripts and coordinators rely on is unchanged: a named
+  # instance destroyed from the workspace root, with or without --force.
+  @critical
+  Scenario: destroy of a named instance from the workspace root works unchanged, with and without --force
+    When I run "niwa destroy --force team-2" from directory "." under workspace "team"
+    Then the exit code is 0
+    And the file "team-2" does not exist under workspace root "team"
+    And the file "team/tools/myapp" exists under workspace root "team"
+    When I run "niwa destroy team" from directory "." under workspace "team"
+    Then the exit code is 0
+    And the file "team" does not exist under workspace root "team"
+    And the workspace root "team" has a workspace.toml
