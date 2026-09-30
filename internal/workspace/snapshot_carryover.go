@@ -4,37 +4,48 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
-// SnapshotManifestFile lists every path the config source put into a snapshot,
-// one slash-separated path relative to the config dir per line. It is written
-// into staging right after extraction, before any local state is carried in,
-// so it records exactly what upstream supplied and nothing niwa or a user
-// added afterwards.
+// SnapshotManifestFile lists every path the config source supplied to a
+// snapshot, one slash-separated path relative to the config dir per line. It
+// is written into staging right after extraction, before any local state is
+// carried in, so it records exactly what the source supplied and nothing niwa
+// or a user added afterwards.
 //
 // The next swap reads it back to tell the two apart. A path the manifest names
-// belongs to upstream: the new snapshot decides whether it still exists. A
-// path the manifest does not name was put there by someone else -- a session
-// keeping notes at the workspace root, a hand-written script -- and the swap
-// carries it into the new snapshot instead of deleting it.
+// was supplied by the source: the new snapshot decides whether it still
+// exists. A path the manifest does not name was put there by someone else -- a
+// session keeping notes at the workspace root, a hand-written script -- and
+// the swap carries it into the new snapshot instead of deleting it.
+//
+// Being line-based, the manifest cannot represent a path containing a line
+// break, and writeSnapshotManifest refuses one rather than record it wrongly:
+// a source file named "x\nnotes.md" would otherwise put a "notes.md" line in
+// the manifest, and the next refresh would delete a local notes.md as if the
+// source had supplied it.
 const SnapshotManifestFile = ".niwa-snapshot-manifest"
 
 // carryOverReserved names top-level entries the generic carry-over never
 // touches. The provenance marker and the manifest are rewritten for every
 // snapshot; instance.json, dispatch-briefs/ and sessions/ each have their own
 // preserve step with rules of its own (local wins on a name clash, the session
-// store keeps its 0700 mode).
+// store keeps its 0700 mode). .git is a legacy working tree's metadata, which
+// the conversion to a snapshot exists to drop; copySubtree skips it for the
+// same reason.
 var carryOverReserved = map[string]bool{
 	ProvenanceFile:        true,
 	SnapshotManifestFile:  true,
 	StateFile:             true,
 	dispatchBriefsDirName: true,
 	sessionsDirName:       true,
+	".git":                true,
 }
 
 // isReservedTopLevel reports whether rel names one of carryOverReserved at the
@@ -44,7 +55,9 @@ func isReservedTopLevel(rel string) bool {
 }
 
 // writeSnapshotManifest records every path currently under staging. Call it
-// after extraction and before anything else is written into staging.
+// after extraction and before anything else is written into staging. It fails,
+// leaving the refresh to fail with it, when a supplied path contains a line
+// break (see SnapshotManifestFile).
 func writeSnapshotManifest(staging string) error {
 	var paths []string
 	err := filepath.WalkDir(staging, func(path string, d fs.DirEntry, err error) error {
@@ -60,7 +73,13 @@ func writeSnapshotManifest(staging string) error {
 		}
 		rel = filepath.ToSlash(rel)
 		if isReservedTopLevel(rel) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
+		}
+		if strings.ContainsAny(rel, "\n\r") {
+			return fmt.Errorf("the config source supplies a path containing a line break, %q; rename it in the source", rel)
 		}
 		paths = append(paths, rel)
 		return nil
@@ -81,9 +100,9 @@ func writeSnapshotManifest(staging string) error {
 	return nil
 }
 
-// readSnapshotManifest returns the set of upstream-supplied paths recorded in
+// readSnapshotManifest returns the set of source-supplied paths recorded in
 // configDir's manifest. ok is false when the snapshot predates the manifest.
-func readSnapshotManifest(configDir string) (claimed map[string]bool, ok bool, err error) {
+func readSnapshotManifest(configDir string) (supplied map[string]bool, ok bool, err error) {
 	f, err := os.Open(filepath.Join(configDir, SnapshotManifestFile))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -92,52 +111,78 @@ func readSnapshotManifest(configDir string) (claimed map[string]bool, ok bool, e
 		return nil, false, err
 	}
 	defer f.Close()
-	claimed = map[string]bool{}
+	supplied = map[string]bool{}
 	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
 		if line := sc.Text(); line != "" {
-			claimed[line] = true
+			supplied[line] = true
 		}
 	}
 	if err := sc.Err(); err != nil {
 		return nil, false, err
 	}
-	return claimed, true, nil
+	return supplied, true, nil
 }
 
-// carryUnclaimedPaths copies every path under the current configDir that the
+// carryResult is what carryLocalPaths did.
+type carryResult struct {
+	// Carried lists the local paths copied into staging, relative and
+	// slash-separated. A carried directory is listed once, not per entry.
+	Carried []string
+	// Skipped lists local entries that are not a regular file, directory or
+	// symlink (a socket, a FIFO, a device). They can't be copied, so the swap
+	// drops them; the caller reports them.
+	Skipped []string
+	// HaveManifest is whether the previous snapshot had a manifest to decide
+	// by. Without one, Carried may include files the source deleted.
+	HaveManifest bool
+}
+
+// carryLocalPaths copies every path under the current configDir that the
 // config source did not supply into staging, so the swap that replaces
-// configDir with staging removes only what upstream stopped supplying.
+// configDir with staging removes only what the source stopped supplying.
 //
-// Which paths are upstream's comes from the previous snapshot's manifest. A
-// snapshot written before the manifest existed has none; then the new
-// snapshot's own contents are the only evidence, and every path the new
-// snapshot lacks is carried. That can keep a file upstream deleted in the
-// same refresh, which is why the carried paths are reported in that case:
-// keeping a stale file is recoverable by hand, and deleting a file nobody else
-// has a copy of is not.
+// Which paths the source supplied comes from the previous snapshot's manifest.
+// A snapshot written before the manifest existed has none; then the new
+// snapshot's own contents are the only evidence. Every path the new snapshot
+// lacks is carried, which can keep a file the source deleted in the same
+// refresh, so the caller reports the carried paths in that case: keeping a
+// stale file is recoverable by hand, and deleting a file nobody else has a copy
+// of is not. A local file at a path the new snapshot supplies is replaced by
+// the source's copy in that case, since nothing says it wasn't the source's.
 //
-// With a manifest, a path that was never upstream's and that upstream now
-// supplies is a clash, and the function refuses rather than let either copy
-// overwrite the other. The existing snapshot is left untouched either way.
-//
-// Returns the carried paths, relative and slash-separated, in walk order, and
-// whether the previous snapshot had a manifest to decide them by.
-func carryUnclaimedPaths(configDir, staging string) (carried []string, haveManifest bool, err error) {
+// With a manifest, a local path the source newly supplies has two owners. The
+// function refuses, naming every such path, rather than let either copy
+// overwrite the other. The existing config dir is never modified: everything
+// happens in staging.
+func carryLocalPaths(configDir, staging string) (carryResult, error) {
+	var res carryResult
 	if info, statErr := os.Lstat(configDir); statErr != nil {
 		if errors.Is(statErr, fs.ErrNotExist) {
 			// First materialization: nothing local exists yet.
-			return nil, false, nil
+			return res, nil
 		}
-		return nil, false, statErr
+		return res, statErr
 	} else if !info.IsDir() {
 		// SwapSnapshotAtomic refuses a non-directory target; let it say so.
-		return nil, false, nil
+		return res, nil
 	}
-	claimed, haveManifest, err := readSnapshotManifest(configDir)
+	supplied, haveManifest, err := readSnapshotManifest(configDir)
 	if err != nil {
-		return nil, false, fmt.Errorf("read snapshot manifest: %w", err)
+		return res, fmt.Errorf("read snapshot manifest: %w", err)
 	}
+	res.HaveManifest = haveManifest
+
+	type dirMode struct {
+		path string
+		perm os.FileMode
+	}
+	var (
+		conflicts []string
+		dirModes  []dirMode
+	)
+	carriedDirs := map[string]bool{}
 	err = filepath.WalkDir(configDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -156,94 +201,141 @@ func carryUnclaimedPaths(configDir, staging string) (carried []string, haveManif
 			}
 			return nil
 		}
+		parentCarried := carriedDirs[filepath.ToSlash(filepath.Dir(rel))]
 
-		dst := filepath.Join(staging, rel)
-		dstInfo, dstErr := os.Lstat(dst)
-		inStaging := dstErr == nil
-		if dstErr != nil && !errors.Is(dstErr, fs.ErrNotExist) {
-			return dstErr
-		}
-
-		if haveManifest && claimed[relSlash] {
-			// Upstream's path. Its fate is whatever the new snapshot says,
-			// but a local file may still live inside an upstream directory.
-			return nil
-		}
-
-		if inStaging {
-			if d.IsDir() && dstInfo.IsDir() {
-				// Both sides have a directory here; carry its local
-				// children one by one.
+		if !parentCarried {
+			if haveManifest && supplied[relSlash] {
+				// The source's path. Its fate is whatever the new snapshot
+				// says, but a local file may still live inside a source
+				// directory, so keep walking.
 				return nil
 			}
-			if !haveManifest {
-				// No record of what upstream supplied before, and upstream
-				// supplies it now: take upstream's copy.
-				return nil
+
+			dst := filepath.Join(staging, rel)
+			dstInfo, dstErr := os.Lstat(dst)
+			switch {
+			case dstErr == nil:
+				if d.IsDir() && dstInfo.IsDir() {
+					// Both sides have a directory here; carry its local
+					// children one by one.
+					return nil
+				}
+				return conflictOrYield(haveManifest, d, relSlash, &conflicts)
+			case errors.Is(dstErr, syscall.ENOTDIR):
+				// Staging has a file where this path's parent would be.
+				return conflictOrYield(haveManifest, d, relSlash, &conflicts)
+			case !errors.Is(dstErr, fs.ErrNotExist):
+				return dstErr
 			}
-			return fmt.Errorf("the config source now provides %s, which already exists locally and was not part of the previous snapshot; move it out of %s and re-run", relSlash, configDir)
 		}
 
-		if err := copyLocalEntry(path, dst); err != nil {
+		copied, err := copyLocalEntry(path, filepath.Join(staging, rel))
+		if err != nil {
 			return err
 		}
-		carried = append(carried, relSlash)
+		if !copied {
+			res.Skipped = append(res.Skipped, relSlash)
+			return nil
+		}
 		if d.IsDir() {
-			return filepath.SkipDir
+			carriedDirs[relSlash] = true
+			if info, err := d.Info(); err == nil {
+				dirModes = append(dirModes, dirMode{filepath.Join(staging, rel), info.Mode().Perm()})
+			}
+		}
+		if !parentCarried {
+			res.Carried = append(res.Carried, relSlash)
 		}
 		return nil
 	})
 	if err != nil {
-		return nil, haveManifest, err
+		return res, err
 	}
-	return carried, haveManifest, nil
+	if len(conflicts) > 0 {
+		return res, fmt.Errorf("the config source now supplies %s, which already exist(s) locally and did not come from the source; move them out of %s and re-run",
+			strings.Join(conflicts, ", "), configDir)
+	}
+	// Deepest first, so a read-only parent doesn't block its children. Done
+	// only on success: the caller removes staging on failure, which a
+	// read-only directory would block.
+	for i := len(dirModes) - 1; i >= 0; i-- {
+		if err := os.Chmod(dirModes[i].path, dirModes[i].perm); err != nil {
+			return res, err
+		}
+	}
+	return res, nil
 }
 
-// copyLocalEntry copies a file, symlink or directory tree from src to dst,
-// keeping modes and recreating symlinks as symlinks. Unlike copySubtree it is
-// not a guard against hostile upstream content: everything it copies was
-// already in the config dir, and it only moves it to the same relative place
-// in the next snapshot.
-func copyLocalEntry(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+// conflictOrYield handles a local path the new snapshot also has. With a
+// manifest it is a conflict, recorded and not descended into. Without one the
+// source's copy wins. Either way the local entry is not carried.
+func conflictOrYield(haveManifest bool, d fs.DirEntry, relSlash string, conflicts *[]string) error {
+	if haveManifest {
+		*conflicts = append(*conflicts, relSlash)
+	}
+	if d.IsDir() {
+		return filepath.SkipDir
+	}
+	return nil
+}
+
+// copyLocalEntry copies one entry from src to dst: a directory is created
+// with its mode, a symlink is recreated as a symlink, and a regular file is
+// streamed with its mode. It reports false, copying nothing, for anything
+// else (a socket, a FIFO, a device). Unlike copySubtree it is not a guard
+// against hostile source content: everything it copies was already in the
+// config dir, and it only moves it to the same relative place in the next
+// snapshot.
+func copyLocalEntry(src, dst string) (bool, error) {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return false, err
+	}
+	mode := info.Mode()
+	switch {
+	case mode&os.ModeSymlink != 0:
+		link, err := os.Readlink(src)
 		if err != nil {
-			return err
+			return false, err
 		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return false, err
 		}
-		target := filepath.Join(dst, rel)
-		info, err := os.Lstat(path)
-		if err != nil {
-			return err
+		return true, os.Symlink(link, dst)
+	case mode.IsDir():
+		// Owner-writable while its children are copied in; a read-only
+		// directory would otherwise refuse them. carryLocalPaths applies the
+		// real mode once the walk is done.
+		if err := os.MkdirAll(dst, mode.Perm()|0o700); err != nil {
+			return false, err
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
+		return true, os.Chmod(dst, mode.Perm()|0o700)
+	case mode.IsRegular():
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return false, err
 		}
-		switch {
-		case info.Mode()&os.ModeSymlink != 0:
-			link, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			return os.Symlink(link, target)
-		case info.IsDir():
-			if err := os.MkdirAll(target, info.Mode().Perm()); err != nil {
-				return err
-			}
-			return os.Chmod(target, info.Mode().Perm())
-		case info.Mode().IsRegular():
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			if err := os.WriteFile(target, data, info.Mode().Perm()); err != nil {
-				return err
-			}
-			return os.Chmod(target, info.Mode().Perm())
-		default:
-			return fmt.Errorf("cannot carry %s across a config refresh: not a regular file, directory or symlink", path)
-		}
-	})
+		return true, streamFile(src, dst, mode.Perm())
+	default:
+		return false, nil
+	}
+}
+
+func streamFile(src, dst string, perm os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return fmt.Errorf("copy %s: %w", src, err)
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Chmod(dst, perm)
 }

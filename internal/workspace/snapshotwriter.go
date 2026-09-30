@@ -403,9 +403,9 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 			redirectNotice.OldOwner, redirectNotice.OldRepo, redirectNotice.NewOwner, redirectNotice.NewRepo)
 	}
 
-	// Record what upstream supplied before anything local is written into
-	// staging, so the next swap can tell upstream's paths from everyone
-	// else's. See carryUnclaimedPaths.
+	// Record what the source supplied before anything local is written into
+	// staging, so the next swap can tell the source's paths from everyone
+	// else's. See carryLocalPaths.
 	if err := writeSnapshotManifest(staging); err != nil {
 		_ = safeRemoveAll(staging)
 		return rank, fmt.Errorf("EnsureConfigSnapshot: %w", err)
@@ -479,14 +479,20 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 	// keeps under the config dir, such as notes and scripts a session at the
 	// workspace root keeps next to dispatch-briefs/. Without it the swap
 	// deletes them whenever the source has moved, at any apply scope.
-	carried, haveManifest, err := carryUnclaimedPaths(configDir, staging)
+	carry, err := carryLocalPaths(configDir, staging)
 	if err != nil {
 		_ = safeRemoveAll(staging)
 		return rank, fmt.Errorf("EnsureConfigSnapshot: keep local paths under %s: %w", configDir, err)
 	}
-	if !haveManifest && len(carried) > 0 && reporter != nil {
-		reporter.Warn("kept %d path(s) under %s that the config source does not provide: %s; delete any that upstream removed on purpose",
-			len(carried), configDir, strings.Join(carried, ", "))
+	if reporter != nil {
+		if !carry.HaveManifest && len(carry.Carried) > 0 {
+			reporter.Warn("kept %d path(s) under %s that the config source does not supply: %s; delete any the source removed on purpose",
+				len(carry.Carried), configDir, strings.Join(carry.Carried, ", "))
+		}
+		if len(carry.Skipped) > 0 {
+			reporter.Warn("dropped %d entr(ies) under %s that are not files, directories or symlinks and cannot be copied: %s",
+				len(carry.Skipped), configDir, strings.Join(carry.Skipped, ", "))
+		}
 	}
 
 	if err := SwapSnapshotAtomic(configDir, staging); err != nil {

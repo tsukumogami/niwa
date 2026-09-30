@@ -117,5 +117,21 @@ func safeRemoveAll(path string) error {
 	if info.Mode()&os.ModeSymlink != 0 {
 		return os.Remove(path)
 	}
+	if err := os.RemoveAll(path); err == nil || !errors.Is(err, fs.ErrPermission) {
+		return err
+	}
+	// A read-only directory refuses the removal of its entries. The config
+	// dir can hold one now that local paths ride across the swap, and a
+	// leftover .prev would fail every later swap's preflight, so make the
+	// directories owner-writable and try again. WalkDir does not follow
+	// symlinks, so only directories inside path are touched.
+	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			if info, statErr := d.Info(); statErr == nil {
+				_ = os.Chmod(p, info.Mode().Perm()|0o700)
+			}
+		}
+		return nil
+	})
 	return os.RemoveAll(path)
 }

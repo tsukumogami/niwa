@@ -151,18 +151,35 @@ source supplied. Every other path under `.niwa/`, at any depth, is
 carried into the new snapshot with its mode, and symlinks stay
 symlinks. So it's safe to keep notes, scripts or other state that has
 to outlive any one instance under the workspace root's `.niwa/`; no
-apply, create or dispatch deletes it, at any scope.
+apply, create, dispatch or reset deletes it, at any scope. The same
+rule covers every snapshot niwa keeps: the workspace overlay's and the
+personal global config's, not only the workspace root's.
 
-Two cases need a decision from you:
+A few cases need a decision from you, or are worth knowing:
 
 - If the source starts supplying a path you already created locally,
-  the refresh refuses and names the path, leaving `.niwa/` untouched.
-  Move your copy aside and re-run.
+  the refresh refuses, names every such path, and leaves `.niwa/`
+  untouched. Until you move or rename the local copies, every apply,
+  create, dispatch and reset in the workspace fails the same way,
+  including an unattended dispatch. Move your copies aside, or merge
+  them into the source, and re-run.
 - A snapshot written before the manifest existed has no record of what
   the source supplied. On its first refresh, every path the new source
   content lacks is kept, and apply prints a `warning:` listing them.
   If the source deleted one of those files on purpose, delete it by
-  hand. After that refresh the manifest exists and removals are exact.
+  hand. A local file at a path the new source content does supply is
+  replaced by the source's copy on that refresh, since nothing says it
+  wasn't the source's. After that refresh the manifest exists and
+  removals are exact.
+- A legacy working tree's `.git/` is never carried: converting to a
+  snapshot drops it, as before.
+- A socket, FIFO or device file under `.niwa/` can't be copied. The
+  refresh drops it and prints a `warning:` naming it.
+- A refresh refuses a source file whose name contains a line break,
+  because the manifest couldn't record it faithfully.
+- Local files are copied on every refresh, so keep large data
+  elsewhere, and a write into `.niwa/` that lands while a refresh is
+  copying can be lost.
 
 ### Provenance marker
 
