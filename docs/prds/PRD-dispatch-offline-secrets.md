@@ -516,9 +516,14 @@ changes, and the criteria compare against those fixtures.
       (R25) Deferred: no test; the sentence was checked by hand.
 - [x] With a counting stub, a successful provisioning run makes the same number of export
       invocations as the code before this change, and no probe invocation. (R26) Tests: `TestGoldenSuccessfulRunInvocations`, `TestClassifySuccessRunsNoProbe`, "a successful apply makes one export per folder and no login status call" (vault-failure-baseline.feature).
-- [ ] The full unit and functional suites are run with `HOME` and `XDG_STATE_HOME` pointing at two
-      sentinel directories that do not exist and with no `infisical` binary on `PATH`; they pass,
-      and afterwards neither sentinel directory exists. (R27) Deferred: enforced by the Linux CI job's sentinel steps rather than a test, and not run on macOS.
+- [x] On Linux, the full unit and functional suites are run with `HOME` and `XDG_STATE_HOME`
+      pointing at two sentinel directories that do not exist and with no `infisical` binary on
+      `PATH`; they pass, and afterwards neither sentinel directory exists. (R27) Tests: the
+      ubuntu CI job's "Point HOME and XDG_STATE_HOME at sentinels", "Test (sentinel HOME)",
+      "Functional tests" and "Verify the suites left the sentinels alone" steps in `.github/workflows/test.yml`.
+- [ ] The same sentinel run passes on macOS. (R27) Deferred: the macOS CI job runs the plain unit
+      suite, because macOS keeps niwa's config directory under `HOME` with no override, and the
+      functional suite doesn't run on macOS at all.
 
 ## Out of Scope
 
@@ -582,7 +587,12 @@ changes, and the criteria compare against those fixtures.
   probe reports `expired` locally and the export gets a 403. Planting a fake expired user session
   into an isolated file vault failed because this CLI version's vault item format isn't
   documented. R2's rules 2, 4 and 5 are written so that an expired user session falls back
-  whether the probe describes it, the export reaches the server, or neither.
+  whether the probe describes it, the export reaches the server, or neither. A live acceptance
+  test after release closes this gap, together with the inferred wording above: the owner
+  dispatches once while logged in so the store holds the values, runs `infisical logout`,
+  dispatches again, and checks that the warning's reason clause reads "the provider is logged
+  out or expired" and that it ends with "Run `infisical login` to refresh them". The owner then
+  confirms the instance has every declared key and logs back in.
 - **A permission denial can be served from the store when the probe is inconclusive.** R2 rule 4
   treats a 401 or 403 as a lapsed login unless a verified probe says otherwise. If the probe
   times out at the same moment a real denial happens, the stale value is served for that run,
@@ -598,7 +608,12 @@ changes, and the criteria compare against those fixtures.
   standard output and 1 MiB of its standard error; the rest is discarded. An export that exits
   0 with more output than that is *answered* (like output niwa can't parse) and serves
   nothing. A probe that passes the cap gives no usable answer, so R2's later rules decide. A
-  truncated standard error only loses its tail, which feeds messages and wording checks.
+  truncated standard error only loses its tail, which feeds messages and wording checks: niwa
+  keeps reading past the cap, including the line the cap cut, for lines that start with
+  `Response Code:` and keeps the last one. The classifier also takes the last status line it
+  sees, because the CLI prints its own after everything else. So the server's answer decides
+  the class however much the CLI printed before it, as long as the CLI's status line comes
+  last. A status-shaped line printed after it would be read instead.
 - **The store key has no principal.** A provider identity is kind, API domain, project,
   environment and folder path. Two principals that read the same folder share one store file,
   so when one principal's login lapses, niwa can serve values that another principal recorded

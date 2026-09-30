@@ -218,9 +218,11 @@ type ProviderSpec struct {
 // storefallback.lessIdentity, fallbacknotice.Identity (which mirrors
 // this struct) with fallbacknotice's lessIdentity and fields helpers,
 // the fake provider's "identity" config, and the infisical
-// provider's StoreIdentity. TestFileStemCoversEveryIdentityField and
-// TestNoticeIdentityCopiesEveryField fail when a new field is missing
-// from the store key or the notice copy.
+// provider's StoreIdentity. TestFileStemCoversEveryIdentityField,
+// TestNoticeIdentityCopiesEveryField and the two
+// TestLessIdentityCoversEveryVaultIdentityField tests (storefallback
+// and fallbacknotice) fail when a new field is missing from the store key,
+// the notice copy, fallbacknotice.Identity or either ordering.
 type Identity struct {
 	Kind        string
 	APIDomain   string

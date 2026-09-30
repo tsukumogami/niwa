@@ -49,18 +49,33 @@ type exportFailure struct {
 }
 
 // responseStatus returns the status of the export's server response,
-// or 0 when the export got none.
+// or 0 when the export got none. The last status line in a stream
+// wins: the CLI prints its own after everything else, so an earlier
+// status-shaped line of program output can't stand in for it.
 func (f exportFailure) responseStatus() int {
 	for _, out := range []string{f.stderr, f.stdout} {
+		status := 0
 		for _, line := range strings.Split(out, "\n") {
-			rest, ok := strings.CutPrefix(strings.TrimRight(line, "\r"), responseCodePrefix)
-			if !ok {
-				continue
-			}
-			if n, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil && n > 0 {
-				return n
+			if n := parseStatusLine(line); n > 0 {
+				status = n
 			}
 		}
+		if status > 0 {
+			return status
+		}
+	}
+	return 0
+}
+
+// parseStatusLine returns the status a server status line carries, or
+// 0 when line isn't one.
+func parseStatusLine(line string) int {
+	rest, ok := strings.CutPrefix(strings.TrimRight(line, "\r"), responseCodePrefix)
+	if !ok {
+		return 0
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil && n > 0 {
+		return n
 	}
 	return 0
 }

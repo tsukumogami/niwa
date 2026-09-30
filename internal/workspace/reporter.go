@@ -172,6 +172,15 @@ func (r *Reporter) FlushDeferred() {
 // Writer returns an io.Writer whose Write calls are routed through Log.
 // Each Write invocation is treated as a single log message (trailing
 // newlines in the input are stripped to avoid double-newlines).
+//
+// Hand it to code that takes a plain io.Writer for warnings and
+// diagnostics (the required-key check, the plaintext-secrets guardrail,
+// fallback notices a caller didn't collect itself), so that output
+// clears the spinner and lands in the same stream as the rest of the
+// run's progress instead of writing over the spinner line. The bytes go
+// to the writer the Reporter was built with: standard error for every
+// Reporter the CLI commands and NewApplier construct, or whatever writer
+// a caller passed to NewReporter or NewReporterWithTTY.
 func (r *Reporter) Writer() io.Writer {
 	return &logWriter{r: r}
 }

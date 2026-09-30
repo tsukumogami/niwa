@@ -1,15 +1,50 @@
 package fallbacknotice
 
 import (
+	"reflect"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/vault"
 )
 
 var (
 	idA = Identity{Kind: "infisical", APIDomain: "https://app.infisical.com", ProjectID: "a", Environment: "dev", FolderPath: "/"}
 	idB = Identity{Kind: "infisical", APIDomain: "https://app.infisical.com", ProjectID: "b", Environment: "dev", FolderPath: "/"}
 )
+
+// Identity mirrors vault.Identity by hand, and lessIdentity must compare
+// every one of its fields. Walking vault.Identity (the package itself
+// imports nothing from vault; only this test does) catches a field
+// added there but not here, and one added here but left out of the
+// ordering, which would make the notice order depend on map iteration.
+func TestLessIdentityCoversEveryVaultIdentityField(t *testing.T) {
+	vt := reflect.TypeOf(vault.Identity{})
+	if nt := reflect.TypeOf(Identity{}); nt.NumField() != vt.NumField() {
+		t.Fatalf("vault.Identity has %d fields, Identity %d", vt.NumField(), nt.NumField())
+	}
+	for i := 0; i < vt.NumField(); i++ {
+		name := vt.Field(i).Name
+		t.Run(name, func(t *testing.T) {
+			var lo, hi Identity
+			lv, hv := reflect.ValueOf(&lo).Elem(), reflect.ValueOf(&hi).Elem()
+			for j := 0; j < vt.NumField(); j++ {
+				lv.Field(j).SetString("same")
+				hv.Field(j).SetString("same")
+			}
+			lf, hf := lv.FieldByName(name), hv.FieldByName(name)
+			if !lf.IsValid() {
+				t.Fatalf("Identity lacks %s", name)
+			}
+			lf.SetString("a")
+			hf.SetString("b")
+			if !lessIdentity(lo, hi) || lessIdentity(hi, lo) {
+				t.Errorf("lessIdentity ignores %s", name)
+			}
+		})
+	}
+}
 
 func TestNilCollectorIsANoOp(t *testing.T) {
 	var c *Collector

@@ -149,3 +149,102 @@ exit 1`)
 		t.Fatalf("err = %v (class %v), want unauthenticated", err, class)
 	}
 }
+
+// Past the cap the buffer keeps nothing but the last status line,
+// rebuilt from its number. A status line the cap cuts is read whole,
+// though the cut line itself stays dropped from the kept text. A prefix
+// in the middle of a line and an overlong line never count.
+func TestCappedBufferKeepsStatusLinePastCap(t *testing.T) {
+	cases := []struct {
+		name   string
+		writes []string
+		want   string
+	}{
+		{"last status after the cap wins", []string{"head\nsecret-cut", "-here\nnoise\nResponse Code: 404\nResponse Code: 500\n"}, "head\nResponse Code: 500\n"},
+		{"split across writes", []string{"head\nxxxxxxx", "\nResp", "onse Co", "de: 403\n"}, "head\nResponse Code: 403\n"},
+		{"no trailing newline", []string{"head\nxx", "xxxxxx\nResponse Code: 401"}, "head\nResponse Code: 401\n"},
+		{"status line the cap cuts", []string{"head\nResponse Co", "de: 404\n"}, "head\nResponse Code: 404\n"},
+		{"status line the cap cuts, no trailing newline", []string{"head\nResponse Code: 404"}, "head\nResponse Code: 404\n"},
+		{"cut line too long to be a status", []string{"head\n" + strings.Repeat("x", 70) + "Response Code: 404\n"}, "head\n"},
+		{"prefix mid-line", []string{"head\nxxxx", "xxxxx\nerror Response Code: 404\n"}, "head\n"},
+		{"overlong line", []string{"head\nxxxxx", "\nResponse Code: 404" + strings.Repeat(" ", 80) + "\n"}, "head\n"},
+		{"cap on a line boundary", []string{"head\nabc\n", "Response Code: 404\n"}, "head\nabc\nResponse Code: 404\n"},
+		{"line boundary inside one write", []string{"head\nabc\nResponse Code: 404\n"}, "head\nabc\nResponse Code: 404\n"},
+		{"CRLF past the cap", []string{"head\nxxxxxxx\r\nResponse Code: 404\r\n"}, "head\nResponse Code: 404\n"},
+		{"writes after the status", []string{"head\nxxxxxxx\nResponse Code: 404\n", "Response Code: 500\n", "more noise\n"}, "head\nResponse Code: 500\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &cappedBuffer{limit: 9, keepStatusLine: true}
+			for _, w := range tc.writes {
+				if n, err := b.Write([]byte(w)); n != len(w) || err != nil {
+					t.Fatalf("Write(%q) = (%d, %v)", w, n, err)
+				}
+			}
+			if got := string(b.wholeLines()); got != tc.want {
+				t.Errorf("wholeLines = %q, want %q", got, tc.want)
+			}
+			if len(b.pending) > maxStatusLineLen {
+				t.Errorf("pending grew to %d bytes", len(b.pending))
+			}
+		})
+	}
+
+	// The cap falls right before a status line's newline: the line is
+	// whole, so it still counts, once, as the status.
+	for _, writes := range [][]string{
+		{"x\nResponse Code: 404\nrest\n"},
+		{"x\nResponse Code: 404", "\nrest\n"},
+	} {
+		edge := &cappedBuffer{limit: 20, keepStatusLine: true}
+		for _, w := range writes {
+			_, _ = edge.Write([]byte(w))
+		}
+		if got := string(edge.wholeLines()); got != "x\nResponse Code: 404\n" {
+			t.Errorf("writes %q: wholeLines = %q, want %q", writes, got, "x\nResponse Code: 404\n")
+		}
+	}
+
+	// The kept start of the cut line is already too long to be a
+	// status line, so the rest of that line is skipped.
+	long := &cappedBuffer{limit: 75, keepStatusLine: true}
+	_, _ = long.Write([]byte("h\n" + strings.Repeat("x", 70) + "Response Code: 404\n"))
+	if got := string(long.wholeLines()); got != "h\n" {
+		t.Errorf("long cut line: wholeLines = %q, want %q", got, "h\n")
+	}
+
+	// A status before the cap and another after it: both reach the
+	// classifier, which takes the later one, the CLI's own trailer.
+	both := &cappedBuffer{limit: 25, keepStatusLine: true}
+	_, _ = both.Write([]byte("Response Code: 200\nabcdef\nResponse Code: 404\n"))
+	got := string(both.wholeLines())
+	if got != "Response Code: 200\nResponse Code: 404\n" {
+		t.Errorf("status on both sides of the cap: wholeLines = %q", got)
+	}
+	if n := (exportFailure{stderr: got}).responseStatus(); n != 404 {
+		t.Errorf("responseStatus = %d, want 404", n)
+	}
+
+	plain := &cappedBuffer{limit: 5}
+	_, _ = plain.Write([]byte("head\nResponse Code: 404\n"))
+	if got := string(plain.wholeLines()); got != "head\n" {
+		t.Errorf("without keepStatusLine, wholeLines = %q, want %q", got, "head\n")
+	}
+}
+
+// A status line printed after more than the real 1 MiB stderr cap is
+// still classified from its status: a 404 is answered, not served from
+// the store. The noise is whole lines (about 1.03 MiB), so the status
+// line starts a line of its own. An earlier status-shaped line before
+// the cap doesn't decide the class; the trailer does.
+func TestRunInfisicalExport_StatusPastStderrCapIsAnswered(t *testing.T) {
+	putStubOnPath(t, writeInfisicalStub(t, probeAnswersAtOnce+
+		"echo 'Response Code: 401' >&2\n"+
+		"yes 'a noisy line of CLI output' | head -n 40000 >&2\necho 'Response Code: 404' >&2\nexit 1"))
+
+	_, _, err := runInfisicalExport(context.Background(), nil, "proj", "dev", "/", "")
+	var class *vault.FailureClass
+	if !errors.As(err, &class) || class.Class != vault.ClassAnswered || class.HTTPStatus != 404 {
+		t.Fatalf("class %+v, want answered with status 404 (err nil: %v)", class, err == nil)
+	}
+}
