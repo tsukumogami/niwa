@@ -85,7 +85,9 @@ beneath it. It has no effect at an instance or a worktree: an instance always
 converges together with its worktrees (the inherit model makes a worktree a
 derived view of its instance, not an independently skippable scope), and a
 worktree is a leaf with nothing below it. Apply destroys nothing and is a no-op
-where everything is current.
+where everything is current, apart from config files the source supplied: a
+refresh of .niwa/ replaces those and removes the ones the source dropped. Files
+under .niwa/ that the source does not supply are kept.
 
 If a workspace name is given as a positional argument, it is resolved through
 the global registry (~/.config/niwa/config.toml) to find the workspace root

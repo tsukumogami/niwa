@@ -532,7 +532,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 
 	// PRD R28: emit the lazy-conversion `note:` once per workspace.
 	if configConverted && !sliceContains(initDisclosedNotices, noticeConfigConverted) {
-		a.Reporter.Log("note: %s converted from working tree to snapshot. Manual edits inside this directory will no longer persist.", configDir)
+		a.Reporter.Log("note: %s converted from working tree to snapshot. Edits to files the config source supplies will no longer persist; files the source does not supply are kept.", configDir)
 		result.disclosedNotices = append(result.disclosedNotices, noticeConfigConverted)
 	}
 
@@ -699,7 +699,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	// apply. The DisclosedNotices check ensures subsequent applies don't
 	// re-emit; the append records the disclosure into the next save.
 	if configConverted && !sliceContains(wsDisclosedNotices, noticeConfigConverted) {
-		a.Reporter.Log("note: %s converted from working tree to snapshot. Manual edits inside this directory will no longer persist.", configDir)
+		a.Reporter.Log("note: %s converted from working tree to snapshot. Edits to files the config source supplies will no longer persist; files the source does not supply are kept.", configDir)
 		result.disclosedNotices = append(result.disclosedNotices, noticeConfigConverted)
 	}
 
@@ -969,7 +969,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		// PRD R28: emit the global-config conversion notice once per
 		// workspace, gated on DisclosedNotices.
 		if converted && !sliceContains(opts.disclosedNotices, noticeConfigConverted) {
-			a.Reporter.Log("note: %s converted from working tree to snapshot. Manual edits inside this directory will no longer persist.", a.GlobalConfigDir)
+			a.Reporter.Log("note: %s converted from working tree to snapshot. Edits to files the config source supplies will no longer persist; files the source does not supply are kept.", a.GlobalConfigDir)
 			newDisclosures = append(newDisclosures, noticeConfigConverted)
 		}
 

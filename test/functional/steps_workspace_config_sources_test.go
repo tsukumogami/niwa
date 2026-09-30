@@ -97,6 +97,25 @@ func aDispatchBriefExistsInWorkspaceRoot(ctx context.Context, file string) (cont
 	return ctx, nil
 }
 
+// aLocalFileExistsUnderWorkspaceRoot writes a file at relPath under the
+// workspace root that no configuration declares, standing in for the notes and
+// scripts sessions keep under the root .niwa/. The config snapshot refresh must
+// carry it across, not delete it.
+func aLocalFileExistsUnderWorkspaceRoot(ctx context.Context, relPath, content string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, filepath.FromSlash(relPath))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return ctx, fmt.Errorf("creating parent of %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return ctx, fmt.Errorf("writing %s: %w", path, err)
+	}
+	return ctx, nil
+}
+
 // theDispatchBriefStillExistsInWorkspaceRoot asserts the brief written by
 // aDispatchBriefExistsInWorkspaceRoot survived a config snapshot refresh.
 // Before the fix, the atomic swap that replaces <workspaceRoot>/.niwa/ with
