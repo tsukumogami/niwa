@@ -81,7 +81,8 @@ below cover every vault-backed layer, whatever each one's authentication.
 - Failures that a stale value would hide (a reachable, authenticated provider that denies
   access or lacks a key) keep today's handling and are never masked by stored values.
 - A host with nothing stored says so plainly, names the re-login command, and otherwise
-  handles the missing keys exactly as today: fatal when required or in strict mode.
+  handles the missing keys exactly as today for a provider that can't be reached: a reported
+  mark, fatal only in strict mode.
 - Once the owner logs back in, fresh values replace the stored ones and the warnings stop,
   with nothing to clear by hand.
 
@@ -97,11 +98,10 @@ below cover every vault-backed layer, whatever each one's authentication.
    complete on the stored values and print the same warning, so that I learn about the lapse
    from the command I ran rather than from a generic provider error.
 3. **First run with no stored values.** As a workspace owner on a freshly set-up host, when I
-   dispatch before ever logging in and the workspace declares a key required, I want the run
-   to fail with a message that says the provider could not be used, that no previously
-   resolved value exists to fall back on, and how to log in, so that I know exactly what to
-   do. When the missing keys are optional, I want the same message and today's handling of
-   optional keys.
+   dispatch before ever logging in, I want a message that says the provider could not be used,
+   that no previously resolved value exists to fall back on, and how to log in, so that I know
+   exactly what to do. The missing keys keep today's handling for a provider that can't be
+   reached: listed in the key report, and fatal only when the workspace runs in strict mode.
 4. **Host-level personal secrets.** As a workspace owner whose personal global configuration
    sources a GitHub token and other personal keys from the vault, when my login lapses and I
    dispatch, I want those keys served from the stored copy like the workspace's own, so that
@@ -264,8 +264,9 @@ A **server response** is an export whose standard output or standard error conta
   served from the store and others missing in the same run.
 - **R17.** When a vault reference fails as *unauthenticated* or *unreachable* and the store does
   not hold that key, niwa keeps today's handling for an unreachable provider: the key is marked
-  unresolved, and the run fails only if strict mode is on or the key is declared required. The
-  run also prints, once per provider identity with at least one such key, a line naming the
+  unresolved and listed in the key report, and the run fails only if strict mode is on. (A
+  key declared required behind an unreachable provider is a reported mark today, not a
+  failure, and stays one.) The run also prints, once per provider identity with at least one such key, a line naming the
   provider kind, API domain and project ID and stating that the provider could not be used, that no previously resolved value existed to fall back on, and
   the re-login command `infisical login`.
 - **R18.** A value served from the store counts as supplied. Strict mode, the required-key check
@@ -398,9 +399,10 @@ changes, and the criteria compare against those fixtures.
 - [ ] One identity with two stored keys and two further, unstored, non-required keys: the run
       serves the two, omits the other two, and prints one R20 warning and one R17 line for that
       identity. (R16, R17, R20)
-- [ ] With an empty store, a required key and the logged-out stub: `niwa dispatch` exits non-zero
-      and standard error holds the R17 line. With the key not required and strict mode off:
-      provisioning succeeds without the key and prints the R17 line. (R17)
+- [ ] With an empty store, a required key, strict mode on and the logged-out stub: `niwa
+      dispatch` exits non-zero and standard error holds the R17 line. With strict mode off, whether
+      or not the key is declared required: provisioning succeeds without the key, lists it in the
+      key report and prints the R17 line. (R17)
 - [ ] A strict-mode workspace whose every declared key is served from the store provisions
       successfully. (R18)
 - [ ] A value stored 30 days before the run is served, and the warning's age reads "30 days". Ages
@@ -490,10 +492,11 @@ changes, and the criteria compare against those fixtures.
       reason reads "logged out or expired". (R20)
 - [ ] Under the session-start hook, the R14, R15, R17 and R20 messages each appear in the
       `additionalContext` payload on standard output when their condition is set up and the hook
-      provisions successfully. When a required key has no stored value, the hook exits non-zero
-      with no payload, as today, and the R17 line is on its standard error. (R21)
+      provisions successfully. When a required key has no stored value, the hook provisions
+      without it and the R17 line is in the payload; with strict mode on, the hook writes its
+      strict-refusal payload, as today, and the R17 line is in that payload. (R21)
 - [ ] A test using distinct marker secret values captures standard output, standard error and every
-      file written during a fallback run, a successful run, a run that fails on a required key with
+      file written during a fallback run, a successful run, a run that fails in strict mode with
       an empty store, and a run with a 404 answer. The markers appear only in the
       store files and the instance's materialized files, and no captured stream or file contains a
       `token` field taken from probe output. (R22)
@@ -590,9 +593,17 @@ changes, and the criteria compare against those fixtures.
   fallback, behaviour stays exactly as it is.
 - **With nothing stored, missing keys keep today's handling rather than always failing.** The
   framing this PRD absorbed treated a first run with nothing stored as a failure. R17 fails only where today's rules
-  already fail (a required key, or strict mode) and otherwise adds a message. Always failing
+  already fail and otherwise adds a message. Always failing
   would make optional keys fatal on a logged-out host, a new unattended failure that today's
   behaviour doesn't have.
+- **"Today's handling" for an unstored key is strict mode alone, not a required declaration.**
+  Earlier drafts of R17, its criteria, story 3 and the goals said a required key behind a
+  logged-out or unreachable provider fails the run. The golden fixtures recorded before this
+  change show otherwise: such a key is a reported mark, and only strict mode turns it into a
+  failure, as it has since the key report was introduced. R17 keeps that behaviour rather than
+  adding a new failure, so the text now says so, and the session-start hook's case follows: it
+  provisions without the key, or in strict mode writes its strict-refusal payload, and the R17
+  line travels in the payload either way.
 - **Evict keys an authenticated run finds missing or denied.** Without eviction a key deleted
   upstream would stay in the store, and the next lapse would serve it. That's exactly the
   masking the fallback must never do.

@@ -40,7 +40,8 @@ and serves keys from it.
 
 Failures are sorted by sentinel errors. `ErrKeyNotFound` and `ErrProviderUnreachable` (with
 its narrower `ErrClientNotInstalled`) become *marks*: empty values that the post-merge key
-report collects, which are fatal only for required keys or in strict mode. Anything else is
+report collects. Strict mode makes any mark fatal; without it only a missing required key is
+(a required key behind an unreachable provider is reported, not fatal). Anything else is
 a hard error. The Infisical backend maps a non-zero export exit to `ErrProviderUnreachable`
 only when scrubbed stderr contains one of a fixed set of markers, which include "401", "403"
 and "forbidden" but none of the current CLI's logged-out messages. A lapsed login is therefore
@@ -277,8 +278,8 @@ The data file is one JSON object:
 `value` is a byte slice, so it round-trips exactly. `resolved_at` is RFC 3339 in UTC and supplies
 the warning's age. `version_token` and `provenance` are the two halves of `vault.VersionToken`. `Update` reports why
 it didn't write through three sentinel errors, `store.ErrLockTimeout`, `store.ErrInWorkTree` and
-`store.ErrUnwritable`, so the session can pick the matching notice. The package holds no state; the
-session caches the work-tree verdict for the run. A
+`store.ErrUnwritable`, so the session can pick the matching notice. The package holds no state, and
+nothing caches the work-tree verdict: `Update` walks for `.git` before every write it makes. A
 file whose echoed identity doesn't match its name, whose `format_version` isn't 1, or that can't be
 read or parsed is treated as empty and overwritten by the next successful write.
 
@@ -308,10 +309,12 @@ Test hooks pause after step 2 and abort between steps 5 and 6. A fallback read o
 with no lock, and since writers only rename complete files into place, it always sees one whole
 version.
 
-Before the first write of a run, niwa walks from the store directory to the root, running
-`os.Lstat(dir/.git)` at each level. It walks twice: once over the cleaned path as configured
-(which need not exist yet), and once over the symlink-resolved path of its deepest existing
-ancestor. Any `.git` entry, file or directory, disables writes for the run and yields one warning.
+Before each write, inside `Update` and so once per identity a run writes, niwa walks from the
+store directory to the root, running `os.Lstat(dir/.git)` at each level. It walks twice: once
+over the cleaned path as configured (which need not exist yet), and once over the
+symlink-resolved path of its deepest existing ancestor. Any `.git` entry, file or directory,
+makes `Update` return `ErrInWorkTree`; the session then stops flushing, so the run writes
+nothing more and prints one warning.
 
 #### Alternatives Considered
 
@@ -369,8 +372,9 @@ fallback session. `wireKeyReport` attaches a notice collector and renders it aft
 which covers `create`, `apply`, `init` and `reset`. `realProvisionInstance` creates one, and
 `provisionResult` carries it on success and on `Create` failure. `dispatch.go` and `watch.go` render
 it after the key report. The hook's two payload builders append its context rendering. The hook prints its text rendering
-to standard error at each of its four other failure returns: a provisioning error, a failed
-session-mapping write, and a failed payload build or write. Strict mode reads only `a.Keys`, so
+to standard error at each of its six other failure returns: a provisioning error, a failed
+session-mapping write, a failed payload build or write on the success path, and a failed payload
+build or write on the strict-refusal path. Strict mode reads only `a.Keys`, so
 nothing in the notice collector can ever count as a shortfall.
 
 #### Alternatives Considered
@@ -491,8 +495,8 @@ keys the provider says are gone, serves stored values only for *unauthenticated*
 failures, and passes every other result through untouched. Its records are buffered in a run session
 that `runPipeline` creates next to the redactor. A deferred flush writes them, one locked update per
 identity, to the store: hashed JSON files under `$XDG_STATE_HOME/niwa/secret-cache/`. The flush runs
-even when a later step fails, so values that resolved still get stored. The first write of a run
-checks for a `.git` directory above the store and skips writing if it finds one.
+even when a later step fails, so values that resolved still get stored. Each write
+checks for a `.git` entry above the store, and the first one found stops the run's writes.
 
 What the session served, missed or couldn't write goes into a notice collector owned by the command,
 next to the key report. Each surface renders it after the key report: to standard error for the
@@ -576,7 +580,7 @@ internal/vault/store             (new)
   store.go           Dir(), Load(identity), Update(identity, puts, evicts), record type (only
                        UnsafeReveal site), identity hashing, format_version 1
   lock_unix.go       flock on <hex>.lock polled every 20 ms to a 2 s deadline
-  worktree.go        lexical + symlink-resolved .git walk, cached per run
+  worktree.go        lexical + symlink-resolved .git walk, run by Update before each write
 internal/vault/storefallback     (new)
   session.go         run Session: buffered puts/evicts per identity, served/miss notes, Flush()
   decorator.go       Provider wrapper + pure policy function
@@ -644,8 +648,9 @@ session on a different domain is *answered*.
 A healthy run: `runPipeline` creates the run state, the session and the notice collector. Each
 provisioning bundle is built with `session.Wrap`. `resolveOne` calls the wrapper, which calls the
 Infisical provider. The export succeeds, the wrapper buffers a put, and the value flows on exactly
-as today. At the end of the pipeline the deferred `Flush` checks the work tree once, then runs one
-locked `Update` per identity. The collector stays empty, so nothing new is printed.
+as today. At the end of the pipeline the deferred `Flush` runs one locked `Update` per identity,
+each of which walks for a work tree before it writes. The collector stays empty, so nothing new
+is printed.
 
 A lapsed login:
 
@@ -681,8 +686,8 @@ come first.
 Record, from the current code, the error text and key-report output for each stub scenario the
 acceptance criteria compare against. That covers the logged-out wordings, 403, 404, 500, "client not
 installed", the universal-auth failure, and a required key with an unreachable provider. They go
-under `internal/vault/resolve/testdata/` and the functional fixtures, with a test that asserts they
-match the current code.
+under `internal/vault/resolve/testdata/golden/` and `internal/workspace/testdata/golden/` and the
+functional fixtures, with a test that asserts they match the current code.
 
 Deliverables: fixture files; a characterization test.
 
@@ -868,7 +873,7 @@ disables writes.
 
 - Tests pin the pass-through identity, one fallback test per layer, and a check that no provisioning
   bundle in `apply.go` is built outside the wrapping helper.
-- The work-tree walk runs before every first write, and the directory mode is tightened if it's found
+- The work-tree walk runs before every write, and the directory mode is tightened if it's found
   looser.
 - The release notes and the vault-integration guide tell owners to run one provisioning command while
   logged in after upgrading, so the store is populated before a host is left unattended.
