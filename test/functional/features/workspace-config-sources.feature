@@ -98,6 +98,49 @@ Feature: workspace config sources (snapshot model)
     # The brief must survive the refresh so the dispatched worker can read it.
     And the dispatch brief "probe.md" still exists in the workspace root
 
+  # --- issue #345: nothing unmanaged under the root .niwa/ is deleted ---
+  # dispatch-briefs/ and sessions/ are named carry-overs; anything else a
+  # session keeps under the root .niwa/ (a runbook, scripts, a nested notes
+  # directory) was dropped by the snapshot swap. The swap runs in the reconcile
+  # step every apply, create and dispatch starts with, so an instance-scope
+  # apply lost it as surely as a root apply. A local config source
+  # re-materializes on every run, so each command below exercises the swap.
+
+  @critical
+  Scenario: an unmanaged directory under the root .niwa/ survives apply at every scope and create
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "keepws" exists with body:
+      """
+      [workspace]
+      name = "keepws"
+      """
+    When I run niwa init from config repo "keepws"
+    Then the exit code is 0
+    And the provenance marker exists
+    When I run "niwa create keepws"
+    Then the exit code is 0
+    Given a local file ".niwa/coordinator-tools/friction/log.md" with content "kept-nested" exists under the workspace root
+    And a local file ".niwa/coordinator-tools/runbook.md" with content "kept-runbook" exists under the workspace root
+    When the config repo "keepws" is force-pushed to:
+      """
+      [workspace]
+      name = "keepws"
+      default_branch = "main"
+      """
+    And I run "niwa apply --instance keepws --no-pull" from the workspace root
+    Then the exit code is 0
+    And the file ".niwa/workspace.toml" under the workspace root contains "default_branch"
+    And the file ".niwa/coordinator-tools/friction/log.md" under the workspace root contains "kept-nested"
+    And the file ".niwa/coordinator-tools/runbook.md" under the workspace root contains "kept-runbook"
+    When I run "niwa create keepws"
+    Then the exit code is 0
+    And the file ".niwa/coordinator-tools/friction/log.md" under the workspace root contains "kept-nested"
+    When I run "niwa apply keepws"
+    Then the exit code is 0
+    And the file ".niwa/coordinator-tools/friction/log.md" under the workspace root contains "kept-nested"
+    And the file ".niwa/coordinator-tools/runbook.md" under the workspace root contains "kept-runbook"
+
   # A dispatched session's mapping lives in that same config dir, at
   # <workspaceRoot>/.niwa/sessions/<id>.json, and the swap took it too. It is
   # the only record of which instance a session became: losing it strands a

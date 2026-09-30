@@ -403,6 +403,14 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 			redirectNotice.OldOwner, redirectNotice.OldRepo, redirectNotice.NewOwner, redirectNotice.NewRepo)
 	}
 
+	// Record what the source supplied before anything local is written into
+	// staging, so the next swap can tell the source's paths from everyone
+	// else's. See carryLocalPaths.
+	if err := writeSnapshotManifest(staging); err != nil {
+		_ = safeRemoveAll(staging)
+		return rank, fmt.Errorf("EnsureConfigSnapshot: %w", err)
+	}
+
 	prov := Provenance{
 		SourceURL:      sourceURL,
 		Host:           src.Host,
@@ -464,6 +472,27 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 	if err := preserveSessionMappings(configDir, staging); err != nil {
 		_ = safeRemoveAll(staging)
 		return rank, fmt.Errorf("EnsureConfigSnapshot: preserve session mappings: %w", err)
+	}
+
+	// Carry everything else upstream did not supply. The three steps above
+	// name the state niwa itself writes; this one covers what anyone else
+	// keeps under the config dir, such as notes and scripts a session at the
+	// workspace root keeps next to dispatch-briefs/. Without it the swap
+	// deletes them whenever the source has moved, at any apply scope.
+	carry, err := carryLocalPaths(configDir, staging)
+	if err != nil {
+		_ = safeRemoveAll(staging)
+		return rank, fmt.Errorf("EnsureConfigSnapshot: keep local paths under %s: %w", configDir, err)
+	}
+	if reporter != nil {
+		if !carry.HaveManifest && len(carry.Carried) > 0 {
+			reporter.Warn("kept %d path(s) under %s that the config source does not supply: %s; delete any the source removed on purpose",
+				len(carry.Carried), configDir, strings.Join(carry.Carried, ", "))
+		}
+		if len(carry.Skipped) > 0 {
+			reporter.Warn("dropped %d entr(ies) under %s that are not files, directories or symlinks and cannot be copied: %s",
+				len(carry.Skipped), configDir, strings.Join(carry.Skipped, ", "))
+		}
 	}
 
 	if err := SwapSnapshotAtomic(configDir, staging); err != nil {
