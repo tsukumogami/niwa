@@ -149,3 +149,60 @@ exit 1`)
 		t.Fatalf("err = %v (class %v), want unauthenticated", err, class)
 	}
 }
+
+// Past the cap the buffer keeps nothing but the first status line,
+// rebuilt from its number. A status the cap cut in half, a prefix in
+// the middle of a line, and an overlong line never count, and the cut
+// line itself stays dropped.
+func TestCappedBufferKeepsStatusLinePastCap(t *testing.T) {
+	cases := []struct {
+		name   string
+		writes []string
+		want   string
+	}{
+		{"status after the cap", []string{"head\nsecret-cut", "-here\nnoise\nResponse Code: 404\nResponse Code: 500\n"}, "head\nResponse Code: 404\n"},
+		{"split across writes", []string{"head\nxxxxxxx", "\nResp", "onse Co", "de: 403\n"}, "head\nResponse Code: 403\n"},
+		{"no trailing newline", []string{"head\nxx", "xxxxxx\nResponse Code: 401"}, "head\nResponse Code: 401\n"},
+		{"cut line is not a status", []string{"head\nResponse Co", "de: 404\n"}, "head\n"},
+		{"prefix mid-line", []string{"head\nxxxx", "xxxxx\nerror Response Code: 404\n"}, "head\n"},
+		{"overlong line", []string{"head\nxxxxx", "\nResponse Code: 404" + strings.Repeat(" ", 80) + "\n"}, "head\n"},
+		{"cap on a line boundary", []string{"head\nabc\n", "Response Code: 404\n"}, "head\nabc\nResponse Code: 404\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &cappedBuffer{limit: 9, keepStatusLine: true}
+			for _, w := range tc.writes {
+				if n, err := b.Write([]byte(w)); n != len(w) || err != nil {
+					t.Fatalf("Write(%q) = (%d, %v)", w, n, err)
+				}
+			}
+			if got := string(b.wholeLines()); got != tc.want {
+				t.Errorf("wholeLines = %q, want %q", got, tc.want)
+			}
+			if len(b.pending) > maxStatusLineLen {
+				t.Errorf("pending grew to %d bytes", len(b.pending))
+			}
+		})
+	}
+
+	plain := &cappedBuffer{limit: 5}
+	_, _ = plain.Write([]byte("head\nResponse Code: 404\n"))
+	if got := string(plain.wholeLines()); got != "head\n" {
+		t.Errorf("without keepStatusLine, wholeLines = %q, want %q", got, "head\n")
+	}
+}
+
+// A status line printed after more than the real 1 MiB stderr cap is
+// still classified from its status: a 404 is answered, not served from
+// the store. The noise is whole lines (about 1.03 MiB), so the status
+// line starts a line of its own.
+func TestRunInfisicalExport_StatusPastStderrCapIsAnswered(t *testing.T) {
+	putStubOnPath(t, writeInfisicalStub(t, probeAnswersAtOnce+
+		"yes 'a noisy line of CLI output' | head -n 40000 >&2\necho 'Response Code: 404' >&2\nexit 1"))
+
+	_, _, err := runInfisicalExport(context.Background(), nil, "proj", "dev", "/", "")
+	var class *vault.FailureClass
+	if !errors.As(err, &class) || class.Class != vault.ClassAnswered || class.HTTPStatus != 404 {
+		t.Fatalf("class %+v, want answered with status 404 (err nil: %v)", class, err == nil)
+	}
+}

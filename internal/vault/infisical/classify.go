@@ -53,14 +53,23 @@ type exportFailure struct {
 func (f exportFailure) responseStatus() int {
 	for _, out := range []string{f.stderr, f.stdout} {
 		for _, line := range strings.Split(out, "\n") {
-			rest, ok := strings.CutPrefix(strings.TrimRight(line, "\r"), responseCodePrefix)
-			if !ok {
-				continue
-			}
-			if n, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil && n > 0 {
+			if n := parseStatusLine(line); n > 0 {
 				return n
 			}
 		}
+	}
+	return 0
+}
+
+// parseStatusLine returns the status a server status line carries, or
+// 0 when line isn't one.
+func parseStatusLine(line string) int {
+	rest, ok := strings.CutPrefix(strings.TrimRight(line, "\r"), responseCodePrefix)
+	if !ok {
+		return 0
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil && n > 0 {
+		return n
 	}
 	return 0
 }

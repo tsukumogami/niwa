@@ -43,6 +43,8 @@ import (
 //     exec.ErrWaitDelay and the truncation isn't reported. Stderr past
 //     maxStderrBytes is truncated with no error, and its cut last line
 //     is dropped so a half-written secret never escapes the scrubber.
+//     The first server status line past the cap is still returned, as
+//     one line after the kept prefix.
 //
 // Call sites that bound the call check callTimedOut before branching
 // on anything else; it catches the last two shapes when they come
@@ -108,7 +110,7 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 	cmd.Env = nil
 	cmd.Stdin = devNull
 	stdout := &cappedBuffer{limit: maxStdoutBytes}
-	stderr := &cappedBuffer{limit: maxStderrBytes}
+	stderr := &cappedBuffer{limit: maxStderrBytes, keepStatusLine: true}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
