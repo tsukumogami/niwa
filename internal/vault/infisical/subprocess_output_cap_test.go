@@ -38,13 +38,25 @@ func TestCappedBuffer(t *testing.T) {
 	if exact.truncated {
 		t.Error("a write that exactly fills the cap marked the buffer truncated")
 	}
+	if got := string(exact.wholeLines()); got != "abc" {
+		t.Errorf("wholeLines of an untruncated buffer = %q, want %q", got, "abc")
+	}
+
+	lines := &cappedBuffer{limit: 8}
+	_, _ = lines.Write([]byte("one\ntwo-cut-here"))
+	if got := string(lines.wholeLines()); got != "one\n" {
+		t.Errorf("wholeLines = %q, want %q", got, "one\n")
+	}
+	if b.wholeLines() != nil {
+		t.Errorf("wholeLines with no complete line = %q, want nil", b.wholeLines())
+	}
 }
 
 // The real caps: a stub that writes past 32 MiB of stdout comes back
 // truncated to the cap, with its real exit code and errOutputTooLarge,
 // and a large stderr is truncated with no error of its own.
 func TestDefaultCommander_RealCaps(t *testing.T) {
-	stub := writeInfisicalStub(t, "head -c 33554500 /dev/zero\nhead -c 1048600 /dev/zero >&2\nexit 0")
+	stub := writeInfisicalStub(t, "head -c 33554500 /dev/zero\nyes x | head -c 1048600 >&2\nexit 0")
 	stdout, stderr, code, err := defaultCommander{}.Run(context.Background(), stub, nil)
 	if !errors.Is(err, errOutputTooLarge) {
 		t.Fatalf("err = %v, want errOutputTooLarge", err)
@@ -61,14 +73,16 @@ func TestDefaultCommander_RealCaps(t *testing.T) {
 }
 
 func TestDefaultCommander_StderrOverCapIsNotAnError(t *testing.T) {
-	shrinkOutputCaps(t, 64, 8)
-	stub := writeInfisicalStub(t, "echo ok\necho 'a long complaint on stderr' >&2\nexit 4")
+	shrinkOutputCaps(t, 64, 12)
+	stub := writeInfisicalStub(t, "echo ok\necho 'first' >&2\necho 'a long complaint cut by the cap' >&2\nexit 4")
 	stdout, stderr, code, err := defaultCommander{}.Run(context.Background(), stub, nil)
 	if err != nil || code != 4 {
 		t.Fatalf("Run = (%d, %v), want (4, nil)", code, err)
 	}
-	if string(stdout) != "ok\n" || string(stderr) != "a long c" {
-		t.Errorf("stdout %q stderr %q, want %q and %q", stdout, stderr, "ok\n", "a long c")
+	// The cut second line is dropped whole, so no half of a value in it
+	// can slip past the scrubber.
+	if string(stdout) != "ok\n" || string(stderr) != "first\n" {
+		t.Errorf("stdout %q stderr %q, want %q and %q", stdout, stderr, "ok\n", "first\n")
 	}
 }
 

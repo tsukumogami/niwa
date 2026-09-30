@@ -83,7 +83,8 @@ func CreateSecretsFolder(ctx context.Context, c commander, projectID, env, path 
 		"--path", path,
 	}
 	_, stderrBytes, exitCode, err := c.Run(ctx, "infisical", args)
-	if err != nil {
+	// Stdout is never read here, so its size cap is no failure.
+	if err != nil && !errors.Is(err, errOutputTooLarge) {
 		// Also taken, deliberately, for exec.ErrWaitDelay (the CLI
 		// exited but left its pipes held open): the create is
 		// idempotent, so reporting it unreachable just means a re-run.

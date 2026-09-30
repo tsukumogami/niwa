@@ -36,10 +36,13 @@ import (
 //     pipes open until they were cut: its real exit code and
 //     exec.ErrWaitDelay. So a non-nil error does not always mean the
 //     process never started.
-//   - The process ran and exited, but wrote more than maxStdoutBytes
-//     to stdout: its real exit code, the stdout truncated to the cap,
-//     and an error wrapping errOutputTooLarge. (Stderr past
-//     maxStderrBytes is truncated with no error.)
+//   - The process ran and exited, or was killed, having written more
+//     than maxStdoutBytes to stdout: its exit code (-1 if killed), the
+//     stdout truncated to the cap, and an error wrapping
+//     errOutputTooLarge. When the pipes were cut the error stays
+//     exec.ErrWaitDelay and the truncation isn't reported. Stderr past
+//     maxStderrBytes is truncated with no error, and its cut last line
+//     is dropped so a half-written secret never escapes the scrubber.
 //
 // Call sites that bound the call check callTimedOut before branching
 // on anything else; it catches the last two shapes when they come
@@ -144,12 +147,12 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 	default:
 		// No ProcessState (e.g., exec.ErrNotFound wrapped in
 		// *fs.PathError): the process never started.
-		return stdout.buf, stderr.buf, -1, err
+		return stdout.buf, stderr.wholeLines(), -1, err
 	}
 	if stdout.truncated && err == nil {
 		err = fmt.Errorf("%w (%d bytes)", errOutputTooLarge, maxStdoutBytes)
 	}
-	return stdout.buf, stderr.buf, code, err
+	return stdout.buf, stderr.wholeLines(), code, err
 }
 
 // runInfisicalExport invokes `infisical export --projectId <proj>

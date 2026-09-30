@@ -1,6 +1,7 @@
 package infisical
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -35,9 +36,10 @@ var (
 	// discarded and Run reports errOutputTooLarge.
 	maxStdoutBytes = 32 << 20
 	// maxStderrBytes caps the captured stderr. Past it, the rest is
-	// discarded silently: stderr only feeds messages and the
-	// classifier's markers, which a truncated tail doesn't change in
-	// any way that matters.
+	// discarded silently, along with the line the cap cut (see
+	// wholeLines): stderr only feeds messages and the classifier's
+	// markers, which a truncated tail doesn't change in any way that
+	// matters.
 	maxStderrBytes = 1 << 20
 )
 
@@ -66,6 +68,21 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 	}
 	b.truncated = true
 	return len(p), nil
+}
+
+// wholeLines returns the kept bytes, minus the last line when the cap cut
+// it short. A secret the cap split in half wouldn't match the scrubber's
+// fragments, so a text stream that gets interpolated into messages
+// (stderr) must never end in a cut line.
+func (b *cappedBuffer) wholeLines() []byte {
+	if !b.truncated {
+		return b.buf
+	}
+	i := bytes.LastIndexByte(b.buf, '\n')
+	if i < 0 {
+		return nil
+	}
+	return b.buf[:i+1]
 }
 
 // testTimeoutEnv names the test-only override for every deadline in
