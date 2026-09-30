@@ -93,6 +93,16 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 		// The line the cap cut continues past it: skip its rest
 		// unless the cap fell exactly on a line boundary.
 		b.skipping = len(b.buf) > 0 && b.buf[len(b.buf)-1] != '\n'
+		if b.skipping && p[0] == '\n' {
+			// The cap fell just before a newline, so the last kept
+			// line is whole. wholeLines still drops its text, but
+			// the scanner gets to read it as a status line.
+			last := b.buf[bytes.LastIndexByte(b.buf, '\n')+1:]
+			if len(last) <= maxStatusLineLen {
+				b.pending = append(b.pending[:0], last...)
+				b.skipping = false
+			}
+		}
 	}
 	if b.keepStatusLine {
 		b.scanPastCap(p)

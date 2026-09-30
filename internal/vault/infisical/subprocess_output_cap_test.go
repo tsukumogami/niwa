@@ -167,6 +167,9 @@ func TestCappedBufferKeepsStatusLinePastCap(t *testing.T) {
 		{"prefix mid-line", []string{"head\nxxxx", "xxxxx\nerror Response Code: 404\n"}, "head\n"},
 		{"overlong line", []string{"head\nxxxxx", "\nResponse Code: 404" + strings.Repeat(" ", 80) + "\n"}, "head\n"},
 		{"cap on a line boundary", []string{"head\nabc\n", "Response Code: 404\n"}, "head\nabc\nResponse Code: 404\n"},
+		{"line boundary inside one write", []string{"head\nabc\nResponse Code: 404\n"}, "head\nabc\nResponse Code: 404\n"},
+		{"CRLF past the cap", []string{"head\nxxxxxxx\r\nResponse Code: 404\r\n"}, "head\nResponse Code: 404\n"},
+		{"writes after the status", []string{"head\nxxxxxxx\nResponse Code: 404\n", "Response Code: 500\n", "more noise\n"}, "head\nResponse Code: 404\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -183,6 +186,21 @@ func TestCappedBufferKeepsStatusLinePastCap(t *testing.T) {
 				t.Errorf("pending grew to %d bytes", len(b.pending))
 			}
 		})
+	}
+
+	// The cap falls right before a status line's newline: the line is
+	// whole, so it still counts, once, as the status.
+	for _, writes := range [][]string{
+		{"x\nResponse Code: 404\nrest\n"},
+		{"x\nResponse Code: 404", "\nrest\n"},
+	} {
+		edge := &cappedBuffer{limit: 20, keepStatusLine: true}
+		for _, w := range writes {
+			_, _ = edge.Write([]byte(w))
+		}
+		if got := string(edge.wholeLines()); got != "x\nResponse Code: 404\n" {
+			t.Errorf("writes %q: wholeLines = %q, want %q", writes, got, "x\nResponse Code: 404\n")
+		}
 	}
 
 	plain := &cappedBuffer{limit: 5}
