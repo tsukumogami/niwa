@@ -171,12 +171,20 @@ A few cases need a decision from you, or are worth knowing:
   replaced by the source's copy on that refresh, since nothing says it
   wasn't the source's. After that refresh the manifest exists and
   removals are exact.
-- A legacy working tree's `.git/` is never carried: converting to a
-  snapshot drops it, as before.
+- A top-level `.niwa/.git` is never kept, at any refresh, silently.
+  That is how converting a legacy working tree to a snapshot drops its
+  git metadata, and it means a repository you `git init` directly in
+  `.niwa/` is lost at the next source move. Keep a tracked repository
+  in a subdirectory instead; a `.git` below the top level is carried
+  like any other path.
 - A socket, FIFO or device file under `.niwa/` can't be copied. The
-  refresh drops it and prints a `warning:` naming it.
+  refresh drops it for good and prints a `warning:` naming it; the
+  warning is the only record.
 - A refresh refuses a source file whose name contains a line break,
-  because the manifest couldn't record it faithfully.
+  because the manifest couldn't record it faithfully. Every apply in
+  the workspace fails until the source renames it.
+- A local file niwa can't read (mode 000, say) fails the refresh,
+  naming it, until its permissions are fixed or it's moved.
 - Local files are copied on every refresh, so keep large data
   elsewhere, and a write into `.niwa/` that lands while a refresh is
   copying can be lost.

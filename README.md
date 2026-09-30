@@ -184,7 +184,8 @@ The config repo is materialized as `.niwa/` — a snapshot of the source content
 a specific commit, not a git checkout. Each `niwa apply` checks for upstream
 changes and atomically refreshes the snapshot when they exist. Edits to files the
 source supplies don't survive a refresh, so make those changes upstream and
-re-apply. Files you add under `.niwa/` that the source doesn't supply are kept.
+re-apply. Files you add under `.niwa/` that the source doesn't supply are kept,
+except a top-level `.niwa/.git`, which every refresh drops.
 
 The snapshot model means upstream history rewrites (force pushes) resolve cleanly
 on the next apply — the legacy git-pull workflow that backed earlier niwa versions

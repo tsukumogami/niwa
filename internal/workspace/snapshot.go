@@ -106,6 +106,13 @@ func SwapSnapshotAtomic(target, staging string) error {
 // the target). For a directory, RemoveAll handles the recursion;
 // because RemoveAll itself doesn't follow symlinks during traversal,
 // any symlinks inside the dir are removed without their targets.
+//
+// When RemoveAll fails with a permission error, it makes every directory
+// under path owner-writable and retries once. That covers the read-only
+// directories local paths can bring into a snapshot. It is best-effort:
+// chmod errors are swallowed, so a directory it can't make writable still
+// leaves path behind and the retry's error is returned. Callers point it
+// only at niwa-owned trees (staging, .prev), never at user data.
 func safeRemoveAll(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {

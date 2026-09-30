@@ -38,7 +38,9 @@ const SnapshotManifestFile = ".niwa-snapshot-manifest"
 // preserve step with rules of its own (local wins on a name clash, the session
 // store keeps its 0700 mode). .git is a legacy working tree's metadata, which
 // the conversion to a snapshot exists to drop; copySubtree skips it for the
-// same reason.
+// same reason. It is dropped at every refresh, not only a conversion, so a
+// repository someone creates directly in the config dir does not survive one;
+// the guide says so.
 var carryOverReserved = map[string]bool{
 	ProvenanceFile:        true,
 	SnapshotManifestFile:  true,
@@ -320,6 +322,10 @@ func copyLocalEntry(src, dst string) (bool, error) {
 	}
 }
 
+// streamFile copies src to dst without holding the file in memory. dst is
+// opened O_EXCL, so the copy never writes through something already in
+// staging, and perm is set explicitly after the copy because the umask
+// narrows the mode OpenFile creates with.
 func streamFile(src, dst string, perm os.FileMode) error {
 	in, err := os.Open(src)
 	if err != nil {

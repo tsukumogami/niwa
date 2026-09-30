@@ -111,10 +111,10 @@ func TestEnsureConfigSnapshot_UpgradeWarningListsKeptPaths(t *testing.T) {
 	}
 }
 
-// TestEnsureConfigSnapshot_KeepsFlatLocalFileAndReadOnlyDirMode covers a
+// TestEnsureConfigSnapshot_KeepsFlatLocalFileAndReadOnlyDirModeAndClearsPrev covers a
 // top-level local file and a read-only local directory, whose mode must come
 // through exactly.
-func TestEnsureConfigSnapshot_KeepsFlatLocalFileAndReadOnlyDirMode(t *testing.T) {
+func TestEnsureConfigSnapshot_KeepsFlatLocalFileAndReadOnlyDirModeAndClearsPrev(t *testing.T) {
 	_, configDir := planSnapshotWorkspace(t)
 	refreshWithManifest(t, configDir, "oid-1", map[string]string{"workspace.toml": "name = one"})
 	writeLocal(t, configDir, "notes.md", "flat", 0o644)
