@@ -104,11 +104,17 @@ func (c CwdClassification) RefuseBelowRoot(cwd, command string) error {
 // isBelowRoot reports whether abs is a directory under root that does not
 // count as the root. The root's own config dir (<root>/.niwa and anything in
 // it) counts as the root: it holds the root's configuration, and editing it
-// there and then applying is ordinary use. Everything else under the root
-// that is not an instance or a worktree does not.
+// there and then applying is ordinary use. So does every directory in a
+// single-instance layout, where the root is itself the instance and its repos
+// sit directly under it; those directories are inside the instance, the same
+// judgement the worktree commands make (IsSingleInstanceLayout). Everything
+// else under the root that is not an instance or a worktree does not.
 func isBelowRoot(root, abs string) bool {
 	top := topLevelEntry(root, abs)
-	return top != "" && top != StateDir
+	if top == "" || top == StateDir {
+		return false
+	}
+	return !IsSingleInstanceLayout(root)
 }
 
 // topLevelEntry returns the first path element of path below root, or "" when

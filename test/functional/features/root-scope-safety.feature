@@ -76,6 +76,9 @@ Feature: apply and destroy never take the whole workspace's scope by accident
     And the file "team-2/tools/myapp" exists under workspace root "team"
     And the workspace root "team" has a workspace.toml
 
+  # The name --confirm checks is the workspace's effective name. `niwa init
+  # "team"` overrides the config's name ("myws"), so the effective name here is
+  # "team", and "myws" is the wrong one.
   @critical
   Scenario: destroy --workspace needs the workspace name before it removes anything
     When I run "niwa destroy --workspace" from directory "." under workspace "team"

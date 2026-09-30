@@ -82,6 +82,14 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	var nameArg string
 	if len(args) > 0 {
 		nameArg = args[0]
+		// An argument that is present but empty is a name that went missing
+		// (`niwa destroy "$NAME"` with NAME unset), not a request for the
+		// no-name modes, which can delete an empty workspace or the only
+		// instance. Refuse it the way a bare --force is refused.
+		if strings.TrimSpace(nameArg) == "" {
+			return fmt.Errorf("the instance name is empty; nothing was destroyed. " +
+				"Pass the instance name, or run `niwa destroy --workspace` to destroy every instance and the workspace itself")
+		}
 	}
 
 	class, err := workspace.ClassifyCwd(cwd)

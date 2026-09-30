@@ -22,6 +22,9 @@ Feature: niwa destroy contextual mode dispatch
     And the instance "myws" of workspace "myws" does not exist
     And the response file contains the path to workspace "myws"
 
+  # Named destroy from the root, with and without --force, is the teardown form
+  # scripts rely on. root-scope-safety.feature pins it alongside the refusals
+  # of a bare --force and of a stray cwd.
   @critical
   Scenario: destroy by name from workspace root preserves today's flow (no cd)
     Given a registered workspace "myws" exists
