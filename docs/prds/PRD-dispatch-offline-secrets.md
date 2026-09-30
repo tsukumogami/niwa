@@ -164,8 +164,11 @@ A **server response** is an export whose standard output or standard error conta
   runs with the export's environment and reports the principal the CLI itself will use, so the
   deciding session is the one the failed export ran as, whatever domain niwa derives for the
   store identity. The probe is **conclusive** when a deciding session exists
-  and has `status` `authenticated` with `verification.state` `verified`. Then, in order, the
-  first matching rule decides:
+  and has `status` `authenticated` with `verification.state` `verified`. The probe **answered**
+  when its standard output decodes as a JSON object with a `sessions` list (possibly empty);
+  a probe that reached its bound, didn't start, printed more than the output cap, or printed
+  anything else (not JSON, `null`, `{}`) gave no answer. Then, in order, the first matching rule
+  decides:
   1. The export was a server response with any status other than 401 or 403 (404, 5xx, and so
      on): *answered*. The service answered, and a missing folder or a server error is never
      served from the store, whatever the probe says.
@@ -175,20 +178,19 @@ A **server response** is an export whose standard output or standard error conta
   4. The export was a 401 or 403 server response and the probe is not conclusive:
      *unauthenticated*. An expired or revoked session that reaches the server comes back this
      way, so a probe that can't describe it still falls back.
-  5. The probe printed parseable JSON with no deciding session (including an empty `sessions`
-     list): *unauthenticated*.
+  5. The probe answered with no deciding session (including an empty `sessions` list):
+     *unauthenticated*.
   6. Otherwise (the export failed without a server response or reached its bound, and the probe
      is conclusive, or the deciding session has any other `status` or `verification.state`, or
-     the probe reached its bound or printed output that is not parseable JSON): *unreachable*.
+     the probe gave no answer): *unreachable*.
 - **R3.** For a minted principal niwa does not run the probe. A server response is *answered*,
   whatever the status code. Any other export failure, and an export that reaches its bound, is
   *unreachable*.
-- **R4.** For a CLI-session principal only, when the probe reached its bound or produced
-  unparseable output, and the export was not a server response, an export whose standard error
-  contains
+- **R4.** For a CLI-session principal only, when the probe gave no answer (R2) and the export
+  was not a server response, an export whose standard error contains
   one of the pinned CLI's logged-out wordings ("No valid login session found", "couldn't find
   your logged in details", "Your login session has expired") is *unauthenticated* rather than
-  *unreachable*. The wordings never override a probe that returned a parseable answer.
+  *unreachable*. The wordings never override a probe that answered.
 - **R5.** An *unauthenticated* or *unreachable* failure still surfaces to the rest of niwa as the
   existing "provider unreachable" condition, and additionally carries its classification. The
   credential-sync lookup keys on the existing condition, so it takes its existing soft path
@@ -554,10 +556,12 @@ changes, and the criteria compare against those fixtures.
   real wording differs, R2's probe still classifies it, since the probe reports session state
   rather than wording. If the probe also reported it unexpectedly, classification still fails
   open, toward serving stored values: rule 6 sends every failure without a usable answer (no
-  server response, a timeout, a probe that doesn't parse) to *unreachable*, which is served,
+  server response, a timeout, a probe that gave no answer) to *unreachable*, which is served,
   and rule 4 sends every 401 or 403 the probe can't vouch for to *unauthenticated*, which is
-  served and evicts nothing. The store is bypassed only for a server response other than 401 or
-  403, or for a 401 or 403 backed by a verified session.
+  served and evicts nothing. For a CLI-session principal, the store is bypassed only for a
+  server response other than 401 or 403, or for a 401 or 403 backed by a verified session. (For
+  a minted principal every server response bypasses it (R3), and so does a missing client
+  (R0).)
 - **Classification errs toward serving stale values.** The same rules mean that a mistake in
   the reasoning behind them shows up as a stored value served with a warning, not as a failed
   run. A real refusal that coincides with a probe that times out or prints output niwa can't

@@ -480,12 +480,12 @@ listed, which is the principal the CLI itself uses; domains are never compared. 
 2. an `expired` or `rejected` session, or a malformed token, is *unauthenticated*;
 3. a 401 or 403 is *answered* when the probe vouches for the session;
 4. a 401 or 403 is *unauthenticated* when the probe doesn't vouch for it;
-5. parseable output with no deciding session is *unauthenticated*;
+5. a probe that answered (a JSON object with a `sessions` list) with no deciding session is *unauthenticated*;
 6. everything else is *unreachable*.
 
 For a token niwa minted itself, it skips the probe: any server response is *answered*, and anything
-else is *unreachable*. The three logged-out wordings decide only when the probe timed out or printed
-garbage and the export wasn't a server response. The HTTP status is taken only from a line that
+else is *unreachable*. The three logged-out wordings decide only when the probe gave no answer (timed out, didn't start, passed the output cap or printed
+anything but a `sessions` list) and the export wasn't a server response. The HTTP status is taken only from a line that
 starts with the CLI's own `Response Code: <n>` format, never from other text the server echoed.
 The probe's JSON is decoded into a struct that has no `token` field. The result rides on the error as a `FailureClass`.
 *Unauthenticated* and *unreachable* failures wrap `ErrProviderUnreachable`, so credential sync softens
