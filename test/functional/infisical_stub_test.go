@@ -236,3 +236,81 @@ func TestWriteFakeInfisical_InvocationLog(t *testing.T) {
 		t.Errorf("invocation log = %q, want %q", data, want)
 	}
 }
+
+// TestWriteFakeInfisical_ProbeModes pins the session probe's answers the
+// fallback scenarios select with INFISICAL_STUB_LOGIN_STATUS, and that the
+// probe token appears only in the probe's own stdout: never in an export's
+// output or the invocation log.
+func TestWriteFakeInfisical_ProbeModes(t *testing.T) {
+	binDir := t.TempDir()
+	if err := writeFakeInfisical(binDir); err != nil {
+		t.Fatalf("writeFakeInfisical: %v", err)
+	}
+	logPath := filepath.Join(t.TempDir(), "invocations.log")
+	const token = "probe-token-under-test"
+	run := func(env []string, args ...string) (string, string) {
+		t.Helper()
+		cmd := exec.Command(filepath.Join(binDir, "infisical"), args...)
+		cmd.Env = append(os.Environ(),
+			"INFISICAL_STUB_STORE_DIR="+t.TempDir(),
+			"INFISICAL_STUB_INVOCATION_LOG="+logPath,
+			"INFISICAL_STUB_PROBE_TOKEN="+token,
+		)
+		cmd.Env = append(cmd.Env, env...)
+		var out, errOut bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &out, &errOut
+		_ = cmd.Run()
+		return out.String(), errOut.String()
+	}
+	type session struct {
+		Status       string `json:"status"`
+		Domain       string `json:"domain"`
+		Token        string `json:"token"`
+		Verification struct {
+			State string `json:"state"`
+		} `json:"verification"`
+	}
+	decode := func(out string) []session {
+		t.Helper()
+		var v struct {
+			Sessions []session `json:"sessions"`
+		}
+		if err := json.Unmarshal([]byte(out), &v); err != nil {
+			t.Fatalf("probe output %q is not JSON: %v", out, err)
+		}
+		return v.Sessions
+	}
+
+	out, _ := run([]string{"INFISICAL_STUB_LOGIN_STATUS=verified"}, "login", "status", "--json")
+	if s := decode(out); len(s) != 1 || s[0].Status != "authenticated" || s[0].Verification.State != "verified" ||
+		s[0].Domain != "https://app.infisical.com" || s[0].Token != token {
+		t.Errorf("verified probe = %+v", s)
+	}
+	out, _ = run(nil, "login", "status", "--json")
+	if s := decode(out); len(s) != 1 || s[0].Verification.State != "" || s[0].Token != token {
+		t.Errorf("default probe = %+v", s)
+	}
+	out, _ = run([]string{"INFISICAL_STUB_LOGIN_STATUS=none"}, "login", "status", "--json")
+	if s := decode(out); len(s) != 0 {
+		t.Errorf("none probe = %+v", s)
+	}
+	out, _ = run([]string{"INFISICAL_STUB_LOGIN_STATUS=json", `INFISICAL_STUB_LOGIN_STATUS_JSON={"sessions":[{"status":"expired"}]}`}, "login", "status", "--json")
+	if s := decode(out); len(s) != 1 || s[0].Status != "expired" {
+		t.Errorf("json probe = %+v", s)
+	}
+	out, _ = run([]string{"INFISICAL_STUB_LOGIN_STATUS=non-json"}, "login", "status", "--json")
+	if json.Valid([]byte(out)) {
+		t.Errorf("non-json probe printed JSON: %q", out)
+	}
+
+	exportOut, exportErr := run([]string{"INFISICAL_STUB_EXPORT_FAIL=response-403"}, "export", "--projectId", "p", "--env", "dev", "--path", "/", "--format", "json")
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, text := range map[string]string{"export stdout": exportOut, "export stderr": exportErr, "invocation log": string(log)} {
+		if bytes.Contains([]byte(text), []byte(token)) {
+			t.Errorf("%s carries the probe token: %q", name, text)
+		}
+	}
+}

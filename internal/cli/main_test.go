@@ -79,6 +79,19 @@ func runWithAgentStubs(m *testing.M) int {
 		fmt.Fprintf(os.Stderr, "setting XDG_STATE_HOME: %v\n", err)
 		return 1
 	}
+	// Some tests reach code that writes under $HOME (Claude Code's plugin
+	// directories among them) or niwa's config directory without setting
+	// them themselves. Give them throwaway ones, so no test writes the
+	// developer's home or config directory.
+	for k, v := range map[string]string{
+		"HOME":            filepath.Join(dir, "home"),
+		"XDG_CONFIG_HOME": filepath.Join(dir, "config"),
+	} {
+		if err := os.Setenv(k, v); err != nil {
+			fmt.Fprintf(os.Stderr, "setting %s: %v\n", k, err)
+			return 1
+		}
+	}
 
 	code := m.Run()
 

@@ -356,6 +356,43 @@ func TestWatchRendersNoticesAfterKeyReport(t *testing.T) {
 	}
 }
 
+// R16/R21 for one watch reconcile cycle through the real provisioner: a
+// logged-out provider with a stored value, so the review instance is
+// provisioned on it and the stale-value warning is on stderr. The functional
+// suite can't drive watch (it needs GitHub's review requests and the OS
+// sandbox), so this is its end-to-end check.
+func TestWatchServesStoredValuesThroughRealProvisioning(t *testing.T) {
+	dir := isolateProvisioning(t)
+	seedStore(t, dir, time.Now().Add(-3*24*time.Hour))
+	root := fallbackWorkspace(t, false)
+	chdir(t, root)
+	installWatchCharFakes(t)
+	// installWatchCharFakes registered the restore of provisionInstanceFunc.
+	provisionInstanceFunc = realProvisionInstance
+	stubAskPostureSeams(t, os.Getenv("HOME"), nil)
+	client := newPullHeadServer(t)
+
+	cmd, _, stderr := newWatchCharCmd()
+	if err := stageReview(cmd, root, root, "", client, watchCharPR, reviewPlan{}); err != nil {
+		t.Fatalf("stageReview: %v\nstderr:\n%s", err, stderr.String())
+	}
+	got := stderr.String()
+	for _, w := range []string{servedMarker, servedLogin, "fake project cli-proj", "3 days", "logged out or expired"} {
+		if !strings.Contains(got, w) {
+			t.Errorf("watch stderr lacks %q:\n%s", w, got)
+		}
+	}
+	if n := strings.Count(got, servedMarker); n != 1 {
+		t.Errorf("watch printed %d served warnings, want 1:\n%s", n, got)
+	}
+	// The workspace declares no repos, so there's no env file to read the
+	// value back from; the served warning is what shows the value was used.
+	matches, _ := filepath.Glob(filepath.Join(root, "*", ".niwa", "instance.json"))
+	if len(matches) != 1 {
+		t.Errorf("want one provisioned review instance, found %v", matches)
+	}
+}
+
 // R17 through the real provisioner: an empty store, a logged-out provider.
 // A required key in a strict workspace fails the dispatch through Create's
 // failure path and the nothing-to-fall-back-on line is on stderr; an
