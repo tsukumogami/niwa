@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Planned
+status: Current
 upstream: docs/prds/PRD-dispatch-offline-secrets.md
 problem: |
   Vault resolution runs `infisical export` with no time bound and treats every failure it
@@ -24,7 +24,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 
