@@ -179,7 +179,7 @@ func discoverInstanceRoot(startDir string) (string, error) {
 	switch class.Class {
 	case workspace.CwdInsideWorktree, workspace.CwdInsideInstance:
 		return class.InstanceDir, nil
-	case workspace.CwdAtWorkspaceRoot:
+	case workspace.CwdAtWorkspaceRoot, workspace.CwdBelowWorkspaceRoot:
 		// The single-instance layout is the one case where the root really is
 		// the instance, and worktree commands there keep working as before.
 		if workspace.IsSingleInstanceLayout(class.WorkspaceRoot) {

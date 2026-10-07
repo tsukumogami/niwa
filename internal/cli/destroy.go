@@ -354,6 +354,12 @@ func runDestroyWorkspace(cmd *cobra.Command, workspaceRoot, confirm string) erro
 	if err != nil {
 		return fmt.Errorf("resolving workspace name for confirmation: %w", err)
 	}
+	// A wrong --confirm is refused before the scan: the scan reaches every
+	// instance's remotes, and its listing is only for a confirmation that
+	// can still succeed.
+	if confirm != "" && confirm != workspaceName {
+		return fmt.Errorf("--confirm %q does not match the workspace name %q; aborting", confirm, workspaceName)
+	}
 
 	// Scan for non-pushed work, so whoever confirms sees what would be lost.
 	scans, scanErr := workspace.ScanInstancesParallel(workspaceRoot, instances, 0, workspace.WithForge(newDestroyForge()))
@@ -370,11 +376,7 @@ func runDestroyWorkspace(cmd *cobra.Command, workspaceRoot, confirm string) erro
 	}
 	workspace.FormatScans(scans, cmd.ErrOrStderr(), promptName)
 
-	if confirm != "" {
-		if confirm != workspaceName {
-			return fmt.Errorf("--confirm %q does not match the workspace name %q; aborting", confirm, workspaceName)
-		}
-	} else {
+	if confirm == "" {
 		if !IsStdinTTY() {
 			return fmt.Errorf("--workspace needs the workspace name and stdin is not a terminal; aborting (pass --confirm %s to confirm without a prompt)", workspaceName)
 		}

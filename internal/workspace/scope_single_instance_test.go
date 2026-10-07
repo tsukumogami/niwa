@@ -39,7 +39,7 @@ func TestResolveApplyScope_SingleInstanceLayoutRepoIsNotBelowRoot(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.BelowRoot {
+	if got.Class != CwdAtWorkspaceRoot {
 		t.Errorf("a repo in a single-instance root must not be flagged below-root: %+v", got)
 	}
 	fromRepo, err := ResolveApplyScope(repo, "")

@@ -32,8 +32,8 @@ Feature: apply and destroy never take the whole workspace's scope by accident
     And the file "team/tools/myapp" exists under workspace root "team"
     And the file "team-2/tools/myapp" exists under workspace root "team"
     # What an interrupted create leaves: a directory with the instance's
-    # shape and no .niwa/instance.json.
-    Given a foreign directory "team/team+-0000beef/tools" exists in the workspace root
+    # .gitignore and shape and no .niwa/instance.json.
+    Given an interrupted create left "team/team+-0000beef" in the workspace root
 
   @critical
   Scenario: apply from a stray directory under the root refuses and converges nothing
@@ -53,6 +53,13 @@ Feature: apply and destroy never take the whole workspace's scope by accident
     Then the exit code is 0
     And the file "team/tools/myapp" exists under workspace root "team"
     And the file "team-2/tools/myapp" exists under workspace root "team"
+
+  Scenario: a directory that was never an instance is refused without the interrupted-create hint
+    Given a foreign directory "team/scratch/notes" exists in the workspace root
+    When I run "niwa apply" from directory "scratch/notes" under workspace "team"
+    Then the exit code is not 0
+    And the error output contains "is not an instance, a worktree, or the workspace root"
+    And the error output does not contain "interrupted"
 
   @critical
   Scenario: destroy from a stray directory under the root refuses, with or without --force

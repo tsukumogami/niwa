@@ -94,7 +94,10 @@ func resolveDestroyScope() (destroyScope, error) {
 	switch class.Class {
 	case workspace.CwdInsideWorktree, workspace.CwdInsideInstance:
 		return destroyScope{instanceDir: class.InstanceDir, workspaceRoot: class.WorkspaceRoot}, nil
-	case workspace.CwdAtWorkspaceRoot:
+	case workspace.CwdAtWorkspaceRoot, workspace.CwdBelowWorkspaceRoot:
+		// Below the root, a session id still resolves through the root's
+		// mapping store, as it does at the root; only a worktree id needs an
+		// instance.
 		if workspace.IsSingleInstanceLayout(class.WorkspaceRoot) {
 			return destroyScope{instanceDir: class.WorkspaceRoot, workspaceRoot: class.WorkspaceRoot}, nil
 		}
