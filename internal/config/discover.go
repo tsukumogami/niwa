@@ -59,18 +59,20 @@ func restoreWorkspaceConfigDir(dir string) (bool, error) {
 	}
 	configDir := filepath.Join(dir, ConfigDir)
 	restored, err := RestoreInterruptedSwap(configDir)
+	if restored {
+		ReportRestoredSwap(configDir)
+		return true, nil
+	}
+	// Not restored, with or without an error: a refresh may have finished its
+	// own swap since the caller's stat, which leaves the workspace in place.
+	if _, statErr := os.Stat(filepath.Join(configDir, ConfigFile)); statErr == nil {
+		return true, nil
+	}
 	if err != nil {
-		if _, statErr := os.Stat(filepath.Join(configDir, ConfigFile)); statErr == nil {
-			return true, nil
-		}
 		return false, fmt.Errorf("%s is missing and %s%s, left by an interrupted config refresh, could not be put back: %w",
 			configDir, configDir, PrevSuffix, err)
 	}
-	if !restored {
-		return false, nil
-	}
-	ReportRestoredSwap(configDir)
-	return true, nil
+	return false, nil
 }
 
 // MarkerSet describes which marker files a probe should look for at the

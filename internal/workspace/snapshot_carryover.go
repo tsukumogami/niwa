@@ -28,8 +28,9 @@ import (
 // supply, line breaks included, is recorded exactly. Manifests written before
 // the switch hold one path per line instead; readSnapshotManifest still reads
 // them (see there). A niwa from before the switch reads a NUL manifest as one
-// entry that matches no path, so after a downgrade it keeps files the source
-// deleted rather than deleting local ones.
+// entry that matches no path, so after a downgrade every source file looks
+// local and the next refresh refuses, naming them as conflicts; deleting the
+// manifest lets it refresh again, on its no-manifest rules.
 const SnapshotManifestFile = ".niwa-snapshot-manifest"
 
 // carryOverReserved names top-level entries the generic carry-over never
