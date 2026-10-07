@@ -84,7 +84,15 @@ func TestResolveApplyScope_SymlinkedCwd(t *testing.T) {
 	})
 
 	t.Run("a symlink outside the workspace into a stray directory gets no scope", func(t *testing.T) {
+		// Lexically the cwd is outside every workspace.
 		cwd := symlink(t, stray, filepath.Join(outside, "to-stray"))
+		class, err := ClassifyCwd(cwd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if class.Class != CwdOutside {
+			t.Errorf("class = %s, want outside", class.Class)
+		}
 		if scope, err := ResolveApplyScope(cwd, ""); err == nil {
 			t.Errorf("want an error, got mode=%d over %v", scope.Mode, scope.Instances)
 		}

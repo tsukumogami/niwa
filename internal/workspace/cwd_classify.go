@@ -21,9 +21,11 @@ const (
 	// WorkspaceRoot and InstanceDir are populated.
 	CwdInsideInstance CwdClass = iota
 
-	// CwdAtWorkspaceRoot: cwd is the workspace root itself, or the root's own
-	// .niwa/ subtree, or any directory of a single-instance layout (see
-	// isBelowRoot). WorkspaceRoot is populated; InstanceDir is empty.
+	// CwdAtWorkspaceRoot: cwd is the workspace root itself, or a directory
+	// that counts as the root: anything in the root's own .niwa/, and, in a
+	// single-instance layout where the root is the instance, every directory
+	// under it (isBelowRoot is false for all of these). WorkspaceRoot is
+	// populated; InstanceDir is empty.
 	CwdAtWorkspaceRoot
 
 	// CwdInsideWorktree: cwd is inside one of an instance's session
@@ -112,7 +114,11 @@ func (c CwdClassification) RefuseBelowRoot(cwd, command string) error {
 // when it stops before finishing: Applier.Create writes the instance
 // .gitignore right after making the directory and writes .niwa/instance.json
 // last. A directory without that .gitignore was never an instance, so the
-// refusal doesn't suggest it was one. A dot-directory never is.
+// refusal doesn't suggest it was one; that includes the rare create killed
+// between making the directory and writing the .gitignore, which then gets no
+// hint. A dot-directory never is. The missing instance.json the hint mentions
+// needs no check: a directory that has one classifies as an instance and never
+// reaches the refusal.
 func looksLikeInterruptedCreate(dir string) bool {
 	if strings.HasPrefix(filepath.Base(dir), ".") {
 		return false

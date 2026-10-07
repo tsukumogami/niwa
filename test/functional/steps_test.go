@@ -1453,6 +1453,8 @@ func anInterruptedCreateLeftDirectory(ctx context.Context, name string) (context
 	if err != nil {
 		return ctx, err
 	}
+	// "*.local*" is instanceGitignorePattern in internal/workspace/gitignore.go,
+	// the line the refusal's interrupted-create hint looks for; keep them equal.
 	gitignore := filepath.Join(getState(ctx).workspaceRoot, name, ".gitignore")
 	if err := os.WriteFile(gitignore, []byte("*.local*\n"), 0o644); err != nil {
 		return ctx, fmt.Errorf("writing %s: %w", gitignore, err)

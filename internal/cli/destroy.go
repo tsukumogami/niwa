@@ -130,6 +130,11 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 
 	case workspace.CwdAtWorkspaceRoot:
 		return runDestroyAtRoot(cmd, class.WorkspaceRoot, nameArg, destroyForce)
+
+	case workspace.CwdBelowWorkspaceRoot:
+		// Refused above already; kept here so the refusal survives the
+		// guard being moved.
+		return class.RefuseBelowRoot(cwd, "niwa destroy")
 	}
 
 	return fmt.Errorf("internal error: unhandled cwd class %s", class.Class)
@@ -330,7 +335,8 @@ func runDestroyEmptyWorkspace(cmd *cobra.Command, workspaceRoot string) error {
 	return nil
 }
 
-// runDestroyWorkspace handles `niwa destroy --workspace`: scan every
+// runDestroyWorkspace handles `niwa destroy --workspace`: refuse a confirm
+// that doesn't match the workspace name before doing anything else, scan every
 // instance for non-pushed work and list any it finds, then require the
 // workspace name, typed at a prompt or passed as confirm, whether or not the
 // scan found anything. Only then destroy every instance and the workspace
@@ -345,20 +351,20 @@ func runDestroyEmptyWorkspace(cmd *cobra.Command, workspaceRoot string) error {
 // writeLandingPath. On a mismatch or EOF the workspace stays intact AND no
 // landing path is written, so the shell stays where it was.
 func runDestroyWorkspace(cmd *cobra.Command, workspaceRoot, confirm string) error {
-	instances, err := workspace.EnumerateInstances(workspaceRoot)
-	if err != nil {
-		return fmt.Errorf("enumerating instances: %w", err)
-	}
-
 	workspaceName, err := loadWorkspaceName(workspaceRoot)
 	if err != nil {
 		return fmt.Errorf("resolving workspace name for confirmation: %w", err)
 	}
-	// A wrong --confirm is refused before the scan: the scan reaches every
-	// instance's remotes, and its listing is only for a confirmation that
-	// can still succeed.
+	// A wrong --confirm is refused before anything else: the scan reaches
+	// every instance's remotes, and its listing is only for a confirmation
+	// that can still succeed.
 	if confirm != "" && confirm != workspaceName {
 		return fmt.Errorf("--confirm %q does not match the workspace name %q; aborting", confirm, workspaceName)
+	}
+
+	instances, err := workspace.EnumerateInstances(workspaceRoot)
+	if err != nil {
+		return fmt.Errorf("enumerating instances: %w", err)
 	}
 
 	// Scan for non-pushed work, so whoever confirms sees what would be lost.
