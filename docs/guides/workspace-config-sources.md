@@ -180,11 +180,14 @@ A few cases need a decision from you, or are worth knowing:
 - A socket, FIFO or device file under `.niwa/` can't be copied. The
   refresh drops it for good and prints a `warning:` naming it; the
   warning is the only record.
-- A refresh refuses a source file whose name contains a line break,
-  because the manifest couldn't record it faithfully. Every apply in
-  the workspace fails until the source renames it.
 - A local file niwa can't read (mode 000, say) fails the refresh,
-  naming it, until its permissions are fixed or it's moved.
+  naming it, until its permissions are fixed or it's moved. It isn't
+  skipped the way a FIFO is: skipping would delete it at the swap, and
+  it may be the only copy.
+- If a refresh is killed between moving the old snapshot aside and
+  moving the new one in, `.niwa/` is missing and `.niwa.prev/` holds
+  the old snapshot. The next niwa command puts it back and says so on
+  stderr; the next refresh then runs normally.
 - Local files are copied on every refresh, so keep large data
   elsewhere, and a write into `.niwa/` that lands while a refresh is
   copying can be lost.

@@ -27,6 +27,9 @@ func Discover(startDir string) (configPath string, configDir string, err error) 
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate, filepath.Join(dir, ConfigDir), nil
 		}
+		if restoreWorkspaceConfigDir(dir) {
+			return candidate, filepath.Join(dir, ConfigDir), nil
+		}
 
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -36,6 +39,24 @@ func Discover(startDir string) (configPath string, configDir string, err error) 
 	}
 
 	return "", "", fmt.Errorf("no %s/%s found in any parent of %s", ConfigDir, ConfigFile, startDir)
+}
+
+// restoreWorkspaceConfigDir puts back dir's config dir when a refresh died
+// between the swap's two renames, leaving only .niwa.prev. Every command
+// starts by discovering the workspace, so without this the workspace would
+// look gone until someone renamed the directory by hand. It acts only when
+// .niwa.prev holds a workspace config, and reports whether .niwa now does.
+func restoreWorkspaceConfigDir(dir string) bool {
+	if _, err := os.Stat(filepath.Join(dir, ConfigDir+PrevSuffix, ConfigFile)); err != nil {
+		return false
+	}
+	configDir := filepath.Join(dir, ConfigDir)
+	restored, err := RestoreInterruptedSwap(configDir)
+	if err != nil || !restored {
+		return false
+	}
+	ReportRestoredSwap(configDir)
+	return true
 }
 
 // MarkerSet describes which marker files a probe should look for at the

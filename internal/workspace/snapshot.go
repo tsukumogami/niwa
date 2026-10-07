@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/testfault"
 )
 
@@ -18,11 +19,15 @@ import (
 //
 // Sequence:
 //
-//  1. Idempotent preflight cleanup: any leftover <target>.prev/ from
-//     a previously-interrupted swap is removed.
+//  1. Preflight: if a previous swap stopped between its two renames,
+//     <target> is missing and <target>.prev is the only copy of the
+//     snapshot, so it is renamed back (config.RestoreInterruptedSwap).
+//     Otherwise any leftover <target>.prev/ is removed.
 //  2. testfault.Maybe("snapshot-swap") — fault injection seam.
 //  3. If the canonical target exists, rename it to <target>.prev.
-//  4. Rename staging → target.
+//  4. Rename staging → target. testfault.Maybe("snapshot-swap-mid")
+//     sits between steps 3 and 4 and stops there without rolling back,
+//     standing in for a crash.
 //  5. fsync the parent directory to push the rename past metadata cache.
 //  6. RemoveAll <target>.prev.
 //
@@ -45,9 +50,21 @@ func SwapSnapshotAtomic(target, staging string) error {
 		return errors.New("swap: target and staging paths are identical")
 	}
 
-	prev := target + ".prev"
+	prev := target + config.PrevSuffix
 
-	// Step 1: idempotent preflight cleanup of stale .prev/.
+	// Step 1: preflight. A missing target with a .prev beside it is a
+	// swap that died between its renames; .prev is the only copy, so put
+	// it back rather than delete it. Callers that carry local state into
+	// staging restore before building it (see materializeAndSwap); this
+	// is the last line for any that don't.
+	restored, err := config.RestoreInterruptedSwap(target)
+	if err != nil {
+		return fmt.Errorf("swap: %w", err)
+	}
+	if restored {
+		config.ReportRestoredSwap(target)
+	}
+	// Any .prev still here sits beside a live target and is a leftover.
 	// Use os.Lstat-aware removal so a planted symlink can't trick the
 	// cleanup into traversing outside the workspace.
 	if err := safeRemoveAll(prev); err != nil {
@@ -71,6 +88,12 @@ func SwapSnapshotAtomic(target, staging string) error {
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("swap: stat %s: %w", target, err)
+	}
+
+	// Crash stand-in: return with target renamed away and staging not yet
+	// in place, exactly what a process killed here leaves behind.
+	if err := testfault.Maybe("snapshot-swap-mid"); err != nil {
+		return fmt.Errorf("swap: %w", err)
 	}
 
 	// Step 4: rename staging into place. On failure, roll prev back.

@@ -52,30 +52,111 @@ func TestEnsureConfigSnapshot_LegacyConversionDropsGitDir(t *testing.T) {
 	readLocal(t, configDir, "notes/mine.md")
 }
 
-// TestEnsureConfigSnapshot_RefusesLineBreakInSuppliedPath: the manifest is one
-// path per line, so a source file named "x\nnotes.md" would record a
-// "notes.md" line, and the next refresh would delete a local notes.md as if the
-// source had supplied it. The refresh refuses such a name instead, and the
-// local file and the old snapshot survive.
-func TestEnsureConfigSnapshot_RefusesLineBreakInSuppliedPath(t *testing.T) {
+// TestEnsureConfigSnapshot_RecordsLineBreakNamesExactly: a source file named
+// "x\nnotes.md" must not stand for a "notes.md" entry. Under a line-based
+// manifest it did, so the next refresh would have deleted a local notes.md as
+// if the source had supplied it. The NUL-separated manifest records such names
+// exactly, at the top level and nested, with \n and \r alike, so the refresh
+// accepts them, and the local files matching the part after the line break
+// survive the next refresh while the source's odd names go away with it.
+func TestEnsureConfigSnapshot_RecordsLineBreakNamesExactly(t *testing.T) {
+	_, configDir := planSnapshotWorkspace(t)
+	odd := []string{"x\nnotes.md", "y\rtools.sh", "dir/z\nmine.md"}
+	refreshWithManifest(t, configDir, "oid-1", map[string]string{
+		"workspace.toml": "name = one",
+		odd[0]:           "s",
+		odd[1]:           "s",
+		"dir/":           "",
+		odd[2]:           "s",
+	})
+
+	supplied, ok, err := readSnapshotManifest(configDir)
+	if err != nil || !ok {
+		t.Fatalf("read manifest: ok=%v err=%v", ok, err)
+	}
+	want := append([]string{"workspace.toml", "dir"}, odd...)
+	for _, p := range want {
+		if !supplied[p] {
+			t.Errorf("manifest lacks %q", p)
+		}
+	}
+	if len(supplied) != len(want) {
+		t.Errorf("manifest has %d entries, want %d: %v", len(supplied), len(want), supplied)
+	}
+
+	for _, local := range []string{"notes.md", "tools.sh", "mine.md", "dir/mine.md"} {
+		writeLocal(t, configDir, local, "local "+local, 0o644)
+	}
+	refreshWithManifest(t, configDir, "oid-2", map[string]string{"workspace.toml": "name = two"})
+	for _, local := range []string{"notes.md", "tools.sh", "mine.md", "dir/mine.md"} {
+		if got := readLocal(t, configDir, local); got != "local "+local {
+			t.Errorf("%s = %q", local, got)
+		}
+	}
+	for _, p := range odd {
+		assertAbsent(t, configDir, p)
+	}
+}
+
+// TestEnsureConfigSnapshot_ReadsLineBasedManifest: snapshots written before the
+// switch to NUL separators carry a manifest with one path per line. It is
+// still the record of what the source supplied: a path it lists goes when the
+// source drops it, a local path it doesn't list is kept, and no upgrade
+// warning fires, since there is a manifest to decide by.
+func TestEnsureConfigSnapshot_ReadsLineBasedManifest(t *testing.T) {
+	_, configDir := planSnapshotWorkspace(t)
+	refreshWithManifest(t, configDir, "oid-1", map[string]string{
+		"workspace.toml": "name = one",
+		"hooks/":         "",
+		"hooks/old.sh":   "source hook",
+	})
+	writeLocal(t, configDir, SnapshotManifestFile, "hooks\nhooks/old.sh\nworkspace.toml\n", 0o644)
+	writeLocal(t, configDir, "hooks/mine.sh", "local hook", 0o755)
+
+	var buf bytes.Buffer
+	if err := EnsureConfigSnapshot(context.Background(), configDir,
+		upstreamFetcher(t, "oid-2", map[string]string{"workspace.toml": "name = two"}), NewReporter(&buf)); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	assertAbsent(t, configDir, "hooks/old.sh")
+	if got := readLocal(t, configDir, "hooks/mine.sh"); got != "local hook" {
+		t.Errorf("local hook = %q", got)
+	}
+	if strings.Contains(buf.String(), "kept") {
+		t.Errorf("a line-based manifest is still a manifest; got the upgrade warning %q", buf.String())
+	}
+	if got := readLocal(t, configDir, SnapshotManifestFile); got != "workspace.toml\x00" {
+		t.Errorf("the refresh should rewrite the manifest NUL-separated, got %q", got)
+	}
+}
+
+// TestEnsureConfigSnapshot_UnreadableLocalFileFailsTheRefresh: a local file
+// niwa can't read can't be carried, and the swap would delete it, so the
+// refresh fails naming it and leaves the config dir as it was. Skipping it
+// with a warning, as a FIFO is, would lose what may be the only copy.
+func TestEnsureConfigSnapshot_UnreadableLocalFileFailsTheRefresh(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 file")
+	}
 	_, configDir := planSnapshotWorkspace(t)
 	refreshWithManifest(t, configDir, "oid-1", map[string]string{"workspace.toml": "name = one"})
-	writeLocal(t, configDir, "notes.md", "mine", 0o644)
+	writeLocal(t, configDir, "notes/locked.md", "secret", 0o000)
 
 	err := EnsureConfigSnapshot(context.Background(), configDir,
-		upstreamFetcher(t, "oid-2", map[string]string{"workspace.toml": "name = two", "x\nnotes.md": "forged"}), nil)
-	if err == nil || !strings.Contains(err.Error(), "line break") {
-		t.Fatalf("expected a refusal naming the line break, got %v", err)
-	}
-	if got := readLocal(t, configDir, "notes.md"); got != "mine" {
-		t.Errorf("local file changed: %q", got)
+		upstreamFetcher(t, "oid-2", map[string]string{"workspace.toml": "name = two"}), nil)
+	if err == nil || !strings.Contains(err.Error(), filepath.Join("notes", "locked.md")) {
+		t.Fatalf("expected a failure naming notes/locked.md, got %v", err)
 	}
 	if got := readLocal(t, configDir, "workspace.toml"); got != "name = one" {
-		t.Errorf("snapshot changed despite the refusal: %q", got)
+		t.Errorf("snapshot changed despite the failure: %q", got)
 	}
-	manifest := readLocal(t, configDir, SnapshotManifestFile)
-	if strings.Contains(manifest, "notes.md") {
-		t.Errorf("manifest names notes.md: %q", manifest)
+	if info, err := os.Lstat(filepath.Join(configDir, "notes", "locked.md")); err != nil || info.Mode().Perm() != 0 {
+		t.Errorf("the unreadable file should be left as it was: %v, %v", info, err)
+	}
+	for _, leftover := range []string{configDir + ".next", configDir + ".prev"} {
+		if _, err := os.Lstat(leftover); !os.IsNotExist(err) {
+			t.Errorf("%s left behind: %v", leftover, err)
+		}
 	}
 }
 
@@ -209,6 +290,7 @@ func TestEnsureConfigSnapshot_SkipsFIFOWithWarning(t *testing.T) {
 		t.Fatalf("refresh: %v", err)
 	}
 	readLocal(t, configDir, "tools/notes.md")
+	assertAbsent(t, configDir, "tools/pipe")
 	if !strings.Contains(buf.String(), "dropped 1 entr(ies)") || !strings.Contains(buf.String(), "tools/pipe") {
 		t.Errorf("expected a warning naming tools/pipe, got %q", buf.String())
 	}
