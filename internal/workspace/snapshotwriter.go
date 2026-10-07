@@ -88,6 +88,9 @@ func EnsureConfigSnapshotWithStatus(ctx context.Context, configDir string, marke
 	if configDir == "" {
 		return false, 0, errors.New("EnsureConfigSnapshot: configDir is empty")
 	}
+	if err := restoreInterruptedSwap(configDir, reporter); err != nil {
+		return false, 0, fmt.Errorf("EnsureConfigSnapshot: %w", err)
+	}
 
 	hasMarker := provenanceMarkerExists(configDir)
 	hasGit := dotGitExists(configDir)
@@ -354,6 +357,12 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 	parent := filepath.Dir(configDir)
 	staging := configDir + ".next"
 
+	// Restore first: the carry-over below reads local state from configDir,
+	// and a configDir an interrupted swap left as .prev would carry nothing.
+	if err := restoreInterruptedSwap(configDir, reporter); err != nil {
+		return 0, fmt.Errorf("EnsureConfigSnapshot: %w", err)
+	}
+
 	// Idempotent cleanup of stale staging.
 	if err := safeRemoveAll(staging); err != nil {
 		return 0, fmt.Errorf("EnsureConfigSnapshot: preflight cleanup: %w", err)
@@ -500,6 +509,22 @@ func materializeAndSwap(ctx context.Context, configDir string, src source.Source
 		return rank, fmt.Errorf("EnsureConfigSnapshot: %w", err)
 	}
 	return rank, nil
+}
+
+// restoreInterruptedSwap puts configDir back from configDir.prev when a swap
+// died between its two renames, and says so: through reporter when there is
+// one, on stderr otherwise.
+func restoreInterruptedSwap(configDir string, reporter *Reporter) error {
+	restored, err := config.RestoreInterruptedSwap(configDir)
+	if err != nil || !restored {
+		return err
+	}
+	if reporter != nil {
+		reporter.Warn("%s", config.RestoredSwapNotice(configDir))
+	} else {
+		config.ReportRestoredSwap(configDir)
+	}
+	return nil
 }
 
 // preserveInstanceState copies <configDir>/instance.json into staging

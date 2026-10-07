@@ -27,6 +27,11 @@ func Discover(startDir string) (configPath string, configDir string, err error) 
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate, filepath.Join(dir, ConfigDir), nil
 		}
+		if found, err := restoreWorkspaceConfigDir(dir); err != nil {
+			return "", "", err
+		} else if found {
+			return candidate, filepath.Join(dir, ConfigDir), nil
+		}
 
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -36,6 +41,38 @@ func Discover(startDir string) (configPath string, configDir string, err error) 
 	}
 
 	return "", "", fmt.Errorf("no %s/%s found in any parent of %s", ConfigDir, ConfigFile, startDir)
+}
+
+// restoreWorkspaceConfigDir puts back dir's config dir when a refresh died
+// between the swap's two renames, leaving only .niwa.prev. Every command
+// starts by discovering the workspace, so without this the workspace would
+// look gone until someone renamed the directory by hand. It acts only when
+// .niwa.prev holds a workspace config, and reports whether .niwa now does.
+//
+// A restore that fails is an error rather than a reason to keep walking up:
+// this directory is the workspace, and walking on could bind an enclosing
+// workspace instead or report none. The one failure that isn't is a refresh
+// finishing its own swap first, which leaves .niwa in place.
+func restoreWorkspaceConfigDir(dir string) (bool, error) {
+	if _, err := os.Stat(filepath.Join(dir, ConfigDir+PrevSuffix, ConfigFile)); err != nil {
+		return false, nil
+	}
+	configDir := filepath.Join(dir, ConfigDir)
+	restored, err := RestoreInterruptedSwap(configDir)
+	if restored {
+		ReportRestoredSwap(configDir)
+		return true, nil
+	}
+	// Not restored, with or without an error: a refresh may have finished its
+	// own swap since the caller's stat, which leaves the workspace in place.
+	if _, statErr := os.Stat(filepath.Join(configDir, ConfigFile)); statErr == nil {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("%s is missing and %s%s, left by an interrupted config refresh, could not be put back: %w",
+			configDir, configDir, PrevSuffix, err)
+	}
+	return false, nil
 }
 
 // MarkerSet describes which marker files a probe should look for at the

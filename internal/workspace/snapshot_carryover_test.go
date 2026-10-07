@@ -97,7 +97,7 @@ func TestEnsureConfigSnapshot_KeepsUnmanagedNestedDirectory(t *testing.T) {
 
 	// The manifest records upstream's paths only.
 	manifest := readLocal(t, configDir, SnapshotManifestFile)
-	if manifest != "workspace.toml\n" {
+	if manifest != "workspace.toml\x00" {
 		t.Errorf("manifest = %q, want only the upstream path", manifest)
 	}
 }

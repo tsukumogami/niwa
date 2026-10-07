@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -14,10 +13,10 @@ import (
 )
 
 // SnapshotManifestFile lists every path the config source supplied to a
-// snapshot, one slash-separated path relative to the config dir per line. It
-// is written into staging right after extraction, before any local state is
-// carried in, so it records exactly what the source supplied and nothing niwa
-// or a user added afterwards.
+// snapshot, each a slash-separated path relative to the config dir followed by
+// a NUL byte. It is written into staging right after extraction, before any
+// local state is carried in, so it records exactly what the source supplied
+// and nothing niwa or a user added afterwards.
 //
 // The next swap reads it back to tell the two apart. A path the manifest names
 // was supplied by the source: the new snapshot decides whether it still
@@ -25,11 +24,13 @@ import (
 // session keeping notes at the workspace root, a hand-written script -- and
 // the swap carries it into the new snapshot instead of deleting it.
 //
-// Being line-based, the manifest cannot represent a path containing a line
-// break, and writeSnapshotManifest refuses one rather than record it wrongly:
-// a source file named "x\nnotes.md" would otherwise put a "notes.md" line in
-// the manifest, and the next refresh would delete a local notes.md as if the
-// source had supplied it.
+// NUL is the one byte a path can't contain, so every name the source can
+// supply, line breaks included, is recorded exactly. Manifests written before
+// the switch hold one path per line instead; readSnapshotManifest still reads
+// them (see there). A niwa from before the switch reads a NUL manifest as one
+// entry that matches no path, so after a downgrade every source file looks
+// local and the next refresh refuses, naming them as conflicts; deleting the
+// manifest lets it refresh again, on its no-manifest rules.
 const SnapshotManifestFile = ".niwa-snapshot-manifest"
 
 // carryOverReserved names top-level entries the generic carry-over never
@@ -57,9 +58,7 @@ func isReservedTopLevel(rel string) bool {
 }
 
 // writeSnapshotManifest records every path currently under staging. Call it
-// after extraction and before anything else is written into staging. It fails,
-// leaving the refresh to fail with it, when a supplied path contains a line
-// break (see SnapshotManifestFile).
+// after extraction and before anything else is written into staging.
 func writeSnapshotManifest(staging string) error {
 	var paths []string
 	err := filepath.WalkDir(staging, func(path string, d fs.DirEntry, err error) error {
@@ -80,9 +79,6 @@ func writeSnapshotManifest(staging string) error {
 			}
 			return nil
 		}
-		if strings.ContainsAny(rel, "\n\r") {
-			return fmt.Errorf("the config source supplies a path containing a line break, %q; rename it in the source", rel)
-		}
 		paths = append(paths, rel)
 		return nil
 	})
@@ -93,7 +89,7 @@ func writeSnapshotManifest(staging string) error {
 	var b strings.Builder
 	for _, p := range paths {
 		b.WriteString(p)
-		b.WriteByte('\n')
+		b.WriteByte(0)
 	}
 	dst := filepath.Join(staging, SnapshotManifestFile)
 	if err := os.WriteFile(dst, []byte(b.String()), 0o644); err != nil {
@@ -104,25 +100,29 @@ func writeSnapshotManifest(staging string) error {
 
 // readSnapshotManifest returns the set of source-supplied paths recorded in
 // configDir's manifest. ok is false when the snapshot predates the manifest.
+//
+// The format is told from the content. A manifest with any entry contains a
+// NUL, since each entry ends in one; a manifest from the earlier line-based
+// writer never does, and that writer refused any path with a line break, so
+// splitting it on newlines gives back exactly the paths it recorded. An empty
+// manifest means "the source supplied nothing" in both formats.
 func readSnapshotManifest(configDir string) (supplied map[string]bool, ok bool, err error) {
-	f, err := os.Open(filepath.Join(configDir, SnapshotManifestFile))
+	data, err := os.ReadFile(filepath.Join(configDir, SnapshotManifestFile))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, false, nil
 		}
 		return nil, false, err
 	}
-	defer f.Close()
-	supplied = map[string]bool{}
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
-	for sc.Scan() {
-		if line := sc.Text(); line != "" {
-			supplied[line] = true
-		}
+	sep := "\x00"
+	if !strings.Contains(string(data), sep) {
+		sep = "\n"
 	}
-	if err := sc.Err(); err != nil {
-		return nil, false, err
+	supplied = map[string]bool{}
+	for _, entry := range strings.Split(string(data), sep) {
+		if entry != "" {
+			supplied[entry] = true
+		}
 	}
 	return supplied, true, nil
 }

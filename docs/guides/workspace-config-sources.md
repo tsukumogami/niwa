@@ -180,11 +180,14 @@ A few cases need a decision from you, or are worth knowing:
 - A socket, FIFO or device file under `.niwa/` can't be copied. The
   refresh drops it for good and prints a `warning:` naming it; the
   warning is the only record.
-- A refresh refuses a source file whose name contains a line break,
-  because the manifest couldn't record it faithfully. Every apply in
-  the workspace fails until the source renames it.
 - A local file niwa can't read (mode 000, say) fails the refresh,
-  naming it, until its permissions are fixed or it's moved.
+  naming it, until its permissions are fixed or it's moved. It isn't
+  skipped the way a FIFO is: skipping would delete it at the swap, and
+  it may be the only copy.
+- If a refresh is killed between moving the old snapshot aside and
+  moving the new one in, `.niwa/` is missing and `.niwa.prev/` holds
+  the old snapshot. The next niwa command puts it back and says so on
+  stderr; the next refresh then runs normally.
 - Local files are copied on every refresh, so keep large data
   elsewhere, and a write into `.niwa/` that lands while a refresh is
   copying can be lost.
@@ -218,17 +221,25 @@ apply overwrites it.
 path (`<workspace>/.niwa.next/`), then promotes it via a two-rename
 swap:
 
-1. Idempotent preflight cleanup of any stale `.niwa.next/` or
-   `.niwa.prev/` from interrupted prior runs.
+1. Preflight. If `.niwa/` is missing and `.niwa.prev/` exists, an
+   earlier swap was interrupted between steps 2 and 3, and
+   `.niwa.prev/` is the only copy: it is renamed back to `.niwa/`
+   before anything else, so local files in it are carried as usual.
+   Otherwise a stale `.niwa.next/` or `.niwa.prev/` from an
+   interrupted run is removed.
 2. Rename `.niwa/` → `.niwa.prev/` (only if `.niwa/` exists).
 3. Rename `.niwa.next/` → `.niwa/`.
 4. fsync the parent directory.
 5. RemoveAll `.niwa.prev/`.
 
 There is a sub-microsecond window between steps 2 and 3 where
-`.niwa/` does not exist; the PRD's R12 contract accepts this. niwa
-itself never reads `.niwa/` mid-swap (the snapshot-consuming code
-runs after the swap completes).
+`.niwa/` does not exist; the PRD's R12 contract accepts this. The
+snapshot-consuming code runs after the swap completes. Workspace
+discovery, which every command runs first, restores `.niwa.prev/`
+when it finds `.niwa/` missing, so a second command that lands in
+that window puts the old snapshot back; the refresh's step 3 then
+fails, its rollback fails with it, and it exits with an error,
+leaving the old snapshot in place and nothing lost.
 
 If extraction fails partway, the staging directory is orphaned at
 `.niwa.next/`; the previous `.niwa/` is intact. The next apply's
