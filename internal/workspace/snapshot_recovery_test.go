@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/source"
 )
 
 // crashBetweenRenames leaves target the way a swap killed between its two
@@ -91,6 +94,32 @@ func TestEnsureConfigSnapshot_RestoresPrevBeforeCarryingLocalState(t *testing.T)
 	}
 	if _, err := os.Lstat(configDir + ".prev"); !os.IsNotExist(err) {
 		t.Errorf("%s.prev left behind: %v", configDir, err)
+	}
+}
+
+// TestMaterializeFromSource_RestoresPrevBeforeCarryingLocalState: init and
+// `niwa config set global` materialize through MaterializeFromSource, which
+// skips EnsureConfigSnapshot's entry. It has to restore before the carry-over
+// too; the swap's own preflight restore comes too late, after staging was
+// built without the local files.
+func TestMaterializeFromSource_RestoresPrevBeforeCarryingLocalState(t *testing.T) {
+	_, configDir := planSnapshotWorkspace(t)
+	refreshWithManifest(t, configDir, "oid-1", map[string]string{"workspace.toml": "name = one"})
+	writeLocal(t, configDir, "notes.md", "only copy", 0o644)
+	if err := os.Rename(configDir, configDir+".prev"); err != nil {
+		t.Fatal(err)
+	}
+
+	src := source.Source{Owner: "org", Repo: "repo"}
+	if _, err := MaterializeFromSource(context.Background(), src, "org/repo", configDir, config.TeamConfigMarkerSet(),
+		upstreamFetcher(t, "oid-2", map[string]string{".niwa/": "", ".niwa/workspace.toml": "name = two"}), nil); err != nil {
+		t.Fatalf("MaterializeFromSource: %v", err)
+	}
+	if got := readLocal(t, configDir, "notes.md"); got != "only copy" {
+		t.Errorf("local file = %q", got)
+	}
+	if got := readLocal(t, configDir, "workspace.toml"); got != "name = two" {
+		t.Errorf("source content not applied: %q", got)
 	}
 }
 
