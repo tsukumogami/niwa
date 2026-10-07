@@ -26,8 +26,10 @@ var restoreNoticeOut io.Writer = os.Stderr
 //
 // It never deletes anything, so calling it from a path that only reads, such
 // as Discover, is safe. If another process is between its two renames at that
-// moment, the restore makes that process's second rename fail and leaves the
-// previous snapshot in place; nothing is lost either way.
+// moment, the restore puts the previous snapshot back under it: this side
+// reports a restore of a swap that wasn't really dead, and the other side's
+// second rename fails, its rollback fails too, and it returns an error naming
+// both. The previous snapshot stays in place and nothing is lost.
 func RestoreInterruptedSwap(dir string) (bool, error) {
 	if _, err := os.Lstat(dir); err == nil {
 		return false, nil
@@ -51,9 +53,13 @@ func RestoreInterruptedSwap(dir string) (bool, error) {
 	return true, nil
 }
 
-// ReportRestoredSwap prints the notice for a snapshot RestoreInterruptedSwap
-// put back.
+// RestoredSwapNotice describes a snapshot RestoreInterruptedSwap put back.
+func RestoredSwapNotice(dir string) string {
+	return fmt.Sprintf("restored %s from %s%s, left by a config refresh that was interrupted mid-swap", dir, dir, PrevSuffix)
+}
+
+// ReportRestoredSwap prints RestoredSwapNotice on stderr, for callers with no
+// reporter of their own.
 func ReportRestoredSwap(dir string) {
-	fmt.Fprintf(restoreNoticeOut, "niwa: restored %s from %s%s, left by a config refresh that was interrupted mid-swap\n",
-		dir, dir, PrevSuffix)
+	fmt.Fprintf(restoreNoticeOut, "niwa: %s\n", RestoredSwapNotice(dir))
 }

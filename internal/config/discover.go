@@ -27,7 +27,9 @@ func Discover(startDir string) (configPath string, configDir string, err error) 
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate, filepath.Join(dir, ConfigDir), nil
 		}
-		if restoreWorkspaceConfigDir(dir) {
+		if found, err := restoreWorkspaceConfigDir(dir); err != nil {
+			return "", "", err
+		} else if found {
 			return candidate, filepath.Join(dir, ConfigDir), nil
 		}
 
@@ -46,17 +48,29 @@ func Discover(startDir string) (configPath string, configDir string, err error) 
 // starts by discovering the workspace, so without this the workspace would
 // look gone until someone renamed the directory by hand. It acts only when
 // .niwa.prev holds a workspace config, and reports whether .niwa now does.
-func restoreWorkspaceConfigDir(dir string) bool {
+//
+// A restore that fails is an error rather than a reason to keep walking up:
+// this directory is the workspace, and walking on could bind an enclosing
+// workspace instead or report none. The one failure that isn't is a refresh
+// finishing its own swap first, which leaves .niwa in place.
+func restoreWorkspaceConfigDir(dir string) (bool, error) {
 	if _, err := os.Stat(filepath.Join(dir, ConfigDir+PrevSuffix, ConfigFile)); err != nil {
-		return false
+		return false, nil
 	}
 	configDir := filepath.Join(dir, ConfigDir)
 	restored, err := RestoreInterruptedSwap(configDir)
-	if err != nil || !restored {
-		return false
+	if err != nil {
+		if _, statErr := os.Stat(filepath.Join(configDir, ConfigFile)); statErr == nil {
+			return true, nil
+		}
+		return false, fmt.Errorf("%s is missing and %s%s, left by an interrupted config refresh, could not be put back: %w",
+			configDir, configDir, PrevSuffix, err)
+	}
+	if !restored {
+		return false, nil
 	}
 	ReportRestoredSwap(configDir)
-	return true
+	return true, nil
 }
 
 // MarkerSet describes which marker files a probe should look for at the

@@ -59,6 +59,32 @@ func TestDiscover_RestoresConfigDirLeftAsPrev(t *testing.T) {
 	}
 }
 
+// TestDiscover_FailedRestoreIsAnError: when .niwa.prev can't be put back,
+// Discover says so instead of walking on, which would bind an enclosing
+// workspace in place of this one.
+func TestDiscover_FailedRestoreIsAnError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root renames inside a read-only directory")
+	}
+	captureRestoreNotice(t)
+	outer := t.TempDir()
+	writeFile(t, filepath.Join(outer, ".niwa", ConfigFile), "name = outer")
+	inner := filepath.Join(outer, "inner")
+	writeFile(t, filepath.Join(inner, ".niwa.prev", ConfigFile), "name = inner")
+	if err := os.Chmod(inner, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(inner, 0o755) })
+
+	_, configDir, err := Discover(inner)
+	if err == nil {
+		t.Fatalf("expected an error, got the workspace at %s", configDir)
+	}
+	if !strings.Contains(err.Error(), "could not be put back") || !strings.Contains(err.Error(), inner) {
+		t.Errorf("error should name the directory it could not restore: %v", err)
+	}
+}
+
 // TestDiscover_IgnoresPrevWithoutWorkspaceConfig: a .niwa.prev that holds no
 // workspace.toml is not a workspace's config snapshot, so Discover leaves it
 // alone and keeps walking.

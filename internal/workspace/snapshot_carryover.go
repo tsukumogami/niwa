@@ -14,10 +14,9 @@ import (
 
 // SnapshotManifestFile lists every path the config source supplied to a
 // snapshot, each a slash-separated path relative to the config dir followed by
-// a NUL byte. It
-// is written into staging right after extraction, before any local state is
-// carried in, so it records exactly what the source supplied and nothing niwa
-// or a user added afterwards.
+// a NUL byte. It is written into staging right after extraction, before any
+// local state is carried in, so it records exactly what the source supplied
+// and nothing niwa or a user added afterwards.
 //
 // The next swap reads it back to tell the two apart. A path the manifest names
 // was supplied by the source: the new snapshot decides whether it still
@@ -28,7 +27,9 @@ import (
 // NUL is the one byte a path can't contain, so every name the source can
 // supply, line breaks included, is recorded exactly. Manifests written before
 // the switch hold one path per line instead; readSnapshotManifest still reads
-// them (see there).
+// them (see there). A niwa from before the switch reads a NUL manifest as one
+// entry that matches no path, so after a downgrade it keeps files the source
+// deleted rather than deleting local ones.
 const SnapshotManifestFile = ".niwa-snapshot-manifest"
 
 // carryOverReserved names top-level entries the generic carry-over never

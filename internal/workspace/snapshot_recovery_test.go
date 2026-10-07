@@ -60,9 +60,11 @@ func TestSwapSnapshotAtomic_PreflightRestoresPrevAfterCrash(t *testing.T) {
 
 // TestEnsureConfigSnapshot_RestoresPrevBeforeCarryingLocalState is the end to
 // end case from the issue: a refresh killed mid-swap leaves .niwa.prev holding
-// a local file nobody else has a copy of. The next refresh must restore it
-// before building the new snapshot, or the carry-over finds no config dir,
-// carries nothing, and the file is gone once the swap completes.
+// a local file nobody else has a copy of. The next refresh must restore it on
+// entry: with no config dir there is no provenance marker, so without the
+// restore the refresh does nothing and the workspace stays without one. The
+// restore inside materializeAndSwap, which entry points other than this one
+// rely on, is covered by the MaterializeFromSource test below.
 func TestEnsureConfigSnapshot_RestoresPrevBeforeCarryingLocalState(t *testing.T) {
 	_, configDir := planSnapshotWorkspace(t)
 	refreshWithManifest(t, configDir, "oid-1", map[string]string{"workspace.toml": "name = one"})

@@ -520,8 +520,7 @@ func restoreInterruptedSwap(configDir string, reporter *Reporter) error {
 		return err
 	}
 	if reporter != nil {
-		reporter.Warn("restored %s from %s%s, left by a config refresh that was interrupted mid-swap",
-			configDir, configDir, config.PrevSuffix)
+		reporter.Warn("%s", config.RestoredSwapNotice(configDir))
 	} else {
 		config.ReportRestoredSwap(configDir)
 	}
