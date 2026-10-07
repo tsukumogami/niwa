@@ -135,6 +135,43 @@ func TestRunDestroy_WorkspaceConfirmMismatchRefuses(t *testing.T) {
 	assertInstancesExist(t, root, "alpha")
 }
 
+// TestRunDestroy_WorkspaceConfirmNearMissRefuses: --confirm must equal the
+// workspace name exactly. A prefix, an extension, a sibling's name and a case
+// or whitespace variant all refuse, so a prefix or case-folding comparison
+// can't creep in.
+func TestRunDestroy_WorkspaceConfirmNearMissRefuses(t *testing.T) {
+	for _, confirm := range []string{"testw", "testws-2", "testwsx", "TESTWS", " testws", "testws "} {
+		root := destroyTestSetup(t, []string{"alpha"})
+		chdirTo(t, root)
+		quietDestroyCmd()
+		setDestroyFlags(t, false, true, confirm)
+
+		err := runDestroy(destroyCmd, nil)
+		if err == nil || !strings.Contains(err.Error(), "does not match") {
+			t.Fatalf("--confirm %q: expected a mismatch refusal; got: %v", confirm, err)
+		}
+		assertInstancesExist(t, root, "alpha")
+	}
+}
+
+// TestRunDestroy_WorkspaceConfirmMismatchRefusedBeforeScan: a wrong --confirm
+// can never succeed, so it is refused before the scan reaches every
+// instance's remotes. The banner and listing print only after the scan.
+func TestRunDestroy_WorkspaceConfirmMismatchRefusedBeforeScan(t *testing.T) {
+	root := destroyTestSetup(t, []string{"alpha", "beta"})
+	chdirTo(t, root)
+	stderr := quietDestroyCmd()
+	setDestroyFlags(t, false, true, "testws-2")
+
+	err := runDestroy(destroyCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("expected a mismatch refusal; got: %v", err)
+	}
+	if strings.Contains(stderr.String(), "This destroys") {
+		t.Errorf("the refusal should come before the scan and its listing; stderr: %q", stderr.String())
+	}
+}
+
 func TestRunDestroy_WorkspaceConfirmedWipes(t *testing.T) {
 	root := destroyTestSetup(t, []string{"alpha", "beta"})
 	chdirTo(t, root)

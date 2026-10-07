@@ -200,6 +200,7 @@ func TestCwdClass_String(t *testing.T) {
 		{CwdAtWorkspaceRoot, "at-workspace-root"},
 		{CwdInsideWorktree, "inside-worktree"},
 		{CwdOutside, "outside"},
+		{CwdBelowWorkspaceRoot, "below-workspace-root"},
 	}
 	for _, tc := range cases {
 		if got := tc.c.String(); got != tc.want {

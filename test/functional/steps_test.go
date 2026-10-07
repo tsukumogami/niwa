@@ -1445,6 +1445,23 @@ func aForeignDirectoryExistsAtInstancePath(ctx context.Context, name string) (co
 	return ctx, nil
 }
 
+// anInterruptedCreateLeftDirectory builds what a create killed partway leaves
+// under the root: the directory with the instance .gitignore create writes
+// first, a group directory, and no .niwa/instance.json.
+func anInterruptedCreateLeftDirectory(ctx context.Context, name string) (context.Context, error) {
+	ctx, err := aForeignDirectoryExistsAtInstancePath(ctx, filepath.Join(name, "tools"))
+	if err != nil {
+		return ctx, err
+	}
+	// "*.local*" is instanceGitignorePattern in internal/workspace/gitignore.go,
+	// the line the refusal's interrupted-create hint looks for; keep them equal.
+	gitignore := filepath.Join(getState(ctx).workspaceRoot, name, ".gitignore")
+	if err := os.WriteFile(gitignore, []byte("*.local*\n"), 0o644); err != nil {
+		return ctx, fmt.Errorf("writing %s: %w", gitignore, err)
+	}
+	return ctx, nil
+}
+
 func noNiwaTempFilesRemain(ctx context.Context) error {
 	s := getState(ctx)
 	entries, err := os.ReadDir(s.tmpDir)

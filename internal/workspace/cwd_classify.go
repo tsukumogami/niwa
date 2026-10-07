@@ -21,9 +21,11 @@ const (
 	// WorkspaceRoot and InstanceDir are populated.
 	CwdInsideInstance CwdClass = iota
 
-	// CwdAtWorkspaceRoot: cwd is the workspace root, or a directory inside
-	// it that is neither an instance nor a worktree (then BelowRoot is set).
-	// WorkspaceRoot is populated; InstanceDir is empty.
+	// CwdAtWorkspaceRoot: cwd is the workspace root itself, or a directory
+	// that counts as the root: anything in the root's own .niwa/, and, in a
+	// single-instance layout where the root is the instance, every directory
+	// under it (isBelowRoot is false for all of these). WorkspaceRoot is
+	// populated; InstanceDir is empty.
 	CwdAtWorkspaceRoot
 
 	// CwdInsideWorktree: cwd is inside one of an instance's session
@@ -37,6 +39,19 @@ const (
 	// CwdOutside: cwd is neither inside a workspace nor at one. Both
 	// path fields are empty.
 	CwdOutside
+
+	// CwdBelowWorkspaceRoot: cwd is a directory inside the workspace root
+	// that is not an instance, a worktree, or the root (such as a
+	// half-provisioned instance left by an interrupted create).
+	// WorkspaceRoot is populated; InstanceDir is empty.
+	//
+	// It is a class of its own, not a flavor of CwdAtWorkspaceRoot, so a
+	// command that switches on CwdAtWorkspaceRoot to take the whole
+	// workspace's scope can't match it by accident: a case nobody wrote
+	// falls to the narrower default. Commands that act on every instance
+	// refuse it (RefuseBelowRoot); read-only commands that want the root
+	// name both classes.
+	CwdBelowWorkspaceRoot
 )
 
 // String returns a human-readable representation of the class. Used in
@@ -51,6 +66,8 @@ func (c CwdClass) String() string {
 		return "inside-worktree"
 	case CwdOutside:
 		return "outside"
+	case CwdBelowWorkspaceRoot:
+		return "below-workspace-root"
 	default:
 		return fmt.Sprintf("unknown(%d)", int(c))
 	}
@@ -64,17 +81,9 @@ func (c CwdClass) String() string {
 // repos.)
 type CwdClassification struct {
 	Class         CwdClass
-	WorkspaceRoot string // populated for CwdInsideInstance, CwdAtWorkspaceRoot, CwdInsideWorktree
+	WorkspaceRoot string // populated for every class but CwdOutside (and an orphan instance)
 	InstanceDir   string // populated for CwdInsideInstance and CwdInsideWorktree
 	WorktreeDir   string // populated for CwdInsideWorktree only (the worktree root)
-
-	// BelowRoot is set for CwdAtWorkspaceRoot when cwd is a directory inside
-	// the workspace root rather than the root itself: a directory that is not
-	// an instance or a worktree, such as a half-provisioned instance left by
-	// an interrupted create. The root's own .niwa/ subtree counts as the root
-	// (see isBelowRoot). Read-only commands treat it as the root. Commands that act on every
-	// instance must refuse it; see RefuseBelowRoot.
-	BelowRoot bool
 }
 
 // RefuseBelowRoot is the scope rule for commands that can act on every
@@ -87,18 +96,35 @@ type CwdClassification struct {
 // every other classification, including CwdOutside, which callers report in
 // their own words.
 func (c CwdClassification) RefuseBelowRoot(cwd, command string) error {
-	if c.Class != CwdAtWorkspaceRoot || !c.BelowRoot {
+	if c.Class != CwdBelowWorkspaceRoot {
 		return nil
 	}
 	msg := fmt.Sprintf("%s: %s is inside workspace %s but is not an instance, a worktree, or the workspace root; "+
 		"refusing to act from here, because from this directory the command would take the whole workspace's scope. "+
 		"Run it inside an instance, or at %s itself",
 		command, cwd, c.WorkspaceRoot, c.WorkspaceRoot)
-	if top := topLevelEntry(c.WorkspaceRoot, cwd); !strings.HasPrefix(top, ".") {
-		msg += fmt.Sprintf(". If %s is an instance whose creation was interrupted, it has no %s and niwa does not manage it; remove it by hand",
-			filepath.Join(c.WorkspaceRoot, top), filepath.Join(StateDir, StateFile))
+	if top := filepath.Join(c.WorkspaceRoot, topLevelEntry(c.WorkspaceRoot, cwd)); looksLikeInterruptedCreate(top) {
+		msg += fmt.Sprintf(". %s looks like an instance whose creation was interrupted: it has no %s and niwa does not manage it; remove it by hand",
+			top, filepath.Join(StateDir, StateFile))
 	}
 	return errors.New(msg)
+}
+
+// looksLikeInterruptedCreate reports whether dir carries what a create leaves
+// when it stops before finishing: Applier.Create writes the instance
+// .gitignore right after making the directory and writes .niwa/instance.json
+// last. A directory without that .gitignore was never an instance, so the
+// refusal doesn't suggest it was one; that includes the rare create killed
+// between making the directory and writing the .gitignore, which then gets no
+// hint. A dot-directory never is. The missing instance.json the hint mentions
+// needs no check: a directory that has one classifies as an instance and never
+// reaches the refusal.
+func looksLikeInterruptedCreate(dir string) bool {
+	if strings.HasPrefix(filepath.Base(dir), ".") {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	return err == nil && instanceGitignorePatterns(data)[instanceGitignorePattern]
 }
 
 // isBelowRoot reports whether abs is a directory under root that does not
@@ -127,13 +153,15 @@ func topLevelEntry(root, path string) string {
 	return strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
 }
 
-// ClassifyCwd discriminates a cwd into one of four classes:
+// ClassifyCwd discriminates a cwd into one of five classes:
 //   - CwdInsideWorktree: cwd is inside a session worktree
 //     (<instanceRoot>/.niwa/worktrees/<name>/...). Most specific.
 //   - CwdInsideInstance: cwd is inside an instance but not one of its
 //     worktrees (DiscoverInstance succeeds)
-//   - CwdAtWorkspaceRoot: cwd is at or inside a workspace root but NOT an
-//     instance (config.Discover succeeds, DiscoverInstance fails)
+//   - CwdAtWorkspaceRoot: cwd is the workspace root, or counts as it
+//     (config.Discover succeeds, DiscoverInstance fails, isBelowRoot false)
+//   - CwdBelowWorkspaceRoot: cwd is inside the workspace root but is not an
+//     instance, a worktree, or the root (isBelowRoot true)
 //   - CwdOutside: neither (both helpers fail)
 //
 // It does not error on missing-niwa-workspace conditions — those produce
@@ -199,10 +227,13 @@ func ClassifyCwd(cwd string) (CwdClassification, error) {
 	// .niwa/workspace.toml exists at or above cwd.
 	if _, configDir, err := config.Discover(abs); err == nil {
 		root := filepath.Dir(configDir)
+		class := CwdAtWorkspaceRoot
+		if isBelowRoot(root, abs) {
+			class = CwdBelowWorkspaceRoot
+		}
 		return CwdClassification{
-			Class:         CwdAtWorkspaceRoot,
+			Class:         class,
 			WorkspaceRoot: root,
-			BelowRoot:     isBelowRoot(root, abs),
 		}, nil
 	}
 
