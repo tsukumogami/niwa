@@ -188,22 +188,38 @@ func TestPrewarm_UpdatesOnlyPinnedMarketplacesAfterASuccessfulAdd(t *testing.T) 
 
 // TestPrewarm_RefusedPinIsReportedByName: when the HOME already declares the
 // marketplace with another source, Claude Code refuses the pinned add. That must
-// never be silent: the warning names the marketplace and the pin not applied.
+// never be silent: an error-level line in the deferred summary block names the
+// marketplace, the pin not applied and, for a declared-source conflict, the
+// one-time remedy. Each wording Claude Code has used for the refusal must reach
+// the remedy; any other failure gets the generic form.
 func TestPrewarm_RefusedPinIsReportedByName(t *testing.T) {
+	remedy := []string{"error: ", `marketplace "koto"`, "pin v0.13.0 not applied", "already declares", "claude plugin marketplace remove koto", "niwa apply", "uninstalls"}
 	cases := []struct {
 		name     string
 		addErr   string
 		wantText []string
+		notText  []string
 	}{
 		{
-			name:     "declared-source conflict",
+			name:     "declared-source conflict, older wording",
 			addErr:   "exit status 1: Cannot add marketplace \"koto\": its network source differs from the one declared for it in settings",
-			wantText: []string{`marketplace "koto"`, "pin v0.13.0 not applied", "already declares", "claude plugin marketplace remove koto", "niwa apply", "uninstalls"},
+			wantText: remedy,
+		},
+		{
+			name:     "declared-source conflict, extraKnownMarketplaces wording",
+			addErr:   "exit status 1: Failed to add marketplace: Cannot add marketplace \"koto\": its source doesn't match its extraKnownMarketplaces entry in user or managed settings; add it from the source that entry lists, or change the entry.",
+			wantText: remedy,
+		},
+		{
+			name:     "declared-source conflict, typographic apostrophe",
+			addErr:   "exit status 1: Cannot add marketplace \"koto\": its source doesn\u2019t match its extraKnownMarketplaces entry in user or managed settings",
+			wantText: remedy,
 		},
 		{
 			name:     "any other failure",
 			addErr:   "exit status 128: could not resolve host",
-			wantText: []string{`marketplace "koto"`, "pin v0.13.0 not applied", "could not resolve host"},
+			wantText: []string{"error: ", `marketplace "koto"`, "pin v0.13.0 not applied", "could not resolve host"},
+			notText:  []string{"already declares", "marketplace remove"},
 		},
 	}
 	for _, tc := range cases {
@@ -224,12 +240,26 @@ func TestPrewarm_RefusedPinIsReportedByName(t *testing.T) {
 			t.Cleanup(func() { runClaudePluginCmd = prev })
 			var buf bytes.Buffer
 
-			prewarmDeclaredPlugins(instance, workspace.NewReporter(&buf), false)
+			reporter := workspace.NewReporter(&buf)
 
+			prewarmDeclaredPlugins(instance, reporter, false)
+
+			if buf.Len() != 0 {
+				t.Errorf("unapplied pin reported inline instead of in the summary block:\n%s", buf.String())
+			}
+			reporter.FlushDeferred()
 			for _, want := range tc.wantText {
 				if !strings.Contains(buf.String(), want) {
-					t.Errorf("warning missing %q:\n%s", want, buf.String())
+					t.Errorf("report missing %q:\n%s", want, buf.String())
 				}
+			}
+			for _, unwanted := range tc.notText {
+				if strings.Contains(buf.String(), unwanted) {
+					t.Errorf("report unexpectedly contains %q:\n%s", unwanted, buf.String())
+				}
+			}
+			if strings.Contains(buf.String(), "warning: ") {
+				t.Errorf("unapplied pin reported as a warning, want error level:\n%s", buf.String())
 			}
 		})
 	}
@@ -365,5 +395,30 @@ func TestConfigurePluginAutoInstall_WiresPrewarm(t *testing.T) {
 	}
 	if applier.SkipPluginInstall {
 		t.Error("SkipPluginInstall should be false with flagOptOut=false and no global opt-out")
+	}
+}
+
+// TestIsDeclaredSourceConflict covers each wording Claude Code has used to refuse
+// a marketplace add whose source differs from the declared one, plus failures
+// that must not be mistaken for that refusal.
+func TestIsDeclaredSourceConflict(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+		want bool
+	}{
+		{"older wording", `Cannot add marketplace "x": its network source differs from the one declared for it in settings`, true},
+		{"extraKnownMarketplaces wording", `Cannot add marketplace "x": its source doesn't match its extraKnownMarketplaces entry in user or managed settings`, true},
+		{"typographic apostrophe", "Cannot add marketplace \"x\": its source doesn\u2019t match its extraKnownMarketplaces entry", true},
+		{"network failure", "exit status 128: could not resolve host", false},
+		{"different casing is not matched", "its source DOESN'T MATCH ITS EXTRAKNOWNMARKETPLACES ENTRY", false},
+		{"unrelated mismatch", "checksum doesn't match the expected value", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isDeclaredSourceConflict(errors.New(tc.msg)); got != tc.want {
+				t.Errorf("isDeclaredSourceConflict(%q) = %v, want %v", tc.msg, got, tc.want)
+			}
+		})
 	}
 }
