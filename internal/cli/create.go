@@ -11,7 +11,6 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/workspace"
-	"golang.org/x/term"
 )
 
 func init() {
@@ -159,8 +158,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// Built here rather than with the rest of the applier wiring below because
 	// the reconcile needs a fetcher and a reporter; everything else it needs
 	// comes from the config that reconcile returns.
-	applier := workspace.NewApplier(gh)
-	applier.Reporter = workspace.NewReporterWithTTY(os.Stderr, !noProgress && term.IsTerminal(int(os.Stderr.Fd())))
+	applier := newInteractiveApplier(gh)
 	configureDeveloperHome(applier)
 	// Rendered on every exit from here on, including the failure path where
 	// Create has already removed the instance directory.

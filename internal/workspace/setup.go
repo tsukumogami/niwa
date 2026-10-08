@@ -6,12 +6,47 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/secret"
 )
 
 const defaultSetupDir = "scripts/setup"
+
+// SetupTerminalEnv is the variable that tells a setup script a terminal is
+// available: niwa sets it to "1" when the command running the script was
+// started with both stdin and stderr on a terminal, and only for the commands
+// a person runs directly (`niwa apply`, `niwa create`). Provisioning paths --
+// the SessionStart hook, dispatch, watch, reap -- never set it. A script that
+// wants to prompt reads and writes /dev/tty; its stdout and stderr stay piped
+// through niwa's output handling either way.
+const SetupTerminalEnv = "NIWA_SETUP_TERMINAL"
+
+// setupTerminalEnv returns the entries that signal a terminal to setup
+// scripts: the variable when terminal is true, nothing otherwise.
+func setupTerminalEnv(terminal bool) []string {
+	if !terminal {
+		return nil
+	}
+	return []string{SetupTerminalEnv + "=1"}
+}
+
+// setupScriptEnv builds a setup script's environment: base (the inherited
+// environment) with every SetupTerminalEnv entry removed, followed by extra.
+// The terminal signal therefore reaches a script only when the caller put it in
+// extra; an inherited value never survives.
+func setupScriptEnv(base, extra []string) []string {
+	env := make([]string, 0, len(base)+len(extra))
+	prefix := SetupTerminalEnv + "="
+	for _, kv := range base {
+		if strings.HasPrefix(kv, prefix) || kv == SetupTerminalEnv {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, extra...)
+}
 
 // ScriptResult records the outcome of running a single setup script.
 type ScriptResult struct {
@@ -51,16 +86,23 @@ func ResolveSetupDir(ws *config.WorkspaceConfig, repoName string) string {
 // Passing nil means no scrubbing, which is appropriate only where no secret
 // has been resolved into the repo's working tree.
 // extraEnv is appended to the inherited process environment for each script.
-// It is variadic so every existing caller is unchanged: the clone path passes
-// nothing and its scripts see exactly the environment they see today, which is
-// what R15's regression guarantee needs.
+// It is variadic so a caller with nothing to add passes nothing.
 //
-// Go runs a subprocess with the parent's environment when cmd.Env is nil, so
-// appending to os.Environ() produces that identical set plus these entries.
-// DESIGN-post-clone-scripts.md's security section reasons about this function
-// setting no cmd.Env; the claim it actually makes is that secrets reach setup
-// scripts by FILE only, and nothing here carries a resolved secret -- these are
-// paths and names. That claim stays true.
+// The environment is always built explicitly rather than left to Go's
+// nil-cmd.Env inheritance, because one variable must never be inherited:
+// NIWA_SETUP_TERMINAL. It is niwa's statement that this run has a terminal, so
+// a value carried in from the parent -- an outer niwa, a shell that exported it
+// once -- would make a script on a provisioning path believe it can prompt. It
+// is filtered from os.Environ() on every call and reaches a script only when
+// the caller put it in extraEnv. See setupScriptEnv.
+//
+// Nothing here carries a resolved secret: these are paths, names and a flag.
+// Secrets reach setup scripts by FILE only.
+//
+// The terminal signal does not change where output goes. A script's stdout and
+// stderr are still piped through the line scanner and the redactor, and the
+// spinner is stopped by the r.Log announcement before each script starts, so a
+// script that prompts through /dev/tty draws on a quiet terminal.
 func RunSetupScripts(repoDir, setupDir string, r *Reporter, red *secret.Redactor, extraEnv ...string) *SetupResult {
 	// The repo name reaches output, and while it comes from workspace config
 	// rather than from the repo, it costs nothing to hold it to the same
@@ -132,9 +174,7 @@ func RunSetupScripts(repoDir, setupDir string, r *Reporter, red *secret.Redactor
 
 		cmd := exec.Command(scriptPath)
 		cmd.Dir = repoDir
-		if len(extraEnv) > 0 {
-			cmd.Env = append(os.Environ(), extraEnv...)
-		}
+		cmd.Env = setupScriptEnv(os.Environ(), extraEnv)
 
 		if err := runCmdWithReporter(r, cmd, prefix, red); err != nil {
 			result.Scripts = append(result.Scripts, ScriptResult{

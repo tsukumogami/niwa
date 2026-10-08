@@ -477,8 +477,7 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 	token := resolveGitHubToken()
 	gh := github.NewAPIClient(token)
 
-	applier := workspace.NewApplier(gh)
-	applier.Reporter = workspace.NewReporter(os.Stderr)
+	applier := newProvisionApplier(gh)
 	configureDeveloperHome(applier)
 	// Collected rather than rendered: this path has no terminal. The caller
 	// decides where the report and the fallback notices go — into the hook's

@@ -92,15 +92,17 @@ func reporterFor(opts WorktreeApplyOptions) *Reporter {
 // shared-state step like a git-hooks installer -- git hooks live in the shared
 // git-common-dir, so running that per tree is duplicate work at best.
 //
+// terminal adds the SetupTerminalEnv signal; see setupTerminalEnv.
+//
 // Nothing here is secret-derived. Paths and names only; see RunSetupScripts.
-func worktreeSetupEnv(instanceRoot, worktreePath, repo, purpose, branch string) []string {
-	return []string{
+func worktreeSetupEnv(instanceRoot, worktreePath, repo, purpose, branch string, terminal bool) []string {
+	return append([]string{
 		"NIWA_WORKTREE_PATH=" + worktreePath,
 		"NIWA_WORKTREE_REPO=" + repo,
 		"NIWA_WORKTREE_PURPOSE=" + purpose,
 		"NIWA_WORKTREE_BRANCH=" + branch,
 		"NIWA_INSTANCE_ROOT=" + instanceRoot,
-	}
+	}, setupTerminalEnv(terminal)...)
 }
 
 // cloneSetupEnv is what a repo's setup script receives when it runs against the
@@ -114,8 +116,10 @@ func worktreeSetupEnv(instanceRoot, worktreePath, repo, purpose, branch string) 
 // entries for this reason.
 //
 // The absence of NIWA_WORKTREE_PATH here is the signal a script gates on.
-func cloneSetupEnv(instanceRoot string) []string {
-	return []string{"NIWA_INSTANCE_ROOT=" + instanceRoot}
+//
+// terminal adds the SetupTerminalEnv signal; see setupTerminalEnv.
+func cloneSetupEnv(instanceRoot string, terminal bool) []string {
+	return append([]string{"NIWA_INSTANCE_ROOT=" + instanceRoot}, setupTerminalEnv(terminal)...)
 }
 
 // worktreeRedactor builds the scrubber for output produced inside a worktree,
@@ -716,6 +720,10 @@ type WorktreeApplyOptions struct {
 	// worktree does hold the clone's byte-copied env output, so the standalone
 	// paths build one rather than passing nil.
 	Redactor *secret.Redactor
+	// SetupTerminal, when true, exports SetupTerminalEnv to this worktree's
+	// setup scripts. The apply pipeline forwards Applier.SetupTerminal; the
+	// standalone worktree commands leave it false.
+	SetupTerminal bool
 }
 
 // ApplyToWorktree installs, into worktreePath, the same class of CLAUDE
@@ -973,7 +981,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 			red = worktreeRedactor(cfg, filepath.Join(instanceRoot, group, repo), repo, opts.GlobalEnvOutput)
 		}
 		result := RunSetupScripts(worktreePath, setupDir, reporterFor(opts), red,
-			worktreeSetupEnv(instanceRoot, worktreePath, repo, purpose, branch)...)
+			worktreeSetupEnv(instanceRoot, worktreePath, repo, purpose, branch, opts.SetupTerminal)...)
 		recordSetupOutcome(opts.Setup, result)
 	}
 

@@ -200,7 +200,7 @@ func TestApplyToWorktree_MixedSetupDirectoryGatesPerScript(t *testing.T) {
 // Asserted against RunSetupScripts directly because that is where the clone
 // path runs, and the property is about which environment reaches a script.
 func TestCloneSetupEnv_DoesNotCarryTheWorktreeSignal(t *testing.T) {
-	for _, entry := range cloneSetupEnv("/instance/root") {
+	for _, entry := range cloneSetupEnv("/instance/root", false) {
 		if strings.HasPrefix(entry, "NIWA_WORKTREE_") {
 			t.Fatalf("the clone environment carries %q: a script that gates itself "+
 				"on the worktree signal would then opt out of the clone run too, and "+
@@ -211,7 +211,7 @@ func TestCloneSetupEnv_DoesNotCarryTheWorktreeSignal(t *testing.T) {
 	// And the anchor IS present, because retiring `cd ../..` on the clone path
 	// is the reason this environment exists at all.
 	var sawAnchor bool
-	for _, entry := range cloneSetupEnv("/instance/root") {
+	for _, entry := range cloneSetupEnv("/instance/root", false) {
 		if entry == "NIWA_INSTANCE_ROOT=/instance/root" {
 			sawAnchor = true
 		}
@@ -234,7 +234,7 @@ func TestRunSetupScripts_MixedDirectoryRunsBothOnTheClone(t *testing.T) {
 
 	var buf strings.Builder
 	result := RunSetupScripts(repoDir, "scripts/setup", NewReporter(&buf), nil,
-		cloneSetupEnv("/instance/root")...)
+		cloneSetupEnv("/instance/root", false)...)
 
 	for _, s := range result.Scripts {
 		if s.Error != nil {

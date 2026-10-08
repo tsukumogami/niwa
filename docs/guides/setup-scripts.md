@@ -49,6 +49,7 @@ Use the environment instead:
 | `NIWA_WORKTREE_REPO` | worktree only | Repo name. |
 | `NIWA_WORKTREE_PURPOSE` | worktree only | The worktree's purpose string. |
 | `NIWA_WORKTREE_BRANCH` | worktree only | The worktree's branch. |
+| `NIWA_SETUP_TERMINAL` | clone and worktree, when signalled | Set to `1` when a terminal is available. See [Prompting the user](#prompting-the-user). |
 
 Everything else in the environment is inherited from the process that invoked
 niwa.
@@ -61,9 +62,47 @@ The unset happens in the root command's pre-run and is pinned by
 that declared its own pre-run once silently disabled it for every subcommand
 underneath.
 
+`NIWA_SETUP_TERMINAL` is removed from the inherited environment as well, and
+added back only when niwa itself signals a terminal. See
+[Prompting the user](#prompting-the-user).
+
 **Secrets reach scripts by file, never by environment.** niwa adds no resolved
 secret to a script's environment. Values it resolved are written to the env
 output files the repo declares, which sit in the working directory.
+
+## Prompting the user
+
+Most setup runs have nobody watching. A script that stops to ask a question
+there hangs the command that ran it, so niwa tells a script when someone is.
+
+`NIWA_SETUP_TERMINAL=1` is set when the script runs under `niwa apply` or
+`niwa create` and that command's stdin and stderr are both a terminal. It is
+never set when an instance is provisioned without a person attached: the
+SessionStart hook (`niwa instance from-hook`), `niwa dispatch`, `niwa watch`
+and `niwa reap` leave it out. A value exported in the environment niwa was
+started from is always removed, so the variable only ever means what niwa says
+it means.
+
+A script that wants to prompt has to talk to the terminal directly, through
+`/dev/tty`. Its stdin is not the terminal, and its stdout and stderr are piped
+through niwa, which prefixes each line, scrubs secrets from it, and prints it
+only once the line is complete -- so a prompt written there without a trailing
+newline never shows up. niwa stops its progress spinner before each script
+starts, so the terminal is quiet while the script runs.
+
+```sh
+#!/bin/sh
+if [ "$NIWA_SETUP_TERMINAL" = "1" ]; then
+  printf 'Enable the optional tooling? [y/N] ' > /dev/tty
+  read -r answer < /dev/tty
+else
+  answer=n   # nobody to ask: take the default
+fi
+```
+
+When the variable is absent, do not assume a terminal and do not open
+`/dev/tty` anyway. Pick a default, or skip the step and say so in the script's
+output, and make sure the next `niwa apply` at a terminal can finish the job.
 
 ## Scripts must be safe to re-run
 
