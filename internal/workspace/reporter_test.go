@@ -240,3 +240,19 @@ func TestReporterMultipleStatusUpdates(t *testing.T) {
 		t.Error("needsClear should be false after Log")
 	}
 }
+
+func TestReporterDeferErrorFlushesAfterSummary(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporterWithTTY(&buf, false)
+	r.DeferWarn("w %d", 1)
+	r.DeferError("e %d", 2)
+	if buf.Len() != 0 {
+		t.Fatalf("deferred messages printed before flush: %q", buf.String())
+	}
+	r.Log("summary")
+	r.FlushDeferred()
+	want := "summary\nwarning: w 1\nerror: e 2\n"
+	if got := buf.String(); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

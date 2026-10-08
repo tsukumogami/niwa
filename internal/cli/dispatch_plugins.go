@@ -70,7 +70,8 @@ func configurePluginAutoInstall(applier *workspace.Applier, flagOptOut bool) {
 // plugin's install, already OR'd with the global auto_install_plugins setting by
 // the caller) short-circuits it. Every other failure (claude absent, CLI error,
 // unreadable settings)
-// is a warning, never fatal: Claude still installs from settings.json at startup, so
+// is reported, never fatal -- a warning, or an error-level summary line when a
+// pin could not be applied: Claude still installs from settings.json at startup, so
 // pre-warming only removes the race -- a provision must never be less robust than
 // before when the plugin CLI is unavailable. reporter may be nil.
 func prewarmDeclaredPlugins(instanceRoot string, reporter *workspace.Reporter, skipInstall bool) {
@@ -107,6 +108,13 @@ func prewarmDeclaredPlugins(instanceRoot string, reporter *workspace.Reporter, s
 	// scope. niwa does not remove or rewrite that declaration -- `marketplace remove`
 	// uninstalls the marketplace's plugins from every project in the HOME -- so it
 	// reports the pin it could not apply and installs from the existing registration.
+	//
+	// A pin that is not applied is reported at error level in the deferred summary
+	// block (after the "applied"/"created" line), not as an inline warning: an
+	// instance silently running a different plugin version than the one its config
+	// pins is the worse outcome, and inline warnings scroll past during a dispatch.
+	// It does not fail the apply -- pre-warming is best-effort by contract and the
+	// instance is otherwise usable -- and niwa still never edits user settings.
 	pinned := map[string]bool{}
 	for _, name := range sortedKeys(marketplaceNames(settings.ExtraKnownMarketplaces)) {
 		mkt := settings.ExtraKnownMarketplaces[name]
@@ -119,9 +127,9 @@ func prewarmDeclaredPlugins(instanceRoot string, reporter *workspace.Reporter, s
 		case err == nil:
 			pinned[name] = mkt.Source.Ref != ""
 		case mkt.Source.Ref != "" && isDeclaredSourceConflict(err):
-			warnPrewarm(reporter, "marketplace %q: pin %s not applied: this HOME already declares %q in ~/.claude/settings.json with a different source (earlier niwa versions wrote it), and Claude Code refuses a per-instance pin while that declaration exists, so plugins install from the registered source instead. One-time fix: run `claude plugin marketplace remove %s`, then `niwa apply` in each instance. The remove uninstalls %q's plugins from every project on this machine until that project is re-applied", name, mkt.Source.Ref, name, name, name)
+			errorPrewarm(reporter, "marketplace %q: pin %s not applied: this HOME already declares %q in ~/.claude/settings.json with a different source (earlier niwa versions wrote it), and Claude Code refuses a per-instance pin while that declaration exists, so plugins install from the registered source instead. One-time fix: run `claude plugin marketplace remove %s`, then `niwa apply` in each instance. The remove uninstalls %q's plugins from every project on this machine until that project is re-applied", name, mkt.Source.Ref, name, name, name)
 		case mkt.Source.Ref != "":
-			warnPrewarm(reporter, "marketplace %q: pin %s not applied: pre-warming %s failed: %v; plugins install from whatever is registered, or on startup", name, mkt.Source.Ref, target, err)
+			errorPrewarm(reporter, "marketplace %q: pin %s not applied: pre-warming %s failed: %v; plugins install from whatever is registered, or on startup", name, mkt.Source.Ref, target, err)
 		default:
 			warnPrewarm(reporter, "pre-warming marketplace %q (%s): %v; it will install on startup instead", name, target, err)
 		}
@@ -164,12 +172,31 @@ func prewarmDeclaredPlugins(instanceRoot string, reporter *workspace.Reporter, s
 	}
 }
 
+// declaredSourceConflictPhrases are the substrings Claude Code has used when it
+// refuses a `marketplace add` whose source differs from the one already declared
+// for that marketplace name in user or managed settings. Older releases said the
+// source "differs from the one declared"; newer ones say it "doesn't match its
+// extraKnownMarketplaces entry". The apostrophe is matched in both its straight
+// and typographic forms so a change in the CLI's punctuation does not drop the
+// remedy.
+var declaredSourceConflictPhrases = []string{
+	"differs from the one declared",
+	"doesn't match its extraKnownMarketplaces entry",
+	"doesn\u2019t match its extraKnownMarketplaces entry",
+}
+
 // isDeclaredSourceConflict reports whether a failed `marketplace add` was Claude
 // Code refusing a source that differs from the one already declared for that
-// marketplace name. It keys on the CLI's wording, so a rewording degrades the
-// warning to the generic "pin not applied" form rather than hiding it.
+// marketplace name. It keys on the CLI's wording, so a future rewording degrades
+// the report to the generic "pin not applied" form rather than hiding it.
 func isDeclaredSourceConflict(err error) bool {
-	return strings.Contains(err.Error(), "differs from the one declared")
+	msg := err.Error()
+	for _, phrase := range declaredSourceConflictPhrases {
+		if strings.Contains(msg, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // pluginMarketplace returns the marketplace half of a `<plugin>@<marketplace>`
@@ -187,6 +214,16 @@ func pluginMarketplace(plugin string) string {
 func warnPrewarm(reporter *workspace.Reporter, format string, a ...any) {
 	if reporter != nil {
 		reporter.Warn(format, a...)
+	}
+}
+
+// errorPrewarm queues an error-level line for the apply/create summary block,
+// tolerating a nil reporter. Used for a pin that could not be applied: the
+// operation still succeeds, but the instance is not on the version its config
+// pins, which the user has to act on.
+func errorPrewarm(reporter *workspace.Reporter, format string, a ...any) {
+	if reporter != nil {
+		reporter.DeferError(format, a...)
 	}
 }
 

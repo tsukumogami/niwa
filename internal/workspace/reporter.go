@@ -159,6 +159,14 @@ func (r *Reporter) DeferWarn(format string, a ...any) {
 	r.deferred = append(r.deferred, fmt.Sprintf("warning: "+format, a...))
 }
 
+// DeferError queues an error-level message for FlushDeferred (prepends
+// "error: "). It is for an outcome the user must act on that does not fail the
+// operation: the command still succeeds, but the line lands in the summary block
+// at error level rather than as a warning that is easy to scroll past.
+func (r *Reporter) DeferError(format string, a ...any) {
+	r.deferred = append(r.deferred, fmt.Sprintf("error: "+format, a...))
+}
+
 // FlushDeferred prints all deferred messages in order and clears the buffer.
 // Call after the operation summary line so messages appear as a clean block
 // below the summary.
