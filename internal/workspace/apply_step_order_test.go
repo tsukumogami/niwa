@@ -152,8 +152,8 @@ func TestPipeline_CloneSetupRunsBeforeWorktreeFanOut(t *testing.T) {
 // TestCloneSetupEnv_DoesNotCarryTheWorktreeSignal asserts the builder RETURNS
 // the anchor, which is a different claim: it pins what cloneSetupEnv produces,
 // not that anything passes the result to a script. Deleting
-// `cloneSetupEnv(instanceRoot)...` from the RunSetupScripts call left both
-// internal/workspace and internal/cli green.
+// `cloneSetupEnv(instanceRoot, a.SetupTerminal)...` from the RunSetupScripts
+// call left both internal/workspace and internal/cli green.
 //
 // The worktree side already had its end-to-end equivalent --
 // TestApplyToWorktree_SetupEnvironment runs a script that echoes the variable --

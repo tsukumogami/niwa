@@ -103,6 +103,14 @@ type Applier struct {
 	// replace it (e.g., with NewReporterWithTTY) before calling Apply or Create.
 	Reporter *Reporter
 
+	// SetupTerminal tells setup scripts a terminal is available by exporting
+	// SetupTerminalEnv=1 to them. Only `niwa apply` and `niwa create` set it,
+	// and only when their stdin and stderr are both terminals. Every
+	// provisioning path (the SessionStart hook, dispatch, watch, reap) leaves
+	// it false, as does every other constructor of an Applier. It changes
+	// nothing about where script output goes.
+	SetupTerminal bool
+
 	// AllowPlaintextSecrets threads through to the public-repo
 	// plaintext-secrets guardrail
 	// (internal/guardrail.CheckGitHubPublicRemoteSecrets). When true,
@@ -2060,7 +2068,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		// stop deriving it by walking up from its working directory. Doing this
 		// only in worktrees would leave the fragile idiom load-bearing here.
 		result := RunSetupScripts(repoDir, setupDir, a.Reporter, redactor,
-			cloneSetupEnv(instanceRoot)...)
+			cloneSetupEnv(instanceRoot, a.SetupTerminal)...)
 
 		if result.Disabled || result.Skipped {
 			continue
@@ -2601,6 +2609,7 @@ func (a *Applier) refreshWorktreeEnvs(in worktreeRefreshInputs) ([]ManagedFile, 
 				// Decision 9: give the worktree the same delegation configuration
 				// the clone got on this apply, so the two do not drift.
 				WorktreeDelegation: in.worktreeDelegation,
+				SetupTerminal:      a.SetupTerminal,
 			},
 		)
 		if refreshErr != nil {
