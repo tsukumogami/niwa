@@ -9,7 +9,7 @@ Feature: the workspace permissions posture is deprecated for dispatch
   setting that replaces it: [global] dispatch_permission_mode in
   ~/.config/niwa/config.toml.
 
-  Design: docs/designs/DESIGN-dispatch-default-permission-mode.md
+  Design: docs/designs/current/DESIGN-dispatch-default-permission-mode.md
 
   Background:
     Given a clean niwa environment
