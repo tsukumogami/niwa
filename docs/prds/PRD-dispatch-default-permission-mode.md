@@ -13,7 +13,8 @@ goals: |
   workspace. The flag still overrides it for one dispatch, a Codex dispatch
   never breaks because of it, and machines with nothing recorded behave
   exactly as they do today.
-upstream: docs/briefs/BRIEF-dispatch-default-permission-mode.md
+absorbed:
+  - docs/briefs/BRIEF-dispatch-default-permission-mode.md
 ---
 
 # PRD: dispatch-default-permission-mode
@@ -21,6 +22,32 @@ upstream: docs/briefs/BRIEF-dispatch-default-permission-mode.md
 ## Status
 
 Accepted
+
+Absorbed [BRIEF-dispatch-default-permission-mode](docs/briefs/BRIEF-dispatch-default-permission-mode.md); carried in Absorbed Brief.
+
+## Absorbed Brief
+
+How much a dispatched worker may do without asking is a decision about the
+machine it runs on and the person who owns that machine, not about the
+workspace. The brief framed it that way after a developer who runs the same
+workspaces on a corporate laptop and on personal machines found no way to
+keep bypass off the laptop and on everywhere else, short of typing a flag on
+every dispatch.
+
+The outcome it set: the developer states once, per machine, how trusted that
+machine's dispatched workers are (auto on the laptop, bypass at home), and
+every dispatch there follows it from any workspace with no change to the
+shared workspace config. A flag still overrides it for one dispatch, a
+machine with nothing recorded behaves as before, a Codex dispatch never fails
+because of a Claude-only preference, and stderr says where the chosen mode
+came from. Workspace maintainers are told the workspace-level posture is on
+its way out, and while it exists the machine preference outranks it.
+
+The brief's boundary is carried by this PRD's requirements and Out of Scope:
+dispatch only (not `niwa watch` or hook-provisioned sessions), one answer per
+machine with no per-workspace layer inside the machine config, no detection
+of what a machine allows, and deprecation rather than removal of the
+workspace posture.
 
 ## Problem Statement
 
