@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 upstream: docs/prds/PRD-dispatch-default-permission-mode.md
 problem: |
   `niwa dispatch` derives a worker's permission mode only from the explicit
@@ -39,7 +39,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
