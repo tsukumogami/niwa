@@ -312,14 +312,31 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	}
 	workspaceRoot := class.WorkspaceRoot
 
-	// (2a) Load the host global config ONCE, best-effort, and reuse it below.
-	// This command reads the machine-wide dispatch harness from it (the
-	// broadest rung of the agent resolution just below) and, after
-	// provisioning, the dispatch defaults: dispatch_model, remote control,
-	// keep-alive, and accepting messages from other sessions. A missing or
-	// unreadable config degrades to "none of those set", which is the default
-	// for every one of them -- they are all opt-in.
-	gc, gcErr := config.LoadGlobalConfig()
+	// (2a) Load the host global config ONCE and reuse it below. This command
+	// reads the machine-wide dispatch harness from it (the broadest rung of the
+	// agent resolution just below) and, after provisioning, the dispatch
+	// defaults: dispatch_model, the permission mode, remote control,
+	// keep-alive, and accepting messages from other sessions.
+	//
+	// The load fails closed. A missing file still loads as an empty config --
+	// "none of those set", the default for every one of them -- but a file that
+	// exists and cannot be read or parsed stops the dispatch here, naming the
+	// file. So does a [global] dispatch_permission_mode outside the accepted
+	// set, whatever the agent and whether or not --permission-mode was given.
+	// Treating either as "unset" would let a broken machine setting fall
+	// through to a workspace `bypass` posture on the very machine the developer
+	// meant to restrict. Both checks run before the workspace config is read at
+	// (2b) and long before provisioning at (7), so a refusal leaves no instance
+	// directory behind. The config is never nil past this point.
+	cfgPath := globalConfigPathForError()
+	gc, err := config.LoadGlobalConfig()
+	if err != nil {
+		return fmt.Errorf("niwa: error: loading %s: %w", cfgPath, err)
+	}
+	hostPermissionMode, err := gc.DispatchPermissionMode()
+	if err != nil {
+		return fmt.Errorf("niwa: error: %w (in %s)", err, cfgPath)
+	}
 
 	// (2b) Resolve which agent this dispatch launches, from --harness,
 	// NIWA_DISPATCH_HARNESS, the workspace default_agent, and the host
@@ -345,11 +362,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if notice := renamedHarnessEnvNotice(); notice != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", notice)
 	}
-	var hostCfg *config.GlobalConfig
-	if gcErr == nil {
-		hostCfg = gc
-	}
-	dispatchedAgent, agErr := resolveSessionAgent(dispatchHarness, wsConfig, wsConfigPath, hostCfg)
+	dispatchedAgent, agErr := resolveSessionAgent(dispatchHarness, wsConfig, wsConfigPath, gc)
 	if agErr != nil {
 		return fmt.Errorf("niwa: error: %w", agErr)
 	}
@@ -564,7 +577,8 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	}
 
 	// (9) The host global config was loaded once at (2a), before the agent
-	// resolution that also reads it. gc/gcErr below are that same result.
+	// resolution that also reads it. gc below is that same result, and it is
+	// never nil: a config that could not be loaded stopped the dispatch there.
 
 	// (9a) Resolve the effective main-loop model. The --model flag wins; when it
 	// is unset the host [global] dispatch_model default fills in; when neither is
@@ -574,7 +588,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// as-is with a warning rather than blocking the launch (see
 	// resolveDispatchModel).
 	effectiveModel := dispatchModel
-	if effectiveModel == "" && gcErr == nil && gc != nil {
+	if effectiveModel == "" {
 		effectiveModel = strings.TrimSpace(gc.Global.DispatchModel)
 	}
 	resolvedModel, modelWarning := resolveDispatchModel(spec, effectiveModel)
@@ -583,15 +597,27 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	}
 
 	// (9a-derive) Derive the permission mode the worker launches with. An
-	// operator's explicit --permission-mode always wins and is the only one on
-	// the argv. Otherwise a workspace that declared `permissions = "bypass"`
-	// gets --permission-mode bypassPermissions, because the CLI flag is the
-	// channel Claude Code honors for a launched worker. The derivation is
-	// scoped to the agent whose permission flag is Claude's own spelling
-	// (`--permission-mode`): Codex's equivalent (`--sandbox`) takes an
-	// unrelated value vocabulary and Codex workers already get full trust
-	// through WorkdirGrantArgs, so forwarding "bypassPermissions" there would
-	// be wrong rather than merely unhelpful.
+	// operator's explicit --permission-mode always wins, for every agent, and
+	// is the only one on the argv. Otherwise the machine's [global]
+	// dispatch_permission_mode, already validated at (2a), applies. Otherwise a
+	// workspace that declared `permissions = "bypass"` gets --permission-mode
+	// bypassPermissions, because the CLI flag is the channel Claude Code honors
+	// for a launched worker. The machine setting outranks the workspace posture
+	// in both directions -- stricter or looser -- because how much a worker may
+	// do unattended is the machine owner's call, not a shared repository's.
+	//
+	// The machine and workspace rungs are scoped to the agent whose permission
+	// flag is Claude's own spelling (`--permission-mode`): Codex's equivalent
+	// (`--sandbox`) takes an unrelated value vocabulary and Codex workers
+	// already get full trust through WorkdirGrantArgs, so forwarding a Claude
+	// mode there would be wrong rather than merely unhelpful. A machine setting
+	// that cannot reach this agent forwards nothing and says nothing; it was
+	// still validated at (2a), so a bad value stops a Codex dispatch too.
+	//
+	// The source of a forwarded mode goes to stderr: one line naming the
+	// machine config for the machine setting, the long-standing line for the
+	// workspace posture, and nothing for the flag (the operator typed it) or
+	// when nothing is forwarded.
 	//
 	// The posture comes from the instance state Create just saved, never from
 	// a generated settings document: what niwa writes into .claude/settings.json
@@ -609,7 +635,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if stateErr == nil {
 		recordedPermissions = state.ClaudePermissions
 	}
-	permissionMode, derived := derivePermissionMode(dispatchPermissionMode, recordedPermissions, spec.Flags)
+	permissionMode, permSource := derivePermissionMode(dispatchPermissionMode, hostPermissionMode, recordedPermissions, spec.Flags)
 	// An explicit --permission-mode sets the mode regardless of the posture, so
 	// the warning is skipped then: it would describe a decision that changed
 	// nothing. It still prints for an agent whose permission flag the
@@ -619,7 +645,10 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: warning: could not read %s (%v); treating the workspace's permissions posture as undeclared\n",
 			filepath.Join(instancePath, workspace.StateDir, workspace.StateFile), stateErr)
 	}
-	if derived {
+	switch permSource {
+	case permissionSourceHost:
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: using --permission-mode %s from [global] dispatch_permission_mode in %s\n", permissionMode, cfgPath)
+	case permissionSourceWorkspace:
 		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: derived --permission-mode %s from the workspace's declared permissions posture\n", permissionMode)
 	}
 
@@ -635,16 +664,13 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// at.
 	passthrough := buildDispatchPassthrough(spec.Flags, forwardedName, resolvedModel, permissionMode)
 
-	// (9b-host) The host [global] settings as a value, zero when the config
-	// could not be loaded. Both the inbound resolution in (9c) and keep-alive in
-	// (9d) read it, so an unreadable or malformed config.toml counts as "no
-	// machine setting" for each of them while their flags still apply. Remote
-	// control's block below still reads gc and gcErr directly; it has no flag,
-	// and an unreadable config means no injection whichever value it reads.
-	var hostGlobal config.GlobalSettings
-	if gcErr == nil && gc != nil {
-		hostGlobal = gc.Global
-	}
+	// (9b-host) The host [global] settings as a value. Both the inbound
+	// resolution in (9c) and keep-alive in (9d) read it; remote control's block
+	// below reads gc.Global directly. An unreadable or malformed config.toml
+	// never gets this far -- it stopped the dispatch at (2a) -- and a missing
+	// one loaded as the zero settings, which is "no machine setting" for each
+	// of them while their flags still apply.
+	hostGlobal := gc.Global
 
 	// (9c) The launch settings document, built from its contributors: remote
 	// control's default-fill first, then accepting messages from other
@@ -657,11 +683,11 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// steerable. The document rides the settings flag as two discrete argv
 	// elements (no shell interpolation). This is the only dispatch-exclusive
 	// seam, so the default never leaks to interactive, ephemeral, or
-	// `niwa apply` sessions. Neither read can fail the dispatch: a
-	// missing/unreadable global config degrades to "no injection" (the preference
-	// is treated as unset), and an unreadable instance settings file is treated as
-	// "downstream unset" -- so the host default-fill still applies. Either way
-	// the dispatch always launches. The global config is loaded once at (2a) and
+	// `niwa apply` sessions. Neither read fails the dispatch here: a missing
+	// global config degrades to "no injection" (the preference is treated as
+	// unset), an unreadable one already stopped the dispatch at (2a), and an
+	// unreadable instance settings file is treated as "downstream unset" -- so
+	// the host default-fill still applies. The global config is loaded once at (2a) and
 	// reused here. The instance settings were read once too, ahead of (9b) at
 	// (9a-derive) -- the keep-alive resolution in (9d) consults the same
 	// projection.
@@ -684,7 +710,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	rcInjected := false
 	rcDecl, rcErr := agentplan.Lookup(agentplan.RemoteControl, dispatchedAgent)
 	rcDeliverable := rcErr == nil && rcDecl.State == agentplan.StateImplemented && spec.Flags.Settings != ""
-	if gcErr == nil && rcDeliverable {
+	if rcDeliverable {
 		// The eligibility check must inspect the environment the worker
 		// inherits, so the warning describes the worker's actual auth context.
 		// That is os.Environ(), except that the lineage contributor below may
@@ -763,9 +789,10 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	}
 
 	// (9d) Keep-alive arming. The opt-in resolves flag > downstream > host
-	// default (resolveDispatchKeepAlive); an unreadable host config degrades to
-	// "host default unset" through the zero GlobalSettings built at (9b-host),
-	// so keep-alive -- like remote-control -- can never fail the dispatch. When
+	// default (resolveDispatchKeepAlive); a missing host config degrades to
+	// "host default unset" through the zero GlobalSettings at (9b-host), and an
+	// unreadable one never gets past (2a), so keep-alive -- like remote-control
+	// -- can never fail the dispatch from here. When
 	// it resolves on AND the worker starts with remote control (either injected
 	// above or decided downstream), prepend the fixed self-arm instruction to
 	// the task prompt (channel B2; see dispatch_keepalive.go for why the
@@ -1223,25 +1250,64 @@ func isDispatchInstanceName(name string) bool {
 	return dispatchInstanceNameRe.MatchString(name)
 }
 
+// permissionSource says which rung of derivePermissionMode chose the mode a
+// worker launches with. The caller prints its stderr line from it, so the line
+// can never name a source the derivation did not use.
+type permissionSource int
+
+const (
+	// permissionSourceNone: nothing is forwarded.
+	permissionSourceNone permissionSource = iota
+	// permissionSourceFlag: the operator's explicit --permission-mode.
+	permissionSourceFlag
+	// permissionSourceHost: the machine's [global] dispatch_permission_mode.
+	permissionSourceHost
+	// permissionSourceWorkspace: the instance's recorded `bypass` posture.
+	permissionSourceWorkspace
+)
+
 // derivePermissionMode decides the permission mode a dispatched worker is
-// launched with. explicit is the operator's --permission-mode value, recorded
-// is the instance's recorded posture (InstanceState.ClaudePermissions), and
-// flags is the launched agent's flag spelling.
+// launched with, and which source it came from. explicit is the operator's
+// --permission-mode value, host is the machine's validated [global]
+// dispatch_permission_mode ("" when unset), recorded is the instance's
+// recorded posture (InstanceState.ClaudePermissions), and flags is the
+// launched agent's flag spelling.
 //
-// An explicit value always wins and is returned unchanged, with derived false.
-// Otherwise the mode is "bypassPermissions", with derived true, exactly when the
-// agent's permission flag is Claude's own --permission-mode and the recorded
-// posture is "bypass". Every other case -- "ask", an empty or unrecognized
-// posture, or an agent with a different permission flag -- yields ("", false),
-// so nothing is forwarded.
-func derivePermissionMode(explicit, recorded string, flags agentplan.LaunchFlags) (mode string, derived bool) {
+// An explicit value always wins, for every agent, and is returned unchanged
+// with permissionSourceFlag. The other two rungs apply only when the agent's
+// permission flag is Claude's own --permission-mode: the host value, returned
+// with permissionSourceHost, and then "bypassPermissions" with
+// permissionSourceWorkspace when the recorded posture is "bypass". The guard
+// is the same string match for both rungs, so an agent with a different
+// permission flag (Codex's --sandbox) never receives a Claude mode from either.
+// Every other case -- "ask", an empty or unrecognized posture, or a non-Claude
+// agent with no explicit flag -- yields ("", permissionSourceNone), so nothing
+// is forwarded.
+func derivePermissionMode(explicit, host, recorded string, flags agentplan.LaunchFlags) (mode string, source permissionSource) {
 	if explicit != "" {
-		return explicit, false
+		return explicit, permissionSourceFlag
 	}
-	if flags.PermissionMode == "--permission-mode" && recorded == "bypass" {
-		return "bypassPermissions", true
+	if flags.PermissionMode != "--permission-mode" {
+		return "", permissionSourceNone
 	}
-	return "", false
+	if host != "" {
+		return host, permissionSourceHost
+	}
+	if recorded == "bypass" {
+		return "bypassPermissions", permissionSourceWorkspace
+	}
+	return "", permissionSourceNone
+}
+
+// globalConfigPathForError is the machine config's path as dispatch names it
+// in an error or a notice: the path config.GlobalConfigPath resolves, or the
+// conventional ~/.config/niwa/config.toml when even that cannot be resolved
+// (no home directory), so a refusal still tells the developer where to look.
+func globalConfigPathForError() string {
+	if p, err := config.GlobalConfigPath(); err == nil {
+		return p
+	}
+	return "~/.config/niwa/config.toml"
 }
 
 // buildDispatchPassthrough turns the set pass-through flags into discrete argv

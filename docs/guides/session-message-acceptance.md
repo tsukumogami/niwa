@@ -37,10 +37,12 @@ would strip whatever comment you left beside a security-relevant key. Edit it by
 hand, inside the `[global]` table that's already there — a second `[global]`
 header makes the file invalid.
 
-A value that isn't a boolean (`"yes"`, `1`) makes the whole `[global]` table
-unreadable, and niwa treats an unreadable machine configuration as an absent
-setting. The behavior stays off, silently, and so do `remote_control_on_dispatch`,
-`keep_alive_on_dispatch`, and every other `[global]` key. Nothing warns you.
+A value that isn't a boolean (`"yes"`, `1`) makes the whole file unparseable.
+`niwa dispatch` refuses to run against a machine configuration it can't read or
+parse: it exits with an error naming the file and the parse error, before it
+provisions anything, whether or not you passed `--accept-session-messages`.
+Fix the value, or remove it, and dispatch again. A missing `config.toml` isn't
+an error; it means no machine settings at all.
 
 ### What can't turn it on
 
