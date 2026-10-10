@@ -36,6 +36,17 @@ type EffectiveConfig struct {
 	// (no .local infix) at a non-git level. Populated only by
 	// MergeInstanceOverrides.
 	RootFiles map[string]string
+
+	// OverlayInstanceFiles is the overlay's verbatim instance-root table,
+	// carried beside InstanceFiles because its sources resolve in the overlay
+	// clone (OverlayFilesDir) rather than the base config directory.
+	// Populated only by MergeInstanceOverrides, and only when a workspace
+	// overlay declared [instance.files].
+	OverlayInstanceFiles map[string]string
+
+	// OverlayFilesDir is the directory OverlayInstanceFiles sources resolve
+	// against. Empty when OverlayInstanceFiles is empty.
+	OverlayFilesDir string
 }
 
 // MergeOverrides produces the effective configuration for a repo by combining
@@ -200,6 +211,10 @@ func MergeInstanceOverrides(ws *config.WorkspaceConfig) EffectiveConfig {
 		// at these single-source levels for an empty value to remove from).
 		InstanceFiles: nonEmptyStringMap(ws.Instance.Files),
 		RootFiles:     nonEmptyStringMap(ws.Root.Files),
+		// The overlay's instance-root table rides along under the same
+		// single-source semantics; its resolution directory travels with it.
+		OverlayInstanceFiles: nonEmptyStringMap(ws.OverlayInstanceFiles),
+		OverlayFilesDir:      ws.OverlayFilesDir,
 	}
 
 	override := ws.Instance
@@ -714,6 +729,7 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 	merged.Content = copyContentConfig(ws.Content)
 	merged.Env = copyEnv(ws.Env)
 	merged.Files = copyStringMap(ws.Files)
+	merged.OverlayInstanceFiles = copyStringMap(ws.OverlayInstanceFiles)
 	merged.Sources = append([]config.SourceConfig(nil), ws.Sources...)
 	merged.Groups = copyGroupMap(ws.Groups)
 	merged.Repos = copyRepoOverrideMap(ws.Repos)
@@ -901,6 +917,33 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 				merged.Files = map[string]string{}
 			}
 			merged.Files[k] = v
+		}
+	}
+
+	// Instance.Files: the overlay's verbatim instance-root table. It stays in
+	// its own map rather than joining merged.Instance.Files because its
+	// sources resolve in the overlay clone, not the base config directory,
+	// and a map entry carries no room for that distinction. Base wins per
+	// destination: an overlay entry targeting a destination the base table
+	// already fills is skipped rather than overwriting a base-managed file.
+	if len(overlay.Instance.Files) > 0 {
+		baseDests := make(map[string]bool, len(merged.Instance.Files))
+		for _, dest := range merged.Instance.Files {
+			if dest != "" {
+				baseDests[dest] = true
+			}
+		}
+		for src, dest := range overlay.Instance.Files {
+			if dest == "" || baseDests[dest] {
+				continue
+			}
+			if merged.OverlayInstanceFiles == nil {
+				merged.OverlayInstanceFiles = map[string]string{}
+			}
+			merged.OverlayInstanceFiles[src] = dest
+		}
+		if len(merged.OverlayInstanceFiles) > 0 {
+			merged.OverlayFilesDir = overlayDir
 		}
 	}
 

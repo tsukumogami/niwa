@@ -523,3 +523,58 @@ files = ["../escape.env"]
 		t.Errorf("error %q does not mention path traversal", err.Error())
 	}
 }
+
+// TestParseOverlay_InstanceFilesValid verifies that a well-formed
+// [instance.files] table parses and is carried on the overlay.
+func TestParseOverlay_InstanceFilesValid(t *testing.T) {
+	toml := `
+[instance.files]
+"mcp/mcp.json" = ".mcp.json"
+`
+	path := writeOverlayFile(t, toml)
+	o, err := ParseOverlay(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := o.Instance.Files["mcp/mcp.json"]; got != ".mcp.json" {
+		t.Errorf("Instance.Files[mcp/mcp.json] = %q, want %q", got, ".mcp.json")
+	}
+}
+
+// TestParseOverlay_InstanceFilesProtectedDestination verifies that
+// [instance.files] destinations under .claude/ or .niwa/ are rejected, the
+// same way [files] destinations are.
+func TestParseOverlay_InstanceFilesProtectedDestination(t *testing.T) {
+	for _, dest := range []string{".claude/settings.json", ".niwa/instance.json"} {
+		toml := `
+[instance.files]
+"src/file.json" = "` + dest + `"
+`
+		path := writeOverlayFile(t, toml)
+		_, err := ParseOverlay(path)
+		if err == nil {
+			t.Fatalf("expected error for destination %q, got nil", dest)
+		}
+		if !strings.Contains(err.Error(), "protected directory") {
+			t.Errorf("error %q does not mention protected directory", err.Error())
+		}
+	}
+}
+
+// TestParseOverlay_InstanceFilesTraversal verifies that ".." components are
+// rejected on both sides of an [instance.files] entry.
+func TestParseOverlay_InstanceFilesTraversal(t *testing.T) {
+	for _, toml := range []string{
+		"[instance.files]\n\"../escape.json\" = \"dest.json\"\n",
+		"[instance.files]\n\"src/file.json\" = \"../escape.json\"\n",
+	} {
+		path := writeOverlayFile(t, toml)
+		_, err := ParseOverlay(path)
+		if err == nil {
+			t.Fatal("expected error for .. in instance.files, got nil")
+		}
+		if !strings.Contains(err.Error(), "path traversal") {
+			t.Errorf("error %q does not mention path traversal", err.Error())
+		}
+	}
+}

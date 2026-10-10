@@ -16,19 +16,31 @@ import (
 // from WorkspaceConfig — overlay TOML has different validation rules and lacks
 // workspace metadata fields.
 type WorkspaceOverlay struct {
-	Sources []OverlaySourceConfig   `toml:"sources"`
-	Groups  map[string]GroupConfig  `toml:"groups"`
-	Repos   map[string]RepoOverride `toml:"repos"`
-	Claude  OverlayClaudeConfig     `toml:"claude"`
-	Env     EnvConfig               `toml:"env"`
-	Files   map[string]string       `toml:"files,omitempty"`
-	Vault   *VaultRegistry          `toml:"vault,omitempty"`
+	Sources  []OverlaySourceConfig   `toml:"sources"`
+	Groups   map[string]GroupConfig  `toml:"groups"`
+	Repos    map[string]RepoOverride `toml:"repos"`
+	Claude   OverlayClaudeConfig     `toml:"claude"`
+	Env      EnvConfig               `toml:"env"`
+	Files    map[string]string       `toml:"files,omitempty"`
+	Instance OverlayInstanceConfig   `toml:"instance,omitempty"`
+	Vault    *VaultRegistry          `toml:"vault,omitempty"`
 	// Workspace is a tombstone, not configuration. Nothing reads it into the
 	// merged config -- MergeWorkspaceOverlay never assigns Workspace at all --
 	// so every field under it is inert by construction. It is decoded solely
 	// so an author who writes the stanza is told it does nothing, instead of
 	// watching a security-relevant setting be silently ignored.
 	Workspace OverlayWorkspaceTombstone `toml:"workspace"`
+}
+
+// OverlayInstanceConfig is the [instance] section of workspace-overlay.toml.
+// Only the verbatim file-distribution table is carried: an overlay can place
+// files at each instance root under their exact names, which is how a private
+// overlay distributes a file that must keep its name to be read at all (a
+// project .mcp.json, say) without declaring it in the public base config.
+// Sources resolve in the overlay clone, not the base config directory, and
+// the base [instance.files] table wins per destination on collision.
+type OverlayInstanceConfig struct {
+	Files map[string]string `toml:"files,omitempty"`
 }
 
 // OverlayWorkspaceTombstone decodes the [workspace] settings an overlay author
@@ -171,6 +183,24 @@ func validateOverlay(o *WorkspaceOverlay) error {
 		}
 		if isProtectedDestination(dest) {
 			return fmt.Errorf("overlay.files[%q]: destination %q targets a protected directory (.claude/ or .niwa/)", src, dest)
+		}
+	}
+
+	// Instance.Files: same rules as Files. Destinations land at each instance
+	// root, where .claude/ and .niwa/ are just as protected as they are in a
+	// repository.
+	for src, dest := range o.Instance.Files {
+		if err := validateContentSource(fmt.Sprintf("overlay.instance.files[%q] source", src), src); err != nil {
+			return err
+		}
+		if dest == "" {
+			continue
+		}
+		if err := validateContentSource(fmt.Sprintf("overlay.instance.files[%q]", src), dest); err != nil {
+			return err
+		}
+		if isProtectedDestination(dest) {
+			return fmt.Errorf("overlay.instance.files[%q]: destination %q targets a protected directory (.claude/ or .niwa/)", src, dest)
 		}
 	}
 

@@ -294,6 +294,17 @@ type WorkspaceConfig struct {
 	Files    map[string]string `toml:"files,omitempty"`
 	Instance InstanceConfig    `toml:"instance,omitempty"`
 	Root     RootConfig        `toml:"root,omitempty"`
+	// OverlayInstanceFiles is not parsed from TOML (toml:"-"). It is set
+	// exclusively by MergeWorkspaceOverlay from the overlay's
+	// [instance.files] table. It is kept separate from Instance.Files
+	// because its sources resolve relative to OverlayFilesDir (the overlay
+	// clone), not the base config directory; destinations land at each
+	// instance root verbatim, exactly as [instance.files] destinations do.
+	OverlayInstanceFiles map[string]string `toml:"-"`
+	// OverlayFilesDir is the overlay clone directory that
+	// OverlayInstanceFiles sources resolve against. Set together with it by
+	// MergeWorkspaceOverlay; empty when the merge added no entries.
+	OverlayFilesDir string `toml:"-"`
 	// Vault carries the optional [vault] block (anonymous [vault.provider]
 	// or named [vault.providers.<name>] shape, plus [vault].team_only).
 	// nil when the config declares no vault providers.

@@ -58,6 +58,26 @@ name, no `.local`.
 The source in the config repo is named `mcp.json` rather than `.mcp.json` only to
 keep it a visible template; mapping `".mcp.json" = ".mcp.json"` works the same.
 
+### From a workspace overlay
+
+A workspace overlay (`workspace-overlay.toml`) can declare its own
+`[instance.files]` table. Entries are copied verbatim to each instance root,
+exactly like the base table, with two differences:
+
+- **Sources resolve in the overlay clone**, not the base config directory, so
+  the distributed file's content lives in the overlay repo and never has to
+  appear in the base config.
+- **The base table wins per destination.** An overlay entry that targets a
+  destination the base `[instance.files]` already fills is skipped rather than
+  overwriting a base-managed file.
+
+Destinations follow the same rules as the overlay's per-repo `[files]` table:
+relative, no `..`, and nothing under `.claude/` or `.niwa/`. This is how a
+private overlay distributes a file that must keep its exact name to work — a
+project `.mcp.json`, say — without declaring it in a public base config. The
+overlay has no `[root.files]` counterpart: the workspace root is shared by
+every instance, overlaid or not.
+
 ### Loading the server without a trust prompt
 
 Claude Code may show a per-session trust prompt the first time a project MCP

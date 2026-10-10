@@ -385,11 +385,23 @@ source = "repos/app.md"
 	charWriteFile(t, filepath.Join(overlaySrc, "workspace-overlay.toml"), `
 [claude.content.repos.app]
 overlay = "app-extra.md"
+
+# The overlay's verbatim instance-root table. The first entry lands at the
+# instance root under its exact name; the second targets a destination the
+# base [instance.files] already fills, so base-wins-per-destination skips it
+# and the golden pins .editorconfig holding the base bytes.
+[instance.files]
+"dist/overlay-note.txt" = "OVERLAY-NOTE.txt"
+"dist/overlay-editorconfig" = ".editorconfig"
 `, 0o644)
 	charWriteFile(t, filepath.Join(overlaySrc, "app-extra.md"),
 		"## Overlay addendum for app\n", 0o644)
 	charWriteFile(t, filepath.Join(overlaySrc, "CLAUDE.overlay.md"),
 		"# Overlay workspace context\n", 0o644)
+	charWriteFile(t, filepath.Join(overlaySrc, "dist", "overlay-note.txt"),
+		"overlay note\n", 0o644)
+	charWriteFile(t, filepath.Join(overlaySrc, "dist", "overlay-editorconfig"),
+		"root = false\n", 0o644)
 
 	// Global (personal) config layer.
 	globalDir := filepath.Join(tmpDir, "global")
