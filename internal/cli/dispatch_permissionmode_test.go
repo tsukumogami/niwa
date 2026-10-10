@@ -140,7 +140,7 @@ func derivedArgv(t *testing.T, instancePath string) []string {
 		t.Fatalf("LoadState: %v", err)
 	}
 	flags := claudeLaunchSpec().Flags
-	mode, _ := derivePermissionMode("", state.ClaudePermissions, flags)
+	mode, _ := derivePermissionMode("", "", state.ClaudePermissions, flags)
 	return buildDispatchPassthrough(flags, "", "", mode)
 }
 
@@ -180,30 +180,67 @@ func TestDerivePermissionMode(t *testing.T) {
 	if codex.PermissionMode == "--permission-mode" {
 		t.Fatal("the Codex case needs an agent whose permission flag is not --permission-mode")
 	}
+	const (
+		none = permissionSourceNone
+		flag = permissionSourceFlag
+		host = permissionSourceHost
+		ws   = permissionSourceWorkspace
+	)
 	cases := []struct {
-		name        string
-		explicit    string
-		recorded    string
-		flags       agentplan.LaunchFlags
-		wantMode    string
-		wantDerived bool
+		name       string
+		explicit   string
+		host       string
+		recorded   string
+		flags      agentplan.LaunchFlags
+		wantMode   string
+		wantSource permissionSource
 	}{
-		{"explicit wins over bypass", "acceptEdits", "bypass", claude, "acceptEdits", false},
-		{"explicit with nothing recorded", "acceptEdits", "", claude, "acceptEdits", false},
-		{"bypass with Claude flags", "", "bypass", claude, "bypassPermissions", true},
-		{"ask", "", "ask", claude, "", false},
-		{"nothing recorded", "", "", claude, "", false},
-		{"unrecognized recorded value", "", "bypassPermissions", claude, "", false},
-		{"bypass with Codex flags", "", "bypass", codex, "", false},
+		// The rungs as they were before the machine setting existed.
+		{"explicit wins over bypass", "acceptEdits", "", "bypass", claude, "acceptEdits", flag},
+		{"explicit with nothing recorded", "acceptEdits", "", "", claude, "acceptEdits", flag},
+		{"bypass with Claude flags", "", "", "bypass", claude, "bypassPermissions", ws},
+		{"ask", "", "", "ask", claude, "", none},
+		{"nothing recorded", "", "", "", claude, "", none},
+		{"unrecognized recorded value", "", "", "bypassPermissions", claude, "", none},
+		{"bypass with Codex flags", "", "", "bypass", codex, "", none},
+
+		// The machine rung, between the flag and the workspace posture.
+		{"explicit wins over host", "default", "auto", "", claude, "default", flag},
+		{"explicit wins over host and bypass", "plan", "auto", "bypass", claude, "plan", flag},
+		{"host with nothing recorded", "", "bypassPermissions", "", claude, "bypassPermissions", host},
+		{"host auto over bypass", "", "auto", "bypass", claude, "auto", host},
+		{"host default over bypass", "", "default", "bypass", claude, "default", host},
+		{"host bypassPermissions over ask", "", "bypassPermissions", "ask", claude, "bypassPermissions", host},
+		{"host acceptEdits", "", "acceptEdits", "", claude, "acceptEdits", host},
+		{"host plan", "", "plan", "", claude, "plan", host},
+		{"host dontAsk", "", "dontAsk", "", claude, "dontAsk", host},
+
+		// Codex gets nothing from any host value, alone or over a bypass
+		// posture, and still gets the explicit flag unchanged.
+		{"Codex host bypassPermissions", "", "bypassPermissions", "", codex, "", none},
+		{"Codex host auto over bypass", "", "auto", "bypass", codex, "", none},
+		{"Codex host default", "", "default", "ask", codex, "", none},
+		{"Codex explicit over host", "workspace-write", "auto", "", codex, "workspace-write", flag},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			mode, derived := derivePermissionMode(tc.explicit, tc.recorded, tc.flags)
-			if mode != tc.wantMode || derived != tc.wantDerived {
-				t.Fatalf("derivePermissionMode(%q, %q) = (%q, %v), want (%q, %v)",
-					tc.explicit, tc.recorded, mode, derived, tc.wantMode, tc.wantDerived)
+			mode, source := derivePermissionMode(tc.explicit, tc.host, tc.recorded, tc.flags)
+			if mode != tc.wantMode || source != tc.wantSource {
+				t.Fatalf("derivePermissionMode(%q, %q, %q) = (%q, %v), want (%q, %v)",
+					tc.explicit, tc.host, tc.recorded, mode, source, tc.wantMode, tc.wantSource)
 			}
 		})
+	}
+
+	// Every host value in the accepted set, against a Codex spec, forwards
+	// nothing. A future change to the flag spellings that let the host rung
+	// past the guard would route a Claude mode into --sandbox here.
+	for _, m := range config.DispatchPermissionModes {
+		for _, recorded := range []string{"", "ask", "bypass"} {
+			if mode, source := derivePermissionMode("", m, recorded, codex); mode != "" || source != permissionSourceNone {
+				t.Fatalf("Codex with host %q, recorded %q: got (%q, %v), want nothing", m, recorded, mode, source)
+			}
+		}
 	}
 }
 

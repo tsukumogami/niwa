@@ -172,9 +172,11 @@ func TestDispatch_RemoteControl_MalformedInstanceSettings_DegradesToInject(t *te
 	}
 }
 
-// An invalid host-config value makes LoadGlobalConfig fail; dispatch must degrade
-// to no injection (today's behavior) rather than fail.
-func TestDispatch_RemoteControl_InvalidHostConfig_NoInjectNoFail(t *testing.T) {
+// An invalid host-config value makes LoadGlobalConfig fail. Dispatch fails
+// closed on an unloadable machine config at step (2a), before provisioning, so
+// it neither injects remote control nor launches anything; the error names the
+// file.
+func TestDispatch_RemoteControl_InvalidHostConfig_FailsClosed(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
@@ -184,10 +186,15 @@ func TestDispatch_RemoteControl_InvalidHostConfig_NoInjectNoFail(t *testing.T) {
 	var pass []string
 	captureLaunchPassthrough(f, &pass)
 
-	if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
-		t.Fatalf("an invalid host config must not fail dispatch: %v", err)
+	_, _, err := runDispatchCmd(t, "do a thing")
+	if err == nil {
+		t.Fatal("an invalid host config must fail dispatch")
 	}
-	if slices.Contains(pass, "--settings") {
-		t.Fatalf("invalid host config should degrade to no injection; got %v", pass)
+	cfgPath := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "niwa", "config.toml")
+	if !strings.Contains(err.Error(), cfgPath) {
+		t.Fatalf("the error must name %s; got %v", cfgPath, err)
+	}
+	if f.provisionCalled != 0 || f.launchCalled != 0 || pass != nil {
+		t.Fatalf("nothing may be provisioned or launched; provision=%d launch=%d argv=%v", f.provisionCalled, f.launchCalled, pass)
 	}
 }

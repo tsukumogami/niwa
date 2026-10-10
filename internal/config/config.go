@@ -633,6 +633,20 @@ func Parse(data []byte) (*ParseResult, error) {
 				"This reverses the v0.7 consolidation: content is no longer Claude-only, so its table is agent-neutral again")
 	}
 
+	// The workspace permissions posture is deprecated as the source of a
+	// dispatched worker's permission mode: how much a worker may do unattended
+	// is the machine owner's call, so it now lives in the machine config. The
+	// posture keeps every effect it has today -- `bypass` still derives
+	// bypassPermissions for dispatch when nothing outranks it, and `ask` still
+	// writes permissions.defaultMode into the generated settings files -- so
+	// this is a notice, not a behavior change. One warning per parse, whichever
+	// levels declare the key, so apply, create and reset each print it once.
+	if table := permissionsPostureTable(&cfg); table != "" {
+		warnings = append(warnings, table+" permissions is deprecated for dispatch; "+
+			"set [global] dispatch_permission_mode in ~/.config/niwa/config.toml instead "+
+			"(niwa config set dispatch-permission-mode <mode>). The workspace value still applies until it is removed")
+	}
+
 	if err := validate(&cfg); err != nil {
 		return nil, err
 	}
@@ -653,6 +667,21 @@ func Parse(data []byte) (*ParseResult, error) {
 	}
 
 	return &ParseResult{Config: &cfg, Warnings: warnings}, nil
+}
+
+// permissionsPostureTable names the table that declares a workspace
+// permissions posture -- "[claude.settings]" or "[instance.claude.settings]",
+// the workspace level first when both do -- or returns "" when neither does.
+func permissionsPostureTable(cfg *WorkspaceConfig) string {
+	if _, ok := cfg.Claude.Settings["permissions"]; ok {
+		return "[claude.settings]"
+	}
+	if cfg.Instance.Claude != nil {
+		if _, ok := cfg.Instance.Claude.Settings["permissions"]; ok {
+			return "[instance.claude.settings]"
+		}
+	}
+	return ""
 }
 
 // isContentConfigZero reports whether a ContentConfig carries any data.
