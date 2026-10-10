@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: In Progress
 problem: |
   `niwa dispatch` takes a worker's permission mode from the workspace
   posture, which every machine running that workspace shares. A developer
@@ -21,7 +21,7 @@ absorbed:
 
 ## Status
 
-Accepted
+In Progress
 
 Absorbed [BRIEF-dispatch-default-permission-mode](docs/briefs/BRIEF-dispatch-default-permission-mode.md); carried in Absorbed Brief.
 
