@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 status: Current
 problem: |
   niwa distributes env vars to repos via [env] (.local.env files) and can inject
@@ -24,7 +25,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Current
 
 ## Context and Problem Statement
 
