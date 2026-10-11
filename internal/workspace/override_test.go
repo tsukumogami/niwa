@@ -1659,3 +1659,102 @@ func TestMergeInstanceOverridesDropsEmptyValuedFiles(t *testing.T) {
 		t.Errorf("RootFiles with only an empty value should be nil/empty, got %v", eff.RootFiles)
 	}
 }
+
+// TestMergeWorkspaceOverlay_InstanceFiles verifies that the overlay's
+// [instance.files] entries land in OverlayInstanceFiles with the overlay clone
+// recorded as their resolution directory, and that they stay out of the base
+// Instance.Files map.
+func TestMergeWorkspaceOverlay_InstanceFiles(t *testing.T) {
+	ws := baseWS()
+	overlay := &config.WorkspaceOverlay{
+		Instance: config.OverlayInstanceConfig{
+			Files: map[string]string{"mcp/mcp.json": ".mcp.json"},
+		},
+	}
+	overlayDir := t.TempDir()
+	merged, err := MergeWorkspaceOverlay(ws, overlay, overlayDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := merged.OverlayInstanceFiles["mcp/mcp.json"]; got != ".mcp.json" {
+		t.Errorf("OverlayInstanceFiles[mcp/mcp.json] = %q, want %q", got, ".mcp.json")
+	}
+	if merged.OverlayFilesDir != overlayDir {
+		t.Errorf("OverlayFilesDir = %q, want %q", merged.OverlayFilesDir, overlayDir)
+	}
+	if len(merged.Instance.Files) != 0 {
+		t.Errorf("overlay instance files leaked into base Instance.Files: %v", merged.Instance.Files)
+	}
+}
+
+// TestMergeWorkspaceOverlay_InstanceFilesBaseWinsPerDestination verifies that
+// an overlay entry targeting a destination the base [instance.files] table
+// already fills is skipped, and that an empty destination is skipped.
+func TestMergeWorkspaceOverlay_InstanceFilesBaseWinsPerDestination(t *testing.T) {
+	ws := baseWS()
+	ws.Instance.Files = map[string]string{"base/mcp.json": ".mcp.json"}
+	overlay := &config.WorkspaceOverlay{
+		Instance: config.OverlayInstanceConfig{
+			Files: map[string]string{
+				"overlay/mcp.json": ".mcp.json", // collides with base destination
+				"overlay/none.txt": "",          // no destination
+			},
+		},
+	}
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(merged.OverlayInstanceFiles) != 0 {
+		t.Errorf("expected no overlay instance files to survive, got %v", merged.OverlayInstanceFiles)
+	}
+	if merged.OverlayFilesDir != "" {
+		t.Errorf("OverlayFilesDir should stay empty when nothing survived, got %q", merged.OverlayFilesDir)
+	}
+}
+
+// TestMergeWorkspaceOverlay_InstanceFilesCollisionSpellingVariants verifies
+// the base-wins rule holds across spellings of one destination: the collision
+// is judged on the cleaned path, so "./.mcp.json" collides with ".mcp.json"
+// and "a//b" with "a/b".
+func TestMergeWorkspaceOverlay_InstanceFilesCollisionSpellingVariants(t *testing.T) {
+	ws := baseWS()
+	ws.Instance.Files = map[string]string{
+		"base/mcp.json": ".mcp.json",
+		"base/b.txt":    "a/b",
+	}
+	overlay := &config.WorkspaceOverlay{
+		Instance: config.OverlayInstanceConfig{
+			Files: map[string]string{
+				"overlay/mcp.json": "./.mcp.json",
+				"overlay/b.txt":    "a//b",
+			},
+		},
+	}
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(merged.OverlayInstanceFiles) != 0 {
+		t.Errorf("spelling variants of base destinations should collide and be skipped, got %v", merged.OverlayInstanceFiles)
+	}
+	if merged.OverlayFilesDir != "" {
+		t.Errorf("OverlayFilesDir should stay empty when nothing survived, got %q", merged.OverlayFilesDir)
+	}
+}
+
+// TestMergeInstanceOverrides_OverlayInstanceFiles verifies the merged config's
+// overlay table reaches the effective instance overrides with its resolution
+// directory.
+func TestMergeInstanceOverrides_OverlayInstanceFiles(t *testing.T) {
+	ws := baseWS()
+	ws.OverlayInstanceFiles = map[string]string{"mcp/mcp.json": ".mcp.json"}
+	ws.OverlayFilesDir = "/overlay/clone"
+	eff := MergeInstanceOverrides(ws)
+	if got := eff.OverlayInstanceFiles["mcp/mcp.json"]; got != ".mcp.json" {
+		t.Errorf("OverlayInstanceFiles[mcp/mcp.json] = %q, want %q", got, ".mcp.json")
+	}
+	if eff.OverlayFilesDir != "/overlay/clone" {
+		t.Errorf("OverlayFilesDir = %q, want %q", eff.OverlayFilesDir, "/overlay/clone")
+	}
+}

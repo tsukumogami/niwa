@@ -478,6 +478,21 @@ func (m *RootSettingsMaterializer) Materialize(ctx *MaterializeContext) ([]strin
 	}
 	written = append(written, instanceFiles...)
 
+	// Distribute the overlay's [instance.files] the same way. The sources live
+	// in the overlay clone, so the copy runs under a context whose ConfigDir
+	// is that directory (containment included); everything else -- verbatim
+	// naming, managed-file tracking, drift and cleanup -- is shared with the
+	// base table above.
+	if len(effective.OverlayInstanceFiles) > 0 && effective.OverlayFilesDir != "" {
+		overlayCtx := *mctx
+		overlayCtx.ConfigDir = effective.OverlayFilesDir
+		overlayFiles, err := materializeVerbatimFiles(&overlayCtx, effective.OverlayInstanceFiles)
+		if err != nil {
+			return nil, fmt.Errorf("materializing overlay instance-root files: %w", err)
+		}
+		written = append(written, overlayFiles...)
+	}
+
 	return written, nil
 }
 

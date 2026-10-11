@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -16,19 +17,31 @@ import (
 // from WorkspaceConfig — overlay TOML has different validation rules and lacks
 // workspace metadata fields.
 type WorkspaceOverlay struct {
-	Sources []OverlaySourceConfig   `toml:"sources"`
-	Groups  map[string]GroupConfig  `toml:"groups"`
-	Repos   map[string]RepoOverride `toml:"repos"`
-	Claude  OverlayClaudeConfig     `toml:"claude"`
-	Env     EnvConfig               `toml:"env"`
-	Files   map[string]string       `toml:"files,omitempty"`
-	Vault   *VaultRegistry          `toml:"vault,omitempty"`
+	Sources  []OverlaySourceConfig   `toml:"sources"`
+	Groups   map[string]GroupConfig  `toml:"groups"`
+	Repos    map[string]RepoOverride `toml:"repos"`
+	Claude   OverlayClaudeConfig     `toml:"claude"`
+	Env      EnvConfig               `toml:"env"`
+	Files    map[string]string       `toml:"files,omitempty"`
+	Instance OverlayInstanceConfig   `toml:"instance,omitempty"`
+	Vault    *VaultRegistry          `toml:"vault,omitempty"`
 	// Workspace is a tombstone, not configuration. Nothing reads it into the
 	// merged config -- MergeWorkspaceOverlay never assigns Workspace at all --
 	// so every field under it is inert by construction. It is decoded solely
 	// so an author who writes the stanza is told it does nothing, instead of
 	// watching a security-relevant setting be silently ignored.
 	Workspace OverlayWorkspaceTombstone `toml:"workspace"`
+}
+
+// OverlayInstanceConfig is the [instance] section of workspace-overlay.toml.
+// Only the verbatim file-distribution table is carried: an overlay can place
+// files at each instance root under their exact names, which is how a private
+// overlay distributes a file that must keep its name to be read at all (a
+// project .mcp.json, say) without declaring it in the public base config.
+// Sources resolve in the overlay clone, not the base config directory, and
+// the base [instance.files] table wins per destination on collision.
+type OverlayInstanceConfig struct {
+	Files map[string]string `toml:"files,omitempty"`
 }
 
 // OverlayWorkspaceTombstone decodes the [workspace] settings an overlay author
@@ -159,19 +172,15 @@ func validateOverlay(o *WorkspaceOverlay) error {
 	// Files: source keys and destination values must not be absolute, must not
 	// contain "..", and destinations must not target protected directories
 	// (.claude/ or .niwa/).
-	for src, dest := range o.Files {
-		if err := validateContentSource(fmt.Sprintf("overlay.files[%q] source", src), src); err != nil {
-			return err
-		}
-		if dest == "" {
-			continue
-		}
-		if err := validateContentSource(fmt.Sprintf("overlay.files[%q]", src), dest); err != nil {
-			return err
-		}
-		if isProtectedDestination(dest) {
-			return fmt.Errorf("overlay.files[%q]: destination %q targets a protected directory (.claude/ or .niwa/)", src, dest)
-		}
+	if err := validateOverlayFileTable("overlay.files", o.Files); err != nil {
+		return err
+	}
+
+	// Instance.Files: same rules as Files. Destinations land at each instance
+	// root, where .claude/ and .niwa/ are just as protected as they are in a
+	// repository.
+	if err := validateOverlayFileTable("overlay.instance.files", o.Instance.Files); err != nil {
+		return err
 	}
 
 	// Claude.Hooks: all hook script paths must be relative (not absolute, no "..").
@@ -224,14 +233,60 @@ func validateOverlay(o *WorkspaceOverlay) error {
 	return nil
 }
 
+// validateOverlayFileTable applies the shared rules for an overlay
+// file-distribution table (per-repo [files] or [instance.files]): source keys
+// must be non-empty and relative with no "..", and destinations must be
+// relative with no "..", must not resolve to the target root itself, and must
+// not target a protected directory. Destinations are judged on their cleaned
+// form so a spelling variant ("./.claude/x", "a//b") obeys the same rules as
+// the plain one.
+func validateOverlayFileTable(table string, files map[string]string) error {
+	for src, dest := range files {
+		if src == "" {
+			return fmt.Errorf("%s: a source key is empty", table)
+		}
+		if err := validateContentSource(fmt.Sprintf("%s[%q] source", table, src), src); err != nil {
+			return err
+		}
+		if dest == "" {
+			continue
+		}
+		if err := validateContentSource(fmt.Sprintf("%s[%q]", table, src), dest); err != nil {
+			return err
+		}
+		if CleanDestination(dest) == "." {
+			return fmt.Errorf("%s[%q]: destination %q resolves to the target root itself", table, src, dest)
+		}
+		if isProtectedDestination(dest) {
+			return fmt.Errorf("%s[%q]: destination %q targets a protected directory (.claude/ or .niwa/)", table, src, dest)
+		}
+	}
+	return nil
+}
+
+// CleanDestination normalizes a destination path for comparison and prefix
+// checks: forward slashes, with redundant separators and "." components
+// removed. A trailing slash is semantic in a destination (place the file
+// under this directory), so callers keep the original string for writing and
+// use the cleaned form only to judge it. The overlay merge uses it too, so a
+// collision between two spellings of one destination is judged by the same
+// rule validation applies.
+func CleanDestination(dest string) string {
+	return path.Clean(filepath.ToSlash(dest))
+}
+
 // isProtectedDestination reports whether a file destination path targets a
 // directory that overlay authors are not permitted to write into (.claude/ or
 // .niwa/ subtrees). These directories contain generated artifacts and Claude
 // Code configuration that must not be overwritten by additive overlay keys.
+// The judgment runs on the cleaned path, so "./.claude/x" and ".claude//x"
+// are as protected as ".claude/x", and the bare directories themselves
+// (".claude", ".claude/") are protected too: with a trailing slash either is
+// a valid directory destination that would drop a file straight into it.
 func isProtectedDestination(dest string) bool {
-	// Normalize slashes for consistent prefix matching.
-	d := filepath.ToSlash(dest)
-	return strings.HasPrefix(d, ".claude/") || strings.HasPrefix(d, ".niwa/")
+	d := CleanDestination(dest)
+	return d == ".claude" || d == ".niwa" ||
+		strings.HasPrefix(d, ".claude/") || strings.HasPrefix(d, ".niwa/")
 }
 
 // DeriveOverlayURL converts a workspace source URL into a convention overlay

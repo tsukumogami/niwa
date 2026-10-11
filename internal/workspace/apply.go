@@ -1808,7 +1808,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	mcpServers, mcpWarnings := MCPServersFromConfig(effectiveCfg)
 	allWarnings = append(allWarnings, mcpWarnings...)
 	instanceOverrides := MergeInstanceOverrides(effectiveCfg)
-	mcpDestinations := mcpVerbatimDestinations(instanceOverrides.Files, instanceOverrides.InstanceFiles, instanceOverrides.RootFiles)
+	mcpDestinations := mcpVerbatimDestinations(instanceOverrides.Files, instanceOverrides.InstanceFiles, instanceOverrides.OverlayInstanceFiles, instanceOverrides.RootFiles)
 
 	// One resolution of the session environment for the whole apply. The values
 	// reach the generated payloads below and the settings documents at step
