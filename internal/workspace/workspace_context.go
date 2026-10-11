@@ -420,6 +420,7 @@ func (m *RootSettingsMaterializer) Materialize(ctx *MaterializeContext) ([]strin
 		DiscoveredEnv: &DiscoveredEnv{
 			WorkspaceFile: relWsEnv,
 		},
+		Stderr: ctx.Stderr,
 	}
 	envResult, _, err := resolveClaudeEnvVars(mctx)
 	if err != nil {

@@ -1099,8 +1099,8 @@ func resolveDeclaredEnvVars(ctx *MaterializeContext, label string, promote []str
 		// string, so promoting it silently produced "". Now it is absent, and
 		// absence alone no longer distinguishes "we could not supply this" from
 		// "you promoted a key that does not exist". The unresolved set makes
-		// that distinction; the hard error is kept for everything outside it,
-		// which is what still catches a typo in the promote list.
+		// that distinction: a key in it is omitted and reported, and a key
+		// outside it is skipped with a warning that points at a possible typo.
 		unresolved := promoteUnresolvedSet(ctx)
 		for _, key := range promote {
 			val, found := resolvedEnv[key]
@@ -1122,7 +1122,20 @@ func resolveDeclaredEnvVars(ctx *MaterializeContext, label string, promote []str
 				reportPromoteOmission(ctx.Keys, key, omitted)
 				continue
 			}
-			return nil, nil, fmt.Errorf("%s: promoted key %q not found in resolved env vars", label, key)
+			// Neither supplied nor known to be unsupplied. This is skipped with
+			// a warning rather than refused, because absence is not evidence of
+			// a typo: a base config may promote a key that only an overlay or a
+			// personal config declares, and a worktree only sees what its
+			// clone's env file recorded, which can lag the config. Failing here
+			// took down whole runs (niwa#367) over a key that was never going to
+			// have a value anyway. Strict mode still refuses it, as it refuses
+			// every promoted key without a value.
+			if ctx.StrictSecrets {
+				return nil, nil, fmt.Errorf("%w: %s promotes %q, which no env table declares and nothing supplied",
+					ErrStrictSecrets, label, key)
+			}
+			warnPromoteUnsupplied(ctx, label, key)
+			continue
 		}
 		// Every env source contributes to the rollup because any
 		// plaintext-file rotation upstream can change promoted
@@ -1169,8 +1182,8 @@ func resolveDeclaredEnvVars(ctx *MaterializeContext, label string, promote []str
 // second shape is the no-provider contributor's exact case, and without it here
 // a promoted key of that shape falls through to the hard error meant to catch a
 // typo in the promote list. Whether the key is spelled anywhere in the
-// declarations is precisely what separates a shortfall from a typo, so a key
-// declared nowhere stays absent from this set and still hard-errors.
+// declarations is what separates a known shortfall from a possible typo, so a
+// key declared nowhere stays absent from this set and gets the louder warning.
 //
 // The instance path reads the marks that ResolveEnvVars just consumed: the mark
 // stays on the value in the effective config, and only the materialized output
@@ -1235,6 +1248,25 @@ func promoteUnresolvedSet(ctx *MaterializeContext) map[string]unresolvedEnvKey {
 		})
 	}
 	return set
+}
+
+// warnPromoteUnsupplied tells the user a promoted key was skipped because no
+// value for it was found and no declaration explains why. The wording differs
+// by path because the remedy does: on the worktree path the clone's env file is
+// the only source, so re-applying the instance is what refreshes it; on the
+// instance path the promote list itself is what to check.
+func warnPromoteUnsupplied(ctx *MaterializeContext, label, key string) {
+	w := ctx.Stderr
+	if w == nil {
+		w = os.Stderr
+	}
+	if ctx.InheritedEnv != nil {
+		fmt.Fprintf(w, "warning: %s: promoted key %q is not in the env niwa materialized for repo %s; skipping it (run niwa apply if it should have a value)\n",
+			label, key, ctx.RepoName)
+		return
+	}
+	fmt.Fprintf(w, "warning: %s: promoted key %q has no value and no env table declares it; skipping it (check the promote list for a typo)\n",
+		label, key)
 }
 
 // reportPromoteOmission records a promoted key that was omitted rather than

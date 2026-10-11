@@ -98,3 +98,43 @@ Feature: niwa worktree env parity
     # Cleanup
     When I call niwa_destroy_session in instance "wt-promote"
     Then the session is ended in instance "wt-promote"
+
+  # Regression coverage for niwa#367. A config that promotes a key nothing
+  # supplies -- here declared by no table at all, the shape a base config has
+  # when only an overlay or a personal config would declare the key -- must not
+  # fail instance creation or worktree creation. The key is skipped with a
+  # warning; the rest of the settings env block is still written.
+  @critical
+  Scenario: niwa worktree create skips a promoted key nothing supplies
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists
+    And a config repo "wt-unsupplied" exists with body:
+      """
+      [workspace]
+      name = "wt-unsupplied"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+
+      [env.vars]
+      PRESENT_KEY = "present-value"
+
+      [claude.env]
+      promote = ["PRESENT_KEY", "UNSUPPLIED_KEY"]
+      """
+    When I run niwa init from config repo "wt-unsupplied"
+    Then the exit code is 0
+    When I run "niwa create wt-unsupplied"
+    Then the exit code is 0
+    When I call niwa worktree create for repo "myapp" with purpose "wt-unsupplied" in instance "wt-unsupplied"
+    Then the last session is active in instance "wt-unsupplied"
+    And the session worktree exists in instance "wt-unsupplied"
+    And the file ".claude/settings.local.json" in the last worktree contains "present-value"
+    And the file ".claude/settings.local.json" in the last worktree does not contain "UNSUPPLIED_KEY"
+    # Cleanup
+    When I call niwa_destroy_session in instance "wt-unsupplied"
+    Then the session is ended in instance "wt-unsupplied"

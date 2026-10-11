@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -76,18 +77,19 @@ func TestPromoteDeclaredWithNoValue(t *testing.T) {
 		}
 	})
 
-	t.Run("workspace root path still rejects a typo", func(t *testing.T) {
+	t.Run("workspace root path warns about a typo", func(t *testing.T) {
 		cfg := &config.WorkspaceConfig{}
 		cfg.Env.Secrets.Recommended = map[string]string{"GH_TOKEN": desc}
 		cfg.Claude.Env.Promote = []string{"GH_TOEKN"}
 
 		configDir, instanceRoot := rootSettingsDirs(t)
-		_, err := (&RootSettingsMaterializer{}).Materialize(&MaterializeContext{Config: cfg, ConfigDir: configDir, RepoDir: instanceRoot})
-		if err == nil {
-			t.Fatal("a promoted key declared nowhere must stay a hard error")
+		var stderr bytes.Buffer
+		_, err := (&RootSettingsMaterializer{}).Materialize(&MaterializeContext{Config: cfg, ConfigDir: configDir, RepoDir: instanceRoot, Stderr: &stderr})
+		if err != nil {
+			t.Fatalf("a promoted key declared nowhere must be skipped, not refused: %v", err)
 		}
-		if !strings.Contains(err.Error(), "GH_TOEKN") {
-			t.Errorf("error = %q, want it to name the misspelled key", err)
+		if !strings.Contains(stderr.String(), "GH_TOEKN") || !strings.Contains(stderr.String(), "typo") {
+			t.Errorf("stderr = %q, want a warning naming the misspelled key", stderr.String())
 		}
 	})
 

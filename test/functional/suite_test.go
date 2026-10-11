@@ -496,6 +496,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^a single-repo channeled workspace "([^"]*)" exists with repo content$`, iSetUpSingleRepoChanneledWorkspaceWithContent)
 	ctx.Step(`^the file "([^"]*)" exists in the last worktree$`, theFileExistsInLastWorktree)
 	ctx.Step(`^the file "([^"]*)" in the last worktree contains "([^"]*)"$`, theFileInLastWorktreeContains)
+	ctx.Step(`^the file "([^"]*)" in the last worktree does not contain "([^"]*)"$`, theFileInLastWorktreeDoesNotContain)
 
 	// --- @critical: rank-2 deprecation + plugin auto-install ---
 	registerRank2Steps(ctx)

@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,24 +85,38 @@ func TestSessionEnvPromotesFromTheEnvPipeline(t *testing.T) {
 	}
 }
 
-// TestSessionEnvErrorNamesItsOwnTable checks that a workspace carrying both
+// TestSessionEnvWarningNamesItsOwnTable checks that a workspace carrying both
 // declarations is told which one to fix. The promote machinery is shared, so
-// the label is the only thing distinguishing the two failures.
-func TestSessionEnvErrorNamesItsOwnTable(t *testing.T) {
+// the label is the only thing distinguishing the two warnings.
+func TestSessionEnvWarningNamesItsOwnTable(t *testing.T) {
 	cfg := sessionEnvConfig(nil, "MISSING")
 	cfg.Env = config.EnvConfig{
 		Vars: config.EnvVarsTable{Values: map[string]config.MaybeSecret{"OTHER": {Plain: "x"}}},
 	}
 
-	_, _, err := SessionEnvVars(cfg, MergeInstanceOverrides(cfg), t.TempDir())
-	if err == nil {
-		t.Fatal("promoting a key that does not exist produced no error")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "session.env") {
-		t.Errorf("the error does not name the table it came from: %v", err)
+	oldStderr := os.Stderr
+	os.Stderr = w
+	vars, _, err := SessionEnvVars(cfg, MergeInstanceOverrides(cfg), t.TempDir())
+	os.Stderr = oldStderr
+	w.Close()
+	captured, _ := io.ReadAll(r)
+
+	if err != nil {
+		t.Fatalf("promoting a key nothing declares must be skipped, not refused: %v", err)
 	}
-	if strings.Contains(err.Error(), "claude.env") {
-		t.Errorf("the error blames the Claude table for a neutral declaration: %v", err)
+	if _, ok := vars["MISSING"]; ok {
+		t.Errorf("MISSING was promoted: %v", vars)
+	}
+	warning := string(captured)
+	if !strings.Contains(warning, "MISSING") || !strings.Contains(warning, "session.env") {
+		t.Errorf("the warning does not name the key and the table it came from: %q", warning)
+	}
+	if strings.Contains(warning, "claude.env") {
+		t.Errorf("the warning blames the Claude table for a neutral declaration: %q", warning)
 	}
 }
 
