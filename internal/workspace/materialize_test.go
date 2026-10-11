@@ -810,13 +810,15 @@ func TestSettingsMaterializerPromoteMissing(t *testing.T) {
 		RepoName:  "testrepo",
 	}
 
+	var stderr bytes.Buffer
+	ctx.Stderr = &stderr
+
 	m := &SettingsMaterializer{}
-	_, err := m.Materialize(ctx)
-	if err == nil {
-		t.Fatal("expected error for missing promoted key")
+	if _, err := m.Materialize(ctx); err != nil {
+		t.Fatalf("a missing promoted key must be skipped, not refused: %v", err)
 	}
-	if !strings.Contains(err.Error(), "promoted key \"MISSING_KEY\" not found") {
-		t.Errorf("unexpected error: %v", err)
+	if !strings.Contains(stderr.String(), "promoted key \"MISSING_KEY\"") {
+		t.Errorf("stderr = %q, want a warning naming the key", stderr.String())
 	}
 }
 

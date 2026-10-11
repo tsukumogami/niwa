@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -353,9 +354,9 @@ func TestLowerLayerPlaceholderIsRemovedByAMark(t *testing.T) {
 }
 
 // TestPromoteThreeWay covers all three arms of the promote branch on the
-// instance path: promote a resolved key, omit-and-report a marked one, and keep
-// the hard error for a key that is neither — which is what still catches a typo
-// in the promote list.
+// instance path: promote a resolved key, omit-and-report a marked one, and skip
+// with a warning a key that is neither — which is what still flags a typo in the
+// promote list without failing the run.
 func TestPromoteThreeWay(t *testing.T) {
 	t.Run("promotes a resolved key", func(t *testing.T) {
 		ctx, _ := unresolvedEnvCtx(t, map[string]config.MaybeSecret{"TOKEN": {Plain: "v"}})
@@ -393,13 +394,20 @@ func TestPromoteThreeWay(t *testing.T) {
 		}
 	})
 
-	t.Run("errors for a key that is neither", func(t *testing.T) {
+	t.Run("warns for a key that is neither", func(t *testing.T) {
 		ctx, _ := unresolvedEnvCtx(t, map[string]config.MaybeSecret{"TOKEN": {Plain: "v"}})
 		ctx.Effective.Claude.Env = config.ClaudeEnvConfig{Promote: []string{"TYPOD_TOKEN"}}
-		if _, _, err := resolveClaudeEnvVars(ctx); err == nil {
-			t.Fatal("a promoted key that was never declared must stay a hard error")
-		} else if !strings.Contains(err.Error(), "TYPOD_TOKEN") {
-			t.Errorf("error = %q, want it to name the key", err)
+		var stderr bytes.Buffer
+		ctx.Stderr = &stderr
+		got, _, err := resolveClaudeEnvVars(ctx)
+		if err != nil {
+			t.Fatalf("a promoted key that was never declared must be skipped, not refused: %v", err)
+		}
+		if _, ok := got["TYPOD_TOKEN"]; ok {
+			t.Errorf("an undeclared key was promoted: %v", got)
+		}
+		if !strings.Contains(stderr.String(), "TYPOD_TOKEN") {
+			t.Errorf("stderr = %q, want a warning naming the key", stderr.String())
 		}
 	})
 }
@@ -443,11 +451,16 @@ func TestPromoteWorktreePathUsesRecoveredRecords(t *testing.T) {
 		t.Errorf("omitted key was promoted: %v", got)
 	}
 
-	// A key in neither the inherited env nor the recovered records is still a
-	// hard error, so inheritance cannot mask a genuine misconfiguration.
+	// A key in neither the inherited env nor the recovered records is skipped
+	// with a warning rather than silently, so inheritance cannot hide it.
 	ctx.Effective.Claude.Env = config.ClaudeEnvConfig{Promote: []string{"ABSENT"}}
-	if _, _, err := resolveClaudeEnvVars(ctx); err == nil {
-		t.Fatal("expected the promote error for a key absent from config, clone env, and records")
+	var stderr bytes.Buffer
+	ctx.Stderr = &stderr
+	if _, _, err := resolveClaudeEnvVars(ctx); err != nil {
+		t.Fatalf("a key absent from config, clone env, and records must be skipped: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "ABSENT") {
+		t.Errorf("stderr = %q, want a warning naming the key", stderr.String())
 	}
 }
 

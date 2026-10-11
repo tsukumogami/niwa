@@ -16,7 +16,8 @@ rationale: |
   The promote + inline model matches existing patterns in the codebase where inline
   vars override file-based sources. It avoids value duplication for vars that need
   both targets, while still supporting settings-only vars that don't belong in
-  .local.env. Hard errors for missing promoted keys prevent silent misconfiguration.
+  .local.env. A promoted key with no value is skipped and reported, never written
+  as a placeholder and never fatal outside strict mode.
 ---
 
 # DESIGN: Settings Env
@@ -60,7 +61,7 @@ inline, and overridden at different levels of the hierarchy.
   or both
 - Resolution order must be predictable -- no surprises when vars appear at multiple
   levels
-- Missing promoted keys must produce actionable errors
+- Missing promoted keys must produce an actionable report or warning
 - The config format should make intent obvious when reading workspace.toml
 - Consistency with existing merge semantics (inline wins over files, repo wins over
   workspace)
@@ -109,7 +110,8 @@ GH_TOKEN = "repo-specific-value"   # overrides promoted GH_TOKEN for this repo
 2. Collect promoted keys: workspace `[claude.env].promote` union with repo
    `[repos.X.claude.env].promote`.
 3. For each promoted key, look it up in the resolved env from step 1. If not found,
-   emit a hard error naming the key and which promote list declared it.
+   skip it: a key some table declares is reported as unresolved, and a key no
+   table declares gets a warning naming the key and the promote list.
 4. Start with promoted key-value pairs as the base.
 5. Overlay workspace `[claude.env]` inline vars (inline wins over promote).
 6. Overlay repo `[repos.X.claude.env]` inline vars (repo wins over workspace).
@@ -118,8 +120,16 @@ The final result is written to the `env` block in `settings.local.json`.
 
 **Error behavior:**
 
-- Promoted key not in resolved env: hard error at materialize time.
-  Message: `claude.env: promoted key "X" not found in resolved env vars`
+- Promoted key not in resolved env: skipped, never fatal outside strict mode. A
+  key declared in an env table (for example `[env.secrets.optional]`) is an
+  expected shortfall and goes into the run's unresolved-key report. A key no table
+  declares gets a warning that suggests checking the promote list for a typo. It
+  started as a hard error, but absence alone can't tell a typo from a key that
+  another layer (a workspace overlay or a personal config) declares, and on the
+  worktree path, which reads the clone's materialized env, from an env file that
+  predates the current config. Failing there aborted worktree creation over a key
+  that was never going to have a value (niwa#367). Under strict mode every
+  promoted key without a value is still refused.
 - Promoted key also declared inline at the same level: not an error. Inline wins
   silently. This is intentional -- it lets users override a promoted value without
   removing it from the promote list.

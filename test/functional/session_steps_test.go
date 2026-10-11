@@ -143,6 +143,27 @@ func theFileInLastWorktreeContains(ctx context.Context, relPath, text string) er
 	return nil
 }
 
+// theFileInLastWorktreeDoesNotContain is the negative of
+// theFileInLastWorktreeContains: the file must exist and must not hold text.
+func theFileInLastWorktreeDoesNotContain(ctx context.Context, relPath, text string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	if s.lastSessionWorktreePath == "" {
+		return fmt.Errorf("no worktree path stored; create a worktree first")
+	}
+	full := filepath.Join(s.lastSessionWorktreePath, relPath)
+	data, err := os.ReadFile(full)
+	if err != nil {
+		return fmt.Errorf("reading %q in worktree %s: %w", relPath, s.lastSessionWorktreePath, err)
+	}
+	if strings.Contains(string(data), text) {
+		return fmt.Errorf("file %q unexpectedly contains %q\ncontent:\n%s", full, text, string(data))
+	}
+	return nil
+}
+
 // sessionCreateRE parses the `niwa session create` success line:
 //
 //	session: created <id> at <path>

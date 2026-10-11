@@ -51,29 +51,3 @@ func TestApplyToWorktreeInheritsPromotedEnvFromClone(t *testing.T) {
 		t.Errorf("settings.local.json missing the clone-sourced GH_TOKEN value:\n%s", data)
 	}
 }
-
-// TestApplyToWorktreePromoteMissingFromCloneErrors pins the negative case: when a
-// promoted key is absent from BOTH the config and the clone's materialized env,
-// the worktree apply still surfaces the promote error naming the key rather than
-// silently dropping it. Inheritance must not mask a genuine misconfiguration.
-func TestApplyToWorktreePromoteMissingFromCloneErrors(t *testing.T) {
-	cfg, configDir, instanceRoot, worktreePath := applyToWorktreeFixture(t)
-	cfg.Claude.Env = config.ClaudeEnvConfig{Promote: []string{"GH_TOKEN"}}
-
-	// Clone exists but its materialized env holds no GH_TOKEN.
-	cloneRepoDir := filepath.Join(instanceRoot, "apps", "app")
-	if err := os.MkdirAll(cloneRepoDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cloneRepoDir, ".local.env"), []byte("OTHER=x\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, "apps", "app", "ship-the-thing", "branch-xyz", WorktreeApplyOptions{})
-	if err == nil {
-		t.Fatal("expected ApplyToWorktree to fail when a promoted key is absent from both config and clone env")
-	}
-	if !strings.Contains(err.Error(), "GH_TOKEN") {
-		t.Errorf("error = %q, want it to name the missing promoted key", err.Error())
-	}
-}
