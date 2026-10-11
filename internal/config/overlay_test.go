@@ -562,11 +562,13 @@ func TestParseOverlay_InstanceFilesProtectedDestination(t *testing.T) {
 }
 
 // TestParseOverlay_InstanceFilesTraversal verifies that ".." components are
-// rejected on both sides of an [instance.files] entry.
+// rejected on both sides of an [instance.files] entry, including one buried
+// mid-path.
 func TestParseOverlay_InstanceFilesTraversal(t *testing.T) {
 	for _, toml := range []string{
 		"[instance.files]\n\"../escape.json\" = \"dest.json\"\n",
 		"[instance.files]\n\"src/file.json\" = \"../escape.json\"\n",
+		"[instance.files]\n\"src/file.json\" = \"a/../../x\"\n",
 	} {
 		path := writeOverlayFile(t, toml)
 		_, err := ParseOverlay(path)
@@ -576,5 +578,37 @@ func TestParseOverlay_InstanceFilesTraversal(t *testing.T) {
 		if !strings.Contains(err.Error(), "path traversal") {
 			t.Errorf("error %q does not mention path traversal", err.Error())
 		}
+	}
+}
+
+// TestParseOverlay_InstanceFilesSpellingVariants verifies that the rules judge
+// a destination's cleaned form: a "./" prefix does not slip a protected
+// directory past the check, an absolute destination is rejected, a destination
+// that resolves to the target root itself is rejected, and an empty source key
+// is rejected.
+func TestParseOverlay_InstanceFilesSpellingVariants(t *testing.T) {
+	cases := []struct {
+		name    string
+		tomlDoc string
+		wantErr string
+	}{
+		{"dot-slash protected", "[instance.files]\n\"src/x.json\" = \"./.claude/x.json\"\n", "protected directory"},
+		{"double-slash protected", "[instance.files]\n\"src/x.json\" = \".niwa//x.json\"\n", "protected directory"},
+		{"bare protected dir", "[instance.files]\n\"src/x.json\" = \".claude/\"\n", "protected directory"},
+		{"absolute destination", "[instance.files]\n\"src/x.json\" = \"/abs/x.json\"\n", "absolute paths are not allowed"},
+		{"root destination", "[instance.files]\n\"src/x.json\" = \"./\"\n", "resolves to the target root"},
+		{"empty source key", "[instance.files]\n\"\" = \"x.json\"\n", "source key is empty"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeOverlayFile(t, tc.tomlDoc)
+			_, err := ParseOverlay(path)
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+		})
 	}
 }

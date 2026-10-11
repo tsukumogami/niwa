@@ -1713,6 +1713,36 @@ func TestMergeWorkspaceOverlay_InstanceFilesBaseWinsPerDestination(t *testing.T)
 	}
 }
 
+// TestMergeWorkspaceOverlay_InstanceFilesCollisionSpellingVariants verifies
+// the base-wins rule holds across spellings of one destination: the collision
+// is judged on the cleaned path, so "./.mcp.json" collides with ".mcp.json"
+// and "a//b" with "a/b".
+func TestMergeWorkspaceOverlay_InstanceFilesCollisionSpellingVariants(t *testing.T) {
+	ws := baseWS()
+	ws.Instance.Files = map[string]string{
+		"base/mcp.json": ".mcp.json",
+		"base/b.txt":    "a/b",
+	}
+	overlay := &config.WorkspaceOverlay{
+		Instance: config.OverlayInstanceConfig{
+			Files: map[string]string{
+				"overlay/mcp.json": "./.mcp.json",
+				"overlay/b.txt":    "a//b",
+			},
+		},
+	}
+	merged, err := MergeWorkspaceOverlay(ws, overlay, t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(merged.OverlayInstanceFiles) != 0 {
+		t.Errorf("spelling variants of base destinations should collide and be skipped, got %v", merged.OverlayInstanceFiles)
+	}
+	if merged.OverlayFilesDir != "" {
+		t.Errorf("OverlayFilesDir should stay empty when nothing survived, got %q", merged.OverlayFilesDir)
+	}
+}
+
 // TestMergeInstanceOverrides_OverlayInstanceFiles verifies the merged config's
 // overlay table reaches the effective instance overrides with its resolution
 // directory.

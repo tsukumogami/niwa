@@ -68,8 +68,9 @@ exactly like the base table, with two differences:
   the distributed file's content lives in the overlay repo and never has to
   appear in the base config.
 - **The base table wins per destination.** An overlay entry that targets a
-  destination the base `[instance.files]` already fills is skipped rather than
-  overwriting a base-managed file.
+  destination the base `[instance.files]` already fills is skipped, silently,
+  rather than overwriting a base-managed file. The comparison runs on the
+  cleaned path, so `./.mcp.json` collides with `.mcp.json`.
 
 Destinations follow the same rules as the overlay's per-repo `[files]` table:
 relative, no `..`, and nothing under `.claude/` or `.niwa/`. This is how a

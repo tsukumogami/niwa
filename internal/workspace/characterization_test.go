@@ -388,11 +388,13 @@ overlay = "app-extra.md"
 
 # The overlay's verbatim instance-root table. The first entry lands at the
 # instance root under its exact name; the second targets a destination the
-# base [instance.files] already fills, so base-wins-per-destination skips it
-# and the golden pins .editorconfig holding the base bytes.
+# base [instance.files] already fills -- spelled "./.editorconfig" so the
+# golden also pins that the collision is judged on the cleaned path -- and
+# base-wins-per-destination skips it, leaving .editorconfig with the base
+# bytes.
 [instance.files]
 "dist/overlay-note.txt" = "OVERLAY-NOTE.txt"
-"dist/overlay-editorconfig" = ".editorconfig"
+"dist/overlay-editorconfig" = "./.editorconfig"
 `, 0o644)
 	charWriteFile(t, filepath.Join(overlaySrc, "app-extra.md"),
 		"## Overlay addendum for app\n", 0o644)

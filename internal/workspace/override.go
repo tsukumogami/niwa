@@ -926,15 +926,18 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 	// and a map entry carries no room for that distinction. Base wins per
 	// destination: an overlay entry targeting a destination the base table
 	// already fills is skipped rather than overwriting a base-managed file.
+	// Both sides are compared on their cleaned form (config.CleanDestination),
+	// so a spelling variant ("./.mcp.json", "a//b") collides with the plain
+	// one instead of slipping past the rule and overwriting the base copy.
 	if len(overlay.Instance.Files) > 0 {
 		baseDests := make(map[string]bool, len(merged.Instance.Files))
 		for _, dest := range merged.Instance.Files {
 			if dest != "" {
-				baseDests[dest] = true
+				baseDests[config.CleanDestination(dest)] = true
 			}
 		}
 		for src, dest := range overlay.Instance.Files {
-			if dest == "" || baseDests[dest] {
+			if dest == "" || baseDests[config.CleanDestination(dest)] {
 				continue
 			}
 			if merged.OverlayInstanceFiles == nil {
