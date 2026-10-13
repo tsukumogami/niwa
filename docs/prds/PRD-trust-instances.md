@@ -14,7 +14,8 @@ goals: |
   applies then comes up trusted, a session started at its root in any
   permission mode gets neither the folder-trust dialog nor the MCP approval
   prompt, and niwa takes back on destroy or reap exactly the trust it gave.
-upstream: docs/briefs/BRIEF-trust-instances.md
+absorbed:
+  - docs/briefs/BRIEF-trust-instances.md
 ---
 
 # PRD: Trust the instances niwa creates
@@ -22,6 +23,44 @@ upstream: docs/briefs/BRIEF-trust-instances.md
 ## Status
 
 Accepted
+
+Absorbed [BRIEF-trust-instances](docs/briefs/BRIEF-trust-instances.md); carried in Absorbed Brief.
+
+## Absorbed Brief
+
+This PRD absorbed the feature's brief, which framed why the work matters before
+any requirement was written.
+
+**The problem.** niwa makes a fresh instance for every `niwa create` and every
+dispatch, and Claude Code treats each one as a stranger. A session started at
+an instance root in any mode other than bypass stops on a folder-trust dialog
+and then on an approval prompt for each MCP server the workspace already
+declared. niwa writes an approval list for those servers into the instance's
+project settings, but Claude Code ignores project settings in a directory
+nobody trusted, and a trusted parent doesn't count. A team whose server is
+private can't even get the list: the overlay, where it keeps what it can't
+publish, has no `[mcp.servers]` table. The workarounds are bypass mode, which
+drops every permission check, or hand-editing user-level Claude settings on
+every host.
+
+**The outcome.** A workspace author opts in once and declares each server once,
+in the base config or the overlay. Instances come up trusted, so a developer or
+a dispatched worker at an instance root gets neither prompt, and the author
+knows that trust means Claude Code applies the instance's permissions, hooks
+and servers without asking. Destroy and reap take back only the trust niwa
+gave; a config file niwa can't read is left alone with a warning; a workspace
+that doesn't opt in sees no change.
+
+**The journeys.** A workspace author turns the option on and existing
+instances catch up on the next apply. A developer starts `claude` at a fresh
+instance root with no prompt. A developer reclaims instances and keeps any
+entry they made by hand. A developer whose Claude config is broken gets a
+warning, not a damaged file.
+
+**Where it stops.** It doesn't write the approval list (earlier, separate
+work), approve servers from a verbatim `.mcp.json`, write an approve-all
+setting, trust the workspace root or repo directories, edit user-level Claude
+settings, or move any particular workspace's servers into `[mcp.servers]`.
 
 ## Problem Statement
 
