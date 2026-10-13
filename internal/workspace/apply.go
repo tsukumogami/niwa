@@ -1250,14 +1250,26 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		defer overlayVaultBundle.CloseAll()
 
-		// Resolve the overlay's env (top-level and per-repo) against the overlay's
-		// own vault bundle. Wrap in a temporary WorkspaceConfig so ResolveWorkspace
-		// can be reused without duplicating the resolution walker. Both overlay.Env
-		// and overlay.Repos carry the same types as WorkspaceConfig fields, so
-		// direct assignment works.
+		// An overlay MCP server the base config also declares is dropped here,
+		// before resolution, so its vault:// references are never looked up:
+		// the base declaration is the one used, and a stale overlay entry
+		// naming a key its provider no longer holds must not fail the apply.
+		// MergeWorkspaceOverlay enforces base-wins as well; this step is what
+		// keeps the dropped entry's secrets unasked and names it to the user.
+		for _, name := range dropShadowedOverlayMCPServers(cfg.MCP, &overlay.MCP) {
+			a.Reporter.DeferWarn("workspace overlay declares MCP server %q, which the workspace config already declares; the workspace config's declaration is used", name)
+		}
+
+		// Resolve the overlay's env (top-level and per-repo) and its surviving
+		// MCP servers against the overlay's own vault bundle. Wrap in a
+		// temporary WorkspaceConfig so ResolveWorkspace can be reused without
+		// duplicating the resolution walker. overlay.Env, overlay.Repos and
+		// overlay.MCP carry the same types as WorkspaceConfig fields, so direct
+		// assignment works; the resolver deep-copies each before writing.
 		tmpCfg := &config.WorkspaceConfig{
 			Env:   overlay.Env,
 			Repos: overlay.Repos,
+			MCP:   overlay.MCP,
 		}
 		// Values that resolve here are secrets and pass through the
 		// second, whole-config resolve untouched; values that do not
@@ -1272,6 +1284,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		overlay.Env = resolvedTmp.Env
 		overlay.Repos = resolvedTmp.Repos
+		overlay.MCP = resolvedTmp.MCP
 
 		mergedWS, mergeErr := MergeWorkspaceOverlay(cfg, overlay, overlayDir)
 		if mergeErr != nil {

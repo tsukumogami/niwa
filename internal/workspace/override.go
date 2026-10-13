@@ -722,12 +722,18 @@ func teamOnlyKeys(vr *config.VaultRegistry) map[string]bool {
 //   - Content.Repos: overlay entries with source= add new content entries
 //     (base wins on key collision). Overlay entries with overlay= set OverlaySource
 //     on an existing base entry (error if the base entry does not exist).
+//   - MCP.Servers: overlay servers added; base wins on name collision. The
+//     apply pipeline drops colliding overlay servers (with a warning) before
+//     it resolves the overlay, so on that path none reach this merge; the rule
+//     is enforced here as well because the worktree path calls this merge on
+//     an overlay it never resolves or filters.
 func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.WorkspaceOverlay, overlayDir string) (*config.WorkspaceConfig, error) {
 	// Deep-copy the input config.
 	merged := *ws
 	merged.Claude = *copyClaudeConfigFull(&ws.Claude)
 	merged.Content = copyContentConfig(ws.Content)
 	merged.Env = copyEnv(ws.Env)
+	merged.MCP = copyMCPConfig(ws.MCP)
 	merged.Files = copyStringMap(ws.Files)
 	merged.OverlayInstanceFiles = copyStringMap(ws.OverlayInstanceFiles)
 	merged.Sources = append([]config.SourceConfig(nil), ws.Sources...)
@@ -993,7 +999,49 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 		}
 	}
 
+	// MCP.Servers: add overlay servers the base does not declare; base wins
+	// on collision. After this, an overlay server is an ordinary entry of
+	// the table, so every generator reading it (.mcp.json, Codex's config)
+	// includes it in name order with no overlay-specific code.
+	//
+	// What the values are depends on the caller. The apply pipeline hands
+	// over servers already resolved against the overlay's own bundle. The
+	// worktree path (mergeWorktreeOverlay) resolves nothing, and its MCP
+	// generation reads this merged table, so an overlay server reaches a
+	// worktree exactly as a base server does there: literal values written,
+	// any value still carrying vault:// left out with a report by
+	// mcpServerFromConfig rather than written unresolved.
+	for _, name := range overlay.MCP.MCPServerNames() {
+		if _, exists := merged.MCP.Servers[name]; exists {
+			continue
+		}
+		if merged.MCP.Servers == nil {
+			merged.MCP.Servers = make(map[string]config.MCPServerConfig)
+		}
+		merged.MCP.Servers[name] = copyMCPServer(overlay.MCP.Servers[name])
+	}
+
 	return &merged, nil
+}
+
+// dropShadowedOverlayMCPServers removes from overlay every MCP server whose
+// name base already declares and returns the removed names in sorted order,
+// for the caller to warn about.
+//
+// The apply pipeline runs it before resolving the overlay, which is the point:
+// a server the base config wins is never used, so its vault:// references are
+// never looked up. A dropped entry naming a key the overlay's provider no
+// longer holds, or a provider that no longer answers, cannot fail or slow an
+// apply over a value nothing would have written.
+func dropShadowedOverlayMCPServers(base config.MCPConfig, overlay *config.MCPConfig) []string {
+	var dropped []string
+	for _, name := range overlay.MCPServerNames() {
+		if _, exists := base.Servers[name]; exists {
+			delete(overlay.Servers, name)
+			dropped = append(dropped, name)
+		}
+	}
+	return dropped
 }
 
 // copyContentConfig returns a deep copy of a ContentConfig, including the
@@ -1340,6 +1388,38 @@ func copyEnv(e config.EnvConfig) config.EnvConfig {
 		Vars:    copyEnvVarsTable(e.Vars),
 		Secrets: copyEnvVarsTable(e.Secrets),
 	}
+}
+
+// copyMCPConfig returns a deep copy of an MCPConfig, so the merged config can
+// gain servers (and the resolver can later rewrite values in place) without
+// reaching back into the base config's maps. It mirrors deepCopyMCP in
+// internal/vault/resolve.
+func copyMCPConfig(m config.MCPConfig) config.MCPConfig {
+	if m.Servers == nil {
+		return config.MCPConfig{}
+	}
+	out := config.MCPConfig{Servers: make(map[string]config.MCPServerConfig, len(m.Servers))}
+	for name, srv := range m.Servers {
+		out.Servers[name] = copyMCPServer(srv)
+	}
+	return out
+}
+
+// copyMCPServer returns a deep copy of one MCPServerConfig: its slices and
+// its two MaybeSecret value maps.
+func copyMCPServer(srv config.MCPServerConfig) config.MCPServerConfig {
+	out := srv
+	out.Args = slices.Clone(srv.Args)
+	out.Agents = slices.Clone(srv.Agents)
+	if srv.Env != nil {
+		out.Env = make(map[string]config.MaybeSecret, len(srv.Env))
+		maps.Copy(out.Env, srv.Env)
+	}
+	if srv.Headers != nil {
+		out.Headers = make(map[string]config.MaybeSecret, len(srv.Headers))
+		maps.Copy(out.Headers, srv.Headers)
+	}
+	return out
 }
 
 // copyEnvExamplePolicy returns a deep copy of an *EnvExamplePolicy, cloning
