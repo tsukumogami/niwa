@@ -1,7 +1,9 @@
 package workspace
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 
 	"github.com/tsukumogami/niwa/internal/claudetrust"
@@ -9,7 +11,8 @@ import (
 
 // noticeClaudeTrustOverlay is the one-time notice key for instance trust that
 // is on only because the workspace overlay set [claude] trust_instances. It
-// is shown by the first create or apply in the workspace that writes trust.
+// is shown by the first create or apply in the workspace that leaves an
+// instance trusted.
 const noticeClaudeTrustOverlay = "claude-trust-overlay"
 
 // deliverClaudeTrust brings the instance root's Claude Code trust in line with
@@ -18,9 +21,16 @@ const noticeClaudeTrustOverlay = "claude-trust-overlay"
 //
 // Create and Apply call it after the pipeline has succeeded, right before the
 // state is saved, so no failure but the save itself can follow a trust write.
-// undo is non-nil exactly when this run wrote trust into the current config
-// file; the caller runs it if the save fails, so a write is never left
-// without the record that lets destroy withdraw it.
+// The caller runs undo if the save fails, so a write is never left without
+// the record that lets destroy withdraw it. undo returns a warning, empty
+// when the write was taken back. It is non-nil whenever this run changed the
+// current config file, which includes setting the flag again on an entry an
+// earlier grant already recorded (a flag removed by hand). It takes back only
+// that change. Two retractions are not rolled back on a failed save: the
+// flag removed from the old file after CLAUDE_CONFIG_DIR changed, and the
+// flag removed because the option is off. Both are benign: the state still
+// on disk names the old entry, so a later Withdraw of it finds the flag gone
+// and does nothing, and the next apply converges.
 //
 //   - DeveloperHome empty: nothing outside the instance is touched, and the
 //     existing record is carried forward.
@@ -91,19 +101,47 @@ func (a *Applier) undoClaudeTrust(undo func() string) {
 // discloseOverlayTrust prints the one-time notice that instance trust is on
 // because of the workspace overlay, and records it in the workspace root's
 // disclosed notices. It runs after the state save, so the notice is shown
-// only for trust that stays written. wrote reports that this run wrote trust;
-// a base config that sets the key never gets the notice.
-func (a *Applier) discloseOverlayTrust(workspaceRoot string, disclosed []string, fromOverlay, wrote bool, grant *claudetrust.Grant) {
-	if !fromOverlay || !wrote || grant == nil || sliceContains(disclosed, noticeClaudeTrustOverlay) {
+// only for trust that stays recorded.
+//
+// The notice is due when trust is on only because of the overlay, the
+// instance holds a workspace grant, and the workspace hasn't been told yet;
+// whether this run wrote the entry doesn't matter, so an instance trusted
+// before the notice existed still gets it once. A base config that sets the
+// key never gets the notice. When the root state exists but can't be read,
+// the notice is neither shown nor recorded, so a damaged file is never
+// replaced by one holding only the notice.
+//
+// In a single-instance layout there is no workspace root state to record
+// the notice in, so it isn't persisted; there it is shown only by a run
+// that wrote trust (wrote), rather than by every apply.
+func (a *Applier) discloseOverlayTrust(workspaceRoot string, fromOverlay, wrote bool, grant *claudetrust.Grant) {
+	if !fromOverlay || grant == nil || grant.Source != claudetrust.SourceWorkspace {
 		return
 	}
+	if !workspaceRootHoldsState(workspaceRoot) {
+		if wrote {
+			a.deferOverlayTrustNotice(grant)
+		}
+		return
+	}
+	// The root state may have been rewritten since it was loaded, by this
+	// run's other disclosures, so it is read again rather than reused.
+	rootState, err := LoadState(workspaceRoot)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	if rootState != nil && sliceContains(rootState.DisclosedNotices, noticeClaudeTrustOverlay) {
+		return
+	}
+	a.deferOverlayTrustNotice(grant)
+	saveWorkspaceRootDisclosures(workspaceRoot, rootState, []string{noticeClaudeTrustOverlay})
+}
+
+// deferOverlayTrustNotice queues the overlay trust notice for grant.
+func (a *Applier) deferOverlayTrustNotice(grant *claudetrust.Grant) {
 	a.Reporter.Defer("note: instance trust is on because the workspace overlay sets [claude] trust_instances. "+
 		"niwa marked %s trusted in %s, so Claude Code will apply the instance's project permissions, hooks and MCP servers without asking. "+
 		"Set [claude] trust_instances = false in the workspace config to turn it off.", grant.Key, grant.ConfigFile)
-	// The root state may have been rewritten since it was loaded, by this
-	// run's other disclosures, so it is read again rather than reused.
-	rootState, _ := LoadState(workspaceRoot)
-	saveWorkspaceRootDisclosures(workspaceRoot, rootState, []string{noticeClaudeTrustOverlay})
 }
 
 // saveInstanceState saves the instance state through the test seam, when one

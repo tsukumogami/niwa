@@ -256,3 +256,23 @@ func TestReporterDeferErrorFlushesAfterSummary(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// TestWarningReporterDropsProgress checks a warnings-only reporter writes
+// warnings and errors, inline and deferred, and drops everything else.
+func TestWarningReporterDropsProgress(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewWarningReporter(&buf)
+	r.Status("working")
+	r.Log("pruned %d record(s)", 2)
+	r.Warn("left %s in place", "entry")
+	r.Defer("note: %s", "once")
+	r.DeferWarn("w %d", 1)
+	r.DeferError("e %d", 2)
+	_, _ = r.Writer().Write([]byte("diagnostic\n"))
+	r.FlushDeferred()
+
+	want := "warning: left entry in place\nwarning: w 1\nerror: e 2\n"
+	if got := buf.String(); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -642,7 +643,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		a.undoClaudeTrust(undoTrust)
 		return "", fmt.Errorf("saving instance state: %w", err)
 	}
-	a.discloseOverlayTrust(workspaceRoot, initDisclosedNotices, result.trustFromOverlay, undoTrust != nil, trustGrant)
+	a.discloseOverlayTrust(workspaceRoot, result.trustFromOverlay, undoTrust != nil, trustGrant)
 
 	n := len(result.repoStates)
 	if n == 1 {
@@ -854,7 +855,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		a.undoClaudeTrust(undoTrust)
 		return fmt.Errorf("saving instance state: %w", err)
 	}
-	a.discloseOverlayTrust(workspaceRoot, wsDisclosedNotices, result.trustFromOverlay, undoTrust != nil, trustGrant)
+	a.discloseOverlayTrust(workspaceRoot, result.trustFromOverlay, undoTrust != nil, trustGrant)
 
 	n := len(result.repoStates)
 	if n == 1 {
@@ -2866,27 +2867,48 @@ func sliceContains(s []string, elem string) bool {
 // state file. It is a best-effort call: errors are silently ignored because a
 // failed write only means the notice reappears on the next run — a recoverable
 // annoyance rather than a data-loss scenario.
+//
+// existing is the root state the caller loaded, nil when it couldn't. A nil
+// existing is only replaced by a fresh state when no root state file is
+// there: one that exists but can't be read is left alone, so fields like
+// OverlayURL and earlier disclosures are never overwritten by an empty state.
 func saveWorkspaceRootDisclosures(workspaceRoot string, existing *InstanceState, newNotices []string) {
 	if len(newNotices) == 0 {
 		return
 	}
-	// Guard against single-instance layouts where workspaceRoot ==
-	// filepath.Dir(instanceRoot) escapes the actual workspace (e.g.,
-	// instanceRoot=/tmp/myws → workspaceRoot=/tmp). In those layouts
-	// the per-instance state file IS the workspace root state file —
-	// disclosures get carried by the instance SaveState. We detect
-	// the layout by checking for the workspace.toml that init writes:
-	// multi-instance has it at workspaceRoot/.niwa/, single-instance
-	// does not.
-	if _, err := os.Stat(filepath.Join(workspaceRoot, StateDir, WorkspaceConfigFile)); err != nil {
+	if !workspaceRootHoldsState(workspaceRoot) {
 		return
 	}
 	s := existing
 	if s == nil {
-		s = &InstanceState{}
+		loaded, err := LoadState(workspaceRoot)
+		switch {
+		case err == nil:
+			s = loaded
+		case errors.Is(err, fs.ErrNotExist):
+			s = &InstanceState{}
+		default:
+			return
+		}
 	}
 	s.DisclosedNotices = mergeDisclosedNotices(s.DisclosedNotices, newNotices)
 	_ = SaveState(workspaceRoot, s)
+}
+
+// workspaceRootHoldsState reports whether workspaceRoot is a multi-instance
+// workspace root, whose own state file carries workspace-level disclosures.
+//
+// It guards against single-instance layouts where workspaceRoot ==
+// filepath.Dir(instanceRoot) escapes the actual workspace (e.g.,
+// instanceRoot=/tmp/myws → workspaceRoot=/tmp). In those layouts
+// the per-instance state file IS the workspace root state file —
+// disclosures get carried by the instance SaveState. We detect
+// the layout by checking for the workspace.toml that init writes:
+// multi-instance has it at workspaceRoot/.niwa/, single-instance
+// does not.
+func workspaceRootHoldsState(workspaceRoot string) bool {
+	_, err := os.Stat(filepath.Join(workspaceRoot, StateDir, WorkspaceConfigFile))
+	return err == nil
 }
 
 // emitRotatedFiles prints `rotated <path>` to stderrOut for every

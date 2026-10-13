@@ -938,11 +938,15 @@ var (
 // resolveAskPosture reports whether the operator-approval (ask) posture can be used
 // for a sandboxed review instance, seeding Claude Code trust for the instance root as
 // a side effect when it can. It returns false -- the shipped hard-deny fallback --
-// when the sandbox is off, HOME cannot be resolved, the instance lives under the
-// Claude config home (a location Claude Code protects independently of
-// mode/trust/hooks), or trust cannot be written and recorded. The ask posture is
-// never entered without a trusted workspace, so a fallback never fails open relative
-// to the shipped deny. A skipped trust write is reported on w.
+// when the sandbox is off, HOME cannot be resolved, CLAUDE_CONFIG_DIR is relative,
+// the instance lives under the Claude config home (a location Claude Code protects
+// independently of mode/trust/hooks), or the root doesn't end up trusted: the trust
+// write was skipped, or its grant couldn't be saved and the write was undone. An
+// entry someone else already trusted counts as trusted and is used with no record,
+// since niwa didn't write it and won't withdraw it. The ask posture is never entered
+// without a trusted workspace, so a fallback never fails open relative to the
+// shipped deny. A relative CLAUDE_CONFIG_DIR and a skipped trust write are reported
+// on w.
 func resolveAskPosture(w io.Writer, instancePath string, sandbox bool) bool {
 	if !sandbox {
 		return false
@@ -951,16 +955,13 @@ func resolveAskPosture(w io.Writer, instancePath string, sandbox bool) bool {
 	if err != nil || home == "" {
 		return false
 	}
-	// The config home is found the way claudetrust finds the config file, so
-	// the guard and the writer agree on where Claude Code keeps its data.
-	claudeHome := filepath.Join(home, ".claude")
-	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
-		if !filepath.IsAbs(dir) {
-			return false
-		}
-		claudeHome = dir
+	// The config home comes from claudetrust, so the guard and the writer
+	// agree on where Claude Code keeps its data.
+	claudeHome, err := claudetrust.ConfigHome(claudetrust.Env{Home: home, ClaudeConfigDir: os.Getenv("CLAUDE_CONFIG_DIR")})
+	if err != nil {
+		fmt.Fprintf(w, "niwa watch: warning: review instance not trusted, out-of-instance writes are hard-denied: %v\n", err)
+		return false
 	}
-	claudeHome = filepath.Clean(claudeHome)
 	abs, err := filepath.Abs(instancePath)
 	if err != nil {
 		return false
@@ -984,6 +985,15 @@ func resolveAskPosture(w io.Writer, instancePath string, sandbox bool) bool {
 // apply in the instance with the option off can't pull trust out from under the
 // review. If the state can't be saved, this call's write is undone and the posture
 // falls back to hard-deny, so trust is never left without the record that removes it.
+//
+// Only hasTrustDialogAccepted is written. The hasTrustDialogHooksAccepted flag an
+// earlier writer also set is deliberately left out: the Claude Code 2.1.295 and
+// 2.1.296 binaries contain no such string, so there is no separate hooks-trust
+// prompt to pre-answer.
+//
+// home must be non-empty. Ensure skips an empty Home with no warning and no
+// write, an outcome the check below would read as already trusted; that skip is
+// unreachable only because resolveAskPosture refuses an empty HOME first.
 func seedReviewTrust(w io.Writer, home, instancePath string) bool {
 	state, err := workspace.LoadState(instancePath)
 	if err != nil {
@@ -995,7 +1005,7 @@ func seedReviewTrust(w io.Writer, home, instancePath string) bool {
 	if out.Warning != "" {
 		fmt.Fprintf(w, "niwa watch: warning: %s\n", out.Warning)
 	}
-	// A skip always carries a warning and writes nothing. An entry already
+	// A skip writes nothing and, with home set, always carries a warning. An entry already
 	// trusted by someone else comes back with no grant and no warning, and
 	// counts as trusted. A warning beside a write (a stale record dropped)
 	// leaves the entry trusted; one beside no write is taken as a skip, which

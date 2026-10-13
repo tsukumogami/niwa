@@ -139,16 +139,47 @@ const (
 // path resolved against niwa's working directory, which Claude Code would
 // resolve differently.
 func ConfigFile(env Env) (string, error) {
-	if env.ClaudeConfigDir != "" {
-		if !filepath.IsAbs(env.ClaudeConfigDir) {
-			return "", fmt.Errorf("CLAUDE_CONFIG_DIR %q is not an absolute path", env.ClaudeConfigDir)
-		}
-		return filepath.Join(filepath.Clean(env.ClaudeConfigDir), configBasename), nil
+	dir, err := configDir(env)
+	if err != nil {
+		return "", err
+	}
+	if dir != "" {
+		return filepath.Join(dir, configBasename), nil
 	}
 	if env.Home == "" {
 		return "", fmt.Errorf("no home directory to find the Claude config file under")
 	}
 	return filepath.Join(filepath.Clean(env.Home), configBasename), nil
+}
+
+// ConfigHome returns the directory Claude Code keeps its own data in for env:
+// $CLAUDE_CONFIG_DIR when ClaudeConfigDir is non-empty, else $HOME/.claude,
+// cleaned. It applies ConfigFile's CLAUDE_CONFIG_DIR rule, so a caller that
+// guards this directory and the writer agree on where it is. With
+// CLAUDE_CONFIG_DIR unset the config file sits beside this directory, at
+// $HOME/.claude.json, not inside it.
+func ConfigHome(env Env) (string, error) {
+	dir, err := configDir(env)
+	if err != nil || dir != "" {
+		return dir, err
+	}
+	if env.Home == "" {
+		return "", fmt.Errorf("no home directory to find the Claude config home under")
+	}
+	return filepath.Join(filepath.Clean(env.Home), ".claude"), nil
+}
+
+// configDir returns env's CLAUDE_CONFIG_DIR cleaned, or "" when it is unset.
+// A relative value is an error rather than a path resolved against niwa's
+// working directory, which Claude Code would resolve differently.
+func configDir(env Env) (string, error) {
+	if env.ClaudeConfigDir == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(env.ClaudeConfigDir) {
+		return "", fmt.Errorf("CLAUDE_CONFIG_DIR %q is not an absolute path", env.ClaudeConfigDir)
+	}
+	return filepath.Clean(env.ClaudeConfigDir), nil
 }
 
 // Key returns the projects key for instanceRoot: its absolute path with every

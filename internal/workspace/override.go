@@ -1036,9 +1036,9 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 	return &merged, nil
 }
 
-// dropShadowedOverlayMCPServers removes from overlay every MCP server whose
-// name base already declares and returns the removed names in sorted order,
-// for the caller to warn about.
+// dropShadowedOverlayMCPServers mutates overlay in place, deleting every MCP
+// server whose name base already declares, and returns the removed names in
+// sorted order, for the caller to warn about.
 //
 // The apply pipeline runs it before resolving the overlay, which is the point:
 // a server the base config wins is never used, so its vault:// references are

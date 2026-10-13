@@ -227,25 +227,29 @@ func TestResolveAskPosture_NoSandbox(t *testing.T) {
 // TestResolveAskPosture_UnderClaudeConfigHomeFallsBack: an instance under the
 // Claude config home (HOME/.claude, or CLAUDE_CONFIG_DIR when set) falls back
 // to the hard-deny posture and writes nothing, and so does a relative
-// CLAUDE_CONFIG_DIR, which claudetrust would refuse anyway.
+// CLAUDE_CONFIG_DIR, which claudetrust would refuse anyway and which is the
+// one case reported on w.
 func TestResolveAskPosture_UnderClaudeConfigHomeFallsBack(t *testing.T) {
 	cases := []struct {
 		name string
 		// setup returns the instance path and the config file to check.
 		setup func(t *testing.T, home string) (inst, file string)
+		// wantWarn is a substring the warning on w must hold; empty means
+		// nothing is printed.
+		wantWarn string
 	}{
 		{"under HOME/.claude", func(t *testing.T, home string) (string, string) {
 			return filepath.Join(home, ".claude", "instances", "watch-x"), filepath.Join(home, ".claude.json")
-		}},
+		}, ""},
 		{"under CLAUDE_CONFIG_DIR", func(t *testing.T, home string) (string, string) {
 			dir := filepath.Join(t.TempDir(), "claude-config")
 			t.Setenv("CLAUDE_CONFIG_DIR", dir)
 			return filepath.Join(dir, "instances", "watch-x"), filepath.Join(dir, ".claude.json")
-		}},
+		}, ""},
 		{"relative CLAUDE_CONFIG_DIR", func(t *testing.T, home string) (string, string) {
 			t.Setenv("CLAUDE_CONFIG_DIR", "relative/config")
 			return filepath.Join(t.TempDir(), "watch-x"), filepath.Join(home, ".claude.json")
-		}},
+		}, `CLAUDE_CONFIG_DIR "relative/config" is not an absolute path`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -254,8 +258,14 @@ func TestResolveAskPosture_UnderClaudeConfigHomeFallsBack(t *testing.T) {
 			if err := writeMinimalInstanceState(inst); err != nil {
 				t.Fatal(err)
 			}
-			if resolveAskPosture(io.Discard, inst, true) {
+			var stderr bytes.Buffer
+			if resolveAskPosture(&stderr, inst, true) {
 				t.Error("resolveAskPosture = true, want the hard-deny fallback")
+			}
+			if got := stderr.String(); tc.wantWarn == "" && got != "" {
+				t.Errorf("printed %q, want nothing", got)
+			} else if tc.wantWarn != "" && (strings.Count(got, "\n") != 1 || !strings.Contains(got, "warning:") || !strings.Contains(got, tc.wantWarn)) {
+				t.Errorf("printed %q, want one warning line holding %q", got, tc.wantWarn)
 			}
 			if _, err := os.Lstat(file); !errors.Is(err, os.ErrNotExist) {
 				t.Errorf("%s was created (err %v)", file, err)

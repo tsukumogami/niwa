@@ -42,6 +42,39 @@ func TestConfigFile(t *testing.T) {
 	}
 }
 
+func TestConfigHome(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     Env
+		want    string
+		wantErr bool
+	}{
+		{name: "CLAUDE_CONFIG_DIR wins", env: Env{Home: "/h", ClaudeConfigDir: "/c"}, want: "/c"},
+		{name: "CLAUDE_CONFIG_DIR cleaned", env: Env{Home: "/h", ClaudeConfigDir: "/c/./d/"}, want: "/c/d"},
+		{name: "CLAUDE_CONFIG_DIR without home", env: Env{ClaudeConfigDir: "/c"}, want: "/c"},
+		{name: "empty CLAUDE_CONFIG_DIR falls back to home", env: Env{Home: "/h/"}, want: "/h/.claude"},
+		{name: "relative CLAUDE_CONFIG_DIR refused", env: Env{Home: "/h", ClaudeConfigDir: "rel/dir"}, wantErr: true},
+		{name: "no home and no dir", env: Env{}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ConfigHome(tt.env)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ConfigHome = %q, want error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Errorf("ConfigHome = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestKeyResolvesSymlinks(t *testing.T) {
 	base := t.TempDir() // on macOS this is under /var, a symlink to /private/var
 	real := filepath.Join(base, "real-inst")

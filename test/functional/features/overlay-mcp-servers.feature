@@ -9,6 +9,10 @@ Feature: a workspace overlay declares MCP servers
   providers is covered by unit tests in internal/workspace (the functional
   suite has no fake vault backend); these scenarios use literal values.
 
+  The instance root's approved-server list (enabledMcpjsonServers in
+  .claude/settings.json) is not asserted here yet; that assertion is
+  added once the separate approval-list change lands on main.
+
   Runs offline against the localGitServer bare-repo fake; no GitHub access.
 
   Design: docs/designs/DESIGN-trust-instances.md

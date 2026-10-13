@@ -341,6 +341,111 @@ func TestClaudeTrust_OverlayNoticeOncePerWorkspace(t *testing.T) {
 	}
 }
 
+// TestClaudeTrust_OverlayNoticeForRecordedGrant covers an instance trusted
+// before the overlay took over the option: the apply that finds trust on only
+// because of the overlay shows the notice although it writes nothing, and the
+// apply after it doesn't. A review grant carried forward never gets it.
+func TestClaudeTrust_OverlayNoticeForRecordedGrant(t *testing.T) {
+	const overlay = "[claude]\ntrust_instances = true\n"
+
+	t.Run("workspace grant", func(t *testing.T) {
+		f := newTrustFixture(t)
+		f.withOverlay(t, overlay)
+		if out := f.mustCreate(t, f.writeConfig(t, trustOn)); strings.Contains(out, overlayNoticeMarker) {
+			t.Fatalf("create with the option in the base config showed the notice:\n%s", out)
+		}
+		before := snapFile(t, f.claudeJSON)
+
+		cfg := f.writeConfig(t, "")
+		if out := f.mustApply(t, cfg); !strings.Contains(out, overlayNoticeMarker) {
+			t.Errorf("apply with trust on from the overlay and a recorded grant did not show the notice:\n%s", out)
+		}
+		assertFileUntouched(t, f.claudeJSON, before)
+		if again := f.mustApply(t, cfg); strings.Contains(again, overlayNoticeMarker) {
+			t.Errorf("the next apply repeated the notice:\n%s", again)
+		}
+	})
+
+	t.Run("review grant", func(t *testing.T) {
+		f := newTrustFixture(t)
+		f.withOverlay(t, overlay)
+		f.mustCreate(t, f.writeConfig(t, trustOff))
+		key := trustKey(t, f.instanceRoot)
+		writeClaudeConfig(t, f.claudeJSON, map[string]any{"projects": map[string]any{
+			key: map[string]any{"hasTrustDialogAccepted": true},
+		}})
+		recordClaudeTrust(t, f.instanceRoot, &claudetrust.Grant{
+			ConfigFile: f.claudeJSON, Key: key, Mode: claudetrust.ModeCreated, Source: claudetrust.SourceReview,
+		})
+		if out := f.mustApply(t, f.writeConfig(t, "")); strings.Contains(out, overlayNoticeMarker) {
+			t.Errorf("a review grant got the overlay notice:\n%s", out)
+		}
+	})
+}
+
+// TestClaudeTrust_OverlayNoticeUnreadableRootState checks that a workspace
+// root state that exists but can't be parsed is left byte-identical and the
+// notice is held back, then shown once the file can be read again.
+func TestClaudeTrust_OverlayNoticeUnreadableRootState(t *testing.T) {
+	f := newTrustFixture(t)
+	f.withOverlay(t, "[claude]\ntrust_instances = true\n")
+	f.mustCreate(t, f.writeConfig(t, trustOn))
+
+	rootStatePath := filepath.Join(f.workspaceRoot, StateDir, StateFile)
+	good := mustRead(t, rootStatePath)
+	if err := os.WriteFile(rootStatePath, []byte(`{"overlay_url": "testorg/posture-ws-overlay", not json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := snapFile(t, rootStatePath)
+
+	cfg := f.writeConfig(t, "")
+	out := f.mustApply(t, cfg)
+	assertFileUntouched(t, rootStatePath, before)
+	if strings.Contains(out, overlayNoticeMarker) {
+		t.Errorf("notice shown although it could not be recorded:\n%s", out)
+	}
+	if grantOf(t, f.instanceRoot) == nil {
+		t.Fatal("the apply dropped the grant; the overlay did not keep trust on")
+	}
+
+	if err := os.WriteFile(rootStatePath, good, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out := f.mustApply(t, cfg); !strings.Contains(out, overlayNoticeMarker) {
+		t.Errorf("notice not shown once the root state was readable:\n%s", out)
+	}
+	state, err := LoadState(f.workspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.OverlayURL != "testorg/posture-ws-overlay" || !sliceContains(state.DisclosedNotices, noticeClaudeTrustOverlay) {
+		t.Errorf("root state = %+v, want the overlay URL kept and the notice recorded", state)
+	}
+}
+
+// TestClaudeTrust_OverlayNoticeSingleInstanceLayout drives the notice where
+// the workspace root holds no state: it is shown only by a run that wrote
+// trust, and nothing is written to the root.
+func TestClaudeTrust_OverlayNoticeSingleInstanceLayout(t *testing.T) {
+	root := t.TempDir()
+	out := &syncBuffer{}
+	a := &Applier{Reporter: NewReporterWithTTY(out, false)}
+	grant := wantGrant("/home/dev/.claude.json", "/work/ws", claudetrust.ModeCreated)
+
+	a.discloseOverlayTrust(root, true, false, grant)
+	a.Reporter.FlushDeferred()
+	if strings.Contains(out.String(), overlayNoticeMarker) {
+		t.Errorf("notice shown by a run that wrote nothing:\n%s", out.String())
+	}
+
+	a.discloseOverlayTrust(root, true, true, grant)
+	a.Reporter.FlushDeferred()
+	if !strings.Contains(out.String(), overlayNoticeMarker) {
+		t.Errorf("notice not shown by a run that wrote trust:\n%s", out.String())
+	}
+	assertNoFile(t, filepath.Join(root, StateDir))
+}
+
 // TestClaudeTrust_KeyAbsentTouchesNothing checks that with the option absent
 // an existing Claude config is left byte-identical and none is created.
 func TestClaudeTrust_KeyAbsentTouchesNothing(t *testing.T) {
@@ -500,6 +605,32 @@ func TestClaudeTrust_MovedInstance(t *testing.T) {
 	newKey := trustKey(t, moved)
 	if g := grantOf(t, moved); !reflect.DeepEqual(g, wantGrant(f.claudeJSON, newKey, claudetrust.ModeCreated)) {
 		t.Errorf("recorded grant = %+v, want a fresh grant for %s", g, newKey)
+	}
+}
+
+// TestClaudeTrust_MovedInstanceOptionOff covers the off switch on a moved
+// instance: the record is dropped with a warning naming the old entry and its
+// file, and the Claude config is left byte-identical.
+func TestClaudeTrust_MovedInstanceOptionOff(t *testing.T) {
+	f := newTrustFixture(t)
+	f.mustCreate(t, f.writeConfig(t, trustOn))
+	oldKey := trustKey(t, f.instanceRoot)
+	before := snapFile(t, f.claudeJSON)
+
+	moved := filepath.Join(f.workspaceRoot, "posture-ws-moved")
+	if err := os.Rename(f.instanceRoot, moved); err != nil {
+		t.Fatal(err)
+	}
+	out, err := f.applyAt(t, f.writeConfig(t, trustOff), moved)
+	if err != nil {
+		t.Fatalf("Apply: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "warning:") || !strings.Contains(out, oldKey) || !strings.Contains(out, f.claudeJSON) {
+		t.Errorf("no warning naming %s and %s:\n%s", oldKey, f.claudeJSON, out)
+	}
+	assertFileUntouched(t, f.claudeJSON, before)
+	if g := grantOf(t, moved); g != nil {
+		t.Errorf("recorded grant = %+v, want it dropped", g)
 	}
 }
 

@@ -315,10 +315,11 @@ type WorkspaceConfig struct {
 	// OverlayInstanceFiles sources resolve against. Set together with it by
 	// MergeWorkspaceOverlay; empty when the merge added no entries.
 	OverlayFilesDir string `toml:"-"`
-	// TrustInstancesFromOverlay is not parsed from TOML (toml:"-"). It is set
-	// by MergeWorkspaceOverlay when Claude.TrustInstances came from the
-	// overlay because the base config left the key out, so the apply can say
-	// that the overlay is what turned instance trust on.
+	// TrustInstancesFromOverlay is not parsed from TOML (toml:"-"). It means
+	// instance trust was turned on by the overlay: MergeWorkspaceOverlay sets
+	// it true only when the base config left [claude] trust_instances out and
+	// the overlay set it to true. An overlay false, or any base value, leaves
+	// it false. The apply uses it to say the overlay is what turned trust on.
 	TrustInstancesFromOverlay bool `toml:"-"`
 	// Vault carries the optional [vault] block (anonymous [vault.provider]
 	// or named [vault.providers.<name>] shape, plus [vault].team_only).

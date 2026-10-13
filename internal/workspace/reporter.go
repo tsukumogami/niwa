@@ -27,6 +27,9 @@ type Reporter struct {
 	isTTY      bool
 	needsClear bool     // true while spinner goroutine is active
 	deferred   []string // messages held for FlushDeferred
+	// warningsOnly drops Log lines and Defer notices, keeping warnings
+	// and deferred errors. See NewWarningReporter.
+	warningsOnly bool
 
 	mu        sync.Mutex
 	spinMsg   string
@@ -51,6 +54,15 @@ func NewReporter(w io.Writer) *Reporter {
 // terminal state (e.g., after checking --no-progress or piping).
 func NewReporterWithTTY(w io.Writer, isTTY bool) *Reporter {
 	return &Reporter{w: w, isTTY: isTTY}
+}
+
+// NewWarningReporter constructs a non-TTY Reporter that writes only
+// warnings and errors: Warn, DeferWarn and DeferError reach w, while Log,
+// Defer, Status and Writer output are dropped. It is for a caller that runs
+// a step as a side effect, such as a reap or a cleanup, where the step's
+// progress lines are noise but a warning must still surface.
+func NewWarningReporter(w io.Writer) *Reporter {
+	return &Reporter{w: w, warningsOnly: true}
 }
 
 // Status updates the current transient status message and starts the
@@ -135,6 +147,14 @@ func (r *Reporter) stopSpinner() {
 // stopped and its line cleared first. The format string follows
 // fmt.Sprintf conventions; a newline is always appended.
 func (r *Reporter) Log(format string, a ...any) {
+	if r.warningsOnly {
+		return
+	}
+	r.line(format, a...)
+}
+
+// line writes one permanent line, clearing the spinner first on TTY output.
+func (r *Reporter) line(format string, a ...any) {
 	if r.isTTY {
 		r.stopSpinner()
 	}
@@ -144,13 +164,16 @@ func (r *Reporter) Log(format string, a ...any) {
 // Warn writes a permanent warning line. It behaves like Log but
 // prepends "warning: " to the format string.
 func (r *Reporter) Warn(format string, a ...any) {
-	r.Log("warning: "+format, a...)
+	r.line("warning: "+format, a...)
 }
 
 // Defer queues an informational message to be printed by FlushDeferred.
 // Use for notices and non-critical information that should appear after
 // the operation summary rather than inline during execution.
 func (r *Reporter) Defer(format string, a ...any) {
+	if r.warningsOnly {
+		return
+	}
 	r.deferred = append(r.deferred, fmt.Sprintf(format, a...))
 }
 
@@ -172,7 +195,7 @@ func (r *Reporter) DeferError(format string, a ...any) {
 // below the summary.
 func (r *Reporter) FlushDeferred() {
 	for _, msg := range r.deferred {
-		r.Log("%s", msg)
+		r.line("%s", msg)
 	}
 	r.deferred = nil
 }
