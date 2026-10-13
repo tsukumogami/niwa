@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   A non-bypass Claude Code session in a fresh niwa instance stops on a
   folder-trust dialog, then on an approval prompt per declared MCP server.
@@ -23,7 +23,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 Framing for an opt-in that lets niwa mark its own instance roots trusted in
 Claude Code, so the declared-server approval list it already writes takes
@@ -131,11 +131,3 @@ config.
 - Trusting instances for agents other than Claude Code.
 - Moving any particular workspace's servers into `[mcp.servers]`; that's the
   workspace author's change, made in their own config.
-
-## Open Questions
-
-- Should the key live with the other Claude-specific workspace settings or as
-  a general instance setting? The PRD decides the name and placement.
-- When an instance root was already trusted by hand before niwa ran, niwa must
-  not claim that entry. How niwa records which entries it added is a PRD and
-  design question.
