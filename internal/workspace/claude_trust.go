@@ -314,14 +314,19 @@ func (a *Applier) deliverRepoClaudeTrust(instanceRoot string, on bool, repos []s
 			if out.Warning != "" {
 				warnings = append(warnings, out.Warning)
 			}
-			if out.Grant != nil && out.Grant.Key != key {
+			if out.Changed && out.Grant != nil && out.Grant.Key != key {
 				// Ensure resolves key again, so a directory swapped for a
-				// symlink since the check lands somewhere else. Take that
-				// write back rather than record trust no check could reach.
-				if w := out.Undo(); w != "" {
-					warnings = append(warnings, w)
+				// symlink since the check writes somewhere else. Take that
+				// write back rather than record trust no check could reach,
+				// and keep the prior record so a later run settles it.
+				if prior != nil {
+					grants[rel] = prior
 				}
-				warnings = append(warnings, fmt.Sprintf("Claude trust for repository %q not written: its directory changed while it was being trusted", rel))
+				if w := out.Undo(); w != "" {
+					warnings = append(warnings, fmt.Sprintf("Claude trust for repository %q went to %s, outside the instance, because its directory changed while it was being trusted, and could not be taken back: %s", rel, out.Grant.Key, w))
+				} else {
+					warnings = append(warnings, fmt.Sprintf("Claude trust for repository %q not written: its directory changed while it was being trusted", rel))
+				}
 				continue
 			}
 			if out.Grant != nil {

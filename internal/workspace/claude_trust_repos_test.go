@@ -639,6 +639,39 @@ func TestClaudeTrustRepos_MovedInstance(t *testing.T) {
 	}
 }
 
+// TestClaudeTrustRepos_SkippedWriteKeepsMovedRecord checks a repository
+// write Ensure skips, here for the legacy config file, carries the prior
+// record forward even when its key no longer matches the directory: nothing
+// was written, so the check for a write that landed elsewhere doesn't apply.
+func TestClaudeTrustRepos_SkippedWriteKeepsMovedRecord(t *testing.T) {
+	f := newTrustFixture(t)
+	on := f.writeConfig(t, trustOn)
+	f.mustCreate(t, on)
+	prior := repoGrantsOf(t, f.instanceRoot)
+
+	moved := filepath.Join(f.workspaceRoot, "posture-ws-moved")
+	if err := os.Rename(f.instanceRoot, moved); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(f.home, ".claude", ".config.json")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := f.applyAt(t, on, moved)
+	if err != nil {
+		t.Fatalf("Apply: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "changed while it was being trusted") {
+		t.Errorf("a skipped write was reported as a moved directory:\n%s", out)
+	}
+	if gs := repoGrantsOf(t, moved); !reflect.DeepEqual(gs, prior) {
+		t.Errorf("repository grants = %+v, want the prior %+v carried", gs, prior)
+	}
+}
+
 // TestClaudeTrustRepos_EmptyDeveloperHomeCarriesRecords checks an applier
 // with no developer home carries the repository records forward untouched.
 func TestClaudeTrustRepos_EmptyDeveloperHomeCarriesRecords(t *testing.T) {

@@ -166,7 +166,7 @@ func TestMarkReviewInstance(t *testing.T) {
 
 		var stderr bytes.Buffer
 		err := markReviewInstance(&stderr, inst)
-		if err == nil || !strings.Contains(err.Error(), "repository directory g/new could not be withdrawn") {
+		if err == nil || !strings.Contains(err.Error(), "repository directory g/new is still recorded") {
 			t.Errorf("markReviewInstance = %v, want the stage failed naming g/new", err)
 		}
 		state, lerr := workspace.LoadState(inst)

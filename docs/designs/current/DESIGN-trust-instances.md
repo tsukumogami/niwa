@@ -721,7 +721,9 @@ So each repository needs both halves, and niwa writes both when
   `review_instance` in the instance state before it fetches the pull request
   and withdraws the repository grants the creating apply wrote; every later
   apply on a marked instance, or one whose root grant has source `review`,
-  retracts repository grants instead of writing them.
+  retracts repository grants instead of writing them. If `niwa watch`'s
+  withdrawal is skipped, the review stage fails after the marker is saved,
+  and the stage's destroy retries it.
 - **Notice.** A workspace whose users saw the root-only overlay notice gets
   one more, `claude-trust-overlay-repos`, the first time an overlay turns on
   repository trust for it.

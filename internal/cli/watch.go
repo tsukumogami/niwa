@@ -1067,7 +1067,10 @@ func seedReviewTrust(w io.Writer, env claudetrust.Env, instancePath string) bool
 // An instance with no state file has nothing recorded and can't be applied,
 // so there is nothing to mark. Any other failure to read or save the state
 // is an error: the review must not go ahead in an instance a later apply
-// would trust.
+// would trust. So is a repository record still standing after the
+// withdrawal, normally one whose withdrawal was skipped: the marker is saved
+// first, the stage fails, and destroying the instance retries the
+// withdrawal.
 func markReviewInstance(w io.Writer, instancePath string) error {
 	state, err := workspace.LoadState(instancePath)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -1088,7 +1091,7 @@ func markReviewInstance(w io.Writer, instancePath string) error {
 	// review must not run there; destroying the instance retries it.
 	for _, rel := range slices.Sorted(maps.Keys(state.ClaudeTrustRepos)) {
 		if state.ClaudeTrustRepos[rel].Source != claudetrust.SourceReview {
-			return fmt.Errorf("marking the review instance: the Claude trust for repository directory %s could not be withdrawn", rel)
+			return fmt.Errorf("marking the review instance: the Claude trust for repository directory %s is still recorded, so its directory may still be trusted", rel)
 		}
 	}
 	return nil

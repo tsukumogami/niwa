@@ -65,8 +65,9 @@ directory it cloned there. No other value in the file changes.
 - **The repositories** are the ones niwa cloned into the instance, at
   `<instance>/<group>/<repo>`, except a repository with Claude turned off
   (`[repos.<name>.claude] enabled = false`, or the workspace-wide
-  `[claude] enabled = false`, which excludes every repository while the
-  instance root is still trusted), which gets no Claude settings from niwa
+  `[claude] enabled = false`, which excludes every repository that doesn't
+  turn Claude back on for itself, while the instance root is still trusted),
+  which gets no Claude settings from niwa
   either. Only Claude's own setting counts: a repository with
   Claude off and another agent on isn't trusted. A repository directory, or
   the group directory above it, that resolves outside the instance (a symlink
@@ -320,8 +321,11 @@ then run in a session there with no prompt. So before the pull request is fetche
 as destroying the instance would, and records `review_instance` in the
 instance's `.niwa/instance.json`. Every later apply in that instance (or one
 whose root grant has source `review`) trusts no repository directory and
-retracts any repository grant it finds. Only the instance root is trusted,
-since that's where the review session runs.
+retracts any repository grant it finds. If a withdrawal is skipped (Claude
+Code's config lock held too long, or a config file niwa can't parse), the
+review doesn't start: the stage fails, and destroying the instance retries
+the withdrawal. Only the instance root is trusted, since that's where the
+review session runs.
 
 The repositories in a review instance can still carry the approval list in
 their `.claude/settings.local.json`: it's written when the instance is
