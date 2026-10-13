@@ -243,4 +243,20 @@ overlay-declared server (`claude -p "list your mcp tools"` in default mode,
 `claude mcp list`, `claude doctor`), and again inside one of that instance's
 cloned repositories, where the trust dialog should still appear.
 
-Live check: pending (recorded before this guide's PR leaves draft).
+Last passed on Claude Code 2.1.296, macOS, on 2026-10-13, with a niwa built
+from this change plus the declared-server approval list:
+
+- `niwa create` with `trust_instances = true` set in the overlay wrote
+  `projects["/private/tmp/.../tc"].hasTrustDialogAccepted = true` (the
+  symlink-resolved path of an instance under `/tmp`), recorded it as
+  `created`, and printed the one-time overlay notice.
+- At the instance root, `claude mcp list` showed the overlay-declared HTTP
+  server as connected, `claude -p` in default permission mode listed its tools
+  with no prompt, and `claude doctor` reported no settings errors.
+- Inside a cloned repository of the same instance, `claude mcp list` showed the
+  server as pending approval, as expected: that session is keyed by the
+  repository.
+- `niwa destroy` removed the entry niwa had created and left no other entry
+  under the instance path.
+- The Claude Code binary contains no `hasTrustDialogHooksAccepted` string, so
+  there's no separate hooks-trust prompt for niwa to pre-answer.
