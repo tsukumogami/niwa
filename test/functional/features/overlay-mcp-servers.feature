@@ -15,7 +15,7 @@ Feature: a workspace overlay declares MCP servers
 
   Runs offline against the localGitServer bare-repo fake; no GitHub access.
 
-  Design: docs/designs/DESIGN-trust-instances.md
+  Design: docs/designs/current/DESIGN-trust-instances.md
 
   @critical
   Scenario: an overlay-declared MCP server reaches the generated configs

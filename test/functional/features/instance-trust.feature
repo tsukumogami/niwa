@@ -9,7 +9,7 @@ Feature: niwa trusts the instances it creates in Claude Code
   developer's own Claude config is never touched. Runs offline against the
   localGitServer bare-repo fake.
 
-  Design: docs/designs/DESIGN-trust-instances.md
+  Design: docs/designs/current/DESIGN-trust-instances.md
 
   @critical
   Scenario: create with trust_instances on trusts and records the instance root

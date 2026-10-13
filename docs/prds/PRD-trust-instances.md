@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: In Progress
+status: Done
 problem: |
   A Claude Code session that isn't in bypass mode, started in a fresh niwa
   instance, stops on a folder-trust dialog and then on an approval prompt for
@@ -22,7 +22,7 @@ absorbed:
 
 ## Status
 
-In Progress
+Done
 
 Absorbed [BRIEF-trust-instances](docs/briefs/BRIEF-trust-instances.md); carried in Absorbed Brief.
 

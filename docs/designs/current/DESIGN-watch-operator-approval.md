@@ -188,7 +188,7 @@ guarantees apply.
   > It writes only `hasTrustDialogAccepted`, finds the file through
   > `CLAUDE_CONFIG_DIR` before `$HOME`, keys on the symlink-resolved instance
   > root, and holds Claude Code's own config lock. See
-  > `docs/designs/DESIGN-trust-instances.md`.
+  > `docs/designs/current/DESIGN-trust-instances.md`.
 - **Settings assembly (`internal/watch/containment.go`, `ApplyReviewSettings`)** --
   gains an `ask` posture flag. In the ask posture it writes
   `permissions.defaultMode = "default"` (fully owned, overriding the inherited
@@ -330,7 +330,7 @@ stageReview
   > doesn't hold: Claude Code serializes its own writes with a
   > `<config file>.lock` directory, and niwa now takes that same lock through
   > `internal/claudetrust`, which closes the lost-update window described
-  > above. See `docs/designs/DESIGN-trust-instances.md`.
+  > above. See `docs/designs/current/DESIGN-trust-instances.md`.
 
 ## Consequences
 
