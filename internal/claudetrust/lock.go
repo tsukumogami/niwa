@@ -42,6 +42,11 @@ var (
 // lockTimedOut records that one wait already timed out in this process. Later
 // attempts skip without waiting, so a sweep over many instances against a busy
 // config doesn't wait the full timeout once per instance.
+//
+// It is never cleared, which assumes the process is a short-lived niwa
+// command: one run gives up on a busy config and the next run tries again. A
+// long-lived process that called into this package would stop writing trust
+// for good after its first timeout.
 var lockTimedOut atomic.Bool
 
 // processLocks holds one mutex per lock path, so goroutines in this process

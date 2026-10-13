@@ -437,7 +437,7 @@ func TestEnsureKeysSymlinkedRoot(t *testing.T) {
 	}
 }
 
-// TestEnsureAndWithdrawPreserveValues checks R8 and R19: every value outside
+// TestEnsureAndWithdrawPreserveValues checks that every value outside
 // the one flag survives a write and a withdrawal byte-for-byte, and the file
 // keeps its mode.
 func TestEnsureAndWithdrawPreserveValues(t *testing.T) {

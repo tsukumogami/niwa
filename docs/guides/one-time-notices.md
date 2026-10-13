@@ -70,6 +70,7 @@ merged into `DisclosedNotices` by both `Create` and `Apply`.
 | Key | Condition | File |
 |-----|-----------|------|
 | `provider-shadow` | Personal overlay declares a provider that shadows the team config's provider | `apply.go` |
+| `claude-trust-overlay` | Instance trust is on only because the workspace overlay sets `[claude] trust_instances`, and this run wrote trust | `claude_trust.go` |
 
 ## Testing
 

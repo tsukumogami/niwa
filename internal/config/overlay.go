@@ -96,8 +96,9 @@ type OverlaySourceConfig struct {
 
 // OverlayClaudeConfig is the Claude section of workspace-overlay.toml.
 // It carries hooks (appended to base), settings (base-wins per key),
-// content (additive repos), marketplaces (append-union), and plugins
-// (append-union). It does not carry Enabled.
+// content (additive repos), marketplaces (append-union), plugins
+// (append-union), and trust_instances (used when the base leaves it out). It
+// does not carry Enabled.
 //
 // Marketplaces and Plugins use append-union semantics: entries already
 // present in the base config are silently skipped; new entries are appended
@@ -110,6 +111,10 @@ type OverlayClaudeConfig struct {
 	Content      OverlayContentConfig `toml:"content"`
 	Marketplaces []string             `toml:"marketplaces,omitempty"`
 	Plugins      []string             `toml:"plugins,omitempty"`
+	// TrustInstances is the overlay's [claude] trust_instances. It applies
+	// only when the base config leaves the key out; see
+	// ClaudeConfig.TrustInstances.
+	TrustInstances *bool `toml:"trust_instances,omitempty"`
 }
 
 // OverlayContentConfig holds the content groups and repos maps for the overlay.

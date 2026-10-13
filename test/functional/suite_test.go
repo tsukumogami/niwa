@@ -508,6 +508,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// release-tracking (Issue 8) ---
 	registerPluginRecordSteps(ctx)
 
+	// --- instance trust: [claude] trust_instances writes, records and
+	// withdraws the instance root's entry in $HOME/.claude.json ---
+	registerClaudeTrustSteps(ctx)
+
 	// --- worktree-delegation integration: from-hook create/remove + the
 	// supported/deny/opt-out install branches (deterministic via a fake claude) ---
 	registerWorktreeDelegationSteps(ctx)

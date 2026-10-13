@@ -10,7 +10,9 @@
 //
 //   - One flag, one key. Only projects[<key>].hasTrustDialogAccepted is ever
 //     set. Every other value in the file is written back as the exact bytes it
-//     was read as; formatting is re-indented, values are not changed.
+//     was read as. A rewrite re-indents the file, sorts each object's keys,
+//     and keeps one value for a key repeated within one object (the last, as
+//     a JSON parser reading the file would); no value is changed.
 //     hasTrustDialogHooksAccepted is never written.
 //   - Claude Code's key and file. The key is the instance root with every
 //     symlink resolved, the key Claude Code computes for a session started
@@ -105,6 +107,13 @@ type Outcome struct {
 	// Changed reports that the current config file was rewritten by this
 	// call. A retraction from a previously recorded file doesn't count.
 	Changed bool
+	// Created reports that the rewrite added the whole entry, not only the
+	// flag on an entry that was already there. It says what undoes this
+	// call's write when the caller can't persist the grant:
+	// Withdraw(Grant, key, Destroy) when true, Withdraw(Grant, key, Retract)
+	// when only Changed is. Grant.Mode can't say this, since a re-set flag
+	// keeps the mode of the record it re-establishes.
+	Created bool
 	// Warning is non-empty when something was skipped or left behind. It
 	// names the file and the reason, and never means the command failed.
 	Warning string
@@ -220,13 +229,20 @@ func validateConfigPath(p string) error {
 //	flag true, prior names this key  nothing, return prior
 //	flag true, otherwise             nothing, record nothing
 //
+// When prior already names this key and file, the instance's first grant
+// keeps its place: a flag someone reset is set again under prior's mode and
+// source, and an entry someone removed is created again under prior's source.
+// A later caller with another source never re-labels the record.
+//
 // A prior record for a different config file but the same key is retracted
 // from its file first. A prior record for a different key (the instance
-// moved) is dropped with a warning and its entry left alone, since niwa can't
-// prove that entry is this instance's. Any skip (Home empty, a relative
-// CLAUDE_CONFIG_DIR, a lock timeout, a file that can't be parsed) writes
-// nothing and returns prior, so a record is never lost because one write
-// couldn't happen.
+// moved), or one with an unknown mode or source or a malformed path, is
+// dropped with a warning and its entry left alone, since niwa can't prove that
+// entry is this instance's; the outcome then carries no record unless this
+// call writes a new one. Any skip (Home empty, a relative CLAUDE_CONFIG_DIR, a
+// lock timeout, a file that can't be parsed) writes nothing and returns the
+// prior record it still holds, so a valid record is never lost because one
+// write couldn't happen.
 func Ensure(env Env, instanceRoot string, prior *Grant, src Source) Outcome {
 	if env.Home == "" {
 		return Outcome{Grant: prior}
@@ -268,64 +284,78 @@ func Ensure(env Env, instanceRoot string, prior *Grant, src Source) Outcome {
 		}
 	}
 
-	grant, changed, err := ensureEntry(file, key, prior, src)
+	out, err := ensureEntry(file, key, prior, src)
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf("Claude trust for %s not written; left %s unchanged: %v", key, file, err))
 		return Outcome{Grant: prior, Warning: joinWarnings(warnings)}
 	}
-	return Outcome{Grant: grant, Changed: changed, Warning: joinWarnings(warnings)}
+	out.Warning = joinWarnings(warnings)
+	return out
 }
 
-// ensureEntry is Ensure's locked read-modify-write against one file.
-func ensureEntry(file, key string, prior *Grant, src Source) (*Grant, bool, error) {
+// ensureEntry is Ensure's locked read-modify-write against one file. Its
+// outcome carries no warning; on error nothing was written.
+func ensureEntry(file, key string, prior *Grant, src Source) (Outcome, error) {
 	// The lock lives beside the config file, so its directory must exist
 	// before the lock can be taken. A missing CLAUDE_CONFIG_DIR is created
 	// private, as Claude Code would.
 	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
-		return prior, false, fmt.Errorf("creating the config directory: %w", err)
+		return Outcome{}, fmt.Errorf("creating the config directory: %w", err)
 	}
 	release, err := acquireLock(file + lockSuffix)
 	if err != nil {
-		return prior, false, err
+		return Outcome{}, err
 	}
 	defer release()
 
 	doc, err := loadConfig(file)
 	if err != nil {
-		return prior, false, err
+		return Outcome{}, err
 	}
 	projects, entry, err := doc.entry(key)
 	if err != nil {
-		return prior, false, err
+		return Outcome{}, err
 	}
 
-	var mode Mode
+	// recorded is prior when it already names this entry: the instance's
+	// first grant, which keeps its source, and its mode while the entry
+	// it describes is still there.
+	var recorded *Grant
+	if prior != nil && prior.Key == key && prior.ConfigFile == file {
+		recorded = prior
+	}
+
+	grant := &Grant{ConfigFile: file, Key: key, Source: src}
+	if recorded != nil {
+		grant.Source = recorded.Source
+	}
+	created := entry == nil
 	switch {
-	case entry == nil:
-		mode = ModeCreated
+	case created:
+		grant.Mode = ModeCreated
 		entry = rawObject{}
 	default:
 		trusted, err := flagValue(entry)
 		if err != nil {
-			return prior, false, err
+			return Outcome{}, err
 		}
 		if trusted {
-			if prior != nil && prior.Key == key && prior.ConfigFile == file {
-				return prior, false, nil
-			}
-			return nil, false, nil
+			return Outcome{Grant: recorded}, nil
 		}
-		mode = ModeFlagOnly
+		grant.Mode = ModeFlagOnly
+		if recorded != nil {
+			grant.Mode = recorded.Mode
+		}
 	}
 
 	entry[trustFlag] = rawTrue
 	if err := doc.setEntry(projects, key, entry); err != nil {
-		return prior, false, err
+		return Outcome{}, err
 	}
 	if err := doc.write(); err != nil {
-		return prior, false, err
+		return Outcome{}, err
 	}
-	return &Grant{ConfigFile: file, Key: key, Mode: mode, Source: src}, true, nil
+	return Outcome{Grant: grant, Changed: true, Created: created}, nil
 }
 
 // Withdraw removes what g names from g's recorded config file: the whole

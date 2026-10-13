@@ -185,6 +185,17 @@ type Applier struct {
 	// When nil, the reconcile is a silent no-op.
 	reconcileMarketplaceAutoUpdate func(desired map[string]bool) (pluginrecord.ReconcileReport, error)
 
+	// saveState persists the instance state at the end of Create and Apply.
+	// Nil means SaveState. Tests set it to inject a failure after every
+	// other step, including the Claude trust write, has run.
+	saveState func(dir string, state *InstanceState) error
+
+	// afterPipeline, when set, runs as the pipeline's last step, and an error
+	// from it fails the pipeline the way a real late failure would. It is a
+	// test seam for proving nothing outside the instance is written before
+	// the pipeline has succeeded; production leaves it nil.
+	afterPipeline func() error
+
 	// vaultRegistry overrides vault.DefaultRegistry for vault bundle building.
 	// Nil means use the process-wide DefaultRegistry (production behaviour).
 	// Tests set this to a fresh *vault.Registry with the fake backend registered
@@ -400,6 +411,12 @@ type pipelineResult struct {
 	// ("bypass", "ask", or ""), computed from this run's effective config.
 	// Persisted into InstanceState.ClaudePermissions by Create/Apply.
 	claudePermissions string
+	// trustInstances is the effective [claude] trust_instances, after the
+	// overlay merge. trustFromOverlay reports that it is true only because
+	// the overlay set it. Create and Apply hand both to deliverClaudeTrust
+	// and its notice once the pipeline has succeeded.
+	trustInstances   bool
+	trustFromOverlay bool
 	// procedureErr is a procedure-routed delivery's failure carried out as
 	// data rather than as the pipeline's error return. The record above has to
 	// reach the state file before the failure reaches the user: a run that
@@ -592,9 +609,15 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 
 	saveWorkspaceRootDisclosures(workspaceRoot, initState, result.disclosedNotices)
 
-	// ClaudeTrust starts empty. A new instance has no earlier grant, and
-	// initState is the workspace root's state, whose grant (if any) names
-	// the root's key, not this instance's.
+	// Claude trust is the last thing written, once nothing but the state save
+	// can fail: the failure path above removes the instance directory and
+	// saves no state, so trust written earlier would be left with no record
+	// to withdraw it. A new instance has no earlier grant, and initState is
+	// the workspace root's state, whose grant (if any) names the root's key,
+	// not this instance's.
+	trustGrant, undoTrust, trustWarnings := a.deliverClaudeTrust(instanceRoot, result.trustInstances, nil)
+	result.warnings = append(result.warnings, trustWarnings...)
+
 	state := &InstanceState{
 		SchemaVersion:  SchemaVersion,
 		ConfigName:     &configName,
@@ -610,13 +633,16 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		OverlayCommit:  result.overlayCommit,
 		AuthSources:    result.authSources,
 		TrustKeys:      result.trustKeys,
+		ClaudeTrust:    trustGrant,
 		// Recomputed from this run's config alone, like Shadows.
 		ClaudePermissions: result.claudePermissions,
 	}
 
-	if err := SaveState(instanceRoot, state); err != nil {
+	if err := a.saveInstanceState(instanceRoot, state); err != nil {
+		a.undoClaudeTrust(undoTrust)
 		return "", fmt.Errorf("saving instance state: %w", err)
 	}
+	a.discloseOverlayTrust(workspaceRoot, initDisclosedNotices, result.trustFromOverlay, undoTrust != nil, trustGrant)
 
 	n := len(result.repoStates)
 	if n == 1 {
@@ -783,6 +809,13 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	if err != nil {
 		return fmt.Errorf("resolving effective workspace name: %w", err)
 	}
+
+	// Claude trust is the last thing written before the state, for the same
+	// reason as in Create: no failure may follow it except the save, which
+	// undoes it.
+	trustGrant, undoTrust, trustWarnings := a.deliverClaudeTrust(instanceRoot, result.trustInstances, existingState.ClaudeTrust)
+	result.warnings = append(result.warnings, trustWarnings...)
+
 	// InstanceName comes from the on-disk instance directory, not from
 	// configName or cfg.Workspace.Name. For numbered ("my-name-2") and
 	// custom-suffix ("my-name-hotfix") instances, the suffix is part of
@@ -809,17 +842,19 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		Shadows:              result.shadows,
 		AuthSources:          result.authSources,
 		TrustKeys:            result.trustKeys,
-		// Carried unchanged: nothing in the pipeline manages the grant yet,
-		// and dropping it would leave an entry no destroy could withdraw.
-		ClaudeTrust: existingState.ClaudeTrust,
+		// The grant deliverClaudeTrust settled on: the existing one carried,
+		// a new one, or none once a withdrawal succeeded.
+		ClaudeTrust: trustGrant,
 		// Taken from this run's result, never from existingState: a posture
 		// removed from the config must stop being recorded on the next apply.
 		ClaudePermissions: result.claudePermissions,
 	}
 
-	if err := SaveState(instanceRoot, state); err != nil {
+	if err := a.saveInstanceState(instanceRoot, state); err != nil {
+		a.undoClaudeTrust(undoTrust)
 		return fmt.Errorf("saving instance state: %w", err)
 	}
+	a.discloseOverlayTrust(workspaceRoot, wsDisclosedNotices, result.trustFromOverlay, undoTrust != nil, trustGrant)
 
 	n := len(result.repoStates)
 	if n == 1 {
@@ -2197,6 +2232,12 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// create and update (R18). Fail-safe like the heal above.
 	a.reconcileMarketplaceRegistry(effectiveCfg, repoIndex)
 
+	if a.afterPipeline != nil {
+		if err := a.afterPipeline(); err != nil {
+			return nil, err
+		}
+	}
+
 	return &pipelineResult{
 		classified:        classified,
 		repoStates:        repoStates,
@@ -2210,6 +2251,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		disclosedNotices:  newDisclosures,
 		trustKeys:         trustKeys,
 		claudePermissions: instancePermissionsPosture(effectiveCfg),
+		trustInstances:    effectiveCfg.Claude.TrustInstances != nil && *effectiveCfg.Claude.TrustInstances,
+		trustFromOverlay:  effectiveCfg.TrustInstancesFromOverlay,
 		procedureErr:      procErr,
 		exemptPaths:       exemptPaths,
 	}, nil

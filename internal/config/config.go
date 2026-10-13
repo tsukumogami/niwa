@@ -52,6 +52,16 @@ type ClaudeConfig struct {
 	// on. Workspace-scoped, like WorkSummaryHooks: not merged from per-repo
 	// overrides.
 	PrBodyHook *bool `toml:"pr_body_hook,omitempty"`
+	// TrustInstances, when true, has every create and apply mark the instance
+	// root as a trusted project in the developer's Claude Code user config.
+	// Trust is what makes Claude Code apply the instance's project
+	// permissions, hooks and MCP servers without asking. Off by default: nil
+	// (the key absent) and false both leave the user config alone, and an
+	// apply with it off withdraws the trust an earlier apply wrote. The
+	// workspace overlay may set it too; a value here wins over the
+	// overlay's, so a config that wants to refuse the overlay's choice says
+	// false. Workspace-scoped: not merged from per-repo overrides.
+	TrustInstances *bool `toml:"trust_instances,omitempty"`
 	// Content is the deprecated [claude.content] spelling of the content
 	// hierarchy. The canonical table is the top-level [content]
 	// (WorkspaceConfig.Content): the same declared content now feeds every
@@ -305,6 +315,11 @@ type WorkspaceConfig struct {
 	// OverlayInstanceFiles sources resolve against. Set together with it by
 	// MergeWorkspaceOverlay; empty when the merge added no entries.
 	OverlayFilesDir string `toml:"-"`
+	// TrustInstancesFromOverlay is not parsed from TOML (toml:"-"). It is set
+	// by MergeWorkspaceOverlay when Claude.TrustInstances came from the
+	// overlay because the base config left the key out, so the apply can say
+	// that the overlay is what turned instance trust on.
+	TrustInstancesFromOverlay bool `toml:"-"`
 	// Vault carries the optional [vault] block (anonymous [vault.provider]
 	// or named [vault.providers.<name>] shape, plus [vault].team_only).
 	// nil when the config declares no vault providers.

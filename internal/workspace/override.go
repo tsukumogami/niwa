@@ -727,6 +727,10 @@ func teamOnlyKeys(vr *config.VaultRegistry) map[string]bool {
 //     it resolves the overlay, so on that path none reach this merge; the rule
 //     is enforced here as well because the worktree path calls this merge on
 //     an overlay it never resolves or filters.
+//   - Claude.TrustInstances: the overlay's value applies only when the base
+//     left the key out; a base value wins, false included. When the overlay's
+//     value is taken and is true, TrustInstancesFromOverlay records that the
+//     overlay is what turned instance trust on.
 func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.WorkspaceOverlay, overlayDir string) (*config.WorkspaceConfig, error) {
 	// Deep-copy the input config.
 	merged := *ws
@@ -876,6 +880,14 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 			}
 		}
 		merged.Claude.Plugins = &combined
+	}
+
+	// Claude.TrustInstances: base wins whenever it set the key, so a base
+	// that wants to refuse the overlay's choice says false.
+	if merged.Claude.TrustInstances == nil && overlay.Claude.TrustInstances != nil {
+		v := *overlay.Claude.TrustInstances
+		merged.Claude.TrustInstances = &v
+		merged.TrustInstancesFromOverlay = v
 	}
 
 	// Claude.Env.Promote and Claude.Env.Vars: OverlayClaudeConfig does not carry
