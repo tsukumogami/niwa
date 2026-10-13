@@ -53,8 +53,10 @@ type ClaudeConfig struct {
 	// overrides.
 	PrBodyHook *bool `toml:"pr_body_hook,omitempty"`
 	// TrustInstances, when true, has every create and apply mark the instance
-	// root as a trusted project in the developer's Claude Code user config.
-	// Trust is what makes Claude Code apply the instance's project
+	// root, and each repository directory cloned into it, as trusted
+	// projects in the developer's Claude Code user config, and approve the
+	// instance root's generated MCP servers in each repository's settings.
+	// Trust is what makes Claude Code apply a directory's project
 	// permissions, hooks and MCP servers without asking. Off by default: nil
 	// (the key absent) and false both leave the user config alone, and an
 	// apply with it off withdraws the trust an earlier apply wrote. The

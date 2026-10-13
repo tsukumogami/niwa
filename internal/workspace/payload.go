@@ -141,6 +141,22 @@ func instanceRootMCPApprovals(cfg *config.WorkspaceConfig) ([]string, error) {
 	return names, nil
 }
 
+// repoMCPApprovals returns the approval list a repository's Claude settings
+// document carries: the names instanceRootMCPApprovals gives, since a session
+// started inside a repository finds the instance root's generated .mcp.json
+// by walking up from its directory and asks to approve each server in it
+// unless the repository's own project settings list it. Claude Code reads
+// that list only in a trusted directory, and niwa trusts repository
+// directories only under [claude] trust_instances, so with the option off
+// (cfg is the merged config, overlay included) the list is empty and the
+// document stays the one a workspace that never opted in gets.
+func repoMCPApprovals(cfg *config.WorkspaceConfig) ([]string, error) {
+	if cfg == nil || cfg.Claude.TrustInstances == nil || !*cfg.Claude.TrustInstances {
+		return nil, nil
+	}
+	return instanceRootMCPApprovals(cfg)
+}
+
 // SessionPostureFromConfig reads the workspace's declared approval and sandbox
 // posture into the form a producer takes.
 //

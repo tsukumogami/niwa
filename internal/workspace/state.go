@@ -156,6 +156,15 @@ type InstanceState struct {
 	// it. omitempty keeps the field invisible to old binaries reading new
 	// state files.
 	ClaudeTrust *claudetrust.Grant `json:"claude_trust,omitempty"`
+	// ClaudeTrustRepos records the trust entries niwa wrote for the repository
+	// directories it cloned into this instance, keyed by the repository's
+	// instance-relative path ("<group>/<repo>", slash-separated). Each grant
+	// follows ClaudeTrust's rules, and a destroy checks it against the
+	// resolved path of <instance>/<group>/<repo>, which must sit inside the
+	// instance. ClaudeTrust stays the root's record so older binaries still
+	// find it. omitempty keeps the field invisible to old binaries reading
+	// new state files.
+	ClaudeTrustRepos map[string]*claudetrust.Grant `json:"claude_trust_repos,omitempty"`
 	// ClaudePermissions records the declared permission posture the
 	// instance-root settings document resolved from: "bypass", "ask", or
 	// empty when nothing is declared. It is niwa's own record of the

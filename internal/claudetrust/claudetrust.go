@@ -1,7 +1,9 @@
 // Package claudetrust is the only code in niwa that edits Claude Code's user
-// config. It marks a niwa instance root as a trusted project, so Claude Code
-// honors the instance's project settings and approved MCP servers, and it
-// removes exactly what a recorded grant says niwa added.
+// config. It marks a niwa instance root, or a repository directory niwa
+// cloned into one, as a trusted project, so Claude Code honors that
+// directory's project settings and approved MCP servers, and it removes
+// exactly what a recorded grant says niwa added. The functions below name
+// the directory instanceRoot either way.
 //
 // Claude Code reads a project's .claude/settings.json only when its user config
 // holds projects[<key>].hasTrustDialogAccepted = true for that exact key. The

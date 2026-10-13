@@ -2,7 +2,10 @@ package functional
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -38,6 +41,37 @@ func theInstanceSettingsApproveMCPServers(ctx context.Context, instance, csv str
 	if err != nil {
 		return err
 	}
+	return settingsApproveMCPServers(path, csv)
+}
+
+// theRepoSettingsApproveMCPServers is theInstanceSettingsApproveMCPServers
+// for the settings document niwa writes into the repository rel
+// ("<group>/<repo>") of instance.
+func theRepoSettingsApproveMCPServers(ctx context.Context, rel, instance, csv string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	return settingsApproveMCPServers(repoSettingsPath(s, rel, instance), csv)
+}
+
+// theRepoSettingsApproveNoMCPServers asserts a repository's settings
+// document, when there is one, carries no MCP approval.
+func theRepoSettingsApproveNoMCPServers(ctx context.Context, rel, instance string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := repoSettingsPath(s, rel, instance)
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return settingsApproveNoMCPServers(path)
+}
+
+// settingsApproveMCPServers asserts the settings document at path approves
+// exactly the comma-separated names, in that order.
+func settingsApproveMCPServers(path, csv string) error {
 	value, found, err := lookupJSONKey(path, enabledMcpjsonServersKey)
 	if err != nil {
 		return err
@@ -72,6 +106,12 @@ func theInstanceSettingsApproveNoMCPServers(ctx context.Context, instance string
 	if err != nil {
 		return err
 	}
+	return settingsApproveNoMCPServers(path)
+}
+
+// settingsApproveNoMCPServers asserts the settings document at path carries
+// neither the named approval list nor the wholesale approval.
+func settingsApproveNoMCPServers(path string) error {
 	for _, key := range []string{enabledMcpjsonServersKey, "enableAllProjectMcpServers"} {
 		value, found, err := lookupJSONKey(path, key)
 		if err != nil {
@@ -87,4 +127,6 @@ func theInstanceSettingsApproveNoMCPServers(ctx context.Context, instance string
 func registerMCPApprovalSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the instance "([^"]*)" settings document approves MCP servers "([^"]*)"$`, theInstanceSettingsApproveMCPServers)
 	ctx.Step(`^the instance "([^"]*)" settings document approves no MCP servers$`, theInstanceSettingsApproveNoMCPServers)
+	ctx.Step(`^the repo "([^"]*)" settings document in instance "([^"]*)" approves MCP servers "([^"]*)"$`, theRepoSettingsApproveMCPServers)
+	ctx.Step(`^the repo "([^"]*)" settings document in instance "([^"]*)" approves no MCP servers$`, theRepoSettingsApproveNoMCPServers)
 }

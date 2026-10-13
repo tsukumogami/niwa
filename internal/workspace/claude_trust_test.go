@@ -24,6 +24,10 @@ import (
 const trustOn = "\n[claude]\ntrust_instances = true\n"
 const trustOff = "\n[claude]\ntrust_instances = false\n"
 
+// appClaudeOff turns Claude off for the fixture's one repository, so a test
+// about the instance root's record sees no repository grant beside it.
+const appClaudeOff = "\n[repos.app.claude]\nenabled = false\n"
+
 // trustFixture is a posture workspace whose applier delivers Claude trust into
 // a temporary developer home.
 type trustFixture struct {
@@ -142,6 +146,39 @@ func grantOf(t *testing.T, root string) *claudetrust.Grant {
 	return state.ClaudeTrust
 }
 
+// appRepo is the fixture's one repository, by the instance-relative path its
+// Claude trust grant is recorded under.
+const appRepo = "default/app"
+
+// repoDir returns the fixture's repository directory in the default instance.
+func (f *trustFixture) repoDir() string {
+	return filepath.Join(f.instanceRoot, filepath.FromSlash(appRepo))
+}
+
+// repoGrantsOf returns the repository Claude trust grants recorded in root's
+// state.
+func repoGrantsOf(t *testing.T, root string) map[string]*claudetrust.Grant {
+	t.Helper()
+	state, err := LoadState(root)
+	if err != nil {
+		t.Fatalf("LoadState(%s): %v", root, err)
+	}
+	return state.ClaudeTrustRepos
+}
+
+// recordRepoClaudeTrust stores grants as root's recorded repository grants.
+func recordRepoClaudeTrust(t *testing.T, root string, grants map[string]*claudetrust.Grant) {
+	t.Helper()
+	state, err := LoadState(root)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	state.ClaudeTrustRepos = grants
+	if err := SaveState(root, state); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+}
+
 // fileSnap is a file's bytes and identity, to prove a run left it alone.
 type fileSnap struct {
 	data []byte
@@ -238,12 +275,14 @@ func TestMergeWorkspaceOverlay_TrustInstances(t *testing.T) {
 
 // TestClaudeTrust_CreateWritesAndRecords is the main path: with the option on
 // in the base config and no Claude config yet, create writes the file private,
-// holding only the resolved root's flag, and records the grant.
+// holding only the flags for the resolved root and its repository, and records
+// both grants.
 func TestClaudeTrust_CreateWritesAndRecords(t *testing.T) {
 	f := newTrustFixture(t)
 	out := f.mustCreate(t, f.writeConfig(t, trustOn))
 
 	key := trustKey(t, f.instanceRoot)
+	repoKey := trustKey(t, f.repoDir())
 	info, err := os.Stat(f.claudeJSON)
 	if err != nil {
 		t.Fatalf("no Claude config written: %v", err)
@@ -251,12 +290,19 @@ func TestClaudeTrust_CreateWritesAndRecords(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Errorf("%s mode = %o, want 600", f.claudeJSON, got)
 	}
-	want := map[string]any{"projects": map[string]any{key: map[string]any{"hasTrustDialogAccepted": true}}}
+	want := map[string]any{"projects": map[string]any{
+		key:     map[string]any{"hasTrustDialogAccepted": true},
+		repoKey: map[string]any{"hasTrustDialogAccepted": true},
+	}}
 	if got := readClaudeConfig(t, f.claudeJSON); !reflect.DeepEqual(got, want) {
 		t.Errorf("Claude config = %v, want %v", got, want)
 	}
 	if g := grantOf(t, f.instanceRoot); !reflect.DeepEqual(g, wantGrant(f.claudeJSON, key, claudetrust.ModeCreated)) {
 		t.Errorf("recorded grant = %+v", g)
+	}
+	wantRepos := map[string]*claudetrust.Grant{appRepo: wantGrant(f.claudeJSON, repoKey, claudetrust.ModeCreated)}
+	if gs := repoGrantsOf(t, f.instanceRoot); !reflect.DeepEqual(gs, wantRepos) {
+		t.Errorf("recorded repository grants = %+v, want %+v", gs, wantRepos)
 	}
 	if strings.Contains(out, overlayNoticeMarker) {
 		t.Errorf("overlay notice printed for a base-config setting:\n%s", out)
@@ -369,7 +415,9 @@ func TestClaudeTrust_OverlayNoticeForRecordedGrant(t *testing.T) {
 	t.Run("review grant", func(t *testing.T) {
 		f := newTrustFixture(t)
 		f.withOverlay(t, overlay)
-		f.mustCreate(t, f.writeConfig(t, trustOff))
+		// With Claude off for the repository, the review grant is the only
+		// grant the instance could hold.
+		f.mustCreate(t, f.writeConfig(t, trustOff+appClaudeOff))
 		key := trustKey(t, f.instanceRoot)
 		writeClaudeConfig(t, f.claudeJSON, map[string]any{"projects": map[string]any{
 			key: map[string]any{"hasTrustDialogAccepted": true},
@@ -377,7 +425,7 @@ func TestClaudeTrust_OverlayNoticeForRecordedGrant(t *testing.T) {
 		recordClaudeTrust(t, f.instanceRoot, &claudetrust.Grant{
 			ConfigFile: f.claudeJSON, Key: key, Mode: claudetrust.ModeCreated, Source: claudetrust.SourceReview,
 		})
-		if out := f.mustApply(t, f.writeConfig(t, "")); strings.Contains(out, overlayNoticeMarker) {
+		if out := f.mustApply(t, f.writeConfig(t, appClaudeOff)); strings.Contains(out, overlayNoticeMarker) {
 			t.Errorf("a review grant got the overlay notice:\n%s", out)
 		}
 	})
@@ -432,13 +480,13 @@ func TestClaudeTrust_OverlayNoticeSingleInstanceLayout(t *testing.T) {
 	a := &Applier{Reporter: NewReporterWithTTY(out, false)}
 	grant := wantGrant("/home/dev/.claude.json", "/work/ws", claudetrust.ModeCreated)
 
-	a.discloseOverlayTrust(root, true, false, grant)
+	a.discloseOverlayTrust(root, true, false, grant, nil)
 	a.Reporter.FlushDeferred()
 	if strings.Contains(out.String(), overlayNoticeMarker) {
 		t.Errorf("notice shown by a run that wrote nothing:\n%s", out.String())
 	}
 
-	a.discloseOverlayTrust(root, true, true, grant)
+	a.discloseOverlayTrust(root, true, true, grant, nil)
 	a.Reporter.FlushDeferred()
 	if !strings.Contains(out.String(), overlayNoticeMarker) {
 		t.Errorf("notice not shown by a run that wrote trust:\n%s", out.String())
@@ -669,18 +717,27 @@ func TestClaudeTrust_OffSwitchDropsMalformedRecord(t *testing.T) {
 			f := newTrustFixture(t)
 			f.mustCreate(t, f.writeConfig(t, trustOn))
 			key := trustKey(t, f.instanceRoot)
+			repoKey := trustKey(t, f.repoDir())
 			g := grantOf(t, f.instanceRoot)
 			corrupt(g)
 			recordClaudeTrust(t, f.instanceRoot, g)
+			rg := repoGrantsOf(t, f.instanceRoot)[appRepo]
+			corrupt(rg)
+			recordRepoClaudeTrust(t, f.instanceRoot, map[string]*claudetrust.Grant{appRepo: rg})
 			before := snapFile(t, f.claudeJSON)
 
 			off := f.writeConfig(t, trustOff)
 			out := f.mustApply(t, off)
-			if !strings.Contains(out, "warning:") || !strings.Contains(out, "malformed") || !strings.Contains(out, key) {
-				t.Errorf("no warning about the malformed record for %s:\n%s", key, out)
+			for _, k := range []string{key, repoKey} {
+				if !strings.Contains(out, "warning:") || !strings.Contains(out, "malformed Claude trust record for "+k) {
+					t.Errorf("no warning about the malformed record for %s:\n%s", k, out)
+				}
 			}
 			if g := grantOf(t, f.instanceRoot); g != nil {
 				t.Errorf("record = %+v, want it dropped", g)
+			}
+			if gs := repoGrantsOf(t, f.instanceRoot); gs != nil {
+				t.Errorf("repository records = %+v, want them dropped", gs)
 			}
 			if out := f.mustApply(t, off); strings.Contains(out, "malformed") {
 				t.Errorf("the dropped record was warned about again:\n%s", out)
@@ -899,7 +956,9 @@ func TestClaudeTrust_EmptyDeveloperHome(t *testing.T) {
 // TestClaudeTrust_InstanceRootIsHomeRefused checks an instance rooted at the
 // developer home itself, as a single-instance `niwa init` run in the home
 // directory gives, is never trusted: Claude Code would then trust every
-// directory under home. Create and apply both warn and record nothing.
+// directory under home. Create and apply both warn and record nothing for
+// the root. The repository inside it is a directory of its own, a git
+// repository Claude Code bounds its trust lookup at, so it is still trusted.
 func TestClaudeTrust_InstanceRootIsHomeRefused(t *testing.T) {
 	f := newTrustFixture(t)
 	on := f.writeConfig(t, trustOn)
@@ -910,6 +969,7 @@ func TestClaudeTrust_InstanceRootIsHomeRefused(t *testing.T) {
 	f.applier.DeveloperHome = root
 	homeJSON := filepath.Join(root, ".claude.json")
 	key := trustKey(t, root)
+	repoKey := trustKey(t, f.repoDir())
 
 	check := func(run, output string) {
 		t.Helper()
@@ -919,7 +979,12 @@ func TestClaudeTrust_InstanceRootIsHomeRefused(t *testing.T) {
 		if g := grantOf(t, root); g != nil {
 			t.Errorf("after %s, record = %+v, want none", run, g)
 		}
-		assertNoFile(t, homeJSON)
+		if _, ok := entryAt(t, homeJSON, key); ok {
+			t.Errorf("after %s, %s holds an entry for the home directory %s", run, homeJSON, key)
+		}
+		if e, ok := entryAt(t, homeJSON, repoKey); !ok || e["hasTrustDialogAccepted"] != true {
+			t.Errorf("after %s, the repository entry = %v (present %v), want it trusted", run, e, ok)
+		}
 		assertNoFile(t, homeJSON+".lock")
 		assertNoFile(t, f.claudeJSON)
 	}
@@ -929,17 +994,25 @@ func TestClaudeTrust_InstanceRootIsHomeRefused(t *testing.T) {
 
 // TestClaudeTrust_ReviewRecordKept checks a review-sourced record is the
 // review command's: an apply with the option on or off keeps it as it is and
-// doesn't rewrite the file.
+// doesn't rewrite the file, for the instance root and a repository alike.
 func TestClaudeTrust_ReviewRecordKept(t *testing.T) {
 	for _, body := range []string{trustOn, trustOff} {
 		f := newTrustFixture(t)
 		f.mustCreate(t, f.writeConfig(t, ""))
 		key := trustKey(t, f.instanceRoot)
+		repoKey := trustKey(t, f.repoDir())
 		writeClaudeConfig(t, f.claudeJSON, map[string]any{"projects": map[string]any{
-			key: map[string]any{"hasTrustDialogAccepted": true},
+			key:     map[string]any{"hasTrustDialogAccepted": true},
+			repoKey: map[string]any{"allowedTools": []any{"Read"}},
 		}})
 		review := &claudetrust.Grant{ConfigFile: f.claudeJSON, Key: key, Mode: claudetrust.ModeCreated, Source: claudetrust.SourceReview}
 		recordClaudeTrust(t, f.instanceRoot, review)
+		// A review record whose flag is gone: Ensure would set it again if
+		// the apply acted on it.
+		repoReview := map[string]*claudetrust.Grant{appRepo: {
+			ConfigFile: f.claudeJSON, Key: repoKey, Mode: claudetrust.ModeFlagOnly, Source: claudetrust.SourceReview,
+		}}
+		recordRepoClaudeTrust(t, f.instanceRoot, repoReview)
 		before := snapFile(t, f.claudeJSON)
 
 		f.mustApply(t, f.writeConfig(t, body))
@@ -947,13 +1020,18 @@ func TestClaudeTrust_ReviewRecordKept(t *testing.T) {
 		if g := grantOf(t, f.instanceRoot); !reflect.DeepEqual(g, review) {
 			t.Errorf("record = %+v, want the review grant kept", g)
 		}
+		if gs := repoGrantsOf(t, f.instanceRoot); !reflect.DeepEqual(gs, repoReview) {
+			t.Errorf("repository records = %+v, want the review grant kept", gs)
+		}
 	}
 }
 
 // TestClaudeTrust_RelabeledReviewGrantSurvivesOffSwitch covers a review
 // instance created with the option on: its workspace grant is re-labeled
 // review when the review seeds trust, and an apply with the option off then
-// leaves the entry trusted and the record as it is.
+// leaves the entry trusted and the record as it is. The review relabels only
+// the root's grant, so the repository's workspace grant is retracted as
+// usual.
 func TestClaudeTrust_RelabeledReviewGrantSurvivesOffSwitch(t *testing.T) {
 	f := newTrustFixture(t)
 	f.mustCreate(t, f.writeConfig(t, trustOn))
@@ -964,15 +1042,20 @@ func TestClaudeTrust_RelabeledReviewGrantSurvivesOffSwitch(t *testing.T) {
 	review := *created
 	review.Source = claudetrust.SourceReview
 	recordClaudeTrust(t, f.instanceRoot, &review)
-	before := snapFile(t, f.claudeJSON)
+	rootEntry, _ := entryAt(t, f.claudeJSON, review.Key)
 
 	f.mustApply(t, f.writeConfig(t, trustOff))
-	assertFileUntouched(t, f.claudeJSON, before)
 	if g := grantOf(t, f.instanceRoot); g == nil || *g != review {
 		t.Errorf("record = %+v, want the review grant kept", g)
 	}
-	if e, ok := entryAt(t, f.claudeJSON, review.Key); !ok || e["hasTrustDialogAccepted"] != true {
-		t.Errorf("entry = %v (present %v), want it still trusted", e, ok)
+	if e, ok := entryAt(t, f.claudeJSON, review.Key); !ok || !reflect.DeepEqual(e, rootEntry) {
+		t.Errorf("entry = %v (present %v), want it still trusted as %v", e, ok, rootEntry)
+	}
+	if e, _ := entryAt(t, f.claudeJSON, trustKey(t, f.repoDir())); e["hasTrustDialogAccepted"] != nil {
+		t.Errorf("repository entry = %v, want its flag retracted", e)
+	}
+	if gs := repoGrantsOf(t, f.instanceRoot); gs != nil {
+		t.Errorf("repository records = %+v, want them cleared", gs)
 	}
 }
 
@@ -1042,7 +1125,8 @@ func TestClaudeTrust_SkippedWritesDontFail(t *testing.T) {
 
 // TestClaudeTrust_StaysInsideItsBoundary runs create, apply and destroy with
 // the option on and checks niwa wrote no Claude Code setting anywhere under
-// HOME and touched no projects key but the instance root's.
+// HOME and touched no projects key but those of the instance root and its
+// repository.
 func TestClaudeTrust_StaysInsideItsBoundary(t *testing.T) {
 	f := newTrustFixture(t)
 	settings := filepath.Join(f.home, ".claude", "settings.json")
@@ -1063,6 +1147,7 @@ func TestClaudeTrust_StaysInsideItsBoundary(t *testing.T) {
 	f.mustCreate(t, on)
 	f.mustApply(t, on)
 	key := trustKey(t, f.instanceRoot)
+	repoKey := trustKey(t, f.repoDir())
 
 	projects := projectsOf(t, readClaudeConfig(t, f.claudeJSON))
 	for k, v := range others {
@@ -1070,8 +1155,8 @@ func TestClaudeTrust_StaysInsideItsBoundary(t *testing.T) {
 			t.Errorf("projects[%s] = %v, want %v", k, projects[k], v)
 		}
 	}
-	if len(projects) != len(others)+1 || projects[key] == nil {
-		t.Errorf("projects = %v, want only %s added", projects, key)
+	if len(projects) != len(others)+2 || projects[key] == nil || projects[repoKey] == nil {
+		t.Errorf("projects = %v, want only %s and %s added", projects, key, repoKey)
 	}
 
 	if err := DestroyInstance(f.instanceRoot, WithDestroyReporter(f.applier.Reporter), WithPluginRecordBaseDir(f.home)); err != nil {

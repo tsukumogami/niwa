@@ -70,7 +70,7 @@ merged into `DisclosedNotices` by both `Create` and `Apply`.
 | Key | Condition | File |
 |-----|-----------|------|
 | `provider-shadow` | Personal overlay declares a provider that shadows the team config's provider | `apply.go` |
-| `claude-trust-overlay` | Instance trust is on only because the workspace overlay sets `[claude] trust_instances`, and the instance holds a workspace grant. Recorded in the workspace root's state, so it's shown once per workspace; a single-instance layout has no root state, so it's shown by any run that writes trust | `claude_trust.go` |
+| `claude-trust-overlay` | Instance trust is on only because the workspace overlay sets `[claude] trust_instances`, and the instance holds a workspace grant for its root or a cloned repository. Recorded in the workspace root's state, so it's shown once per workspace; a single-instance layout has no root state, so it's shown by any run that writes trust | `claude_trust.go` |
 
 ## Testing
 

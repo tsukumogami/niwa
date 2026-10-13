@@ -211,11 +211,16 @@ func prunePluginRecords(instanceRoot string, reporter *Reporter, baseDir string)
 	}
 }
 
-// withdrawClaudeTrust removes the Claude Code trust entry, or only its flag,
-// that instanceDir's state records niwa as having written. Only the recorded
-// grant is acted on: an entry with no record is the developer's own and is
-// left alone. The expected key is computed here, while the directory still
-// exists, so a record naming any other path is refused rather than followed.
+// withdrawClaudeTrust removes the Claude Code trust entries, or only their
+// flags, that instanceDir's state records niwa as having written: the
+// instance root's and each repository directory's. Only recorded grants are
+// acted on: an entry with no record is the developer's own and is left
+// alone. The expected keys are computed here, while the directories still
+// exist, so a record naming any other path is refused rather than followed.
+// A repository grant's expected key is the resolved path of
+// <instanceDir>/<recorded path>; a recorded path that is absolute, contains
+// "..", or resolves outside the instance is refused, and one whose directory
+// is already gone has no expected key, so Withdraw refuses it with a warning.
 //
 // It is fail-safe by contract: a missing state file means there is nothing to
 // withdraw, and a state file that can't be read, a root that can't be
@@ -239,19 +244,37 @@ func withdrawClaudeTrust(instanceDir string, reporter *Reporter) {
 		}
 		return
 	}
-	if state == nil || state.ClaudeTrust == nil {
+	if state == nil {
 		return
 	}
-	g := state.ClaudeTrust
-
-	key, err := claudeTrustKey(instanceDir)
-	if err != nil {
-		warn("Claude trust entry %q in %s left in place: the instance root could not be resolved: %v", g.Key, g.ConfigFile, err)
+	repos := sortedGrantPaths(state.ClaudeTrustRepos)
+	if state.ClaudeTrust == nil && len(repos) == 0 {
 		return
 	}
 
-	if w := claudetrust.Withdraw(g, key, claudetrust.Destroy); w != "" {
-		warn("%s", w)
+	key, keyErr := claudeTrustKey(instanceDir)
+	if g := state.ClaudeTrust; g != nil {
+		if keyErr != nil {
+			warn("Claude trust entry %q in %s left in place: the instance root could not be resolved: %v", g.Key, g.ConfigFile, keyErr)
+		} else if w := claudetrust.Withdraw(g, key, claudetrust.Destroy); w != "" {
+			warn("%s", w)
+		}
+	}
+
+	for _, rel := range repos {
+		g := state.ClaudeTrustRepos[rel]
+		if keyErr != nil {
+			warn("Claude trust entry %q in %s left in place: the instance root could not be resolved: %v", g.Key, g.ConfigFile, keyErr)
+			continue
+		}
+		repoKey, err := repoTrustKey(instanceDir, key, rel)
+		if err != nil {
+			warn("Claude trust entry %q in %s left in place: refusing the record for repository %q: %v", g.Key, g.ConfigFile, rel, err)
+			continue
+		}
+		if w := claudetrust.Withdraw(g, repoKey, claudetrust.Destroy); w != "" {
+			warn("%s", w)
+		}
 	}
 }
 
