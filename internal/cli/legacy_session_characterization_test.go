@@ -259,7 +259,6 @@ func TestLegacySessionCharacterization(t *testing.T) {
 			ws := buildLegacySessionWorkspace(t, dir)
 			writeJobEntry(t, filepath.Join(ws.home, ".claude", "jobs"), legacySessionID)
 			destroyed := stubDestroyAll(t)
-			stubRemoveTrust(t)
 			cmd, stdout, _ := newLegacyCmd()
 			var runErr error
 			stderr := captureOSStderr(t, func() { runErr = runReap(cmd, nil) })
@@ -277,12 +276,11 @@ func TestLegacySessionCharacterization(t *testing.T) {
 					legacySection("live: spared report (stderr)", stderr), ws))
 		}
 
-		// Dead: no job entry, so the instance is reclaimed, its trust entry
-		// removed, and its mapping deleted.
+		// Dead: no job entry, so the instance is reclaimed and its mapping
+		// deleted.
 		{
 			ws := buildLegacySessionWorkspace(t, dir)
 			destroyed := stubDestroyAll(t)
-			untrusted := stubRemoveTrust(t)
 			var n int
 			var reapErr error
 			stderr := captureOSStderr(t, func() {
@@ -296,9 +294,6 @@ func TestLegacySessionCharacterization(t *testing.T) {
 			}
 			if !reflect.DeepEqual(*destroyed, []string{ws.inst}) {
 				t.Errorf("destroyed = %q, want [%q]", *destroyed, ws.inst)
-			}
-			if !reflect.DeepEqual(*untrusted, []string{ws.inst}) {
-				t.Errorf("untrusted = %q, want [%q]", *untrusted, ws.inst)
 			}
 			if _, err := os.Stat(ws.mappingPath); !os.IsNotExist(err) {
 				t.Errorf("a dead session's mapping survived the reap (stat err %v)", err)

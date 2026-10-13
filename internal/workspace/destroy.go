@@ -1,7 +1,9 @@
 package workspace
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -215,22 +217,44 @@ func prunePluginRecords(instanceRoot string, reporter *Reporter, baseDir string)
 // left alone. The expected key is computed here, while the directory still
 // exists, so a record naming any other path is refused rather than followed.
 //
-// It is fail-safe by contract: a missing or unreadable state file means there
-// is nothing to withdraw, and a refused or skipped withdrawal is reported
-// (when a reporter is set) and otherwise swallowed, so a destroy never fails
-// on trust cleanup. A nil reporter drops the warning, as prunePluginRecords
-// does; every CLI route passes one.
+// It is fail-safe by contract: a missing state file means there is nothing to
+// withdraw, and a state file that can't be read, a root that can't be
+// resolved, or a refused or skipped withdrawal is reported (when a reporter
+// is set) and otherwise swallowed, so a destroy never fails on trust cleanup.
+// A nil reporter drops the warning, as prunePluginRecords does; every CLI
+// route passes one.
 func withdrawClaudeTrust(instanceDir string, reporter *Reporter) {
+	warn := func(format string, a ...any) {
+		if reporter != nil {
+			reporter.Warn("instance %s: "+format, append([]any{filepath.Base(instanceDir)}, a...)...)
+		}
+	}
+
 	state, err := LoadState(instanceDir)
-	if err != nil || state == nil || state.ClaudeTrust == nil {
+	if err != nil {
+		// The state is about to be removed with the instance, so a grant it
+		// records can't be withdrawn later either.
+		if !errors.Is(err, fs.ErrNotExist) {
+			warn("any Claude trust entry the instance state records was left in place: %v", err)
+		}
+		return
+	}
+	if state == nil || state.ClaudeTrust == nil {
+		return
+	}
+	g := state.ClaudeTrust
+
+	key, err := claudeTrustKey(instanceDir)
+	if err != nil {
+		warn("Claude trust entry %q in %s left in place: the instance root could not be resolved: %v", g.Key, g.ConfigFile, err)
 		return
 	}
 
-	// A root that can't be resolved yields an empty key, which Withdraw
-	// refuses, so the record is reported rather than acted on.
-	key, _ := claudetrust.Key(instanceDir)
-
-	if w := claudetrust.Withdraw(state.ClaudeTrust, key, claudetrust.Destroy); w != "" && reporter != nil {
-		reporter.Warn("instance %s: %s", filepath.Base(instanceDir), w)
+	if w := claudetrust.Withdraw(g, key, claudetrust.Destroy); w != "" {
+		warn("%s", w)
 	}
 }
+
+// claudeTrustKey computes the projects key withdrawClaudeTrust checks a record
+// against. It is a variable so a test can make the root unresolvable.
+var claudeTrustKey = claudetrust.Key

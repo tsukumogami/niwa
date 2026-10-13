@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/tsukumogami/niwa/internal/claudetrust"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/keyreport"
@@ -558,7 +559,7 @@ func continueReview(cmd *cobra.Command, root, cwd, token string, client *github.
 	// (3) Re-assert containment on the SAME instance: re-run ApplyReviewSettings
 	// (sandbox stanza + hooks + post-guard). This runs on a NEW untrusted diff, so
 	// re-asserting -- not assuming the stage-time settings still hold -- is required.
-	askPosture := resolveAskPosture(instancePath, plan.sandbox)
+	askPosture := resolveAskPosture(cmd.ErrOrStderr(), instancePath, plan.sandbox)
 	if err := watch.ApplyReviewSettings(instancePath, plan.sandbox, askPosture); err != nil {
 		return err
 	}
@@ -790,14 +791,11 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	}
 	instancePath := provRes.Path
 
+	// A failed stage destroys the instance, which also withdraws the Claude trust
+	// grant its state records.
 	success := false
-	askPosture := false
 	defer func() {
 		if !success {
-			if askPosture {
-				// Undo the trust seed for an instance we are about to destroy.
-				_ = removeInstanceTrustFunc(instancePath)
-			}
 			_ = destroyInstanceFunc(instancePath)
 		}
 	}()
@@ -810,9 +808,9 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 
 	// Resolve the out-of-instance-write posture for a sandboxed review. The
 	// operator-approval (ask) posture requires a trusted workspace and an instance
-	// outside ~/.claude; resolveAskPosture seeds workspace trust when it can guarantee
-	// both, and returns false (the shipped hard-deny fallback) otherwise.
-	askPosture = resolveAskPosture(instancePath, plan.sandbox)
+	// outside the Claude config home; resolveAskPosture seeds workspace trust when it
+	// can guarantee both, and returns false (the shipped hard-deny fallback) otherwise.
+	askPosture := resolveAskPosture(cmd.ErrOrStderr(), instancePath, plan.sandbox)
 
 	// Apply the review-session settings: always the post-guard rule, plus the OS
 	// no-egress sandbox stanza when plan.sandbox. When askPosture is on, the sandboxed
@@ -930,22 +928,22 @@ func reviewWritePosture(sandbox, ask bool) string {
 	return " -- out-of-instance writes are hard-denied"
 }
 
-// ensureInstanceTrustedFunc / removeInstanceTrustFunc / reviewHomeDir are seams so a
-// test can drive resolveAskPosture without touching the real ~/.claude.json or HOME.
+// reviewHomeDir and saveReviewState are seams so a test can drive
+// resolveAskPosture against a temporary HOME and inject a failed state save.
 var (
-	ensureInstanceTrustedFunc = watch.EnsureInstanceTrusted
-	removeInstanceTrustFunc   = watch.RemoveInstanceTrust
-	reviewHomeDir             = os.UserHomeDir
+	reviewHomeDir   = os.UserHomeDir
+	saveReviewState = workspace.SaveState
 )
 
 // resolveAskPosture reports whether the operator-approval (ask) posture can be used
-// for a sandboxed review instance, seeding workspace trust as a side effect when it
-// can. It returns false -- the shipped hard-deny fallback -- when the sandbox is off,
-// HOME cannot be resolved, the instance lives under ~/.claude (a location Claude Code
-// protects independently of mode/trust/hooks), or trust cannot be seeded. The ask
-// posture is never entered without a guaranteed trusted workspace, so a fallback never
-// fails open relative to the shipped deny.
-func resolveAskPosture(instancePath string, sandbox bool) bool {
+// for a sandboxed review instance, seeding Claude Code trust for the instance root as
+// a side effect when it can. It returns false -- the shipped hard-deny fallback --
+// when the sandbox is off, HOME cannot be resolved, the instance lives under the
+// Claude config home (a location Claude Code protects independently of
+// mode/trust/hooks), or trust cannot be written and recorded. The ask posture is
+// never entered without a trusted workspace, so a fallback never fails open relative
+// to the shipped deny. A skipped trust write is reported on w.
+func resolveAskPosture(w io.Writer, instancePath string, sandbox bool) bool {
 	if !sandbox {
 		return false
 	}
@@ -953,21 +951,93 @@ func resolveAskPosture(instancePath string, sandbox bool) bool {
 	if err != nil || home == "" {
 		return false
 	}
+	// The config home is found the way claudetrust finds the config file, so
+	// the guard and the writer agree on where Claude Code keeps its data.
+	claudeHome := filepath.Join(home, ".claude")
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		if !filepath.IsAbs(dir) {
+			return false
+		}
+		claudeHome = dir
+	}
+	claudeHome = filepath.Clean(claudeHome)
 	abs, err := filepath.Abs(instancePath)
 	if err != nil {
 		return false
 	}
 	abs = filepath.Clean(abs)
-	claudeHome := filepath.Clean(filepath.Join(home, ".claude"))
 	if abs == claudeHome || strings.HasPrefix(abs, claudeHome+string(os.PathSeparator)) {
-		// Under ~/.claude: the sensitive-location protection would block the review's
-		// own in-instance writes regardless of trust, so autonomy cannot be guaranteed.
+		// Under the config home: the sensitive-location protection would block the
+		// review's own in-instance writes regardless of trust, so autonomy cannot be
+		// guaranteed.
 		return false
 	}
-	if err := ensureInstanceTrustedFunc(instancePath); err != nil {
+	return seedReviewTrust(w, home, instancePath)
+}
+
+// seedReviewTrust marks the review instance's root trusted through claudetrust and
+// records the grant, with source review, in the instance state, so destroying the
+// instance withdraws it. It reports whether the entry is trusted afterwards.
+//
+// A review takes precedence for its own instance: a workspace grant already there
+// (the instance was created with trust_instances on) is re-labeled review, so an
+// apply in the instance with the option off can't pull trust out from under the
+// review. If the state can't be saved, this call's write is undone and the posture
+// falls back to hard-deny, so trust is never left without the record that removes it.
+func seedReviewTrust(w io.Writer, home, instancePath string) bool {
+	state, err := workspace.LoadState(instancePath)
+	if err != nil {
+		fmt.Fprintf(w, "niwa watch: warning: Claude trust for %s not written: %v\n", instancePath, err)
 		return false
 	}
-	return true
+	env := claudetrust.Env{Home: home, ClaudeConfigDir: os.Getenv("CLAUDE_CONFIG_DIR")}
+	out := claudetrust.Ensure(env, instancePath, state.ClaudeTrust, claudetrust.SourceReview)
+	if out.Warning != "" {
+		fmt.Fprintf(w, "niwa watch: warning: %s\n", out.Warning)
+	}
+	// A skip always carries a warning and writes nothing. An entry already
+	// trusted by someone else comes back with no grant and no warning, and
+	// counts as trusted. A warning beside a write (a stale record dropped)
+	// leaves the entry trusted; one beside no write is taken as a skip, which
+	// can only err towards the hard-deny posture.
+	trusted := out.Changed || out.Warning == ""
+
+	grant := out.Grant
+	if trusted && grant != nil && grant.Source == claudetrust.SourceWorkspace {
+		// Outside a skip, the grant Ensure returns names this instance's
+		// current key and config file.
+		relabeled := *grant
+		relabeled.Source = claudetrust.SourceReview
+		grant = &relabeled
+	}
+	if sameGrant(grant, state.ClaudeTrust) {
+		return trusted
+	}
+	state.ClaudeTrust = grant
+	if err := saveReviewState(instancePath, state); err != nil {
+		fmt.Fprintf(w, "niwa watch: warning: recording Claude trust for %s: %v\n", instancePath, err)
+		if out.Changed && out.Grant != nil {
+			// Only what this call wrote is undone: a created entry goes, a
+			// flag set on an entry that was already there is retracted.
+			how := claudetrust.Retract
+			if out.Created {
+				how = claudetrust.Destroy
+			}
+			if uw := claudetrust.Withdraw(out.Grant, out.Grant.Key, how); uw != "" {
+				fmt.Fprintf(w, "niwa watch: warning: the Claude trust written for %s could not be removed: %s\n", instancePath, uw)
+			}
+		}
+		return false
+	}
+	return trusted
+}
+
+// sameGrant reports whether a and b record the same grant.
+func sameGrant(a, b *claudetrust.Grant) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // sandboxCapabilityCheck is the preflight capability probe (a seam so tests can

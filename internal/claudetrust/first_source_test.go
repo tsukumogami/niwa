@@ -43,6 +43,21 @@ func TestEnsureRecordedGrantKeepsItsPlace(t *testing.T) {
 	})
 }
 
+// TestEnsureRecordsTheAskingSource checks a first grant carries the source of
+// the feature that asked for it, review as well as workspace.
+func TestEnsureRecordsTheAskingSource(t *testing.T) {
+	for _, src := range []Source{SourceWorkspace, SourceReview} {
+		t.Run(string(src), func(t *testing.T) {
+			f := newFixture(t)
+			out := Ensure(f.env, f.root, nil, src)
+			want := &Grant{ConfigFile: f.file, Key: f.key, Mode: ModeCreated, Source: src}
+			if out.Warning != "" || !reflect.DeepEqual(out.Grant, want) {
+				t.Errorf("outcome = %+v (grant %+v), want %+v", out, out.Grant, want)
+			}
+		})
+	}
+}
+
 // TestEnsureReportsWhatItCreated checks Outcome.Created against each write
 // Ensure can make, since a caller undoes the write by it.
 func TestEnsureReportsWhatItCreated(t *testing.T) {

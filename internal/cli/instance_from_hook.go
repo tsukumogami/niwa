@@ -551,10 +551,13 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 // realDestroyInstance is the production teardown: it force-destroys the
 // instance directory, equivalent to `niwa destroy --force <instance>`. It
 // validates the directory is a destroyable instance (not a workspace root)
-// first. It is wired into destroyInstanceFunc; tests override that variable.
+// first. Plugin-record pruning and Claude trust withdrawal report on stderr,
+// so a trust entry left behind during reap or dispatch cleanup is never
+// silent. It is wired into destroyInstanceFunc; tests override that variable.
 func realDestroyInstance(instancePath string) error {
 	if err := workspace.ValidateInstanceDir(instancePath); err != nil {
 		return err
 	}
-	return workspace.DestroyInstance(instancePath)
+	return workspace.DestroyInstance(instancePath,
+		workspace.WithDestroyReporter(workspace.NewReporter(os.Stderr)))
 }

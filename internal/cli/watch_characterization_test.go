@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/agentplan"
+	"github.com/tsukumogami/niwa/internal/claudetrust"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/watch"
 )
@@ -111,7 +112,7 @@ func installWatchCharFakes(t *testing.T) *watchCharFakes {
 	provisionInstanceFunc = func(_ context.Context, root, _, namePrefix, sep string, _ int) (provisionResult, error) {
 		name := "test-ws" + sep + namePrefix
 		dir := filepath.Join(root, name)
-		if err := os.MkdirAll(filepath.Join(dir, ".niwa"), 0o755); err != nil {
+		if err := writeMinimalInstanceState(dir); err != nil {
 			return provisionResult{}, err
 		}
 		f.provisioned = watchCharProvision{root: root, namePrefix: namePrefix, sep: sep, path: dir}
@@ -189,43 +190,57 @@ func assertSingleNameValue(t *testing.T, passthrough []string, want string) {
 	}
 }
 
+// stubWatchTrust points review trust at home with CLAUDE_CONFIG_DIR cleared.
+// With unparseable set, the config file there holds something claudetrust must
+// skip, so a sandboxed review falls back to the hard-deny posture.
+func stubWatchTrust(t *testing.T, home string, unparseable bool) {
+	t.Helper()
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	prev := reviewHomeDir
+	reviewHomeDir = func() (string, error) { return home, nil }
+	t.Cleanup(func() { reviewHomeDir = prev })
+	if unparseable {
+		writeTestFile(t, filepath.Join(home, ".claude.json"), "{ not json")
+	}
+}
+
 func TestWatchCharacterization_StageReview(t *testing.T) {
 	cases := []struct {
 		name            string
 		plan            reviewPlan
-		seedErr         error
+		unparseable     bool
 		wantPassthrough []string
 		wantLine        string
-		wantSeeded      bool
+		wantRecorded    bool
 	}{
 		{
 			name:            "unsandboxed",
 			plan:            reviewPlan{},
 			wantPassthrough: []string{"--name", "watch_acme_widget_7"},
 			wantLine:        "niwa watch: staged review for acme/widget#7 (handle watch_acme_widget_7)",
-			wantSeeded:      false,
+			wantRecorded:    false,
 		},
 		{
 			name:            "sandboxed_ask",
 			plan:            reviewPlan{sandbox: true},
 			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--strict-mcp-config"},
 			wantLine:        "niwa watch: staged review for acme/widget#7 (handle watch_acme_widget_7) -- out-of-instance writes surface an operator approval",
-			wantSeeded:      true,
+			wantRecorded:    true,
 		},
 		{
 			name:            "sandboxed_deny",
 			plan:            reviewPlan{sandbox: true},
-			seedErr:         errors.New("seed refused"),
+			unparseable:     true,
 			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--strict-mcp-config"},
 			wantLine:        "niwa watch: staged review for acme/widget#7 (handle watch_acme_widget_7) -- out-of-instance writes are hard-denied",
-			wantSeeded:      true,
+			wantRecorded:    false,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			root, home := setupWatchCharEnv(t)
 			fakes := installWatchCharFakes(t)
-			stub := stubAskPostureSeams(t, home, tc.seedErr)
+			stubWatchTrust(t, home, tc.unparseable)
 			client := newPullHeadServer(t)
 			cmd, stdout, _ := newWatchCharCmd()
 
@@ -297,11 +312,8 @@ func TestWatchCharacterization_StageReview(t *testing.T) {
 			if len(*fakes.destroyed) != 0 {
 				t.Errorf("a successful stage destroyed %q", *fakes.destroyed)
 			}
-			if stub.seeded != tc.wantSeeded {
-				t.Errorf("trust seeded = %v, want %v", stub.seeded, tc.wantSeeded)
-			}
-			if stub.removed {
-				t.Errorf("a successful stage removed the trust seed")
+			if g := recordedGrant(t, instancePath); (g != nil) != tc.wantRecorded {
+				t.Errorf("recorded trust = %+v, want recorded %v", g, tc.wantRecorded)
 			}
 		})
 	}
@@ -312,7 +324,7 @@ func TestWatchCharacterization_StageReview(t *testing.T) {
 		root, home := setupWatchCharEnv(t)
 		fakes := installWatchCharFakes(t)
 		fakes.fetchErr = errors.New("boom")
-		stubAskPostureSeams(t, home, nil)
+		stubWatchTrust(t, home, false)
 		client := newPullHeadServer(t)
 		cmd, _, _ := newWatchCharCmd()
 
@@ -330,50 +342,82 @@ func TestWatchCharacterization_StageReview(t *testing.T) {
 			t.Errorf("destroyed = %q, want %q", got, want)
 		}
 	})
+
+	// A launch that fails after the trust was seeded destroys the instance
+	// through the real teardown, which withdraws the recorded grant.
+	t.Run("launch_failure_withdraws_trust", func(t *testing.T) {
+		root, home := setupWatchCharEnv(t)
+		installWatchCharFakes(t)
+		stubWatchTrust(t, home, false)
+		destroyInstanceFunc = realDestroyInstance // installWatchCharFakes restores the original
+		claudeJSON := filepath.Join(home, ".claude.json")
+		var key string
+		var seeded *claudetrust.Grant
+		dispatchLaunch = func(_ context.Context, req launchRequest) error {
+			key = resolvedKey(t, req.InstanceDir)
+			seeded = recordedGrant(t, req.InstanceDir)
+			assertTrusted(t, claudeJSON, key)
+			return errors.New("launch boom")
+		}
+		client := newPullHeadServer(t)
+		cmd, _, _ := newWatchCharCmd()
+
+		err := stageReview(cmd, root, root, "", client, watchCharPR, reviewPlan{sandbox: true})
+		if err == nil {
+			t.Fatal("stageReview succeeded, want the launch error")
+		}
+		if seeded == nil || seeded.Source != claudetrust.SourceReview {
+			t.Fatalf("grant recorded before launch = %+v, want a review grant", seeded)
+		}
+		if _, statErr := os.Stat(seeded.Key); !os.IsNotExist(statErr) {
+			t.Errorf("instance %s survived a failed stage (stat err %v)", seeded.Key, statErr)
+		}
+		assertNoEntry(t, claudeJSON, key)
+	})
 }
 
 func TestWatchCharacterization_ContinueReview(t *testing.T) {
 	cases := []struct {
 		name            string
 		plan            reviewPlan
-		seedErr         error
+		unparseable     bool
 		wantPassthrough []string
 		wantLine        string
-		wantSeeded      bool
+		wantRecorded    bool
 	}{
 		{
 			name:            "unsandboxed",
 			plan:            reviewPlan{},
 			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--resume", "5f0c2d1e-7a3b-4c9d-8e2f-1a2b3c4d5e6f"},
 			wantLine:        "niwa watch: continued review for acme/widget#7 (handle watch_acme_widget_7)",
-			wantSeeded:      false,
+			wantRecorded:    false,
 		},
 		{
 			name:            "sandboxed_ask",
 			plan:            reviewPlan{sandbox: true},
 			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--resume", "5f0c2d1e-7a3b-4c9d-8e2f-1a2b3c4d5e6f", "--strict-mcp-config"},
 			wantLine:        "niwa watch: continued review for acme/widget#7 (handle watch_acme_widget_7) -- out-of-instance writes surface an operator approval",
-			wantSeeded:      true,
+			wantRecorded:    true,
 		},
 		{
 			name:            "sandboxed_deny",
 			plan:            reviewPlan{sandbox: true},
-			seedErr:         errors.New("seed refused"),
+			unparseable:     true,
 			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--resume", "5f0c2d1e-7a3b-4c9d-8e2f-1a2b3c4d5e6f", "--strict-mcp-config"},
 			wantLine:        "niwa watch: continued review for acme/widget#7 (handle watch_acme_widget_7) -- out-of-instance writes are hard-denied",
-			wantSeeded:      true,
+			wantRecorded:    false,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			root, home := setupWatchCharEnv(t)
 			fakes := installWatchCharFakes(t)
-			stub := stubAskPostureSeams(t, home, tc.seedErr)
+			stubWatchTrust(t, home, tc.unparseable)
 			client := newPullHeadServer(t)
 			cmd, stdout, _ := newWatchCharCmd()
 
 			inst := filepath.Join(root, "test-ws+watch_acme_widget_7-4e33acfa")
-			if err := os.MkdirAll(filepath.Join(inst, ".niwa"), 0o755); err != nil {
+			if err := writeMinimalInstanceState(inst); err != nil {
 				t.Fatal(err)
 			}
 			jobsDir := filepath.Join(home, ".claude", "jobs")
@@ -458,8 +502,8 @@ func TestWatchCharacterization_ContinueReview(t *testing.T) {
 				t.Errorf("record ids = (%q, %q), want both cleared by the capture miss", got.SessionID, got.ShortID)
 			}
 
-			if stub.seeded != tc.wantSeeded {
-				t.Errorf("trust seeded = %v, want %v", stub.seeded, tc.wantSeeded)
+			if g := recordedGrant(t, inst); (g != nil) != tc.wantRecorded {
+				t.Errorf("recorded trust = %+v, want recorded %v", g, tc.wantRecorded)
 			}
 			if len(*fakes.destroyed) != 0 {
 				t.Errorf("a continuation destroyed %q", *fakes.destroyed)

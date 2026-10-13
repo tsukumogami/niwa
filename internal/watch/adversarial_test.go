@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/claudetrust"
 )
 
 // TestContainedSessionDeniesEgress_OnHarness is the adversarial
@@ -109,7 +111,7 @@ func assertSandboxedSessionDeniesEgress(t *testing.T) error {
 
 	// Isolate the trust store to a throwaway HOME. The Claude daemon OWNS
 	// ~/.claude.json and re-flushes it after the session ends, so a file-level
-	// RemoveInstanceTrust against the real config loses the race and leaves a stale
+	// trust withdrawal against the real config loses the race and leaves a stale
 	// trust entry behind. Redirecting HOME to a t.TempDir means every write the seed
 	// AND the daemon make to ~/.claude.json lands in a directory t.TempDir removes on
 	// cleanup, so a live run never accumulates cruft in the developer's real config.
@@ -131,21 +133,20 @@ func assertSandboxedSessionDeniesEgress(t *testing.T) error {
 		}
 	}
 	claudeEnv := append(os.Environ(), "HOME="+testHome)
-	origTrustHome := trustHomeDir
-	trustHomeDir = func() (string, error) { return testHome, nil }
-	defer func() { trustHomeDir = origTrustHome }()
 
 	// Operator-approval posture: the ask-posture settings write defaultMode=default,
 	// and the session must run in a TRUSTED workspace or Claude Code silently ignores
-	// the hook allow/ask decisions. Seed trust for the instance exactly as the watch
-	// path does (into the isolated test HOME), and remove it on teardown.
+	// the hook allow/ask decisions. Seed trust for the instance through the same
+	// writer the watch path uses (into the isolated test HOME, never a
+	// CLAUDE_CONFIG_DIR the developer set), and withdraw it on teardown.
 	if err := ApplyReviewSettings(inst, true, true); err != nil {
 		return err
 	}
-	if err := EnsureInstanceTrusted(inst); err != nil {
-		return fmt.Errorf("seeding workspace trust for the ask-posture gate: %w", err)
+	seed := claudetrust.Ensure(claudetrust.Env{Home: testHome}, inst, nil, claudetrust.SourceReview)
+	if seed.Warning != "" || seed.Grant == nil {
+		return fmt.Errorf("seeding workspace trust for the ask-posture gate: %s", seed.Warning)
 	}
-	defer func() { _ = RemoveInstanceTrust(inst) }()
+	defer func() { _ = claudetrust.Withdraw(seed.Grant, seed.Grant.Key, claudetrust.Destroy) }()
 
 	// A path OUTSIDE the instance for the filesystem-escape probe. Under the ask-posture
 	// fs-guard hook the built-in Write tool surfaces an approval and blocks; unanswered,

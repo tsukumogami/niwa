@@ -3,6 +3,7 @@ package workspace
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -412,4 +413,66 @@ func TestDestroyInstance_NilReporterDropsWarning(t *testing.T) {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
 	assertGone(t, inst)
+}
+
+// TestDestroyInstance_UnreadableStateWarns checks that an instance state that
+// can't be parsed is reported: a grant it records is about to become
+// unreachable, so the destroy says so rather than staying silent.
+func TestDestroyInstance_UnreadableStateWarns(t *testing.T) {
+	root := destroySetupWorkspace(t)
+	inst := destroySetupInstance(t, root, "alpha")
+	if err := os.WriteFile(filepath.Join(inst, StateDir, StateFile), []byte("{ not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := DestroyInstance(inst, WithDestroyReporter(NewReporterWithTTY(&buf, false))); err != nil {
+		t.Fatalf("DestroyInstance: %v", err)
+	}
+	assertGone(t, inst)
+
+	out := buf.String()
+	for _, want := range []string{"warning:", "Claude trust", "parsing instance state"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("warning lacks %q, got:\n%s", want, out)
+		}
+	}
+}
+
+// TestDestroyInstance_UnresolvableRootWarns checks that when the instance root
+// can't be resolved, the warning says so and carries the cause, and the
+// recorded entry is left alone.
+func TestDestroyInstance_UnresolvableRootWarns(t *testing.T) {
+	root := destroySetupWorkspace(t)
+	inst := destroySetupInstance(t, root, "alpha")
+	key := trustKey(t, inst)
+
+	cfgPath := filepath.Join(t.TempDir(), ".claude.json")
+	writeClaudeConfig(t, cfgPath, map[string]any{
+		"projects": map[string]any{key: map[string]any{"hasTrustDialogAccepted": true}},
+	})
+	recordClaudeTrust(t, inst, &claudetrust.Grant{
+		ConfigFile: cfgPath, Key: key, Mode: claudetrust.ModeCreated, Source: claudetrust.SourceWorkspace,
+	})
+	before := mustRead(t, cfgPath)
+
+	prev := claudeTrustKey
+	claudeTrustKey = func(string) (string, error) { return "", errors.New("lstat failed") }
+	t.Cleanup(func() { claudeTrustKey = prev })
+
+	var buf bytes.Buffer
+	if err := DestroyInstance(inst, WithDestroyReporter(NewReporterWithTTY(&buf, false))); err != nil {
+		t.Fatalf("DestroyInstance: %v", err)
+	}
+	assertGone(t, inst)
+
+	if !bytes.Equal(mustRead(t, cfgPath), before) {
+		t.Errorf("config file was modified")
+	}
+	out := buf.String()
+	for _, want := range []string{"warning:", "instance root could not be resolved", "lstat failed", cfgPath, key} {
+		if !strings.Contains(out, want) {
+			t.Errorf("warning lacks %q, got:\n%s", want, out)
+		}
+	}
 }

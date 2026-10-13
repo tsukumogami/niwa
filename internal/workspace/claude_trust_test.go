@@ -644,6 +644,32 @@ func TestClaudeTrust_ReviewRecordKept(t *testing.T) {
 	}
 }
 
+// TestClaudeTrust_RelabeledReviewGrantSurvivesOffSwitch covers a review
+// instance created with the option on: its workspace grant is re-labeled
+// review when the review seeds trust, and an apply with the option off then
+// leaves the entry trusted and the record as it is.
+func TestClaudeTrust_RelabeledReviewGrantSurvivesOffSwitch(t *testing.T) {
+	f := newTrustFixture(t)
+	f.mustCreate(t, f.writeConfig(t, trustOn))
+	created := grantOf(t, f.instanceRoot)
+	if created == nil || created.Source != claudetrust.SourceWorkspace {
+		t.Fatalf("record after create = %+v, want a workspace grant", created)
+	}
+	review := *created
+	review.Source = claudetrust.SourceReview
+	recordClaudeTrust(t, f.instanceRoot, &review)
+	before := snapFile(t, f.claudeJSON)
+
+	f.mustApply(t, f.writeConfig(t, trustOff))
+	assertFileUntouched(t, f.claudeJSON, before)
+	if g := grantOf(t, f.instanceRoot); g == nil || *g != review {
+		t.Errorf("record = %+v, want the review grant kept", g)
+	}
+	if e, ok := entryAt(t, f.claudeJSON, review.Key); !ok || e["hasTrustDialogAccepted"] != true {
+		t.Errorf("entry = %v (present %v), want it still trusted", e, ok)
+	}
+}
+
 // TestClaudeTrust_SkippedWritesDontFail covers a config file niwa can't parse
 // and a lock held by another process: create and apply succeed with a warning
 // naming the file and leave it byte-identical; create records nothing, and a
