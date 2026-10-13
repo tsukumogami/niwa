@@ -1,0 +1,403 @@
+// Package claudetrust is the only code in niwa that edits Claude Code's user
+// config. It marks a niwa instance root as a trusted project, so Claude Code
+// honors the instance's project settings and approved MCP servers, and it
+// removes exactly what a recorded grant says niwa added.
+//
+// Claude Code reads a project's .claude/settings.json only when its user config
+// holds projects[<key>].hasTrustDialogAccepted = true for that exact key. The
+// file also holds login-adjacent state and every project's history, and Claude
+// Code rewrites it constantly, so the write discipline is part of the contract:
+//
+//   - One flag, one key. Only projects[<key>].hasTrustDialogAccepted is ever
+//     set. Every other value in the file is written back as the exact bytes it
+//     was read as; formatting is re-indented, values are not changed.
+//     hasTrustDialogHooksAccepted is never written.
+//   - Claude Code's key and file. The key is the instance root with every
+//     symlink resolved, the key Claude Code computes for a session started
+//     there. The file is $CLAUDE_CONFIG_DIR/.claude.json, else
+//     $HOME/.claude.json; a symlinked file is written through, never replaced.
+//   - Claude Code's lock. The read-modify-write runs under the mkdir lock
+//     Claude Code itself takes, <config>.lock, so neither side loses the
+//     other's write.
+//   - Never write what did not parse, and never fail a command over it. A file
+//     that is unreadable, not JSON, or not the expected shape is left
+//     byte-untouched and reported as a warning.
+//   - Atomic replacement. New contents go to a 0600 temp file beside the
+//     target, are fsynced, and are renamed over it with the original mode, so
+//     a reader sees the old file or the new one. A file already in the desired
+//     state is not rewritten at all.
+//   - Record-bounded removal. Claude Code writes an identically-shaped entry
+//     when a person answers its trust prompt, so ownership can't be read from
+//     the entry. Removal is driven by a Grant, validated against the instance
+//     it is withdrawn for, and nothing a Grant doesn't name is ever removed.
+package claudetrust
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// configBasename is the name of Claude Code's user config file, both under
+// $CLAUDE_CONFIG_DIR and under $HOME.
+const configBasename = ".claude.json"
+
+// trustFlag is the one entry key niwa writes or removes.
+const trustFlag = "hasTrustDialogAccepted"
+
+// Mode says what a grant added, and so what destroying the instance removes.
+type Mode string
+
+const (
+	// ModeCreated means niwa created the whole projects entry. Destroying the
+	// instance removes the entry.
+	ModeCreated Mode = "created"
+	// ModeFlagOnly means the entry already existed and niwa only set the flag.
+	// Destroying the instance removes only the flag.
+	ModeFlagOnly Mode = "flag-only"
+)
+
+// Source says which niwa feature recorded a grant. An apply with the option
+// off retracts only a workspace grant, so it never pulls trust out from under
+// a running review.
+type Source string
+
+const (
+	// SourceWorkspace is a grant written by the create/apply pipeline.
+	SourceWorkspace Source = "workspace"
+	// SourceReview is a grant written for a review instance.
+	SourceReview Source = "review"
+)
+
+// Grant is the ownership record of one trust write, persisted in instance
+// state. Removal uses these recorded values, never values recomputed at
+// removal time.
+type Grant struct {
+	// ConfigFile is the unresolved config path niwa locked and wrote through,
+	// e.g. $HOME/.claude.json even when that path is a symlink. The lock name
+	// is derived from it, so it must be the name Claude Code locks.
+	ConfigFile string `json:"config_file"`
+	// Key is the symlink-resolved instance root used as the projects key.
+	Key    string `json:"key"`
+	Mode   Mode   `json:"mode"`
+	Source Source `json:"source"`
+}
+
+// Env is the environment the config file is resolved from. Callers pass it in
+// explicitly so tests never reach the developer's own file.
+type Env struct {
+	// Home is the developer's home directory. Empty disables every write.
+	Home string
+	// ClaudeConfigDir is the value of CLAUDE_CONFIG_DIR at the call. Empty
+	// means unset; a relative value is refused.
+	ClaudeConfigDir string
+}
+
+// Outcome is the result of Ensure.
+type Outcome struct {
+	// Grant is the record to persist: nil when nothing is recorded (the entry
+	// was already trusted by someone else, or the write was skipped with no
+	// usable prior record), otherwise the new grant or the prior one.
+	Grant *Grant
+	// Changed reports that the current config file was rewritten by this
+	// call. A retraction from a previously recorded file doesn't count.
+	Changed bool
+	// Warning is non-empty when something was skipped or left behind. It
+	// names the file and the reason, and never means the command failed.
+	Warning string
+}
+
+// WithdrawMode selects what Withdraw removes. The zero value is invalid and
+// refused, so an unset mode can never remove anything.
+type WithdrawMode int
+
+const (
+	// Destroy removes what the grant added: the whole entry for a created
+	// grant, only the flag for a flag-only grant. Used when the instance goes.
+	Destroy WithdrawMode = iota + 1
+	// Retract removes only the flag, whatever the grant's mode, since the
+	// instance and Claude Code's data for it still exist. Used when an apply
+	// turns trust off or moves it to another config file.
+	Retract
+)
+
+// ConfigFile returns the unresolved path of the Claude config file for env:
+// $CLAUDE_CONFIG_DIR/.claude.json when ClaudeConfigDir is non-empty, else
+// $HOME/.claude.json. A relative ClaudeConfigDir is an error rather than a
+// path resolved against niwa's working directory, which Claude Code would
+// resolve differently.
+func ConfigFile(env Env) (string, error) {
+	if env.ClaudeConfigDir != "" {
+		if !filepath.IsAbs(env.ClaudeConfigDir) {
+			return "", fmt.Errorf("CLAUDE_CONFIG_DIR %q is not an absolute path", env.ClaudeConfigDir)
+		}
+		return filepath.Join(filepath.Clean(env.ClaudeConfigDir), configBasename), nil
+	}
+	if env.Home == "" {
+		return "", fmt.Errorf("no home directory to find the Claude config file under")
+	}
+	return filepath.Join(filepath.Clean(env.Home), configBasename), nil
+}
+
+// Key returns the projects key for instanceRoot: its absolute path with every
+// symlink resolved, the root itself and every parent, which is the key Claude
+// Code computes for a session started there. The root must exist.
+func Key(instanceRoot string) (string, error) {
+	abs, err := filepath.Abs(instanceRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolving the instance root %s: %w", instanceRoot, err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("resolving symlinks in the instance root %s: %w", abs, err)
+	}
+	return filepath.Clean(resolved), nil
+}
+
+// Validate checks a grant before anything acts on it. Instance state is a file
+// anyone controlling the instance can edit, so a crafted record must not turn
+// removal into a write to an arbitrary file or the removal of another
+// project's trust. It checks, in order: known mode and source; an absolute,
+// clean config_file named .claude.json; a key equal to expectedKey; and that
+// config_file resolves to a regular file. A config file that doesn't exist
+// fails with an error wrapping fs.ErrNotExist, and only after every other
+// check passed, so a caller can treat it as "nothing left to remove".
+func (g *Grant) Validate(expectedKey string) error {
+	if g == nil {
+		return fmt.Errorf("no grant")
+	}
+	switch g.Mode {
+	case ModeCreated, ModeFlagOnly:
+	default:
+		return fmt.Errorf("unknown mode %q", g.Mode)
+	}
+	switch g.Source {
+	case SourceWorkspace, SourceReview:
+	default:
+		return fmt.Errorf("unknown source %q", g.Source)
+	}
+	if err := validateConfigPath(g.ConfigFile); err != nil {
+		return err
+	}
+	if g.Key == "" || g.Key != expectedKey {
+		return fmt.Errorf("key %q is not this instance's key %q", g.Key, expectedKey)
+	}
+	info, err := os.Stat(g.ConfigFile)
+	if err != nil {
+		return fmt.Errorf("config file %s: %w", g.ConfigFile, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("config file %s is not a regular file", g.ConfigFile)
+	}
+	return nil
+}
+
+// validateConfigPath is the purely lexical part of Validate.
+func validateConfigPath(p string) error {
+	if !filepath.IsAbs(p) {
+		return fmt.Errorf("config file %q is not an absolute path", p)
+	}
+	if filepath.Clean(p) != p {
+		return fmt.Errorf("config file %q is not a clean path", p)
+	}
+	if filepath.Base(p) != configBasename {
+		return fmt.Errorf("config file %q is not named %s", p, configBasename)
+	}
+	return nil
+}
+
+// Ensure marks instanceRoot trusted in the config file env names and returns
+// the record to persist. prior is the record already in instance state, if
+// any; src is the feature asking.
+//
+// The existing entry decides what happens:
+//
+//	no entry                         create {hasTrustDialogAccepted: true}, record created
+//	flag absent or false             set the flag, record flag-only
+//	flag true, prior names this key  nothing, return prior
+//	flag true, otherwise             nothing, record nothing
+//
+// A prior record for a different config file but the same key is retracted
+// from its file first. A prior record for a different key (the instance
+// moved) is dropped with a warning and its entry left alone, since niwa can't
+// prove that entry is this instance's. Any skip (Home empty, a relative
+// CLAUDE_CONFIG_DIR, a lock timeout, a file that can't be parsed) writes
+// nothing and returns prior, so a record is never lost because one write
+// couldn't happen.
+func Ensure(env Env, instanceRoot string, prior *Grant, src Source) Outcome {
+	if env.Home == "" {
+		return Outcome{Grant: prior}
+	}
+	if src != SourceWorkspace && src != SourceReview {
+		return Outcome{Grant: prior, Warning: fmt.Sprintf("Claude trust for %s not written: unknown source %q", instanceRoot, src)}
+	}
+	file, err := ConfigFile(env)
+	if err != nil {
+		return Outcome{Grant: prior, Warning: fmt.Sprintf("Claude trust for %s not written: %v", instanceRoot, err)}
+	}
+	key, err := Key(instanceRoot)
+	if err != nil {
+		return Outcome{Grant: prior, Warning: fmt.Sprintf("Claude trust not written to %s: %v", file, err)}
+	}
+
+	var warnings []string
+	if prior != nil {
+		switch {
+		case prior.Key != key:
+			warnings = append(warnings, fmt.Sprintf(
+				"the recorded Claude trust entry %q in %s is for a different path than this instance (%s); leaving it in place, remove it by hand if it is stale",
+				prior.Key, prior.ConfigFile, key))
+			prior = nil
+		case prior.Mode != ModeCreated && prior.Mode != ModeFlagOnly,
+			prior.Source != SourceWorkspace && prior.Source != SourceReview,
+			validateConfigPath(prior.ConfigFile) != nil:
+			warnings = append(warnings, fmt.Sprintf(
+				"ignoring a malformed Claude trust record for %s (config file %q, mode %q, source %q)",
+				key, prior.ConfigFile, prior.Mode, prior.Source))
+			prior = nil
+		case prior.ConfigFile != file:
+			if w := Withdraw(prior, key, Retract); w != "" {
+				// A skipped withdrawal keeps the record so the next apply
+				// retries it; the new file waits until then.
+				return Outcome{Grant: prior, Warning: joinWarnings(append(warnings, w))}
+			}
+			prior = nil
+		}
+	}
+
+	grant, changed, err := ensureEntry(file, key, prior, src)
+	if err != nil {
+		warnings = append(warnings, fmt.Sprintf("Claude trust for %s not written; left %s unchanged: %v", key, file, err))
+		return Outcome{Grant: prior, Warning: joinWarnings(warnings)}
+	}
+	return Outcome{Grant: grant, Changed: changed, Warning: joinWarnings(warnings)}
+}
+
+// ensureEntry is Ensure's locked read-modify-write against one file.
+func ensureEntry(file, key string, prior *Grant, src Source) (*Grant, bool, error) {
+	// The lock lives beside the config file, so its directory must exist
+	// before the lock can be taken. A missing CLAUDE_CONFIG_DIR is created
+	// private, as Claude Code would.
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		return prior, false, fmt.Errorf("creating the config directory: %w", err)
+	}
+	release, err := acquireLock(file + lockSuffix)
+	if err != nil {
+		return prior, false, err
+	}
+	defer release()
+
+	doc, err := loadConfig(file)
+	if err != nil {
+		return prior, false, err
+	}
+	projects, entry, err := doc.entry(key)
+	if err != nil {
+		return prior, false, err
+	}
+
+	var mode Mode
+	switch {
+	case entry == nil:
+		mode = ModeCreated
+		entry = rawObject{}
+	default:
+		trusted, err := flagValue(entry)
+		if err != nil {
+			return prior, false, err
+		}
+		if trusted {
+			if prior != nil && prior.Key == key && prior.ConfigFile == file {
+				return prior, false, nil
+			}
+			return nil, false, nil
+		}
+		mode = ModeFlagOnly
+	}
+
+	entry[trustFlag] = rawTrue
+	if err := doc.setEntry(projects, key, entry); err != nil {
+		return prior, false, err
+	}
+	if err := doc.write(); err != nil {
+		return prior, false, err
+	}
+	return &Grant{ConfigFile: file, Key: key, Mode: mode, Source: src}, true, nil
+}
+
+// Withdraw removes what g names from g's recorded config file: the whole
+// entry for Destroy on a created grant, otherwise only the flag. expectedKey
+// is the canonical key of the instance being destroyed or applied, computed
+// while its directory still exists; a grant naming any other key is refused.
+//
+// It returns a warning, naming the file and key, when it refused or skipped;
+// nothing is written then. Withdrawing an entry or flag that is already gone,
+// or from a config file that no longer exists, is a silent no-op.
+func Withdraw(g *Grant, expectedKey string, how WithdrawMode) (warning string) {
+	if g == nil {
+		return ""
+	}
+	if how != Destroy && how != Retract {
+		return fmt.Sprintf("Claude trust entry %q in %s left in place: unknown withdrawal mode %d", g.Key, g.ConfigFile, how)
+	}
+	if err := g.Validate(expectedKey); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return ""
+		}
+		return fmt.Sprintf("Claude trust entry %q in %s left in place: refusing the recorded grant: %v", g.Key, g.ConfigFile, err)
+	}
+	if err := withdrawEntry(g, how); err != nil {
+		return fmt.Sprintf("Claude trust entry %q in %s left in place: %v", g.Key, g.ConfigFile, err)
+	}
+	return ""
+}
+
+// withdrawEntry is Withdraw's locked read-modify-write.
+func withdrawEntry(g *Grant, how WithdrawMode) error {
+	release, err := acquireLock(g.ConfigFile + lockSuffix)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	doc, err := loadConfig(g.ConfigFile)
+	if err != nil {
+		return err
+	}
+	if !doc.exists {
+		return nil
+	}
+	projects, entry, err := doc.entry(g.Key)
+	if err != nil {
+		return err
+	}
+	if entry == nil {
+		return nil
+	}
+
+	if how == Destroy && g.Mode == ModeCreated {
+		delete(projects, g.Key)
+	} else {
+		if _, ok := entry[trustFlag]; !ok {
+			return nil
+		}
+		delete(entry, trustFlag)
+		raw, err := marshalRaw(entry)
+		if err != nil {
+			return err
+		}
+		projects[g.Key] = raw
+	}
+	if err := doc.setProjects(projects); err != nil {
+		return err
+	}
+	return doc.write()
+}
+
+// joinWarnings combines the warnings one call produced into one line.
+func joinWarnings(ws []string) string {
+	return strings.Join(ws, "; ")
+}
