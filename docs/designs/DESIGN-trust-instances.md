@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Proposed
+status: Accepted
 upstream: docs/prds/PRD-trust-instances.md
 problem: |
   niwa writes a declared-server approval list into each instance root's
@@ -37,7 +37,7 @@ user_visible_surface: true
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
