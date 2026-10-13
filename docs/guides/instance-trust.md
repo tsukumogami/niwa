@@ -361,3 +361,18 @@ trust entries and settings written by hand:
 - Trusting the repository's root and listing the server in
   `enabledMcpjsonServers` in its `.claude/settings.local.json` (or its
   `.claude/settings.json`) approved it, with the instance root untrusted.
+
+The repository check last passed on Claude Code 2.1.296, macOS, on 2026-10-13,
+with a niwa built from the change that trusts repository directories, a fresh
+instance of ten cloned repositories, and an overlay-declared HTTP server with
+two vault-backed headers:
+
+- `niwa create` recorded a grant for the instance root and for each of the ten
+  repositories, and each repository's `.claude/settings.local.json` listed the
+  server in `enabledMcpjsonServers`.
+- `claude mcp list` showed the server connected at the instance root and inside
+  two of the repositories; inside one of them, `claude -p` in default
+  permission mode listed its tools with no prompt, and `claude doctor` reported
+  no settings errors.
+- `niwa destroy` took the trusted entries under the instance path from eleven
+  to none.
