@@ -29,6 +29,11 @@ Framing for an opt-in that lets niwa mark its own instance roots trusted in
 Claude Code, so the declared-server approval list it already writes takes
 effect without a prompt.
 
+Edited after acceptance: scoping found that a workspace overlay can't declare
+`[mcp.servers]` at all, so a workspace whose servers live in a private overlay
+never gets an approval list to trust. The problem statement and scope now
+cover that gap.
+
 ## Problem Statement
 
 niwa creates a new instance for every dispatch and for every `niwa create`.
@@ -47,6 +52,13 @@ directory whose own trust entry is set in the user's Claude config, and a
 trusted parent directory doesn't count. On a host with dozens of niwa
 instances, every instance root shows up there untrusted with an empty approved
 list.
+
+The approved list also only exists for servers declared in the base workspace
+config. A workspace overlay, which is where a team keeps what it can't publish,
+has no `[mcp.servers]` table. A team whose server is private ships its
+`.mcp.json` from the overlay as a verbatim file instead, and niwa never approves
+a file it didn't generate, so that team gets the prompts even after the trust
+problem is solved.
 
 So the cost lands three ways. A person at the keyboard answers the same two
 prompts in every new instance. A session started without a person, in default
@@ -111,6 +123,9 @@ config.
 
 - An opt-in workspace config key, off by default, that a base config or an
   overlay can set.
+- Letting a workspace overlay declare MCP servers the same way the base config
+  does, so a team can declare a private server once, in the overlay, and get the
+  same generated file and approval list a base-declared server gets.
 - Marking the instance root trusted in the user's Claude config on `niwa
   create` and on `niwa apply`, for every instance the option applies to.
 - Removing, on destroy and on reap, only a trust entry niwa itself added.
@@ -121,8 +136,9 @@ config.
 
 ### OUT
 
-- Approving MCP servers. The declared-server approval list is written by
-  separate, earlier work; this feature only makes Claude Code read it.
+- Writing the approval list itself. That's separate, earlier work; this
+  feature makes Claude Code read it, and makes overlay-declared servers part of
+  it.
 - Approving servers from a `.mcp.json` distributed verbatim, or writing an
   "approve every project server" setting. Neither is added here.
 - Trusting the workspace root, repo directories inside an instance, or any
