@@ -220,7 +220,8 @@ func prunePluginRecords(instanceRoot string, reporter *Reporter, baseDir string)
 // A repository grant's expected key is the resolved path of
 // <instanceDir>/<recorded path>; a recorded path that is absolute, contains
 // "..", or resolves outside the instance is refused, and one whose directory
-// is already gone has no expected key, so Withdraw refuses it with a warning.
+// is already gone has no expected key, so its entry is left and the warning
+// says the directory no longer exists and to remove the entry by hand.
 //
 // It is fail-safe by contract: a missing state file means there is nothing to
 // withdraw, and a state file that can't be read, a root that can't be
@@ -267,12 +268,9 @@ func withdrawClaudeTrust(instanceDir string, reporter *Reporter) {
 			warn("Claude trust entry %q in %s left in place: the instance root could not be resolved: %v", g.Key, g.ConfigFile, keyErr)
 			continue
 		}
-		repoKey, err := repoTrustKey(instanceDir, key, rel)
-		if err != nil {
-			warn("Claude trust entry %q in %s left in place: refusing the record for repository %q: %v", g.Key, g.ConfigFile, rel, err)
-			continue
-		}
-		if w := claudetrust.Withdraw(g, repoKey, claudetrust.Destroy); w != "" {
+		// The same per-directory ladder apply uses, so a recorded directory
+		// that is gone gets apply's wording rather than a key mismatch.
+		if _, w := settleRepoGrant(instanceDir, key, rel, g, claudetrust.Destroy); w != "" {
 			warn("%s", w)
 		}
 	}

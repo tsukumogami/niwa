@@ -167,6 +167,16 @@ see [instance trust](instance-trust.md).
   file at the workspace root or instance root reaches sessions started *at* those
   levels, not sessions started *inside* a managed repo. Per-repo coverage is the
   separate `[files]` mechanism.
+
+  **Correction (2026-10-13):** the walk-up claim above is wrong for current
+  Claude Code. Measured on Claude Code 2.1.296, a session started inside a
+  repository does find the instance root's `.mcp.json` by walking up, and asks
+  to approve each server in it. With `[claude] trust_instances` on, niwa covers
+  those repository sessions: it trusts each cloned repository directory and
+  approves the instance root's generated servers in each repository's
+  settings. See [instance trust](instance-trust.md). A file distributed
+  verbatim through `[instance.files]` or `[root.files]` is still never
+  pre-approved, since niwa doesn't read the files it copies.
 - **Destinations stay at the project root** of their level. Distributed files are
   meant for the workspace-root or instance-root project directory, not for
   niwa-internal directories.

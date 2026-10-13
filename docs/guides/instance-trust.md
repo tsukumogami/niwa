@@ -30,10 +30,12 @@ The key takes a TOML boolean; any other value is a config error. It can go in
   so a workspace config that wants to say no has to say `false`.
 
 Every run of the create/apply pipeline then trusts the instance root and its
-repository directories before the command exits. That covers `niwa create`, `niwa apply`, `niwa reset`, `niwa
-init` when it creates an instance, `niwa dispatch`, and session-start
-provisioning for ephemeral instances. Instances that existed before you turned
-the option on catch up on their next `niwa apply`.
+repository directories before the command exits. That covers `niwa create`,
+`niwa apply`, `niwa reset`, `niwa init` when it creates an instance, `niwa
+dispatch`, and session-start provisioning for ephemeral instances. Instances
+that existed before you turned the option on catch up on their next `niwa
+apply`. Review instances are the exception: niwa never trusts their
+repository directories (see [Review instances](#review-instances)).
 
 ## What niwa writes
 
@@ -63,7 +65,12 @@ directory it cloned there. No other value in the file changes.
 - **The repositories** are the ones niwa cloned into the instance, at
   `<instance>/<group>/<repo>`, except a repository with Claude turned off
   (`[repos.<name>.claude] enabled = false`), which gets no Claude settings
-  from niwa either.
+  from niwa either. Only Claude's own setting counts: a repository with
+  Claude off and another agent on isn't trusted. A repository directory, or
+  the group directory above it, that resolves outside the instance (a symlink
+  to somewhere else, say) isn't trusted either, since niwa could never check
+  that entry against the instance to take it back. niwa skips it with a
+  warning naming the repository.
 - **The lock.** niwa holds Claude Code's own config lock, the
   `<config file>.lock` directory, while it reads, changes and replaces the
   file, so neither side loses the other's write. It waits up to 5 seconds and
@@ -186,18 +193,22 @@ overlay's repository like code that runs on your machine. It is.
 
 When trust is on only because the overlay set it, niwa prints a one-time
 notice saying so, naming the key and file it wrote, how many repository
-directories it trusted, and what trust allows. The
-notice is recorded in the workspace root's state, so it appears once per
-workspace. A later overlay commit that adds a server or changes a command
-reaches trusted sessions with no new notice, and a dispatched worker never sees
-the notice at all. In a single-instance layout there's no workspace root state
-to record it in, so the notice appears on any apply that writes trust.
+directories it trusted, and what trust allows. The notice is recorded in the
+workspace root's state, so it appears once per workspace. A workspace that saw
+the notice before niwa trusted repository directories gets a second one-time
+notice the first time an instance in it holds trust for a repository
+directory, saying those directories are trusted now too. A later overlay
+commit that adds a server or changes a command reaches trusted sessions with
+no new notice, and a dispatched worker never sees the notice at all. In a
+single-instance layout there's no workspace root state to record it in, so the
+notice appears on any apply that writes trust.
 
 Code that already runs in the instance as you (a build script in a cloned
 repository, an agent session) can rewrite the instance root's
 `.claude/settings.json` or `.mcp.json`, or a repository's `.claude` settings,
-and with those directories trusted, Claude Code honors the rewrite. That code could already do anything you can, so trust
-gives it another route rather than more reach.
+and with those directories trusted, Claude Code honors the rewrite. That code
+could already do anything you can, so trust gives it another route rather than
+more reach.
 
 ## Which sessions it covers
 
@@ -282,8 +293,9 @@ After the merge, overlay servers are ordinary `[mcp.servers]` entries. They
 appear in the instance root's `.mcp.json`, in every other agent's generated MCP
 config (Codex's `[mcp_servers.<name>]` table, for example), and in the
 approved-server lists, the instance root's and each repository's, sorted by
-name together with the workspace config's servers. A worktree created with `niwa worktree` gets them too; a vault value
-that path can't resolve is left out with a warning.
+name together with the workspace config's servers. A worktree created with
+`niwa worktree` gets them too; a vault value that path can't resolve is left
+out with a warning.
 
 ## Review instances
 
@@ -292,10 +304,25 @@ source `review`. Destroying a review instance withdraws its grant through the
 record like any other. A review instance created in a workspace that has
 `trust_instances` on starts with a workspace grant, and the review relabels it
 as its own, so an apply in that instance with the option off can't pull trust
-out from under a running review. An apply never withdraws a review grant. The
-review relabels only the instance root's grant, since that's where the review
-session runs; the repository grants stay workspace grants and follow the
-option like any other instance's.
+out from under a running review. An apply never withdraws a review grant.
+
+A review instance never gets repository-directory trust, whatever
+`trust_instances` says. It exists to hold a pull request's code for an agent
+to read before anyone has accepted it, and in a trusted directory Claude Code
+applies the `.claude` settings and hooks committed there without asking. With
+repository directories trusted, a pull request's committed hooks could run in
+a session there with no prompt. So before the pull request is fetched,
+`niwa watch` withdraws every repository grant the instance was created with,
+as destroying the instance would, and records `review_instance` in the
+instance's `.niwa/instance.json`. Every later apply in that instance (or one
+whose root grant has source `review`) trusts no repository directory and
+retracts any repository grant it finds. Only the instance root is trusted,
+since that's where the review session runs.
+
+The repositories in a review instance can still carry the approval list in
+their `.claude/settings.local.json`: it's written when the instance is
+created, before the review marks it. Claude Code reads that list only in a
+trusted directory, so without trust it approves nothing.
 
 ## Known limits
 

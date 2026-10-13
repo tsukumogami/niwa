@@ -3,6 +3,7 @@ package workspace
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -492,8 +493,9 @@ func TestClaudeTrustRepos_DestroyRefusesCraftedPaths(t *testing.T) {
 			t.Errorf("no refusal for %q:\n%s", rel, out)
 		}
 	}
-	if !strings.Contains(out, goneKey) {
-		t.Errorf("no warning naming the entry %s left for the gone directory:\n%s", goneKey, out)
+	goneWarning := fmt.Sprintf("Claude trust entry %q in %s is for the repository directory g/gone, which no longer exists; leaving it in place, remove it by hand", goneKey, cfgPath)
+	if !strings.Contains(out, goneWarning) {
+		t.Errorf("no warning saying the directory for %s no longer exists:\n%s", goneKey, out)
 	}
 	want := map[string]any{
 		victimKey: map[string]any{"hasTrustDialogAccepted": true},

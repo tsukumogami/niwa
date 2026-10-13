@@ -19,6 +19,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/claudetrust"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/watch"
+	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
 // These tests characterize what `niwa watch` forwards to the review agent it
@@ -314,6 +315,11 @@ func TestWatchCharacterization_StageReview(t *testing.T) {
 			}
 			if g := recordedGrant(t, instancePath); (g != nil) != tc.wantRecorded {
 				t.Errorf("recorded trust = %+v, want recorded %v", g, tc.wantRecorded)
+			}
+			// Every review instance is marked, sandboxed or not, so no later
+			// apply trusts its repository directories.
+			if state, err := workspace.LoadState(instancePath); err != nil || !state.ReviewInstance {
+				t.Errorf("review_instance not recorded (state %+v, err %v)", state, err)
 			}
 		})
 	}

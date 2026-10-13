@@ -1372,7 +1372,7 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 	// deduped against a pr-body hook the workspace still declares itself.
 	prBodyHook := resolvePrBodyHook(ctx.Effective, hooks)
 
-	approvedMCP, err := repoMCPApprovals(ctx.Config)
+	approvedMCP, err := repoMCPApprovals(ctx.Config, ctx.RepoName)
 	if err != nil {
 		return nil, fmt.Errorf("deciding which MCP servers the repository settings approve: %w", err)
 	}

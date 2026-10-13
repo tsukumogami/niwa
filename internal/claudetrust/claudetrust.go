@@ -2,8 +2,9 @@
 // config. It marks a niwa instance root, or a repository directory niwa
 // cloned into one, as a trusted project, so Claude Code honors that
 // directory's project settings and approved MCP servers, and it removes
-// exactly what a recorded grant says niwa added. The functions below name
-// the directory instanceRoot either way.
+// exactly what a recorded grant says niwa added. Ensure and Key take either
+// kind of directory as dir; "instance" in the rest of this package means
+// whichever directory a grant is for.
 //
 // Claude Code reads a project's .claude/settings.json only when its user config
 // holds projects[<key>].hasTrustDialogAccepted = true for that exact key. The
@@ -16,7 +17,7 @@
 //     and keeps one value for a key repeated within one object (the last, as
 //     a JSON parser reading the file would); no value is changed.
 //     hasTrustDialogHooksAccepted is never written.
-//   - Claude Code's key and file. The key is the instance root with every
+//   - Claude Code's key and file. The key is the directory with every
 //     symlink resolved, the key Claude Code computes for a session started
 //     there. The file is $CLAUDE_CONFIG_DIR/.claude.json, else
 //     $HOME/.claude.json; a symlinked file is written through, never replaced.
@@ -96,7 +97,7 @@ type Grant struct {
 	// e.g. $HOME/.claude.json even when that path is a symlink. The lock name
 	// is derived from it, so it must be the name Claude Code locks.
 	ConfigFile string `json:"config_file"`
-	// Key is the symlink-resolved instance root used as the projects key.
+	// Key is the symlink-resolved directory used as the projects key.
 	Key    string `json:"key"`
 	Mode   Mode   `json:"mode"`
 	Source Source `json:"source"`
@@ -234,17 +235,17 @@ func configDir(env Env) (string, error) {
 	return filepath.Clean(env.ClaudeConfigDir), nil
 }
 
-// Key returns the projects key for instanceRoot: its absolute path with every
-// symlink resolved, the root itself and every parent, which is the key Claude
-// Code computes for a session started there. The root must exist.
-func Key(instanceRoot string) (string, error) {
-	abs, err := filepath.Abs(instanceRoot)
+// Key returns the projects key for dir: its absolute path with every symlink
+// resolved, dir itself and every parent, which is the key Claude Code
+// computes for a session started there. dir must exist.
+func Key(dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
 	if err != nil {
-		return "", fmt.Errorf("resolving the instance root %s: %w", instanceRoot, err)
+		return "", fmt.Errorf("resolving %s: %w", dir, err)
 	}
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return "", fmt.Errorf("resolving symlinks in the instance root %s: %w", abs, err)
+		return "", fmt.Errorf("resolving symlinks in %s: %w", abs, err)
 	}
 	return filepath.Clean(resolved), nil
 }
@@ -325,9 +326,9 @@ func validateConfigPath(p string) error {
 	return nil
 }
 
-// Ensure marks instanceRoot trusted in the config file env names and returns
-// the record to persist. prior is the record already in instance state, if
-// any; src is the feature asking.
+// Ensure marks dir trusted in the config file env names and returns the
+// record to persist. prior is the record already in instance state, if any;
+// src is the feature asking.
 //
 // The existing entry decides what happens:
 //
@@ -343,26 +344,27 @@ func validateConfigPath(p string) error {
 //
 // A prior record for a different config file but the same key is retracted
 // from its file first, unless both names reach the same physical file, in
-// which case the record is carried over to the current name as it is. A prior record for a different key (the instance
-// moved), or one with an unknown mode or source or a malformed path, is
-// dropped with a warning and its entry left alone, since niwa can't prove that
-// entry is this instance's; the outcome then carries no record unless this
-// call writes a new one. Any skip (Home empty, a relative CLAUDE_CONFIG_DIR, a
+// which case the record is carried over to the current name as it is. A
+// prior record for a different key (the directory moved), or one with an
+// unknown mode or source or a malformed path, is dropped with a warning and
+// its entry left alone, since niwa can't prove that entry is this
+// directory's; the outcome then carries no record unless this call writes a
+// new one. Any skip (Home empty, a relative CLAUDE_CONFIG_DIR, a
 // legacy <config home>/.config.json that Claude Code would read instead, a
 // key that is the filesystem root, the home directory, the Claude config home
 // or an ancestor of either, a lock timeout, a file that can't be parsed)
 // writes nothing, reports Trusted false and returns the prior record it still
 // holds, so a valid record is never lost because one write couldn't happen.
-func Ensure(env Env, instanceRoot string, prior *Grant, src Source) Outcome {
+func Ensure(env Env, dir string, prior *Grant, src Source) Outcome {
 	if env.Home == "" {
 		return Outcome{Grant: prior}
 	}
 	if src != SourceWorkspace && src != SourceReview {
-		return Outcome{Grant: prior, Warning: fmt.Sprintf("Claude trust for %s not written: unknown source %q", instanceRoot, src)}
+		return Outcome{Grant: prior, Warning: fmt.Sprintf("Claude trust for %s not written: unknown source %q", dir, src)}
 	}
 	file, err := ConfigFile(env)
 	if err != nil {
-		return Outcome{Grant: prior, Warning: fmt.Sprintf("Claude trust for %s not written: %v", instanceRoot, err)}
+		return Outcome{Grant: prior, Warning: fmt.Sprintf("Claude trust for %s not written: %v", dir, err)}
 	}
 	// Claude Code reads the legacy file instead whenever it exists (any stat
 	// that succeeds, as its own existence check), so a write to file would
@@ -371,17 +373,17 @@ func Ensure(env Env, instanceRoot string, prior *Grant, src Source) Outcome {
 		if _, err := os.Stat(legacy); err == nil {
 			return Outcome{Grant: prior, Warning: fmt.Sprintf(
 				"Claude trust for %s not written to %s: Claude Code reads %s instead while that file exists",
-				instanceRoot, file, legacy)}
+				dir, file, legacy)}
 		}
 	}
-	key, err := Key(instanceRoot)
+	key, err := Key(dir)
 	if err != nil {
 		return Outcome{Grant: prior, Warning: fmt.Sprintf("Claude trust not written to %s: %v", file, err)}
 	}
 	if why := overBroad(env, key); why != "" {
 		return Outcome{Grant: prior, Warning: fmt.Sprintf(
 			"Claude trust for %s not written to %s: %s, and Claude Code would skip its trust dialog in every directory beneath it outside a git repository; give the instance a directory of its own",
-			instanceRoot, file, why)}
+			dir, file, why)}
 	}
 
 	var warnings []string

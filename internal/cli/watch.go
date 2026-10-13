@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -800,6 +802,12 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 		}
 	}()
 
+	// Mark the instance as a review instance, and take back any Claude trust
+	// for its repository directories, before any of the PR's code is on disk.
+	if err := markReviewInstance(cmd.ErrOrStderr(), instancePath); err != nil {
+		return err
+	}
+
 	// Fetch the PR head as inert data (hardened) into the clone subdir.
 	cloneDir := filepath.Join(instancePath, watch.DefaultCloneRelDir)
 	if err := fetchPRHeadFunc(ctx, cloneURL, head.SHA, cloneDir, token); err != nil {
@@ -994,6 +1002,10 @@ func resolveAskPosture(w io.Writer, instancePath string, sandbox bool) bool {
 // review. If the state can't be saved, this call's write is undone and the posture
 // falls back to hard-deny, so trust is never left without the record that removes it.
 //
+// Only the root is trusted. Every workspace grant for a repository directory is
+// withdrawn and its record cleared (see markReviewInstance): a review instance gets
+// no repository-directory trust.
+//
 // Only hasTrustDialogAccepted is written. The hasTrustDialogHooksAccepted flag an
 // earlier writer also set is deliberately left out: the Claude Code 2.1.295 and
 // 2.1.296 binaries contain no such string, so there is no separate hooks-trust
@@ -1007,6 +1019,10 @@ func seedReviewTrust(w io.Writer, env claudetrust.Env, instancePath string) bool
 		fmt.Fprintf(w, "niwa watch: warning: Claude trust for %s not written: %v\n", instancePath, err)
 		return false
 	}
+	// stageReview has already withdrawn the repository grants; this repeats
+	// it for any other route into the review's trust, since a review instance
+	// must hold none, and saves the state below whenever it changed anything.
+	reposWithdrawn := withdrawReviewRepoTrust(w, instancePath, state)
 	out := claudetrust.Ensure(env, instancePath, state.ClaudeTrust, claudetrust.SourceReview)
 	if out.Warning != "" {
 		fmt.Fprintf(w, "niwa watch: warning: %s\n", out.Warning)
@@ -1023,7 +1039,7 @@ func seedReviewTrust(w io.Writer, env claudetrust.Env, instancePath string) bool
 		relabeled.Source = claudetrust.SourceReview
 		grant = &relabeled
 	}
-	if sameGrant(grant, state.ClaudeTrust) {
+	if sameGrant(grant, state.ClaudeTrust) && !reposWithdrawn {
 		return trusted
 	}
 	state.ClaudeTrust = grant
@@ -1035,6 +1051,48 @@ func seedReviewTrust(w io.Writer, env claudetrust.Env, instancePath string) bool
 		return false
 	}
 	return trusted
+}
+
+// markReviewInstance records in the instance state at instancePath that the
+// instance holds a review, so no later apply trusts its repository
+// directories, and withdraws the repository-directory Claude trust the
+// instance was created with (trust_instances on). A review instance holds a
+// pull request nobody has accepted yet, and trusting a directory would let
+// the .claude settings and hooks committed there run without a prompt.
+//
+// An instance with no state file has nothing recorded and can't be applied,
+// so there is nothing to mark. Any other failure to read or save the state
+// is an error: the review must not go ahead in an instance a later apply
+// would trust.
+func markReviewInstance(w io.Writer, instancePath string) error {
+	state, err := workspace.LoadState(instancePath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("marking the review instance: %w", err)
+	}
+	withdrawn := withdrawReviewRepoTrust(w, instancePath, state)
+	if state.ReviewInstance && !withdrawn {
+		return nil
+	}
+	state.ReviewInstance = true
+	if err := saveReviewState(instancePath, state); err != nil {
+		return fmt.Errorf("marking the review instance: %w", err)
+	}
+	return nil
+}
+
+// withdrawReviewRepoTrust withdraws the workspace grants state records for
+// the instance's repository directories, reporting each one left behind on
+// w, and reports whether it changed state.ClaudeTrustRepos. The caller saves
+// the state.
+func withdrawReviewRepoTrust(w io.Writer, instancePath string, state *workspace.InstanceState) bool {
+	before := len(state.ClaudeTrustRepos)
+	for _, warning := range workspace.WithdrawRepoClaudeTrust(instancePath, state) {
+		fmt.Fprintf(w, "niwa watch: warning: %s\n", warning)
+	}
+	return len(state.ClaudeTrustRepos) != before
 }
 
 // sameGrant reports whether a and b record the same grant.

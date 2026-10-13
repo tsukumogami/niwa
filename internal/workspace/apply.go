@@ -419,8 +419,8 @@ type pipelineResult struct {
 	trustInstances   bool
 	trustFromOverlay bool
 	// claudeTrustRepos are the instance-relative paths ("<group>/<repo>") of
-	// the repositories this run materialized Claude settings into, the
-	// directories deliverClaudeTrust trusts when trustInstances is set.
+	// the repositories whose Claude settings gate is open, the directories
+	// deliverClaudeTrust trusts when trustInstances is set.
 	claudeTrustRepos []string
 	// procedureErr is a procedure-routed delivery's failure carried out as
 	// data rather than as the pipeline's error return. The record above has to
@@ -841,6 +841,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		SkipGlobal:           existingState.SkipGlobal,
 		NoOverlay:            existingState.NoOverlay,
 		NoWorktreeDelegation: existingState.NoWorktreeDelegation,
+		ReviewInstance:       existingState.ReviewInstance,
 		OverlayURL:           finalOverlayURL,
 		OverlayCommit:        finalOverlayCommit,
 		ManagedFiles:         result.managedFiles,
@@ -2071,13 +2072,17 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// be canonicalized. Which agent receives it is a lookup in the declaration
 	// table, not a branch here.
 	repoRoots := make([]string, 0, len(classified))
-	// The repositories that received a Claude settings document, behind the
-	// same gate the settings materializer runs behind. Claude trust for them
-	// is written after the pipeline, beside the instance root's.
+	// The repositories whose Claude settings gate is open: Claude's own
+	// per-repository gate, the one the repository approval list follows too
+	// (see repoMCPApprovals). Claude trust for them is written after the
+	// pipeline, beside the instance root's. The settings materializer runs
+	// behind hookOwningAgentsEnabled, which today is the same gate, since
+	// Claude is the only agent that receives hooks; asking Claude's gate
+	// directly keeps another agent's gate from ever opening Claude trust.
 	var claudeTrustRepos []string
 	for _, cr := range classified {
 		repoRoots = append(repoRoots, filepath.Join(instanceRoot, cr.Group, cr.Repo.Name))
-		if hookOwningAgentsEnabled(effectiveCfg, cr.Repo.Name) {
+		if claudeEnabled(effectiveCfg, cr.Repo.Name) {
 			claudeTrustRepos = append(claudeTrustRepos, filepath.ToSlash(filepath.Join(cr.Group, cr.Repo.Name)))
 		}
 	}
@@ -2265,7 +2270,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		disclosedNotices:  newDisclosures,
 		trustKeys:         trustKeys,
 		claudePermissions: instancePermissionsPosture(effectiveCfg),
-		trustInstances:    effectiveCfg.Claude.TrustInstances != nil && *effectiveCfg.Claude.TrustInstances,
+		trustInstances:    trustInstancesOn(effectiveCfg),
 		trustFromOverlay:  effectiveCfg.TrustInstancesFromOverlay,
 		claudeTrustRepos:  claudeTrustRepos,
 		procedureErr:      procErr,
