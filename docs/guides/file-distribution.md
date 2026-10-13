@@ -99,6 +99,9 @@ start yourself at the workspace root or an instance root gets your own Claude
 Code settings; launch it with `claude --permission-mode bypassPermissions` if
 you want bypass there. This setting is independent of the file tables above.
 
+To get past the trust dialog and the MCP approval prompt without bypass mode,
+see [instance trust](instance-trust.md).
+
 ## Tracking and cleanup
 
 - **Instance-root files** (`[instance.files]`) are recorded as niwa-managed, so

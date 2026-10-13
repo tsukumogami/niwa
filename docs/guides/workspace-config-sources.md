@@ -651,6 +651,11 @@ relied on the old derivation see a one-time URL-change gate the
 next time they apply; the rename to the new convention is the
 remediation.
 
+An overlay can also declare `[mcp.servers]` entries, resolved against
+its own vault providers, and set `[claude] trust_instances`. See
+[instance trust](instance-trust.md) for how both merge with the base
+config and what trust lets Claude Code do.
+
 ### Rank-2 deprecation {#rank-2-deprecation}
 
 The rank 2 layout — `workspace.toml` at the source repo root with

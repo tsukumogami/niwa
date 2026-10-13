@@ -172,17 +172,21 @@ Resolved inline.
 `trust_keys` precedent did. Create and Apply carry it forward from the
 existing state like `TrustKeys`, since Apply rebuilds state from scratch.
 `DestroyInstance` and `DestroyWorkspace` load the instance's state before
-`os.RemoveAll` and call `claudetrust.Withdraw(grant, claudetrust.Destroy)`;
-failures become warnings through the destroy reporter, and the destroy goes
-on. Reap's two `removeInstanceTrustFunc` calls and the review staging
-cleanup's call are deleted, since the destroy they precede now does the work.
+`os.RemoveAll` and call `claudetrust.Withdraw(grant, key, claudetrust.Destroy)`,
+where `key` is the instance's canonical path; failures become warnings through
+the destroy reporter, and the destroy goes on. Reap's two explicit trust
+removals and the review staging cleanup's are deleted, since the destroy they
+precede now does the work.
 
 `source` exists so that apply's withdrawal with the option off (R12) leaves a
 review grant alone: a review instance's trust is the review command's, not the
 workspace's, and an apply in it must not pull trust out from under a running
-review. An instance holds at most one grant, and the first source to record
-one keeps it: a later `Ensure` from the other source finds the entry trusted
-and already recorded, and returns the record unchanged.
+review. An instance holds at most one grant. `Ensure` itself never relabels a
+recorded grant: a later call from the other source finds the entry trusted and
+already recorded, and returns the record unchanged. The review command then
+relabels a `workspace` grant as `review` before saving it, and apply carries a
+`review` grant forward untouched, so in a review instance the review owns the
+grant whichever source wrote it first.
 
 **The record is validated before it's acted on.** Instance state is a file
 anyone who controls the instance can edit, so a crafted record must not turn
@@ -264,13 +268,15 @@ overlay entry whose name the base doesn't declare, and sets
 `merged.Claude.TrustInstances` from the overlay only when the base left it nil.
 Base-wins lives in the merge itself, not only in the pipeline's pre-filter,
 because the worktree path (`mergeWorktreeOverlay`) also calls the merge
-without the pipeline's resolution step; that path installs content only and
-never reads `MCP`, so the overlay's unresolved values it carries are never
-written anywhere. Validation and generation run on the merged config, so R1
+without the pipeline's resolution step. That path does read `MCP`: worktree
+content calls `MCPServersFromConfig` on the merged config, and a `vault://`
+value it can't resolve is left out of the generated file with a warning rather
+than written as the reference. Validation and generation run on the merged config, so R1
 and R4 follow from the existing code paths.
 
-When trust is on only because the overlay set it, the first apply in the
-workspace that writes trust prints a one-time notice through the existing
+When trust is on only because the overlay set it, the first create or apply
+in the workspace that finds the instance holding a `workspace` grant prints a
+one-time notice through the existing
 per-workspace disclosed-notices record: trust is on because the workspace overlay sets
 `[claude] trust_instances`, niwa wrote it to the named config file, and what
 that lets Claude Code do. A base config that wants to refuse the overlay's
@@ -311,7 +317,7 @@ type Mode string   // "created" | "flag-only"
 type Source string // "workspace" | "review"
 
 type Grant struct {
-    ConfigFile string `json:"config_file"` // resolved path niwa wrote
+    ConfigFile string `json:"config_file"` // unresolved path niwa locked and wrote through
     Key        string `json:"key"`
     Mode       Mode   `json:"mode"`
     Source     Source `json:"source"`
@@ -328,11 +334,12 @@ func Key(instanceRoot string) (string, error)  // R9: Abs + EvalSymlinks
 type Outcome struct {
     Grant   *Grant // nil when nothing is recorded (already trusted by someone else, or skipped)
     Changed bool   // file was rewritten
+    Created bool   // the rewrite added the whole entry (undo is Destroy, else Retract)
     Warning string // non-empty on a skip
 }
 
 func Ensure(env Env, instanceRoot string, prior *Grant, src Source) Outcome
-func Withdraw(g *Grant, how WithdrawMode) (warning string) // Destroy | Retract
+func Withdraw(g *Grant, expectedKey string, how WithdrawMode) (warning string) // Destroy | Retract
 ```
 
 `Ensure` resolves the file and key, and if `prior` names a different file or
@@ -356,23 +363,26 @@ couldn't happen.
 `Withdraw(Destroy)` deletes the entry for `created` and the flag for
 `flag-only`. `Withdraw(Retract)` deletes only the flag either way. Both are
 no-ops when the entry or flag is already gone, and both use the grant's
-recorded file and key.
+recorded file and key. `expectedKey` is the canonical key of the instance being
+destroyed or applied; a grant naming any other key is refused.
 
 Only `hasTrustDialogAccepted` is written, and only under `projects`.
 
 ### Pipeline step
 
-`Applier.deliverClaudeTrust(instanceRoot, cfg, existing)` runs after
+`Applier.deliverClaudeTrust(instanceRoot, on, existing)` runs after
 `runPipeline` has returned without error, in both `Create` and `Apply`, as the
 last step before the state is saved. Running it last means no pipeline failure
 can follow a trust write: Create's failure path removes the instance directory
 and saves no state, so a grant written earlier in the pipeline would be
 orphaned with nothing left to withdraw it. It returns early, carrying
-`existing.ClaudeTrust` forward, when `a.DeveloperHome == ""`. Otherwise:
+`existing.ClaudeTrust` forward, when `a.DeveloperHome == ""`. `on` is the
+effective value of `[claude] trust_instances` after the overlay merge, worked
+out by the caller. Otherwise:
 
-- `cfg.Claude.TrustInstances` true: `claudetrust.Ensure(...,
+- `on` true: `claudetrust.Ensure(...,
   SourceWorkspace)`; persist the returned grant.
-- false or nil, with a `workspace`-sourced record: `Withdraw(Retract)` and
+- `on` false, with a `workspace`-sourced record: `Withdraw(Retract)` and
   clear the record; on a skip, keep it.
 - a `review`-sourced record is carried forward untouched.
 
@@ -397,7 +407,8 @@ withdrawn from the recorded file as R13 asks.
 
 `DestroyInstance` and `DestroyWorkspace` call a shared
 `withdrawClaudeTrust(instanceDir, reporter)` right after plugin-record pruning:
-load state; if it holds a grant, `Withdraw(Destroy)`; report any warning. A
+load state; if it holds a grant, `Withdraw(grant, Key(instanceDir), Destroy)`;
+report any warning. A
 missing or unreadable state file means nothing to withdraw. Reap, dispatch,
 reset and review cleanup reach this through `DestroyInstance`, so their own
 trust calls are deleted. As with plugin-record pruning, a nil reporter drops
@@ -411,7 +422,8 @@ exists.
 
 `resolveAskPosture` keeps its sandbox and `~/.claude` guards, then calls
 `claudetrust.Ensure(env, instancePath, state.ClaudeTrust, SourceReview)` and
-saves the returned grant into the instance's state; if that save fails, it
+saves the returned grant into the instance's state, relabeled `review` when
+`Ensure` returned a `workspace` grant; if that save fails, it
 withdraws the grant it just wrote and falls back to hard-deny. It returns true
 only when the entry is trusted afterward, whether niwa wrote it or found it
 trusted; a skip falls back to the hard-deny posture as today. The `~/.claude` guard reads
