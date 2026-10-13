@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 )
@@ -109,6 +110,35 @@ func MCPServersFromConfig(cfg *config.WorkspaceConfig) ([]agentplan.MCPServer, [
 		warnings = append(warnings, warns...)
 	}
 	return servers, warnings
+}
+
+// instanceRootMCPApprovals returns the names of the declared MCP servers the
+// instance root's generated payload carries for an agent whose sessions read a
+// standing approval out of the instance root's settings document. The settings
+// document writes them as its approval list, so a server the workspace
+// declares once is both shipped and approved.
+//
+// It asks every agent's producer, gated exactly as the payload step gates the
+// instance root, and the producers decide: an agent whose approval does not
+// live in that document, a closed gate, and a workspace declaring no servers
+// all answer with nothing. The resolution warnings MCPServersFromConfig
+// returns are dropped here because the payload step resolves the same
+// declaration and reports them; only the names matter for an approval.
+func instanceRootMCPApprovals(cfg *config.WorkspaceConfig) ([]string, error) {
+	servers, _ := MCPServersFromConfig(cfg)
+	if len(servers) == 0 {
+		return nil, nil
+	}
+	var names []string
+	for _, ag := range agent.All() {
+		producer := agentplan.For(ag).Gated(AgentEnabled(cfg, "", string(ag)))
+		approved, err := producer.MCPApprovals(agentplan.PayloadAtInstanceRoot, servers)
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, approved...)
+	}
+	return names, nil
 }
 
 // SessionPostureFromConfig reads the workspace's declared approval and sandbox
