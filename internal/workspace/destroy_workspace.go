@@ -45,7 +45,8 @@ type DestroyWorkspaceOpts struct {
 // Sequence:
 //  1. Enumerate instances under workspaceRoot.
 //  2. Sort by instance name (alphabetical, deterministic).
-//  3. For each instance: ValidateInstanceDir → RemoveAll(instanceDir).
+//  3. For each instance: ValidateInstanceDir → prune plugin records →
+//     withdraw the recorded Claude trust grant → RemoveAll(instanceDir).
 //  4. After all instances are removed, RemoveAll(workspaceRoot).
 //
 // Per-instance synchronous ordering preserves resumability on partial
@@ -87,10 +88,12 @@ func DestroyWorkspace(workspaceRoot string, opts DestroyWorkspaceOpts) error {
 				filepath.Base(instanceDir), err)
 		}
 
-		// Prune the records this instance owns before removing it, so the
-		// instance-owned predicate matches against a path that still exists.
-		// Fail-safe: registry trouble never blocks the wipe.
+		// Prune the records this instance owns and withdraw its recorded
+		// Claude trust grant before removing it, so both match against a
+		// path that still exists. Fail-safe: registry or config-file trouble
+		// never blocks the wipe.
 		prunePluginRecords(instanceDir, opts.Reporter, opts.PluginRecordBaseDir)
+		withdrawClaudeTrust(instanceDir, opts.Reporter)
 
 		if err := os.RemoveAll(instanceDir); err != nil {
 			return fmt.Errorf("removing instance %s: %w",

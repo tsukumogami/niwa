@@ -592,6 +592,9 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 
 	saveWorkspaceRootDisclosures(workspaceRoot, initState, result.disclosedNotices)
 
+	// ClaudeTrust starts empty. A new instance has no earlier grant, and
+	// initState is the workspace root's state, whose grant (if any) names
+	// the root's key, not this instance's.
 	state := &InstanceState{
 		SchemaVersion:  SchemaVersion,
 		ConfigName:     &configName,
@@ -806,6 +809,9 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		Shadows:              result.shadows,
 		AuthSources:          result.authSources,
 		TrustKeys:            result.trustKeys,
+		// Carried unchanged: nothing in the pipeline manages the grant yet,
+		// and dropping it would leave an entry no destroy could withdraw.
+		ClaudeTrust: existingState.ClaudeTrust,
 		// Taken from this run's result, never from existingState: a posture
 		// removed from the config must stop being recorded on the next apply.
 		ClaudePermissions: result.claudePermissions,
