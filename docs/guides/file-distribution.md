@@ -81,9 +81,56 @@ every instance, overlaid or not.
 
 ### Loading the server without a trust prompt
 
-Claude Code may show a per-session trust prompt the first time a project MCP
-server loads. A session running in bypass mode doesn't show it. To get that for
-dispatched workers, declare the posture in `workspace.toml`:
+Claude Code asks a person to approve each server in a project `.mcp.json` the
+first time a session that isn't in bypass mode starts in that directory. How
+much of that niwa can take off your hands depends on how the servers arrive.
+
+If you declare the servers under `[mcp.servers.<name>]` instead of shipping a
+file, niwa generates the instance root's `.mcp.json` itself and approves the
+servers it wrote. The same apply puts Claude Code's `enabledMcpjsonServers`
+list into the instance root's `.claude/settings.json`, holding exactly the
+names of the generated servers, sorted:
+
+```toml
+[mcp.servers.example]
+command = "example-mcp-server"
+```
+
+```json
+{
+  "enabledMcpjsonServers": ["example"]
+}
+```
+
+The list sits beside everything else niwa writes to that file, and it follows
+the declaration: drop a server and the next `niwa apply` drops its name, drop
+them all and the key goes away. A server scoped to another agent with
+`agents = [...]` isn't in Claude's `.mcp.json`, so it isn't in the list either.
+niwa only ever names servers one by one. It never writes
+`enableAllProjectMcpServers`, which would approve whatever any `.mcp.json` in
+that directory happens to contain.
+
+Claude Code reads that list from a project `settings.json` only once you've
+trusted the directory, so the first session in a new instance still asks the
+folder trust question. After you accept it, the declared servers start without
+a per-server prompt. Checked against Claude Code 2.1.296 with `claude mcp list`,
+which reports a project server as pending until it's approved: the declared
+servers showed as pending in an untrusted instance and were started once the
+instance root itself was trusted. A trust entry on a parent directory alone
+wasn't enough.
+
+A `.mcp.json` distributed verbatim through `[instance.files]`, `[root.files]`
+or `[files]` gets no approval. niwa copies that file without reading it, so it
+has no server names to approve, and those servers keep the per-server prompt.
+Declaring them under `[mcp.servers]` is the way to have them approved.
+
+Declared servers are generated at the instance root only, so this covers
+sessions started there. A session at the workspace root still gets its servers
+from a `[root.files]` copy, with the prompt.
+
+Bypass mode is the other route: a session running in bypass mode doesn't show
+the prompt. To get that for dispatched workers, declare the posture in
+`workspace.toml`:
 
 ```toml
 [claude.settings]

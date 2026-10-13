@@ -251,6 +251,37 @@ changes settings semantics for every level that calls it. That is a separate
 concern with its own design; it is recorded as an explicit follow-up, not built
 here.
 
+**Later change: declared servers are pre-approved.** The follow-up landed for
+servers a workspace declares under `[mcp.servers.<name>]`, not for the verbatim
+route this design adds. When niwa generates the instance root's `.mcp.json`
+from that declaration, the same apply writes `enabledMcpjsonServers` into the
+instance root's `.claude/settings.json`, holding exactly the names of the
+servers it generated, sorted. The names come from the same selection the
+generator makes, so the list can't approve a server the file lacks or miss
+one it carries. The list is rebuilt on every apply, so removing a server
+removes its name and removing them all removes the key. `buildSettingsDoc`
+still ignores these keys under `[claude.settings]`; the list comes only from
+the declaration.
+
+The verbatim route described here is unchanged. niwa doesn't parse a file it
+distributes through `[instance.files]`, `[root.files]` or `[files]`, so it has
+no names to approve, and it never writes `enableAllProjectMcpServers`, which
+would approve whatever such a file contains. Those servers keep the per-server
+prompt.
+
+Claude Code honors `enabledMcpjsonServers` from a project `settings.json`, but
+only once the directory itself is trusted (`hasTrustDialogAccepted` for that
+path in `~/.claude.json`). Checked against Claude Code 2.1.296: in an
+untrusted instance `claude mcp list` reported the declared servers as pending
+approval, and with the instance root trusted it reported them as approved and
+tried to start them. A trust entry for a parent directory alone left them
+pending. A developer starting a session in a new instance therefore still
+answers the folder trust question once, and no longer sees a prompt for each
+declared server afterwards. The value is always a JSON array of strings,
+because Claude Code rejects a settings file whose value there has any other
+shape and then approves nothing; `claude doctor` lists such a file under
+"Invalid settings", and it lists nothing for the document niwa writes.
+
 ## Decision Outcome
 
 niwa gains verbatim file distribution at the two non-repo levels. Authors
@@ -262,7 +293,9 @@ are tracked and cleaned through the existing `ManagedFiles` machinery;
 workspace-root files are overwrite-idempotent like the other root-managed files.
 The `enableAllProjectMcpServers` question is deferred; `permissions = "bypass"`
 was the supported way to auto-load the delivered MCP server until Claude Code
-2.1.257 (see the later-change note under Decision 5).
+2.1.257 (see the later-change note under Decision 5). Servers declared under
+`[mcp.servers]` are now approved by name in the instance root's settings; a
+verbatim `.mcp.json` still isn't (see the second later-change note there).
 
 ## Solution Architecture
 

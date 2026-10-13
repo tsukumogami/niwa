@@ -493,6 +493,21 @@ const RemoteControlAtStartupKey = "remoteControlAtStartup"
 // settings.
 const CrossSessionInboundKey = "crossSessionInbound"
 
+// EnabledMcpjsonServersKey is the Claude Code settings key that lists the
+// servers from a project .mcp.json a session may start without asking a person
+// to approve each one. It is the single source of truth for the key's spelling.
+//
+// niwa writes it, and only it, into the instance root's settings.json: the
+// value is the sorted names of the servers niwa generated into that tree's
+// .mcp.json from [mcp.servers], and nothing else. It never writes the
+// enableAllProjectMcpServers form, which would also approve servers niwa did
+// not generate, such as a .mcp.json distributed verbatim through the file
+// tables. Claude Code honors the key from a project settings.json only once
+// the directory carries workspace trust; until then the list is ignored and
+// the per-server prompt still appears. The value must be a JSON array of
+// strings: anything else makes Claude Code reject the whole settings file.
+const EnabledMcpjsonServersKey = "enabledMcpjsonServers"
+
 // KeepAliveOnDispatchKey is the settings key a downstream [claude.settings]
 // uses to decide dispatch keep-alive for its own instances. Unlike
 // RemoteControlAtStartupKey it is a niwa-defined key, not a Claude Code one --
