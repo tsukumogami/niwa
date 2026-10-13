@@ -50,7 +50,11 @@ Code's user config file. No other value in the file changes.
 - **The key** is the instance root's absolute path with every symlink
   resolved, in the root itself and in every parent. That's the key Claude Code
   computes for a session started there. On macOS, for example, a root under
-  `/var/folders/...` is keyed as `/private/var/folders/...`.
+  `/var/folders/...` is keyed as `/private/var/folders/...`. Outside a git
+  repository, Claude Code skips its trust dialog in any directory beneath a
+  trusted one, so niwa writes nothing and warns when the key is `/`, your
+  home directory, Claude Code's config home, or an ancestor of either, the
+  key a single-instance `niwa init` run in your home directory would give.
 - **The lock.** niwa holds Claude Code's own config lock, the
   `<config file>.lock` directory, while it reads, changes and replaces the
   file, so neither side loses the other's write. It waits up to 5 seconds and

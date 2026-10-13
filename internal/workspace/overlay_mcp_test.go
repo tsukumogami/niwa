@@ -341,6 +341,16 @@ url = "https://analytics.example.com"
 	}
 	assertInOrder(t, "the Codex config", codexRaw,
 		"[mcp_servers.analytics]", "[mcp_servers.docs]", "[mcp_servers.example]")
+
+	settings, err := os.ReadFile(filepath.Join(run.instanceRoot, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("reading the instance root's settings.json: %v", err)
+	}
+	approved, present := approvedServersIn(t, settings)
+	if want := []string{"analytics", "docs", "example"}; !present || !reflect.DeepEqual(approved, want) {
+		t.Errorf("approved servers = %v (present %v), want %v, overlay servers sorted among the base config's:\n%s",
+			approved, present, want, settings)
+	}
 }
 
 // TestApplyOverlayMCPCollisionDropsBeforeResolving pins the pre-resolution

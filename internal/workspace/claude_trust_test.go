@@ -896,6 +896,37 @@ func TestClaudeTrust_EmptyDeveloperHome(t *testing.T) {
 	assertFileUntouched(t, f.claudeJSON, before)
 }
 
+// TestClaudeTrust_InstanceRootIsHomeRefused checks an instance rooted at the
+// developer home itself, as a single-instance `niwa init` run in the home
+// directory gives, is never trusted: Claude Code would then trust every
+// directory under home. Create and apply both warn and record nothing.
+func TestClaudeTrust_InstanceRootIsHomeRefused(t *testing.T) {
+	f := newTrustFixture(t)
+	on := f.writeConfig(t, trustOn)
+	root := f.instance(t, on.Workspace.Name)
+	if root != f.instanceRoot {
+		t.Fatalf("instance root %s, want the fixture's %s", root, f.instanceRoot)
+	}
+	f.applier.DeveloperHome = root
+	homeJSON := filepath.Join(root, ".claude.json")
+	key := trustKey(t, root)
+
+	check := func(run, output string) {
+		t.Helper()
+		if !strings.Contains(output, key) || !strings.Contains(output, "is the home directory") {
+			t.Errorf("%s output lacks the refusal naming %s:\n%s", run, key, output)
+		}
+		if g := grantOf(t, root); g != nil {
+			t.Errorf("after %s, record = %+v, want none", run, g)
+		}
+		assertNoFile(t, homeJSON)
+		assertNoFile(t, homeJSON+".lock")
+		assertNoFile(t, f.claudeJSON)
+	}
+	check("create", f.mustCreate(t, on))
+	check("apply", f.mustApply(t, on))
+}
+
 // TestClaudeTrust_ReviewRecordKept checks a review-sourced record is the
 // review command's: an apply with the option on or off keeps it as it is and
 // doesn't rewrite the file.

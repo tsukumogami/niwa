@@ -30,6 +30,12 @@
 //     target, are fsynced, and are renamed over it with the original mode, so
 //     a reader sees the old file or the new one. A file already in the desired
 //     state is not rewritten at all.
+//   - No over-broad key. Outside a git repository, Claude Code skips its
+//     trust dialog in any directory beneath a trusted one, so a key that is
+//     the filesystem root, the home directory or one of its ancestors, or the
+//     Claude config home or one of its ancestors is refused: nothing is
+//     written and a warning names the key. Removal isn't affected, since it
+//     only takes back what a record names.
 //   - Record-bounded removal. Claude Code writes an identically-shaped entry
 //     when a person answers its trust prompt, so ownership can't be read from
 //     the entry. Removal is driven by a Grant, validated against the instance
@@ -341,9 +347,10 @@ func validateConfigPath(p string) error {
 // entry is this instance's; the outcome then carries no record unless this
 // call writes a new one. Any skip (Home empty, a relative CLAUDE_CONFIG_DIR, a
 // legacy <config home>/.config.json that Claude Code would read instead, a
-// lock timeout, a file that can't be parsed) writes nothing, reports Trusted
-// false and returns the prior record it still holds, so a valid record is
-// never lost because one write couldn't happen.
+// key that is the filesystem root, the home directory, the Claude config home
+// or an ancestor of either, a lock timeout, a file that can't be parsed)
+// writes nothing, reports Trusted false and returns the prior record it still
+// holds, so a valid record is never lost because one write couldn't happen.
 func Ensure(env Env, instanceRoot string, prior *Grant, src Source) Outcome {
 	if env.Home == "" {
 		return Outcome{Grant: prior}
@@ -368,6 +375,11 @@ func Ensure(env Env, instanceRoot string, prior *Grant, src Source) Outcome {
 	key, err := Key(instanceRoot)
 	if err != nil {
 		return Outcome{Grant: prior, Warning: fmt.Sprintf("Claude trust not written to %s: %v", file, err)}
+	}
+	if why := overBroad(env, key); why != "" {
+		return Outcome{Grant: prior, Warning: fmt.Sprintf(
+			"Claude trust for %s not written to %s: %s, and Claude Code would skip its trust dialog in every directory beneath it outside a git repository; give the instance a directory of its own",
+			instanceRoot, file, why)}
 	}
 
 	var warnings []string
@@ -403,6 +415,87 @@ func Ensure(env Env, instanceRoot string, prior *Grant, src Source) Outcome {
 	}
 	out.Warning = joinWarnings(warnings)
 	return out
+}
+
+// overBroad returns why trusting key would reach beyond one instance, or ""
+// when it wouldn't. Outside a git repository, Claude Code skips its trust
+// dialog in any directory beneath a trusted one, so the filesystem root, the
+// home directory or any of its ancestors, and the Claude config home or any
+// of its ancestors are all refused. Each guarded directory is compared both
+// as written and with its symlinks resolved, since key is resolved.
+func overBroad(env Env, key string) string {
+	if filepath.Dir(key) == key {
+		return fmt.Sprintf("the key %s is the filesystem root", key)
+	}
+	for _, home := range pathForms(env.Home) {
+		switch {
+		case key == home:
+			return fmt.Sprintf("the key %s is the home directory", key)
+		case isAncestor(key, home):
+			return fmt.Sprintf("the key %s is an ancestor of the home directory %s", key, home)
+		}
+	}
+	if configHome, err := ConfigHome(env); err == nil {
+		for _, dir := range pathForms(configHome) {
+			switch {
+			case key == dir:
+				return fmt.Sprintf("the key %s is the Claude config home", key)
+			case isAncestor(key, dir):
+				return fmt.Sprintf("the key %s is an ancestor of the Claude config home %s", key, dir)
+			}
+		}
+	}
+	return ""
+}
+
+// pathForms returns p made absolute and clean, and the same path with the
+// symlinks in its longest existing prefix resolved, without duplicates, so a
+// directory that doesn't exist yet still resolves through the parents that
+// do. An empty p has no forms.
+func pathForms(p string) []string {
+	if p == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return nil
+	}
+	forms := []string{abs}
+	if resolved := resolveExisting(abs); resolved != abs {
+		forms = append(forms, resolved)
+	}
+	return forms
+}
+
+// resolveExisting resolves the symlinks in the longest existing prefix of the
+// absolute, clean path p and joins the rest back on unchanged.
+func resolveExisting(p string) string {
+	var rest []string
+	dir := p
+	for {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(append([]string{resolved}, rest...)...)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return p
+		}
+		rest = append([]string{filepath.Base(dir)}, rest...)
+		dir = parent
+	}
+}
+
+// isAncestor reports whether dir is a proper ancestor of p. Both are
+// absolute and clean.
+func isAncestor(dir, p string) bool {
+	if dir == p {
+		return false
+	}
+	rel, err := filepath.Rel(dir, p)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // ensureEntry is Ensure's locked read-modify-write against one file. Its

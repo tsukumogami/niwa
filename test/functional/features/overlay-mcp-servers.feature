@@ -3,15 +3,13 @@ Feature: a workspace overlay declares MCP servers
   base config takes. After the merge an overlay server is an ordinary entry of
   the table, so the instance root's .mcp.json and each repo's generated Codex
   config carry it. A name the base config also declares is the base config's:
-  the overlay entry is dropped with a warning naming it.
+  the overlay entry is dropped with a warning naming it. The instance root's
+  approved-server list (enabledMcpjsonServers in .claude/settings.json)
+  names an overlay server like any other.
 
   Vault resolution of overlay server values against the overlay's own
   providers is covered by unit tests in internal/workspace (the functional
   suite has no fake vault backend); these scenarios use literal values.
-
-  The instance root's approved-server list (enabledMcpjsonServers in
-  .claude/settings.json) is not asserted here yet; that assertion is
-  added once the separate approval-list change lands on main.
 
   Runs offline against the localGitServer bare-repo fake; no GitHub access.
 
@@ -49,6 +47,7 @@ Feature: a workspace overlay declares MCP servers
     And the file ".mcp.json" in instance "ws" contains "https://mcp.example.com/v1"
     And the file ".mcp.json" in instance "ws" contains "literal-header-value"
     And the file "tools/app/.codex/config.toml" in instance "ws" contains "[mcp_servers.example]"
+    And the instance "ws" settings document approves MCP servers "example"
 
   @critical
   Scenario: the base config's MCP server wins a name collision with the overlay
@@ -81,3 +80,4 @@ Feature: a workspace overlay declares MCP servers
     And the error output contains "workspace overlay declares MCP server"
     And the file ".mcp.json" in instance "ws" contains "https://base.example.com/v1"
     And the file ".mcp.json" in instance "ws" does not contain "overlay.example.com"
+    And the instance "ws" settings document approves MCP servers "example"

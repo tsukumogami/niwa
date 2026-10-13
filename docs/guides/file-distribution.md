@@ -111,9 +111,9 @@ niwa only ever names servers one by one. It never writes
 that directory happens to contain.
 
 Claude Code reads that list from a project `settings.json` only once you've
-trusted the directory, so the first session in a new instance still asks the
-folder trust question. After you accept it, the declared servers start without
-a per-server prompt. Checked against Claude Code 2.1.296 with `claude mcp list`,
+trusted the directory, so unless [instance trust](instance-trust.md) is on, the
+first session in a new instance still asks the folder trust question. After
+you accept it, the declared servers start without a per-server prompt. Checked against Claude Code 2.1.296 with `claude mcp list`,
 which reports a project server as pending until it's approved: the declared
 servers showed as pending in an untrusted instance and were started once the
 instance root itself was trusted. A trust entry on a parent directory alone

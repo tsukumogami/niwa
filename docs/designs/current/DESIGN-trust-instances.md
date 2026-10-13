@@ -569,7 +569,12 @@ records the result.
 the resolved path of a directory niwa created. It never writes
 `enableAllProjectMcpServers`, never edits a settings file, and never writes a
 key for a parent or the workspace root. `claudetrust` is the only code that
-opens the file, so a reviewer can check this in one place.
+opens the file, so a reviewer can check this in one place. Outside a git
+repository, Claude Code skips its trust dialog in any directory beneath a
+trusted one, so `Ensure` writes nothing and warns when the key is the
+filesystem root, the home directory, the Claude config home, or an ancestor of
+either, the key a single-instance `niwa init` run in the home directory would
+otherwise produce.
 
 **Not damaging the file.** The file holds login-adjacent state and every
 project's history. niwa never writes without Claude Code's lock, never writes
