@@ -11,11 +11,11 @@ import (
 )
 
 // WorkspaceOverlay is parsed from workspace-overlay.toml in the overlay clone.
-// It carries additive configuration (sources, groups, repos, content) and
-// override configuration (hooks, settings, env, files) that MergeWorkspaceOverlay
-// layers on top of the base WorkspaceConfig. It is intentionally a distinct type
-// from WorkspaceConfig — overlay TOML has different validation rules and lacks
-// workspace metadata fields.
+// It carries additive configuration (sources, groups, repos, content, MCP
+// servers) and override configuration (hooks, settings, env, files) that
+// MergeWorkspaceOverlay layers on top of the base WorkspaceConfig. It is
+// intentionally a distinct type from WorkspaceConfig — overlay TOML has
+// different validation rules and lacks workspace metadata fields.
 type WorkspaceOverlay struct {
 	Sources  []OverlaySourceConfig   `toml:"sources"`
 	Groups   map[string]GroupConfig  `toml:"groups"`
@@ -25,6 +25,14 @@ type WorkspaceOverlay struct {
 	Files    map[string]string       `toml:"files,omitempty"`
 	Instance OverlayInstanceConfig   `toml:"instance,omitempty"`
 	Vault    *VaultRegistry          `toml:"vault,omitempty"`
+	// MCP declares servers in the same [mcp.servers.<name>] shape the base
+	// config takes, so a server whose name or credentials are private can be
+	// declared where only the people who can clone the overlay see it. A name
+	// the base config also declares is the base config's: the apply pipeline
+	// drops the overlay entry with a warning before resolving anything in it,
+	// and MergeWorkspaceOverlay skips it too. The vault:// values that survive
+	// resolve against the overlay's own [vault] providers, like its [env].
+	MCP MCPConfig `toml:"mcp,omitempty"`
 	// Workspace is a tombstone, not configuration. Nothing reads it into the
 	// merged config -- MergeWorkspaceOverlay never assigns Workspace at all --
 	// so every field under it is inert by construction. It is decoded solely
@@ -88,8 +96,9 @@ type OverlaySourceConfig struct {
 
 // OverlayClaudeConfig is the Claude section of workspace-overlay.toml.
 // It carries hooks (appended to base), settings (base-wins per key),
-// content (additive repos), marketplaces (append-union), and plugins
-// (append-union). It does not carry Enabled.
+// content (additive repos), marketplaces (append-union), plugins
+// (append-union), and trust_instances (used when the base leaves it out). It
+// does not carry Enabled.
 //
 // Marketplaces and Plugins use append-union semantics: entries already
 // present in the base config are silently skipped; new entries are appended
@@ -102,6 +111,10 @@ type OverlayClaudeConfig struct {
 	Content      OverlayContentConfig `toml:"content"`
 	Marketplaces []string             `toml:"marketplaces,omitempty"`
 	Plugins      []string             `toml:"plugins,omitempty"`
+	// TrustInstances is the overlay's [claude] trust_instances. It applies
+	// only when the base config leaves the key out; see
+	// ClaudeConfig.TrustInstances.
+	TrustInstances *bool `toml:"trust_instances,omitempty"`
 }
 
 // OverlayContentConfig holds the content groups and repos maps for the overlay.
@@ -132,6 +145,8 @@ type OverlayContentRepoConfig struct {
 //   - [files] destination paths beginning with ".claude/" or ".niwa/".
 //   - Content entries where both source and overlay are set, or neither is set.
 //   - Sources without an explicit repos list (no auto-discovery).
+//   - [mcp.servers.*] vault:// values naming a provider the overlay itself
+//     does not declare.
 func ParseOverlay(path string) (*WorkspaceOverlay, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -227,6 +242,22 @@ func validateOverlay(o *WorkspaceOverlay) error {
 			if err := validateContentSource(fmt.Sprintf("overlay.claude.content.repos.%s.overlay", repoName), entry.Overlay); err != nil {
 				return err
 			}
+		}
+	}
+
+	// MCP: a vault:// value must name a provider this file declares, the
+	// same same-file rule the base config's parse applies to its own
+	// servers, and through the same walker so the error reads the same.
+	// Without it, a reference to a provider only the base declares would
+	// not fail at all: the overlay's bundle cannot answer it, the resolver
+	// marks it rather than erroring, and the header would quietly go
+	// missing from the generated file. The rest of an overlay server's
+	// validation (transport, url or command) runs on the merged config at
+	// generation time, where base and overlay servers share one code path.
+	if len(o.MCP.Servers) > 0 {
+		scoped := &WorkspaceConfig{MCP: o.MCP, Vault: o.Vault}
+		if err := walkVaultRefsForUnknownProvider(scoped, o.Vault.KnownProviderNames()); err != nil {
+			return err
 		}
 	}
 

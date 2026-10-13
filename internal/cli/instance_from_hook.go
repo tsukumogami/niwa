@@ -553,8 +553,18 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 // validates the directory is a destroyable instance (not a workspace root)
 // first. It is wired into destroyInstanceFunc; tests override that variable.
 func realDestroyInstance(instancePath string) error {
+	return destroyInstanceWarningTo(instancePath, os.Stderr)
+}
+
+// destroyInstanceWarningTo is realDestroyInstance writing to w. Plugin-record
+// prune and Claude trust withdrawal warnings reach w, so a trust entry left
+// behind during reap or dispatch cleanup is never silent; their progress
+// lines ("pruned N plugin record(s)") don't, since these teardowns run as a
+// side effect of another command, the SessionStart hook among them.
+func destroyInstanceWarningTo(instancePath string, w io.Writer) error {
 	if err := workspace.ValidateInstanceDir(instancePath); err != nil {
 		return err
 	}
-	return workspace.DestroyInstance(instancePath)
+	return workspace.DestroyInstance(instancePath,
+		workspace.WithDestroyReporter(workspace.NewWarningReporter(w)))
 }

@@ -178,6 +178,17 @@ guarantees apply.
   is reclaimed -- the success path, where the instance is kept and reaped later, not
   just the staging-failure destroy. It is a safe no-op for instances that never held a
   grant, so calling it on every reaped instance is correct.
+
+  > **Update 2026-10 -- review trust moved onto `internal/claudetrust`.**
+  > `EnsureInstanceTrusted` and `RemoveInstanceTrust` are gone. Review-instance
+  > trust is now written by `internal/claudetrust`, the same writer
+  > `[claude] trust_instances` uses: it records the grant (source `review`) in
+  > the instance state, and destroying the instance withdraws exactly what that
+  > record names, so reap no longer deletes the entry at every reclaimed path.
+  > It writes only `hasTrustDialogAccepted`, finds the file through
+  > `CLAUDE_CONFIG_DIR` before `$HOME`, keys on the symlink-resolved instance
+  > root, and holds Claude Code's own config lock. See
+  > `docs/designs/current/DESIGN-trust-instances.md`.
 - **Settings assembly (`internal/watch/containment.go`, `ApplyReviewSettings`)** --
   gains an `ask` posture flag. In the ask posture it writes
   `permissions.defaultMode = "default"` (fully owned, overriding the inherited
@@ -314,6 +325,12 @@ stageReview
   `flock` best-effort guard. The seed happens before the daemon has an entry for the
   fresh instance, so a lost seed (the reverse direction) degrades to a broken-autonomy
   session the operator can re-stage -- never a fail-open.
+
+  > **Update 2026-10.** The premise that Claude Code wouldn't honor a shared lock
+  > doesn't hold: Claude Code serializes its own writes with a
+  > `<config file>.lock` directory, and niwa now takes that same lock through
+  > `internal/claudetrust`, which closes the lost-update window described
+  > above. See `docs/designs/current/DESIGN-trust-instances.md`.
 
 ## Consequences
 

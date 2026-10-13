@@ -1,12 +1,15 @@
 package workspace
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"github.com/tsukumogami/niwa/internal/claudetrust"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/pluginrecord"
 )
@@ -126,7 +129,8 @@ func CheckUncommittedChanges(instanceDir string) ([]string, error) {
 
 // destroyOptions holds the resolved configuration for a destroy operation.
 type destroyOptions struct {
-	// reporter, when set, receives plugin-record prune output. nil is silent.
+	// reporter, when set, receives plugin-record prune output and Claude
+	// trust withdrawal warnings. nil is silent.
 	reporter *Reporter
 
 	// pluginRecordBaseDir overrides the home directory used to locate Claude
@@ -138,8 +142,8 @@ type destroyOptions struct {
 // DestroyOption configures a DestroyInstance call.
 type DestroyOption func(*destroyOptions)
 
-// WithDestroyReporter routes plugin-record prune output through reporter so a
-// removal is never silent.
+// WithDestroyReporter routes plugin-record prune output and Claude trust
+// withdrawal warnings through reporter so a removal or a skip is never silent.
 func WithDestroyReporter(r *Reporter) DestroyOption {
 	return func(o *destroyOptions) { o.reporter = r }
 }
@@ -151,14 +155,14 @@ func WithPluginRecordBaseDir(dir string) DestroyOption {
 }
 
 // DestroyInstance validates that dir is a proper instance directory, prunes the
-// Claude Code plugin records owned by that instance root, and then removes the
-// directory entirely.
+// Claude Code plugin records owned by that instance root, withdraws the Claude
+// trust grant its state records, and then removes the directory entirely.
 //
-// The prune runs BEFORE os.RemoveAll so the instance-owned predicate matches
-// against an instance root that still exists, making ownership unambiguous. The
-// prune is fail-safe: a missing or malformed registry is reported and ignored,
-// never failing the teardown (a registry niwa does not own must not block a
-// destroy the user asked for).
+// The prune and the withdrawal run BEFORE os.RemoveAll so both match against
+// an instance root that still exists, making ownership unambiguous. Both are
+// fail-safe: a missing or malformed registry or config file is reported and
+// ignored, never failing the teardown (a file niwa does not own must not block
+// a destroy the user asked for).
 func DestroyInstance(dir string, opts ...DestroyOption) error {
 	if err := ValidateInstanceDir(dir); err != nil {
 		return err
@@ -169,8 +173,10 @@ func DestroyInstance(dir string, opts ...DestroyOption) error {
 		opt(&o)
 	}
 
-	// Prune the records this instance owns before removing the directory.
+	// Prune the records and withdraw the trust grant this instance owns
+	// before removing the directory.
 	prunePluginRecords(dir, o.reporter, o.pluginRecordBaseDir)
+	withdrawClaudeTrust(dir, o.reporter)
 
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("removing instance directory: %w", err)
@@ -204,3 +210,51 @@ func prunePluginRecords(instanceRoot string, reporter *Reporter, baseDir string)
 			report.Removed, len(report.PerPlugin), filepath.Base(instanceRoot))
 	}
 }
+
+// withdrawClaudeTrust removes the Claude Code trust entry, or only its flag,
+// that instanceDir's state records niwa as having written. Only the recorded
+// grant is acted on: an entry with no record is the developer's own and is
+// left alone. The expected key is computed here, while the directory still
+// exists, so a record naming any other path is refused rather than followed.
+//
+// It is fail-safe by contract: a missing state file means there is nothing to
+// withdraw, and a state file that can't be read, a root that can't be
+// resolved, or a refused or skipped withdrawal is reported (when a reporter
+// is set) and otherwise swallowed, so a destroy never fails on trust cleanup.
+// A nil reporter drops the warning, as prunePluginRecords does; every CLI
+// route passes one.
+func withdrawClaudeTrust(instanceDir string, reporter *Reporter) {
+	warn := func(format string, a ...any) {
+		if reporter != nil {
+			reporter.Warn("instance %s: "+format, append([]any{filepath.Base(instanceDir)}, a...)...)
+		}
+	}
+
+	state, err := LoadState(instanceDir)
+	if err != nil {
+		// The state is about to be removed with the instance, so a grant it
+		// records can't be withdrawn later either.
+		if !errors.Is(err, fs.ErrNotExist) {
+			warn("any Claude trust entry the instance state records was left in place: %v", err)
+		}
+		return
+	}
+	if state == nil || state.ClaudeTrust == nil {
+		return
+	}
+	g := state.ClaudeTrust
+
+	key, err := claudeTrustKey(instanceDir)
+	if err != nil {
+		warn("Claude trust entry %q in %s left in place: the instance root could not be resolved: %v", g.Key, g.ConfigFile, err)
+		return
+	}
+
+	if w := claudetrust.Withdraw(g, key, claudetrust.Destroy); w != "" {
+		warn("%s", w)
+	}
+}
+
+// claudeTrustKey computes the projects key withdrawClaudeTrust checks a record
+// against. It is a variable so a test can make the root unresolvable.
+var claudeTrustKey = claudetrust.Key

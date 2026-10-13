@@ -442,7 +442,8 @@ func selectReapTargets(workspaceRoot, jobsDir string, now time.Time) ([]reapTarg
 // reapWorkspace selects and reclaims orphaned ephemeral instances under
 // workspaceRoot, returning the count actually destroyed. For each target it
 // force-destroys the instance (via destroyInstanceFunc, the non-interactive
-// destroy path) and deletes the mapping entry. A destroy
+// destroy path, which also withdraws the Claude trust grant the instance's
+// state records) and deletes the mapping entry. A destroy
 // failure on one target is surfaced on stderr and does not abort the rest, so a
 // single stuck instance never blocks reclaiming the others.
 func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
@@ -479,11 +480,6 @@ func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 			// rather than orphaning the mapping for a still-present instance.
 			continue
 		}
-		// A watch-review instance may hold a Claude Code workspace-trust grant in
-		// ~/.claude.json; remove it now that the instance is reclaimed so trust
-		// entries do not accumulate for deleted paths. Best-effort and a safe no-op
-		// for instances that were never granted trust.
-		_ = removeInstanceTrustFunc(t.InstancePath)
 		if err := workspace.DeleteSessionMapping(workspaceRoot, t.SessionID); err != nil {
 			fmt.Fprintf(os.Stderr, "niwa: warning: deleting session mapping %s: %v\n", t.SessionID, err)
 		}
@@ -743,9 +739,6 @@ func reapBackstop(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 			fmt.Fprintf(os.Stderr, "niwa: warning: reaping orphaned dispatch instance %s: %v\n", t.InstancePath, err)
 			continue
 		}
-		// Remove any Claude Code workspace-trust grant for the reclaimed instance
-		// (see reapWorkspace); best-effort and a safe no-op when none was granted.
-		_ = removeInstanceTrustFunc(t.InstancePath)
 		reaped++
 	}
 

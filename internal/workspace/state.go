@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	"github.com/tsukumogami/niwa/internal/agentplan"
+	"github.com/tsukumogami/niwa/internal/claudetrust"
 )
 
 const (
@@ -144,6 +145,17 @@ type InstanceState struct {
 	// not tell its own entry from the developer's answer. omitempty keeps the
 	// field invisible to old binaries reading new state files.
 	TrustKeys []string `json:"trust_keys,omitempty"`
+	// ClaudeTrust records the trust entry niwa wrote for this instance root
+	// into Claude Code's user config: the file, the projects key, whether
+	// niwa created the entry or only set its flag, and which feature asked.
+	//
+	// It is the sole authority for what destroying the instance may withdraw:
+	// Claude Code writes an identical entry when the developer answers its own
+	// trust prompt, so ownership can't be inferred from the entry. A destroy
+	// validates the record against the instance's own path before acting on
+	// it. omitempty keeps the field invisible to old binaries reading new
+	// state files.
+	ClaudeTrust *claudetrust.Grant `json:"claude_trust,omitempty"`
 	// ClaudePermissions records the declared permission posture the
 	// instance-root settings document resolved from: "bypass", "ask", or
 	// empty when nothing is declared. It is niwa's own record of the

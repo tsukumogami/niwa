@@ -30,7 +30,9 @@ func deepCopyWorkspaceConfig(in *config.WorkspaceConfig) *config.WorkspaceConfig
 	out.Files = cloneStringMap(in.Files)
 	out.Repos = deepCopyRepos(in.Repos)
 	out.Instance = deepCopyInstance(in.Instance)
-	out.MCP = deepCopyMCP(in.MCP)
+	// The MCP declaration is cloned down to the two maps that carry
+	// MaybeSecret values, so the walker can resolve them in place.
+	out.MCP = in.MCP.Clone()
 	out.Session = deepCopySession(in.Session)
 	// Vault is not mutated by the resolver: it is the source of
 	// truth for provider selection. Share by pointer.
@@ -139,28 +141,10 @@ func deepCopyInstance(in config.InstanceConfig) config.InstanceConfig {
 	}
 }
 
-// deepCopyMCP clones the agent-neutral MCP declaration down to the two maps
-// that carry MaybeSecret values, so the walker can resolve them in place
-// without reaching back into the caller's config.
-func deepCopyMCP(in config.MCPConfig) config.MCPConfig {
-	if in.Servers == nil {
-		return config.MCPConfig{}
-	}
-	out := config.MCPConfig{Servers: make(map[string]config.MCPServerConfig, len(in.Servers))}
-	for name, srv := range in.Servers {
-		cp := srv
-		cp.Args = slices.Clone(srv.Args)
-		cp.Agents = slices.Clone(srv.Agents)
-		cp.Env = cloneMaybeSecretMap(srv.Env)
-		cp.Headers = cloneMaybeSecretMap(srv.Headers)
-		out.Servers[name] = cp
-	}
-	return out
-}
-
 // deepCopySession clones the agent-neutral session declaration down to the
-// value map the walker resolves in place, for the same reason deepCopyMCP
-// does: the resolver returns a new config and never mutates the caller's.
+// value map the walker resolves in place, for the same reason the MCP
+// declaration is cloned: the resolver returns a new config and never mutates
+// the caller's.
 func deepCopySession(in config.SessionConfig) config.SessionConfig {
 	return config.SessionConfig{
 		Env: config.SessionEnvConfig{
@@ -168,15 +152,6 @@ func deepCopySession(in config.SessionConfig) config.SessionConfig {
 			Vars:    cloneEnvVarsTable(in.Env.Vars),
 		},
 	}
-}
-
-func cloneMaybeSecretMap(in map[string]config.MaybeSecret) map[string]config.MaybeSecret {
-	if in == nil {
-		return nil
-	}
-	out := make(map[string]config.MaybeSecret, len(in))
-	maps.Copy(out, in)
-	return out
 }
 
 func deepCopyGlobalConfigOverride(in *config.GlobalConfigOverride) *config.GlobalConfigOverride {

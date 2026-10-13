@@ -3,8 +3,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -225,82 +223,5 @@ func TestCountLiveStaged(t *testing.T) {
 	mixed := map[string]bool{"acme/api#1": true, "acme/api#2": false}
 	if got := countLiveStaged(mixed); got != 1 {
 		t.Errorf("one live + one false: got %d, want 1", got)
-	}
-}
-
-// stubAskPostureSeams overrides the trust seams and HOME for resolveAskPosture and
-// records whether the seed/remove were invoked, restoring the originals on cleanup.
-type askPostureStub struct {
-	seeded  bool
-	removed bool
-}
-
-func stubAskPostureSeams(t *testing.T, home string, seedErr error) *askPostureStub {
-	t.Helper()
-	s := &askPostureStub{}
-	origEnsure, origRemove, origHome := ensureInstanceTrustedFunc, removeInstanceTrustFunc, reviewHomeDir
-	ensureInstanceTrustedFunc = func(string) error { s.seeded = true; return seedErr }
-	removeInstanceTrustFunc = func(string) error { s.removed = true; return nil }
-	reviewHomeDir = func() (string, error) { return home, nil }
-	t.Cleanup(func() {
-		ensureInstanceTrustedFunc, removeInstanceTrustFunc, reviewHomeDir = origEnsure, origRemove, origHome
-	})
-	return s
-}
-
-// TestResolveAskPosture_PrerequisitesMet: a sandboxed instance outside ~/.claude with a
-// successful trust seed yields the ask posture.
-func TestResolveAskPosture_PrerequisitesMet(t *testing.T) {
-	home := t.TempDir()
-	inst := t.TempDir() // a normal repo path, not under ~/.claude
-	s := stubAskPostureSeams(t, home, nil)
-
-	if got := resolveAskPosture(inst, true); !got {
-		t.Errorf("prerequisites met must yield the ask posture (true)")
-	}
-	if !s.seeded {
-		t.Errorf("the ask posture must seed workspace trust")
-	}
-}
-
-// TestResolveAskPosture_NoSandbox: a non-sandboxed review never uses the ask posture
-// and never seeds trust.
-func TestResolveAskPosture_NoSandbox(t *testing.T) {
-	s := stubAskPostureSeams(t, t.TempDir(), nil)
-	if got := resolveAskPosture(t.TempDir(), false); got {
-		t.Errorf("a non-sandboxed review must not use the ask posture")
-	}
-	if s.seeded {
-		t.Errorf("a non-sandboxed review must not seed trust")
-	}
-}
-
-// TestResolveAskPosture_TrustSeedFailureFallsBack: a failed trust seed falls back to the
-// hard-deny posture.
-func TestResolveAskPosture_TrustSeedFailureFallsBack(t *testing.T) {
-	home := t.TempDir()
-	inst := t.TempDir()
-	stubAskPostureSeams(t, home, errors.New("cannot write ~/.claude.json"))
-
-	if got := resolveAskPosture(inst, true); got {
-		t.Errorf("a trust-seed failure must fall back to the hard-deny posture (false)")
-	}
-}
-
-// TestResolveAskPosture_UnderClaudeHomeFallsBack: an instance under ~/.claude falls back
-// to the hard-deny posture and never seeds trust (writes there are blocked regardless).
-func TestResolveAskPosture_UnderClaudeHomeFallsBack(t *testing.T) {
-	home := t.TempDir()
-	inst := filepath.Join(home, ".claude", "instances", "watch-x")
-	if err := os.MkdirAll(inst, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	s := stubAskPostureSeams(t, home, nil)
-
-	if got := resolveAskPosture(inst, true); got {
-		t.Errorf("an instance under ~/.claude must fall back to the hard-deny posture")
-	}
-	if s.seeded {
-		t.Errorf("an instance under ~/.claude must not seed trust")
 	}
 }

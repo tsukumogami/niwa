@@ -462,7 +462,11 @@ func printWorktreeContentFiles(cmd *cobra.Command, written []string) {
 // This runs only the structural config merge (which populates OverlaySource on
 // content entries); it deliberately does not re-run the overlay's vault
 // resolution, which the apply pipeline needs for env/secrets but the worktree
-// content install does not.
+// content install does not. Overlay [mcp.servers] entries merge in with base
+// wins on name collision (the merge enforces that itself, since the apply
+// pipeline's pre-resolution filter does not run here) and are generated into
+// the worktree like base servers: a value still carrying vault:// is left out
+// with a report, exactly as an unresolved base value is on this path.
 func mergeWorktreeOverlay(cfg *config.WorkspaceConfig, instanceRoot string) (*config.WorkspaceConfig, string, error) {
 	state, err := workspace.LoadState(instanceRoot)
 	if err != nil {

@@ -722,12 +722,22 @@ func teamOnlyKeys(vr *config.VaultRegistry) map[string]bool {
 //   - Content.Repos: overlay entries with source= add new content entries
 //     (base wins on key collision). Overlay entries with overlay= set OverlaySource
 //     on an existing base entry (error if the base entry does not exist).
+//   - MCP.Servers: overlay servers added; base wins on name collision. The
+//     apply pipeline drops colliding overlay servers (with a warning) before
+//     it resolves the overlay, so on that path none reach this merge; the rule
+//     is enforced here as well because the worktree path calls this merge on
+//     an overlay it never resolves or filters.
+//   - Claude.TrustInstances: the overlay's value applies only when the base
+//     left the key out; a base value wins, false included. When the overlay's
+//     value is taken and is true, TrustInstancesFromOverlay records that the
+//     overlay is what turned instance trust on.
 func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.WorkspaceOverlay, overlayDir string) (*config.WorkspaceConfig, error) {
 	// Deep-copy the input config.
 	merged := *ws
 	merged.Claude = *copyClaudeConfigFull(&ws.Claude)
 	merged.Content = copyContentConfig(ws.Content)
 	merged.Env = copyEnv(ws.Env)
+	merged.MCP = ws.MCP.Clone()
 	merged.Files = copyStringMap(ws.Files)
 	merged.OverlayInstanceFiles = copyStringMap(ws.OverlayInstanceFiles)
 	merged.Sources = append([]config.SourceConfig(nil), ws.Sources...)
@@ -872,6 +882,14 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 		merged.Claude.Plugins = &combined
 	}
 
+	// Claude.TrustInstances: base wins whenever it set the key, so a base
+	// that wants to refuse the overlay's choice says false.
+	if merged.Claude.TrustInstances == nil && overlay.Claude.TrustInstances != nil {
+		v := *overlay.Claude.TrustInstances
+		merged.Claude.TrustInstances = &v
+		merged.TrustInstancesFromOverlay = v
+	}
+
 	// Claude.Env.Promote and Claude.Env.Vars: OverlayClaudeConfig does not carry
 	// a Claude env section (claude env is workspace-scoped and flows through the
 	// top-level Env pipeline). Nothing to merge here.
@@ -993,7 +1011,49 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 		}
 	}
 
+	// MCP.Servers: add overlay servers the base does not declare; base wins
+	// on collision. After this, an overlay server is an ordinary entry of
+	// the table, so every generator reading it (.mcp.json, Codex's config)
+	// includes it in name order with no overlay-specific code.
+	//
+	// What the values are depends on the caller. The apply pipeline hands
+	// over servers already resolved against the overlay's own bundle. The
+	// worktree path (mergeWorktreeOverlay) resolves nothing, and its MCP
+	// generation reads this merged table, so an overlay server reaches a
+	// worktree exactly as a base server does there: literal values written,
+	// any value still carrying vault:// left out with a report by
+	// mcpServerFromConfig rather than written unresolved.
+	for _, name := range overlay.MCP.MCPServerNames() {
+		if _, exists := merged.MCP.Servers[name]; exists {
+			continue
+		}
+		if merged.MCP.Servers == nil {
+			merged.MCP.Servers = make(map[string]config.MCPServerConfig)
+		}
+		merged.MCP.Servers[name] = overlay.MCP.Servers[name].Clone()
+	}
+
 	return &merged, nil
+}
+
+// dropShadowedOverlayMCPServers mutates overlay in place, deleting every MCP
+// server whose name base already declares, and returns the removed names in
+// sorted order, for the caller to warn about.
+//
+// The apply pipeline runs it before resolving the overlay, which is the point:
+// a server the base config wins is never used, so its vault:// references are
+// never looked up. A dropped entry naming a key the overlay's provider no
+// longer holds, or a provider that no longer answers, cannot fail or slow an
+// apply over a value nothing would have written.
+func dropShadowedOverlayMCPServers(base config.MCPConfig, overlay *config.MCPConfig) []string {
+	var dropped []string
+	for _, name := range overlay.MCPServerNames() {
+		if _, exists := base.Servers[name]; exists {
+			delete(overlay.Servers, name)
+			dropped = append(dropped, name)
+		}
+	}
+	return dropped
 }
 
 // copyContentConfig returns a deep copy of a ContentConfig, including the

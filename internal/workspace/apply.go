@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -184,6 +185,17 @@ type Applier struct {
 	// against the real ~/.claude; tests override it to a temp HOME or a fake.
 	// When nil, the reconcile is a silent no-op.
 	reconcileMarketplaceAutoUpdate func(desired map[string]bool) (pluginrecord.ReconcileReport, error)
+
+	// saveState persists the instance state at the end of Create and Apply.
+	// Nil means SaveState. Tests set it to inject a failure after every
+	// other step, including the Claude trust write, has run.
+	saveState func(dir string, state *InstanceState) error
+
+	// afterPipeline, when set, runs as the pipeline's last step, and an error
+	// from it fails the pipeline the way a real late failure would. It is a
+	// test seam for proving nothing outside the instance is written before
+	// the pipeline has succeeded; production leaves it nil.
+	afterPipeline func() error
 
 	// vaultRegistry overrides vault.DefaultRegistry for vault bundle building.
 	// Nil means use the process-wide DefaultRegistry (production behaviour).
@@ -400,6 +412,12 @@ type pipelineResult struct {
 	// ("bypass", "ask", or ""), computed from this run's effective config.
 	// Persisted into InstanceState.ClaudePermissions by Create/Apply.
 	claudePermissions string
+	// trustInstances is the effective [claude] trust_instances, after the
+	// overlay merge. trustFromOverlay reports that it is true only because
+	// the overlay set it. Create and Apply hand both to deliverClaudeTrust
+	// and its notice once the pipeline has succeeded.
+	trustInstances   bool
+	trustFromOverlay bool
 	// procedureErr is a procedure-routed delivery's failure carried out as
 	// data rather than as the pipeline's error return. The record above has to
 	// reach the state file before the failure reaches the user: a run that
@@ -592,6 +610,15 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 
 	saveWorkspaceRootDisclosures(workspaceRoot, initState, result.disclosedNotices)
 
+	// Claude trust is the last thing written, once nothing but the state save
+	// can fail: the failure path above removes the instance directory and
+	// saves no state, so trust written earlier would be left with no record
+	// to withdraw it. A new instance has no earlier grant, and initState is
+	// the workspace root's state, whose grant (if any) names the root's key,
+	// not this instance's.
+	trustGrant, undoTrust, trustWrote, trustWarnings := a.deliverClaudeTrust(instanceRoot, result.trustInstances, nil)
+	result.warnings = append(result.warnings, trustWarnings...)
+
 	state := &InstanceState{
 		SchemaVersion:  SchemaVersion,
 		ConfigName:     &configName,
@@ -607,13 +634,16 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		OverlayCommit:  result.overlayCommit,
 		AuthSources:    result.authSources,
 		TrustKeys:      result.trustKeys,
+		ClaudeTrust:    trustGrant,
 		// Recomputed from this run's config alone, like Shadows.
 		ClaudePermissions: result.claudePermissions,
 	}
 
-	if err := SaveState(instanceRoot, state); err != nil {
+	if err := a.saveInstanceState(instanceRoot, state); err != nil {
+		a.undoClaudeTrust(undoTrust)
 		return "", fmt.Errorf("saving instance state: %w", err)
 	}
+	a.discloseOverlayTrust(workspaceRoot, result.trustFromOverlay, trustWrote, trustGrant)
 
 	n := len(result.repoStates)
 	if n == 1 {
@@ -780,6 +810,13 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	if err != nil {
 		return fmt.Errorf("resolving effective workspace name: %w", err)
 	}
+
+	// Claude trust is the last thing written before the state, for the same
+	// reason as in Create: no failure may follow it except the save, which
+	// undoes it.
+	trustGrant, undoTrust, trustWrote, trustWarnings := a.deliverClaudeTrust(instanceRoot, result.trustInstances, existingState.ClaudeTrust)
+	result.warnings = append(result.warnings, trustWarnings...)
+
 	// InstanceName comes from the on-disk instance directory, not from
 	// configName or cfg.Workspace.Name. For numbered ("my-name-2") and
 	// custom-suffix ("my-name-hotfix") instances, the suffix is part of
@@ -806,14 +843,19 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		Shadows:              result.shadows,
 		AuthSources:          result.authSources,
 		TrustKeys:            result.trustKeys,
+		// The grant deliverClaudeTrust settled on: the existing one carried,
+		// a new one, or none once a withdrawal cleared it.
+		ClaudeTrust: trustGrant,
 		// Taken from this run's result, never from existingState: a posture
 		// removed from the config must stop being recorded on the next apply.
 		ClaudePermissions: result.claudePermissions,
 	}
 
-	if err := SaveState(instanceRoot, state); err != nil {
+	if err := a.saveInstanceState(instanceRoot, state); err != nil {
+		a.undoClaudeTrust(undoTrust)
 		return fmt.Errorf("saving instance state: %w", err)
 	}
+	a.discloseOverlayTrust(workspaceRoot, result.trustFromOverlay, trustWrote, trustGrant)
 
 	n := len(result.repoStates)
 	if n == 1 {
@@ -1250,14 +1292,26 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		defer overlayVaultBundle.CloseAll()
 
-		// Resolve the overlay's env (top-level and per-repo) against the overlay's
-		// own vault bundle. Wrap in a temporary WorkspaceConfig so ResolveWorkspace
-		// can be reused without duplicating the resolution walker. Both overlay.Env
-		// and overlay.Repos carry the same types as WorkspaceConfig fields, so
-		// direct assignment works.
+		// An overlay MCP server the base config also declares is dropped here,
+		// before resolution, so its vault:// references are never looked up:
+		// the base declaration is the one used, and a stale overlay entry
+		// naming a key its provider no longer holds must not fail the apply.
+		// MergeWorkspaceOverlay enforces base-wins as well; this step is what
+		// keeps the dropped entry's secrets unasked and names it to the user.
+		for _, name := range dropShadowedOverlayMCPServers(cfg.MCP, &overlay.MCP) {
+			a.Reporter.DeferWarn("workspace overlay declares MCP server %q, which the workspace config already declares; the workspace config's declaration is used", name)
+		}
+
+		// Resolve the overlay's env (top-level and per-repo) and its surviving
+		// MCP servers against the overlay's own vault bundle. Wrap in a
+		// temporary WorkspaceConfig so ResolveWorkspace can be reused without
+		// duplicating the resolution walker. overlay.Env, overlay.Repos and
+		// overlay.MCP carry the same types as WorkspaceConfig fields, so direct
+		// assignment works; the resolver deep-copies each before writing.
 		tmpCfg := &config.WorkspaceConfig{
 			Env:   overlay.Env,
 			Repos: overlay.Repos,
+			MCP:   overlay.MCP,
 		}
 		// Values that resolve here are secrets and pass through the
 		// second, whole-config resolve untouched; values that do not
@@ -1272,6 +1326,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		overlay.Env = resolvedTmp.Env
 		overlay.Repos = resolvedTmp.Repos
+		overlay.MCP = resolvedTmp.MCP
 
 		mergedWS, mergeErr := MergeWorkspaceOverlay(cfg, overlay, overlayDir)
 		if mergeErr != nil {
@@ -2178,6 +2233,12 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// create and update (R18). Fail-safe like the heal above.
 	a.reconcileMarketplaceRegistry(effectiveCfg, repoIndex)
 
+	if a.afterPipeline != nil {
+		if err := a.afterPipeline(); err != nil {
+			return nil, err
+		}
+	}
+
 	return &pipelineResult{
 		classified:        classified,
 		repoStates:        repoStates,
@@ -2191,6 +2252,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		disclosedNotices:  newDisclosures,
 		trustKeys:         trustKeys,
 		claudePermissions: instancePermissionsPosture(effectiveCfg),
+		trustInstances:    effectiveCfg.Claude.TrustInstances != nil && *effectiveCfg.Claude.TrustInstances,
+		trustFromOverlay:  effectiveCfg.TrustInstancesFromOverlay,
 		procedureErr:      procErr,
 		exemptPaths:       exemptPaths,
 	}, nil
@@ -2804,27 +2867,48 @@ func sliceContains(s []string, elem string) bool {
 // state file. It is a best-effort call: errors are silently ignored because a
 // failed write only means the notice reappears on the next run — a recoverable
 // annoyance rather than a data-loss scenario.
+//
+// existing is the root state the caller loaded, nil when it couldn't. A nil
+// existing is only replaced by a fresh state when no root state file is
+// there: one that exists but can't be read is left alone, so fields like
+// OverlayURL and earlier disclosures are never overwritten by an empty state.
 func saveWorkspaceRootDisclosures(workspaceRoot string, existing *InstanceState, newNotices []string) {
 	if len(newNotices) == 0 {
 		return
 	}
-	// Guard against single-instance layouts where workspaceRoot ==
-	// filepath.Dir(instanceRoot) escapes the actual workspace (e.g.,
-	// instanceRoot=/tmp/myws → workspaceRoot=/tmp). In those layouts
-	// the per-instance state file IS the workspace root state file —
-	// disclosures get carried by the instance SaveState. We detect
-	// the layout by checking for the workspace.toml that init writes:
-	// multi-instance has it at workspaceRoot/.niwa/, single-instance
-	// does not.
-	if _, err := os.Stat(filepath.Join(workspaceRoot, StateDir, WorkspaceConfigFile)); err != nil {
+	if !workspaceRootHoldsState(workspaceRoot) {
 		return
 	}
 	s := existing
 	if s == nil {
-		s = &InstanceState{}
+		loaded, err := LoadState(workspaceRoot)
+		switch {
+		case err == nil:
+			s = loaded
+		case errors.Is(err, fs.ErrNotExist):
+			s = &InstanceState{}
+		default:
+			return
+		}
 	}
 	s.DisclosedNotices = mergeDisclosedNotices(s.DisclosedNotices, newNotices)
 	_ = SaveState(workspaceRoot, s)
+}
+
+// workspaceRootHoldsState reports whether workspaceRoot is a multi-instance
+// workspace root, whose own state file carries workspace-level disclosures.
+//
+// It guards against single-instance layouts where workspaceRoot ==
+// filepath.Dir(instanceRoot) escapes the actual workspace (e.g.,
+// instanceRoot=/tmp/myws → workspaceRoot=/tmp). In those layouts
+// the per-instance state file IS the workspace root state file —
+// disclosures get carried by the instance SaveState. We detect
+// the layout by checking for the workspace.toml that init writes:
+// multi-instance has it at workspaceRoot/.niwa/, single-instance
+// does not.
+func workspaceRootHoldsState(workspaceRoot string) bool {
+	_, err := os.Stat(filepath.Join(workspaceRoot, StateDir, WorkspaceConfigFile))
+	return err == nil
 }
 
 // emitRotatedFiles prints `rotated <path>` to stderrOut for every

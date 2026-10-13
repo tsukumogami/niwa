@@ -333,7 +333,7 @@ func TestWatchRendersNoticesAfterKeyReport(t *testing.T) {
 		t.Run(fmt.Sprintf("failed=%v", fail), func(t *testing.T) {
 			root, home := setupWatchCharEnv(t)
 			installWatchCharFakes(t)
-			stubAskPostureSeams(t, home, nil)
+			stubWatchTrust(t, home, false)
 			// The install*Fakes helper registered the restore of provisionInstanceFunc.
 			inner := provisionInstanceFunc
 			provisionInstanceFunc = func(ctx context.Context, r, cwd, namePrefix, sep string, n int) (provisionResult, error) {
@@ -369,7 +369,7 @@ func TestWatchServesStoredValuesThroughRealProvisioning(t *testing.T) {
 	installWatchCharFakes(t)
 	// installWatchCharFakes registered the restore of provisionInstanceFunc.
 	provisionInstanceFunc = realProvisionInstance
-	stubAskPostureSeams(t, os.Getenv("HOME"), nil)
+	stubWatchTrust(t, os.Getenv("HOME"), false)
 	client := newPullHeadServer(t)
 
 	cmd, _, stderr := newWatchCharCmd()
