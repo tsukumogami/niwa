@@ -171,9 +171,10 @@ type InstanceState struct {
 	// ReviewInstance marks an instance niwa watch staged a pull-request
 	// review in. Set once, before the pull request's head is fetched, and
 	// carried forward by every apply. A review instance never gets
-	// repository-directory Claude trust: the review is there to read code
-	// nobody has accepted yet, and trust would let committed .claude settings
-	// and hooks run without a prompt. An older niwa that saves the state
+	// repository-directory Claude trust: the reviewing agent can check the
+	// pull request out in a repository directory, and trust there would let
+	// the pull request's committed .claude settings and hooks run without a
+	// prompt. An older niwa that saves the state
 	// drops the field; a review-sourced ClaudeTrust grant marks the instance
 	// too (see isReviewInstance). omitempty keeps the field invisible to old
 	// binaries reading new state files.

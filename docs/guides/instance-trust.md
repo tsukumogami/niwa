@@ -64,8 +64,10 @@ directory it cloned there. No other value in the file changes.
   each is a directory of its own.
 - **The repositories** are the ones niwa cloned into the instance, at
   `<instance>/<group>/<repo>`, except a repository with Claude turned off
-  (`[repos.<name>.claude] enabled = false`), which gets no Claude settings
-  from niwa either. Only Claude's own setting counts: a repository with
+  (`[repos.<name>.claude] enabled = false`, or the workspace-wide
+  `[claude] enabled = false`, which excludes every repository while the
+  instance root is still trusted), which gets no Claude settings from niwa
+  either. Only Claude's own setting counts: a repository with
   Claude off and another agent on isn't trusted. A repository directory, or
   the group directory above it, that resolves outside the instance (a symlink
   to somewhere else, say) isn't trusted either, since niwa could never check
@@ -307,11 +309,13 @@ as its own, so an apply in that instance with the option off can't pull trust
 out from under a running review. An apply never withdraws a review grant.
 
 A review instance never gets repository-directory trust, whatever
-`trust_instances` says. It exists to hold a pull request's code for an agent
-to read before anyone has accepted it, and in a trusted directory Claude Code
-applies the `.claude` settings and hooks committed there without asking. With
-repository directories trusted, a pull request's committed hooks could run in
-a session there with no prompt. So before the pull request is fetched,
+`trust_instances` says. It exists so an agent can read a pull request's code
+before anyone has accepted it. `niwa watch` fetches the pull request into its
+own clone directory, not into the repository directories, but the agent can
+check the pull request out in a repository directory of the same repository,
+and in a trusted directory Claude Code applies the `.claude` settings and
+hooks committed there without asking. A pull request's committed hooks could
+then run in a session there with no prompt. So before the pull request is fetched,
 `niwa watch` withdraws every repository grant the instance was created with,
 as destroying the instance would, and records `review_instance` in the
 instance's `.niwa/instance.json`. Every later apply in that instance (or one

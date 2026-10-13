@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -1056,9 +1058,11 @@ func seedReviewTrust(w io.Writer, env claudetrust.Env, instancePath string) bool
 // markReviewInstance records in the instance state at instancePath that the
 // instance holds a review, so no later apply trusts its repository
 // directories, and withdraws the repository-directory Claude trust the
-// instance was created with (trust_instances on). A review instance holds a
-// pull request nobody has accepted yet, and trusting a directory would let
-// the .claude settings and hooks committed there run without a prompt.
+// instance was created with (trust_instances on). The pull request's head is
+// fetched into its own clone directory, not into the repository directories,
+// but the reviewing agent can check the pull request out in a repository
+// directory of the same repository, and in a trusted directory the .claude
+// settings and hooks committed there would run without a prompt.
 //
 // An instance with no state file has nothing recorded and can't be applied,
 // so there is nothing to mark. Any other failure to read or save the state
@@ -1073,12 +1077,19 @@ func markReviewInstance(w io.Writer, instancePath string) error {
 		return fmt.Errorf("marking the review instance: %w", err)
 	}
 	withdrawn := withdrawReviewRepoTrust(w, instancePath, state)
-	if state.ReviewInstance && !withdrawn {
-		return nil
+	if !state.ReviewInstance || withdrawn {
+		state.ReviewInstance = true
+		if err := saveReviewState(instancePath, state); err != nil {
+			return fmt.Errorf("marking the review instance: %w", err)
+		}
 	}
-	state.ReviewInstance = true
-	if err := saveReviewState(instancePath, state); err != nil {
-		return fmt.Errorf("marking the review instance: %w", err)
+	// A record still standing is a withdrawal that was skipped (a config lock
+	// held too long, say), so its repository directory is still trusted. The
+	// review must not run there; destroying the instance retries it.
+	for _, rel := range slices.Sorted(maps.Keys(state.ClaudeTrustRepos)) {
+		if state.ClaudeTrustRepos[rel].Source != claudetrust.SourceReview {
+			return fmt.Errorf("marking the review instance: the Claude trust for repository directory %s could not be withdrawn", rel)
+		}
 	}
 	return nil
 }

@@ -156,6 +156,25 @@ func TestMarkReviewInstance(t *testing.T) {
 		}
 	})
 
+	t.Run("skipped withdrawal fails the stage", func(t *testing.T) {
+		home, file := stubReviewHome(t)
+		inst := makeReviewInstance(t)
+		reviewRepoGrants(t, home, file, inst)
+		// A config file niwa can't parse makes it skip the withdrawal and
+		// keep the records, as a lock held too long would.
+		writeTestFile(t, file, `{"projects": `)
+
+		var stderr bytes.Buffer
+		err := markReviewInstance(&stderr, inst)
+		if err == nil || !strings.Contains(err.Error(), "repository directory g/new could not be withdrawn") {
+			t.Errorf("markReviewInstance = %v, want the stage failed naming g/new", err)
+		}
+		state, lerr := workspace.LoadState(inst)
+		if lerr != nil || !state.ReviewInstance || len(state.ClaudeTrustRepos) != 2 {
+			t.Errorf("state = %+v (err %v), want the instance marked and both records kept for destroy", state, lerr)
+		}
+	})
+
 	t.Run("no instance state", func(t *testing.T) {
 		inst := t.TempDir()
 		if err := markReviewInstance(io.Discard, inst); err != nil {

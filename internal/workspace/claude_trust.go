@@ -187,8 +187,10 @@ func (a *Applier) deliverRootClaudeTrust(instanceRoot string, on bool, existing 
 // through, so the instance root's and the repository directories' can't
 // drift apart: the root's on the off switch, and each repository
 // directory's, through settleRepoGrant, on the off switch, on leaving the
-// config, in a review instance and on destroy. key is the directory's key
-// now, and keyErr the error computing it.
+// config, in a review instance and on destroy. The instance root's own
+// destroy path doesn't use it: it hands the recorded key to
+// claudetrust.Withdraw, which checks it against the instance's key itself.
+// key is the directory's key now, and keyErr the error computing it.
 //
 // keep reports that the record must stay so a later run retries: the
 // directory couldn't be resolved, or the withdrawal was skipped. A record for
@@ -311,6 +313,16 @@ func (a *Applier) deliverRepoClaudeTrust(instanceRoot string, on bool, repos []s
 			out := claudetrust.Ensure(env, key, prior, claudetrust.SourceWorkspace)
 			if out.Warning != "" {
 				warnings = append(warnings, out.Warning)
+			}
+			if out.Grant != nil && out.Grant.Key != key {
+				// Ensure resolves key again, so a directory swapped for a
+				// symlink since the check lands somewhere else. Take that
+				// write back rather than record trust no check could reach.
+				if w := out.Undo(); w != "" {
+					warnings = append(warnings, w)
+				}
+				warnings = append(warnings, fmt.Sprintf("Claude trust for repository %q not written: its directory changed while it was being trusted", rel))
+				continue
 			}
 			if out.Grant != nil {
 				grants[rel] = out.Grant
