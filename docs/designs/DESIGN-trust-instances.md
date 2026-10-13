@@ -30,6 +30,7 @@ rationale: |
   generation means every existing validator, generator and approval-list
   writer covers them unchanged.
 decision_provenance: inline-resolved
+user_visible_surface: true
 ---
 
 # DESIGN: Trust the instances niwa creates
@@ -136,6 +137,8 @@ Every question below was resolved inline under `/scope` (standard tier).
 
 ### Decision 1: Where the Claude trust writer lives
 
+Resolved inline.
+
 **Chosen: a new neutral package, `internal/claudetrust`.** It owns config-file
 resolution, key canonicalization, the lock, the classification table and the
 grant record type, and imports nothing from niwa except the standard library.
@@ -159,6 +162,8 @@ Alternatives:
   the writer's tests would run inside the workspace package's large suite.
 
 ### Decision 2: The ownership record and how teardown reads it
+
+Resolved inline.
 
 **Chosen: one optional field in instance state,
 `ClaudeTrust *claudetrust.Grant` (`json:"claude_trust,omitempty"`), holding
@@ -204,14 +209,25 @@ Alternatives:
 
 ### Decision 3: Serializing with Claude Code's writes
 
+Resolved inline.
+
 **Chosen: take Claude Code's own lock.** Claude Code 2.1.296 serializes writes
 to its config with a lock directory at `<config file>.lock`, created with an
 atomic mkdir, treated as stale when its modification time is more than 10
 seconds old, and re-reads the file under the lock before writing. niwa does
-the same: `os.Mkdir(<config>.lock, 0o700)`; on `EEXIST`, stat it, and if its
-mtime is older than 10 seconds, re-stat to confirm it's the same directory and
-still stale, remove it with a non-recursive `os.Remove`, and retry; otherwise
-sleep 50 ms and retry, for up to 5 seconds. Under the lock niwa resolves the
+the same: `os.Mkdir(<config>.lock, 0o700)`; on `EEXIST`, `Lstat` it (a
+symlink or regular file at the lock path is never followed or removed; niwa
+waits and then skips), and if it's a directory with an mtime older than 10
+seconds, `Lstat` again to confirm it's the same directory and still stale,
+remove it with a non-recursive `os.Remove`, and retry; otherwise sleep 50 ms
+and retry, for up to 5 seconds. Once one lock wait has timed out, later
+attempts in the same niwa process skip without waiting, so a reap sweep over
+many instances doesn't wait 5 seconds per instance. A relative
+`CLAUDE_CONFIG_DIR` is refused with a warning, like an unparseable file.
+Like Claude Code's own protocol, the staleness takeover has a narrow window in
+which two takers can both proceed; niwa's 5-second wait is far below the
+10-second threshold, so a live holder that refreshes its lock is never taken
+over. Under the lock niwa resolves the
 write target, reads, decides and writes, then releases with a non-recursive
 `os.Remove` through a deferred call on every path. The lock path is built from
 the unresolved config path (the name Claude Code locks), while the write goes
@@ -232,6 +248,8 @@ Alternatives:
 
 ### Decision 4: Overlay `[mcp.servers]` and `[claude] trust_instances`
 
+Resolved inline.
+
 **Chosen: decode both in the overlay, filter collisions before resolution,
 resolve against the overlay bundle, then merge.** `WorkspaceOverlay` gains
 `MCP config.MCPConfig` (`toml:"mcp"`), and `OverlayClaudeConfig` gains
@@ -241,14 +259,19 @@ base declares and defers a warning naming it (so R3's dropped secrets are
 never looked up). The surviving `overlay.MCP` joins `overlay.Env` and
 `overlay.Repos` in the temporary config passed to `resolve.ResolveWorkspace`
 with the overlay's vault bundle, whose walker already visits `MCP`. Then
-`MergeWorkspaceOverlay` copies the base `MCP.Servers` map and adds the overlay's
-entries, and sets `merged.Claude.TrustInstances` from the overlay only when
-the base left it nil. Validation and generation run on the merged config, so
-R1 and R4 follow from the existing code paths.
+`MergeWorkspaceOverlay` copies the base `MCP.Servers` map and adds each
+overlay entry whose name the base doesn't declare, and sets
+`merged.Claude.TrustInstances` from the overlay only when the base left it nil.
+Base-wins lives in the merge itself, not only in the pipeline's pre-filter,
+because the worktree path (`mergeWorktreeOverlay`) also calls the merge
+without the pipeline's resolution step; that path installs content only and
+never reads `MCP`, so the overlay's unresolved values it carries are never
+written anywhere. Validation and generation run on the merged config, so R1
+and R4 follow from the existing code paths.
 
-When trust is on only because the overlay set it, the first apply of each
-instance that writes trust prints a one-time notice through the existing
-disclosed-notices record: trust is on because the workspace overlay sets
+When trust is on only because the overlay set it, the first apply in the
+workspace that writes trust prints a one-time notice through the existing
+per-workspace disclosed-notices record: trust is on because the workspace overlay sets
 `[claude] trust_instances`, niwa wrote it to the named config file, and what
 that lets Claude Code do. A base config that wants to refuse the overlay's
 choice has to say `trust_instances = false`; leaving the key out hands the
@@ -339,11 +362,13 @@ Only `hasTrustDialogAccepted` is written, and only under `projects`.
 
 ### Pipeline step
 
-`Applier.deliverClaudeTrust(instanceRoot, cfg, existing)` runs inside
-`runPipeline` after the directory-trust and niwa-plugin steps, so the
-instance-root `.claude/settings.json` and `.mcp.json` already exist. It
-returns early, carrying `existing.ClaudeTrust` forward, when
-`a.DeveloperHome == ""`. Otherwise:
+`Applier.deliverClaudeTrust(instanceRoot, cfg, existing)` runs after
+`runPipeline` has returned without error, in both `Create` and `Apply`, as the
+last step before the state is saved. Running it last means no pipeline failure
+can follow a trust write: Create's failure path removes the instance directory
+and saves no state, so a grant written earlier in the pipeline would be
+orphaned with nothing left to withdraw it. It returns early, carrying
+`existing.ClaudeTrust` forward, when `a.DeveloperHome == ""`. Otherwise:
 
 - `cfg.Claude.TrustInstances` true: `claudetrust.Ensure(...,
   SourceWorkspace)`; persist the returned grant.
@@ -351,9 +376,22 @@ returns early, carrying `existing.ClaudeTrust` forward, when
   clear the record; on a skip, keep it.
 - a `review`-sourced record is carried forward untouched.
 
+If `SaveState` then fails, the step's own change is rolled back before the
+error returns: a grant this run created is withdrawn with `Withdraw(Destroy)`,
+and a flag this run set is withdrawn with `Withdraw(Retract)`. A grant that was
+already recorded before the run is left as it was.
+
 `CLAUDE_CONFIG_DIR` is read from the process environment at that point. The
-grant goes back through `pipelineResult` and into both state builders, beside
-`TrustKeys`. Warnings join `allWarnings` and print through `DeferWarn`.
+grant is stored beside `TrustKeys` in both state builders. Warnings print
+through `DeferWarn` with the rest.
+
+**Moved instances.** The record's key is validated against the instance's
+current canonical path. When an instance directory has moved since the grant
+was written, the old key no longer matches, so niwa can't prove the old entry
+is this instance's: it leaves that entry alone, warns naming it, drops the
+record and writes a fresh grant for the new path. When only the config file
+differs (`CLAUDE_CONFIG_DIR` changed) and the key matches, the old grant is
+withdrawn from the recorded file as R13 asks.
 
 ### Teardown
 
@@ -362,15 +400,21 @@ grant goes back through `pipelineResult` and into both state builders, beside
 load state; if it holds a grant, `Withdraw(Destroy)`; report any warning. A
 missing or unreadable state file means nothing to withdraw. Reap, dispatch,
 reset and review cleanup reach this through `DestroyInstance`, so their own
-trust calls are deleted.
+trust calls are deleted. As with plugin-record pruning, a nil reporter drops
+the warning; every CLI route passes one. Tests drive withdrawal by writing a
+record that names a config file in a temporary directory, so no destroy test
+can reach the developer's own file. An instance removed by hand (`rm -rf`)
+bypasses all of this and leaves its entry behind, for a path that no longer
+exists.
 
 ### Review instances
 
 `resolveAskPosture` keeps its sandbox and `~/.claude` guards, then calls
 `claudetrust.Ensure(env, instancePath, state.ClaudeTrust, SourceReview)` and
-saves the returned grant into the instance's state. It returns true only when
-the entry is trusted afterward, whether niwa wrote it or found it trusted; a
-skip falls back to the hard-deny posture as today. The `~/.claude` guard reads
+saves the returned grant into the instance's state; if that save fails, it
+withdraws the grant it just wrote and falls back to hard-deny. It returns true
+only when the entry is trusted afterward, whether niwa wrote it or found it
+trusted; a skip falls back to the hard-deny posture as today. The `~/.claude` guard reads
 the same config home the writer resolves.
 
 ### Overlay
@@ -403,22 +447,33 @@ destroy/reap/reset -> DestroyInstance -> LoadState -> Withdraw -> RemoveAll
    root, mode preservation, value preservation outside the one flag, no-op
    rewrites, concurrent writers, and crafted records (another project's key, a
    file not named `.claude.json`, a directory) that must be refused.
-3. **Pipeline, state and teardown.** `[claude] trust_instances` (base and
-   overlay), `InstanceState.ClaudeTrust`, `deliverClaudeTrust`, withdrawal in
-   `DestroyInstance` and `DestroyWorkspace`, review seeding moved to
-   `claudetrust`, `internal/watch/trust.go` and reap's calls removed, and the
-   one-time notice when the overlay is what turned trust on. Unit tests per
-   route and `@critical` functional scenarios for create, apply, destroy and
-   the off switch.
-4. **Docs.** `docs/guides/instance-trust.md` (R22 to R24), a line in the
-   CLAUDE.md guide list, a pointer from the overlay section of
-   `docs/guides/workspace-config-sources.md`, and an update to the review
-   design's note about the lock. Run the live check on a host with Claude
-   Code, including a session started inside a cloned repository (expected to
-   still see the trust dialog), and record the version and results in the
-   guide.
+3. **State and teardown.** `InstanceState.ClaudeTrust`, record validation,
+   and withdrawal in `DestroyInstance` and `DestroyWorkspace`. This lands
+   before anything writes a grant, so a grant never exists without a teardown
+   route that removes it. Unit tests per destroy route with records naming a
+   temporary config file.
+4. **The option and the pipeline step.** `[claude] trust_instances` (base and
+   overlay), `deliverClaudeTrust` after the pipeline with the save-failure
+   rollback, the moved-instance handling, and the one-time notice when the
+   overlay is what turned trust on. Unit tests and `@critical` functional
+   scenarios for create, apply, destroy and the off switch.
+5. **Review instances.** Review seeding moved to `claudetrust`,
+   `internal/watch/trust.go` deleted, and the reap and review-cleanup trust
+   calls removed.
+6. **Live check, then docs.** Run the live check on a host with Claude Code
+   before the pull request leaves draft: a fresh instance with the option on
+   and an overlay server must load the server with no prompt in default mode,
+   `claude mcp list` must show no "Pending approval", `claude doctor` must
+   report no settings errors, and a session started inside a cloned
+   repository must still see the trust dialog. If any of these fail, the
+   design's assumptions about Claude Code are wrong and the work stops for a
+   redesign. Then `docs/guides/instance-trust.md` (R22 to R24) with the
+   version and results, a line in the CLAUDE.md guide list, a pointer from the
+   overlay section of `docs/guides/workspace-config-sources.md`, and an update
+   to the review design's note about the lock.
 
-Steps 1 and 2 are independent; step 3 needs step 2; step 4 needs both.
+Steps 1 and 2 are independent; step 3 needs step 2, step 4 needs steps 1 and
+3, step 5 needs step 3, and step 6 needs all of them.
 
 ## Security Considerations
 
@@ -431,7 +486,19 @@ author's choosing. That's the cost the owner accepted; the guide says it in
 those words (R22). The option is off by default. A base config refuses an
 overlay's choice only by setting `trust_instances = false`; leaving it unset
 hands the decision to the overlay, and the one-time notice tells each
-developer when the overlay is the reason their instance is trusted.
+developer when the overlay is the reason their instance is trusted. The notice
+fires once per workspace, so a later overlay commit that adds a server or
+changes a command reaches trusted sessions with no new prompt or notice, and a
+dispatched worker never sees the notice at all. Opting in means treating the
+overlay's repository with the same care as code that runs on the developer's
+machine; the guide says so.
+
+**Code already inside the instance.** Anything that runs in the instance as
+the developer (a build script in a cloned repository, an agent session) can
+rewrite the instance root's `.claude/settings.json` or `.mcp.json`, and with
+the root trusted, Claude Code honors the rewrite. That code could already do
+anything the developer can, so trust adds a new route rather than new reach;
+the guide names it.
 
 **Which sessions it reaches.** Claude Code 2.1.296 keys a session inside a
 repository by that repository's root and bounds its trust lookup there, so the
@@ -450,7 +517,8 @@ opens the file, so a reviewer can check this in one place.
 **Not damaging the file.** The file holds login-adjacent state and every
 project's history. niwa never writes without Claude Code's lock, never writes
 what it couldn't parse or what has an unexpected shape, keeps every other
-value byte-for-byte, writes through a 0600 temp file, fsync and rename, keeps
+value (formatting is re-indented, values aren't changed), writes through a
+0600 temp file, fsync and rename, keeps
 the existing mode, creates a new file as 0600, and follows a symlinked config
 to its target (resolved under the lock) rather than replacing the link. A
 stale lock is removed only after 10 seconds, Claude Code's own threshold, and
@@ -460,11 +528,12 @@ lock a live Claude Code process holds or delete anything placed inside it.
 **Not trusting a tampered record.** Removal is driven by the record in
 instance state, which anyone controlling the instance can edit. Every record
 is validated before use: known `mode` and `source`, an absolute `config_file`
-named `.claude.json` that is a regular file, and a `key` equal to the
-canonical path of the instance being destroyed or applied. A record that fails
-is left alone with a warning. The worst a crafted record can then do is remove
-the trust flag for its own instance's path, which destroying the instance
-removes anyway.
+named `.claude.json` that is a regular file holding a JSON object, and a `key`
+equal to the canonical path of the instance being destroyed or applied. A
+record that fails is left alone with a warning. The worst a crafted record can
+then do is remove the trust flag for its own instance's path from some file
+named `.claude.json` the developer can write, which destroying the instance
+does anyway.
 
 **Not removing what isn't niwa's.** A hand-made entry is never recorded, so
 it's never removed. This also fixes the current reap behavior, which deletes
@@ -480,8 +549,17 @@ boolean.
 
 **Residual risks.** Trust written to the file niwa's environment names won't
 help a session started under a different `CLAUDE_CONFIG_DIR`, and a session
-still running in a destroyed instance can write an untrusted entry back.
-Neither grants anything.
+still running in a destroyed instance can write an untrusted entry back;
+neither grants anything. A withdrawal skipped during destroy (lock timeout,
+unparseable file), an instance removed by hand, and review entries from older
+niwa versions leave a trusted entry for a path that no longer exists. If niwa
+later creates an instance at the same path, that entry already trusts it
+before the new instance's own grant (which won't be recorded, since the entry
+is already trusted). The destroy warning names the exact file and key so the
+developer can remove it. Claude Code's trust behavior is verified for 2.1.296
+only; a later version that widens trust to child repositories would widen
+this feature with it, which is why the guide records the version and the
+"still seeing prompts" check doubles as a re-check after upgrades.
 
 ## Consequences
 
@@ -507,5 +585,6 @@ Neither grants anything.
 - The live check is recorded with the Claude Code version it passed on, and
   the guide's "still seeing prompts" check (`claude doctor`, `claude mcp list`)
   lets a developer find a broken assumption without reading code.
-- Old review entries name directories that no longer exist, so they grant
+- Old review entries name directories that no longer exist, and review
+  instance names aren't reused, so in practice they grant
   nothing.
