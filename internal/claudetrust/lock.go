@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"os"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -39,22 +38,50 @@ var (
 	lockPoll  = defaultLockPoll
 )
 
-// lockTimedOut records that one wait already timed out in this process. Later
-// attempts skip without waiting, so a sweep over many instances against a busy
-// config doesn't wait the full timeout once per instance.
+// lockTimeouts records the lock paths whose wait already timed out in this
+// process. An Ensure against one of them skips without waiting, so a sweep
+// over many instances against one busy config doesn't wait the full timeout
+// once per instance. A withdrawal ignores it and always waits, so a teardown
+// keeps trying to remove each instance's entry.
 //
-// It is never cleared, which assumes the process is a short-lived niwa
+// Entries are never cleared, which assumes the process is a short-lived niwa
 // command: one run gives up on a busy config and the next run tries again. A
 // long-lived process that called into this package would stop writing trust
-// for good after its first timeout.
-var lockTimedOut atomic.Bool
+// to that file for good after its first timeout.
+var lockTimeouts = struct {
+	sync.Mutex
+	paths map[string]bool
+}{paths: map[string]bool{}}
+
+// lockTimedOutAt reports whether a wait for lockPath already timed out.
+func lockTimedOutAt(lockPath string) bool {
+	lockTimeouts.Lock()
+	defer lockTimeouts.Unlock()
+	return lockTimeouts.paths[lockPath]
+}
+
+// markLockTimedOut records that a wait for lockPath timed out.
+func markLockTimedOut(lockPath string) {
+	lockTimeouts.Lock()
+	defer lockTimeouts.Unlock()
+	lockTimeouts.paths[lockPath] = true
+}
+
+// clearLockTimeouts forgets every recorded timeout. Only tests call it.
+func clearLockTimeouts() {
+	lockTimeouts.Lock()
+	defer lockTimeouts.Unlock()
+	lockTimeouts.paths = map[string]bool{}
+}
 
 // processLocks holds one mutex per lock path, so goroutines in this process
 // queue on the mutex instead of spinning on mkdir against each other.
 var processLocks sync.Map // lock path -> *sync.Mutex
 
 // acquireLock takes the lock directory at lockPath and returns the function
-// that releases it. The caller defers the release on every path.
+// that releases it. The caller defers the release on every path. With
+// skipIfTimedOut, a path whose wait already timed out in this process is
+// skipped at once instead of waited on again.
 //
 // When the directory exists, it is inspected with Lstat and never followed: a
 // symlink or file at the lock path is never removed, only waited on. A
@@ -62,24 +89,38 @@ var processLocks sync.Map // lock path -> *sync.Mutex
 // confirm it is the same directory and still stale, then removed with a
 // non-recursive remove (which fails, harmlessly, if anything was placed inside
 // it) and the mkdir retried.
-func acquireLock(lockPath string) (func(), error) {
+//
+// The release removes the lock directory only if it is still the one this
+// call created. Another process that judged the lock stale may have removed
+// it and taken its own; that lock is left for its holder.
+func acquireLock(lockPath string, skipIfTimedOut bool) (func(), error) {
 	m, _ := processLocks.LoadOrStore(lockPath, &sync.Mutex{})
 	mu := m.(*sync.Mutex)
 	mu.Lock()
 
 	// Checked after the mutex, so goroutines queued behind a wait that timed
 	// out skip too.
-	if lockTimedOut.Load() {
+	if skipIfTimedOut && lockTimedOutAt(lockPath) {
 		mu.Unlock()
-		return nil, fmt.Errorf("the lock %s was not taken: an earlier wait for a Claude config lock timed out in this run", lockPath)
+		return nil, fmt.Errorf("the lock %s was not taken: an earlier wait for it timed out in this run", lockPath)
 	}
 
 	deadline := time.Now().Add(lockWait)
 	for {
 		err := os.Mkdir(lockPath, 0o700)
 		if err == nil {
-			return func() {
+			owned, err := os.Lstat(lockPath)
+			if err != nil {
+				// Without its identity the release couldn't tell this lock
+				// from a successor's, so it is given up at once.
 				_ = os.Remove(lockPath)
+				mu.Unlock()
+				return nil, fmt.Errorf("inspecting the lock %s just taken: %w", lockPath, err)
+			}
+			return func() {
+				if cur, err := os.Lstat(lockPath); err == nil && os.SameFile(owned, cur) {
+					_ = os.Remove(lockPath)
+				}
 				mu.Unlock()
 			}, nil
 		}
@@ -97,7 +138,7 @@ func acquireLock(lockPath string) (func(), error) {
 		}
 
 		if !time.Now().Before(deadline) {
-			lockTimedOut.Store(true)
+			markLockTimedOut(lockPath)
 			mu.Unlock()
 			return nil, fmt.Errorf("the lock %s is held by another process (waited %s)", lockPath, lockWait)
 		}

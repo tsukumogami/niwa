@@ -11,15 +11,15 @@ import (
 )
 
 // resetLockState restores the package's lock timings, the process-wide
-// timed-out flag and the rename hook, now and when the test ends. Tests in
-// this package mutate package state, so none of them run in parallel.
+// recorded lock timeouts and the rename hook, now and when the test ends.
+// Tests in this package mutate package state, so none of them run in parallel.
 func resetLockState(t *testing.T) {
 	t.Helper()
 	reset := func() {
 		lockWait = defaultLockWait
 		lockStale = defaultLockStale
 		lockPoll = defaultLockPoll
-		lockTimedOut.Store(false)
+		clearLockTimeouts()
 		beforeRename = nil
 	}
 	reset()

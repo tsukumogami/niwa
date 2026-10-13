@@ -494,45 +494,84 @@ func TestClaudeTrust_ApplyAddsThenLeavesAlone(t *testing.T) {
 }
 
 // TestClaudeTrust_OffSwitchRetracts covers turning the option off: the flag
-// goes, keys Claude Code added to the entry stay, and the record is cleared;
-// an entry already removed by hand just clears the record.
+// goes and keys Claude Code added to the entry stay. A created grant's record
+// is kept, so destroy can still remove the whole entry niwa created; a
+// flag-only grant's record is cleared. An entry already removed by hand
+// leaves the file alone.
 func TestClaudeTrust_OffSwitchRetracts(t *testing.T) {
-	for _, offBody := range map[string]string{"false": trustOff, "absent": ""} {
-		f := newTrustFixture(t)
-		f.mustCreate(t, f.writeConfig(t, trustOn))
-		key := trustKey(t, f.instanceRoot)
+	for name, offBody := range map[string]string{"false": trustOff, "absent": ""} {
+		t.Run(name, func(t *testing.T) {
+			f := newTrustFixture(t)
+			f.mustCreate(t, f.writeConfig(t, trustOn))
+			key := trustKey(t, f.instanceRoot)
+			created := grantOf(t, f.instanceRoot)
 
-		// Claude Code adds its own keys to the entry once a session runs.
-		writeClaudeConfig(t, f.claudeJSON, map[string]any{
-			"numStartups": 3,
-			"projects": map[string]any{
-				key:        map[string]any{"hasTrustDialogAccepted": true, "allowedTools": []any{"Bash(ls)"}},
-				"/another": map[string]any{"hasTrustDialogAccepted": true},
-			},
+			// Claude Code adds its own keys to the entry once a session runs.
+			writeClaudeConfig(t, f.claudeJSON, map[string]any{
+				"numStartups": 3,
+				"projects": map[string]any{
+					key:        map[string]any{"hasTrustDialogAccepted": true, "allowedTools": []any{"Bash(ls)"}},
+					"/another": map[string]any{"hasTrustDialogAccepted": true},
+				},
+			})
+
+			f.mustApply(t, f.writeConfig(t, offBody))
+			e, ok := entryAt(t, f.claudeJSON, key)
+			if !ok {
+				t.Fatal("the off switch removed the whole entry")
+			}
+			if _, has := e["hasTrustDialogAccepted"]; has {
+				t.Errorf("flag still set after the off switch: %v", e)
+			}
+			if !reflect.DeepEqual(e["allowedTools"], []any{"Bash(ls)"}) {
+				t.Errorf("allowedTools = %v, want it kept", e["allowedTools"])
+			}
+			if other, _ := entryAt(t, f.claudeJSON, "/another"); other["hasTrustDialogAccepted"] != true {
+				t.Errorf("another project's entry changed: %v", other)
+			}
+			if g := grantOf(t, f.instanceRoot); !reflect.DeepEqual(g, wantGrant(f.claudeJSON, key, claudetrust.ModeCreated)) || !reflect.DeepEqual(g, created) {
+				t.Errorf("record = %+v, want the created record %+v kept", g, created)
+			}
+
+			// A second apply with the option off finds the flag gone and
+			// leaves the file and the record as they are.
+			before := snapFile(t, f.claudeJSON)
+			if out := f.mustApply(t, f.writeConfig(t, offBody)); strings.Contains(out, "Claude trust") {
+				t.Errorf("second off apply warned about Claude trust:\n%s", out)
+			}
+			assertFileUntouched(t, f.claudeJSON, before)
+			if g := grantOf(t, f.instanceRoot); !reflect.DeepEqual(g, created) {
+				t.Errorf("record after a second off apply = %+v, want %+v", g, created)
+			}
 		})
+	}
 
-		f.mustApply(t, f.writeConfig(t, offBody))
+	t.Run("flag-only record is cleared", func(t *testing.T) {
+		f := newTrustFixture(t)
+		f.instance(t, filepath.Base(f.instanceRoot))
+		key := trustKey(t, f.instanceRoot)
+		writeClaudeConfig(t, f.claudeJSON, map[string]any{"projects": map[string]any{
+			key: map[string]any{"allowedTools": []any{"Read"}},
+		}})
+		f.mustCreate(t, f.writeConfig(t, trustOn))
+		if g := grantOf(t, f.instanceRoot); !reflect.DeepEqual(g, wantGrant(f.claudeJSON, key, claudetrust.ModeFlagOnly)) {
+			t.Fatalf("record after create = %+v, want a flag-only grant", g)
+		}
+
+		f.mustApply(t, f.writeConfig(t, trustOff))
 		e, ok := entryAt(t, f.claudeJSON, key)
-		if !ok {
-			t.Fatal("the off switch removed the whole entry")
-		}
-		if _, has := e["hasTrustDialogAccepted"]; has {
-			t.Errorf("flag still set after the off switch: %v", e)
-		}
-		if !reflect.DeepEqual(e["allowedTools"], []any{"Bash(ls)"}) {
-			t.Errorf("allowedTools = %v, want it kept", e["allowedTools"])
-		}
-		if other, _ := entryAt(t, f.claudeJSON, "/another"); other["hasTrustDialogAccepted"] != true {
-			t.Errorf("another project's entry changed: %v", other)
+		if !ok || !reflect.DeepEqual(e, map[string]any{"allowedTools": []any{"Read"}}) {
+			t.Errorf("entry = %v (present %v), want only the flag removed", e, ok)
 		}
 		if g := grantOf(t, f.instanceRoot); g != nil {
 			t.Errorf("record = %+v, want it cleared", g)
 		}
-	}
+	})
 
 	t.Run("entry removed by hand", func(t *testing.T) {
 		f := newTrustFixture(t)
 		f.mustCreate(t, f.writeConfig(t, trustOn))
+		created := grantOf(t, f.instanceRoot)
 		writeClaudeConfig(t, f.claudeJSON, map[string]any{"projects": map[string]any{}})
 		before := snapFile(t, f.claudeJSON)
 
@@ -540,10 +579,93 @@ func TestClaudeTrust_OffSwitchRetracts(t *testing.T) {
 			t.Fatalf("Apply: %v\n%s", err, out)
 		}
 		assertFileUntouched(t, f.claudeJSON, before)
-		if g := grantOf(t, f.instanceRoot); g != nil {
-			t.Errorf("record = %+v, want it cleared", g)
+		if g := grantOf(t, f.instanceRoot); !reflect.DeepEqual(g, created) {
+			t.Errorf("record = %+v, want the created record %+v kept", g, created)
 		}
 	})
+}
+
+// TestClaudeTrust_OffThenDestroyRemovesCreatedEntry checks the record the off
+// switch keeps does its job: destroying the instance afterwards removes the
+// whole entry niwa created, keys Claude Code added included, and nothing else.
+func TestClaudeTrust_OffThenDestroyRemovesCreatedEntry(t *testing.T) {
+	f := newTrustFixture(t)
+	f.mustCreate(t, f.writeConfig(t, trustOn))
+	key := trustKey(t, f.instanceRoot)
+	writeClaudeConfig(t, f.claudeJSON, map[string]any{"projects": map[string]any{
+		key:        map[string]any{"hasTrustDialogAccepted": true, "allowedTools": []any{"Bash(ls)"}},
+		"/another": map[string]any{"hasTrustDialogAccepted": true},
+	}})
+	f.mustApply(t, f.writeConfig(t, trustOff))
+
+	if err := DestroyInstance(f.instanceRoot, WithDestroyReporter(f.applier.Reporter), WithPluginRecordBaseDir(f.home)); err != nil {
+		t.Fatalf("DestroyInstance: %v", err)
+	}
+	if e, ok := entryAt(t, f.claudeJSON, key); ok {
+		t.Errorf("entry = %v after destroy, want the whole created entry removed", e)
+	}
+	if other, ok := entryAt(t, f.claudeJSON, "/another"); !ok || other["hasTrustDialogAccepted"] != true {
+		t.Errorf("another project's entry = %v (present %v), want it untouched", other, ok)
+	}
+}
+
+// TestClaudeTrust_OffThenOnKeepsCreatedMode checks turning the option back on
+// after the off switch sets the flag again under the created record, so the
+// record still says niwa created the entry.
+func TestClaudeTrust_OffThenOnKeepsCreatedMode(t *testing.T) {
+	f := newTrustFixture(t)
+	on := f.writeConfig(t, trustOn)
+	f.mustCreate(t, on)
+	key := trustKey(t, f.instanceRoot)
+	f.mustApply(t, f.writeConfig(t, trustOff))
+	if e, _ := entryAt(t, f.claudeJSON, key); e["hasTrustDialogAccepted"] != nil {
+		t.Fatalf("entry after off = %v, want the flag gone", e)
+	}
+
+	f.mustApply(t, on)
+	if e, ok := entryAt(t, f.claudeJSON, key); !ok || e["hasTrustDialogAccepted"] != true {
+		t.Errorf("entry after on = %v (present %v), want the flag set", e, ok)
+	}
+	if g := grantOf(t, f.instanceRoot); !reflect.DeepEqual(g, wantGrant(f.claudeJSON, key, claudetrust.ModeCreated)) {
+		t.Errorf("record = %+v, want mode created kept", g)
+	}
+}
+
+// TestClaudeTrust_OffSwitchDropsMalformedRecord checks a workspace record the
+// off switch can't act on (unknown mode, unknown source, a bad config_file)
+// is dropped with one warning, as Ensure drops it, rather than kept and
+// warned about on every apply. The Claude config is left alone.
+func TestClaudeTrust_OffSwitchDropsMalformedRecord(t *testing.T) {
+	cases := map[string]func(g *claudetrust.Grant){
+		"unknown mode":        func(g *claudetrust.Grant) { g.Mode = "bogus" },
+		"unknown source":      func(g *claudetrust.Grant) { g.Source = "bogus" },
+		"relative file":       func(g *claudetrust.Grant) { g.ConfigFile = "rel/.claude.json" },
+		"wrong file basename": func(g *claudetrust.Grant) { g.ConfigFile = filepath.Join(filepath.Dir(g.ConfigFile), "settings.json") },
+	}
+	for name, corrupt := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newTrustFixture(t)
+			f.mustCreate(t, f.writeConfig(t, trustOn))
+			key := trustKey(t, f.instanceRoot)
+			g := grantOf(t, f.instanceRoot)
+			corrupt(g)
+			recordClaudeTrust(t, f.instanceRoot, g)
+			before := snapFile(t, f.claudeJSON)
+
+			off := f.writeConfig(t, trustOff)
+			out := f.mustApply(t, off)
+			if !strings.Contains(out, "warning:") || !strings.Contains(out, "malformed") || !strings.Contains(out, key) {
+				t.Errorf("no warning about the malformed record for %s:\n%s", key, out)
+			}
+			if g := grantOf(t, f.instanceRoot); g != nil {
+				t.Errorf("record = %+v, want it dropped", g)
+			}
+			if out := f.mustApply(t, off); strings.Contains(out, "malformed") {
+				t.Errorf("the dropped record was warned about again:\n%s", out)
+			}
+			assertFileUntouched(t, f.claudeJSON, before)
+		})
+	}
 }
 
 // TestClaudeTrust_ConfigDirChanged covers CLAUDE_CONFIG_DIR set at create and

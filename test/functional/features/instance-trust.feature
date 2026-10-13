@@ -83,7 +83,7 @@ Feature: niwa trusts the instances it creates in Claude Code
     And the Claude config in HOME still has a trusted entry for "/elsewhere/hand-made"
 
   @critical
-  Scenario: turning the option off and applying withdraws the flag
+  Scenario: turning the option off and applying withdraws the flag and keeps the created record
     Given a clean niwa environment
     And a local git server is set up
     And a config repo "trustws" exists with body:
@@ -110,7 +110,10 @@ Feature: niwa trusts the instances it creates in Claude Code
     And I run "niwa apply trustws"
     Then the exit code is 0
     And the Claude config in HOME keeps an untrusted entry for instance "trustws"
-    And instance "trustws" records no Claude trust
+    And instance "trustws" records Claude trust with mode "created"
+    When I run "niwa destroy trustws" from workspace root
+    Then the exit code is 0
+    And the Claude config in HOME has no entry for instance "trustws"
 
   # --- Every surface that provisions an instance runs the same step ---
 

@@ -56,10 +56,12 @@ func NewReporterWithTTY(w io.Writer, isTTY bool) *Reporter {
 	return &Reporter{w: w, isTTY: isTTY}
 }
 
-// NewWarningReporter constructs a non-TTY Reporter that writes only
-// warnings and errors: Warn, DeferWarn and DeferError reach w, while Log,
-// Defer, Status and Writer output are dropped. It is for a caller that runs
-// a step as a side effect, such as a reap or a cleanup, where the step's
+// NewWarningReporter constructs a non-TTY Reporter that keeps only warnings
+// and errors. Warn writes to w at once. Log and Defer are dropped, and so is
+// anything written to Writer(), which goes through Log. Status draws nothing,
+// as on any non-TTY Reporter. DeferWarn and DeferError are queued as usual
+// and reach w only if the caller calls FlushDeferred. It is for a caller that
+// runs a step as a side effect, such as a reap or a cleanup, where the step's
 // progress lines are noise but a warning must still surface.
 func NewWarningReporter(w io.Writer) *Reporter {
 	return &Reporter{w: w, warningsOnly: true}

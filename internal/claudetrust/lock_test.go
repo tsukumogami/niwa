@@ -28,6 +28,9 @@ func TestLockHeldFreshSkips(t *testing.T) {
 	if elapsed < 200*time.Millisecond || elapsed > 2*time.Second {
 		t.Errorf("waited %s, want about the 200ms override", elapsed)
 	}
+	if out.Trusted {
+		t.Error("Trusted = true on a lock timeout")
+	}
 	if _, err := os.Stat(f.file); !os.IsNotExist(err) {
 		t.Error("config written without the lock")
 	}
@@ -35,44 +38,140 @@ func TestLockHeldFreshSkips(t *testing.T) {
 		t.Error("another holder's fresh lock was removed")
 	}
 
-	// Once a wait timed out, later attempts in the process don't wait again.
+	// Once a wait on this path timed out, a later Ensure against it doesn't
+	// wait again.
 	lockWait = 3 * time.Second
 	start = time.Now()
 	again := Ensure(f.env, f.root, nil, SourceWorkspace)
 	if d := time.Since(start); d > time.Second {
 		t.Errorf("second attempt waited %s, want an immediate skip", d)
 	}
-	if again.Warning == "" || again.Grant != nil {
+	if again.Warning == "" || again.Grant != nil || again.Trusted {
 		t.Errorf("second outcome = %+v, want an immediate skip", again)
 	}
-	g := &Grant{ConfigFile: f.file, Key: f.key, Mode: ModeCreated, Source: SourceWorkspace}
-	writeFile(t, f.file, `{"projects": {`+jsonKey(t, f.key)+`: {"hasTrustDialogAccepted": true}}}`, 0o600)
-	before := snap(t, f.file)
-	if w := Withdraw(g, f.key, Destroy); w == "" {
-		t.Error("Withdraw after a timeout did not skip")
-	}
-	assertUntouched(t, f.file, before)
 }
 
-func TestLockDefaultWaitSkipsWithinSixSeconds(t *testing.T) {
-	if testing.Short() {
-		t.Skip("waits the real 5-second default")
-	}
+// TestLockWithdrawWaitsAfterTimeout checks a timeout doesn't stop a later
+// withdrawal from trying: it waits for the lock again, skips while the lock
+// is still held, and goes through once it is free, so one busy moment in a
+// teardown sweep doesn't leave every later instance's entry behind.
+func TestLockWithdrawWaitsAfterTimeout(t *testing.T) {
 	f := newFixture(t)
-	if lockWait != 5*time.Second {
-		t.Fatalf("default lock wait = %s, want 5s", lockWait)
+	fastLock(t, 150*time.Millisecond)
+	lock := f.file + lockSuffix
+	writeFile(t, f.file, `{"projects": {`+jsonKey(t, f.key)+`: {"hasTrustDialogAccepted": true}}}`, 0o600)
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		t.Fatal(err)
 	}
+	other := filepath.Join(filepath.Dir(f.root), "inst-2")
+	if err := os.Mkdir(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out := Ensure(f.env, other, nil, SourceWorkspace); out.Warning == "" || out.Trusted {
+		t.Fatalf("outcome = %+v, want a lock timeout", out)
+	}
+
+	g := &Grant{ConfigFile: f.file, Key: f.key, Mode: ModeCreated, Source: SourceWorkspace}
+	before := snap(t, f.file)
+	start := time.Now()
+	if w := Withdraw(g, f.key, Destroy); !strings.Contains(w, lock) {
+		t.Errorf("withdraw warning = %q, want a skip naming %s", w, lock)
+	}
+	if d := time.Since(start); d < 150*time.Millisecond {
+		t.Errorf("withdraw gave up after %s, want it to wait for the lock again", d)
+	}
+	assertUntouched(t, f.file, before)
+
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	if w := Withdraw(g, f.key, Destroy); w != "" {
+		t.Errorf("withdraw warning = %q after the lock was freed, want none", w)
+	}
+	if e, ok := entryOf(t, f.file, f.key); ok {
+		t.Errorf("entry = %v, want it removed", e)
+	}
+	assertClean(t, f.file)
+}
+
+// TestLockTimeoutIsPerPath checks a timeout on one config file's lock doesn't
+// make Ensure skip another file.
+func TestLockTimeoutIsPerPath(t *testing.T) {
+	f := newFixture(t)
+	fastLock(t, 100*time.Millisecond)
 	if err := os.Mkdir(f.file+lockSuffix, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	start := time.Now()
-	out := Ensure(f.env, f.root, nil, SourceWorkspace)
-	elapsed := time.Since(start)
-	if out.Warning == "" || out.Grant != nil {
-		t.Errorf("outcome = %+v, want a skip", out)
+	if out := Ensure(f.env, f.root, nil, SourceWorkspace); out.Warning == "" || out.Trusted {
+		t.Fatalf("outcome = %+v, want a lock timeout", out)
 	}
-	if elapsed < 5*time.Second || elapsed > 6*time.Second {
-		t.Errorf("skipped after %s, want between 5s and 6s", elapsed)
+
+	dir := filepath.Join(filepath.Dir(f.env.Home), "claude-b")
+	env := Env{Home: f.env.Home, ClaudeConfigDir: dir}
+	out := Ensure(env, f.root, nil, SourceWorkspace)
+	if out.Warning != "" || !out.Trusted || out.Grant == nil || out.Grant.ConfigFile != filepath.Join(dir, ".claude.json") {
+		t.Errorf("outcome = %+v (grant %+v), want a write to the other file", out, out.Grant)
+	}
+}
+
+// TestLockDefaultWait pins the default wait. The shortened-wait tests above
+// cover what the wait does; this keeps the default from drifting.
+func TestLockDefaultWait(t *testing.T) {
+	resetLockState(t)
+	if defaultLockWait != 5*time.Second || lockWait != defaultLockWait {
+		t.Errorf("default lock wait = %s (current %s), want 5s", defaultLockWait, lockWait)
+	}
+	if defaultLockWait >= defaultLockStale {
+		t.Errorf("default lock wait %s is not below the staleness threshold %s", defaultLockWait, defaultLockStale)
+	}
+}
+
+// TestLockReleaseLeavesASuccessorsLock checks the release removes only the
+// lock directory it created: one that replaced it (another process took the
+// lock over as stale) is left for its holder.
+func TestLockReleaseLeavesASuccessorsLock(t *testing.T) {
+	f := newFixture(t)
+	lock := f.file + lockSuffix
+	if err := os.MkdirAll(filepath.Dir(lock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	release, err := acquireLock(lock, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The successor's directory exists before ours is removed, so it can't
+	// reuse our directory's inode.
+	successor := filepath.Join(filepath.Dir(lock), "successor")
+	if err := os.Mkdir(successor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(successor, lock); err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := os.Lstat(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if cur, err := os.Lstat(lock); err != nil || !os.SameFile(theirs, cur) {
+		t.Errorf("the successor's lock was removed or replaced (err %v)", err)
+	}
+
+	// With the lock still ours, the release removes it.
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	release, err = acquireLock(lock, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if _, err := os.Lstat(lock); !os.IsNotExist(err) {
+		t.Errorf("our own lock was left behind (err %v)", err)
 	}
 }
 

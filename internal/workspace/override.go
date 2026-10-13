@@ -737,7 +737,7 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 	merged.Claude = *copyClaudeConfigFull(&ws.Claude)
 	merged.Content = copyContentConfig(ws.Content)
 	merged.Env = copyEnv(ws.Env)
-	merged.MCP = copyMCPConfig(ws.MCP)
+	merged.MCP = ws.MCP.Clone()
 	merged.Files = copyStringMap(ws.Files)
 	merged.OverlayInstanceFiles = copyStringMap(ws.OverlayInstanceFiles)
 	merged.Sources = append([]config.SourceConfig(nil), ws.Sources...)
@@ -1030,7 +1030,7 @@ func MergeWorkspaceOverlay(ws *config.WorkspaceConfig, overlay *config.Workspace
 		if merged.MCP.Servers == nil {
 			merged.MCP.Servers = make(map[string]config.MCPServerConfig)
 		}
-		merged.MCP.Servers[name] = copyMCPServer(overlay.MCP.Servers[name])
+		merged.MCP.Servers[name] = overlay.MCP.Servers[name].Clone()
 	}
 
 	return &merged, nil
@@ -1400,38 +1400,6 @@ func copyEnv(e config.EnvConfig) config.EnvConfig {
 		Vars:    copyEnvVarsTable(e.Vars),
 		Secrets: copyEnvVarsTable(e.Secrets),
 	}
-}
-
-// copyMCPConfig returns a deep copy of an MCPConfig, so the merged config can
-// gain servers (and the resolver can later rewrite values in place) without
-// reaching back into the base config's maps. It mirrors deepCopyMCP in
-// internal/vault/resolve.
-func copyMCPConfig(m config.MCPConfig) config.MCPConfig {
-	if m.Servers == nil {
-		return config.MCPConfig{}
-	}
-	out := config.MCPConfig{Servers: make(map[string]config.MCPServerConfig, len(m.Servers))}
-	for name, srv := range m.Servers {
-		out.Servers[name] = copyMCPServer(srv)
-	}
-	return out
-}
-
-// copyMCPServer returns a deep copy of one MCPServerConfig: its slices and
-// its two MaybeSecret value maps.
-func copyMCPServer(srv config.MCPServerConfig) config.MCPServerConfig {
-	out := srv
-	out.Args = slices.Clone(srv.Args)
-	out.Agents = slices.Clone(srv.Agents)
-	if srv.Env != nil {
-		out.Env = make(map[string]config.MaybeSecret, len(srv.Env))
-		maps.Copy(out.Env, srv.Env)
-	}
-	if srv.Headers != nil {
-		out.Headers = make(map[string]config.MaybeSecret, len(srv.Headers))
-		maps.Copy(out.Headers, srv.Headers)
-	}
-	return out
 }
 
 // copyEnvExamplePolicy returns a deep copy of an *EnvExamplePolicy, cloning

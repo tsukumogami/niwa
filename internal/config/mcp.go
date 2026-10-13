@@ -1,6 +1,10 @@
 package config
 
-import "sort"
+import (
+	"maps"
+	"slices"
+	"sort"
+)
 
 // The agent-neutral MCP declaration.
 //
@@ -62,6 +66,41 @@ type MCPServerConfig struct {
 	// a construct one agent cannot express is a named error rather than a
 	// silent omission, and this is the escape hatch that error points at.
 	Agents []string `toml:"agents,omitempty"`
+}
+
+// Clone returns a deep copy of m, so a merged or resolved config can gain
+// servers and rewrite values in place without reaching back into m's maps.
+// A nil Servers map stays nil.
+func (m MCPConfig) Clone() MCPConfig {
+	if m.Servers == nil {
+		return MCPConfig{}
+	}
+	out := MCPConfig{Servers: make(map[string]MCPServerConfig, len(m.Servers))}
+	for name, srv := range m.Servers {
+		out.Servers[name] = srv.Clone()
+	}
+	return out
+}
+
+// Clone returns a deep copy of s: its slices and its two MaybeSecret value
+// maps. The MaybeSecret values themselves are copied as values.
+func (s MCPServerConfig) Clone() MCPServerConfig {
+	out := s
+	out.Args = slices.Clone(s.Args)
+	out.Agents = slices.Clone(s.Agents)
+	out.Env = cloneSecretMap(s.Env)
+	out.Headers = cloneSecretMap(s.Headers)
+	return out
+}
+
+// cloneSecretMap copies a MaybeSecret map, keeping nil as nil.
+func cloneSecretMap(in map[string]MaybeSecret) map[string]MaybeSecret {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]MaybeSecret, len(in))
+	maps.Copy(out, in)
+	return out
 }
 
 // MCPServerNames returns the declared server names in a stable order, so

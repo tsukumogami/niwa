@@ -43,7 +43,10 @@ Code's user config file. No other value in the file changes.
   set and non-empty, and `$HOME/.claude.json` otherwise. niwa reads
   `CLAUDE_CONFIG_DIR` from its own environment when the command runs, and
   refuses a relative value with a warning. If the file is a symlink, niwa
-  writes the file it points to and leaves the link in place.
+  writes the file it points to and leaves the link in place. If the legacy
+  `.config.json` exists in Claude Code's config home (`$CLAUDE_CONFIG_DIR`, or
+  `$HOME/.claude` when that's unset), Claude Code reads it instead of
+  `.claude.json`, so niwa writes nothing and prints a warning naming it.
 - **The key** is the instance root's absolute path with every symlink
   resolved, in the root itself and in every parent. That's the key Claude Code
   computes for a session started there. On macOS, for example, a root under
@@ -52,8 +55,11 @@ Code's user config file. No other value in the file changes.
   `<config file>.lock` directory, while it reads, changes and replaces the
   file, so neither side loses the other's write. It waits up to 5 seconds and
   treats a lock older than 10 seconds as stale, Claude Code's own threshold.
-  Once one wait has timed out, the rest of that niwa command skips without
-  waiting, so a reap over many instances doesn't wait 5 seconds for each.
+  Once a wait on one config file's lock has timed out, the rest of that niwa
+  command skips writing trust to that file without waiting, so an apply over
+  many instances doesn't wait 5 seconds for each. Removal doesn't take that
+  shortcut: a destroy or reap waits for the lock again for each instance, so
+  one busy moment doesn't leave every later instance's entry behind.
 - **The write** goes to a temporary file beside the original, is flushed to
   disk, and is renamed over it, keeping the original's permission mode. A new
   file is created with mode 0600. A file that already says what niwa would
@@ -91,8 +97,10 @@ niwa removes only what its record names.
   file. An entry or flag that's already gone is fine.
 - **Turning the option off** withdraws on the next `niwa apply` in each
   instance. niwa deletes the flag, never the whole entry, since the instance
-  and whatever Claude Code stored for it still exist, and then clears the
-  record.
+  and whatever Claude Code stored for it still exist. A `flag-only` record is
+  then cleared. A `created` record is kept, so destroying the instance later
+  still removes the whole entry niwa created, and turning the option back on
+  sets the flag again under the same record.
 - **Changing `CLAUDE_CONFIG_DIR`** between applies withdraws the flag from the
   old file before the new one is written.
 - **A moved instance** gets a fresh grant at its new path. niwa can't prove
@@ -102,8 +110,10 @@ niwa removes only what its record names.
 An entry you made yourself, by answering Claude Code's trust prompt, is never
 in the record, so niwa never removes it. Every record is checked before niwa
 acts on it: the key has to be the resolved path of the instance being
-destroyed or applied, and the file has to be named `.claude.json`. A record
-that fails is left alone with a warning.
+destroyed or applied, and the file has to be named `.claude.json`. niwa never
+acts on a record that fails, and warns. An apply also drops a malformed record
+(unknown mode or source, a bad file path) from the instance's state, so you
+see that warning once rather than on every apply.
 
 A skipped removal (unparseable file, lock held) doesn't stop a destroy. The
 warning names the file and key that were left, so you can delete the entry by

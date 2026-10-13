@@ -945,8 +945,8 @@ var (
 // entry someone else already trusted counts as trusted and is used with no record,
 // since niwa didn't write it and won't withdraw it. The ask posture is never entered
 // without a trusted workspace, so a fallback never fails open relative to the
-// shipped deny. A relative CLAUDE_CONFIG_DIR and a skipped trust write are reported
-// on w.
+// shipped deny. A relative CLAUDE_CONFIG_DIR, an instance root that can't be
+// resolved and a skipped trust write are reported on w.
 func resolveAskPosture(w io.Writer, instancePath string, sandbox bool) bool {
 	if !sandbox {
 		return false
@@ -955,25 +955,33 @@ func resolveAskPosture(w io.Writer, instancePath string, sandbox bool) bool {
 	if err != nil || home == "" {
 		return false
 	}
-	// The config home comes from claudetrust, so the guard and the writer
-	// agree on where Claude Code keeps its data.
-	claudeHome, err := claudetrust.ConfigHome(claudetrust.Env{Home: home, ClaudeConfigDir: os.Getenv("CLAUDE_CONFIG_DIR")})
+	// One Env for the guard and the write, so both agree on where Claude Code
+	// keeps its data.
+	env := claudetrust.EnvFor(home)
+	claudeHome, err := claudetrust.ConfigHome(env)
 	if err != nil {
 		fmt.Fprintf(w, "niwa watch: warning: review instance not trusted, out-of-instance writes are hard-denied: %v\n", err)
 		return false
 	}
-	abs, err := filepath.Abs(instancePath)
+	// Both sides are compared with symlinks resolved, so a config home reached
+	// through a link (or an instance path that goes through one) can't slip
+	// past the prefix check. A config home that doesn't exist yet can't hold
+	// the instance, so its cleaned path is enough.
+	key, err := claudetrust.Key(instancePath)
 	if err != nil {
+		fmt.Fprintf(w, "niwa watch: warning: review instance not trusted, out-of-instance writes are hard-denied: %v\n", err)
 		return false
 	}
-	abs = filepath.Clean(abs)
-	if abs == claudeHome || strings.HasPrefix(abs, claudeHome+string(os.PathSeparator)) {
+	if resolved, err := filepath.EvalSymlinks(claudeHome); err == nil {
+		claudeHome = filepath.Clean(resolved)
+	}
+	if key == claudeHome || strings.HasPrefix(key, claudeHome+string(os.PathSeparator)) {
 		// Under the config home: the sensitive-location protection would block the
 		// review's own in-instance writes regardless of trust, so autonomy cannot be
 		// guaranteed.
 		return false
 	}
-	return seedReviewTrust(w, home, instancePath)
+	return seedReviewTrust(w, env, instancePath)
 }
 
 // seedReviewTrust marks the review instance's root trusted through claudetrust and
@@ -991,26 +999,21 @@ func resolveAskPosture(w io.Writer, instancePath string, sandbox bool) bool {
 // 2.1.296 binaries contain no such string, so there is no separate hooks-trust
 // prompt to pre-answer.
 //
-// home must be non-empty. Ensure skips an empty Home with no warning and no
-// write, an outcome the check below would read as already trusted; that skip is
-// unreachable only because resolveAskPosture refuses an empty HOME first.
-func seedReviewTrust(w io.Writer, home, instancePath string) bool {
+// env is the one resolveAskPosture guarded with, so the entry is written to the
+// file its config-home check was made against.
+func seedReviewTrust(w io.Writer, env claudetrust.Env, instancePath string) bool {
 	state, err := workspace.LoadState(instancePath)
 	if err != nil {
 		fmt.Fprintf(w, "niwa watch: warning: Claude trust for %s not written: %v\n", instancePath, err)
 		return false
 	}
-	env := claudetrust.Env{Home: home, ClaudeConfigDir: os.Getenv("CLAUDE_CONFIG_DIR")}
 	out := claudetrust.Ensure(env, instancePath, state.ClaudeTrust, claudetrust.SourceReview)
 	if out.Warning != "" {
 		fmt.Fprintf(w, "niwa watch: warning: %s\n", out.Warning)
 	}
-	// A skip writes nothing and, with home set, always carries a warning. An entry already
-	// trusted by someone else comes back with no grant and no warning, and
-	// counts as trusted. A warning beside a write (a stale record dropped)
-	// leaves the entry trusted; one beside no write is taken as a skip, which
-	// can only err towards the hard-deny posture.
-	trusted := out.Changed || out.Warning == ""
+	// An entry already trusted by someone else comes back trusted with no
+	// grant, and is used without a record.
+	trusted := out.Trusted
 
 	grant := out.Grant
 	if trusted && grant != nil && grant.Source == claudetrust.SourceWorkspace {
@@ -1026,16 +1029,8 @@ func seedReviewTrust(w io.Writer, home, instancePath string) bool {
 	state.ClaudeTrust = grant
 	if err := saveReviewState(instancePath, state); err != nil {
 		fmt.Fprintf(w, "niwa watch: warning: recording Claude trust for %s: %v\n", instancePath, err)
-		if out.Changed && out.Grant != nil {
-			// Only what this call wrote is undone: a created entry goes, a
-			// flag set on an entry that was already there is retracted.
-			how := claudetrust.Retract
-			if out.Created {
-				how = claudetrust.Destroy
-			}
-			if uw := claudetrust.Withdraw(out.Grant, out.Grant.Key, how); uw != "" {
-				fmt.Fprintf(w, "niwa watch: warning: the Claude trust written for %s could not be removed: %s\n", instancePath, uw)
-			}
+		if uw := out.Undo(); uw != "" {
+			fmt.Fprintf(w, "niwa watch: warning: the Claude trust written for %s could not be removed: %s\n", instancePath, uw)
 		}
 		return false
 	}

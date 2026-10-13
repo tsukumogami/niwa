@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 
 	"github.com/tsukumogami/niwa/internal/claudetrust"
 )
@@ -32,6 +31,13 @@ const noticeClaudeTrustOverlay = "claude-trust-overlay"
 // on disk names the old entry, so a later Withdraw of it finds the flag gone
 // and does nothing, and the next apply converges.
 //
+// One race is known and not handled here: the instance state is saved without
+// any lock, so two applies running at once on the same instance can each save
+// a state built before the other's, and the later save can drop the grant the
+// earlier one recorded. The unsynchronized save predates trust. The entry is
+// then left with no record: later applies take it for trust someone else
+// granted, and destroying the instance leaves it behind.
+//
 //   - DeveloperHome empty: nothing outside the instance is touched, and the
 //     existing record is carried forward.
 //   - A review-sourced record is the review command's, so it is carried
@@ -39,8 +45,14 @@ const noticeClaudeTrustOverlay = "claude-trust-overlay"
 //   - On: claudetrust.Ensure records the grant, retracting a record left in
 //     another config file first. A record for a different path (the instance
 //     moved) is dropped with a warning and its entry left alone.
-//   - Off with a workspace record: the flag is retracted and the record
-//     cleared. A skipped retraction keeps the record for the next apply.
+//   - Off with a workspace record: the flag is retracted. A flag-only record
+//     is cleared. A created record is kept, so destroying the instance still
+//     removes the whole entry niwa created, and turning the option back on
+//     sets the flag again under that record. A skipped retraction keeps the
+//     record for the next apply. A record for a different path is dropped
+//     with a warning as Ensure does, and so is a malformed one (unknown mode
+//     or source, a bad config_file), so it isn't kept and warned about on
+//     every apply.
 func (a *Applier) deliverClaudeTrust(instanceRoot string, on bool, existing *claudetrust.Grant) (grant *claudetrust.Grant, undo func() string, warnings []string) {
 	if a.DeveloperHome == "" {
 		return existing, nil, nil
@@ -50,21 +62,14 @@ func (a *Applier) deliverClaudeTrust(instanceRoot string, on bool, existing *cla
 	}
 
 	if on {
-		env := claudetrust.Env{Home: a.DeveloperHome, ClaudeConfigDir: os.Getenv("CLAUDE_CONFIG_DIR")}
-		out := claudetrust.Ensure(env, instanceRoot, existing, claudetrust.SourceWorkspace)
+		out := claudetrust.Ensure(claudetrust.EnvFor(a.DeveloperHome), instanceRoot, existing, claudetrust.SourceWorkspace)
 		if out.Warning != "" {
 			warnings = append(warnings, out.Warning)
 		}
 		if !out.Changed || out.Grant == nil {
 			return out.Grant, nil, warnings
 		}
-		// Only what this run wrote is undone: a created entry goes, a flag
-		// set on an entry that was already there is retracted.
-		g, how := out.Grant, claudetrust.Retract
-		if out.Created {
-			how = claudetrust.Destroy
-		}
-		return g, func() string { return claudetrust.Withdraw(g, g.Key, how) }, warnings
+		return out.Grant, out.Undo, warnings
 	}
 
 	if existing == nil {
@@ -81,8 +86,14 @@ func (a *Applier) deliverClaudeTrust(instanceRoot string, on bool, existing *cla
 			"the recorded Claude trust entry %q in %s is for a different path than this instance (%s); leaving it in place, remove it by hand if it is stale",
 			existing.Key, existing.ConfigFile, key)}
 	}
+	if existing.ValidateShape() != nil {
+		return nil, nil, []string{claudetrust.MalformedWarning(existing, key)}
+	}
 	if w := claudetrust.Withdraw(existing, key, claudetrust.Retract); w != "" {
 		return existing, nil, []string{w}
+	}
+	if existing.Mode == claudetrust.ModeCreated {
+		return existing, nil, nil
 	}
 	return nil, nil, nil
 }

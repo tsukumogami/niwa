@@ -87,16 +87,18 @@ func TestEnsureReportsWhatItCreated(t *testing.T) {
 }
 
 // TestSetLockWaitForTestRestores checks the cross-package hook leaves the
-// package as it found it, timed-out flag included.
+// package as it found it, recorded lock timeouts included.
 func TestSetLockWaitForTestRestores(t *testing.T) {
 	resetLockState(t)
+	const path = "/some/.claude.json.lock"
+	markLockTimedOut(path)
 	restore := SetLockWaitForTest(0)
-	if lockWait != 0 {
-		t.Fatalf("lockWait = %v, want 0", lockWait)
+	if lockWait != 0 || lockTimedOutAt(path) {
+		t.Fatalf("lockWait = %v, timed out %v; want 0 and the timeout forgotten", lockWait, lockTimedOutAt(path))
 	}
-	lockTimedOut.Store(true)
+	markLockTimedOut(path)
 	restore()
-	if lockWait != defaultLockWait || lockPoll != defaultLockPoll || lockTimedOut.Load() {
-		t.Errorf("after restore: wait %v poll %v timedOut %v", lockWait, lockPoll, lockTimedOut.Load())
+	if lockWait != defaultLockWait || lockPoll != defaultLockPoll || lockTimedOutAt(path) {
+		t.Errorf("after restore: wait %v poll %v timedOut %v", lockWait, lockPoll, lockTimedOutAt(path))
 	}
 }

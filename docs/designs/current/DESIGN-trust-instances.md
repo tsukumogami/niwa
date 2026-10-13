@@ -94,9 +94,12 @@ symlink-resolved absolute path (R9). It finds the config file through
 `created`; an entry whose flag is absent or false gets the flag set and is
 recorded `flag-only`; an entry already true is left alone and not recorded
 unless niwa already recorded it (R11). With the option off, apply withdraws
-the recorded flag and clears the record (R12). The record holds the file path,
-the key and the mode, and removal uses those, never recomputed values; a
-changed file or key at apply time withdraws the old grant first (R13). A
+the recorded flag (R12); this design clears a `flag-only` record but keeps a
+`created` one, so destroy still removes the entry niwa created. The record
+holds the file path, the key and the mode, and removal uses those, never
+recomputed values; a changed config file at apply time withdraws the old grant
+first (R13), while a changed key (the instance moved) leaves the old entry in
+place with a warning, since niwa can't prove it's this instance's. A
 created entry is removed whole on destroy, a flag-only grant loses only its
 flag (R14). The writer classifies the file before touching it (missing: create
 0600 in a 0700 directory; empty: `{}`; anything unparseable, non-object or
@@ -133,7 +136,7 @@ settings or paths other than a managed instance root (R21).
 
 ## Considered Options
 
-Every question below was resolved inline under `/scope` (standard tier).
+Every question below was resolved inline under `/scope` (standard level).
 
 ### Decision 1: Where the Claude trust writer lives
 
@@ -196,7 +199,10 @@ trust. Every `Withdraw` checks that `mode` and `source` are known values, that
 it resolves to a regular file; and every teardown and retraction also checks
 that `key` equals `claudetrust.Key(instanceDir)` for the instance being
 destroyed or applied, computed while the directory still exists. A record that
-fails any check is left alone with a warning, and nothing is written.
+fails any check is never acted on: nothing is written and a warning names it.
+An apply, with the option on or off, also drops a malformed record (unknown
+mode or source, a bad `config_file`) from state, so it's reported once rather
+than on every apply.
 
 Alternatives:
 
@@ -224,16 +230,23 @@ symlink or regular file at the lock path is never followed or removed; niwa
 waits and then skips), and if it's a directory with an mtime older than 10
 seconds, `Lstat` again to confirm it's the same directory and still stale,
 remove it with a non-recursive `os.Remove`, and retry; otherwise sleep 50 ms
-and retry, for up to 5 seconds. Once one lock wait has timed out, later
-attempts in the same niwa process skip without waiting, so a reap sweep over
-many instances doesn't wait 5 seconds per instance. A relative
+and retry, for up to 5 seconds. Once a wait for one lock path has timed out,
+later `Ensure` calls against that same path in the same niwa process skip
+without waiting, so an apply sweep over many instances doesn't wait 5 seconds
+per instance; other config files are unaffected. `Withdraw` ignores that
+shortcut and always waits, so one busy moment during a teardown sweep can't
+leave every later instance's entry behind. A relative
 `CLAUDE_CONFIG_DIR` is refused with a warning, like an unparseable file.
 Like Claude Code's own protocol, the staleness takeover has a narrow window in
 which two takers can both proceed; niwa's 5-second wait is far below the
 10-second threshold, so a live holder that refreshes its lock is never taken
 over. Under the lock niwa resolves the
 write target, reads, decides and writes, then releases with a non-recursive
-`os.Remove` through a deferred call on every path. The lock path is built from
+`os.Remove` through a deferred call on every path. The release removes the
+lock directory only if `os.SameFile` says it's still the one niwa created
+(its `Lstat` identity is taken right after the mkdir); a directory another
+process put there after taking the lock over as stale is left to its holder.
+The lock path is built from
 the unresolved config path (the name Claude Code locks), while the write goes
 to the symlink-resolved target, resolved after the lock is held so a link
 swapped before then can't redirect the write.
@@ -328,22 +341,35 @@ type Env struct {
     ClaudeConfigDir string // value of CLAUDE_CONFIG_DIR at the call
 }
 
+func EnvFor(home string) Env                   // CLAUDE_CONFIG_DIR from the process env
 func ConfigFile(env Env) (string, error)       // R10, unresolved name
 func Key(instanceRoot string) (string, error)  // R9: Abs + EvalSymlinks
 
 type Outcome struct {
     Grant   *Grant // nil when nothing is recorded (already trusted by someone else, or skipped)
+    Trusted bool   // the entry holds the flag after the call; false on every skip
     Changed bool   // file was rewritten
     Created bool   // the rewrite added the whole entry (undo is Destroy, else Retract)
-    Warning string // non-empty on a skip
+    Warning string // why something was skipped or left behind; not a trust signal
 }
 
+func (o Outcome) Undo() (warning string) // takes back only this call's write
 func Ensure(env Env, instanceRoot string, prior *Grant, src Source) Outcome
 func Withdraw(g *Grant, expectedKey string, how WithdrawMode) (warning string) // Destroy | Retract
 ```
 
-`Ensure` resolves the file and key, and if `prior` names a different file or
-key, withdraws it (`Retract`) first (R13). It takes the lock, classifies the
+Callers read `Trusted`, not `Warning`, to learn whether the entry is trusted:
+an empty-`Home` skip carries no warning, and a write can carry one (a stale
+record dropped). `Undo` is the one rule for rolling back a write whose grant
+couldn't be saved: nothing unless `Changed`, `Withdraw(Destroy)` when
+`Created`, else `Withdraw(Retract)`.
+
+`Ensure` resolves the file and key. Claude Code reads the legacy
+`<config home>/.config.json` instead of `.claude.json` whenever it exists
+(config home is `CLAUDE_CONFIG_DIR`, else `$HOME/.claude`), so when that file
+exists `Ensure` writes nothing and warns naming it; `Withdraw` still works on
+the recorded file. If `prior` names a different file for the same key, it
+withdraws it (`Retract`) first (R13). It takes the lock, classifies the
 file (R17), applies R11's table, and writes only when the entry changes (R20),
 through a temp file created with mode 0600, fsync and rename in the resolved
 target's directory, then sets the existing mode, or keeps 0600 for a new file
@@ -382,14 +408,22 @@ out by the caller. Otherwise:
 
 - `on` true: `claudetrust.Ensure(...,
   SourceWorkspace)`; persist the returned grant.
-- `on` false, with a `workspace`-sourced record: `Withdraw(Retract)` and
-  clear the record; on a skip, keep it.
+- `on` false, with a `workspace`-sourced record: `Withdraw(Retract)`. A
+  `flag-only` record is cleared; a `created` record is kept, so destroy still
+  removes the whole entry niwa created and turning the option back on sets the
+  flag again under it. On a skip, keep the record. A malformed record is
+  dropped with a warning.
 - a `review`-sourced record is carried forward untouched.
 
 If `SaveState` then fails, the step's own change is rolled back before the
-error returns: a grant this run created is withdrawn with `Withdraw(Destroy)`,
-and a flag this run set is withdrawn with `Withdraw(Retract)`. A grant that was
-already recorded before the run is left as it was.
+error returns through `Outcome.Undo`: a grant this run created is withdrawn
+with `Withdraw(Destroy)`, and a flag this run set is withdrawn with
+`Withdraw(Retract)`. A grant that was already recorded before the run is left
+as it was.
+
+Two applies running at once on one instance can still lose the record: state
+saves aren't synchronized, so the later save can drop the grant the earlier
+one wrote. That race predates this feature and isn't fixed here.
 
 `CLAUDE_CONFIG_DIR` is read from the process environment at that point. The
 grant is stored beside `TrustKeys` in both state builders. Warnings print
@@ -425,9 +459,12 @@ exists.
 saves the returned grant into the instance's state, relabeled `review` when
 `Ensure` returned a `workspace` grant; if that save fails, it
 withdraws the grant it just wrote and falls back to hard-deny. It returns true
-only when the entry is trusted afterward, whether niwa wrote it or found it
-trusted; a skip falls back to the hard-deny posture as today. The `~/.claude` guard reads
-the same config home the writer resolves.
+only when `Outcome.Trusted` says the entry is trusted afterward, whether niwa
+wrote it or found it trusted; a skip falls back to the hard-deny posture as
+today. The `~/.claude` guard and the write share one `Env`, so they read the
+same config home, and the guard compares the instance's symlink-resolved key
+with the symlink-resolved config home, so a link on either side can't slip
+past it.
 
 ### Overlay
 
@@ -536,13 +573,15 @@ to its target (resolved under the lock) rather than replacing the link. A
 stale lock is removed only after 10 seconds, Claude Code's own threshold, and
 only with a non-recursive remove after a second stat, so niwa can't take a
 lock a live Claude Code process holds or delete anything placed inside it.
+On release niwa removes the lock directory only if it's still the one niwa
+created, so it never deletes a lock another process took over.
 
 **Not trusting a tampered record.** Removal is driven by the record in
 instance state, which anyone controlling the instance can edit. Every record
 is validated before use: known `mode` and `source`, an absolute `config_file`
 named `.claude.json` that is a regular file holding a JSON object, and a `key`
 equal to the canonical path of the instance being destroyed or applied. A
-record that fails is left alone with a warning. The worst a crafted record can
+record that fails is never acted on, and niwa warns. The worst a crafted record can
 then do is remove the trust flag for its own instance's path from some file
 named `.claude.json` the developer can write, which destroying the instance
 does anyway.

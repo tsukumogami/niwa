@@ -843,8 +843,9 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		Shadows:              result.shadows,
 		AuthSources:          result.authSources,
 		TrustKeys:            result.trustKeys,
-		// The grant deliverClaudeTrust settled on: the existing one carried,
-		// a new one, or none once a withdrawal succeeded.
+		// The grant deliverClaudeTrust settled on: the existing one carried
+		// (a created one stays after the off switch), a new one, or none
+		// once a withdrawal cleared it.
 		ClaudeTrust: trustGrant,
 		// Taken from this run's result, never from existingState: a posture
 		// removed from the config must stop being recorded on the next apply.

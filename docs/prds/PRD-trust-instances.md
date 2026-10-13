@@ -199,6 +199,13 @@ root directory of an instance niwa created, as recorded in that instance's
   than the record names (for example, `CLAUDE_CONFIG_DIR` changed), niwa first
   withdraws the recorded grant under R12's rules, then writes and records the
   new one.
+
+  As implemented, only a changed config file works that way. A changed key
+  (the instance moved) leaves the old entry in place with a warning and writes
+  a fresh grant, because niwa can't prove the old entry is this instance's.
+  And an apply with the option off keeps a `created` grant's record after
+  deleting the flag, so destroying the instance still removes the entry niwa
+  created.
 - **R14.** Destroying an instance removes what its record names: the whole
   entry when the record says `created`, only the trust flag when it says
   `flag-only`. If the recorded entry or flag is already gone, nothing is

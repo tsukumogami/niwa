@@ -246,6 +246,36 @@ func TestResolveAskPosture_UnderClaudeConfigHomeFallsBack(t *testing.T) {
 			t.Setenv("CLAUDE_CONFIG_DIR", dir)
 			return filepath.Join(dir, "instances", "watch-x"), filepath.Join(dir, ".claude.json")
 		}, ""},
+		{"under a symlinked CLAUDE_CONFIG_DIR", func(t *testing.T, home string) (string, string) {
+			// CLAUDE_CONFIG_DIR names a link; the instance path is given
+			// through the directory the link points at.
+			base := t.TempDir()
+			real := filepath.Join(base, "real-config")
+			link := filepath.Join(base, "link-config")
+			if err := os.MkdirAll(real, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(real, link); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CLAUDE_CONFIG_DIR", link)
+			return filepath.Join(real, "instances", "watch-x"), filepath.Join(link, ".claude.json")
+		}, ""},
+		{"through a symlink into CLAUDE_CONFIG_DIR", func(t *testing.T, home string) (string, string) {
+			// The instance path goes through a link that leads into the
+			// config home CLAUDE_CONFIG_DIR names directly.
+			base := t.TempDir()
+			dir := filepath.Join(base, "claude-config")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(base, "elsewhere")
+			if err := os.Symlink(dir, link); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CLAUDE_CONFIG_DIR", dir)
+			return filepath.Join(link, "instances", "watch-x"), filepath.Join(dir, ".claude.json")
+		}, ""},
 		{"relative CLAUDE_CONFIG_DIR", func(t *testing.T, home string) (string, string) {
 			t.Setenv("CLAUDE_CONFIG_DIR", "relative/config")
 			return filepath.Join(t.TempDir(), "watch-x"), filepath.Join(home, ".claude.json")
@@ -296,6 +326,31 @@ func TestResolveAskPosture_SkippedWriteFallsBack(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "warning") || !strings.Contains(stderr.String(), file) {
 		t.Errorf("stderr = %q, want a warning naming %s", stderr.String(), file)
+	}
+}
+
+// TestResolveAskPosture_LegacyConfigFallsBack: a legacy .config.json in the
+// config home, which Claude Code reads instead of .claude.json, means the
+// write would trust nothing Claude Code looks at, so nothing is written, the
+// skip is reported naming the legacy file, and the posture is hard-deny.
+func TestResolveAskPosture_LegacyConfigFallsBack(t *testing.T) {
+	home, file := stubReviewHome(t)
+	legacy := filepath.Join(home, ".claude", ".config.json")
+	writeTestFile(t, legacy, `{}`)
+	inst := makeReviewInstance(t)
+
+	var stderr bytes.Buffer
+	if resolveAskPosture(&stderr, inst, true) {
+		t.Error("resolveAskPosture = true with a legacy config present, want false")
+	}
+	if _, err := os.Lstat(file); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("%s was created (err %v)", file, err)
+	}
+	if g := recordedGrant(t, inst); g != nil {
+		t.Errorf("record = %+v, want none", g)
+	}
+	if !strings.Contains(stderr.String(), "warning") || !strings.Contains(stderr.String(), legacy) {
+		t.Errorf("stderr = %q, want a warning naming %s", stderr.String(), legacy)
 	}
 }
 

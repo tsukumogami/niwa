@@ -18,6 +18,8 @@
 //     symlink resolved, the key Claude Code computes for a session started
 //     there. The file is $CLAUDE_CONFIG_DIR/.claude.json, else
 //     $HOME/.claude.json; a symlinked file is written through, never replaced.
+//     When the legacy <config home>/.config.json exists, Claude Code reads it
+//     instead, so niwa writes nothing and warns.
 //   - Claude Code's lock. The read-modify-write runs under the mkdir lock
 //     Claude Code itself takes, <config>.lock, so neither side loses the
 //     other's write.
@@ -46,6 +48,10 @@ import (
 // configBasename is the name of Claude Code's user config file, both under
 // $CLAUDE_CONFIG_DIR and under $HOME.
 const configBasename = ".claude.json"
+
+// legacyConfigBasename is the older config file name Claude Code still reads,
+// in preference to .claude.json, when it exists in the config home.
+const legacyConfigBasename = ".config.json"
 
 // trustFlag is the one entry key niwa writes or removes.
 const trustFlag = "hasTrustDialogAccepted"
@@ -98,25 +104,53 @@ type Env struct {
 	ClaudeConfigDir string
 }
 
+// EnvFor returns the Env for home with ClaudeConfigDir read from the process's
+// CLAUDE_CONFIG_DIR, the value a Claude Code session started from this
+// environment would use.
+func EnvFor(home string) Env {
+	return Env{Home: home, ClaudeConfigDir: os.Getenv("CLAUDE_CONFIG_DIR")}
+}
+
 // Outcome is the result of Ensure.
 type Outcome struct {
 	// Grant is the record to persist: nil when nothing is recorded (the entry
 	// was already trusted by someone else, or the write was skipped with no
 	// usable prior record), otherwise the new grant or the prior one.
 	Grant *Grant
+	// Trusted reports that, after the call, the entry at the instance's key
+	// in the config file env names holds hasTrustDialogAccepted = true:
+	// written by this call, already recorded as niwa's, or already trusted by
+	// someone else. It is false on every skip, an empty Home included.
+	Trusted bool
 	// Changed reports that the current config file was rewritten by this
 	// call. A retraction from a previously recorded file doesn't count.
 	Changed bool
 	// Created reports that the rewrite added the whole entry, not only the
-	// flag on an entry that was already there. It says what undoes this
-	// call's write when the caller can't persist the grant:
-	// Withdraw(Grant, key, Destroy) when true, Withdraw(Grant, key, Retract)
-	// when only Changed is. Grant.Mode can't say this, since a re-set flag
-	// keeps the mode of the record it re-establishes.
+	// flag on an entry that was already there. Undo reads it to take back
+	// only what this call wrote. Grant.Mode can't say this, since a re-set
+	// flag keeps the mode of the record it re-establishes.
 	Created bool
-	// Warning is non-empty when something was skipped or left behind. It
-	// names the file and the reason, and never means the command failed.
+	// Warning names the file and the reason when something was skipped or
+	// left behind, and never means the command failed. It can sit beside a
+	// write (a stale record dropped), and a skip that isn't a problem, an
+	// empty Home, carries none. Read Trusted, not Warning, to learn whether
+	// the entry is trusted.
 	Warning string
+}
+
+// Undo takes back this call's write, for a caller that couldn't persist the
+// grant: the whole entry when the call created it, otherwise only the flag it
+// set. It does nothing unless Changed. The warning is Withdraw's, empty when
+// the write was taken back.
+func (o Outcome) Undo() (warning string) {
+	if !o.Changed || o.Grant == nil {
+		return ""
+	}
+	how := Retract
+	if o.Created {
+		how = Destroy
+	}
+	return Withdraw(o.Grant, o.Grant.Key, how)
 }
 
 // WithdrawMode selects what Withdraw removes. The zero value is invalid and
@@ -169,6 +203,16 @@ func ConfigHome(env Env) (string, error) {
 	return filepath.Join(filepath.Clean(env.Home), ".claude"), nil
 }
 
+// legacyConfigFile returns <config home>/.config.json for env, the legacy
+// config file Claude Code reads instead of ConfigFile's when it exists.
+func legacyConfigFile(env Env) (string, error) {
+	home, err := ConfigHome(env)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, legacyConfigBasename), nil
+}
+
 // configDir returns env's CLAUDE_CONFIG_DIR cleaned, or "" when it is unset.
 // A relative value is an error rather than a path resolved against niwa's
 // working directory, which Claude Code would resolve differently.
@@ -206,20 +250,7 @@ func Key(instanceRoot string) (string, error) {
 // fails with an error wrapping fs.ErrNotExist, and only after every other
 // check passed, so a caller can treat it as "nothing left to remove".
 func (g *Grant) Validate(expectedKey string) error {
-	if g == nil {
-		return fmt.Errorf("no grant")
-	}
-	switch g.Mode {
-	case ModeCreated, ModeFlagOnly:
-	default:
-		return fmt.Errorf("unknown mode %q", g.Mode)
-	}
-	switch g.Source {
-	case SourceWorkspace, SourceReview:
-	default:
-		return fmt.Errorf("unknown source %q", g.Source)
-	}
-	if err := validateConfigPath(g.ConfigFile); err != nil {
+	if err := g.ValidateShape(); err != nil {
 		return err
 	}
 	if g.Key == "" || g.Key != expectedKey {
@@ -235,7 +266,35 @@ func (g *Grant) Validate(expectedKey string) error {
 	return nil
 }
 
-// validateConfigPath is the purely lexical part of Validate.
+// ValidateShape is the part of Validate that needs neither the instance nor
+// the filesystem: a known mode and source, and an absolute, clean config_file
+// named .claude.json. A record that fails it is malformed and is never acted
+// on, only dropped.
+func (g *Grant) ValidateShape() error {
+	if g == nil {
+		return fmt.Errorf("no grant")
+	}
+	switch g.Mode {
+	case ModeCreated, ModeFlagOnly:
+	default:
+		return fmt.Errorf("unknown mode %q", g.Mode)
+	}
+	switch g.Source {
+	case SourceWorkspace, SourceReview:
+	default:
+		return fmt.Errorf("unknown source %q", g.Source)
+	}
+	return validateConfigPath(g.ConfigFile)
+}
+
+// MalformedWarning is the warning for dropping g, a record that fails
+// ValidateShape, from the instance whose key is key.
+func MalformedWarning(g *Grant, key string) string {
+	return fmt.Sprintf("ignoring a malformed Claude trust record for %s (config file %q, mode %q, source %q)",
+		key, g.ConfigFile, g.Mode, g.Source)
+}
+
+// validateConfigPath is the purely lexical part of ValidateShape.
 func validateConfigPath(p string) error {
 	if !filepath.IsAbs(p) {
 		return fmt.Errorf("config file %q is not an absolute path", p)
@@ -271,9 +330,10 @@ func validateConfigPath(p string) error {
 // dropped with a warning and its entry left alone, since niwa can't prove that
 // entry is this instance's; the outcome then carries no record unless this
 // call writes a new one. Any skip (Home empty, a relative CLAUDE_CONFIG_DIR, a
-// lock timeout, a file that can't be parsed) writes nothing and returns the
-// prior record it still holds, so a valid record is never lost because one
-// write couldn't happen.
+// legacy <config home>/.config.json that Claude Code would read instead, a
+// lock timeout, a file that can't be parsed) writes nothing, reports Trusted
+// false and returns the prior record it still holds, so a valid record is
+// never lost because one write couldn't happen.
 func Ensure(env Env, instanceRoot string, prior *Grant, src Source) Outcome {
 	if env.Home == "" {
 		return Outcome{Grant: prior}
@@ -284,6 +344,16 @@ func Ensure(env Env, instanceRoot string, prior *Grant, src Source) Outcome {
 	file, err := ConfigFile(env)
 	if err != nil {
 		return Outcome{Grant: prior, Warning: fmt.Sprintf("Claude trust for %s not written: %v", instanceRoot, err)}
+	}
+	// Claude Code reads the legacy file instead whenever it exists (any stat
+	// that succeeds, as its own existence check), so a write to file would
+	// trust nothing Claude Code looks at.
+	if legacy, err := legacyConfigFile(env); err == nil {
+		if _, err := os.Stat(legacy); err == nil {
+			return Outcome{Grant: prior, Warning: fmt.Sprintf(
+				"Claude trust for %s not written to %s: Claude Code reads %s instead while that file exists",
+				instanceRoot, file, legacy)}
+		}
 	}
 	key, err := Key(instanceRoot)
 	if err != nil {
@@ -298,12 +368,8 @@ func Ensure(env Env, instanceRoot string, prior *Grant, src Source) Outcome {
 				"the recorded Claude trust entry %q in %s is for a different path than this instance (%s); leaving it in place, remove it by hand if it is stale",
 				prior.Key, prior.ConfigFile, key))
 			prior = nil
-		case prior.Mode != ModeCreated && prior.Mode != ModeFlagOnly,
-			prior.Source != SourceWorkspace && prior.Source != SourceReview,
-			validateConfigPath(prior.ConfigFile) != nil:
-			warnings = append(warnings, fmt.Sprintf(
-				"ignoring a malformed Claude trust record for %s (config file %q, mode %q, source %q)",
-				key, prior.ConfigFile, prior.Mode, prior.Source))
+		case prior.ValidateShape() != nil:
+			warnings = append(warnings, MalformedWarning(prior, key))
 			prior = nil
 		case prior.ConfigFile != file:
 			if w := Withdraw(prior, key, Retract); w != "" {
@@ -333,7 +399,7 @@ func ensureEntry(file, key string, prior *Grant, src Source) (Outcome, error) {
 	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
 		return Outcome{}, fmt.Errorf("creating the config directory: %w", err)
 	}
-	release, err := acquireLock(file + lockSuffix)
+	release, err := acquireLock(file+lockSuffix, true)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -371,7 +437,7 @@ func ensureEntry(file, key string, prior *Grant, src Source) (Outcome, error) {
 			return Outcome{}, err
 		}
 		if trusted {
-			return Outcome{Grant: recorded}, nil
+			return Outcome{Grant: recorded, Trusted: true}, nil
 		}
 		grant.Mode = ModeFlagOnly
 		if recorded != nil {
@@ -386,7 +452,7 @@ func ensureEntry(file, key string, prior *Grant, src Source) (Outcome, error) {
 	if err := doc.write(); err != nil {
 		return Outcome{}, err
 	}
-	return Outcome{Grant: grant, Changed: true, Created: created}, nil
+	return Outcome{Grant: grant, Trusted: true, Changed: true, Created: created}, nil
 }
 
 // Withdraw removes what g names from g's recorded config file: the whole
@@ -396,7 +462,9 @@ func ensureEntry(file, key string, prior *Grant, src Source) (Outcome, error) {
 //
 // It returns a warning, naming the file and key, when it refused or skipped;
 // nothing is written then. Withdrawing an entry or flag that is already gone,
-// or from a config file that no longer exists, is a silent no-op.
+// or from a config file that no longer exists, is a silent no-op. Withdraw
+// writes the recorded file even when Ensure would now refuse to write there
+// (a legacy .config.json appeared), since what it removes is niwa's own.
 func Withdraw(g *Grant, expectedKey string, how WithdrawMode) (warning string) {
 	if g == nil {
 		return ""
@@ -416,9 +484,12 @@ func Withdraw(g *Grant, expectedKey string, how WithdrawMode) (warning string) {
 	return ""
 }
 
-// withdrawEntry is Withdraw's locked read-modify-write.
+// withdrawEntry is Withdraw's locked read-modify-write. It always waits for
+// the lock, even after an earlier wait on the same path timed out, so one busy
+// moment during a teardown sweep can't leave every later instance's entry
+// behind.
 func withdrawEntry(g *Grant, how WithdrawMode) error {
-	release, err := acquireLock(g.ConfigFile + lockSuffix)
+	release, err := acquireLock(g.ConfigFile+lockSuffix, false)
 	if err != nil {
 		return err
 	}

@@ -2,8 +2,46 @@ package config
 
 import (
 	"fmt"
+	"reflect"
 	"testing"
 )
+
+// TestMCPConfigClone checks a clone is equal to its source and shares none of
+// its maps or slices, and that nil stays nil.
+func TestMCPConfigClone(t *testing.T) {
+	if got := (MCPConfig{}).Clone(); got.Servers != nil {
+		t.Errorf("clone of an empty config = %+v, want nil servers", got)
+	}
+	src := MCPConfig{Servers: map[string]MCPServerConfig{
+		"files": {Command: "srv", Args: []string{"a"}, Agents: []string{"claude"}, Env: map[string]MaybeSecret{"K": {Plain: "v"}}},
+		"docs":  {URL: "https://docs.example.com", Headers: map[string]MaybeSecret{"Authorization": {Plain: "Bearer x"}}},
+	}}
+	got := src.Clone()
+	if !reflect.DeepEqual(got, src) {
+		t.Fatalf("clone = %+v, want %+v", got, src)
+	}
+	if got.Servers["docs"].Env != nil || got.Servers["files"].Headers != nil {
+		t.Error("a nil map became non-nil in the clone")
+	}
+
+	got.Servers["new"] = MCPServerConfig{}
+	files := got.Servers["files"]
+	files.Args[0] = "changed"
+	files.Agents[0] = "changed"
+	files.Env["K"] = MaybeSecret{Plain: "changed"}
+	got.Servers["docs"].Headers["Authorization"] = MaybeSecret{Plain: "changed"}
+
+	if _, ok := src.Servers["new"]; ok {
+		t.Error("adding a server to the clone reached the source")
+	}
+	s := src.Servers["files"]
+	if s.Args[0] != "a" || s.Agents[0] != "claude" || s.Env["K"].Plain != "v" {
+		t.Errorf("source server changed through the clone: %+v", s)
+	}
+	if src.Servers["docs"].Headers["Authorization"].Plain != "Bearer x" {
+		t.Error("source headers changed through the clone")
+	}
+}
 
 // TestMCPDeclarationParses pins the authored shape of the agent-neutral
 // declaration: every key it documents decodes into a field, and none of them
