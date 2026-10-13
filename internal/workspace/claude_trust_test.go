@@ -494,17 +494,15 @@ func TestClaudeTrust_ApplyAddsThenLeavesAlone(t *testing.T) {
 }
 
 // TestClaudeTrust_OffSwitchRetracts covers turning the option off: the flag
-// goes and keys Claude Code added to the entry stay. A created grant's record
-// is kept, so destroy can still remove the whole entry niwa created; a
-// flag-only grant's record is cleared. An entry already removed by hand
-// leaves the file alone.
+// goes, keys Claude Code added to the entry stay, and the record is cleared
+// for a created grant and a flag-only grant alike. An entry already removed
+// by hand leaves the file alone and clears the record too.
 func TestClaudeTrust_OffSwitchRetracts(t *testing.T) {
 	for name, offBody := range map[string]string{"false": trustOff, "absent": ""} {
 		t.Run(name, func(t *testing.T) {
 			f := newTrustFixture(t)
 			f.mustCreate(t, f.writeConfig(t, trustOn))
 			key := trustKey(t, f.instanceRoot)
-			created := grantOf(t, f.instanceRoot)
 
 			// Claude Code adds its own keys to the entry once a session runs.
 			writeClaudeConfig(t, f.claudeJSON, map[string]any{
@@ -529,19 +527,19 @@ func TestClaudeTrust_OffSwitchRetracts(t *testing.T) {
 			if other, _ := entryAt(t, f.claudeJSON, "/another"); other["hasTrustDialogAccepted"] != true {
 				t.Errorf("another project's entry changed: %v", other)
 			}
-			if g := grantOf(t, f.instanceRoot); !reflect.DeepEqual(g, wantGrant(f.claudeJSON, key, claudetrust.ModeCreated)) || !reflect.DeepEqual(g, created) {
-				t.Errorf("record = %+v, want the created record %+v kept", g, created)
+			if g := grantOf(t, f.instanceRoot); g != nil {
+				t.Errorf("record = %+v, want it cleared", g)
 			}
 
-			// A second apply with the option off finds the flag gone and
-			// leaves the file and the record as they are.
+			// A second apply with the option off has no record to act on
+			// and leaves the file as it is.
 			before := snapFile(t, f.claudeJSON)
 			if out := f.mustApply(t, f.writeConfig(t, offBody)); strings.Contains(out, "Claude trust") {
 				t.Errorf("second off apply warned about Claude trust:\n%s", out)
 			}
 			assertFileUntouched(t, f.claudeJSON, before)
-			if g := grantOf(t, f.instanceRoot); !reflect.DeepEqual(g, created) {
-				t.Errorf("record after a second off apply = %+v, want %+v", g, created)
+			if g := grantOf(t, f.instanceRoot); g != nil {
+				t.Errorf("record after a second off apply = %+v, want none", g)
 			}
 		})
 	}
@@ -571,7 +569,6 @@ func TestClaudeTrust_OffSwitchRetracts(t *testing.T) {
 	t.Run("entry removed by hand", func(t *testing.T) {
 		f := newTrustFixture(t)
 		f.mustCreate(t, f.writeConfig(t, trustOn))
-		created := grantOf(t, f.instanceRoot)
 		writeClaudeConfig(t, f.claudeJSON, map[string]any{"projects": map[string]any{}})
 		before := snapFile(t, f.claudeJSON)
 
@@ -579,16 +576,17 @@ func TestClaudeTrust_OffSwitchRetracts(t *testing.T) {
 			t.Fatalf("Apply: %v\n%s", err, out)
 		}
 		assertFileUntouched(t, f.claudeJSON, before)
-		if g := grantOf(t, f.instanceRoot); !reflect.DeepEqual(g, created) {
-			t.Errorf("record = %+v, want the created record %+v kept", g, created)
+		if g := grantOf(t, f.instanceRoot); g != nil {
+			t.Errorf("record = %+v, want it cleared", g)
 		}
 	})
 }
 
-// TestClaudeTrust_OffThenDestroyRemovesCreatedEntry checks the record the off
-// switch keeps does its job: destroying the instance afterwards removes the
-// whole entry niwa created, keys Claude Code added included, and nothing else.
-func TestClaudeTrust_OffThenDestroyRemovesCreatedEntry(t *testing.T) {
+// TestClaudeTrust_OffThenDestroyLeavesFlaglessEntry checks the cost of
+// clearing the record at the off switch: the entry niwa created stays in the
+// config without the flag, and destroying the instance afterwards, with no
+// record left, leaves the file as it is.
+func TestClaudeTrust_OffThenDestroyLeavesFlaglessEntry(t *testing.T) {
 	f := newTrustFixture(t)
 	f.mustCreate(t, f.writeConfig(t, trustOn))
 	key := trustKey(t, f.instanceRoot)
@@ -597,22 +595,25 @@ func TestClaudeTrust_OffThenDestroyRemovesCreatedEntry(t *testing.T) {
 		"/another": map[string]any{"hasTrustDialogAccepted": true},
 	}})
 	f.mustApply(t, f.writeConfig(t, trustOff))
+	if g := grantOf(t, f.instanceRoot); g != nil {
+		t.Fatalf("record after off = %+v, want it cleared", g)
+	}
+	before := snapFile(t, f.claudeJSON)
 
 	if err := DestroyInstance(f.instanceRoot, WithDestroyReporter(f.applier.Reporter), WithPluginRecordBaseDir(f.home)); err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
-	if e, ok := entryAt(t, f.claudeJSON, key); ok {
-		t.Errorf("entry = %v after destroy, want the whole created entry removed", e)
-	}
-	if other, ok := entryAt(t, f.claudeJSON, "/another"); !ok || other["hasTrustDialogAccepted"] != true {
-		t.Errorf("another project's entry = %v (present %v), want it untouched", other, ok)
+	assertFileUntouched(t, f.claudeJSON, before)
+	if e, ok := entryAt(t, f.claudeJSON, key); !ok || !reflect.DeepEqual(e, map[string]any{"allowedTools": []any{"Bash(ls)"}}) {
+		t.Errorf("entry = %v (present %v), want the flagless entry left behind", e, ok)
 	}
 }
 
-// TestClaudeTrust_OffThenOnKeepsCreatedMode checks turning the option back on
-// after the off switch sets the flag again under the created record, so the
-// record still says niwa created the entry.
-func TestClaudeTrust_OffThenOnKeepsCreatedMode(t *testing.T) {
+// TestClaudeTrust_OffThenOnWritesFreshGrant checks turning the option back on
+// after the off switch writes a new grant. The entry niwa created is still
+// there without the flag, so the flag is set on it and the grant is recorded
+// flag-only.
+func TestClaudeTrust_OffThenOnWritesFreshGrant(t *testing.T) {
 	f := newTrustFixture(t)
 	on := f.writeConfig(t, trustOn)
 	f.mustCreate(t, on)
@@ -626,8 +627,29 @@ func TestClaudeTrust_OffThenOnKeepsCreatedMode(t *testing.T) {
 	if e, ok := entryAt(t, f.claudeJSON, key); !ok || e["hasTrustDialogAccepted"] != true {
 		t.Errorf("entry after on = %v (present %v), want the flag set", e, ok)
 	}
-	if g := grantOf(t, f.instanceRoot); !reflect.DeepEqual(g, wantGrant(f.claudeJSON, key, claudetrust.ModeCreated)) {
-		t.Errorf("record = %+v, want mode created kept", g)
+	if g := grantOf(t, f.instanceRoot); !reflect.DeepEqual(g, wantGrant(f.claudeJSON, key, claudetrust.ModeFlagOnly)) {
+		t.Errorf("record = %+v, want a fresh flag-only grant", g)
+	}
+}
+
+// TestClaudeTrust_OffLeavesHandSetFlag checks the off switch retracts once:
+// after niwa withdrew its own flag, a flag the developer sets by hand is
+// someone else's trust, and a later apply with the option off leaves it.
+func TestClaudeTrust_OffLeavesHandSetFlag(t *testing.T) {
+	f := newTrustFixture(t)
+	f.mustCreate(t, f.writeConfig(t, trustOn))
+	key := trustKey(t, f.instanceRoot)
+	off := f.writeConfig(t, trustOff)
+	f.mustApply(t, off)
+
+	writeClaudeConfig(t, f.claudeJSON, map[string]any{"projects": map[string]any{
+		key: map[string]any{"hasTrustDialogAccepted": true},
+	}})
+	before := snapFile(t, f.claudeJSON)
+	f.mustApply(t, off)
+	assertFileUntouched(t, f.claudeJSON, before)
+	if g := grantOf(t, f.instanceRoot); g != nil {
+		t.Errorf("record = %+v, want none", g)
 	}
 }
 

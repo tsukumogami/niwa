@@ -94,12 +94,12 @@ symlink-resolved absolute path (R9). It finds the config file through
 `created`; an entry whose flag is absent or false gets the flag set and is
 recorded `flag-only`; an entry already true is left alone and not recorded
 unless niwa already recorded it (R11). With the option off, apply withdraws
-the recorded flag (R12); this design clears a `flag-only` record but keeps a
-`created` one, so destroy still removes the entry niwa created. The record
-holds the file path, the key and the mode, and removal uses those, never
-recomputed values; a changed config file at apply time withdraws the old grant
-first (R13), while a changed key (the instance moved) leaves the old entry in
-place with a warning, since niwa can't prove it's this instance's. A
+the recorded flag once and clears the record, whatever its mode (R12). The
+record holds the file path, the key and the mode, and removal uses those,
+never recomputed values; a changed config file at apply time withdraws the old
+grant first (R13), unless the old and new paths name the same physical file,
+while a changed key (the instance moved) leaves the old entry in place with a
+warning, since niwa can't prove it's this instance's. A
 created entry is removed whole on destroy, a flag-only grant loses only its
 flag (R14). The writer classifies the file before touching it (missing: create
 0600 in a 0700 directory; empty: `{}`; anything unparseable, non-object or
@@ -369,7 +369,10 @@ couldn't be saved: nothing unless `Changed`, `Withdraw(Destroy)` when
 (config home is `CLAUDE_CONFIG_DIR`, else `$HOME/.claude`), so when that file
 exists `Ensure` writes nothing and warns naming it; `Withdraw` still works on
 the recorded file. If `prior` names a different file for the same key, it
-withdraws it (`Retract`) first (R13). It takes the lock, classifies the
+withdraws it (`Retract`) first (R13). Two paths that name the same physical
+file (checked with `os.SameFile`, for a `CLAUDE_CONFIG_DIR` symlinked to
+`$HOME`, say) are not a different file: the record keeps its mode and takes
+the current name. It takes the lock, classifies the
 file (R17), applies R11's table, and writes only when the entry changes (R20),
 through a temp file created with mode 0600, fsync and rename in the resolved
 target's directory, then sets the existing mode, or keeps 0600 for a new file
@@ -408,11 +411,15 @@ out by the caller. Otherwise:
 
 - `on` true: `claudetrust.Ensure(...,
   SourceWorkspace)`; persist the returned grant.
-- `on` false, with a `workspace`-sourced record: `Withdraw(Retract)`. A
-  `flag-only` record is cleared; a `created` record is kept, so destroy still
-  removes the whole entry niwa created and turning the option back on sets the
-  flag again under it. On a skip, keep the record. A malformed record is
-  dropped with a warning.
+- `on` false, with a `workspace`-sourced record: `Withdraw(Retract)`, then
+  clear the record, `created` and `flag-only` alike. On a skip, keep the
+  record so the next apply retries. A malformed record is dropped with a
+  warning. Clearing a `created` record is deliberate: kept, it would make
+  every later apply with the option off strip the flag again, including trust
+  the developer granted by hand after niwa withdrew its own. The cost is that
+  an entry niwa created can stay behind without the flag, trusting nothing,
+  and destroy no longer removes it. Turning the option back on writes a fresh
+  grant, `flag-only` since the entry is still there.
 - a `review`-sourced record is carried forward untouched.
 
 If `SaveState` then fails, the step's own change is rolled back before the
@@ -435,7 +442,8 @@ was written, the old key no longer matches, so niwa can't prove the old entry
 is this instance's: it leaves that entry alone, warns naming it, drops the
 record and writes a fresh grant for the new path. When only the config file
 differs (`CLAUDE_CONFIG_DIR` changed) and the key matches, the old grant is
-withdrawn from the recorded file as R13 asks.
+withdrawn from the recorded file as R13 asks, unless both names reach the same
+physical file, which isn't a change at all.
 
 ### Teardown
 
@@ -630,6 +638,9 @@ this feature with it, which is why the guide records the version and the
   destroy.
 - Review-instance trust entries written by older niwa versions aren't removed
   by reap any more.
+- After the off switch, an entry niwa created can stay in the developer's
+  config without the flag. It trusts nothing, but no record names it any
+  more, so destroying the instance leaves it behind.
 
 ### Mitigations
 

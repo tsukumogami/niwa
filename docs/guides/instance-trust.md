@@ -91,18 +91,22 @@ niwa removes only what its record names.
 
 - **Destroying an instance** removes the whole entry when the record says
   `created` and only the flag when it says `flag-only`. That holds for every
-  route: `niwa destroy` in any form, `niwa reap`, `niwa reset`, and dispatch's
-  cleanup of a failed launch. Removal uses the recorded file and key, so a
-  destroy run under a different `CLAUDE_CONFIG_DIR` still cleans the right
-  file. An entry or flag that's already gone is fine.
-- **Turning the option off** withdraws on the next `niwa apply` in each
+  route: `niwa destroy` in any form, `niwa reap`, `niwa reset`, dispatch's
+  cleanup of a failed launch, and review-instance cleanup. Removal uses the
+  recorded file and key, so a destroy run under a different
+  `CLAUDE_CONFIG_DIR` still cleans the right file. An entry or flag that's
+  already gone is fine.
+- **Turning the option off** withdraws once, on the next `niwa apply` in each
   instance. niwa deletes the flag, never the whole entry, since the instance
-  and whatever Claude Code stored for it still exist. A `flag-only` record is
-  then cleared. A `created` record is kept, so destroying the instance later
-  still removes the whole entry niwa created, and turning the option back on
-  sets the flag again under the same record.
+  and whatever Claude Code stored for it still exist, and then clears the
+  record, whatever its mode. A flag you set by hand afterwards is yours, and
+  later applies leave it alone. An entry niwa created stays behind without the
+  flag (see [Known limits](#known-limits)). Turning the option back on writes a
+  fresh grant, recorded `flag-only` since the entry is still there.
 - **Changing `CLAUDE_CONFIG_DIR`** between applies withdraws the flag from the
-  old file before the new one is written.
+  old file before the new one is written. When both paths name the same file
+  (`CLAUDE_CONFIG_DIR` is a symlink to your home directory, say), nothing
+  moved: niwa withdraws nothing and keeps the record's mode.
 - **A moved instance** gets a fresh grant at its new path. niwa can't prove
   the old entry still belongs to this instance, so it leaves it and warns,
   naming its key and file.
@@ -242,6 +246,10 @@ out from under a running review. An apply never withdraws a review grant.
   that entry already trusts it, and since the entry is already trusted, niwa
   records nothing for the new instance. Destroy's warning names the file and
   key to delete.
+- **Entries left by the off switch.** Turning the option off clears the
+  record, so an entry niwa created stays in the config without the flag, and
+  destroying the instance doesn't remove it. It trusts nothing; delete it by
+  hand if you want the file tidy.
 - **A session still running in a destroyed instance** can write its project
   entry back when it saves state. That entry has no trust flag, so it's
   leftover data, not trust.

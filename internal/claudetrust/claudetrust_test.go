@@ -612,6 +612,60 @@ func TestEnsureChangedConfigFileRetractsOldGrant(t *testing.T) {
 	})
 }
 
+// TestEnsureSamePhysicalFileIsNoChange covers a CLAUDE_CONFIG_DIR that is a
+// symlink to HOME, so $CLAUDE_CONFIG_DIR/.claude.json and $HOME/.claude.json
+// are two names for one file. Switching between them is not a config-file
+// change: nothing is retracted or re-granted, the mode is kept, and the
+// record takes the name in use now.
+func TestEnsureSamePhysicalFileIsNoChange(t *testing.T) {
+	f := newFixture(t)
+	link := filepath.Join(filepath.Dir(f.env.Home), "claude-link")
+	if err := os.Symlink(f.env.Home, link); err != nil {
+		t.Fatal(err)
+	}
+	envLink := Env{Home: f.env.Home, ClaudeConfigDir: link}
+	linkFile := filepath.Join(link, ".claude.json")
+
+	t.Run("trusted entry is left alone", func(t *testing.T) {
+		resetLockState(t)
+		_ = os.Remove(f.file)
+		g := Ensure(f.env, f.root, nil, SourceWorkspace).Grant
+		if g == nil || g.Mode != ModeCreated {
+			t.Fatalf("grant in HOME = %+v", g)
+		}
+		before := snap(t, f.file)
+
+		out := Ensure(envLink, f.root, g, SourceWorkspace)
+		if out.Warning != "" || out.Changed || !out.Trusted {
+			t.Fatalf("outcome = %+v, want trusted with nothing written", out)
+		}
+		want := &Grant{ConfigFile: linkFile, Key: f.key, Mode: ModeCreated, Source: SourceWorkspace}
+		if !reflect.DeepEqual(out.Grant, want) {
+			t.Errorf("grant = %+v, want %+v", out.Grant, want)
+		}
+		assertUntouched(t, f.file, before)
+	})
+
+	t.Run("flag reset by hand is set again under the prior mode", func(t *testing.T) {
+		resetLockState(t)
+		writeFile(t, f.file, `{"projects": {`+jsonKey(t, f.key)+`: {"allowedTools": ["Read"]}}}`, 0o600)
+		g := &Grant{ConfigFile: linkFile, Key: f.key, Mode: ModeCreated, Source: SourceWorkspace}
+
+		out := Ensure(f.env, f.root, g, SourceWorkspace)
+		if out.Warning != "" || !out.Changed {
+			t.Fatalf("outcome = %+v, want the flag set again", out)
+		}
+		want := &Grant{ConfigFile: f.file, Key: f.key, Mode: ModeCreated, Source: SourceWorkspace}
+		if !reflect.DeepEqual(out.Grant, want) {
+			t.Errorf("grant = %+v, want %+v", out.Grant, want)
+		}
+		e, _ := entryOf(t, f.file, f.key)
+		if e["hasTrustDialogAccepted"] != true || e["allowedTools"] == nil {
+			t.Errorf("entry = %v, want the flag set and allowedTools kept", e)
+		}
+	})
+}
+
 func TestEnsureMovedInstanceLeavesOldEntry(t *testing.T) {
 	f := newFixture(t)
 	g := Ensure(f.env, f.root, nil, SourceWorkspace).Grant

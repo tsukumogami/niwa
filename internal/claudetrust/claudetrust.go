@@ -294,6 +294,15 @@ func MalformedWarning(g *Grant, key string) string {
 		key, g.ConfigFile, g.Mode, g.Source)
 }
 
+// MovedWarning is the warning for dropping g, a record whose key is not key,
+// the path of the instance it was found in: the instance moved, so niwa can't
+// prove the old entry is this instance's and leaves it in place.
+func MovedWarning(g *Grant, key string) string {
+	return fmt.Sprintf(
+		"the recorded Claude trust entry %q in %s is for a different path than this instance (%s); leaving it in place, remove it by hand if it is stale",
+		g.Key, g.ConfigFile, key)
+}
+
 // validateConfigPath is the purely lexical part of ValidateShape.
 func validateConfigPath(p string) error {
 	if !filepath.IsAbs(p) {
@@ -325,7 +334,8 @@ func validateConfigPath(p string) error {
 // A later caller with another source never re-labels the record.
 //
 // A prior record for a different config file but the same key is retracted
-// from its file first. A prior record for a different key (the instance
+// from its file first, unless both names reach the same physical file, in
+// which case the record is carried over to the current name as it is. A prior record for a different key (the instance
 // moved), or one with an unknown mode or source or a malformed path, is
 // dropped with a warning and its entry left alone, since niwa can't prove that
 // entry is this instance's; the outcome then carries no record unless this
@@ -364,13 +374,18 @@ func Ensure(env Env, instanceRoot string, prior *Grant, src Source) Outcome {
 	if prior != nil {
 		switch {
 		case prior.Key != key:
-			warnings = append(warnings, fmt.Sprintf(
-				"the recorded Claude trust entry %q in %s is for a different path than this instance (%s); leaving it in place, remove it by hand if it is stale",
-				prior.Key, prior.ConfigFile, key))
+			warnings = append(warnings, MovedWarning(prior, key))
 			prior = nil
 		case prior.ValidateShape() != nil:
 			warnings = append(warnings, MalformedWarning(prior, key))
 			prior = nil
+		case prior.ConfigFile != file && sameFile(prior.ConfigFile, file):
+			// Two names for one file (CLAUDE_CONFIG_DIR is a symlink to
+			// HOME, say): nothing moved, so the record keeps its mode and
+			// is carried over to the name in use now.
+			moved := *prior
+			moved.ConfigFile = file
+			prior = &moved
 		case prior.ConfigFile != file:
 			if w := Withdraw(prior, key, Retract); w != "" {
 				// A skipped withdrawal keeps the record so the next apply
@@ -527,6 +542,20 @@ func withdrawEntry(g *Grant, how WithdrawMode) error {
 		return err
 	}
 	return doc.write()
+}
+
+// sameFile reports whether a and b both exist and name the same physical
+// file, following symlinks. A path that can't be stat'ed is never the same.
+func sameFile(a, b string) bool {
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(ai, bi)
 }
 
 // joinWarnings combines the warnings one call produced into one line.

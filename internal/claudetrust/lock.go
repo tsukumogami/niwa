@@ -16,9 +16,11 @@ import (
 // read and rename, nor niwa's between Claude Code's.
 //
 // The staleness takeover has the same narrow window Claude Code's own protocol
-// has, in which two takers can both proceed. niwa's wait is well below the
-// staleness threshold, so a live holder that keeps its lock fresh is never
-// taken over.
+// has, in which two takers can both proceed. Takeover depends only on the
+// lock directory's modification time, not on how long anyone has waited.
+// niwa holds the lock for milliseconds, one read and one rename, far under
+// Claude Code's 10-second threshold, so in normal operation niwa's lock is
+// never taken over as stale.
 
 const (
 	// lockSuffix names the lock directory after the config path.

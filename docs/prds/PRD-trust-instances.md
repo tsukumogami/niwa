@@ -174,6 +174,11 @@ root directory of an instance niwa created, as recorded in that instance's
   `CLAUDE_CONFIG_DIR` is set and non-empty, and `$HOME/.claude.json`
   otherwise. When that path is a symlink, niwa writes the file it points to and
   leaves the symlink in place.
+
+  As implemented, a relative `CLAUDE_CONFIG_DIR` is refused with a warning
+  rather than resolved against niwa's working directory. And while Claude
+  Code's legacy `<config home>/.config.json` exists, niwa writes nothing and
+  warns, since Claude Code reads that file instead.
 - **R11.** niwa treats an existing entry by its state:
 
   | Entry state when niwa looks | What niwa does | What niwa records |
@@ -203,9 +208,9 @@ root directory of an instance niwa created, as recorded in that instance's
   As implemented, only a changed config file works that way. A changed key
   (the instance moved) leaves the old entry in place with a warning and writes
   a fresh grant, because niwa can't prove the old entry is this instance's.
-  And an apply with the option off keeps a `created` grant's record after
-  deleting the flag, so destroying the instance still removes the entry niwa
-  created.
+  Two paths that name the same physical file (a `CLAUDE_CONFIG_DIR` symlinked
+  to `$HOME`, say) don't count as a changed config file: nothing is withdrawn
+  and the record keeps its mode.
 - **R14.** Destroying an instance removes what its record names: the whole
   entry when the record says `created`, only the trust flag when it says
   `flag-only`. If the recorded entry or flag is already gone, nothing is
@@ -243,6 +248,11 @@ root directory of an instance niwa created, as recorded in that instance's
   can't take the lock in time, it skips the write and warns, under R17's
   rules. It never writes the file without the lock, and it releases the lock
   on every path, errors included.
+
+  As implemented, after one lock timeout on a path, later writes to the same
+  file in the same process skip at once without waiting, so a sweep over many
+  instances doesn't wait the full timeout for each. Withdrawals still wait
+  every time.
 - **R19.** niwa writes the new contents to a temporary file in the same
   directory, flushes it to disk, and renames it over the original, so a reader
   sees either the old file or the new one. The original file's permission

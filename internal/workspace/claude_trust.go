@@ -16,7 +16,8 @@ const noticeClaudeTrustOverlay = "claude-trust-overlay"
 
 // deliverClaudeTrust brings the instance root's Claude Code trust in line with
 // [claude] trust_instances and returns the grant to record in the instance
-// state, an undo for this run's write, and warnings for the deferred block.
+// state, an undo for this run's write, whether this run changed the current
+// config file (wrote), and warnings for the deferred block.
 //
 // Create and Apply call it after the pipeline has succeeded, right before the
 // state is saved, so no failure but the save itself can follow a trust write.
@@ -45,20 +46,18 @@ const noticeClaudeTrustOverlay = "claude-trust-overlay"
 //   - On: claudetrust.Ensure records the grant, retracting a record left in
 //     another config file first. A record for a different path (the instance
 //     moved) is dropped with a warning and its entry left alone.
-//   - Off with a workspace record: the flag is retracted. A flag-only record
-//     is cleared. A created record is kept, so destroying the instance still
-//     removes the whole entry niwa created, and turning the option back on
-//     sets the flag again under that record. A skipped retraction keeps the
-//     record for the next apply. A record for a different path is dropped
-//     with a warning as Ensure does, and so is a malformed one (unknown mode
-//     or source, a bad config_file), so it isn't kept and warned about on
-//     every apply.
-func (a *Applier) deliverClaudeTrust(instanceRoot string, on bool, existing *claudetrust.Grant) (grant *claudetrust.Grant, undo func() string, warnings []string) {
+//   - Off with a workspace record: the flag is retracted once and the record
+//     cleared, whatever its mode. A skipped retraction keeps the record for
+//     the next apply. A record for a different path is dropped with a
+//     warning as Ensure does, and so is a malformed one (unknown mode or
+//     source, a bad config_file), so it isn't kept and warned about on every
+//     apply.
+func (a *Applier) deliverClaudeTrust(instanceRoot string, on bool, existing *claudetrust.Grant) (grant *claudetrust.Grant, undo func() string, wrote bool, warnings []string) {
 	if a.DeveloperHome == "" {
-		return existing, nil, nil
+		return existing, nil, false, nil
 	}
 	if existing != nil && existing.Source == claudetrust.SourceReview {
-		return existing, nil, nil
+		return existing, nil, false, nil
 	}
 
 	if on {
@@ -67,35 +66,35 @@ func (a *Applier) deliverClaudeTrust(instanceRoot string, on bool, existing *cla
 			warnings = append(warnings, out.Warning)
 		}
 		if !out.Changed || out.Grant == nil {
-			return out.Grant, nil, warnings
+			return out.Grant, nil, false, warnings
 		}
-		return out.Grant, out.Undo, warnings
+		return out.Grant, out.Undo, true, warnings
 	}
 
 	if existing == nil {
-		return nil, nil, nil
+		return nil, nil, false, nil
 	}
 	key, err := claudetrust.Key(instanceRoot)
 	if err != nil {
-		return existing, nil, []string{fmt.Sprintf("Claude trust entry %q in %s left in place: %v", existing.Key, existing.ConfigFile, err)}
+		return existing, nil, false, []string{fmt.Sprintf("Claude trust entry %q in %s left in place: %v", existing.Key, existing.ConfigFile, err)}
 	}
 	if existing.Key != key {
 		// The same call Ensure makes for a moved instance: the old entry
 		// can't be proven this instance's, so it stays and the record goes.
-		return nil, nil, []string{fmt.Sprintf(
-			"the recorded Claude trust entry %q in %s is for a different path than this instance (%s); leaving it in place, remove it by hand if it is stale",
-			existing.Key, existing.ConfigFile, key)}
+		return nil, nil, false, []string{claudetrust.MovedWarning(existing, key)}
 	}
 	if existing.ValidateShape() != nil {
-		return nil, nil, []string{claudetrust.MalformedWarning(existing, key)}
+		return nil, nil, false, []string{claudetrust.MalformedWarning(existing, key)}
 	}
 	if w := claudetrust.Withdraw(existing, key, claudetrust.Retract); w != "" {
-		return existing, nil, []string{w}
+		return existing, nil, false, []string{w}
 	}
-	if existing.Mode == claudetrust.ModeCreated {
-		return existing, nil, nil
-	}
-	return nil, nil, nil
+	// The record goes even for a created grant. Keeping it would make every
+	// later apply with the option off strip the flag again, including trust a
+	// developer granted by hand after niwa withdrew its own. The cost: an
+	// entry niwa created can stay in the config without the flag, a leftover
+	// that trusts nothing, and destroying the instance no longer removes it.
+	return nil, nil, false, nil
 }
 
 // undoClaudeTrust runs deliverClaudeTrust's undo after the state save failed,

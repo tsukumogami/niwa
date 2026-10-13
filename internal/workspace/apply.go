@@ -616,7 +616,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	// to withdraw it. A new instance has no earlier grant, and initState is
 	// the workspace root's state, whose grant (if any) names the root's key,
 	// not this instance's.
-	trustGrant, undoTrust, trustWarnings := a.deliverClaudeTrust(instanceRoot, result.trustInstances, nil)
+	trustGrant, undoTrust, trustWrote, trustWarnings := a.deliverClaudeTrust(instanceRoot, result.trustInstances, nil)
 	result.warnings = append(result.warnings, trustWarnings...)
 
 	state := &InstanceState{
@@ -643,7 +643,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		a.undoClaudeTrust(undoTrust)
 		return "", fmt.Errorf("saving instance state: %w", err)
 	}
-	a.discloseOverlayTrust(workspaceRoot, result.trustFromOverlay, undoTrust != nil, trustGrant)
+	a.discloseOverlayTrust(workspaceRoot, result.trustFromOverlay, trustWrote, trustGrant)
 
 	n := len(result.repoStates)
 	if n == 1 {
@@ -814,7 +814,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	// Claude trust is the last thing written before the state, for the same
 	// reason as in Create: no failure may follow it except the save, which
 	// undoes it.
-	trustGrant, undoTrust, trustWarnings := a.deliverClaudeTrust(instanceRoot, result.trustInstances, existingState.ClaudeTrust)
+	trustGrant, undoTrust, trustWrote, trustWarnings := a.deliverClaudeTrust(instanceRoot, result.trustInstances, existingState.ClaudeTrust)
 	result.warnings = append(result.warnings, trustWarnings...)
 
 	// InstanceName comes from the on-disk instance directory, not from
@@ -843,9 +843,8 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		Shadows:              result.shadows,
 		AuthSources:          result.authSources,
 		TrustKeys:            result.trustKeys,
-		// The grant deliverClaudeTrust settled on: the existing one carried
-		// (a created one stays after the off switch), a new one, or none
-		// once a withdrawal cleared it.
+		// The grant deliverClaudeTrust settled on: the existing one carried,
+		// a new one, or none once a withdrawal cleared it.
 		ClaudeTrust: trustGrant,
 		// Taken from this run's result, never from existingState: a posture
 		// removed from the config must stop being recorded on the next apply.
@@ -856,7 +855,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		a.undoClaudeTrust(undoTrust)
 		return fmt.Errorf("saving instance state: %w", err)
 	}
-	a.discloseOverlayTrust(workspaceRoot, result.trustFromOverlay, undoTrust != nil, trustGrant)
+	a.discloseOverlayTrust(workspaceRoot, result.trustFromOverlay, trustWrote, trustGrant)
 
 	n := len(result.repoStates)
 	if n == 1 {
