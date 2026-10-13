@@ -205,6 +205,16 @@ files that need exact names); the implementation diverged to always insert
   coverage is a separate concern handled by the (unchanged) per-repo mechanism.
   The feature names this boundary rather than solving it.
 
+  *Correction (2026-10):* the walk-up premise doesn't hold for Claude Code
+  2.1.296. A session started inside a repository under an instance does find
+  the instance root's `.mcp.json` by walking up, and lists its servers pending
+  approval. What it lacks is trust and approval for its own directory:
+  Claude Code approves the server there only once the repository root is
+  trusted and the repository's project settings list it. niwa's
+  `[claude] trust_instances` now writes both for each cloned repository; see
+  `docs/designs/current/DESIGN-trust-instances.md`, "Repo directories
+  (2026-10)". The text above is kept as written.
+
 - **No removal-cleanup at the workspace root.** The workspace root has no
   managed-file state store -- its existing managed files (`settings.json`,
   `CLAUDE.md`, root skills) are overwrite-idempotent and never auto-removed.

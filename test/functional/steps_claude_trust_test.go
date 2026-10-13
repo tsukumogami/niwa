@@ -28,6 +28,144 @@ func registerClaudeTrustSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^instance "([^"]*)" records Claude trust with mode "([^"]*)"$`, instanceRecordsClaudeTrust)
 	ctx.Step(`^instance "([^"]*)" records no Claude trust$`, instanceRecordsNoClaudeTrust)
 	ctx.Step(`^the Claude config in HOME trusts the dispatch instance, recorded with mode "([^"]*)"$`, theClaudeConfigTrustsTheDispatchInstance)
+	ctx.Step(`^the Claude config in HOME trusts repo "([^"]*)" of instance "([^"]*)"$`, theClaudeConfigTrustsRepo)
+	ctx.Step(`^the Claude config in HOME has no entry for repo "([^"]*)" of instance "([^"]*)"$`, theClaudeConfigHasNoEntryForRepo)
+	ctx.Step(`^the Claude config in HOME keeps an untrusted entry for repo "([^"]*)" of instance "([^"]*)"$`, theClaudeConfigKeepsUntrustedEntryForRepo)
+	ctx.Step(`^instance "([^"]*)" records Claude trust for repo "([^"]*)" with mode "([^"]*)"$`, instanceRecordsRepoClaudeTrust)
+	ctx.Step(`^instance "([^"]*)" records no Claude trust for repos$`, instanceRecordsNoRepoClaudeTrust)
+}
+
+// repoTrustKey is the projects key Claude Code computes for a session started
+// in the repository rel ("<group>/<repo>") of instance. niwa clones the
+// repository as a plain directory, so only the workspace root can hold a
+// symlink.
+func repoTrustKey(s *testState, instance, rel string) (string, error) {
+	key, err := instanceTrustKey(s, instance)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(key, filepath.FromSlash(rel)), nil
+}
+
+func theClaudeConfigTrustsRepo(ctx context.Context, rel, instance string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	key, err := repoTrustKey(s, instance, rel)
+	if err != nil {
+		return err
+	}
+	projects, err := claudeProjects(s)
+	if err != nil {
+		return err
+	}
+	if e := projects[key]; e["hasTrustDialogAccepted"] != true {
+		return fmt.Errorf("no trusted entry keyed %q in %s; projects: %v", key, claudeConfigPath(s), projects)
+	}
+	return nil
+}
+
+func theClaudeConfigHasNoEntryForRepo(ctx context.Context, rel, instance string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	key, err := repoTrustKey(s, instance, rel)
+	if err != nil {
+		return err
+	}
+	projects, err := claudeProjects(s)
+	if err != nil {
+		return err
+	}
+	if e, ok := projects[key]; ok {
+		return fmt.Errorf("entry keyed %q still in %s: %v", key, claudeConfigPath(s), e)
+	}
+	return nil
+}
+
+func theClaudeConfigKeepsUntrustedEntryForRepo(ctx context.Context, rel, instance string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	key, err := repoTrustKey(s, instance, rel)
+	if err != nil {
+		return err
+	}
+	projects, err := claudeProjects(s)
+	if err != nil {
+		return err
+	}
+	e, ok := projects[key]
+	if !ok {
+		return fmt.Errorf("the entry keyed %q is gone; the off switch removes only the flag", key)
+	}
+	if _, has := e["hasTrustDialogAccepted"]; has {
+		return fmt.Errorf("entry keyed %q still carries the trust flag: %v", key, e)
+	}
+	return nil
+}
+
+// recordedRepoClaudeTrust reads the claude_trust_repos records from the
+// instance state.
+func recordedRepoClaudeTrust(s *testState, instance string) (map[string]map[string]string, error) {
+	path := filepath.Join(s.workspaceRoot, instance, ".niwa", "instance.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var state struct {
+		ClaudeTrustRepos map[string]map[string]string `json:"claude_trust_repos"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	return state.ClaudeTrustRepos, nil
+}
+
+func instanceRecordsRepoClaudeTrust(ctx context.Context, instance, rel, mode string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	key, err := repoTrustKey(s, instance, rel)
+	if err != nil {
+		return err
+	}
+	records, err := recordedRepoClaudeTrust(s, instance)
+	if err != nil {
+		return err
+	}
+	got := records[rel]
+	want := map[string]string{
+		"config_file": claudeConfigPath(s),
+		"key":         key,
+		"mode":        mode,
+		"source":      "workspace",
+	}
+	for k, v := range want {
+		if got[k] != v {
+			return fmt.Errorf("claude_trust_repos[%q] = %v, want %v", rel, got, want)
+		}
+	}
+	return nil
+}
+
+func instanceRecordsNoRepoClaudeTrust(ctx context.Context, instance string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	got, err := recordedRepoClaudeTrust(s, instance)
+	if err != nil {
+		return err
+	}
+	if got != nil {
+		return fmt.Errorf("claude_trust_repos = %v, want no records", got)
+	}
+	return nil
 }
 
 // theClaudeConfigTrustsTheDispatchInstance checks the instance the last

@@ -655,3 +655,85 @@ this feature with it, which is why the guide records the version and the
 - Old review entries name directories that no longer exist, and review
   instance names aren't reused, so in practice they grant
   nothing.
+
+## Repo directories (2026-10)
+
+The owner widened the goal after the instance-root version shipped: a session
+started anywhere in an instance should ask nothing, not only one started at the
+root. The accepted cost is that each cloned repository's own committed
+`.claude` settings, hooks and `.mcp.json` then apply without a prompt.
+
+Measured on Claude Code 2.1.296, with an isolated `CLAUDE_CONFIG_DIR`, one
+stdio server in `<instance>/.mcp.json`, and a git repository at
+`<instance>/<group>/<repo>`:
+
+- A session in the repository does see the ancestor `<instance>/.mcp.json`
+  server, pending approval with nothing trusted.
+- Trusting and approving at the instance root leaves the repository session
+  pending, and so does trusting the repository root with no approval there.
+- Trusting the repository root and listing the server in
+  `enabledMcpjsonServers` in `<repo>/.claude/settings.local.json` (or
+  `settings.json`) approves it, even with the instance root untrusted.
+
+So each repository needs both halves, and niwa writes both when
+`trust_instances` is on:
+
+- **Trust.** `deliverClaudeTrust` now takes the instance-relative paths of the
+  repositories `runPipeline` materialized Claude settings into (carried out in
+  `pipelineResult`) and
+  runs `claudetrust.Ensure` on each repository root beside the root's own
+  call. Grants go in a new `InstanceState.ClaudeTrustRepos`, a map keyed by
+  `<group>/<repo>`; `ClaudeTrust` stays the root's record so older binaries
+  still find it. Each repository grant follows the root's rules: the same
+  over-broad-key refusal, moved and malformed handling, review records left
+  untouched, and the off switch retracting once and clearing. A recorded
+  repository that's no longer trusted (removed from the config, or Claude
+  turned off for it) is retracted and dropped on the next apply. A failed
+  state save runs every undo the run collected, latest first.
+- **Approval.** `SettingsMaterializer` writes `enabledMcpjsonServers` into
+  each repository's `settings.local.json`, the same names
+  `instanceRootMCPApprovals` gives the instance root, since those are the
+  servers a repository session reaches through the ancestor walk. It writes
+  them only when the merged config's `trust_instances` is true, so a
+  workspace that doesn't opt in gets a byte-identical document, and the list
+  alone is now enough to write the document.
+- **Teardown.** `withdrawClaudeTrust` withdraws each repository grant with
+  `Destroy`, checked against the resolved path of
+  `<instanceDir>/<recorded path>`. The recorded path comes from a file anyone
+  controlling the instance can edit, so one that is absolute, contains `..`,
+  isn't clean, or resolves (through a symlink, say) outside the instance's own
+  key is refused before any key is computed from it. A repository directory
+  already gone has no expected key, so its record is dropped with a warning
+  naming the entry, and the entry is left for the developer to remove.
+- **Inside the instance only.** Apply runs the same path check before it
+  trusts a repository, and trusts the key the check returns. A repository or
+  group directory that is a symlink leading out of the instance is skipped
+  with a warning: its entry could never be checked against the instance to
+  take it back.
+- **The gate.** A repository gets trust and the approval list only when
+  Claude's own enable setting for it is on (`AgentEnabled` with Claude's gate
+  key), not when any agent's is, so a repository with Claude off and another
+  agent on gets neither.
+- **Review instances.** A `niwa watch` review instance gets no repository
+  trust. The pull request is fetched into its own clone directory, but the
+  reviewing agent can check it out in a repository directory, where trust
+  would let its committed hooks run without a prompt. `niwa watch` records
+  `review_instance` in the instance state before it fetches the pull request
+  and withdraws the repository grants the creating apply wrote; every later
+  apply on a marked instance, or one whose root grant has source `review`,
+  retracts repository grants instead of writing them. If `niwa watch`'s
+  withdrawal is skipped, the review stage fails after the marker is saved,
+  and the stage's destroy retries it.
+- **Notice.** A workspace whose users saw the root-only overlay notice gets
+  one more, `claude-trust-overlay-repos`, the first time an overlay turns on
+  repository trust for it.
+
+Worktrees share the repository settings document, so they get the approval
+list, but niwa doesn't trust worktree directories: a session normally enters a
+worktree from one already running, and trusting them would need the worktree
+create and remove hooks to write and withdraw grants. The guide names the gap.
+
+This also corrects two statements above. "Which sessions it reaches" now
+includes sessions started inside a cloned repository, and "Scope of the
+write" is one boolean per instance root and one per cloned repository root,
+each a directory niwa created.

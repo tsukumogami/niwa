@@ -418,6 +418,10 @@ type pipelineResult struct {
 	// and its notice once the pipeline has succeeded.
 	trustInstances   bool
 	trustFromOverlay bool
+	// claudeTrustRepos are the instance-relative paths ("<group>/<repo>") of
+	// the repositories whose Claude settings gate is open, the directories
+	// deliverClaudeTrust trusts when trustInstances is set.
+	claudeTrustRepos []string
 	// procedureErr is a procedure-routed delivery's failure carried out as
 	// data rather than as the pipeline's error return. The record above has to
 	// reach the state file before the failure reaches the user: a run that
@@ -616,34 +620,35 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	// to withdraw it. A new instance has no earlier grant, and initState is
 	// the workspace root's state, whose grant (if any) names the root's key,
 	// not this instance's.
-	trustGrant, undoTrust, trustWrote, trustWarnings := a.deliverClaudeTrust(instanceRoot, result.trustInstances, nil)
-	result.warnings = append(result.warnings, trustWarnings...)
+	trust := a.deliverClaudeTrust(instanceRoot, result.trustInstances, result.claudeTrustRepos, nil)
+	result.warnings = append(result.warnings, trust.warnings...)
 
 	state := &InstanceState{
-		SchemaVersion:  SchemaVersion,
-		ConfigName:     &configName,
-		InstanceName:   instanceName,
-		InstanceNumber: instanceNumber,
-		Root:           instanceRoot,
-		Created:        now,
-		LastApplied:    now,
-		ManagedFiles:   result.managedFiles,
-		Repos:          result.repoStates,
-		Shadows:        result.shadows,
-		OverlayURL:     result.overlayURL,
-		OverlayCommit:  result.overlayCommit,
-		AuthSources:    result.authSources,
-		TrustKeys:      result.trustKeys,
-		ClaudeTrust:    trustGrant,
+		SchemaVersion:    SchemaVersion,
+		ConfigName:       &configName,
+		InstanceName:     instanceName,
+		InstanceNumber:   instanceNumber,
+		Root:             instanceRoot,
+		Created:          now,
+		LastApplied:      now,
+		ManagedFiles:     result.managedFiles,
+		Repos:            result.repoStates,
+		Shadows:          result.shadows,
+		OverlayURL:       result.overlayURL,
+		OverlayCommit:    result.overlayCommit,
+		AuthSources:      result.authSources,
+		TrustKeys:        result.trustKeys,
+		ClaudeTrust:      trust.root,
+		ClaudeTrustRepos: trust.repos,
 		// Recomputed from this run's config alone, like Shadows.
 		ClaudePermissions: result.claudePermissions,
 	}
 
 	if err := a.saveInstanceState(instanceRoot, state); err != nil {
-		a.undoClaudeTrust(undoTrust)
+		a.undoClaudeTrust(trust.undos)
 		return "", fmt.Errorf("saving instance state: %w", err)
 	}
-	a.discloseOverlayTrust(workspaceRoot, result.trustFromOverlay, trustWrote, trustGrant)
+	a.discloseOverlayTrust(workspaceRoot, result.trustFromOverlay, trust.wrote, trust.root, trust.repos)
 
 	n := len(result.repoStates)
 	if n == 1 {
@@ -814,8 +819,8 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	// Claude trust is the last thing written before the state, for the same
 	// reason as in Create: no failure may follow it except the save, which
 	// undoes it.
-	trustGrant, undoTrust, trustWrote, trustWarnings := a.deliverClaudeTrust(instanceRoot, result.trustInstances, existingState.ClaudeTrust)
-	result.warnings = append(result.warnings, trustWarnings...)
+	trust := a.deliverClaudeTrust(instanceRoot, result.trustInstances, result.claudeTrustRepos, existingState)
+	result.warnings = append(result.warnings, trust.warnings...)
 
 	// InstanceName comes from the on-disk instance directory, not from
 	// configName or cfg.Workspace.Name. For numbered ("my-name-2") and
@@ -836,6 +841,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		SkipGlobal:           existingState.SkipGlobal,
 		NoOverlay:            existingState.NoOverlay,
 		NoWorktreeDelegation: existingState.NoWorktreeDelegation,
+		ReviewInstance:       existingState.ReviewInstance,
 		OverlayURL:           finalOverlayURL,
 		OverlayCommit:        finalOverlayCommit,
 		ManagedFiles:         result.managedFiles,
@@ -843,19 +849,20 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		Shadows:              result.shadows,
 		AuthSources:          result.authSources,
 		TrustKeys:            result.trustKeys,
-		// The grant deliverClaudeTrust settled on: the existing one carried,
-		// a new one, or none once a withdrawal cleared it.
-		ClaudeTrust: trustGrant,
+		// The grants deliverClaudeTrust settled on: the existing ones carried,
+		// new ones, or none once a withdrawal cleared them.
+		ClaudeTrust:      trust.root,
+		ClaudeTrustRepos: trust.repos,
 		// Taken from this run's result, never from existingState: a posture
 		// removed from the config must stop being recorded on the next apply.
 		ClaudePermissions: result.claudePermissions,
 	}
 
 	if err := a.saveInstanceState(instanceRoot, state); err != nil {
-		a.undoClaudeTrust(undoTrust)
+		a.undoClaudeTrust(trust.undos)
 		return fmt.Errorf("saving instance state: %w", err)
 	}
-	a.discloseOverlayTrust(workspaceRoot, result.trustFromOverlay, trustWrote, trustGrant)
+	a.discloseOverlayTrust(workspaceRoot, result.trustFromOverlay, trust.wrote, trust.root, trust.repos)
 
 	n := len(result.repoStates)
 	if n == 1 {
@@ -2065,8 +2072,19 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// be canonicalized. Which agent receives it is a lookup in the declaration
 	// table, not a branch here.
 	repoRoots := make([]string, 0, len(classified))
+	// The repositories whose Claude settings gate is open: Claude's own
+	// per-repository gate, the one the repository approval list follows too
+	// (see repoMCPApprovals). Claude trust for them is written after the
+	// pipeline, beside the instance root's. The settings materializer runs
+	// behind hookOwningAgentsEnabled, which today is the same gate, since
+	// Claude is the only agent that receives hooks; asking Claude's gate
+	// directly keeps another agent's gate from ever opening Claude trust.
+	var claudeTrustRepos []string
 	for _, cr := range classified {
 		repoRoots = append(repoRoots, filepath.Join(instanceRoot, cr.Group, cr.Repo.Name))
+		if claudeEnabled(effectiveCfg, cr.Repo.Name) {
+			claudeTrustRepos = append(claudeTrustRepos, filepath.ToSlash(filepath.Join(cr.Group, cr.Repo.Name)))
+		}
 	}
 	trustKeys, procErr := a.deliverDirectoryTrust(repoRoots, opts.existingState, &allWarnings)
 
@@ -2252,8 +2270,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		disclosedNotices:  newDisclosures,
 		trustKeys:         trustKeys,
 		claudePermissions: instancePermissionsPosture(effectiveCfg),
-		trustInstances:    effectiveCfg.Claude.TrustInstances != nil && *effectiveCfg.Claude.TrustInstances,
+		trustInstances:    trustInstancesOn(effectiveCfg),
 		trustFromOverlay:  effectiveCfg.TrustInstancesFromOverlay,
+		claudeTrustRepos:  claudeTrustRepos,
 		procedureErr:      procErr,
 		exemptPaths:       exemptPaths,
 	}, nil

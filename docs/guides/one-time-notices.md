@@ -70,7 +70,8 @@ merged into `DisclosedNotices` by both `Create` and `Apply`.
 | Key | Condition | File |
 |-----|-----------|------|
 | `provider-shadow` | Personal overlay declares a provider that shadows the team config's provider | `apply.go` |
-| `claude-trust-overlay` | Instance trust is on only because the workspace overlay sets `[claude] trust_instances`, and the instance holds a workspace grant. Recorded in the workspace root's state, so it's shown once per workspace; a single-instance layout has no root state, so it's shown by any run that writes trust | `claude_trust.go` |
+| `claude-trust-overlay` | Instance trust is on only because the workspace overlay sets `[claude] trust_instances`, and the instance holds a workspace grant for its root or a cloned repository. Recorded in the workspace root's state, so it's shown once per workspace; a single-instance layout has no root state, so it's shown by any run that writes trust. When the notice names repository directories, `claude-trust-overlay-repos` is recorded with it | `claude_trust.go` |
+| `claude-trust-overlay-repos` | The workspace already holds `claude-trust-overlay` without this key (it was told before niwa trusted repository directories), trust is on only because of the overlay, and the instance holds a workspace grant for a cloned repository. Says the repository directories are now trusted too, and what their committed `.claude` settings and hooks can then do. Recorded in the workspace root's state, so it's shown once per workspace | `claude_trust.go` |
 
 ## Testing
 

@@ -1372,15 +1372,21 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 	// deduped against a pr-body hook the workspace still declares itself.
 	prBodyHook := resolvePrBodyHook(ctx.Effective, hooks)
 
+	approvedMCP, err := repoMCPApprovals(ctx.Config, ctx.RepoName)
+	if err != nil {
+		return nil, fmt.Errorf("deciding which MCP servers the repository settings approve: %w", err)
+	}
+
 	// The worktree-delegation decision (computed once per apply, threaded via the
 	// context) is itself enough to require a settings file even when nothing else
 	// is configured: it writes either the WorktreeCreate/WorktreeRemove hooks or
 	// the permissions.deny fallback. The default work-summary hooks are likewise
 	// enough on their own (though in practice a shirabe adopter also carries a
-	// non-empty plugin list, so this rarely decides the outcome).
+	// non-empty plugin list, so this rarely decides the outcome), and so is an
+	// approval list.
 	if len(settings) == 0 && len(hooks) == 0 && len(resolvedEnv) == 0 &&
 		len(plugins) == 0 && len(marketplaces) == 0 && ctx.WorktreeDelegation == nil &&
-		len(workSummaryHooks) == 0 && !prBodyHook {
+		len(workSummaryHooks) == 0 && !prBodyHook && len(approvedMCP) == 0 {
 		return nil, nil
 	}
 
@@ -1398,6 +1404,7 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 		WorktreeDelegation: ctx.WorktreeDelegation,
 		WorkSummaryHooks:   workSummaryHooks,
 		PrBodyHook:         prBodyHook,
+		ApprovedMCPServers: approvedMCP,
 	})
 	if err != nil {
 		return nil, err

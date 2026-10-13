@@ -1,9 +1,11 @@
 Feature: niwa trusts the instances it creates in Claude Code
   With [claude] trust_instances = true, create and apply mark the instance
   root as a trusted project in $HOME/.claude.json, keyed by the root with
-  every symlink resolved, and record the grant in the instance state. Destroy
-  removes what the record names, and turning the option off and applying
-  withdraws the flag while keeping the entry.
+  every symlink resolved, and record the grant in the instance state. Each
+  repository niwa clones into the instance gets its own entry and record, and
+  its settings.local.json approves the servers the instance root's .mcp.json
+  carries. Destroy removes what the records name, and turning the option off
+  and applying withdraws the flags while keeping the entries.
 
   HOME is the scenario sandbox and CLAUDE_CONFIG_DIR is stripped, so the
   developer's own Claude config is never touched. Runs offline against the
@@ -184,3 +186,126 @@ Feature: niwa trusts the instances it creates in Claude Code
     And the instance "trustws-cdcdcdcd-cdc" exists
     And the Claude config in HOME trusts instance "trustws-cdcdcdcd-cdc"
     And instance "trustws-cdcdcdcd-cdc" records Claude trust with mode "created"
+
+  # --- Repository directories ---
+
+  @critical
+  Scenario: create with trust_instances on trusts each repo root and approves the declared servers there
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "app" exists
+    And a source repo "lib" exists
+    And a config repo "trustws" exists with body:
+      """
+      [workspace]
+      name = "trustws"
+
+      [groups.tools]
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+
+      [repos.lib]
+      url = "{repo:lib}"
+      group = "tools"
+
+      [claude]
+      trust_instances = true
+
+      [mcp.servers.example]
+      url = "https://mcp.example.test/v1"
+      """
+    When I run niwa init from config repo "trustws"
+    Then the exit code is 0
+    When I run "niwa create trustws"
+    Then the exit code is 0
+    And the Claude config in HOME trusts instance "trustws"
+    And the Claude config in HOME trusts repo "tools/app" of instance "trustws"
+    And the Claude config in HOME trusts repo "tools/lib" of instance "trustws"
+    And instance "trustws" records Claude trust for repo "tools/app" with mode "created"
+    And instance "trustws" records Claude trust for repo "tools/lib" with mode "created"
+    And the repo "tools/app" settings document in instance "trustws" approves MCP servers "example"
+    And the repo "tools/lib" settings document in instance "trustws" approves MCP servers "example"
+
+  @critical
+  Scenario: destroy removes the entries niwa created for the repo roots
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "app" exists
+    And the Claude config in HOME has a trusted entry for "/elsewhere/hand-made"
+    And a config repo "trustws" exists with body:
+      """
+      [workspace]
+      name = "trustws"
+
+      [groups.tools]
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+
+      [claude]
+      trust_instances = true
+      """
+    When I run niwa init from config repo "trustws"
+    Then the exit code is 0
+    When I run "niwa create trustws"
+    Then the exit code is 0
+    And the Claude config in HOME trusts repo "tools/app" of instance "trustws"
+    When I run "niwa destroy trustws" from workspace root
+    Then the exit code is 0
+    And the instance "trustws" does not exist
+    And the Claude config in HOME has no entry for instance "trustws"
+    And the Claude config in HOME has no entry for repo "tools/app" of instance "trustws"
+    And the Claude config in HOME still has a trusted entry for "/elsewhere/hand-made"
+
+  @critical
+  Scenario: turning the option off retracts the repo roots' flags and approvals
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "app" exists
+    And a config repo "trustws" exists with body:
+      """
+      [workspace]
+      name = "trustws"
+
+      [groups.tools]
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+
+      [claude]
+      trust_instances = true
+
+      [mcp.servers.example]
+      url = "https://mcp.example.test/v1"
+      """
+    When I run niwa init from config repo "trustws"
+    Then the exit code is 0
+    When I run "niwa create trustws"
+    Then the exit code is 0
+    And the Claude config in HOME trusts repo "tools/app" of instance "trustws"
+    When the config repo "trustws" is force-pushed to:
+      """
+      [workspace]
+      name = "trustws"
+
+      [groups.tools]
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+
+      [claude]
+      trust_instances = false
+
+      [mcp.servers.example]
+      url = "https://mcp.example.test/v1"
+      """
+    And I run "niwa apply trustws"
+    Then the exit code is 0
+    And the Claude config in HOME keeps an untrusted entry for repo "tools/app" of instance "trustws"
+    And instance "trustws" records no Claude trust for repos
+    And the repo "tools/app" settings document in instance "trustws" approves no MCP servers

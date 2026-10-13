@@ -156,6 +156,29 @@ type InstanceState struct {
 	// it. omitempty keeps the field invisible to old binaries reading new
 	// state files.
 	ClaudeTrust *claudetrust.Grant `json:"claude_trust,omitempty"`
+	// ClaudeTrustRepos records the trust entries niwa wrote for the repository
+	// directories it cloned into this instance, keyed by the repository's
+	// instance-relative path ("<group>/<repo>", slash-separated). Each grant
+	// follows ClaudeTrust's rules, and a destroy checks it against the
+	// resolved path of <instance>/<group>/<repo>, which must sit inside the
+	// instance. ClaudeTrust stays the root's record so older binaries still
+	// find it. omitempty keeps the field invisible to old binaries reading
+	// new state files, but an older niwa that saves the state drops it: the
+	// entries it named then stay in the Claude config with no record, so a
+	// later apply takes them for trust someone else granted and destroying
+	// the instance leaves them behind.
+	ClaudeTrustRepos map[string]*claudetrust.Grant `json:"claude_trust_repos,omitempty"`
+	// ReviewInstance marks an instance niwa watch staged a pull-request
+	// review in. Set once, before the pull request's head is fetched, and
+	// carried forward by every apply. A review instance never gets
+	// repository-directory Claude trust: the reviewing agent can check the
+	// pull request out in a repository directory, and trust there would let
+	// the pull request's committed .claude settings and hooks run without a
+	// prompt. An older niwa that saves the state
+	// drops the field; a review-sourced ClaudeTrust grant marks the instance
+	// too (see isReviewInstance). omitempty keeps the field invisible to old
+	// binaries reading new state files.
+	ReviewInstance bool `json:"review_instance,omitempty"`
 	// ClaudePermissions records the declared permission posture the
 	// instance-root settings document resolved from: "bypass", "ask", or
 	// empty when nothing is declared. It is niwa's own record of the

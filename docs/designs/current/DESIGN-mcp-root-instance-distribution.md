@@ -492,6 +492,11 @@ delivered MCP server load without a prompt.
   instance-root behavior.
 - Sessions started inside a managed repo subdirectory are not covered (Claude
   Code does not walk up to an ancestor `.mcp.json`). Accepted per the PRD.
+  *Correction (2026-10):* Claude Code 2.1.296 does walk up from a repository
+  to the instance root's `.mcp.json`; the server stays pending there until the
+  repository root is trusted and its project settings approve it, which
+  `[claude] trust_instances` now provides for cloned repositories. See
+  `DESIGN-trust-instances.md`, "Repo directories (2026-10)".
 
 ### Mitigations
 
