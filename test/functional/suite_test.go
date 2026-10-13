@@ -540,6 +540,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// settings documents a declared posture reaches ---
 	registerPostureSteps(ctx)
 
+	// --- declared MCP servers: the approval list the instance root's settings
+	// document carries for the servers niwa generated into its .mcp.json ---
+	registerMCPApprovalSteps(ctx)
+
 	// --- the Codex acceptance bar: what a session in a prepared instance gets
 	// from the capability contract, and what the table says it does not ---
 	registerCodexAgentSteps(ctx)

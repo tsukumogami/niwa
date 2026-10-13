@@ -527,6 +527,14 @@ type BuildSettingsConfig struct {
 	// already applied the shirabe-plugin gate, the off switch, and dedup against
 	// a workspace's own declaration.
 	PrBodyHook bool
+
+	// ApprovedMCPServers, when non-empty, is written as Claude Code's
+	// enabledMcpjsonServers list (config.EnabledMcpjsonServersKey): the names
+	// of the servers niwa generated into the same tree's .mcp.json from
+	// [mcp.servers], as agentplan's MCPApprovals returned them. Empty writes
+	// no key at all, so a workspace that declares nothing -- or ships its
+	// .mcp.json verbatim -- gets the document it got before.
+	ApprovedMCPServers []string
 }
 
 // SessionHooks carries the inputs for the workspace-root
@@ -806,6 +814,16 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 		}
 	}
 
+	// enabledMcpjsonServers: the servers niwa generated into this tree's
+	// .mcp.json, approved by name so a session does not stop to ask about each
+	// one. The value is always a sorted, de-duplicated JSON array of strings:
+	// Claude Code rejects a settings file whose value here has any other
+	// shape, and a rejected file approves nothing at all. The all-servers
+	// form (enableAllProjectMcpServers) is never written.
+	if names := approvedMCPServerList(cfg.ApprovedMCPServers); len(names) > 0 {
+		doc[config.EnabledMcpjsonServersKey] = names
+	}
+
 	// Build hooks block from installed hooks.
 	hooksDoc := make(map[string]any, len(cfg.InstalledHooks))
 	if len(cfg.InstalledHooks) > 0 {
@@ -1020,6 +1038,27 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 	}
 
 	return doc, nil
+}
+
+// approvedMCPServerList normalizes the approved server names into the value
+// written under config.EnabledMcpjsonServersKey: sorted, without duplicates or
+// empty names. It returns nil when nothing is left, which writes no key.
+func approvedMCPServerList(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if n != "" {
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	out = slices.Compact(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // emitReports writes each report line to w (falling back to os.Stderr when w

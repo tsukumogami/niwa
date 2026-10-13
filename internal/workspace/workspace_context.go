@@ -427,6 +427,11 @@ func (m *RootSettingsMaterializer) Materialize(ctx *MaterializeContext) ([]strin
 		return nil, fmt.Errorf("resolving env vars for workspace root: %w", err)
 	}
 
+	approvedMCP, err := instanceRootMCPApprovals(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("deciding which MCP servers the instance root settings approve: %w", err)
+	}
+
 	includeGit := false
 	var reports []string
 	doc, err := buildSettingsDoc(BuildSettingsConfig{
@@ -440,6 +445,7 @@ func (m *RootSettingsMaterializer) Materialize(ctx *MaterializeContext) ([]strin
 		IncludeGitInstructions: &includeGit,
 		UseAbsolutePaths:       true,
 		Reports:                &reports,
+		ApprovedMCPServers:     approvedMCP,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("building workspace root settings: %w", err)

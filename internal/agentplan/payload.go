@@ -60,7 +60,10 @@ import (
 // The existing verbatim .mcp.json file-distribution route is untouched by all
 // of this. It stays byte-opaque -- niwa has never parsed it and does not start
 // -- and a workspace that uses it without a structured declaration gets one
-// honest line at apply time saying where those servers reach.
+// honest line at apply time saying where those servers reach. Its servers are
+// also never pre-approved: the approval niwa writes for Claude Code names the
+// generated servers one by one (MCPApprovals), so a verbatim file keeps the
+// per-server prompt it has always had.
 
 // payloadFileMode is the permission a generated payload configuration is
 // written with. It is the same 0o600 internal/workspace spells as
@@ -319,6 +322,14 @@ type payloadLayout struct {
 	// verbatimFileName is the destination the compatibility file-distribution
 	// route uses for this agent, empty when the agent has no such route.
 	verbatimFileName string
+
+	// approvedInSettings marks an agent that asks a person to approve each
+	// server in this document before a session starts it, and that reads a
+	// standing approval out of the settings document SettingsPlan writes for
+	// the same tree. For such an agent the servers niwa generates here are
+	// also the servers it approves there, named one by one; see MCPApprovals.
+	// The settings document is one agent's, so at most one layout sets this.
+	approvedInSettings bool
 }
 
 // payloadLayouts is the per-agent table.
@@ -351,10 +362,11 @@ type payloadLayout struct {
 // developer will see it.
 var payloadLayouts = map[agent.Agent]payloadLayout{
 	agent.AgentClaude: {
-		scope:            PayloadAtInstanceRoot,
-		path:             []string{claudeMCPFileName},
-		format:           payloadFormatClaudeJSON,
-		verbatimFileName: claudeMCPFileName,
+		scope:              PayloadAtInstanceRoot,
+		path:               []string{claudeMCPFileName},
+		format:             payloadFormatClaudeJSON,
+		verbatimFileName:   claudeMCPFileName,
+		approvedInSettings: true,
 	},
 	agent.AgentCodex: {
 		scope:            PayloadInRepo,
@@ -653,6 +665,47 @@ func (p Producer) MCPVerbatimReport(destinations []string, declared bool) string
 			dest, resolved)
 	}
 	return ""
+}
+
+// MCPApprovals returns the names of the servers this agent's generated payload
+// document at scope carries, sorted, for an agent whose sessions ask a person
+// to approve each one unless its settings document already lists it. The
+// caller writes exactly these names into the settings document for the same
+// tree, so a server the workspace declares once is both shipped and approved.
+//
+// The selection is the one PayloadPlan makes -- the same gate, the same
+// capability lookup, the same scope, the same per-agent filter -- so the list
+// cannot name a server the document leaves out or miss one it carries. It is
+// a separate call rather than a by-product of PayloadPlan because the settings
+// document is written by a different step of the apply.
+//
+// Servers that reach the same file by being distributed verbatim are not
+// here and never could be: niwa does not parse that file, so it has no names
+// to approve, and approving them wholesale would mean trusting whatever the
+// file happens to contain. An agent with no such approval, a scope it does
+// not take, a closed gate, and a workspace declaring nothing each return nil.
+func (p Producer) MCPApprovals(scope PayloadScope, servers []MCPServer) ([]string, error) {
+	layout, ok := p.payloadLayout()
+	if !ok || !layout.approvedInSettings || layout.scope != scope {
+		return nil, nil
+	}
+	deliversMCP, err := p.delivers(MCPServers)
+	if err != nil {
+		return nil, err
+	}
+	if !deliversMCP {
+		return nil, nil
+	}
+	generated := p.mcpServersForAgent(servers)
+	if len(generated) == 0 {
+		return nil, nil
+	}
+	names := make([]string, 0, len(generated))
+	for _, s := range generated {
+		names = append(names, s.Name)
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // mcpServersForAgent returns the servers this producer's agent generates, in
