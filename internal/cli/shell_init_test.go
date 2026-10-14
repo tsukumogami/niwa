@@ -333,6 +333,100 @@ func TestShellWrapper_NoCdOnFailure(t *testing.T) {
 	}
 }
 
+// TestShellWrapper_ResponseFileUnderTMPDIR runs the wrapper with TMPDIR at a
+// scratch directory and checks that the response file it hands niwa is one
+// validateResponseFilePath accepts, and that the shell navigates.
+//
+// macOS's bare `mktemp` ignores TMPDIR and always uses the per-user directory
+// under /var/folders, so a wrapper that relied on mktemp's default produced a
+// file niwa rejected whenever TMPDIR was unset or pointed anywhere else. The
+// second case puts a `mktemp` that behaves that way on PATH, so the test fails
+// on Linux too if the wrapper stops naming the directory itself.
+func TestShellWrapper_ResponseFileUnderTMPDIR(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatalf("bash is required to exercise the shell wrapper: %v", err)
+	}
+	landing := resolvedTempDir(t)
+
+	for _, tc := range []struct {
+		name         string
+		ignoreTMPDIR bool
+	}{
+		{name: "system mktemp"},
+		{name: "mktemp that ignores TMPDIR, as macOS's does", ignoreTMPDIR: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			stubDir := t.TempDir()
+			record := filepath.Join(stubDir, "response-file")
+
+			// The stub niwa records the response file it was handed and
+			// writes the landing path into it.
+			stub := fmt.Sprintf(`#!/bin/sh
+printf '%%s' "$NIWA_RESPONSE_FILE" > %q
+[ -n "$NIWA_RESPONSE_FILE" ] && printf '%%s\n' %q > "$NIWA_RESPONSE_FILE"
+exit 0
+`, record, landing)
+			if err := os.WriteFile(filepath.Join(stubDir, "niwa"), []byte(stub), 0o755); err != nil {
+				t.Fatalf("writing stub niwa: %v", err)
+			}
+			if tc.ignoreTMPDIR {
+				elsewhere := t.TempDir()
+				fake := fmt.Sprintf(`#!/bin/sh
+if [ $# -eq 0 ]; then
+    f=%q/tmp.$$
+else
+    f="${1%%%%XXX*}$$"
+fi
+: > "$f" && printf '%%s\n' "$f"
+`, elsewhere)
+				if err := os.WriteFile(filepath.Join(stubDir, "mktemp"), []byte(fake), 0o755); err != nil {
+					t.Fatalf("writing fake mktemp: %v", err)
+				}
+			}
+
+			script := shellWrapperTemplate + `
+niwa go
+printf 'CWD=%s\n' "$PWD"
+`
+			cmd := exec.Command(bash, "-c", script)
+			cmd.Dir = resolvedTempDir(t)
+			cmd.Env = append(os.Environ(),
+				"PATH="+stubDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"TMPDIR="+tmpDir,
+				"NIWA_RESPONSE_FILE=",
+				"_NIWA_SHELL_INIT=",
+			)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("running wrapper: %v\noutput:\n%s", err, out)
+			}
+
+			handed, err := os.ReadFile(record)
+			if err != nil {
+				t.Fatalf("the stub niwa recorded no response file: %v\noutput:\n%s", err, out)
+			}
+			t.Setenv("TMPDIR", tmpDir)
+			if err := validateResponseFilePath(string(handed)); err != nil {
+				t.Errorf("niwa would reject the wrapper's response file: %v", err)
+			}
+			cwd := ""
+			for line := range strings.SplitSeq(string(out), "\n") {
+				if strings.HasPrefix(line, "CWD=") {
+					cwd = strings.TrimPrefix(line, "CWD=")
+				}
+			}
+			if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+				cwd = resolved
+			}
+			if cwd != landing {
+				t.Errorf("niwa go did not cd: cwd = %q, want %q", cwd, landing)
+			}
+		})
+	}
+}
+
 // TestShellWrapperTemplate_AllCdPathsRouteThroughWrap holds the one invariant
 // the behavioral tests cannot see. They prove the commands they name navigate;
 // they cannot prove some other arm does not cd on its own, bypassing the
