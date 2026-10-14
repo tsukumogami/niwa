@@ -351,7 +351,7 @@ func TestShellWrapperTemplate_ProtocolStructure(t *testing.T) {
 	tmpl := shellWrapperTemplate
 
 	// mktemp failure falls back to running niwa without navigation (not a hard error).
-	if !strings.Contains(tmpl, `__niwa_tmp=$(mktemp) || { command niwa "$@"; return $?; }`) {
+	if !strings.Contains(tmpl, `__niwa_tmp=$(mktemp "${TMPDIR:-/tmp}/niwa.XXXXXXXXXX") || { command niwa "$@"; return $?; }`) {
 		t.Error("wrapper missing mktemp-failure fallback that still runs niwa and preserves exit code")
 	}
 
