@@ -224,8 +224,8 @@ func theOnboardMintRecordHasSecretID(ctx context.Context, kind, project, secretI
 }
 
 // iRunFromWorkspaceUnderPTYWithInput mirrors iRunUnderPTYWithInput
-// (util-linux `script -q` allocates a real pty so IsStdinTTY() reads
-// true) but cd's into a named workspace's .niwa directory first,
+// (`script` allocates a real pty so IsStdinTTY() reads true; see
+// scriptCommand) but cd's into a named workspace's .niwa directory first,
 // matching iRunFromWorkspace's own resolution -- needed for the
 // auto-detect re-run scenario (AC-19), which requires Interactive to
 // gate true before Detect ever runs.
@@ -235,7 +235,7 @@ func iRunFromWorkspaceUnderPTYWithInput(ctx context.Context, command, workspace,
 		return ctx, fmt.Errorf("no test state")
 	}
 	if _, err := exec.LookPath("script"); err != nil {
-		return ctx, fmt.Errorf("util-linux `script` not on PATH; cannot drive PTY scenario: %w", err)
+		return ctx, fmt.Errorf("`script` not on PATH; cannot drive PTY scenario: %w", err)
 	}
 
 	args := strings.Fields(command)
@@ -249,7 +249,8 @@ func iRunFromWorkspaceUnderPTYWithInput(ctx context.Context, command, workspace,
 	cwd := filepath.Join(s.workspaceRoot, workspace, ".niwa")
 	// util-linux `script` does not propagate the wrapped command's exit
 	// status as its own (confirmed empirically: `script -q -c "exit 42"
-	// /dev/null` exits 0) -- every existing PTY scenario in this suite
+	// /dev/null` exits 0). BSD `script` on macOS does propagate it, but
+	// the sentinel works under both, so one path serves both -- every existing PTY scenario in this suite
 	// only ever asserts exit 0 for exactly this reason. AC-32 needs a
 	// real non-zero exit code out of a TTY-driven run, so the inner
 	// command prints its own $? as a sentinel line instead of relying on
@@ -263,11 +264,17 @@ func iRunFromWorkspaceUnderPTYWithInput(ctx context.Context, command, workspace,
 	innerCmd := "cd " + shellQuote(cwd) + " && " + strings.Join(quoted, " ") +
 		"; printf '\\n" + sentinel + ":%d\\n' \"$?\""
 
-	cmd := exec.CommandContext(ctx, "script", "-q", "-c", innerCmd, "/dev/null")
+	cmd := scriptCommand(ctx, innerCmd)
 	cmd.Env = s.buildEnv()
 	rawInput := strings.ReplaceAll(input, `\n`, "\n")
-	cmd.Stdin = strings.NewReader(rawInput)
-	var stdout, stderr strings.Builder
+	var stdout ptyTranscript
+	var stderr strings.Builder
+	pr, err := ptyInput(rawInput, &stdout)
+	if err != nil {
+		return ctx, err
+	}
+	defer pr.Close()
+	cmd.Stdin = pr
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()

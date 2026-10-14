@@ -27,7 +27,9 @@ Feature: a declared permission posture across the generated settings documents
   Scenario Outline: <scenario> reaches every settings document with the mode the table gives it
     Given a clean niwa environment
     And a local git server is set up
-    And a source repo "app" exists
+    # "app" gets a worktree below, and git older than 2.42 can't add one to a
+    # repository with no commits.
+    And a source repo "app" exists with a commit
     And a source repo "other" exists
     And a config repo "posture" exists with body:
       """

@@ -154,9 +154,9 @@ jobs:
           echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           git status --porcelain > /tmp/repo-status-before.txt
 
-      # Linux-only until the godog harness is portable: it fakes a TTY with
-      # `script -c`, which is GNU-only syntax, and several scenarios assume an
-      # unresolved /tmp path. Tracked in tsukumogami/niwa#243.
+      # Linux-only for now. The suite also passes on macOS (tsukumogami/niwa#372
+      # made the harness portable), but no macOS leg runs it here yet; adding
+      # one is follow-up work under tsukumogami/niwa#243.
       # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
       - name: Functional tests
         if: matrix.os == 'ubuntu-latest'

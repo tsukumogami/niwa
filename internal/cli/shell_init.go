@@ -50,11 +50,18 @@ Add this to your shell profile:
 // The dispatcher matches on "$1", so a persistent flag before the command
 // (`niwa --no-progress worktree create`) falls through to the default arm and
 // does not navigate. Pre-existing and true of every wrapped command.
+//
+// The temp file is named under ${TMPDIR:-/tmp} rather than left to a bare
+// `mktemp`, because validateResponseFilePath accepts only a path under $TMPDIR
+// or /tmp, and macOS's bare `mktemp` ignores TMPDIR: it always uses the
+// per-user directory under /var/folders. With TMPDIR unset or pointing
+// anywhere else, every wrapped command there failed with "outside temp
+// directory" instead of navigating.
 const shellWrapperTemplate = `export _NIWA_SHELL_INIT=1
 
 __niwa_cd_wrap() {
     local __niwa_tmp __niwa_dir __niwa_rc
-    __niwa_tmp=$(mktemp) || { command niwa "$@"; return $?; }
+    __niwa_tmp=$(mktemp "${TMPDIR:-/tmp}/niwa.XXXXXXXXXX") || { command niwa "$@"; return $?; }
     NIWA_RESPONSE_FILE="$__niwa_tmp" command niwa "$@"
     __niwa_rc=$?
     __niwa_dir=$(cat "$__niwa_tmp" 2>/dev/null)

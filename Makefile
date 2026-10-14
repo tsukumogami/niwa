@@ -9,8 +9,11 @@ test:
 
 # Build a test binary for functional tests. The separate target lets the
 # functional workflow build once and reuse the artifact across scenarios.
+# The niwa_functional tag adds only what the suite's doubles need on macOS
+# (internal/vault/infisical/functional_roots_darwin.go); a Linux build is
+# unchanged by it.
 build-test:
-	go build -o niwa-test ./cmd/niwa
+	go build -tags niwa_functional -o niwa-test ./cmd/niwa
 
 # Only one functional suite at a time per checkout. The suite drives real git
 # against sandboxes it allocates itself, and two interleaved runs are how the

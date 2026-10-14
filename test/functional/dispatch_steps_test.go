@@ -73,25 +73,19 @@ var dispatchInstanceNameRe = regexp.MustCompile(`\+[a-z0-9_]*-[0-9a-f]{8}$`)
 func dispatchFakeClaudeScript(behaviour string) string {
 	pickSession := `  sid="${FAKE_CLAUDE_SESSION_ID:-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}"`
 	if behaviour == dispatchFakeClaudeMintedSession {
-		// A fresh id per invocation, from the kernel's own generator, so
-		// concurrent launches cannot collide on one job-state directory.
-		//
-		// /proc is Linux-only and so is this suite: CI runs the functional
-		// tests on ubuntu-latest alone, because the harness fakes a TTY with
-		// GNU-only `script -c` syntax and several scenarios assume an
-		// unresolved /tmp path (tsukumogami/niwa#243). A portable generator
-		// here would be the only portable thing in the harness, so this reads
-		// /proc directly and is one of the lines whoever closes #243 has to
-		// revisit.
+		// A fresh id per invocation, so concurrent launches cannot collide on
+		// one job-state directory: the kernel's own generator on Linux, and
+		// uuidgen where there is no /proc (macOS), lowercased because macOS
+		// prints it in capitals and a real session id is lowercase.
 		//
 		// It refuses rather than minting an empty id, which would otherwise
 		// surface thirty seconds later as a capture timeout and read as a
 		// broken capture path in the product. The refusal is a non-zero exit,
 		// not the message: a backgrounded launch wires neither stream, so what
 		// a developer sees is the dispatch failing at the launch.
-		pickSession = `  sid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null)
+		pickSession = `  sid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null | tr 'A-F' 'a-f')
   if [ -z "$sid" ]; then
-    echo "fake claude: no session-id generator; this fake needs /proc (see the minting mode in dispatch_steps_test.go)" >&2
+    echo "fake claude: no session-id generator; this fake needs /proc or uuidgen (see the minting mode in dispatch_steps_test.go)" >&2
     exit 1
   fi`
 	}
