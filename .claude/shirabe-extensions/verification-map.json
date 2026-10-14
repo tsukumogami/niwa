@@ -1,0 +1,78 @@
+{
+  "schema": "shirabe-verification-map/v1",
+  "commands": {
+    "go-mod-tidy": {
+      "run": ["go", "mod", "tidy", "-diff"],
+      "network": true,
+      "unattended": true
+    },
+    "gofmt": {
+      "run": ["sh", "-c", "F=$(git ls-files --cached --others --exclude-standard \"*.go\") && [ -n \"$F\" ] && out=$(printf \"%s\\n\" \"$F\" | xargs gofmt -l) && [ -z \"$out\" ]"]
+    },
+    "go-vet": {
+      "run": ["go", "vet", "./..."],
+      "network": true,
+      "unattended": true
+    },
+    "go-test-race": {
+      "run": ["go", "test", "-race", "./..."],
+      "network": true,
+      "unattended": true,
+      "max_procs": 1024
+    },
+    "functional": {
+      "run": ["sh", "-c", "H=$(git rev-parse HEAD) && S=$(git status --porcelain) && NIWA_TEST_TAGS='~@codex-discovery && ~@codex-live && ~@claude-integration' make test-functional && [ \"$(git rev-parse HEAD)\" = \"$H\" ] && [ \"$(git status --porcelain)\" = \"$S\" ]"],
+      "timeout_secs": 3600,
+      "network": true,
+      "unattended": true,
+      "max_procs": 1024
+    },
+    "shell-init": {
+      "run": ["sh", "-c", "go build -o niwa-test ./cmd/niwa && for shell in bash zsh; do output=$(./niwa-test shell-init \"$shell\") && [ -n \"$output\" ] && echo \"$output\" | grep -q \"niwa()\" && echo \"$output\" | grep -q \"__complete\" || exit 1; done && rm niwa-test"],
+      "network": true,
+      "unattended": true
+    },
+    "docs-agentplan": {
+      "run": ["go", "test", "./internal/agentplan/"],
+      "network": true,
+      "unattended": true
+    },
+    "docs-cli-scan": {
+      "run": ["go", "test", "-count=1", "./internal/cli/"],
+      "network": true,
+      "unattended": true
+    },
+    "docs-validate-changed": {
+      "run": ["sh", "-c", "B=$(git merge-base origin/main HEAD) && git diff --name-only --diff-filter=ACMR \"$B\" -- :/docs/ | grep -vE \"(^|/)(evals|tests)/fixtures/\" | xargs -r shirabe validate --visibility=public"]
+    },
+    "docs-lifecycle": {
+      "run": ["shirabe", "validate", "--visibility=public", "--lifecycle", ".", "--mode=draft"]
+    },
+    "recipe": {
+      "run": ["tsuku", "validate", ".tsuku-recipes/niwa.toml"]
+    },
+    "unexamined-paths": {
+      "run": ["false"],
+      "unattended": false
+    }
+  },
+  "entries": [
+    {
+      "paths": ["**.go", "go.mod", "go.sum", "Makefile", "cmd/**", "internal/**", "test/functional/**"],
+      "commands": ["go-mod-tidy", "gofmt", "go-vet", "go-test-race", "functional", "shell-init"]
+    },
+    {
+      "paths": ["docs/**"],
+      "commands": ["docs-agentplan", "docs-cli-scan", "docs-validate-changed", "docs-lifecycle"]
+    },
+    {
+      "paths": [".tsuku-recipes/**"],
+      "commands": ["recipe"]
+    },
+    {
+      "paths": [".github/**", "install.sh", "scripts/**", ".goreleaser.yaml", "test/live/**"],
+      "commands": ["unexamined-paths"]
+    }
+  ],
+  "default": ["go-mod-tidy", "gofmt", "go-vet", "go-test-race", "functional", "shell-init"]
+}
