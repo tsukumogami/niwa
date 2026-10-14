@@ -1296,6 +1296,24 @@ func aSourceRepoExists(ctx context.Context, name string) (context.Context, error
 	return ctx, nil
 }
 
+// aSourceRepoExistsWithACommit is aSourceRepoExists for a repo that needs a
+// commit: one a scenario runs `niwa worktree create` against. git 2.42 and
+// later infer --orphan when `git worktree add -b` meets a repository with no
+// commits, and older git (Apple's, on macOS) fails with "not a valid object
+// name: 'HEAD'", so an empty fixture only passes where git is new enough.
+func aSourceRepoExistsWithACommit(ctx context.Context, name string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	url, err := s.gitServer.SourceRepo(name)
+	if err != nil {
+		return ctx, fmt.Errorf("creating source repo %q: %w", name, err)
+	}
+	s.repoURLs[name] = url
+	return ctx, nil
+}
+
 // iRunNiwaInitFromConfigRepo runs niwa init --from <url> from workspaceRoot so
 // that the workspace root (and subsequent instance directories) land under the
 // sandboxed workspaces directory rather than homeDir.

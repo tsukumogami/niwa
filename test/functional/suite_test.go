@@ -379,6 +379,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^a config repo "([^"]*)" exists with a "([^"]*)" source file and body:$`, aConfigRepoWithSourceFileAndBody)
 	ctx.Step(`^an overlay repo "([^"]*)" exists with body:$`, anOverlayRepoExistsWithBody)
 	ctx.Step(`^a source repo "([^"]*)" exists$`, aSourceRepoExists)
+	ctx.Step(`^a source repo "([^"]*)" exists with a commit$`, aSourceRepoExistsWithACommit)
 	ctx.Step(`^I run niwa init from config repo "([^"]*)"$`, iRunNiwaInitFromConfigRepo)
 	ctx.Step(`^I run niwa init from config repo "([^"]*)" with overlay "([^"]*)"$`, iRunNiwaInitFromConfigRepoWithOverlay)
 	ctx.Step(`^I run niwa init "([^"]*)" from config repo "([^"]*)"$`, iRunNiwaInitNamedFromConfigRepo)
@@ -567,7 +568,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	ctx.Step(`^the GitHub fake returns HTTP (\d+) for "([^"]*)" repo metadata$`, theGitHubFakeReturnsStatusForRepoMetadata)
 	ctx.Step(`^the GitHub fake serves "([^"]*)" repo metadata with body:$`, theGitHubFakeServesRepoMetadataWithBody)
 
-	// TTY simulation: run the command under util-linux `script -q` so stdin
+	// TTY simulation: run the command under `script` so stdin
 	// and stdout are a real pty, and feed it the supplied input. Defined in
 	// steps_pty_test.go, which holds the harness's terminal primitives; the
 	// session-message steps register two more of them against the same runner.

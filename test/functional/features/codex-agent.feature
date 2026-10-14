@@ -1356,9 +1356,13 @@ Feature: prepare every instance for both agents
     # It spends nothing and needs no login. Codex records a turn's resolved
     # sandbox policy at turn bootstrap, before its first model request, so an
     # unreachable model endpoint lets every turn bootstrap, record, and then
-    # fail on connect. That is why the gate here is the binary alone.
+    # fail on connect. That is why the gate here is the binary alone, and a
+    # recent enough one: an older Codex doesn't record the turn this reads, so
+    # the scenario skips, saying which version it found, rather than failing on
+    # the host's Codex.
     Given a clean niwa environment
     And the codex binary is on PATH
+    And the codex binary on PATH is recent enough to record turn postures
     And an isolated Codex home whose model endpoint is unreachable
     And a local git server is set up
     And a config repo "ws" exists with body:

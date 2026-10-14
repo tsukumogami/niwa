@@ -18,7 +18,7 @@ Feature: niwa worktree env parity
   Scenario: niwa worktree create inherits the clone's env into the worktree .local.env
     Given a clean niwa environment
     And a local git server is set up
-    And a source repo "myapp" exists
+    And a source repo "myapp" exists with a commit
     And a config repo "wt-env" exists with body:
       """
       [workspace]
@@ -63,7 +63,7 @@ Feature: niwa worktree env parity
   Scenario: niwa worktree create inherits a promoted env key resolved only at instance apply time
     Given a clean niwa environment
     And a local git server is set up
-    And a source repo "myapp" exists
+    And a source repo "myapp" exists with a commit
     And a config repo "wt-promote" exists with body:
       """
       [workspace]
@@ -108,7 +108,7 @@ Feature: niwa worktree env parity
   Scenario: niwa worktree create skips a promoted key nothing supplies
     Given a clean niwa environment
     And a local git server is set up
-    And a source repo "myapp" exists
+    And a source repo "myapp" exists with a commit
     And a config repo "wt-unsupplied" exists with body:
       """
       [workspace]

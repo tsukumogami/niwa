@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,8 +27,8 @@ import (
 // rather than the niwa one, from a resolved location rather than the workspace
 // root, on its own dwell timeout that is EXPECTED to expire because the
 // interface never exits, and it keeps the transcript in its own field instead
-// of the shared stdout/stderr/exit-code slots. It borrows shellQuote from here
-// and nothing else.
+// of the shared stdout/stderr/exit-code slots. It borrows shellQuote and
+// scriptCommand from here and nothing else.
 
 // ptyStepTimeout bounds the steps that hand the binary a standard input this
 // harness controls: the four that reach runUnderPTY, whether or not they supply
@@ -41,17 +43,129 @@ import (
 // it; with it, the failure is a step failure naming the command.
 const ptyStepTimeout = 60 * time.Second
 
-// iRunUnderPTYWithInput drives the niwa binary under util-linux
-// `script -q -c <cmd> /dev/null`, which allocates a real pty and
-// connects it to the child's stdin/stdout. This is the test seam for
-// R13 TTY-Y / TTY-N scenarios that need the binary's IsStdinTTY()
-// check to return true. The input is written to the pty in chunks;
-// runUnderPTY says why it cannot be one write.
+// ptyInputTail is how long the pty's input pipe stays open after its last
+// byte. BSD `script` (macOS) that reads the input and end-of-input in the same
+// pass writes the terminal's EOF character to the pty ahead of the input, so
+// the child's first read comes back empty. A short gap before the close lets
+// the input reach the pty first. util-linux `script` doesn't need it, and
+// doesn't mind it.
+const ptyInputTail = 100 * time.Millisecond
+
+// scriptCommand returns the `script` invocation that runs inner, a command
+// string for the shell, under a fresh pty and discards the transcript.
+// util-linux `script` (Linux) takes the command with -c; BSD `script` (macOS)
+// has no -c and takes the command as trailing arguments instead.
+func scriptCommand(ctx context.Context, inner string) *exec.Cmd {
+	if runtime.GOOS == "linux" {
+		return exec.CommandContext(ctx, "script", "-q", "-c", inner, "/dev/null")
+	}
+	return exec.CommandContext(ctx, "script", "-q", "/dev/null", "/bin/sh", "-c", inner)
+}
+
+// ptyPromptQuiet and ptyPromptWait bound how long the input feed waits for the
+// command to settle at its prompt under BSD `script`; ptyTranscript.awaitPrompt
+// says why it waits at all.
+const (
+	ptyPromptQuiet = 300 * time.Millisecond
+	ptyPromptWait  = 5 * time.Second
+)
+
+// ptyTranscript collects what the pty showed, and notes when it last showed
+// anything, so the input feed can tell when the command has settled at a
+// prompt. `script` writes to it from exec's copying goroutine while the feed
+// reads it from its own, hence the lock.
+type ptyTranscript struct {
+	mu   sync.Mutex
+	buf  strings.Builder
+	last time.Time
+}
+
+func (t *ptyTranscript) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.last = time.Now()
+	return t.buf.Write(p)
+}
+
+func (t *ptyTranscript) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.buf.String()
+}
+
+// awaitPrompt returns once the command has shown something and then gone quiet
+// for ptyPromptQuiet, or after ptyPromptWait, whichever is first.
 //
-// `script` is the POSIX util-linux command; it ships on every Linux
-// CI image and on macOS via Homebrew. Adding a Go pty library
-// (github.com/creack/pty) was considered and rejected to avoid a new
-// dependency.
+// BSD `script` (macOS) forwards input to the pty the moment it arrives. Input
+// that lands before the command has switched the terminal to raw mode goes
+// through the canonical line discipline instead, which turns a submitting \r
+// into \n, so a raw-mode reader such as dispatch's prompt capture never sees
+// its Enter. A command at an interactive prompt has printed it and is blocked
+// reading, which is what "shown something, then quiet" detects. util-linux
+// `script` doesn't need the wait, so on Linux this returns at once.
+func (t *ptyTranscript) awaitPrompt() {
+	if runtime.GOOS == "linux" {
+		return
+	}
+	deadline := time.Now().Add(ptyPromptWait)
+	for time.Now().Before(deadline) {
+		t.mu.Lock()
+		last := t.last
+		t.mu.Unlock()
+		if !last.IsZero() && time.Since(last) >= ptyPromptQuiet {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// ptyInput returns the read end of a pipe that carries raw to a `script`
+// process's standard input and then closes. It waits for the command to
+// settle at its prompt first (see ptyTranscript.awaitPrompt), reading out the
+// transcript the same `script` process writes. It feeds the pty in chunks
+// rather than one burst: `script` performs a short write to the pty master and
+// does not retry the remainder, so a large single write silently loses
+// everything past the first few kilobytes and the child waits forever for
+// input that was never delivered. Chunking keeps each write inside the pty
+// buffer. This is a property of the harness, not of any reader under test. The
+// close waits ptyInputTail after the last chunk; the constant says why.
+func ptyInput(raw string, out *ptyTranscript) (*os.File, error) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("creating pty input pipe: %w", err)
+	}
+	go func() {
+		defer pw.Close()
+		out.awaitPrompt()
+		const chunk = 2048
+		for i := 0; i < len(raw); i += chunk {
+			end := i + chunk
+			if end > len(raw) {
+				end = len(raw)
+			}
+			if _, err := io.WriteString(pw, raw[i:end]); err != nil {
+				return
+			}
+			if end < len(raw) {
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
+		time.Sleep(ptyInputTail)
+	}()
+	return pr, nil
+}
+
+// iRunUnderPTYWithInput drives the niwa binary under `script` (see
+// scriptCommand), which allocates a real pty and connects it to the
+// child's stdin/stdout. This is the test seam for R13 TTY-Y / TTY-N
+// scenarios that need the binary's IsStdinTTY() check to return true.
+// The input is written to the pty in chunks; ptyInput says why it
+// cannot be one write.
+//
+// `script` ships on every Linux CI image (util-linux) and on macOS
+// (BSD); scriptCommand covers the difference in their syntax. Adding a
+// Go pty library (github.com/creack/pty) was considered and rejected to
+// avoid a new dependency.
 func iRunUnderPTYWithInput(ctx context.Context, command, input string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
@@ -82,7 +196,7 @@ type ptyRun struct {
 	exitCode int
 }
 
-// runUnderPTY builds and runs one `script -q -c <cmd> /dev/null` invocation and
+// runUnderPTY builds and runs one `script` invocation and
 // returns its transcript and exit code without touching testState. Both the
 // single-run step above and the parallel step in session_message_steps_test.go
 // go through it, so the pty construction -- the cd-and-exec inner command, the
@@ -94,7 +208,7 @@ type ptyRun struct {
 func runUnderPTY(ctx context.Context, s *testState, command, input string) (ptyRun, error) {
 	var run ptyRun
 	if _, err := exec.LookPath("script"); err != nil {
-		return run, fmt.Errorf("util-linux `script` not on PATH; cannot drive PTY scenario: %w", err)
+		return run, fmt.Errorf("`script` not on PATH; cannot drive PTY scenario: %w", err)
 	}
 
 	// Substitute {repo:<name>} placeholders for symmetry with iRunFromWorkspaceRoot.
@@ -117,53 +231,32 @@ func runUnderPTY(ctx context.Context, s *testState, command, input string) (ptyR
 	}
 	innerCmd := "cd " + shellQuote(s.workspaceRoot) + " && exec " + strings.Join(quoted, " ")
 
-	// `script -q -c <cmd> /dev/null` runs cmd under a pty and writes
-	// the terminal-output transcript to /dev/null. We capture the
-	// child's output via the script process's stdout (which mirrors
-	// the pty master side). The child's stdin is fed by writing to
-	// script's own stdin via cmd.Stdin — script forwards stdin bytes
-	// to the pty so the child sees them as terminal input.
+	// `script` runs cmd under a pty and writes the terminal-output
+	// transcript to /dev/null. We capture the child's output via the
+	// script process's stdout (which mirrors the pty master side). The
+	// child's stdin is fed by writing to script's own stdin via
+	// cmd.Stdin — script forwards stdin bytes to the pty so the child
+	// sees them as terminal input.
 	// A scenario whose input never terminates must fail as a step rather than
 	// run out the suite's global deadline. godog's context carries no deadline
 	// of its own, so one is imposed here.
 	ptyCtx, cancel := context.WithTimeout(ctx, ptyStepTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ptyCtx, "script", "-q", "-c", innerCmd, "/dev/null")
+	cmd := scriptCommand(ptyCtx, innerCmd)
 	cmd.Env = s.buildEnv()
 	// Convert escapes so feature files can write `y\n` and paste markers.
 	rawInput := strings.ReplaceAll(input, `\n`, "\n")
 	rawInput = strings.ReplaceAll(rawInput, `\r`, "\r")
 	rawInput = strings.ReplaceAll(rawInput, `\e`, "\x1b")
 
-	// Feed the pty in chunks rather than one burst. `script` performs a short
-	// write to the pty master and does not retry the remainder, so a large
-	// single write silently loses everything past the first few kilobytes and
-	// the child waits forever for input that was never delivered. Chunking
-	// keeps each write inside the pty buffer. This is a property of the
-	// harness, not of any reader under test.
-	pr, pw, err := os.Pipe()
+	var stdout ptyTranscript
+	var stderr strings.Builder
+	pr, err := ptyInput(rawInput, &stdout)
 	if err != nil {
-		return run, fmt.Errorf("creating pty input pipe: %w", err)
+		return run, err
 	}
 	cmd.Stdin = pr
-	go func() {
-		defer pw.Close()
-		const chunk = 2048
-		for i := 0; i < len(rawInput); i += chunk {
-			end := i + chunk
-			if end > len(rawInput) {
-				end = len(rawInput)
-			}
-			if _, err := io.WriteString(pw, rawInput[i:end]); err != nil {
-				return
-			}
-			if end < len(rawInput) {
-				time.Sleep(20 * time.Millisecond)
-			}
-		}
-	}()
-	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
@@ -190,7 +283,7 @@ func runUnderPTY(ctx context.Context, s *testState, command, input string) (ptyR
 
 // shellQuote escapes s for use inside a `bash -c` string. Single-quotes
 // are doubled with the standard `'\”` trick. It is what lets a command
-// string, and the directory it runs in, travel through `script -c` safely:
+// string, and the directory it runs in, travel through `script` safely:
 // runUnderPTY quotes both, and the live-Codex interactive step quotes its own
 // directory the same way.
 func shellQuote(s string) string {

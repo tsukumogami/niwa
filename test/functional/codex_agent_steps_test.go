@@ -168,6 +168,7 @@ func registerCodexAgentSteps(ctx *godog.ScenarioContext) {
 	// Live, codex-gated.
 	ctx.Step(`^codex is available$`, codexIsAvailable)
 	ctx.Step(`^the codex binary is on PATH$`, theCodexBinaryIsOnPath)
+	ctx.Step(`^the codex binary on PATH is recent enough to record turn postures$`, theCodexBinaryOnPathIsRecentEnough)
 	ctx.Step(`^I render the skills a Codex session at "([^"]*)" resolves$`, iRenderTheSkillsACodexSessionResolves)
 	ctx.Step(`^the resolved skills include "([^"]*)"$`, theResolvedSkillsInclude)
 	ctx.Step(`^the resolved skills do not include "([^"]*)"$`, theResolvedSkillsDoNotInclude)
@@ -1889,7 +1890,7 @@ func iStartInteractiveCodexAt(ctx context.Context, loc string) (context.Context,
 		return ctx, fmt.Errorf("no test state")
 	}
 	if _, err := exec.LookPath("script"); err != nil {
-		return ctx, fmt.Errorf("util-linux `script` not on PATH; cannot drive the interactive scenario: %w", err)
+		return ctx, fmt.Errorf("`script` not on PATH; cannot drive the interactive scenario: %w", err)
 	}
 	dir, err := s.resolveLocation(loc)
 	if err != nil {
@@ -1900,7 +1901,7 @@ func iStartInteractiveCodexAt(ctx context.Context, loc string) (context.Context,
 	defer cancel()
 
 	inner := "cd " + shellQuote(dir) + " && exec codex"
-	cmd := exec.CommandContext(runCtx, "script", "-q", "-c", inner, "/dev/null")
+	cmd := scriptCommand(runCtx, inner)
 	cmd.Env = codexLiveEnv(s)
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -1981,6 +1982,42 @@ const codexPromptInputHomeDir = ".codex-prompt-input"
 func theCodexBinaryIsOnPath(ctx context.Context) (context.Context, error) {
 	if _, err := exec.LookPath("codex"); err != nil {
 		return ctx, godog.ErrPending
+	}
+	return ctx, nil
+}
+
+// codexPostureFloor is the oldest Codex the resume-posture scenario has been
+// measured passing against; docs/guides/codex-agent.md's posture measurements
+// were taken on the same release. Older releases don't record a dispatched
+// turn the way the scenario reads it: codex-cli 0.8.0 fails at the dispatch,
+// and the capture times out.
+var codexPostureFloor = [3]int{0, 147, 0}
+
+// theCodexBinaryOnPathIsRecentEnough skips a scenario whose subject is what a
+// current Codex records, when the Codex on PATH predates codexPostureFloor.
+// What is under test is niwa's grant, not the host's Codex version, so a stale
+// host binary is a reason to skip with a stated reason rather than to fail.
+func theCodexBinaryOnPathIsRecentEnough(ctx context.Context) (context.Context, error) {
+	out, err := exec.Command("codex", "--version").Output()
+	if err != nil {
+		return ctx, fmt.Errorf("reading the Codex version: %w", err)
+	}
+	var v [3]int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "codex-cli %d.%d.%d", &v[0], &v[1], &v[2]); err != nil {
+		return ctx, fmt.Errorf("reading the Codex version from %q: %w", strings.TrimSpace(string(out)), err)
+	}
+	for i := range v {
+		if v[i] != codexPostureFloor[i] {
+			if v[i] < codexPostureFloor[i] {
+				// godog prints a skipped step without its error, so the reason
+				// is printed here.
+				reason := fmt.Sprintf("codex-cli %d.%d.%d on PATH is older than %d.%d.%d, the oldest this scenario was measured against",
+					v[0], v[1], v[2], codexPostureFloor[0], codexPostureFloor[1], codexPostureFloor[2])
+				fmt.Fprintf(os.Stderr, "skipping the scenario: %s\n", reason)
+				return ctx, fmt.Errorf("%s: %w", reason, godog.ErrSkip)
+			}
+			break
+		}
 	}
 	return ctx, nil
 }
@@ -2438,15 +2475,18 @@ func theSandboxCodexHomeHoldsNoTrustStanza(ctx context.Context) (context.Context
 //
 // Processes are matched on the scenario's own sandbox path, which appears in
 // the worker's command line and is unique to this run, so nothing outside this
-// sandbox is a candidate. A developer's own Codex session cannot match.
+// sandbox is a candidate. A developer's own Codex session cannot match. The
+// path is checked against the process sandbox itself rather than os.TempDir():
+// on macOS the sandbox path is symlink-resolved (/private/var/...) and $TMPDIR
+// is not (/var/...), so a prefix test refused every run there.
 func theDispatchedWorkerHasFinished(ctx context.Context) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
 		return ctx, fmt.Errorf("no test state")
 	}
 	root := s.workspaceRoot
-	if !strings.HasPrefix(root, os.TempDir()) {
-		return ctx, fmt.Errorf("refusing to match processes outside a temporary sandbox: %s", root)
+	if _, err := sandboxPath(root); err != nil {
+		return ctx, fmt.Errorf("refusing to match processes outside the test sandbox: %w", err)
 	}
 	for _, sig := range []string{"-TERM", "-KILL"} {
 		_ = exec.Command("pkill", sig, "-f", root).Run()
