@@ -2006,20 +2006,25 @@ func theCodexBinaryOnPathIsRecentEnough(ctx context.Context) (context.Context, e
 	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "codex-cli %d.%d.%d", &v[0], &v[1], &v[2]); err != nil {
 		return ctx, fmt.Errorf("reading the Codex version from %q: %w", strings.TrimSpace(string(out)), err)
 	}
-	for i := range v {
-		if v[i] != codexPostureFloor[i] {
-			if v[i] < codexPostureFloor[i] {
-				// godog prints a skipped step without its error, so the reason
-				// is printed here.
-				reason := fmt.Sprintf("codex-cli %d.%d.%d on PATH is older than %d.%d.%d, the oldest this scenario was measured against",
-					v[0], v[1], v[2], codexPostureFloor[0], codexPostureFloor[1], codexPostureFloor[2])
-				fmt.Fprintf(os.Stderr, "skipping the scenario: %s\n", reason)
-				return ctx, fmt.Errorf("%s: %w", reason, godog.ErrSkip)
-			}
-			break
+	if !versionBefore(v, codexPostureFloor) {
+		return ctx, nil
+	}
+	// godog prints a skipped step without its error, so the reason is
+	// printed here.
+	reason := fmt.Sprintf("codex-cli %d.%d.%d on PATH is older than %d.%d.%d, the oldest this scenario was measured against",
+		v[0], v[1], v[2], codexPostureFloor[0], codexPostureFloor[1], codexPostureFloor[2])
+	fmt.Fprintf(os.Stderr, "skipping the scenario: %s\n", reason)
+	return ctx, fmt.Errorf("%s: %w", reason, godog.ErrSkip)
+}
+
+// versionBefore reports whether major.minor.patch a sorts before b.
+func versionBefore(a, b [3]int) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return a[i] < b[i]
 		}
 	}
-	return ctx, nil
+	return false
 }
 
 // iRenderTheSkillsACodexSessionResolves runs `codex debug prompt-input` from a

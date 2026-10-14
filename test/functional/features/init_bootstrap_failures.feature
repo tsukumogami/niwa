@@ -41,7 +41,8 @@ Feature: niwa init --bootstrap failure-mode user-visible text
     And the error output contains "remote has no .niwa/workspace.toml and stdin is not a terminal; re-run with --bootstrap to scaffold"
 
   # --- R13 TTY interactive prompt scenarios ---
-  # Run niwa under util-linux `script -q` so IsStdinTTY returns true.
+  # Run niwa under `script` (util-linux on Linux, BSD on macOS) so
+  # IsStdinTTY returns true.
   # The pty wrapper feeds the supplied input to stdin and captures the
   # combined stdout+stderr stream for assertion.
 

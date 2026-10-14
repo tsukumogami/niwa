@@ -28,9 +28,10 @@ default, since halting every map edit would make the map painful to maintain. Th
   exists, so the run stops for a person to check them: no command here checks what these files
   do (`test/live/**` is behind the `live` build tag and needs a real `claude` session) and most
   are not read by PR CI either. The JSON file says this with a command marked
-  `unattended: false` (its `false` argv is a placeholder), which the gate never starts; it
-  settles cannot-verify before running any other selected command, so a change that also breaks a Go test learns that only after the
-  person's check.
+  `unattended: false` (its `false` argv is a placeholder), which the gate never starts. The
+  gate then stops before running any other selected command, so a change that touches one of
+  these paths and also breaks a Go test finds out about the test only after the person's
+  check.
 
 In the JSON file, each command is an argv run with no shell, so the lines above that need one
 run under `sh -c`. The Go-file glob is `**.go`, because the gate's `**/*.go` needs a directory

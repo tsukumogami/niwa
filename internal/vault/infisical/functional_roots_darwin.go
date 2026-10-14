@@ -32,8 +32,9 @@ func init() {
 	if !pool.AppendCertsFromPEM(pem) {
 		return
 	}
-	HTTPClient = &http.Client{Transport: &http.Transport{
-		Proxy:           http.ProxyFromEnvironment,
-		TLSClientConfig: &tls.Config{RootCAs: pool},
-	}}
+	// A clone of the default transport, so only the trust pool differs from
+	// what a release build uses.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{RootCAs: pool}
+	HTTPClient = &http.Client{Transport: transport}
 }
