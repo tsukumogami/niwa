@@ -39,6 +39,10 @@ path never changes:
   else, such as an instance clone registered by an older niwa. The file is
   replaced atomically, other marketplaces' entries are left as they were, and a
   backup is kept beside it.
+- niwa doesn't create a missing entry. Claude Code adds it itself the first time
+  it installs one of the marketplace's plugins (niwa's plugin pre-install after
+  `create`, or a session's startup), reading the instance settings, which already
+  name the managed copy.
 - `destroy` doesn't touch the entry. Nothing it removes is registered.
 - A worktree of the marketplace's repo registers the managed copy too, never the
   worktree.
@@ -91,8 +95,16 @@ directory inside your clone:
 claude --plugin-dir <instance>/<group>/team-plugins/<path to the plugin>
 ```
 
-A plugin loaded this way replaces the installed plugin with the same manifest
-name for that session only. Nothing is written to `known_marketplaces.json`,
-and other sessions keep loading the managed copy. Don't repoint the global
-entry at your clone to test a change: that's the move that hands every other
-session your unmerged code.
+Claude Code's plugin loading reference (the name conflicts section) says a
+plugin loaded this way replaces an installed marketplace plugin with the same
+manifest name, for that session only. Nothing is written to
+`known_marketplaces.json`, and other sessions keep loading the managed copy.
+
+niwa has no override of its own on purpose: anything niwa could change is the
+global entry, and pointing that at your clone is exactly the move that hands
+every other session on the machine your unmerged code.
+
+Two workspaces on one machine that declare a marketplace with the same name
+still share Claude Code's one entry for it, so each apply points it at that
+workspace's managed copy. Give them different marketplace names if they need
+different code.

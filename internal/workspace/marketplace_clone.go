@@ -294,10 +294,14 @@ func resolveManagedRef(ctx context.Context, bare, ref string) (string, error) {
 }
 
 // addManagedCheckout makes a detached worktree of sha at target. A target that
-// already holds sha is reused; anything else there is removed first.
+// already holds a clean checkout of sha is reused; anything else there,
+// including a checkout an interrupted apply left part-written (missing files
+// show as changes), is removed first.
 func addManagedCheckout(ctx context.Context, bare, target, sha string) error {
 	if head, err := managedGit(ctx, target, "rev-parse", "HEAD"); err == nil && strings.TrimSpace(head) == sha {
-		return nil
+		if status, err := managedGit(ctx, target, "status", "--porcelain", "--untracked-files=no"); err == nil && strings.TrimSpace(status) == "" {
+			return nil
+		}
 	}
 	removeManagedCheckout(ctx, bare, target)
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {

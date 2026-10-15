@@ -187,6 +187,14 @@ type Applier struct {
 	// nil, the reconcile is a silent no-op.
 	reconcileMarketplaces func(desired map[string]pluginrecord.MarketplaceWant) (pluginrecord.ReconcileReport, error)
 
+	// syncMarketplaces brings the workspace's managed copy of each repo:
+	// marketplace to its configured ref (see marketplace_clone.go). Production
+	// wires it (via NewApplier) to syncManagedMarketplaces, which fetches from
+	// the repo's remote; tests whose clones are stand-ins with no remote set
+	// it to nil, which skips the sync and leaves those marketplaces resolving
+	// against the instance's clones.
+	syncMarketplaces func(ctx context.Context, workspaceRoot string, marketplaces []managedMarketplace) []string
+
 	// saveState persists the instance state at the end of Create and Apply.
 	// Nil means SaveState. Tests set it to inject a failure after every
 	// other step, including the Claude trust write, has run.
@@ -246,6 +254,7 @@ func NewApplier(gh github.Client) *Applier {
 		}
 		return reconcileMarketplacesAt(home, desired)
 	}
+	a.syncMarketplaces = syncManagedMarketplaces
 	a.cloneOrSync = func(ctx context.Context, url, dir string) (bool, int, error) {
 		fetcher, _ := a.GitHubClient.(FetchClient)
 		return EnsureOverlaySnapshot(ctx, url, dir, fetcher, a.Reporter)
@@ -1719,7 +1728,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	workspaceRoot := filepath.Dir(instanceRoot)
 	managed, managedWarnings := managedMarketplaces(effectiveCfg, classified)
 	allWarnings = append(allWarnings, managedWarnings...)
-	allWarnings = append(allWarnings, syncManagedMarketplaces(ctx, workspaceRoot, managed)...)
+	if a.syncMarketplaces != nil {
+		allWarnings = append(allWarnings, a.syncMarketplaces(ctx, workspaceRoot, managed)...)
+	}
 	marketplaceIndex := managedMarketplaceIndex(workspaceRoot, repoIndex)
 
 	// Step 4.5: Install workspace-root context and settings.

@@ -2412,6 +2412,8 @@ marketplaces = ["tsukumogami/shirabe"]
 	applier.Cloner = &Cloner{}
 	applier.cloneOrSync = cloneFn
 	applier.headSHA = func(string) (string, error) { return "abc123", nil }
+	// tools is a stand-in clone with no reachable remote.
+	applier.syncMarketplaces = nil
 
 	if err := applier.Apply(context.Background(), result.Config, niwaDir, instanceRoot); err != nil {
 		t.Fatalf("apply with overlay marketplaces failed: %v", err)
