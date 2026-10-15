@@ -44,8 +44,11 @@ path never changes:
   `create`, or a session's startup), reading the instance settings, which already
   name the managed copy.
 - `destroy` doesn't touch the entry. Nothing it removes is registered.
-- A worktree of the marketplace's repo registers the managed copy too, never the
+- A worktree of the marketplace's repo registers the managed copy too, not the
   worktree.
+- The managed copy needs a workspace root to live in. In a single-instance
+  layout, where the instance has no workspace root above it, the instance keeps
+  registering its own clone.
 
 A new commit is checked out next to the old one and `current` is then swapped
 in a single rename, so a session reading the marketplace sees either the old

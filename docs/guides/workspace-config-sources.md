@@ -855,7 +855,7 @@ cause of dangling install records. Set `auto_update = true` per
 marketplace to opt back in. This matches Claude Code's own safer default
 for third-party marketplaces.
 
-### `track` (default: `release` for github sources)
+### `track` (default: `release` for github sources, the default branch for `repo:` sources)
 
 Which version of a github-sourced marketplace to track:
 
@@ -864,7 +864,12 @@ Which version of a github-sourced marketplace to track:
 - `main` — track the default branch (the prior behavior).
 - an explicit ref/tag — pin to that ref.
 
-Local (`directory` / `repo:`) sources ignore `track`.
+A `repo:` source reads `track` differently. niwa registers it from its own
+copy of the repo at the workspace root, and `track` picks the commit that
+copy checks out: unset means the remote's default branch, and any other
+value is a branch, tag or commit, so `main` means the branch named `main`.
+`release` is a config error for a `repo:` source. See
+`docs/guides/repo-marketplaces.md`.
 
 niwa writes the resolved ref into the instance's `.claude/settings.json`,
 and the plugin pre-install on `niwa create` and `niwa apply` registers

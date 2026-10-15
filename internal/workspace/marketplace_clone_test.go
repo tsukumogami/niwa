@@ -249,6 +249,27 @@ func TestManagedMarketplaceIndex_WorktreeStaysLocal(t *testing.T) {
 	}
 }
 
+// TestInstanceMarketplaceIndex_SingleInstanceLayout asserts an instance whose
+// parent is not a workspace root never resolves to a managed copy found there:
+// that parent is some unrelated directory other workspaces may share.
+func TestInstanceMarketplaceIndex_SingleInstanceLayout(t *testing.T) {
+	parent := t.TempDir()
+	writeToolsManifest(t, managedMarketplaceCurrent(parent, "tools"), "tsukumogami")
+	instanceRoot := filepath.Join(parent, "solo")
+	clone := filepath.Join(instanceRoot, "private", "tools")
+
+	if got := instanceMarketplaceIndex(instanceRoot, map[string]string{"tools": clone})["tools"]; got != clone {
+		t.Fatalf("index[tools] = %q, want the instance clone %q outside a workspace root", got, clone)
+	}
+
+	if err := os.WriteFile(filepath.Join(parent, StateDir, WorkspaceConfigFile), []byte("[workspace]\nname = \"ws\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := instanceMarketplaceIndex(instanceRoot, map[string]string{"tools": clone})["tools"]; got != managedMarketplaceCurrent(parent, "tools") {
+		t.Fatalf("index[tools] = %q, want the managed copy once the parent is a workspace root", got)
+	}
+}
+
 // marketplacePipeline is a workspace whose tools repo is a repo: marketplace,
 // cloned from a local remote, with Claude Code's registry in a scratch HOME.
 type marketplacePipeline struct {

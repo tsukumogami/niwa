@@ -802,7 +802,7 @@ func ApplyToWorktree(cfg *config.WorkspaceConfig, configDir, instanceRoot, workt
 		InstanceRoot: instanceRoot,
 		Plugins:      MergeInstanceOverrides(cfg).Plugins,
 		Marketplaces: cfg.Claude.Marketplaces,
-		RepoIndex:    managedMarketplaceIndex(filepath.Dir(instanceRoot), instanceRepoIndex(instanceRoot)),
+		RepoIndex:    instanceMarketplaceIndex(instanceRoot, instanceRepoIndex(instanceRoot)),
 	})
 	var skillReports []string
 	for _, m := range missingPlugins {
@@ -1036,9 +1036,11 @@ func installWorktreeMaterialization(cfg *config.WorkspaceConfig, configDir, inst
 			relWsEnv = r
 		}
 	}
-	// A worktree of a repo: marketplace's repo still registers the
-	// workspace's managed copy, never the worktree (see marketplace_clone.go).
-	repoIndex := managedMarketplaceIndex(filepath.Dir(instanceRoot), map[string]string{repo: worktreePath})
+	// A worktree of a repo: marketplace's repo registers the workspace's
+	// managed copy whenever one exists (see marketplace_clone.go); only before
+	// the first successful sync does it fall back to the worktree, as the
+	// instance falls back to its clone.
+	repoIndex := instanceMarketplaceIndex(instanceRoot, map[string]string{repo: worktreePath})
 
 	// The SettingsMaterializer resolves [claude.env] promoted keys, but the
 	// worktree path's cfg is unresolved (no vault / machine-identity sync ran),

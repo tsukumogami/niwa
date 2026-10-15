@@ -71,6 +71,19 @@ func managedMarketplaceIndex(workspaceRoot string, repoIndex map[string]string) 
 	return out
 }
 
+// instanceMarketplaceIndex is managedMarketplaceIndex for an instance at
+// instanceRoot. The managed copies live under the workspace root, which is the
+// instance's parent only in a multi-instance workspace; in a single-instance
+// layout the parent is some unrelated directory (see workspaceRootHoldsState),
+// so the instance keeps its own clones there.
+func instanceMarketplaceIndex(instanceRoot string, repoIndex map[string]string) map[string]string {
+	workspaceRoot := filepath.Dir(instanceRoot)
+	if !workspaceRootHoldsState(workspaceRoot) {
+		return repoIndex
+	}
+	return managedMarketplaceIndex(workspaceRoot, repoIndex)
+}
+
 // repoMarketplaceRef splits a "repo:<name>/<path>" marketplace source into the
 // repo name and the manifest path inside it. ok is false for any other source.
 func repoMarketplaceRef(source string) (repo, manifest string, ok bool) {

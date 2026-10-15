@@ -1724,14 +1724,16 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// to its configured ref, and resolve those marketplaces against it rather
 	// than this instance's clone (see marketplace_clone.go). Every marketplace
 	// consumer below reads marketplaceIndex, so the settings, the plugin skill
-	// delivery and the global registry all name the same directory.
+	// delivery and the global registry all name the same directory. Only a
+	// multi-instance workspace has a root to keep the copies in (see
+	// instanceMarketplaceIndex); a single-instance layout keeps its clones.
 	workspaceRoot := filepath.Dir(instanceRoot)
-	managed, managedWarnings := managedMarketplaces(effectiveCfg, classified)
-	allWarnings = append(allWarnings, managedWarnings...)
-	if a.syncMarketplaces != nil {
+	if a.syncMarketplaces != nil && workspaceRootHoldsState(workspaceRoot) {
+		managed, managedWarnings := managedMarketplaces(effectiveCfg, classified)
+		allWarnings = append(allWarnings, managedWarnings...)
 		allWarnings = append(allWarnings, a.syncMarketplaces(ctx, workspaceRoot, managed)...)
 	}
-	marketplaceIndex := managedMarketplaceIndex(workspaceRoot, repoIndex)
+	marketplaceIndex := instanceMarketplaceIndex(instanceRoot, repoIndex)
 
 	// Step 4.5: Install workspace-root context and settings.
 	// Context file uses @import for level-scoped visibility.
@@ -2514,6 +2516,10 @@ func (a *Applier) reconcileMarketplaceRegistry(cfg *config.WorkspaceConfig, mark
 		}
 		want := pluginrecord.MarketplaceWant{AutoUpdate: mc.AutoUpdate}
 		if repo, _, ok := repoMarketplaceRef(mc.Source); ok && marketplaceIndex[repo] == managedMarketplaceCurrent(workspaceRoot, repo) {
+			// The marketplace root is the directory holding
+			// .claude-plugin/marketplace.json, which can sit below the repo
+			// root; this is the same derivation the settings entry uses
+			// (mapMarketplaceSourceWithIndex), so the two name one path.
 			if resolved, err := ResolveMarketplaceSource(mc.Source, marketplaceIndex); err == nil {
 				want.Path = filepath.Dir(filepath.Dir(resolved))
 			}
