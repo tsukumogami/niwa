@@ -222,6 +222,33 @@ func TestSyncManagedMarketplaces_FirstFailureLeavesNothingToRegister(t *testing.
 	}
 }
 
+// TestManagedMarketplaceIndex_WorktreeStaysLocal pins niwa's half of the
+// per-session override: unmerged plugin changes live in an instance clone or a
+// worktree of the marketplace repo and reach a session only through
+// `claude --plugin-dir`, so neither may ever be what the settings or the
+// global entry name while a managed copy exists.
+func TestManagedMarketplaceIndex_WorktreeStaysLocal(t *testing.T) {
+	bare := newMarketplaceRemote(t, "tsukumogami")
+	ws := t.TempDir()
+	if w := syncManagedMarketplaces(context.Background(), ws, toolsMarketplace(bare, "")); len(w) != 0 {
+		t.Fatalf("unexpected warnings: %v", w)
+	}
+
+	managed := managedMarketplaceCurrent(ws, "tools")
+	for name, local := range map[string]string{
+		"instance clone": filepath.Join(ws, "mkt", "private", "tools"),
+		"worktree":       filepath.Join(ws, "mkt", "private", "tools.worktrees", "try-hook"),
+	} {
+		index := managedMarketplaceIndex(ws, map[string]string{"tools": local, "app": "/elsewhere/app"})
+		if index["tools"] != managed {
+			t.Errorf("%s: index[tools] = %q, want the managed copy %q", name, index["tools"], managed)
+		}
+		if index["app"] != "/elsewhere/app" {
+			t.Errorf("%s: a repo with no managed copy was remapped to %q", name, index["app"])
+		}
+	}
+}
+
 // marketplacePipeline is a workspace whose tools repo is a repo: marketplace,
 // cloned from a local remote, with Claude Code's registry in a scratch HOME.
 type marketplacePipeline struct {
