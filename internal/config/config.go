@@ -750,6 +750,16 @@ func validate(cfg *WorkspaceConfig) error {
 		}
 	}
 
+	// A repo: marketplace is registered from niwa's own clone of the repo,
+	// checked out at its track: the default branch when unset, otherwise the
+	// named branch, tag or commit. There is no release list to pick from for a
+	// local repo, so "release" would quietly mean something else; refuse it.
+	for i, mc := range cfg.Claude.Marketplaces {
+		if strings.HasPrefix(mc.Source, "repo:") && mc.Track == "release" {
+			return fmt.Errorf("claude.marketplaces[%d] (%s): track = \"release\" is not supported for a repo: source; leave track unset for the repo's default branch, or name a branch, tag or commit", i, mc.Source)
+		}
+	}
+
 	// Validate content source paths don't escape the content directory.
 	// Reads from cfg.Content because Parse() migrates the deprecated
 	// [claude.content] into the canonical [content] before validate() runs.

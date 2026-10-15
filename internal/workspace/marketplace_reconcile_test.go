@@ -68,11 +68,11 @@ func TestReconcileMarketplaceRegistry_BuildsDesiredAndReports(t *testing.T) {
 	writeToolsManifest(t, toolsDir, "tsukumogami")
 	repoIndex := map[string]string{"tools": toolsDir}
 
-	var captured map[string]bool
+	var captured map[string]pluginrecord.MarketplaceWant
 	var buf bytes.Buffer
 	a := &Applier{
 		Reporter: NewReporter(&buf),
-		reconcileMarketplaceAutoUpdate: func(desired map[string]bool) (pluginrecord.ReconcileReport, error) {
+		reconcileMarketplaces: func(desired map[string]pluginrecord.MarketplaceWant) (pluginrecord.ReconcileReport, error) {
 			captured = desired
 			return pluginrecord.ReconcileReport{Updated: []string{"shirabe"}}, nil
 		},
@@ -86,19 +86,54 @@ func TestReconcileMarketplaceRegistry_BuildsDesiredAndReports(t *testing.T) {
 		},
 	}
 
-	a.reconcileMarketplaceRegistry(cfg, repoIndex)
+	a.reconcileMarketplaceRegistry(cfg, repoIndex, base)
 
 	if len(captured) != 2 {
 		t.Fatalf("desired = %v, want 2 entries", captured)
 	}
-	if v, ok := captured["shirabe"]; !ok || v != false {
-		t.Errorf("desired[shirabe] = %v (ok=%v), want false", v, ok)
+	if v, ok := captured["shirabe"]; !ok || v != (pluginrecord.MarketplaceWant{}) {
+		t.Errorf("desired[shirabe] = %+v (ok=%v), want autoUpdate false and no path", v, ok)
 	}
-	if v, ok := captured["tsukumogami"]; !ok || v != true {
-		t.Errorf("desired[tsukumogami] = %v (ok=%v), want true", v, ok)
+	// tools resolves to an instance clone, not the managed copy, so the
+	// entry's path is left alone.
+	if v, ok := captured["tsukumogami"]; !ok || v != (pluginrecord.MarketplaceWant{AutoUpdate: true}) {
+		t.Errorf("desired[tsukumogami] = %+v (ok=%v), want autoUpdate true and no path", v, ok)
 	}
 	if !strings.Contains(buf.String(), "auto-update policy") {
 		t.Errorf("expected a report log mentioning the policy update, got %q", buf.String())
+	}
+}
+
+// TestReconcileMarketplaceRegistry_PathFromManagedCopy asserts a repo:
+// marketplace resolved to the workspace's managed copy asks for its entry to
+// point there.
+func TestReconcileMarketplaceRegistry_PathFromManagedCopy(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	managed := managedMarketplaceCurrent(workspaceRoot, "tools")
+	writeToolsManifest(t, managed, "tsukumogami")
+
+	var captured map[string]pluginrecord.MarketplaceWant
+	var buf bytes.Buffer
+	a := &Applier{
+		Reporter: NewReporter(&buf),
+		reconcileMarketplaces: func(desired map[string]pluginrecord.MarketplaceWant) (pluginrecord.ReconcileReport, error) {
+			captured = desired
+			return pluginrecord.ReconcileReport{Repointed: []string{"tsukumogami"}}, nil
+		},
+	}
+	cfg := &config.WorkspaceConfig{
+		Claude: config.ClaudeConfig{
+			Marketplaces: config.MarketplaceConfigs{{Source: "repo:tools/.claude-plugin/marketplace.json"}},
+		},
+	}
+
+	a.reconcileMarketplaceRegistry(cfg, map[string]string{"tools": managed}, workspaceRoot)
+
+	if got := captured["tsukumogami"]; got.Path != managed {
+		t.Errorf("desired[tsukumogami].Path = %q, want %q", got.Path, managed)
+	}
+	if !strings.Contains(buf.String(), "managed copy: tsukumogami") {
+		t.Errorf("expected a report log naming the repointed marketplace, got %q", buf.String())
 	}
 }
 
@@ -113,13 +148,13 @@ func TestReconcileMarketplaceRegistry_FailSafe(t *testing.T) {
 	var buf bytes.Buffer
 	a := &Applier{
 		Reporter: NewReporter(&buf),
-		reconcileMarketplaceAutoUpdate: func(map[string]bool) (pluginrecord.ReconcileReport, error) {
+		reconcileMarketplaces: func(map[string]pluginrecord.MarketplaceWant) (pluginrecord.ReconcileReport, error) {
 			return pluginrecord.ReconcileReport{}, os.ErrPermission
 		},
 	}
-	a.reconcileMarketplaceRegistry(cfg, nil)
+	a.reconcileMarketplaceRegistry(cfg, nil, "")
 
 	// Nil seam: silent no-op, no panic.
 	b := &Applier{Reporter: NewReporter(&bytes.Buffer{})}
-	b.reconcileMarketplaceRegistry(cfg, nil)
+	b.reconcileMarketplaceRegistry(cfg, nil, "")
 }

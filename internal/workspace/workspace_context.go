@@ -568,8 +568,10 @@ func readMarketplaceManifestName(dir string) (string, bool) {
 //
 // For local (repo:/directory) sources the registration key is read from the
 // marketplace's declared name in .claude-plugin/marketplace.json, falling back
-// to the repo-ref-derived name when the manifest cannot be read. Local sources
-// ignore track entirely. For github sources the repo name is used as the key.
+// to the repo-ref-derived name when the manifest cannot be read. A local
+// source's track is not emitted here: it picks the commit of the workspace's
+// managed copy, which repoIndex already resolves to (see
+// managedMarketplaceIndex). For github sources the repo name is used as the key.
 //
 // Track interpretation for github sources:
 //   - "" or "release": resolve the highest non-prerelease release tag and emit
@@ -587,7 +589,7 @@ func mapMarketplaceSourceWithIndex(source string, repoIndex map[string]string, a
 
 	if strings.HasPrefix(source, repoRefPrefix) {
 		// repo:tools/.claude-plugin/marketplace.json -> directory source.
-		// Local sources ignore track (no remote version to resolve).
+		// track was applied when the managed copy was checked out.
 		resolved, err := ResolveMarketplaceSource(source, repoIndex)
 		if err != nil {
 			return "", nil, "", err

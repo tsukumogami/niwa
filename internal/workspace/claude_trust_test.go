@@ -50,7 +50,7 @@ func newTrustFixture(t *testing.T) *trustFixture {
 	a := pf.applier
 	a.DeveloperHome = home
 	a.prunePluginRecords = nil
-	a.reconcileMarketplaceAutoUpdate = nil
+	a.reconcileMarketplaces = nil
 	a.headSHA = func(string) (string, error) { return "abc123", nil }
 	out := &syncBuffer{}
 	a.Reporter = NewReporterWithTTY(out, false)

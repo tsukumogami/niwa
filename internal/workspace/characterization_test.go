@@ -252,7 +252,7 @@ func newCharacterizationApplier(t *testing.T, fx *characterizationFixture) *Appl
 	// real ~/.claude. Neither writes a managed file, so stub them rather than
 	// letting a test touch the developer's home directory.
 	applier.prunePluginRecords = nil
-	applier.reconcileMarketplaceAutoUpdate = nil
+	applier.reconcileMarketplaces = nil
 
 	return applier
 }

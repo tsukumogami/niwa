@@ -355,9 +355,10 @@ own `settings.json`.
 
 The one exception is marketplaces with no root-resolvable path. A github-sourced
 marketplace (`org/repo`) hoists to the root unchanged. A `repo:`-sourced
-marketplace resolves to a directory inside an instance checkout (for example a
-private `tools` repo) that does not exist at the workspace root, so it has no
-root-stable path. Such a marketplace — and any plugin bound to it — is excluded
+marketplace resolves against a repo that only an instance apply fetches (into
+the managed copy described in `docs/guides/repo-marketplaces.md`, or an
+instance's own clone), so the root settings can't count on it. Such a
+marketplace — and any plugin bound to it — is excluded
 from the root settings and a notice is printed at `niwa init` / `niwa apply` time
 (no silent drop). Those plugins still load normally inside a provisioned instance,
 where the `repo:` source resolves. In short: a root-launched session has the
@@ -405,8 +406,8 @@ root, and the root config installs again.
   instance settings do for permissions, hooks, env, plugins, and marketplaces.
   One field is deliberately filtered, not forwarded verbatim: the root receives
   only the **root-hoistable** subset of marketplaces (see `rootHoistableConfig`).
-  github-sourced marketplaces hoist as-is; `repo:`-sourced ones point into an
-  instance checkout that does not exist at the root, so they and the plugins
+  github-sourced marketplaces hoist as-is; `repo:`-sourced ones resolve against
+  a repo only an instance apply fetches, so they and the plugins
   bound to them are excluded and reported. Do not assume the root settings are a
   byte-for-byte copy of an instance's — they match for everything except those
   instance-local marketplaces.
