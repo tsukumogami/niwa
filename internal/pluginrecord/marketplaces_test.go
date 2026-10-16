@@ -261,3 +261,37 @@ func TestReconcileAutoUpdate_MalformedIsFailSafe(t *testing.T) {
 		t.Errorf("malformed file was modified")
 	}
 }
+
+func TestRegisteredMarketplaces_ListsNames(t *testing.T) {
+	base := t.TempDir()
+	writeKnownMarketplaces(t, base, claudeFormattedRegistry)
+	got, err := RegisteredMarketplaces(WithBaseDir(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top map[string]any
+	if err := json.Unmarshal([]byte(claudeFormattedRegistry), &top); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(top) || !got["tsukumogami"] {
+		t.Errorf("got %v, want every name in the registry", got)
+	}
+}
+
+func TestRegisteredMarketplaces_AbsentFileIsEmpty(t *testing.T) {
+	got, err := RegisteredMarketplaces(WithBaseDir(t.TempDir()))
+	if err != nil {
+		t.Fatalf("absent file should be an empty set, got %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %v, want an empty set", got)
+	}
+}
+
+func TestRegisteredMarketplaces_MalformedIsErrMalformed(t *testing.T) {
+	base := t.TempDir()
+	writeKnownMarketplaces(t, base, `{ this is not json`)
+	if _, err := RegisteredMarketplaces(WithBaseDir(base)); !errors.Is(err, ErrMalformed) {
+		t.Errorf("error = %v, want ErrMalformed", err)
+	}
+}

@@ -39,7 +39,17 @@ func recordPluginCalls(t *testing.T, err error) *[][]string {
 		return err
 	}
 	t.Cleanup(func() { runClaudePluginCmd = prev })
+	stubRegisteredMarketplaces(t, nil, nil)
 	return &calls
+}
+
+// stubRegisteredMarketplaces swaps the registry read for a fixed answer and
+// restores it on cleanup, so no test reads the developer's HOME.
+func stubRegisteredMarketplaces(t *testing.T, names map[string]bool, err error) {
+	t.Helper()
+	prev := registeredMarketplaces
+	registeredMarketplaces = func() (map[string]bool, error) { return names, err }
+	t.Cleanup(func() { registeredMarketplaces = prev })
 }
 
 // The settings fixtures below mirror the shape niwa emits in
@@ -62,6 +72,7 @@ func TestPrewarm_GithubMarketplacesAndPlugins(t *testing.T) {
 
 	want := [][]string{
 		{instance, "marketplace", "add", "tsukumogami/shirabe#v0.13.0", "--scope", "local"},
+		{instance, "marketplace", "add", "/local/tools", "--scope", "local"},
 		{instance, "install", "shirabe@shirabe", "--scope", "local"},
 		{instance, "update", "shirabe@shirabe", "--scope", "local"},
 		{instance, "install", "tsukumogami@tsukumogami", "--scope", "local"},
@@ -306,20 +317,86 @@ func TestPrewarm_SkipsDisabledPlugins(t *testing.T) {
 	}
 }
 
-func TestPrewarm_SkipsDirectoryMarketplaces(t *testing.T) {
+// TestPrewarm_RegistersUnregisteredDirectoryMarketplace guards #385: `claude
+// plugin install` resolves a marketplace through Claude Code's registry, not the
+// project settings declaring it, so a directory marketplace the host has never
+// registered must be added before its plugins install, or every install fails
+// with "not found in marketplace".
+func TestPrewarm_RegistersUnregisteredDirectoryMarketplace(t *testing.T) {
+	instance := writeInstanceSettings(t, `{
+	  "enabledPlugins": {"tsukumogami@tsukumogami": true},
+	  "extraKnownMarketplaces": {
+	    "tsukumogami": {"source": {"source": "directory", "path": "/local/tools"}}
+	  }
+	}`)
+	calls := recordPluginCalls(t, nil)
+	stubRegisteredMarketplaces(t, map[string]bool{"shirabe": true}, nil)
+
+	prewarmDeclaredPlugins(instance, nil, false)
+
+	want := [][]string{
+		{instance, "marketplace", "add", "/local/tools", "--scope", "local"},
+		{instance, "install", "tsukumogami@tsukumogami", "--scope", "local"},
+	}
+	if !reflect.DeepEqual(*calls, want) {
+		t.Errorf("calls =\n  %v\nwant\n  %v", *calls, want)
+	}
+}
+
+// A directory marketplace the registry already lists is left alone: an add under
+// that name with a different path would repoint the entry for the whole HOME,
+// which only reconcileMarketplaceRegistry may do.
+func TestPrewarm_SkipsRegisteredDirectoryMarketplace(t *testing.T) {
+	instance := writeInstanceSettings(t, `{
+	  "enabledPlugins": {"tsukumogami@tsukumogami": true},
+	  "extraKnownMarketplaces": {
+	    "tsukumogami": {"source": {"source": "directory", "path": "/local/tools"}}
+	  }
+	}`)
+	calls := recordPluginCalls(t, nil)
+	stubRegisteredMarketplaces(t, map[string]bool{"tsukumogami": true}, nil)
+
+	prewarmDeclaredPlugins(instance, nil, false)
+
+	want := [][]string{{instance, "install", "tsukumogami@tsukumogami", "--scope", "local"}}
+	if !reflect.DeepEqual(*calls, want) {
+		t.Errorf("calls =\n  %v\nwant\n  %v", *calls, want)
+	}
+}
+
+// A registry that can't be read counts as having no entry, so the add still runs.
+func TestPrewarm_UnreadableRegistryStillRegistersDirectoryMarketplace(t *testing.T) {
 	instance := writeInstanceSettings(t, `{
 	  "extraKnownMarketplaces": {
 	    "tsukumogami": {"source": {"source": "directory", "path": "/local/tools"}}
 	  }
 	}`)
 	calls := recordPluginCalls(t, nil)
+	stubRegisteredMarketplaces(t, nil, errors.New("malformed"))
 
 	prewarmDeclaredPlugins(instance, nil, false)
 
-	for _, c := range *calls {
-		if len(c) >= 2 && c[1] == "marketplace" {
-			t.Errorf("directory marketplace should not be added, got call %v", c)
-		}
+	want := [][]string{{instance, "marketplace", "add", "/local/tools", "--scope", "local"}}
+	if !reflect.DeepEqual(*calls, want) {
+		t.Errorf("calls =\n  %v\nwant\n  %v", *calls, want)
+	}
+}
+
+// A failed directory add warns and the plugin install is still attempted.
+func TestPrewarm_DirectoryAddFailureWarns(t *testing.T) {
+	instance := writeInstanceSettings(t, `{
+	  "extraKnownMarketplaces": {
+	    "tsukumogami": {"source": {"source": "directory", "path": "/local/tools"}}
+	  }
+	}`)
+	recordPluginCalls(t, errors.New("boom"))
+	var buf bytes.Buffer
+	reporter := workspace.NewReporter(&buf)
+
+	prewarmDeclaredPlugins(instance, reporter, false)
+
+	if out := buf.String(); !strings.Contains(out, `pre-warming marketplace "tsukumogami" (/local/tools)`) || !strings.Contains(out, "boom") {
+		t.Errorf("want a warning naming the marketplace and the error, got %q", out)
 	}
 }
 
