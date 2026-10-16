@@ -618,6 +618,13 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		a.PrewarmDeclaredPlugins(instanceRoot, a.Reporter, a.SkipPluginInstall)
 	}
 
+	// Mirror the instance root's MCP approvals into its settings.local.json so
+	// a background session started from a pre-warmed spare, which may not yet
+	// see the root's workspace trust, starts the servers without prompting.
+	if err := mirrorMCPApprovalsToLocal(instanceRoot); err != nil {
+		a.Reporter.Warn("approving MCP servers in .claude/settings.local.json: %v", err)
+	}
+
 	// Use the effective configName (resolved earlier above) for the
 	// instance-number derivation so `niwa init my-name --from upstream`
 	// correctly resolves the first instance to InstanceNumber=1 (not 0).
@@ -791,6 +798,11 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	// Claude session enumerates skills. Best-effort; see Create for the rationale.
 	if a.PrewarmDeclaredPlugins != nil {
 		a.PrewarmDeclaredPlugins(instanceRoot, a.Reporter, a.SkipPluginInstall)
+	}
+
+	// Keep the root's settings.local.json approvals in step; see Create.
+	if err := mirrorMCPApprovalsToLocal(instanceRoot); err != nil {
+		a.Reporter.Warn("approving MCP servers in .claude/settings.local.json: %v", err)
 	}
 
 	// Emit `rotated <path>` to stderr for every managed file whose
