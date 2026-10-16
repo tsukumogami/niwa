@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
@@ -240,7 +241,17 @@ func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsD
 		return fmt.Errorf("niwa: error: writing session mapping for %s: %w", payload.SessionID, err)
 	}
 
-	out, err := buildSessionStartInjection(res.Path, res.Keys, res.Notices)
+	// The session's MCP set comes from its project, the workspace root, so
+	// the servers the instance declares never reach it. The names niwa
+	// recorded for the instance go into a notice that says so. A state that
+	// can't be read means no notice, not a failed hook: the instance exists
+	// and the session can still use it.
+	var mcpServers []string
+	if st, stErr := workspace.LoadState(res.Path); stErr == nil {
+		mcpServers = st.ApprovedMCPServers
+	}
+
+	out, err := buildSessionStartInjection(res.Path, res.Keys, res.Notices, mcpServers)
 	if err != nil {
 		renderNotices(cmd.ErrOrStderr(), res.Notices)
 		return fmt.Errorf("niwa: error: assembling session context: %w", err)
@@ -363,7 +374,12 @@ type sessionStartInjection struct {
 // the only channel from this process that reaches the session. The fallback
 // notices follow the key report for the same reason; on this path they go
 // only here, not also to stderr, so each is delivered once.
-func buildSessionStartInjection(instancePath string, keys []keyreport.Entry, notices *fallbacknotice.Collector) ([]byte, error) {
+//
+// mcpServers is the instance's recorded ApprovedMCPServers. When it is
+// non-empty, ephemeralMCPNotice follows the fallback notices, since it too
+// describes what this session has to work with. An empty list adds nothing,
+// so a workspace with no MCP servers gets exactly the payload it got before.
+func buildSessionStartInjection(instancePath string, keys []keyreport.Entry, notices *fallbacknotice.Collector, mcpServers []string) ([]byte, error) {
 	claudeMD := ""
 	if data, err := os.ReadFile(filepath.Join(instancePath, "CLAUDE.md")); err == nil {
 		claudeMD = string(data)
@@ -383,6 +399,10 @@ func buildSessionStartInjection(instancePath string, keys []keyreport.Entry, not
 		b = append(b, text...)
 		b = append(b, '\n')
 	}
+	if text := ephemeralMCPNotice(mcpServers); text != "" {
+		b = append(b, text...)
+		b = append(b, "\n\n"...)
+	}
 	if claudeMD != "" {
 		b = append(b, "The instance's CLAUDE.md follows; treat it as the authoritative guidance for this session:\n\n"...)
 		b = append(b, claudeMD...)
@@ -397,6 +417,40 @@ func buildSessionStartInjection(instancePath string, keys []keyreport.Entry, not
 		return nil, fmt.Errorf("marshaling session start injection: %w", err)
 	}
 	return append(encoded, '\n'), nil
+}
+
+// ephemeralMCPNotice is the paragraph telling an ephemeral session which MCP
+// servers it did not load and how to get them. names is the instance's
+// recorded approval list; only names matching mcpServerNamePattern are
+// printed, in backticks, and the rest are counted, so a hand-edited state
+// file can't put arbitrary text into the agent's context. Everything else is
+// fixed text. It returns "" for an empty list.
+func ephemeralMCPNotice(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	kept, dropped := filterMCPServerNames(names)
+
+	quoted := make([]string, len(kept))
+	for i, name := range kept {
+		quoted[i] = "`" + name + "`"
+	}
+	list := strings.Join(quoted, ", ")
+	switch {
+	case len(kept) == 0 && len(dropped) == 1:
+		list = "1 server"
+	case len(kept) == 0:
+		list = fmt.Sprintf("%d servers", len(dropped))
+	case len(dropped) == 1:
+		list += " and 1 other server"
+	case len(dropped) > 1:
+		list += fmt.Sprintf(" and %d other servers", len(dropped))
+	}
+
+	return "This instance declares MCP servers that this session does not have: " + list + ". " +
+		"The session started at the workspace root, so it did not load the MCP servers declared " +
+		"for the instance, and changing directory won't load them. To work with them, run the task " +
+		"as a `niwa dispatch` worker, or start a new Claude Code session inside the instance."
 }
 
 // buildStrictFailureInjection assembles the SessionStart hook JSON for a

@@ -592,11 +592,11 @@ func TestEmptyNoticesRenderLikeNoCollector(t *testing.T) {
 	dir := t.TempDir()
 	empty := fallbacknotice.New(nil)
 	keys := []keyreport.Entry{missingKey}
-	a, err := buildSessionStartInjection(dir, keys, nil)
+	a, err := buildSessionStartInjection(dir, keys, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := buildSessionStartInjection(dir, keys, empty)
+	b, err := buildSessionStartInjection(dir, keys, empty, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
