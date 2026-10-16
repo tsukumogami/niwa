@@ -539,8 +539,12 @@ func TestDestroySession_DirtyGuard(t *testing.T) {
 	})
 }
 
-// runCmd runs a command and returns its combined output.
+// runCmd runs a command and returns its combined output. GIT_CONFIG_GLOBAL
+// keeps a developer's global commit signing or hooks out of the throwaway
+// repositories the tests set up with it.
 func runCmd(name string, args ...string) (string, error) {
-	out, err := exec.Command(name, args...).CombinedOutput()
+	cmd := exec.Command(name, args...)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

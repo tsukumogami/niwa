@@ -22,7 +22,10 @@ func makeSourceRepo(t *testing.T) (repoDir, sha string) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = repoDir
+		// GIT_CONFIG_GLOBAL keeps a developer's global commit signing or hooks
+		// out of the throwaway repository.
 		cmd.Env = append(os.Environ(),
+			"GIT_CONFIG_GLOBAL=/dev/null",
 			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e", "GIT_AUTHOR_DATE=2026-01-01T00:00:00Z",
 			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e", "GIT_COMMITTER_DATE=2026-01-01T00:00:00Z",
 			"GIT_LFS_SKIP_SMUDGE=1",
