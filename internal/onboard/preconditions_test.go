@@ -197,6 +197,7 @@ func TestEnsurePersonalOverlay_UnregisteredPointerNoRepoSuppliedIsError(t *testi
 // function scaffolds it locally (git init + niwa.toml + commit),
 // pauses with guidance, and never issues any remote-creating command.
 func TestEnsurePersonalOverlay_ScaffoldsNewRepoAndGuidesNoRemoteCreated(t *testing.T) {
+	isolateGitConfig(t)
 	xdg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	if _, err := WriteLocalPointer("acme/dot-niwa-overlay"); err != nil {

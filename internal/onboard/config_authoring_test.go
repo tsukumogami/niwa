@@ -261,6 +261,7 @@ func (r *recordingGitInvoker) CommandContext(ctx context.Context, args ...string
 }
 
 func TestWritePersonalOverlayVaultProvider_RealGitCommitNoPush(t *testing.T) {
+	isolateGitConfig(t)
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -326,6 +327,7 @@ func TestWritePersonalOverlayVaultProvider_RealGitCommitNoPush(t *testing.T) {
 // the content-only landing check is not proof of a commit. The retry must
 // still stage and commit the pre-existing bytes.
 func TestWritePersonalOverlayVaultProvider_RetryAfterUncommittedWrite(t *testing.T) {
+	isolateGitConfig(t)
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -367,6 +369,7 @@ func TestWritePersonalOverlayVaultProvider_RetryAfterUncommittedWrite(t *testing
 }
 
 func TestWritePersonalOverlayVaultProvider_AC24_DoesNotTouchSnapshotDir(t *testing.T) {
+	isolateGitConfig(t)
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -408,6 +411,7 @@ func TestWritePersonalOverlayVaultProvider_AC24_DoesNotTouchSnapshotDir(t *testi
 }
 
 func TestWritePersonalOverlayVaultProvider_HostileCharacterFixture(t *testing.T) {
+	isolateGitConfig(t)
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -640,10 +644,29 @@ func TestWritePersonalOverlayVaultProvider_PrefersConfiguredIdentity(t *testing.
 	}
 }
 
+// isolateGitConfig keeps a developer's global and system git configuration,
+// such as commit signing that needs an agent, out of the commits the code under
+// test makes, and supplies the identity that configuration would have. The
+// identity goes in a config file because the code under test runs git with a
+// scrubbed environment.
+func isolateGitConfig(t *testing.T) {
+	t.Helper()
+	cfg := filepath.Join(t.TempDir(), "gitconfig")
+	body := "[user]\n\tname = test\n\temail = test@example.com\n[commit]\n\tgpgsign = false\n"
+	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+}
+
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.CommandContext(context.Background(), "git", append([]string{"-C", dir}, args...)...)
+	// GIT_CONFIG_GLOBAL keeps a developer's global commit signing or hooks out
+	// of the throwaway repository.
 	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
 	)
