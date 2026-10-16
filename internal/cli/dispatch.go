@@ -772,6 +772,14 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			launchSettings["env"] = resourceAttributesEnv{value: lineageValue}
 		}
 	}
+	// EXPERIMENT: repeat the MCP approvals niwa wrote into the instance root's
+	// settings.json on the command line, to see whether a background worker
+	// honors them from the flag settings source when it ignores the project
+	// and local ones. This breaks the constants-only rule above (the names come
+	// from the workspace's [mcp.servers]) and is not meant to land as is.
+	if spec.Flags.Settings != "" && inst != nil && len(inst.EnabledMcpjsonServers) > 0 {
+		launchSettings[config.EnabledMcpjsonServersKey] = inst.EnabledMcpjsonServers
+	}
 	// Two discrete argv elements, and none at all when no contributor added a
 	// key. An agent with no settings flag has nowhere for the document to go,
 	// so every contributor must check spec.Flags.Settings itself before adding

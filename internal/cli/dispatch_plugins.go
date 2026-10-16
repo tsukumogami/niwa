@@ -319,6 +319,9 @@ type instanceSettings struct {
 	// set it; the dispatch keep-alive resolver reads it as the downstream layer
 	// between the --keep-alive flag and the host default.
 	KeepAliveOnDispatch *bool `json:"keepAliveOnDispatch"`
+	// EnabledMcpjsonServers mirrors the Claude Code key niwa writes for the
+	// servers it generated into the instance root's .mcp.json.
+	EnabledMcpjsonServers []string `json:"enabledMcpjsonServers"`
 }
 
 type marketplaceEntry struct {
