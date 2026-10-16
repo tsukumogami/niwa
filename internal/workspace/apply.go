@@ -177,14 +177,23 @@ type Applier struct {
 	// unit tests that don't exercise the registry at all.
 	prunePluginRecords func() (pluginrecord.PruneReport, error)
 
-	// reconcileMarketplaceAutoUpdate sets the autoUpdate flag in Claude Code's
-	// global known_marketplaces.json for the marketplaces niwa manages, so an
-	// already-registered marketplace adopts the configured policy instead of
-	// keeping a stale value Claude Code does not refresh from project settings.
-	// Production wires it (via NewApplier) to pluginrecord.ReconcileAutoUpdate
-	// against the real ~/.claude; tests override it to a temp HOME or a fake.
-	// When nil, the reconcile is a silent no-op.
-	reconcileMarketplaceAutoUpdate func(desired map[string]bool) (pluginrecord.ReconcileReport, error)
+	// reconcileMarketplaces brings the entries of Claude Code's global
+	// known_marketplaces.json for the marketplaces niwa manages to the
+	// configured autoUpdate policy and, for a repo: marketplace, to the
+	// workspace's managed copy, so an already-registered marketplace adopts
+	// both instead of keeping values Claude Code does not refresh from project
+	// settings. Production wires it (via NewApplier) to reconcileMarketplacesAt
+	// against the real home; tests override it to a temp HOME or a fake. When
+	// nil, the reconcile is a silent no-op.
+	reconcileMarketplaces func(desired map[string]pluginrecord.MarketplaceWant) (pluginrecord.ReconcileReport, error)
+
+	// syncMarketplaces brings the workspace's managed copy of each repo:
+	// marketplace to its configured ref (see marketplace_clone.go). Production
+	// wires it (via NewApplier) to syncManagedMarketplaces, which fetches from
+	// the repo's remote; tests whose clones are stand-ins with no remote set
+	// it to nil, which skips the sync and leaves those marketplaces resolving
+	// against the instance's clones.
+	syncMarketplaces func(ctx context.Context, workspaceRoot string, marketplaces []managedMarketplace) []string
 
 	// saveState persists the instance state at the end of Create and Apply.
 	// Nil means SaveState. Tests set it to inject a failure after every
@@ -236,11 +245,16 @@ func NewApplier(gh github.Client) *Applier {
 	a.prunePluginRecords = func() (pluginrecord.PruneReport, error) {
 		return pluginrecord.Prune(pluginrecord.Dangling)
 	}
-	// Reconcile the global marketplace registry's autoUpdate flag to the
-	// configured per-marketplace policy. Defaults to the real ~/.claude.
-	a.reconcileMarketplaceAutoUpdate = func(desired map[string]bool) (pluginrecord.ReconcileReport, error) {
-		return pluginrecord.ReconcileAutoUpdate(desired)
+	// Reconcile the global marketplace registry to the configured
+	// per-marketplace policy and managed paths. Defaults to the real ~/.claude.
+	a.reconcileMarketplaces = func(desired map[string]pluginrecord.MarketplaceWant) (pluginrecord.ReconcileReport, error) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return pluginrecord.ReconcileReport{}, err
+		}
+		return reconcileMarketplacesAt(home, desired)
 	}
+	a.syncMarketplaces = syncManagedMarketplaces
 	a.cloneOrSync = func(ctx context.Context, url, dir string) (bool, int, error) {
 		fetcher, _ := a.GitHubClient.(FetchClient)
 		return EnsureOverlaySnapshot(ctx, url, dir, fetcher, a.Reporter)
@@ -1706,6 +1720,21 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		repoIndex[cr.Repo.Name] = filepath.Join(instanceRoot, cr.Group, cr.Repo.Name)
 	}
 
+	// Step 4.4: Bring the workspace's managed copy of each repo: marketplace
+	// to its configured ref, and resolve those marketplaces against it rather
+	// than this instance's clone (see marketplace_clone.go). Every marketplace
+	// consumer below reads marketplaceIndex, so the settings, the plugin skill
+	// delivery and the global registry all name the same directory. Only a
+	// multi-instance workspace has a root to keep the copies in (see
+	// instanceMarketplaceIndex); a single-instance layout keeps its clones.
+	workspaceRoot := filepath.Dir(instanceRoot)
+	if a.syncMarketplaces != nil && workspaceRootHoldsState(workspaceRoot) {
+		managed, managedWarnings := managedMarketplaces(effectiveCfg, classified)
+		allWarnings = append(allWarnings, managedWarnings...)
+		allWarnings = append(allWarnings, a.syncMarketplaces(ctx, workspaceRoot, managed)...)
+	}
+	marketplaceIndex := instanceMarketplaceIndex(instanceRoot, repoIndex)
+
 	// Step 4.5: Install workspace-root context and settings.
 	// Context file uses @import for level-scoped visibility.
 	// Settings uses settings.json (not .local) since instance root is non-git.
@@ -1738,7 +1767,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		Config:    effectiveCfg,
 		ConfigDir: configDir,
 		RepoDir:   instanceRoot,
-		RepoIndex: repoIndex,
+		RepoIndex: marketplaceIndex,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("installing workspace root settings: %w", err)
@@ -1810,7 +1839,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		InstanceRoot: instanceRoot,
 		Plugins:      MergeInstanceOverrides(effectiveCfg).Plugins,
 		Marketplaces: effectiveCfg.Claude.Marketplaces,
-		RepoIndex:    repoIndex,
+		RepoIndex:    marketplaceIndex,
 		Fetcher:      fetcher,
 	})
 	for _, m := range missingPlugins {
@@ -2032,7 +2061,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			RepoDir:               repoDir,
 			DiscoveredHooks:       discoveredHooks,
 			DiscoveredEnv:         discoveredEnv,
-			RepoIndex:             repoIndex,
+			RepoIndex:             marketplaceIndex,
 			SourceTuples:          sourceTuples,
 			AllowPlaintextSecrets: a.AllowPlaintextSecrets,
 			Stderr:                a.Reporter.Writer(),
@@ -2244,12 +2273,12 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// removed so the heal is never silent (R4).
 	a.healDanglingPluginRecords()
 
-	// Step 9: Reconcile the global marketplace registry's autoUpdate flag to
-	// the configured per-marketplace policy. niwa writes the policy into
-	// project settings, but Claude Code does not refresh an already-registered
-	// marketplace's global entry from those, so this closes the gap on every
-	// create and update (R18). Fail-safe like the heal above.
-	a.reconcileMarketplaceRegistry(effectiveCfg, repoIndex)
+	// Step 9: Reconcile the global marketplace registry to the configured
+	// per-marketplace policy and the managed marketplace copies. niwa writes
+	// both into project settings, but Claude Code does not refresh an
+	// already-registered marketplace's global entry from those, so this closes
+	// the gap on every create and update (R18). Fail-safe like the heal above.
+	a.reconcileMarketplaceRegistry(effectiveCfg, marketplaceIndex, workspaceRoot)
 
 	if a.afterPipeline != nil {
 		if err := a.afterPipeline(); err != nil {
@@ -2457,40 +2486,83 @@ func (a *Applier) healDanglingPluginRecords() {
 	}
 }
 
-// reconcileMarketplaceRegistry sets the autoUpdate flag in Claude Code's global
-// known_marketplaces.json to the configured per-marketplace policy for the
-// marketplaces niwa manages, so an already-registered marketplace adopts the
-// new policy instead of keeping a stale value Claude Code never refreshes from
-// project settings. It runs from runPipeline on every create and update.
+// reconcileMarketplaceRegistry brings Claude Code's global
+// known_marketplaces.json in line with the marketplaces niwa manages: each
+// entry's autoUpdate flag to the configured policy, and each repo:
+// marketplace's directory source to the workspace's managed copy. Claude Code
+// never refreshes an existing entry from project settings, so without this an
+// entry keeps a stale policy, and keeps naming whichever instance's clone
+// registered it first. It runs from runPipeline on every create and update.
+//
+// marketplaceIndex is the pipeline's marketplace index (see
+// managedMarketplaceIndex). A repo: marketplace is repointed only when that
+// index resolves it to its managed copy, which exists only after a checkout
+// succeeded, so the entry never names a directory that is missing or half
+// written.
 //
 // Like the dangling-record heal, it is fail-safe: a nil seam or any registry
 // error is reported via a deferred warning and never propagated, so a missing
 // or malformed registry can never fail a create or update.
-func (a *Applier) reconcileMarketplaceRegistry(cfg *config.WorkspaceConfig, repoIndex map[string]string) {
-	if a.reconcileMarketplaceAutoUpdate == nil || cfg == nil {
+func (a *Applier) reconcileMarketplaceRegistry(cfg *config.WorkspaceConfig, marketplaceIndex map[string]string, workspaceRoot string) {
+	if a.reconcileMarketplaces == nil || cfg == nil {
 		return
 	}
 
-	desired := make(map[string]bool, len(cfg.Claude.Marketplaces))
+	desired := make(map[string]pluginrecord.MarketplaceWant, len(cfg.Claude.Marketplaces))
 	for _, mc := range cfg.Claude.Marketplaces {
-		name, err := marketplaceRegistrationName(mc.Source, repoIndex)
+		name, err := marketplaceRegistrationName(mc.Source, marketplaceIndex)
 		if err != nil || name == "" {
 			continue
 		}
-		desired[name] = mc.AutoUpdate
+		want := pluginrecord.MarketplaceWant{AutoUpdate: mc.AutoUpdate}
+		if repo, _, ok := repoMarketplaceRef(mc.Source); ok && marketplaceIndex[repo] == managedMarketplaceCurrent(workspaceRoot, repo) {
+			// The marketplace root is the directory holding
+			// .claude-plugin/marketplace.json, which can sit below the repo
+			// root; this is the same derivation the settings entry uses
+			// (mapMarketplaceSourceWithIndex), so the two name one path.
+			if resolved, err := ResolveMarketplaceSource(mc.Source, marketplaceIndex); err == nil {
+				want.Path = filepath.Dir(filepath.Dir(resolved))
+			}
+		}
+		desired[name] = want
 	}
 	if len(desired) == 0 {
 		return
 	}
 
-	report, err := a.reconcileMarketplaceAutoUpdate(desired)
+	report, err := a.reconcileMarketplaces(desired)
 	if err != nil {
-		a.Reporter.DeferWarn("could not reconcile marketplace auto-update policy: %v", err)
+		a.Reporter.DeferWarn("could not reconcile Claude Code's marketplace registry: %v", err)
 		return
 	}
 	if len(report.Updated) > 0 {
 		a.Reporter.Log("updated auto-update policy for %d marketplace(s): %s", len(report.Updated), strings.Join(report.Updated, ", "))
 	}
+	if len(report.Repointed) > 0 {
+		a.Reporter.Log("registered %d marketplace(s) from the workspace's managed copy: %s", len(report.Repointed), strings.Join(report.Repointed, ", "))
+	}
+}
+
+// reconcileMarketplacesAt runs pluginrecord.ReconcileMarketplaces against the
+// registry under home, holding a lock beside niwa's other host-wide locks for
+// the read-modify-write. Two applies running at once (in one workspace or two)
+// then take turns rather than one writing back a registry it read before the
+// other's change. Claude Code's own writes don't take this lock; the atomic
+// rename still means it never reads a half-written file.
+func reconcileMarketplacesAt(home string, desired map[string]pluginrecord.MarketplaceWant) (pluginrecord.ReconcileReport, error) {
+	if strings.TrimSpace(home) == "" {
+		return pluginrecord.ReconcileReport{}, fmt.Errorf("no home directory to resolve Claude Code's marketplace registry under")
+	}
+	locks := filepath.Join(home, ".niwa", "locks")
+	if err := os.MkdirAll(locks, 0o700); err != nil {
+		return pluginrecord.ReconcileReport{}, fmt.Errorf("creating the niwa lock directory %s: %w", locks, err)
+	}
+	unlock, err := acquireFileLock(filepath.Join(locks, "claude-known-marketplaces.lock"), "writing Claude Code's marketplace registry")
+	if err != nil {
+		return pluginrecord.ReconcileReport{}, err
+	}
+	defer unlock()
+	return pluginrecord.ReconcileMarketplaces(desired, pluginrecord.WithBaseDir(home))
 }
 
 // affectedPlugins returns the sorted, de-duplicated set of plugin keys touched

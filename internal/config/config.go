@@ -119,9 +119,12 @@ type ClaudeOverride struct {
 // per-marketplace policy. Source is the marketplace reference (a github
 // "org/repo", a "repo:<repo>/<path>" local source, etc.). AutoUpdate
 // controls whether Claude Code auto-updates this marketplace (default
-// false). Track selects which version to install ("release" for the
-// latest stable tag, "main" for the default branch, or an explicit ref);
-// empty defers to the source-type default.
+// false). Track selects which version to install; empty defers to the
+// source-type default. For a github source it is "release" (the latest
+// stable tag, the default), "main" (the default branch) or an explicit ref.
+// For a repo: source it picks the commit of niwa's managed copy: empty is
+// the remote's default branch, anything else a branch, tag or commit, and
+// "release" is refused by validate.
 type MarketplaceConfig struct {
 	Source     string `toml:"source"`
 	AutoUpdate bool   `toml:"auto_update,omitempty"`
@@ -747,6 +750,16 @@ func validate(cfg *WorkspaceConfig) error {
 		// clone URL override for discovered repos).
 		if override.Group != "" && override.URL == "" {
 			return fmt.Errorf("repo %q has group but no url: explicit repos require both url and group", name)
+		}
+	}
+
+	// A repo: marketplace is registered from niwa's own clone of the repo,
+	// checked out at its track: the default branch when unset, otherwise the
+	// named branch, tag or commit. There is no release list to pick from for a
+	// local repo, so "release" would quietly mean something else; refuse it.
+	for i, mc := range cfg.Claude.Marketplaces {
+		if strings.HasPrefix(mc.Source, "repo:") && mc.Track == "release" {
+			return fmt.Errorf("claude.marketplaces[%d] (%s): track = \"release\" is not supported for a repo: source; leave track unset for the repo's default branch, or name a branch, tag or commit", i, mc.Source)
 		}
 	}
 

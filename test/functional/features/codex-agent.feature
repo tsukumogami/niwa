@@ -796,9 +796,10 @@ Feature: prepare every instance for both agents
     When I run "niwa create ws"
     Then the exit code is 0
     # Reported, and reported with both sources in it: the configured tree that
-    # was skipped, and what holds the name instead.
+    # was skipped, and what holds the name instead. A repo: marketplace resolves
+    # from the workspace's managed copy, not the instance's clone of mkt.
     And the error output contains "is not delivered at the instance root"
-    And the error output contains "tools/mkt/plugins/niwa"
+    And the error output contains ".niwa/marketplaces/mkt/current/plugins/niwa"
     And the error output contains "that name carries niwa's own plugin there"
     # The one tree at the root is niwa's own, asserted by content rather than by
     # name: mirroring is exact, and the configured plugin's tree is not this.

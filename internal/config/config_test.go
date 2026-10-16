@@ -1056,6 +1056,38 @@ track = "v1.2.3"
 	}
 }
 
+// TestParseMarketplacesRepoSourceTrack accepts a branch, tag or commit as the
+// track of a repo: source and rejects "release", which has no meaning for a
+// repo niwa checks out itself.
+func TestParseMarketplacesRepoSourceTrack(t *testing.T) {
+	for _, track := range []string{"main", "feature/x", "v1.2.3", "0123456789abcdef"} {
+		input := `
+[workspace]
+name = "test-ws"
+
+[[claude.marketplaces]]
+source = "repo:tools/.claude-plugin/marketplace.json"
+track = "` + track + `"
+`
+		if _, err := Parse([]byte(input)); err != nil {
+			t.Errorf("track %q: unexpected error: %v", track, err)
+		}
+	}
+
+	input := `
+[workspace]
+name = "test-ws"
+
+[[claude.marketplaces]]
+source = "repo:tools/.claude-plugin/marketplace.json"
+track = "release"
+`
+	_, err := Parse([]byte(input))
+	if err == nil || !strings.Contains(err.Error(), `track = "release" is not supported for a repo: source`) {
+		t.Fatalf("error = %v, want a refusal of release on a repo: source", err)
+	}
+}
+
 // TestParseMarketplacesTableMissingSource rejects a table without the
 // required source field.
 func TestParseMarketplacesTableMissingSource(t *testing.T) {

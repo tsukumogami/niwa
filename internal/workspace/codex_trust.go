@@ -640,7 +640,7 @@ func lockCodexTrust(home, configPath string) (func(), error) {
 	}
 	sum := sha256.Sum256([]byte(configPath))
 	lockPath := filepath.Join(root, "codex-trust-"+hex.EncodeToString(sum[:])[:16]+".lock")
-	return acquireCodexTrustLock(lockPath)
+	return acquireFileLock(lockPath, "writing Codex trust entries")
 }
 
 // quoteTOMLKey renders s as a TOML basic string, suitable as a quoted key in a

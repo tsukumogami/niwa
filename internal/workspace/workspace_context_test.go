@@ -684,9 +684,11 @@ func TestMapMarketplaceTrackNoReleaseFallback(t *testing.T) {
 	}
 }
 
-// TestMapMarketplaceTrackLocalIgnored verifies that local sources ignore track
-// entirely (no ref, no report) even when a track is configured.
-func TestMapMarketplaceTrackLocalIgnored(t *testing.T) {
+// TestMapMarketplaceTrackLocalEmitsNoRef verifies that mapping a local source
+// emits no ref and no report even when a track is configured: a repo:
+// source's track picks the commit of the managed copy the repo index already
+// resolves to, so the settings entry carries only the directory.
+func TestMapMarketplaceTrackLocalEmitsNoRef(t *testing.T) {
 	resolveLatestStableRelease = func(string) (string, bool) {
 		t.Fatalf("resolver should not be called for a local source")
 		return "", false
@@ -694,7 +696,7 @@ func TestMapMarketplaceTrackLocalIgnored(t *testing.T) {
 	t.Cleanup(func() { resolveLatestStableRelease = defaultResolveLatestStableRelease })
 
 	repoIndex := localMarketplaceRepo(t, "{}")
-	_, entry, report, err := mapMarketplaceSourceWithIndex("repo:tools/.claude-plugin/marketplace.json", repoIndex, false, "release")
+	_, entry, report, err := mapMarketplaceSourceWithIndex("repo:tools/.claude-plugin/marketplace.json", repoIndex, false, "v1.2.3")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
