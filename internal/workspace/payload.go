@@ -162,6 +162,36 @@ func repoMCPApprovals(cfg *config.WorkspaceConfig, repoName string) ([]string, e
 	return instanceRootMCPApprovals(cfg)
 }
 
+// recordedMCPApprovals returns the approval list an instance's state records:
+// the instance root's, normalized exactly as the settings materializer writes
+// it, so the recorded value and the settings document's enabledMcpjsonServers
+// cannot disagree on a fresh instance.
+//
+// backed reports that every agent approving servers at the instance root had
+// its instance-root payload written by this run (see payloadBacksApprovals).
+// When one didn't, the names would describe servers niwa never wrote, and a
+// launch that sent them would approve whatever the file in that place
+// declares under those names, so nothing is recorded. A review instance
+// (existing is its state; nil on create, which never makes one) records
+// nothing either: niwa watch launches its reviews itself, and nothing should
+// read an approval out of an instance staged for untrusted code.
+func recordedMCPApprovals(cfg *config.WorkspaceConfig, backed bool, existing *InstanceState) ([]string, error) {
+	if !backed || (existing != nil && existing.isReviewInstance()) {
+		return nil, nil
+	}
+	names, err := instanceRootMCPApprovals(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return approvedMCPServerList(names), nil
+}
+
+// payloadBacksApprovals reports whether install wrote its payload rather than
+// leaving the place to a file niwa did not generate.
+func payloadBacksApprovals(install *PayloadInstall) bool {
+	return install != nil && len(install.Written) > 0 && len(install.Exempt) == 0
+}
+
 // SessionPostureFromConfig reads the workspace's declared approval and sandbox
 // posture into the form a producer takes.
 //
