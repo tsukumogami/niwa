@@ -674,7 +674,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 	// (9c) The launch settings document, built from its contributors: remote
 	// control's default-fill first, then accepting messages from other
-	// sessions (below).
+	// sessions, lineage resource attributes, and the MCP approval (below).
 	//
 	// Remote-control-on-dispatch default-fill: when the host preference
 	// (~/.config/niwa/config.toml [global].remote_control_on_dispatch) is on and
@@ -704,7 +704,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// whether a document was rendered: keep-alive reads it in (9d), and a
 	// document carrying some other contributor's key must not arm keep-alive on
 	// a worker that starts without remote control. A new contributor adds its
-	// own block between remote control's and the render call, deciding and
+	// own block after the last contributor and before the render call, deciding and
 	// recording for itself whether its key went in.
 	launchSettings := map[string]any{}
 	rcInjected := false

@@ -27,8 +27,8 @@ import (
 // settings files, so anything a caller could influence here would let that
 // caller rewrite the worker's configuration.
 //
-// One value is the exception, and it is named here so it stays the only one:
-// the lineage contributor's "env" key, a resourceAttributesEnv that can
+// Two values are exceptions, and they are named here so they stay the only
+// ones. The first is the lineage contributor's "env" key, a resourceAttributesEnv that can
 // marshal to nothing but {"OTEL_RESOURCE_ATTRIBUTES": "<value>"}. Its value is
 // composed in dispatch_lineage.go from niwa's own entries, each checked
 // against an alphabet that has no ',' or '=', and from attributes the
