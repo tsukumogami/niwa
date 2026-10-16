@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: In Progress
 problem: |
   A developer who declares MCP servers in `[mcp.servers]` expects them running
   in every Claude Code session niwa sets up. Foreground sessions and hand-started
@@ -26,7 +26,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+In Progress
 
 Absorbed [BRIEF-mcp-approval-launch-paths](docs/briefs/BRIEF-mcp-approval-launch-paths.md); carried in Absorbed Brief.
 
