@@ -14,7 +14,8 @@ goals: |
   up front which declared servers they lack and where to get them. The paths
   that already work keep working, and niwa's guide says which launch path gets
   the servers and which doesn't, verified against a named Claude Code version.
-upstream: docs/briefs/BRIEF-mcp-approval-launch-paths.md
+absorbed:
+  - docs/briefs/BRIEF-mcp-approval-launch-paths.md
 motivating_context: |
   The gap went unnoticed on a host whose dispatches ran in bypass mode. The
   first dispatch on a host set to `auto` stalled on the approval dialog even
@@ -26,6 +27,34 @@ motivating_context: |
 ## Status
 
 Accepted
+
+Absorbed [BRIEF-mcp-approval-launch-paths](docs/briefs/BRIEF-mcp-approval-launch-paths.md); carried in Absorbed Brief.
+
+## Absorbed Brief
+
+The framing this PRD was written from, carried forward because the brief that
+held it was folded in here.
+
+The feature exists because niwa's promise about declared MCP servers is a
+promise about sessions, not about files. niwa can write the `.mcp.json`, the
+approval list and the trust entry correctly and still leave a developer with a
+worker stalled on a dialog or a session missing its tools, because what
+counts is what each launch path actually loads. So the framing measures
+success per launch path: dispatch workers, ephemeral sessions, foreground
+sessions and hand-started background sessions, each judged on whether the
+servers arrive without a dialog.
+
+The outcome has three parts. Unattended work, the reason dispatch exists,
+must not wait on a person, under any permission mode a host can choose,
+because a fix that only holds in bypass mode is one most hosts can't rely on.
+Paths that already work must not regress. And where niwa can't deliver the
+servers, the gap must be visible before a task depends on them, in the session
+and in the guide, rather than discovered halfway through.
+
+The boundary was drawn at framing time: niwa approves only servers it
+generated itself, never writes the developer's user settings, and doesn't try
+to fix Claude Code's own behavior, only to route around it in a way that keeps
+working once that behavior is fixed.
 
 ## Problem Statement
 
@@ -229,7 +258,7 @@ reason. Nothing about the fix widens which servers are approved.
 ## Decisions and Trade-offs
 
 - **Ephemeral sessions: a surfaced gap, not root materialization** (closes the
-  BRIEF's first deferred question). Making the servers load means generating
+  framing's first deferred question). Making the servers load means generating
   them at the workspace root. Today root materialization gets the raw config,
   with no overlay merge, no vault resolution and no file tracking, so the work
   would move overlay and vault resolution out of the per-instance pipeline and
@@ -240,7 +269,7 @@ reason. Nothing about the fix widens which servers are approved.
   addition to text the hook already emits and replaces a silent failure with a
   visible one. Revisit if Claude Code lets a hook relocate a session or add MCP
   servers, or root-scope apply gains vault resolution.
-- **Permission mode doesn't change the approval** (closes the BRIEF's second
+- **Permission mode doesn't change the approval** (closes the framing's second
   deferred question). The mode is passed as its own flag and never enters the
   settings document, so the approval is sent the same way under every mode.
   Whether Claude Code would have shown the dialog under a given mode doesn't
