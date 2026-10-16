@@ -772,6 +772,35 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			launchSettings["env"] = resourceAttributesEnv{value: lineageValue}
 		}
 	}
+	// The MCP approval is the fourth contributor, and the second non-constant
+	// value (see renderLaunchSettings). A dispatched worker ignores the
+	// enabledMcpjsonServers list in the instance's own settings files and
+	// stops on the per-server approval prompt; the launch document outranks
+	// them, so the same list sent here lets it start the servers niwa
+	// generated. The names come from the state Create just saved, read above
+	// for the permissions posture, never from the generated settings.json,
+	// which a person or tool can edit. The key goes in whatever the
+	// permission mode and whether or not the workspace opted into instance
+	// trust: the worker's project is the instance root, whose .mcp.json niwa
+	// wrote. enableAllProjectMcpServers is never sent.
+	if spec.Flags.Settings != "" {
+		if stateErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: warning: could not read %s (%v); the worker's MCP servers are not approved at launch and may prompt for approval\n",
+				filepath.Join(instancePath, workspace.StateDir, workspace.StateFile), stateErr)
+		} else {
+			kept, dropped := filterMCPServerNames(state.ApprovedMCPServers)
+			for _, name := range dropped {
+				reason := "name must match " + mcpServerNamePattern.String()
+				if mcpServerNamePattern.MatchString(name) {
+					reason = fmt.Sprintf("the launch approval holds at most %d names", maxLaunchMCPServers)
+				}
+				fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: warning: MCP server %s left out of the launch approval: %s\n", quoteDroppedName(name), reason)
+			}
+			if len(kept) > 0 {
+				launchSettings[config.EnabledMcpjsonServersKey] = mcpApprovalList{names: kept}
+			}
+		}
+	}
 	// Two discrete argv elements, and none at all when no contributor added a
 	// key. An agent with no settings flag has nowhere for the document to go,
 	// so every contributor must check spec.Flags.Settings itself before adding

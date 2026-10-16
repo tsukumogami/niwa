@@ -338,6 +338,53 @@ func theLaunchedClaudeSettingsHasRemoteControlAtStartup(ctx context.Context) err
 	return nil
 }
 
+// theLaunchedClaudeSettingsApprovesMCPServers asserts the launch settings
+// document's enabledMcpjsonServers is exactly the comma-separated names, in
+// order, and that nothing in the launch says enableAllProjectMcpServers.
+func theLaunchedClaudeSettingsApprovesMCPServers(ctx context.Context, csv string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	want := strings.Split(csv, ",")
+	elems, err := launchedClaudeArgvElements(s)
+	if err != nil {
+		return err
+	}
+	for _, e := range elems {
+		if strings.Contains(e, "enableAllProjectMcpServers") {
+			return fmt.Errorf("the launch carries enableAllProjectMcpServers: %q", e)
+		}
+	}
+	v, present, err := launchedClaudeSettingsKey(s, "enabledMcpjsonServers")
+	if err != nil {
+		return err
+	}
+	if !present {
+		doc, hasDoc, _ := launchedClaudeSettingsDocument(s)
+		if !hasDoc {
+			return fmt.Errorf("the launch carried no --settings document at all; want enabledMcpjsonServers %q\nstderr:\n%s", want, s.stderr)
+		}
+		return fmt.Errorf("the launch settings document has no enabledMcpjsonServers; want %q\ndocument: %s", want, doc)
+	}
+	items, ok := v.([]any)
+	if !ok {
+		return fmt.Errorf("enabledMcpjsonServers = %v; want a JSON array", v)
+	}
+	got := make([]string, 0, len(items))
+	for _, it := range items {
+		name, ok := it.(string)
+		if !ok {
+			return fmt.Errorf("enabledMcpjsonServers holds %v; want strings only", it)
+		}
+		got = append(got, name)
+	}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		return fmt.Errorf("enabledMcpjsonServers = %q; want %q", got, want)
+	}
+	return nil
+}
+
 // theLaunchedClaudePromptIs asserts the prompt reached the worker as the single
 // element right after the `--` separator, and that nothing follows it.
 func theLaunchedClaudePromptIs(ctx context.Context, want string) error {
@@ -1060,6 +1107,7 @@ func registerSessionMessageSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the launched claude settings document has crossSessionInbound "([^"]*)"$`, theLaunchedClaudeSettingsHasCrossSessionInbound)
 	ctx.Step(`^the launched claude settings document has no crossSessionInbound$`, theLaunchedClaudeSettingsHasNoCrossSessionInbound)
 	ctx.Step(`^the launched claude settings document has remoteControlAtStartup true$`, theLaunchedClaudeSettingsHasRemoteControlAtStartup)
+	ctx.Step(`^the launched claude settings document approves MCP servers "([^"]*)"$`, theLaunchedClaudeSettingsApprovesMCPServers)
 	ctx.Step(`^the launched claude prompt is "([^"]*)"$`, theLaunchedClaudePromptIs)
 
 	// The one-time notice marker.
