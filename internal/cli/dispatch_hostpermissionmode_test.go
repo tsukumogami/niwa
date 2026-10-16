@@ -398,7 +398,7 @@ func TestWatch_IgnoresHostPermissionMode(t *testing.T) {
 			}
 		}
 		fakes := installWatchCharFakes(t)
-		stubAskPostureSeams(t, home, nil)
+		stubWatchTrust(t, home, false)
 		client := newPullHeadServer(t)
 		cmd, _, _ := newWatchCharCmd()
 		stubDispatchRand(t, constByteReader(0xab))
