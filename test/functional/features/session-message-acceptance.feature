@@ -727,11 +727,12 @@ Feature: niwa dispatch: accepting messages from other sessions
 
   # --- A machine configuration niwa cannot read ---
   #
-  # A malformed or unreadable config.toml makes the whole [global] table
-  # unreadable, which reads as an absent machine setting. The flag still decides,
-  # in both directions, so a developer is never stuck without a way to ask.
+  # A malformed or unreadable config.toml stops niwa dispatch before it
+  # provisions anything, with an error naming the file, with or without the
+  # flag. Treating it as an absent machine setting could let a broken
+  # dispatch_permission_mode fall through to a workspace bypass posture.
 
-  Scenario: an unreadable config.toml leaves the behavior off, and the flag still turns it on
+  Scenario: an unreadable config.toml stops dispatch, with or without the flag
     Given a clean niwa environment
     And the scenario is skipped when tests run as root
     And a local git server is set up
@@ -745,15 +746,16 @@ Feature: niwa dispatch: accepting messages from other sessions
     And the niwa machine config is not readable
     Given a fake claude for dispatch that mints a new session per launch
     When I run "niwa dispatch unreadable-off --detach" from the workspace root
-    Then the exit code is 0
-    And the launched claude settings document has no crossSessionInbound
-    And the error output has exactly 0 lines containing "accepts messages from other sessions without asking"
+    Then the exit code is not 0
+    And the error output contains "config.toml"
+    And no dispatch instance remains
     When I run "niwa dispatch unreadable-on --accept-session-messages --detach" from the workspace root
-    Then the exit code is 0
-    And the launched claude settings document has crossSessionInbound "accept"
-    And the error output has exactly 1 line containing "without asking (source: --accept-session-messages); see https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md"
+    Then the exit code is not 0
+    And the error output contains "config.toml"
+    And the error output has exactly 0 lines containing "accepts messages from other sessions without asking"
+    And no dispatch instance remains
 
-  Scenario Outline: a config.toml niwa cannot use leaves the behavior off, and the flag still turns it on
+  Scenario Outline: a config.toml niwa cannot parse stops dispatch, with or without the flag
     Given a clean niwa environment
     And a local git server is set up
     And a config repo "myws" exists with body:
@@ -769,13 +771,14 @@ Feature: niwa dispatch: accepting messages from other sessions
       """
     Given a fake claude for dispatch that mints a new session per launch
     When I run "niwa dispatch broken-off --detach" from the workspace root
-    Then the exit code is 0
-    And the launched claude settings document has no crossSessionInbound
-    And the error output has exactly 0 lines containing "accepts messages from other sessions without asking"
+    Then the exit code is not 0
+    And the error output contains "config.toml"
+    And no dispatch instance remains
     When I run "niwa dispatch broken-on --accept-session-messages --detach" from the workspace root
-    Then the exit code is 0
-    And the launched claude settings document has crossSessionInbound "accept"
-    And the error output has exactly 1 line containing "without asking (source: --accept-session-messages); see https://github.com/tsukumogami/niwa/blob/main/docs/guides/session-message-acceptance.md"
+    Then the exit code is not 0
+    And the error output contains "config.toml"
+    And the error output has exactly 0 lines containing "accepts messages from other sessions without asking"
+    And no dispatch instance remains
 
     Examples:
       | line                                        |

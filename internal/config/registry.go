@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"unicode"
 
 	"github.com/BurntSushi/toml"
@@ -121,6 +122,65 @@ type GlobalSettings struct {
 	// file never looks validated by its type. "" (the default) means no
 	// machine-wide preference.
 	DefaultDispatchHarness string `toml:"default_dispatch_harness,omitempty"`
+	// DispatchPermissionMode is the developer's machine-wide permission mode
+	// for Claude workers that `niwa dispatch` launches. For an agent whose
+	// permission flag is Claude's --permission-mode, the forwarded mode is the
+	// first of:
+	//
+	//	--permission-mode  >  [global].dispatch_permission_mode  >
+	//	bypassPermissions from a `bypass` workspace permissions posture  >  nothing
+	//
+	// It outranks the workspace posture on purpose, in both directions: a
+	// stricter value (auto, default) replaces a bypass posture and a looser one
+	// (bypassPermissions) replaces an ask posture or none. That is the opposite
+	// polarity to DefaultDispatchHarness above. How much a worker may do
+	// without asking is the developer's call about their own machine, not
+	// something a cloned workspace config should be able to loosen or keep
+	// loose. For other agents (Codex) it forwards nothing.
+	//
+	// It is stored raw, like DefaultDispatchHarness, and goes through a single
+	// validation boundary (ParseDispatchPermissionMode) via the accessor of the
+	// same name. "" (the default) means no machine-wide preference.
+	DispatchPermissionMode string `toml:"dispatch_permission_mode,omitempty"`
+}
+
+// DispatchPermissionModes is the closed set of values
+// [global].dispatch_permission_mode accepts -- exactly Claude Code's permission
+// modes -- in the order error messages and help text list them.
+var DispatchPermissionModes = []string{
+	"default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions",
+}
+
+// ParseDispatchPermissionMode is the one validation boundary for
+// [global].dispatch_permission_mode. It trims surrounding whitespace and
+// returns "" for an empty or whitespace-only value (no machine setting), the
+// trimmed value when it matches one of DispatchPermissionModes exactly (case
+// included), and otherwise an error naming the key, the offending value, and
+// every accepted value.
+func ParseDispatchPermissionMode(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return "", nil
+	}
+	for _, m := range DispatchPermissionModes {
+		if v == m {
+			return v, nil
+		}
+	}
+	return "", fmt.Errorf("invalid [global] dispatch_permission_mode %q; accepted values are %s",
+		v, strings.Join(DispatchPermissionModes, ", "))
+}
+
+// DispatchPermissionMode returns the validated machine-wide dispatch
+// permission mode from ~/.config/niwa/config.toml, or "" when the file, the
+// section, or the key is absent or blank. A value outside
+// DispatchPermissionModes is an error, so callers can fail closed. A nil
+// receiver is unset.
+func (g *GlobalConfig) DispatchPermissionMode() (string, error) {
+	if g == nil {
+		return "", nil
+	}
+	return ParseDispatchPermissionMode(g.Global.DispatchPermissionMode)
 }
 
 // DefaultDispatchHarness returns the machine-wide default dispatch harness

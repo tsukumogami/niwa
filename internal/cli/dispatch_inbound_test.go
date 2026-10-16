@@ -364,9 +364,12 @@ func TestDispatch_Inbound_DoesNotArmKeepAliveWithoutRemoteControl(t *testing.T) 
 }
 
 // TestDispatch_Inbound_UnreadableHostConfig: a config.toml that cannot be
-// opened, one that is not TOML, and one whose key is not a boolean all count as
-// an absent machine setting. The flag still applies, and remote control, whose
-// preference shares the file, still injects nothing.
+// opened, one that is not TOML, and one whose key is not a boolean all stop the
+// dispatch before anything is provisioned, with an error naming the file --
+// with or without the flag. The machine config fails closed as a whole (see
+// step (2a) of runDispatch): treating it as an absent setting could let a
+// broken dispatch_permission_mode fall through to a workspace bypass, and a
+// file that cannot be parsed cannot be trusted to say which keys it holds.
 func TestDispatch_Inbound_UnreadableHostConfig(t *testing.T) {
 	fixtures := []struct {
 		name  string
@@ -407,24 +410,21 @@ func TestDispatch_Inbound_UnreadableHostConfig(t *testing.T) {
 				}
 
 				_, stderr, err := runDispatchCmd(t, "do a thing")
-				if err != nil {
-					t.Fatalf("an unreadable host config must not fail the dispatch: %v", err)
+				if err == nil {
+					t.Fatal("an unreadable host config must fail the dispatch")
 				}
-				_, ok := inboundKeyValue(t, pass)
-				if ok != withFlag {
-					t.Fatalf("crossSessionInbound present = %v, want %v (only the flag can turn it on here); passthrough %v", ok, withFlag, pass)
+				cfgPath := filepath.Join(niwaDir, "config.toml")
+				if !strings.Contains(err.Error(), cfgPath) {
+					t.Fatalf("the error must name %s; got %v", cfgPath, err)
 				}
-				if withFlag {
-					if !strings.Contains(stderr, inboundAuditLine(inboundSourceFlag)+"\n") {
-						t.Fatalf("expected the audit line naming the flag; stderr:\n%s", stderr)
-					}
-				} else if strings.Contains(stderr, auditNeedle) {
-					t.Fatalf("no audit line expected without the flag; stderr:\n%s", stderr)
+				if f.provisionCalled != 0 || f.launchCalled != 0 {
+					t.Fatalf("nothing may be provisioned or launched; provision=%d launch=%d", f.provisionCalled, f.launchCalled)
 				}
-				for _, doc := range launchSettingsDocs(t, pass) {
-					if _, rc := doc[config.RemoteControlAtStartupKey]; rc {
-						t.Fatalf("remote control must inject nothing from an unreadable config: %v", doc)
-					}
+				if pass != nil {
+					t.Fatalf("no launch argv expected; got %v", pass)
+				}
+				if strings.Contains(stderr, auditNeedle) {
+					t.Fatalf("no audit line expected from a refused dispatch; stderr:\n%s", stderr)
 				}
 			})
 		}
