@@ -14,6 +14,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/pluginrecord"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -86,9 +87,19 @@ func prewarmDeclaredPlugins(instanceRoot string, reporter *workspace.Reporter, s
 		return
 	}
 
-	// 1. Clone the github-sourced marketplaces -- the ones that require a network
-	// fetch and therefore race. Directory/local sources are already on disk and
-	// never race, so they are skipped.
+	// 1. Register the declared marketplaces, so the installs below can resolve
+	// them: `claude plugin install` looks a marketplace up in Claude Code's
+	// registry (~/.claude/plugins/known_marketplaces.json), never in the project
+	// settings that declare it, and only an interactive session registers those.
+	//
+	// A github source is cloned on every pre-warm -- the clone needs the network
+	// and is what races a session's startup. A directory source is already on
+	// disk, so it is only registered, and only when the registry has no entry by
+	// that name (#385): an add under a registered name with a different path
+	// repoints that entry for the whole HOME, and moving a registered entry is
+	// reconcileMarketplaceRegistry's job, which does it only for the workspace's
+	// managed copy. A registry that can't be read counts as no entry; an add of
+	// the path already registered changes nothing.
 	//
 	// The registration decides which commit the plugins below install from, so it
 	// carries the ref niwa resolved: `<repo>#<ref>` for a release or explicit pin,
@@ -116,8 +127,23 @@ func prewarmDeclaredPlugins(instanceRoot string, reporter *workspace.Reporter, s
 	// It does not fail the apply -- pre-warming is best-effort by contract and the
 	// instance is otherwise usable -- and niwa still never edits user settings.
 	pinned := map[string]bool{}
+	var registered map[string]bool
 	for _, name := range sortedKeys(marketplaceNames(settings.ExtraKnownMarketplaces)) {
 		mkt := settings.ExtraKnownMarketplaces[name]
+		if mkt.Source.Source == "directory" && mkt.Source.Path != "" {
+			if registered == nil {
+				if registered, err = registeredMarketplaces(); err != nil {
+					registered = map[string]bool{}
+				}
+			}
+			if registered[name] {
+				continue
+			}
+			if err := runClaudePluginCmd(context.Background(), instanceRoot, "marketplace", "add", mkt.Source.Path, "--scope", "local"); err != nil {
+				warnPrewarm(reporter, "pre-warming marketplace %q (%s): %v; it will install on startup instead", name, mkt.Source.Path, err)
+			}
+			continue
+		}
 		if mkt.Source.Source != "github" || mkt.Source.Repo == "" {
 			continue
 		}
@@ -274,6 +300,10 @@ var runClaudePluginCmd = func(ctx context.Context, dir string, args ...string) e
 	return nil
 }
 
+// registeredMarketplaces reports the marketplace names in Claude Code's
+// registry. It is a package variable so tests never read the developer's HOME.
+var registeredMarketplaces = func() (map[string]bool, error) { return pluginrecord.RegisteredMarketplaces() }
+
 // instanceSettings is the narrow projection of .claude/settings.json this package
 // reads back: the plugin/marketplace, remote-control, and keep-alive
 // declarations niwa materialized. Unknown fields are ignored.
@@ -298,13 +328,13 @@ type marketplaceEntry struct {
 // marketplaceSource is the subset of the Claude Code marketplace source shape (emitted
 // by mapMarketplaceSourceWithIndex in internal/workspace) that pre-warming needs:
 // Source is the kind ("github", "directory", ...), Repo is set for github sources,
-// and Ref is the pin niwa resolved for them (empty when the marketplace tracks its
-// default branch). The path field directory sources carry is omitted: those are
-// already on disk and are never pre-warmed.
+// Ref is the pin niwa resolved for them (empty when the marketplace tracks its
+// default branch), and Path is set for directory sources.
 type marketplaceSource struct {
 	Source string `json:"source"`
 	Repo   string `json:"repo"`
 	Ref    string `json:"ref"`
+	Path   string `json:"path"`
 }
 
 // marketplaceAddTarget is the argument `claude plugin marketplace add` takes for a

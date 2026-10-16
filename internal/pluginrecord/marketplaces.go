@@ -85,8 +85,8 @@ func ReconcileAutoUpdate(desired map[string]bool, opts ...Option) (ReconcileRepo
 // ReconcileMarketplaces brings each named marketplace that ALREADY EXISTS in
 // known_marketplaces.json to its wanted autoUpdate value and, when the want
 // carries a Path, to that directory source. It never adds a marketplace
-// (Claude Code registers it from project settings, which name the same path)
-// and never touches marketplaces absent from desired. An absent registry file
+// (plugin pre-warming, or a Claude Code session reading project settings,
+// registers it) and never touches marketplaces absent from desired. An absent registry file
 // is a no-op; a malformed file returns an error wrapping ErrMalformed and
 // leaves the file untouched. Every other entry, every other field and the
 // file's key order are preserved; a backup is written before the first change,
@@ -174,6 +174,32 @@ func ReconcileMarketplaces(desired map[string]MarketplaceWant, opts ...Option) (
 	rep.Repointed = repointed
 	rep.BackupPath = backupPath
 	return rep, nil
+}
+
+// RegisteredMarketplaces returns the names of the marketplaces registered in
+// known_marketplaces.json. An absent registry file yields an empty set; a
+// malformed one returns an error wrapping ErrMalformed. It only reads.
+func RegisteredMarketplaces(opts ...Option) (map[string]bool, error) {
+	path, err := LocateMarketplaces(opts...)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return map[string]bool{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	top, err := decodeOrderedObject(data)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMalformed, err)
+	}
+	names := make(map[string]bool, len(top))
+	for _, f := range top {
+		names[f.Key] = true
+	}
+	return names, nil
 }
 
 // setEntryDirectory returns the entry with its source set to a directory
