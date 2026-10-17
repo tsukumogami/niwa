@@ -221,6 +221,41 @@ session inside a repository by that repository's root, not by the instance
 root, which is why each repository gets an entry of its own and an approval
 list of its own.
 
+Whether the servers declared in `[mcp.servers]` load without a dialog depends
+on how the session was launched:
+
+| Launch path | Declared servers load without a dialog? |
+|---|---|
+| `niwa dispatch` worker | Yes, under every permission mode, whether or not `trust_instances` is on |
+| Ephemeral session started at the workspace root | No: the servers don't load at all |
+| Foreground `claude` or `claude -p` at an instance root or in a cloned repository | Yes, when the instance is trusted |
+| `claude --bg` started by hand at an instance root or in a cloned repository | Yes, when the instance is trusted, the same as foreground |
+
+**Dispatched workers** get their approval from the launch, not from the
+instance's settings files. Without it, a dispatched worker stopped at startup
+on the per-server approval dialog even with the server listed under
+`enabledMcpjsonServers` in those files (see [Verified with](#verified-with)), so `niwa dispatch` puts the same list in the
+`--settings` document it passes to the worker. The names come from what niwa
+recorded in the instance's `.niwa/instance.json` when it generated the
+instance root's `.mcp.json`, never from a `.mcp.json` or a settings file. Only
+names made of letters, digits, `_` and `-`, at most 64 characters, are sent,
+and at most 64 of them; each name left out gets a warning. The approval is
+sent whether or not `trust_instances` is on. niwa records no servers for a
+review instance, so a review launch carries no approval.
+
+**Ephemeral sessions** started at the workspace root don't get the servers.
+The session's project is the workspace root, not the instance niwa provisions
+for it, and Claude Code reads MCP config once, at startup, so the instance's
+`.mcp.json` never reaches the session. The SessionStart hook's context names the
+servers the session lacks and the two ways to get them: run the work as a
+`niwa dispatch` worker, or start a new session inside the instance. When the
+hook can't read the instance's state, it adds no such notice.
+
+**Foreground and hand-started background sessions** at an instance root or
+inside a cloned repository load the servers with no dialog when the instance
+is trusted, as described above. `claude --bg` started by hand there behaves
+like foreground `claude`.
+
 Two places stay uncovered:
 
 - **Worktrees.** A worktree niwa creates gets the same `settings.local.json`
@@ -250,6 +285,14 @@ Work through these in order:
    named. A session started under a different `CLAUDE_CONFIG_DIR` reads a
    different file and won't find the entry. `claude_trust.config_file` in the
    instance's `.niwa/instance.json` shows the file niwa used.
+5. **For a dispatched worker, read the dispatch output.** The worker's
+   approval comes from the launch, not from the instance's settings files, so
+   editing `.claude/settings.json` or `.claude/settings.local.json` changes
+   nothing for it. A warning that an MCP server was left out of the launch
+   approval means that server's name didn't fit the allowed characters or
+   length, or the list already held 64 names; that server will prompt.
+   Renaming it in `[mcp.servers]` fixes the first case. A warning that niwa
+   couldn't read the instance's state means no server was approved at launch.
 
 Servers in a `.mcp.json` distributed verbatim, through `[instance.files]` for
 example, are never pre-approved, because niwa doesn't read the files it copies.
@@ -411,3 +454,28 @@ two vault-backed headers:
   no settings errors.
 - `niwa destroy` took the trusted entries under the instance path from eleven
   to none.
+
+The launch-path coverage above was checked on Claude Code 2.1.301 and
+2.1.302, macOS, on 2026-10-16, with a declared HTTP server:
+
+- Foreground `claude`, `claude -p`, and hand-started `claude --bg` at a
+  freshly created trusted instance root loaded the declared server with no
+  dialog, in default and `auto` permission modes.
+- A `niwa dispatch` worker on the released niwa stopped at startup on the "New
+  MCP server found in this project" dialog, on both 2.1.301 and 2.1.302.
+  Replaying its command line, environment and prompt by hand in the same
+  instance didn't reproduce it, so the cause inside Claude Code isn't known.
+  Adding the approval to the instance's `.claude/settings.local.json` didn't
+  help.
+- A dispatched worker whose launch `--settings` document carried
+  `enabledMcpjsonServers` started with the server connecting and no dialog,
+  under `auto`, on Claude Code 2.1.301, with a niwa build that sends the
+  approval from the launch.
+- An ephemeral session started at the workspace root, on 2.1.302, had none of
+  the workspace's declared MCP servers, consistent with its project being the
+  workspace root.
+
+One check is still to run with the final build: a dispatched worker under
+`default` permission mode. To run it, dispatch with `--permission-mode
+default` in a workspace that declares a server, and confirm the worker reaches
+its first turn with no startup dialog.

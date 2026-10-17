@@ -325,6 +325,34 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     And the codex launch argv does not contain "--permission-mode"
     And the codex launch argv does not contain "--sandbox"
 
+  # --- MCP servers are approved at launch ---
+  #
+  # A dispatched worker ignores the approval list in the instance's own
+  # settings files, so the servers niwa generated go in the launch settings
+  # document, sorted, whatever the permission mode.
+
+  @critical
+  Scenario: dispatch approves the workspace's MCP servers in the launch settings
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [mcp.servers.zeta]
+      command = "zeta-mcp"
+
+      [mcp.servers.example]
+      url = "https://mcp.example.test/v1"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "3c900000-0000-4000-8000-00000000a11e"
+    When I run "niwa dispatch mcp-task --detach" from the workspace root
+    Then the exit code is 0
+    And the launched claude settings document approves MCP servers "example,zeta"
+
   # --- Model selection resolves a category to a concrete model ---
 
   @critical

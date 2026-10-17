@@ -195,6 +195,22 @@ type InstanceState struct {
 	// omitempty keeps the field invisible to old binaries reading new state
 	// files.
 	ClaudePermissions string `json:"claude_permissions,omitempty"`
+	// ApprovedMCPServers records the MCP server names the instance root's
+	// settings document approves under enabledMcpjsonServers: sorted, without
+	// duplicates, and the same value the settings materializer writes. It is
+	// recorded only when niwa wrote the instance root's generated .mcp.json
+	// itself; when a file niwa did not generate occupies that name, the names
+	// would describe servers niwa never wrote, so nothing is recorded. A
+	// review instance records nothing either.
+	//
+	// The instance pipeline recomputes it on every Create and Apply; it is
+	// never carried over from an earlier state file. Only `niwa dispatch` and
+	// the SessionStart hook read it, and each trusts it only for an instance
+	// the reading process just provisioned: the state file is as editable as
+	// the settings document, and only a fresh provision guarantees the value
+	// is the one the pipeline computed. omitempty keeps the field invisible to
+	// old binaries reading new state files.
+	ApprovedMCPServers []string `json:"approved_mcp_servers,omitempty"`
 }
 
 // AuthSourceRecord is one row of the credential-source audit map

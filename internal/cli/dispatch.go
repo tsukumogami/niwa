@@ -674,7 +674,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 	// (9c) The launch settings document, built from its contributors: remote
 	// control's default-fill first, then accepting messages from other
-	// sessions (below).
+	// sessions, lineage resource attributes, and the MCP approval (below).
 	//
 	// Remote-control-on-dispatch default-fill: when the host preference
 	// (~/.config/niwa/config.toml [global].remote_control_on_dispatch) is on and
@@ -704,7 +704,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// whether a document was rendered: keep-alive reads it in (9d), and a
 	// document carrying some other contributor's key must not arm keep-alive on
 	// a worker that starts without remote control. A new contributor adds its
-	// own block between remote control's and the render call, deciding and
+	// own block after the last contributor and before the render call, deciding and
 	// recording for itself whether its key went in.
 	launchSettings := map[string]any{}
 	rcInjected := false
@@ -770,6 +770,35 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		})
 		if lineageValue != "" {
 			launchSettings["env"] = resourceAttributesEnv{value: lineageValue}
+		}
+	}
+	// The MCP approval is the fourth contributor, and the second non-constant
+	// value (see renderLaunchSettings). A dispatched worker ignores the
+	// enabledMcpjsonServers list in the instance's own settings files and
+	// stops on the per-server approval prompt; the launch document outranks
+	// them, so the same list sent here lets it start the servers niwa
+	// generated. The names come from the state Create just saved, read above
+	// for the permissions posture, never from the generated settings.json,
+	// which a person or tool can edit. The key goes in whatever the
+	// permission mode and whether or not the workspace opted into instance
+	// trust: the worker's project is the instance root, whose .mcp.json niwa
+	// wrote. enableAllProjectMcpServers is never sent.
+	if spec.Flags.Settings != "" {
+		if stateErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: warning: could not read %s (%v); the worker's MCP servers are not approved at launch and may prompt for approval\n",
+				filepath.Join(instancePath, workspace.StateDir, workspace.StateFile), stateErr)
+		} else {
+			kept, dropped := filterMCPServerNames(state.ApprovedMCPServers)
+			for _, name := range dropped {
+				reason := "name must match " + mcpServerNamePattern.String()
+				if mcpServerNamePattern.MatchString(name) {
+					reason = fmt.Sprintf("the launch approval holds at most %d names", maxLaunchMCPServers)
+				}
+				fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: warning: MCP server %s left out of the launch approval: %s\n", quoteDroppedName(name), reason)
+			}
+			if len(kept) > 0 {
+				launchSettings[config.EnabledMcpjsonServersKey] = mcpApprovalList{names: kept}
+			}
 		}
 	}
 	// Two discrete argv elements, and none at all when no contributor added a

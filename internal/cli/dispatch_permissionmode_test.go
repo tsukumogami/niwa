@@ -426,7 +426,10 @@ func TestDispatch_PermissionMode_BrokenState_WithholdsFlag(t *testing.T) {
 				t.Fatalf("a broken state file must not fail dispatch: %v", err)
 			}
 			requireNoPermissionMode(t, pass)
-			if !strings.Contains(stderr, "warning") || !strings.Contains(stderr, statePathOf(f.instancePath)) {
+			// The MCP approval names the same file, so the posture warning is
+			// told apart by its own wording.
+			if !strings.Contains(stderr, "warning") || !strings.Contains(stderr, statePathOf(f.instancePath)) ||
+				!strings.Contains(stderr, "treating the workspace's permissions posture as undeclared") {
 				t.Fatalf("expected a warning naming %s, got %q", statePathOf(f.instancePath), stderr)
 			}
 		})
@@ -457,8 +460,10 @@ func TestDispatch_PermissionMode_BrokenState_ExplicitFlagStillWins(t *testing.T)
 	}
 	requirePermissionMode(t, pass, "acceptEdits")
 	// The explicit flag set the mode, so the unreadable posture changed nothing
-	// and there is nothing to warn about.
-	if strings.Contains(stderr, statePathOf(f.instancePath)) {
+	// and there is nothing to warn about. The MCP approval still warns about
+	// the same file, since it has no explicit stand-in; that line is pinned by
+	// TestDispatch_MCPApproval_UnreadableStateWarns.
+	if strings.Contains(stderr, "treating the workspace's permissions posture as undeclared") {
 		t.Fatalf("no posture warning expected alongside an explicit flag; got %q", stderr)
 	}
 }

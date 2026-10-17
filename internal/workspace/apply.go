@@ -426,6 +426,12 @@ type pipelineResult struct {
 	// ("bypass", "ask", or ""), computed from this run's effective config.
 	// Persisted into InstanceState.ClaudePermissions by Create/Apply.
 	claudePermissions string
+	// approvedMCPServers is the instance root's approval list as the settings
+	// materializer writes it, or nil when niwa did not write the instance
+	// root's payload or the instance is a review instance (see
+	// recordedMCPApprovals). Persisted into InstanceState.ApprovedMCPServers
+	// by Create/Apply.
+	approvedMCPServers []string
 	// trustInstances is the effective [claude] trust_instances, after the
 	// overlay merge. trustFromOverlay reports that it is true only because
 	// the overlay set it. Create and Apply hand both to deliverClaudeTrust
@@ -655,7 +661,8 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		ClaudeTrust:      trust.root,
 		ClaudeTrustRepos: trust.repos,
 		// Recomputed from this run's config alone, like Shadows.
-		ClaudePermissions: result.claudePermissions,
+		ClaudePermissions:  result.claudePermissions,
+		ApprovedMCPServers: result.approvedMCPServers,
 	}
 
 	if err := a.saveInstanceState(instanceRoot, state); err != nil {
@@ -869,7 +876,9 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		ClaudeTrustRepos: trust.repos,
 		// Taken from this run's result, never from existingState: a posture
 		// removed from the config must stop being recorded on the next apply.
-		ClaudePermissions: result.claudePermissions,
+		// The same holds for the approved servers.
+		ClaudePermissions:  result.claudePermissions,
+		ApprovedMCPServers: result.approvedMCPServers,
 	}
 
 	if err := a.saveInstanceState(instanceRoot, state); err != nil {
@@ -1915,6 +1924,12 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// which every producer writes nothing for.
 	sessionPosture := SessionPostureFromConfig(effectiveCfg)
 
+	// Whether every agent that approves servers out of the instance root's
+	// settings document had its instance-root payload written by this run.
+	// It gates the approval list recorded in the instance state, never the
+	// settings document itself.
+	rootApprovalsBacked := true
+
 	for _, ag := range agent.All() {
 		// The instance root belongs to no repository, so the gate that applies
 		// here is the workspace-level one -- the same lookup, asked with no
@@ -1955,6 +1970,18 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		writtenFiles = append(writtenFiles, rootPayload.Written...)
 		exemptPaths = append(exemptPaths, rootPayload.Exempt...)
 		allWarnings = append(allWarnings, rootPayload.Warnings...)
+
+		// The producer that approves servers at the instance root is the one
+		// whose payload has to be niwa's for the recorded list to name what it
+		// actually wrote. Asking every producer keeps the check agent-neutral:
+		// an agent approving nothing there answers with nothing.
+		rootApprovals, err := producer.MCPApprovals(agentplan.PayloadAtInstanceRoot, mcpServers)
+		if err != nil {
+			return nil, err
+		}
+		if len(rootApprovals) > 0 && !payloadBacksApprovals(rootPayload) {
+			rootApprovalsBacked = false
+		}
 
 		// The per-repository gate is this agent's own, applied to this agent's
 		// producer. A Claude-named switch in front of a loop that produces
@@ -2286,24 +2313,30 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
+	approvedMCPServers, err := recordedMCPApprovals(effectiveCfg, rootApprovalsBacked, opts.existingState)
+	if err != nil {
+		return nil, err
+	}
+
 	return &pipelineResult{
-		classified:        classified,
-		repoStates:        repoStates,
-		managedFiles:      managedFiles,
-		warnings:          allWarnings,
-		setupIncomplete:   setupIncomplete,
-		shadows:           pipelineShadows,
-		authSources:       credentialPool.AuditLog().AsMap(),
-		overlayURL:        pipelineOverlayURL,
-		overlayCommit:     pipelineOverlayCommit,
-		disclosedNotices:  newDisclosures,
-		trustKeys:         trustKeys,
-		claudePermissions: instancePermissionsPosture(effectiveCfg),
-		trustInstances:    trustInstancesOn(effectiveCfg),
-		trustFromOverlay:  effectiveCfg.TrustInstancesFromOverlay,
-		claudeTrustRepos:  claudeTrustRepos,
-		procedureErr:      procErr,
-		exemptPaths:       exemptPaths,
+		classified:         classified,
+		repoStates:         repoStates,
+		managedFiles:       managedFiles,
+		warnings:           allWarnings,
+		setupIncomplete:    setupIncomplete,
+		shadows:            pipelineShadows,
+		authSources:        credentialPool.AuditLog().AsMap(),
+		overlayURL:         pipelineOverlayURL,
+		overlayCommit:      pipelineOverlayCommit,
+		disclosedNotices:   newDisclosures,
+		trustKeys:          trustKeys,
+		claudePermissions:  instancePermissionsPosture(effectiveCfg),
+		approvedMCPServers: approvedMCPServers,
+		trustInstances:     trustInstancesOn(effectiveCfg),
+		trustFromOverlay:   effectiveCfg.TrustInstancesFromOverlay,
+		claudeTrustRepos:   claudeTrustRepos,
+		procedureErr:       procErr,
+		exemptPaths:        exemptPaths,
 	}, nil
 }
 
