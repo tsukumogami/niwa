@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: In Progress
+status: Done
 problem: |
   A developer who declares MCP servers in `[mcp.servers]` expects them running
   in every Claude Code session niwa sets up. Foreground sessions and hand-started
@@ -26,7 +26,7 @@ motivating_context: |
 
 ## Status
 
-In Progress
+Done
 
 Absorbed [BRIEF-mcp-approval-launch-paths](docs/briefs/BRIEF-mcp-approval-launch-paths.md); carried in Absorbed Brief.
 
@@ -291,4 +291,4 @@ reason. Nothing about the fix widens which servers are approved.
 
 ## Downstream Artifacts
 
-- `docs/designs/DESIGN-mcp-approval-launch-paths.md` (planned)
+- `docs/designs/current/DESIGN-mcp-approval-launch-paths.md` (planned)

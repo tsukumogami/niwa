@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Planned
+status: Current
 upstream: docs/prds/PRD-mcp-approval-launch-paths.md
 problem: |
   A `niwa dispatch` worker stops on Claude Code's per-server approval dialog
@@ -32,7 +32,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 
