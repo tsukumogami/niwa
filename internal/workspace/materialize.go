@@ -399,6 +399,14 @@ const (
 	worktreeGuardMatcher        = "EnterWorktree|Bash"
 	worktreeGuardTimeoutSeconds = 5
 
+	// rootContextCommandSuffix, rootContextMatcher and rootContextTimeoutSeconds
+	// describe the instance root's SessionStart context hook. The matcher
+	// names every SessionStart source that starts or restarts a session's
+	// context.
+	rootContextCommandSuffix  = "instance context"
+	rootContextMatcher        = "startup|resume|clear|compact"
+	rootContextTimeoutSeconds = 10
+
 	// denyEnterWorktree / denyExitWorktree are the Claude Code tool names denied
 	// when the harness does NOT support the worktree hooks. Denying these steers
 	// agents to `niwa worktree create` instead of a competing bare checkout.
@@ -470,6 +478,21 @@ func guardedNiwaHookCommand(niwaPath, suffix string) string {
 		"; exec " + shellSingleQuote(normalized) + " " + suffix
 }
 
+// guardedNiwaContextCommand builds the session-context hook command. It
+// resolves niwa the same PATH-first way guardedNiwaHookCommand does, but it
+// can't exec: SessionStart adds a hook's stdout to the session's context, and
+// a niwa too old to have `instance context` prints help text there. So the
+// output is captured and printed only when it is the JSON the hook emits
+// (it starts with "{"); anything else is dropped and the hook exits 0.
+//
+//	out=$(if command -v niwa >/dev/null 2>&1; then niwa instance context; else '<abs>' instance context; fi 2>/dev/null); case "$out" in "{"*) printf '%s\n' "$out";; esac
+func guardedNiwaContextCommand(niwaPath string) string {
+	abs := shellSingleQuote(filepath.ToSlash(niwaPath))
+	return "out=$(if command -v niwa >/dev/null 2>&1; then niwa " + rootContextCommandSuffix +
+		"; else " + abs + " " + rootContextCommandSuffix + "; fi 2>/dev/null); " +
+		`case "$out" in "{"*) printf '%s\n' "$out";; esac`
+}
+
 // shellSingleQuote wraps s in single quotes for safe interpolation into a shell
 // command. An embedded single quote is escaped the standard way: close the
 // quoted run, emit a backslash-escaped quote, reopen the run.
@@ -521,6 +544,12 @@ type BuildSettingsConfig struct {
 	// already gets working worktrees, and a hand-run `git worktree add` there
 	// may be legitimate. An opted-out instance has no delegation, so no guard.
 	WorktreeGuard bool
+
+	// RootContextNiwaPath, when non-empty, adds the `niwa instance context`
+	// SessionStart entry, which states the instance's layout at session start
+	// and after compaction. Only the instance root's document sets it; the
+	// value is the absolute niwa path the PATH-first command falls back to.
+	RootContextNiwaPath string
 
 	// SessionHooks, when non-nil, installs the workspace-root
 	// SessionStart/SessionEnd hook entries (the ephemeral-session integration).
@@ -927,6 +956,31 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 					"type":    "command",
 					"command": guardedNiwaHookCommand(wd.NiwaPath, worktreeGuardCommandSuffix),
 					"timeout": worktreeGuardTimeoutSeconds,
+				},
+			},
+		}
+		if existing, ok := hooksDoc[pascalEvent].([]map[string]any); ok {
+			hooksDoc[pascalEvent] = append(existing, entry)
+		} else {
+			hooksDoc[pascalEvent] = []map[string]any{entry}
+		}
+	}
+
+	// Root session context (instance root only): state the instance's layout
+	// on every session start and again after compaction, resume and clear, so
+	// the facts survive compaction instead of living in a file read once.
+	if cfg.RootContextNiwaPath != "" {
+		pascalEvent, ok := hookEventMapping["session_start"]
+		if !ok {
+			pascalEvent = snakeToPascal("session_start")
+		}
+		entry := map[string]any{
+			"matcher": rootContextMatcher,
+			"hooks": []map[string]any{
+				{
+					"type":    "command",
+					"command": guardedNiwaContextCommand(cfg.RootContextNiwaPath),
+					"timeout": rootContextTimeoutSeconds,
 				},
 			},
 		}
