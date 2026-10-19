@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: In Progress
 problem: |
   A Claude Code session launched at a niwa instance root -- every
   `niwa dispatch` worker, and every interactive session opened there --
@@ -22,7 +22,7 @@ upstream: docs/briefs/BRIEF-enforced-agent-conformance.md
 
 ## Status
 
-Accepted
+In Progress
 
 ## Problem Statement
 
@@ -228,13 +228,16 @@ the guidance already present.
   and before making changes, and no niwa-generated CLAUDE.md contains a
   worktree instruction. R8, R9 and R11 replace them.
 - **R13. Trust.** When `niwa apply` writes the integration or the guard
-  to an instance root or workspace root that isn't a trusted root, it
-  writes one warning line to stderr containing the root's path, the
-  word `untrusted`, and the remedy `trust_instances = true`. A worker
-  started by `niwa dispatch` gets the integration and the guard even
-  when its instance root isn't trusted, without niwa changing the
+  to an instance root or workspace root that has no trusted root at or
+  above it, it writes one warning line to stderr containing the root's
+  path, the word `untrusted`, and the remedy `trust_instances = true`.
+  A worker started by `niwa dispatch` runs the integration and the
+  guard whenever Claude Code lets it start, without niwa changing the
   `trust_instances` setting or the user's trust config as a side
-  effect.
+  effect. (Amended during design: Claude Code refuses to start a
+  background session in a directory with no trusted ancestor and runs
+  no hook source there, so a running dispatched worker is always under
+  a trusted root.)
 
 ### Non-functional
 
@@ -409,12 +412,11 @@ Trust:
       `niwa apply` writes one stderr line containing the root's path,
       `untrusted`, and `trust_instances = true`; with the root trusted,
       it writes no such line.
-- [ ] For a dispatch whose instance root is untrusted, the launch
-      arguments or launch settings document niwa builds contain the
-      `WorktreeCreate`, `WorktreeRemove` and guard entries (or a
-      per-launch trust grant scoped to that root), and after the dispatch
-      neither `trust_instances` nor the user's Claude Code trust
-      records have changed.
+- [ ] With an instance root that is untrusted itself but sits under a
+      trusted workspace root, `niwa apply` prints no untrusted warning
+      for it; with no trusted ancestor, it prints the warning. Neither
+      `niwa apply` nor `niwa dispatch` changes `trust_instances` or the
+      user's Claude Code trust records.
 
 Live check (manual, recorded in the implementing PR, Claude Code
 2.1.302 or later):
@@ -424,8 +426,8 @@ Live check (manual, recorded in the implementing PR, Claude Code
       `<repo>/x`; the transcript shows no permission request, the
       session's working directory ends inside `.niwa/worktrees/`, and
       `niwa worktree list` shows the worktree.
-- [ ] A worker started by `niwa dispatch` with `trust_instances` off
-      does the same.
+- [ ] A worker started by `niwa dispatch` with `trust_instances` off,
+      in an instance under a trusted workspace root, does the same.
 - [ ] In the same session, `git worktree add` and a path-form
       `EnterWorktree` are refused with the R8/R9 text.
 
