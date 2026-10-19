@@ -19,10 +19,14 @@ func init() {
 }
 
 // sessionFromHookCmd is the thin entry Claude Code invokes DIRECTLY as the
-// per-repo WorktreeCreate/WorktreeRemove hook command (an absolute-path
-// `niwa worktree from-hook`, with NO shim script). It reads the Claude hook
-// JSON on stdin and dispatches on hook_event_name to the same create/destroy
-// core the human `niwa worktree create`/`destroy` commands use.
+// WorktreeCreate/WorktreeRemove hook command (`niwa worktree from-hook`, with
+// NO shim script) written into each repo's settings and into the instance
+// root's and workspace root's settings. A session launched at a root has no
+// repo for its working directory, so the repo can come from a `<repo>/`
+// prefix in the worktree name or from a one-repo instance as well as from
+// cwd; see workspace.ResolveHookTarget. It reads the Claude hook JSON on
+// stdin and dispatches on hook_event_name to the same create/destroy core the
+// human `niwa worktree create`/`destroy` commands use.
 //
 // The hook I/O contract is the only thing this command owns:
 //   - WorktreeCreate: print ONLY the absolute worktree path to stdout, exit 0
@@ -269,9 +273,11 @@ func runFromHookRemove(cmd *cobra.Command, payload hookPayload) error {
 	// a remove sent from the workspace root (where the process's own working
 	// directory is in no instance) still finds it. When that fails, fall back
 	// to NIWA_INSTANCE_ROOT or the process's working directory, as before.
-	// The fallback is safe for remove in a way it wouldn't be for create:
-	// remove only tears down a worktree that matches a session record in the
-	// instance it found, and keeps any worktree with uncommitted work.
+	// The fallback deliberately does not enforce the anchor refusal that create
+	// does ("outside the instance this session was launched in"). That is safe
+	// for remove in a way it wouldn't be for create: remove only tears down a
+	// worktree that matches a session record in the instance it found, and
+	// keeps any worktree with uncommitted work. Don't copy this into create.
 	instanceRoot, err := workspace.ResolveHookInstance(workspace.HookAnchor(), wantPath)
 	if err != nil {
 		var fallbackErr error

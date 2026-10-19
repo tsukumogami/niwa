@@ -33,6 +33,12 @@ const maxListedInstances = 20
 // cwd, which follows the agent's `cd`; resolution anchored on it can't be
 // steered by a model-chosen directory. It returns "" only when even the
 // working directory can't be read.
+//
+// The working-directory fallback rests on an assumption about the harness:
+// that Claude Code starts a hook in the session's launch directory, not in a
+// directory the agent chose. If a harness ever runs hooks elsewhere without
+// setting CLAUDE_PROJECT_DIR, this fallback stops protecting against a
+// planted instance.
 func HookAnchor() string {
 	if dir := os.Getenv("CLAUDE_PROJECT_DIR"); dir != "" {
 		return dir
@@ -149,10 +155,14 @@ func enumerateHookRepos(instanceRoot string) ([]hookRepo, error) {
 // order, stopping at the first that applies:
 //
 //  1. a repo prefix in name: `<group>/<repo>/<slug>` or `<repo>/<slug>`,
-//     matched exactly against the repos cloned in the instance. A prefix only
-//     ever selects from that set; it is never used as a path.
-//  2. the repo whose clone contains cwd.
-//  3. the only repo, when the instance has exactly one.
+//     matched exactly against the repos cloned in the instance (the on-disk
+//     scan, with each repo's group taken from its parent directory). A
+//     prefix only ever selects from that set; it is never used as a path.
+//  2. a prefix naming a repo the instance's state lists (the configured set
+//     as of the last apply) but that has no clone on disk is refused as a
+//     missing clone, rather than falling through to the rules below.
+//  3. the repo whose clone contains cwd.
+//  4. the only repo, when the instance has exactly one.
 //
 // Otherwise it refuses with the instance's repos and an example name. An
 // explicit prefix wins over cwd because it is what the agent asked for at the
