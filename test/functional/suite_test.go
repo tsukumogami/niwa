@@ -516,6 +516,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// --- worktree-delegation integration: from-hook create/remove + the
 	// supported/deny/opt-out install branches (deterministic via a fake claude) ---
 	registerWorktreeDelegationSteps(ctx)
+	registerRootSessionWorktreeSteps(ctx)
 
 	// --- worktree teardown by session id or handle: destroy resolved from the
 	// workspace root against the worktrees of a dispatched session's instance ---
