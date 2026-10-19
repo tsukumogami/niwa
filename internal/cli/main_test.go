@@ -37,6 +37,10 @@ exit 1
 // someone removes it by hand. CI never notices, because CI has no agent
 // installed.
 func TestMain(m *testing.M) {
+	// A run started from inside a Claude Code session inherits the session's
+	// launch directory, which the worktree hooks anchor on. Tests that want an
+	// anchor set it themselves.
+	os.Unsetenv("CLAUDE_PROJECT_DIR")
 	os.Exit(runWithAgentStubs(m))
 }
 
