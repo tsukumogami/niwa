@@ -70,11 +70,25 @@ func TestRunWorktreeGuard(t *testing.T) {
 		{"tool_name": "Bash", "tool_input": map[string]string{"command": "ls"}, "cwd": root},
 		{"tool_name": "EnterWorktree", "tool_input": map[string]string{"name": "niwa/x"}, "cwd": root},
 		{"tool_name": "Read", "tool_input": map[string]string{"file_path": "x"}, "cwd": root},
-		{"tool_name": "Bash", "tool_input": map[string]string{"command": "git worktree add x"}},
+		{"tool_name": "Bash", "tool_input": map[string]string{"command": `echo "unterminated git worktree add`}, "cwd": root},
 	} {
 		if code, stderr := runGuard(t, p); code != 0 {
 			t.Errorf("%v: exit %d (%s), want 0", p, code, stderr)
 		}
+	}
+}
+
+// TestRunWorktreeGuard_MissingCwdUsesAnchor checks a payload without cwd is
+// judged from the launch directory rather than waved through.
+func TestRunWorktreeGuard_MissingCwdUsesAnchor(t *testing.T) {
+	root := guardInstance(t)
+	t.Setenv("CLAUDE_PROJECT_DIR", root)
+	code, _ := runGuard(t, map[string]any{
+		"tool_name":  "Bash",
+		"tool_input": map[string]string{"command": "git worktree add x"},
+	})
+	if code != guardBlockExit {
+		t.Errorf("missing cwd: exit %d, want %d", code, guardBlockExit)
 	}
 }
 

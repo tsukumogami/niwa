@@ -35,7 +35,8 @@ const guardBlockExit = 2
 // It fails open: anything it can't read, parse or resolve lets the call
 // through, because it runs on every Bash call in a root session and a broken
 // guard must never block the shell. A niwa too old to have this subcommand
-// prints help and exits 0, which also allows.
+// fails it as an unknown command (exit 1) or prints help (exit 0); neither is
+// exit 2, so Claude Code lets the call proceed either way.
 var worktreeGuardCmd = &cobra.Command{
 	Use:           "guard",
 	Short:         "Internal: PreToolUse guard against building worktrees by hand at a root (reads JSON on stdin)",
@@ -72,11 +73,19 @@ func runWorktreeGuard(stdin io.Reader, stderr io.Writer) (code int) {
 		fmt.Fprintf(stderr, "niwa worktree guard: parsing payload, allowing: %v\n", err)
 		return 0
 	}
-	if !guardMayRefuse(payload) || payload.Cwd == "" {
+	if !guardMayRefuse(payload) {
 		return 0
 	}
+	anchor := workspace.HookAnchor()
+	cwd := payload.Cwd
+	if cwd == "" {
+		// A payload without cwd is judged from the launch directory, so the
+		// guard doesn't switch itself off for it.
+		cwd = anchor
+		payload.Cwd = anchor
+	}
 
-	hs, err := workspace.ResolveHookScope(workspace.HookAnchor(), payload.Cwd)
+	hs, err := workspace.ResolveHookScope(anchor, cwd)
 	if err != nil {
 		// Not in a niwa instance or workspace this guard can reason about.
 		return 0
@@ -97,7 +106,9 @@ func runWorktreeGuard(stdin io.Reader, stderr io.Writer) (code int) {
 
 // guardMayRefuse is a cheap prefilter run before any filesystem work: only an
 // EnterWorktree call, or a Bash command that mentions "worktree", can be
-// refused, so every other call returns at once.
+// refused, so every other call returns at once. A command that builds the word
+// at run time (a variable, command substitution) passes here, as it would pass
+// the tokenizer: the guard steers, it doesn't enforce.
 func guardMayRefuse(p worktreeguard.Payload) bool {
 	switch p.ToolName {
 	case "EnterWorktree":
