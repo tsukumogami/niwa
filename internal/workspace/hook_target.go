@@ -27,11 +27,21 @@ var ErrDelegationOptedOut = errors.New("this instance opted out of worktree dele
 const maxListedInstances = 20
 
 // HookAnchor returns the directory Claude Code launched the session in, from
-// CLAUDE_PROJECT_DIR, or "" when the variable is unset. Unlike the hook
-// payload's cwd, which follows the agent's `cd`, this is fixed by the harness,
-// so resolution anchored on it can't be steered by a model-chosen directory.
+// CLAUDE_PROJECT_DIR. When the variable is unset it returns the hook process's
+// own working directory, which Claude Code chooses when it starts the hook.
+// Either way the anchor comes from the harness, not from the hook payload's
+// cwd, which follows the agent's `cd`; resolution anchored on it can't be
+// steered by a model-chosen directory. It returns "" only when even the
+// working directory can't be read.
 func HookAnchor() string {
-	return os.Getenv("CLAUDE_PROJECT_DIR")
+	if dir := os.Getenv("CLAUDE_PROJECT_DIR"); dir != "" {
+		return dir
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return wd
 }
 
 // ResolveHookInstance finds the instance a hook call acts on, anchored on the
@@ -45,16 +55,19 @@ func HookAnchor() string {
 // a remove; both are model-influenced, so a target outside the instance found
 // from the anchor is refused rather than followed.
 //
-// With an empty anchor (a harness that sets no CLAUDE_PROJECT_DIR) the
-// instance is found by walking up from target, as before this resolver
-// existed.
+// An empty anchor is refused: walking up from target alone would let a
+// session plant an instance marker and steer the hook at it.
+//
+// It does not apply the delegation opt-out; callers that act on the instance
+// check InstanceState.NoWorktreeDelegation themselves, as ResolveHookTarget
+// and the WorktreeRemove path do.
 func ResolveHookInstance(anchor, target string) (string, error) {
+	if anchor == "" {
+		return "", errors.New("cannot tell which directory this session was launched in")
+	}
 	canonTarget, err := canonicalize(target)
 	if err != nil {
 		return "", err
-	}
-	if anchor == "" {
-		return DiscoverInstance(canonTarget)
 	}
 	canonAnchor, err := canonicalize(anchor)
 	if err != nil {
@@ -173,8 +186,17 @@ func ResolveHookTarget(anchor, cwd, name string) (HookTarget, error) {
 				return withSlug(target, r.name, segs[1:], repos)
 			}
 		}
-		if missing := missingClone(instanceRoot, segs[0]); missing {
-			return HookTarget{}, fmt.Errorf("repo %q is configured in this instance but its clone is missing; run niwa apply", segs[0])
+		// A prefix naming a repo the instance lists but hasn't cloned gets its
+		// own message, for either form. The instance state's repo list is the
+		// configured set as of the last apply; the hook has no config loaded.
+		candidates := []string{segs[0]}
+		if len(segs) >= 3 {
+			candidates = append(candidates, segs[1])
+		}
+		for _, candidate := range candidates {
+			if missingClone(instanceRoot, candidate) {
+				return HookTarget{}, fmt.Errorf("repo %q is configured in this instance but its clone is missing; run niwa apply", candidate)
+			}
 		}
 	}
 

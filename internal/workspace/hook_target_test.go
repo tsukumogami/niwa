@@ -76,11 +76,12 @@ func TestResolveHookTarget(t *testing.T) {
 		{"empty slug", f.alpha, f.alpha, "niwa/", "", "", "no repo selected"},
 		{"case differs", f.alpha, f.alpha, "Niwa/fix-x", "", "", "no repo selected"},
 		{"missing clone", f.alpha, f.alpha, "ghost/fix-x", "", "", "clone is missing"},
+		{"missing clone, group form", f.alpha, f.alpha, "public/ghost/fix-x", "", "", "clone is missing"},
 		{"single-repo instance", f.beta, f.beta, "fix-x", "solo", "fix-x", ""},
 		{"workspace-root launch moved into instance", f.workspaceRoot, f.alpha, "koto/y", "koto", "y", ""},
 		{"workspace-root launch not moved", f.workspaceRoot, f.workspaceRoot, "niwa/fix-x", "", "", "not inside a niwa instance"},
 		{"cwd outside the launch instance", f.alpha, f.beta, "solo/x", "", "", "outside the instance"},
-		{"no anchor falls back to cwd", "", kotoDir, "fix-x", "koto", "fix-x", ""},
+		{"empty anchor is refused", "", kotoDir, "fix-x", "", "", "launched in"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -159,6 +160,59 @@ func TestResolveHookTarget_PlantedInstanceIsRefused(t *testing.T) {
 	}
 	if _, err := ResolveHookTarget(f.alpha, filepath.Join(planted, "g", "evil"), "evil/x"); err == nil {
 		t.Fatal("a cwd outside the launch instance must be refused")
+	}
+}
+
+// TestHookAnchor_FallsBackToWorkingDirectory checks that with no
+// CLAUDE_PROJECT_DIR the anchor is the process's working directory, never the
+// payload's cwd.
+func TestHookAnchor_FallsBackToWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+	prev, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(prev) }()
+	got, err := canonicalize(HookAnchor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := canonicalize(dir)
+	if got != want {
+		t.Errorf("HookAnchor() = %q, want the working directory %q", got, want)
+	}
+
+	t.Setenv("CLAUDE_PROJECT_DIR", "/launch/dir")
+	if got := HookAnchor(); got != "/launch/dir" {
+		t.Errorf("HookAnchor() = %q, want CLAUDE_PROJECT_DIR", got)
+	}
+}
+
+// TestResolveHookTarget_PlantedInstanceWithoutEnv covers the unset-variable
+// case: a session launched in alpha (the hook runs there) can't point the
+// hook at a planted instance through cwd.
+func TestResolveHookTarget_PlantedInstanceWithoutEnv(t *testing.T) {
+	f := newHookFixture(t)
+	planted := filepath.Join(t.TempDir(), "planted")
+	mustMkdir(t, filepath.Join(planted, "g", "evil", ".git"))
+	if err := SaveState(planted, &InstanceState{SchemaVersion: SchemaVersion}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+	prev, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(f.alpha); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(prev) }()
+	if _, err := ResolveHookTarget(HookAnchor(), filepath.Join(planted, "g", "evil"), "evil/x"); err == nil {
+		t.Fatal("a cwd outside the launch instance must be refused without CLAUDE_PROJECT_DIR too")
 	}
 }
 

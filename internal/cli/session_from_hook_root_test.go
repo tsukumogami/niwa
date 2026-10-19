@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tsukumogami/niwa/internal/workspace"
 	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
@@ -104,6 +105,85 @@ func TestFromHookRemove_ResolvesInstanceFromAnchor(t *testing.T) {
 	}
 	if _, statErr := os.Stat(created.WorktreePath); !os.IsNotExist(statErr) {
 		t.Errorf("worktree still present: %v", statErr)
+	}
+}
+
+// TestFromHookCreate_RefusalsThroughTheCommand covers the refusals end to end:
+// a second repo makes the instance root ambiguous, an unknown prefix is
+// refused without creating anything named after it, and the stderr names the
+// repos and an example.
+func TestFromHookCreate_RefusalsThroughTheCommand(t *testing.T) {
+	f := newCreateFlowFixture(t)
+	resetSessionCreateFlags(t)
+	defer resetSessionCreateFlags(t)
+	t.Setenv("CLAUDE_PROJECT_DIR", f.root)
+	if err := os.MkdirAll(filepath.Join(f.root, f.group, "other", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"plain", "nosuchrepo/fix-x"} {
+		hookJSON := mustHookJSON(t, map[string]any{
+			"hook_event_name": "WorktreeCreate",
+			"session_id":      "claude-sid",
+			"cwd":             f.root,
+			"name":            name,
+		})
+		out, _, err := runFromHook(t, f.root, hookJSON)
+		if err == nil || out != "" {
+			t.Fatalf("name %q: want a refusal and empty stdout, got err=%v out=%q", name, err, out)
+		}
+		for _, want := range []string{"no repo selected", f.repo, "other", "/<slug>"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("name %q: refusal %q lacks %q", name, err, want)
+			}
+		}
+	}
+	if matches, _ := filepath.Glob(filepath.Join(f.root, "*", "nosuchrepo*")); len(matches) != 0 {
+		t.Errorf("an unknown prefix must create nothing, found %v", matches)
+	}
+	states, _ := worktree.ListSessionLifecycleStates(f.sessionsDir)
+	if len(states) != 0 {
+		t.Errorf("want no sessions, got %d", len(states))
+	}
+}
+
+// TestFromHookRemove_OptedOutInstanceIsLeftAlone covers the shared
+// workspace-root hook reaching an opted-out instance: remove exits 0 and
+// changes nothing.
+func TestFromHookRemove_OptedOutInstanceIsLeftAlone(t *testing.T) {
+	f := newCreateFlowFixture(t)
+	resetSessionCreateFlags(t)
+	defer resetSessionCreateFlags(t)
+
+	created := createViaHook(t, f, "keep-me")
+
+	state, err := workspace.LoadState(f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.NoWorktreeDelegation = true
+	if err := workspace.SaveState(f.root, state); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CLAUDE_PROJECT_DIR", f.root)
+	hookJSON := mustHookJSON(t, map[string]any{
+		"hook_event_name": "WorktreeRemove",
+		"session_id":      "claude-sid",
+		"worktree_path":   created.WorktreePath,
+	})
+	if _, errOut, err := runFromHook(t, f.root, hookJSON); err != nil {
+		t.Fatalf("remove must exit 0: %v\nstderr:\n%s", err, errOut)
+	}
+	if _, statErr := os.Stat(created.WorktreePath); statErr != nil {
+		t.Errorf("an opted-out instance's worktree must be left alone: %v", statErr)
+	}
+	after, err := worktree.ReadSessionLifecycleState(f.sessionsDir, created.SessionID)
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	if after.Status == worktree.SessionStatusEnded {
+		t.Errorf("session should not have been ended")
 	}
 }
 

@@ -268,13 +268,16 @@ func runFromHookRemove(cmd *cobra.Command, payload hookPayload) error {
 	// The instance comes from the launch directory and the worktree path, so
 	// a remove sent from the workspace root (where the process's own working
 	// directory is in no instance) still finds it. When that fails, fall back
-	// to the process's working directory or NIWA_INSTANCE_ROOT, as before.
+	// to NIWA_INSTANCE_ROOT or the process's working directory, as before.
+	// The fallback is safe for remove in a way it wouldn't be for create:
+	// remove only tears down a worktree that matches a session record in the
+	// instance it found, and keeps any worktree with uncommitted work.
 	instanceRoot, err := workspace.ResolveHookInstance(workspace.HookAnchor(), wantPath)
 	if err != nil {
 		var fallbackErr error
 		instanceRoot, fallbackErr = resolveInstanceRoot()
 		if fallbackErr != nil {
-			fmt.Fprintf(stderr, "niwa: warning: WorktreeRemove could not resolve instance root: %v\n", err)
+			fmt.Fprintf(stderr, "niwa: warning: WorktreeRemove could not resolve instance root: %v (fallback: %v)\n", err, fallbackErr)
 			return nil
 		}
 	}
