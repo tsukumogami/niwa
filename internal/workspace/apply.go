@@ -1792,7 +1792,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	//
 	// Gated on the init-time opt-out (Issue 6, design Decision 5): when
 	// `niwa init --no-worktree-delegation` set InstanceState.NoWorktreeDelegation,
-	// skip the entire block — no probe, no hook, no deny, no disclosure.
+	// skip the entire block — no probe here, no hook, no deny, no disclosure.
+	// (A caller that also writes the workspace root may already have probed.)
 	// worktreeDelegation stays nil, so neither the instance root nor any repo
 	// gets the hook or the deny entries. The opt-out is reversible: re-running
 	// init without the flag clears the state field, and the next apply

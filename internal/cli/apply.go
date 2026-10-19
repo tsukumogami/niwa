@@ -241,7 +241,8 @@ func runApply(cmd *cobra.Command, args []string) error {
 	if scope.Mode == workspace.ApplyAll && scope.WorkspaceRoot != "" {
 		// Probe the harness once and share the answer with every instance
 		// below, so the workspace root and each instance make the same
-		// hook-or-deny choice.
+		// hook-or-deny choice. Narrower scopes write no workspace root, so
+		// they leave applier.Harness nil and the Applier probes once itself.
 		harness := workspace.ProbeHarness(contextOrBackground(cmd.Context()))
 		applier.Harness = &harness
 		rootDelegation, delegationErr := rootWorktreeDelegation(cfg, harness)

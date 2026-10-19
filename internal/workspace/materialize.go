@@ -130,7 +130,8 @@ type MaterializeContext struct {
 
 	// WorktreeDelegation carries the apply-time worktree-integration decision
 	// (probe result + niwa absolute path), computed ONCE per apply and threaded
-	// to every repo's SettingsMaterializer. nil installs neither hook nor deny.
+	// to the instance root's RootSettingsMaterializer and every repo's
+	// SettingsMaterializer. nil installs neither hook nor deny.
 	// See WorktreeDelegation for the supported/unsupported branch contract.
 	WorktreeDelegation *WorktreeDelegation
 
@@ -399,9 +400,11 @@ const (
 	denyExitWorktree  = "ExitWorktree"
 )
 
-// WorktreeDelegation carries the apply-time decision for the per-repo worktree
-// integration, computed once per apply (not per repo) and threaded into each
-// repo's MaterializeContext. Hook and deny are MUTUALLY EXCLUSIVE: when
+// WorktreeDelegation carries the apply-time decision for the worktree
+// integration, computed once per apply (not per repo) and written into every
+// settings document a session can be launched under: each repo's, the
+// instance root's, and (through RootMaterializeOptions) the workspace root's.
+// Hook and deny are MUTUALLY EXCLUSIVE: when
 // Supported is true the materializer writes the WorktreeCreate/WorktreeRemove
 // hook entries; when false it writes permissions.deny instead. The zero value
 // (nil pointer on the context) installs neither, leaving settings unchanged.
