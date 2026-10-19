@@ -280,6 +280,7 @@ func writeRootSettings(cfg *config.WorkspaceConfig, workspaceRoot, niwaPath stri
 			TimeoutSeconds: rootSessionHookTimeoutSeconds,
 		},
 		WorktreeDelegation: worktreeDelegation,
+		WorktreeGuard:      true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("building workspace-root settings: %w", err)

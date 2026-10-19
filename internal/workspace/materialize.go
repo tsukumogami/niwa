@@ -393,6 +393,12 @@ const (
 	// function for the PATH-first shape.
 	worktreeFromHookCommandSuffix = "worktree from-hook"
 
+	// worktreeGuardCommandSuffix, worktreeGuardMatcher and
+	// worktreeGuardTimeoutSeconds describe the root-scope PreToolUse guard.
+	worktreeGuardCommandSuffix  = "worktree guard"
+	worktreeGuardMatcher        = "EnterWorktree|Bash"
+	worktreeGuardTimeoutSeconds = 5
+
 	// denyEnterWorktree / denyExitWorktree are the Claude Code tool names denied
 	// when the harness does NOT support the worktree hooks. Denying these steers
 	// agents to `niwa worktree create` instead of a competing bare checkout.
@@ -508,6 +514,13 @@ type BuildSettingsConfig struct {
 	// Unsupported => permissions.deny: ["EnterWorktree","ExitWorktree"]. Hook and
 	// deny are mutually exclusive; nil installs neither.
 	WorktreeDelegation *WorktreeDelegation
+
+	// WorktreeGuard, when true and WorktreeDelegation is non-nil, adds the
+	// `niwa worktree guard` PreToolUse entry. Only the instance root's and
+	// workspace root's documents set it: a session launched inside a repo
+	// already gets working worktrees, and a hand-run `git worktree add` there
+	// may be legitimate. An opted-out instance has no delegation, so no guard.
+	WorktreeGuard bool
 
 	// SessionHooks, when non-nil, installs the workspace-root
 	// SessionStart/SessionEnd hook entries (the ephemeral-session integration).
@@ -892,6 +905,36 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 		}
 		hooksDoc[worktreeCreateEvent] = worktreeEntry
 		hooksDoc[worktreeRemoveEvent] = worktreeEntry
+	}
+
+	// Worktree guard (root scopes only): refuse EnterWorktree with a path and a
+	// hand-run `git worktree add`, which can't work from a root. Appended to
+	// PreToolUse so it composes with any installed entries. The matcher names
+	// both tools rather than "Bash" alone, so `niwa watch`, which dedupes its
+	// own Bash guard by matcher, never mistakes this entry for its own. The
+	// short timeout keeps a hung niwa from stalling Bash; an expired hook
+	// doesn't block. A deny branch caused by an unresolvable niwa path has no
+	// path to fall back to, so it gets no guard.
+	if wd := cfg.WorktreeDelegation; cfg.WorktreeGuard && wd != nil && wd.NiwaPath != "" {
+		pascalEvent, ok := hookEventMapping["pre_tool_use"]
+		if !ok {
+			pascalEvent = snakeToPascal("pre_tool_use")
+		}
+		entry := map[string]any{
+			"matcher": worktreeGuardMatcher,
+			"hooks": []map[string]any{
+				{
+					"type":    "command",
+					"command": guardedNiwaHookCommand(wd.NiwaPath, worktreeGuardCommandSuffix),
+					"timeout": worktreeGuardTimeoutSeconds,
+				},
+			},
+		}
+		if existing, ok := hooksDoc[pascalEvent].([]map[string]any); ok {
+			hooksDoc[pascalEvent] = append(existing, entry)
+		} else {
+			hooksDoc[pascalEvent] = []map[string]any{entry}
+		}
 	}
 
 	// Work-summary hooks (default-on for shirabe adopters): inject the built-in

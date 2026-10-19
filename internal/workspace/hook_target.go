@@ -257,3 +257,62 @@ func noRepoSelectedError(repos []hookRepo) error {
 	return fmt.Errorf("no repo selected; name the worktree <repo>/<slug> or <group>/<repo>/<slug>, for example %s/<slug>. Repos in this instance: %s",
 		repos[0].name, strings.Join(names, ", "))
 }
+
+// HookScope is what the worktree guard needs to know about where a session
+// is: the instance it acts in and that instance's repos and worktree
+// directory, or, for a workspace-root session that hasn't moved into an
+// instance, the instances it could move into.
+type HookScope struct {
+	InstanceRoot string
+	// WorktreesDir is the instance's .niwa/worktrees, symlink-resolved so it
+	// compares equal to a symlink-resolved target.
+	WorktreesDir string
+	Repos        []string // sorted
+	Instances    []string // sorted directory names; set only when InstanceRoot is ""
+	OptedOut     bool
+}
+
+// ResolveHookScope resolves the guard's view of a session, anchored on the
+// launch directory as ResolveHookInstance is. When the anchor is a workspace
+// root and cwd is in none of its instances, it returns a scope with no
+// instance and the workspace's instance names. Any other failure is returned
+// as an error, which the guard treats as "let the call through".
+func ResolveHookScope(anchor, cwd string) (HookScope, error) {
+	instanceRoot, err := ResolveHookInstance(anchor, cwd)
+	if err != nil {
+		canonAnchor, cerr := canonicalize(anchor)
+		if cerr != nil || !isWorkspaceRoot(canonAnchor) {
+			return HookScope{}, err
+		}
+		instances, ierr := EnumerateInstances(canonAnchor)
+		if ierr != nil {
+			return HookScope{}, err
+		}
+		names := make([]string, 0, len(instances))
+		for _, instance := range instances {
+			names = append(names, filepath.Base(instance))
+		}
+		sort.Strings(names)
+		return HookScope{Instances: names}, nil
+	}
+
+	scope := HookScope{InstanceRoot: instanceRoot}
+	if state, err := LoadState(instanceRoot); err == nil && state.NoWorktreeDelegation {
+		scope.OptedOut = true
+		return scope, nil
+	}
+	repos, err := enumerateHookRepos(instanceRoot)
+	if err != nil {
+		return HookScope{}, err
+	}
+	for _, r := range repos {
+		scope.Repos = append(scope.Repos, r.name)
+	}
+	// The worktrees directory may not exist yet; resolve the instance root
+	// (which does) and join, so the comparison still works on hosts where
+	// the temp or home directory sits behind a symlink.
+	if canonRoot, err := canonicalize(instanceRoot); err == nil {
+		scope.WorktreesDir = filepath.Join(canonRoot, StateDir, "worktrees")
+	}
+	return scope, nil
+}
