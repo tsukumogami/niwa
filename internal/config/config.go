@@ -64,6 +64,13 @@ type ClaudeConfig struct {
 	// overlay's, so a config that wants to refuse the overlay's choice says
 	// false. Workspace-scoped: not merged from per-repo overrides.
 	TrustInstances *bool `toml:"trust_instances,omitempty"`
+	// WorktreeDelegation is the off switch for the worktree integration niwa
+	// writes into the workspace root's settings, so a session launched there
+	// (an ephemeral session, before it moves into its instance) creates niwa
+	// worktrees instead of native ones. nil (the key absent) means on.
+	// Per-instance opt-out stays with `niwa init --no-worktree-delegation`.
+	// Workspace-scoped: not merged from per-repo overrides.
+	WorktreeDelegation *bool `toml:"worktree_delegation,omitempty"`
 	// Content is the deprecated [claude.content] spelling of the content
 	// hierarchy. The canonical table is the top-level [content]
 	// (WorkspaceConfig.Content): the same declared content now feeds every
@@ -74,6 +81,12 @@ type ClaudeConfig struct {
 	// WorkspaceConfig.Content with a deprecation warning, and the alias is
 	// removed at v1.0. Nothing outside Parse reads this field.
 	Content ContentConfig `toml:"content,omitempty"`
+}
+
+// WorktreeDelegationEnabled reports whether the workspace root gets niwa's
+// worktree integration: true unless worktree_delegation is set to false.
+func (c ClaudeConfig) WorktreeDelegationEnabled() bool {
+	return c.WorktreeDelegation == nil || *c.WorktreeDelegation
 }
 
 // CodexConfig is the workspace-level Codex configuration under [codex].

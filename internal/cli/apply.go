@@ -239,9 +239,19 @@ func runApply(cmd *cobra.Command, args []string) error {
 	// already current — but it does not skip the write: it rewrites the
 	// root-managed files via unconditional os.WriteFile on every apply.
 	if scope.Mode == workspace.ApplyAll && scope.WorkspaceRoot != "" {
+		// Probe the harness once and share the answer with every instance
+		// below, so the workspace root and each instance make the same
+		// hook-or-deny choice.
+		harness := workspace.ProbeHarness(contextOrBackground(cmd.Context()))
+		applier.Harness = &harness
+		rootDelegation, delegationErr := rootWorktreeDelegation(cfg, harness)
+		if delegationErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not resolve niwa binary path for worktree hooks (%v); installing deny fallback\n", delegationErr)
+		}
 		if _, mErr := workspace.MaterializeWorkspaceRoot(cfg, scope.WorkspaceRoot, workspace.RootMaterializeOptions{
 			EphemeralSessionMode: workspace.EphemeralSessionMode(scope.WorkspaceRoot),
 			ConfigDir:            configDir,
+			WorktreeDelegation:   rootDelegation,
 		}); mErr != nil {
 			return fmt.Errorf("materializing workspace-root config: %w", mErr)
 		}

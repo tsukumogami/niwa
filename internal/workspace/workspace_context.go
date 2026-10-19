@@ -446,6 +446,9 @@ func (m *RootSettingsMaterializer) Materialize(ctx *MaterializeContext) ([]strin
 		UseAbsolutePaths:       true,
 		Reports:                &reports,
 		ApprovedMCPServers:     approvedMCP,
+		// A session launched at the instance root reads only this document,
+		// so it carries the same worktree integration each repo gets.
+		WorktreeDelegation: ctx.WorktreeDelegation,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("building workspace root settings: %w", err)

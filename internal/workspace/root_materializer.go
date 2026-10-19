@@ -92,6 +92,14 @@ type RootMaterializeOptions struct {
 	// <workspaceRoot>/.niwa). It is the source root for [root.files] verbatim
 	// file distribution; required only when [root.files] is non-empty.
 	ConfigDir string
+
+	// WorktreeDelegation, when non-nil, writes the worktree integration (the
+	// WorktreeCreate/WorktreeRemove hooks, or the deny fallback) into the
+	// workspace root's settings, so a session launched here creates niwa
+	// worktrees. The caller builds it from the same probe it hands each
+	// instance's Applier, and leaves it nil when the workspace's
+	// worktree_delegation setting is off.
+	WorktreeDelegation *WorktreeDelegation
 }
 
 // MaterializeWorkspaceRoot writes the workspace-root managed config:
@@ -124,7 +132,7 @@ func MaterializeWorkspaceRoot(cfg *config.WorkspaceConfig, workspaceRoot string,
 
 	var written []string
 
-	settingsPaths, err := writeRootSettings(cfg, workspaceRoot, niwaPath, opts.EphemeralSessionMode)
+	settingsPaths, err := writeRootSettings(cfg, workspaceRoot, niwaPath, opts.EphemeralSessionMode, opts.WorktreeDelegation)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +248,7 @@ func writeRootSkills(workspaceRoot string) ([]string, error) {
 // The document is declared as a plan entry and written by the executor, so the
 // path, the marshalled bytes, and the file mode are the producer's rather than
 // this function's; what remains here is deciding what the document says.
-func writeRootSettings(cfg *config.WorkspaceConfig, workspaceRoot, niwaPath string, ephemeral bool) ([]string, error) {
+func writeRootSettings(cfg *config.WorkspaceConfig, workspaceRoot, niwaPath string, ephemeral bool, worktreeDelegation *WorktreeDelegation) ([]string, error) {
 	effective := MergeInstanceOverrides(cfg)
 
 	// Forward only the plugins/marketplaces that have a root-resolvable form.
@@ -271,6 +279,7 @@ func writeRootSettings(cfg *config.WorkspaceConfig, workspaceRoot, niwaPath stri
 			Command:        instanceFromHookCommand(niwaPath),
 			TimeoutSeconds: rootSessionHookTimeoutSeconds,
 		},
+		WorktreeDelegation: worktreeDelegation,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("building workspace-root settings: %w", err)

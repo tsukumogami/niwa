@@ -66,6 +66,14 @@ type Applier struct {
 	// delivers what a session needs.
 	DeveloperHome string
 
+	// Harness is a probe result the caller already holds, so a command that
+	// writes several settings documents (the workspace root and each
+	// instance) makes one hook-or-deny choice for all of them. nil means the
+	// Applier probes once itself, before the first settings document it
+	// writes; every Applier caller that doesn't set it (create, reset, the
+	// provisioning path) still gets the worktree integration.
+	Harness *HarnessSupport
+
 	// Keys collects the declared keys this run could not supply, for the
 	// caller to render once the run returns. It is caller-supplied rather
 	// than returned because Create removes its instance directory and
@@ -1771,12 +1779,61 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
+	// Decide the worktree-delegation integration ONCE per apply (design
+	// Decisions 4 & 6), before the first settings document is written, then
+	// thread it into the instance root's settings and every repo's
+	// SettingsMaterializer below. The instance root needs it because a session
+	// launched there reads only the instance root's settings. Hook and deny are
+	// mutually exclusive; the materializer writes one based on Supported.
+	//
+	// The probe result comes from the caller when it already holds one
+	// (a.Harness), so the workspace root and every instance a command touches
+	// agree; otherwise it runs here, once.
+	//
+	// Gated on the init-time opt-out (Issue 6, design Decision 5): when
+	// `niwa init --no-worktree-delegation` set InstanceState.NoWorktreeDelegation,
+	// skip the entire block — no probe, no hook, no deny, no disclosure.
+	// worktreeDelegation stays nil, so neither the instance root nor any repo
+	// gets the hook or the deny entries. The opt-out is reversible: re-running
+	// init without the flag clears the state field, and the next apply
+	// re-enters this block and installs the integration.
+	var worktreeDelegation *WorktreeDelegation
+	if !opts.noWorktreeDelegation {
+		harness := a.Harness
+		if harness == nil {
+			probed := ProbeHarness(ctx)
+			harness = &probed
+		}
+		var niwaPathErr error
+		worktreeDelegation, niwaPathErr = WorktreeDelegationFor(*harness)
+		if niwaPathErr != nil {
+			a.Reporter.DeferWarn("could not resolve niwa binary path for worktree hooks (%v); installing deny fallback", niwaPathErr)
+		}
+
+		// Disclosure (design Decision 4): the deny fallback is a current-state
+		// condition, so its warning fires on EVERY apply; a one-time explainer fires
+		// only on first encounter. The decision is computed by the pure
+		// worktreeFallbackDisclosure helper.
+		warnFallback, explainFallback := worktreeFallbackDisclosure(
+			worktreeDelegation.Supported,
+			noticeDisclosed(opts.existingState, noticeWorktreeFallback),
+		)
+		if warnFallback {
+			a.Reporter.Warn("%s", worktreeFallbackWarning)
+		}
+		if explainFallback {
+			a.Reporter.Log("%s", worktreeFallbackExplainer)
+			newDisclosures = append(newDisclosures, noticeWorktreeFallback)
+		}
+	}
+
 	rootSettings := &RootSettingsMaterializer{}
 	rootSettingsFiles, err := rootSettings.Materialize(&MaterializeContext{
-		Config:    effectiveCfg,
-		ConfigDir: configDir,
-		RepoDir:   instanceRoot,
-		RepoIndex: marketplaceIndex,
+		Config:             effectiveCfg,
+		ConfigDir:          configDir,
+		RepoDir:            instanceRoot,
+		RepoIndex:          marketplaceIndex,
+		WorktreeDelegation: worktreeDelegation,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("installing workspace root settings: %w", err)
@@ -2007,57 +2064,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			exemptPaths = append(exemptPaths, repoPayload.Exempt...)
 			allWarnings = append(allWarnings, repoPayload.Warnings...)
 			contentExcludes[repoDir] = append(contentExcludes[repoDir], repoPayload.Excludes...)
-		}
-	}
-
-	// Step 6.4: Decide the worktree-delegation integration ONCE per apply
-	// (design Decisions 4 & 6), then thread it into every repo's
-	// SettingsMaterializer below. Running the probe once — not per repo — keeps
-	// the subprocess off the per-repo path. Hook and deny are mutually exclusive;
-	// the materializer writes one based on Supported.
-	//
-	// Gated on the init-time opt-out (Issue 6, design Decision 5): when
-	// `niwa init --no-worktree-delegation` set InstanceState.NoWorktreeDelegation,
-	// skip the entire block — no probe, no hook, no deny, no disclosure.
-	// worktreeDelegation stays nil, so the SettingsMaterializer writes neither
-	// the hook nor the deny entries. The opt-out is reversible: re-running init
-	// without the flag clears the state field, and the next apply re-enters this
-	// block and installs the integration.
-	var worktreeDelegation *WorktreeDelegation
-	if !opts.noWorktreeDelegation {
-		worktreeSupported := SupportsWorktreeHooks(ctx)
-		niwaPath, niwaPathErr := os.Executable()
-		worktreeDelegation = &WorktreeDelegation{
-			Supported: worktreeSupported,
-			NiwaPath:  niwaPath,
-		}
-		// If we cannot determine niwa's own path, fall back to the deny branch.
-		// Since Decision 7 the hook command resolves `niwa` from PATH first, so a
-		// PATH-only command would still be writable here — but it would be a hook
-		// with no fallback arm, which fails loudly in exactly the environments the
-		// fallback exists for. Deny+steer is the graceful degradation the design
-		// already builds, so we prefer it over a hook that might not resolve.
-		// (os.Executable failing is extremely rare — a removed/renamed binary
-		// mid-run.)
-		if niwaPathErr != nil {
-			a.Reporter.DeferWarn("could not resolve niwa binary path for worktree hooks (%v); installing deny fallback", niwaPathErr)
-			worktreeDelegation.Supported = false
-		}
-
-		// Disclosure (design Decision 4): the deny fallback is a current-state
-		// condition, so its warning fires on EVERY apply; a one-time explainer fires
-		// only on first encounter. The decision is computed by the pure
-		// worktreeFallbackDisclosure helper.
-		warnFallback, explainFallback := worktreeFallbackDisclosure(
-			worktreeDelegation.Supported,
-			noticeDisclosed(opts.existingState, noticeWorktreeFallback),
-		)
-		if warnFallback {
-			a.Reporter.Warn("%s", worktreeFallbackWarning)
-		}
-		if explainFallback {
-			a.Reporter.Log("%s", worktreeFallbackExplainer)
-			newDisclosures = append(newDisclosures, noticeWorktreeFallback)
 		}
 	}
 
