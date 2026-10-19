@@ -2,6 +2,7 @@ package worktreeguard
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,6 +34,8 @@ func TestDecide_Bash(t *testing.T) {
 		"make build & git worktree add x",
 		"true || git worktree add x",
 		"cat <<EOF > notes.txt\ngit worktree add inside heredoc\nEOF\ngit worktree add real",
+		"git --work-tree=. worktree add x",
+		`echo "a; b" && git worktree add x`,
 	}
 	for _, cmd := range refused {
 		d := Decide(bashPayload(t, cmd), scope, os.Readlink)
@@ -58,6 +61,8 @@ func TestDecide_Bash(t *testing.T) {
 		`bash -c "git worktree add x"`,
 		"cat <<EOF\ngit worktree add only in the heredoc\nEOF",
 		`echo "unterminated`,
+		`echo "a; git worktree add x"`,
+		`echo 'a && git worktree add x'`,
 		"",
 		"git status",
 	}
@@ -154,6 +159,15 @@ func TestDecide_NoInstanceListsInstances(t *testing.T) {
 	in, _ := json.Marshal(map[string]string{"path": "/ws/alpha/public/niwa/.claude/worktrees/x"})
 	if d := Decide(Payload{ToolName: "EnterWorktree", ToolInput: in, Cwd: "/ws"}, scope, os.Readlink); d.Allow {
 		t.Error("path-form EnterWorktree at a workspace root with no instance should be refused")
+	}
+
+	var many []string
+	for i := 0; i < 25; i++ {
+		many = append(many, fmt.Sprintf("inst%02d", i))
+	}
+	d = Decide(bashPayload(t, "git worktree add x"), Scope{Instances: many}, os.Readlink)
+	if !strings.Contains(d.Reason, "inst19") || strings.Contains(d.Reason, "inst20") || !strings.Contains(d.Reason, "and 5 more") {
+		t.Errorf("refusal should list 20 instances and count the rest, got %q", d.Reason)
 	}
 }
 

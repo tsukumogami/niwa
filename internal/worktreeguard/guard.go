@@ -91,8 +91,10 @@ func Decide(p Payload, s Scope, resolve PathResolver) Decision {
 }
 
 // underWorktrees reports whether path, joined with cwd when relative,
-// cleaned and symlink-resolved, lies under worktreesDir. A path that doesn't
-// resolve is not under it: every allowed target exists.
+// cleaned and symlink-resolved, lies strictly under worktreesDir, which the
+// caller passes symlink-resolved. A path that doesn't resolve is not under
+// it: every allowed target exists. The directory itself is not a worktree,
+// and an empty worktreesDir (no instance resolved) has nothing under it.
 func underWorktrees(cwd, path, worktreesDir string, resolve PathResolver) bool {
 	if worktreesDir == "" {
 		return false
@@ -108,13 +110,22 @@ func underWorktrees(cwd, path, worktreesDir string, resolve PathResolver) bool {
 	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// maxListedInstances caps how many instance names a refusal lists.
+const maxListedInstances = 20
+
 // refusal builds the reason text: what went wrong, the form that works, and
-// the repos (or instances) available.
+// the repos (or instances) available. The example repo is the first in
+// s.Repos, which callers sort, so the text is stable across calls.
 func refusal(s Scope, why string) string {
 	if s.InstanceRoot == "" {
 		where := "this workspace has no instances"
 		if len(s.Instances) > 0 {
-			where = "cd into one of: " + strings.Join(s.Instances, ", ")
+			names, more := s.Instances, ""
+			if len(names) > maxListedInstances {
+				more = fmt.Sprintf(" (and %d more)", len(names)-maxListedInstances)
+				names = names[:maxListedInstances]
+			}
+			where = "cd into one of: " + strings.Join(names, ", ") + more
 		}
 		return fmt.Sprintf("niwa: %s. This session is at a workspace root; %s, then use EnterWorktree with name <repo>/<slug>.", why, where)
 	}
