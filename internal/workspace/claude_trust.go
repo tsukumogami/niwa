@@ -597,3 +597,33 @@ func (a *Applier) saveInstanceState(dir string, state *InstanceState) error {
 	}
 	return SaveState(dir, state)
 }
+
+// RootTrustWarning returns a warning when Claude Code won't run the hooks
+// niwa just wrote into dir's settings because neither dir nor any directory
+// above it is trusted, or "" when it will or the answer can't be told. Claude
+// Code applies its trust check before resolving any hook source, so in an
+// untrusted directory the worktree integration, guard and context hooks all
+// stay silent. home is the developer's home directory; an empty home skips
+// the check, so unit tests never read the developer's own config.
+func RootTrustWarning(home, dir string) string {
+	if home == "" {
+		return ""
+	}
+	trusted, known := claudetrust.IsTrusted(claudetrust.EnvFor(home), dir)
+	if !known || trusted {
+		return ""
+	}
+	return fmt.Sprintf("%s is untrusted in Claude Code, so it won't run niwa's worktree hooks there; trust the workspace root in Claude Code, or set [claude] trust_instances = true", dir)
+}
+
+// rootTrustWarnings checks the instance root after Create or Apply delivered
+// trust, so an apply that just granted it doesn't warn.
+func (a *Applier) rootTrustWarnings(instanceRoot string, wroteHooks bool) []string {
+	if !wroteHooks {
+		return nil
+	}
+	if w := RootTrustWarning(a.DeveloperHome, instanceRoot); w != "" {
+		return []string{w}
+	}
+	return nil
+}

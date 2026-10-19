@@ -403,6 +403,10 @@ type pipelineResult struct {
 	repoStates   map[string]RepoState
 	managedFiles []ManagedFile
 	warnings     []string
+	// rootWorktreeHooks reports that the instance root's settings got the
+	// worktree integration, so Create and Apply check, after delivering
+	// trust, whether Claude Code will run it there.
+	rootWorktreeHooks bool
 	// shadows carries the personal-overlay-vs-team key conflicts
 	// detected during this apply invocation. Empty when no overlay
 	// is active or no keys overlapped. Persisted into
@@ -650,6 +654,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	// not this instance's.
 	trust := a.deliverClaudeTrust(instanceRoot, result.trustInstances, result.claudeTrustRepos, nil)
 	result.warnings = append(result.warnings, trust.warnings...)
+	result.warnings = append(result.warnings, a.rootTrustWarnings(instanceRoot, result.rootWorktreeHooks)...)
 
 	state := &InstanceState{
 		SchemaVersion:    SchemaVersion,
@@ -850,6 +855,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	// undoes it.
 	trust := a.deliverClaudeTrust(instanceRoot, result.trustInstances, result.claudeTrustRepos, existingState)
 	result.warnings = append(result.warnings, trust.warnings...)
+	result.warnings = append(result.warnings, a.rootTrustWarnings(instanceRoot, result.rootWorktreeHooks)...)
 
 	// InstanceName comes from the on-disk instance directory, not from
 	// configName or cfg.Workspace.Name. For numbered ("my-name-2") and
@@ -2344,6 +2350,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		claudeTrustRepos:   claudeTrustRepos,
 		procedureErr:       procErr,
 		exemptPaths:        exemptPaths,
+		rootWorktreeHooks:  worktreeDelegation != nil,
 	}, nil
 }
 

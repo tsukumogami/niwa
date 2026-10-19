@@ -809,6 +809,12 @@ func runInit(cmd *cobra.Command, args []string) error {
 			WorktreeDelegation:   rootDelegation,
 		}); mErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not install workspace-root session config: %v\n", mErr)
+		} else if rootDelegation != nil {
+			if home, err := os.UserHomeDir(); err == nil {
+				if w := workspace.RootTrustWarning(home, workspaceRoot); w != "" {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", w)
+				}
+			}
 		}
 	}
 

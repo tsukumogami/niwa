@@ -256,6 +256,11 @@ func runApply(cmd *cobra.Command, args []string) error {
 		}); mErr != nil {
 			return fmt.Errorf("materializing workspace-root config: %w", mErr)
 		}
+		if rootDelegation != nil {
+			if w := workspace.RootTrustWarning(applier.DeveloperHome, scope.WorkspaceRoot); w != "" {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+			}
+		}
 	}
 
 	// --no-cascade at the workspace root caps the operation at the root scope:
