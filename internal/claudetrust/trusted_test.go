@@ -52,10 +52,10 @@ func TestIsTrusted(t *testing.T) {
 	}
 
 	path := writeConfig(t, home, `{not json`)
+	before, _ := os.ReadFile(path)
 	if _, known := IsTrusted(env, instance); known {
 		t.Error("an unparseable config must report unknown")
 	}
-	before, _ := os.ReadFile(path)
 	after, _ := os.ReadFile(path)
 	if string(before) != string(after) {
 		t.Error("IsTrusted must not modify the config file")

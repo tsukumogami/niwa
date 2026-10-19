@@ -810,6 +810,8 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}); mErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not install workspace-root session config: %v\n", mErr)
 		} else if rootDelegation != nil {
+			// init builds no Applier, so there's no DeveloperHome to read;
+			// the user's home is the one Claude Code itself reads.
 			if home, err := os.UserHomeDir(); err == nil {
 				if w := workspace.RootTrustWarning(home, workspaceRoot); w != "" {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", w)
