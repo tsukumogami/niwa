@@ -80,7 +80,7 @@ func ResolveHookInstance(anchor, target string) (string, error) {
 		return "", err
 	}
 
-	if instance, err := DiscoverInstance(canonAnchor); err == nil {
+	if instance, err := DiscoverHookInstance(canonAnchor); err == nil {
 		canonInstance, err := canonicalize(instance)
 		if err != nil {
 			return "", err
@@ -108,6 +108,22 @@ func ResolveHookInstance(anchor, target string) (string, error) {
 		}
 	}
 	return "", notInsideInstanceError(instances)
+}
+
+// DiscoverHookInstance finds the instance at or above dir, as
+// DiscoverInstance does, except that a workspace root's own init state is not
+// an instance: `niwa init` writes instance.json at every registered root, and
+// a session launched there must resolve through the root's instances instead.
+// A single-instance layout, where the root is itself the instance, still is.
+func DiscoverHookInstance(dir string) (string, error) {
+	instance, err := DiscoverInstance(dir)
+	if err != nil {
+		return "", err
+	}
+	if isWorkspaceRoot(instance) && !IsSingleInstanceLayout(instance) {
+		return "", fmt.Errorf("%s is a workspace root, not an instance", instance)
+	}
+	return instance, nil
 }
 
 // notInsideInstanceError names the instances a workspace-root session can

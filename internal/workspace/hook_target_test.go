@@ -24,6 +24,11 @@ func newHookFixture(t *testing.T) hookFixture {
 	if err := os.WriteFile(filepath.Join(root, StateDir, WorkspaceConfigFile), []byte("[workspace]\nname = \"ws\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// `niwa init` writes unnamed init state at the workspace root; the
+	// resolver must not mistake it for an instance.
+	if err := SaveState(root, &InstanceState{SchemaVersion: SchemaVersion}); err != nil {
+		t.Fatal(err)
+	}
 
 	alpha := filepath.Join(root, "alpha")
 	for _, repo := range []string{"niwa", "koto"} {
@@ -230,5 +235,23 @@ func TestResolveHookInstance_FromWorkspaceRootByWorktreePath(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("instance = %q, want %q", got, want)
+	}
+}
+
+// TestDiscoverHookInstance_SingleInstanceLayout checks a root that is itself
+// the instance still resolves as one.
+func TestDiscoverHookInstance_SingleInstanceLayout(t *testing.T) {
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, StateDir))
+	if err := os.WriteFile(filepath.Join(root, StateDir, WorkspaceConfigFile), []byte("[workspace]\nname = \"ws\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveState(root, &InstanceState{SchemaVersion: SchemaVersion, InstanceName: "ws"}); err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(root, "public", "app")
+	mustMkdir(t, filepath.Join(repo, ".git"))
+	if got, err := DiscoverHookInstance(repo); err != nil || got != root {
+		t.Fatalf("DiscoverHookInstance = %q, %v; want %q", got, err, root)
 	}
 }

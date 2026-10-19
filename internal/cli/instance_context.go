@@ -40,7 +40,7 @@ func writeInstanceContext(w io.Writer, dir string) error {
 	if dir == "" {
 		return nil
 	}
-	instanceRoot, err := workspace.DiscoverInstance(dir)
+	instanceRoot, err := workspace.DiscoverHookInstance(dir)
 	if err != nil {
 		return nil
 	}

@@ -27,7 +27,7 @@ func seedLifecycleSessions(t *testing.T, sessions []worktree.SessionLifecycleSta
 	if err := os.MkdirAll(filepath.Join(root, ".niwa"), 0o700); err != nil {
 		t.Fatalf("mkdir .niwa: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".niwa", "instance.json"), []byte("{}"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".niwa", "instance.json"), []byte(`{"instance_name":"testws"}`), 0o600); err != nil {
 		t.Fatalf("write instance.json: %v", err)
 	}
 	sessionsDir := filepath.Join(root, ".niwa", "sessions")
@@ -247,7 +247,7 @@ func TestSessionList_AttachedAndAvailableMutuallyExclusive(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, ".niwa"), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".niwa", "instance.json"), []byte("{}"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".niwa", "instance.json"), []byte(`{"instance_name":"testws"}`), 0o600); err != nil {
 		t.Fatalf("write instance.json: %v", err)
 	}
 	t.Setenv("NIWA_INSTANCE_ROOT", root)
@@ -303,7 +303,7 @@ func TestRunSessionCreate_NoArgsCwdOutsideWorkspaceErrors(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, ".niwa"), 0o700); err != nil {
 		t.Fatalf("mkdir .niwa: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".niwa", "instance.json"), []byte("{}"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".niwa", "instance.json"), []byte(`{"instance_name":"testws"}`), 0o600); err != nil {
 		t.Fatalf("write instance.json: %v", err)
 	}
 	t.Setenv("NIWA_INSTANCE_ROOT", root)

@@ -673,6 +673,9 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		TrustKeys:        result.trustKeys,
 		ClaudeTrust:      trust.root,
 		ClaudeTrustRepos: trust.repos,
+		// Carried from the workspace root's init state so apply, and the
+		// worktree hooks that read it at runtime, keep honoring the opt-out.
+		NoWorktreeDelegation: initNoWorktreeDelegation,
 		// Recomputed from this run's config alone, like Shadows.
 		ClaudePermissions:  result.claudePermissions,
 		ApprovedMCPServers: result.approvedMCPServers,
