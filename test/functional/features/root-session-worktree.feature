@@ -16,7 +16,7 @@ Feature: worktrees from sessions launched at a root
   the scenario sandbox, so the Claude config the trust check reads is a
   scenario file, never the developer's.
 
-  Design: docs/designs/current/DESIGN-enforced-agent-conformance.md
+  Design: docs/designs/DESIGN-enforced-agent-conformance.md
 
   Background:
     Given a clean niwa environment

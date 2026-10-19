@@ -204,8 +204,13 @@ This is on by default. There's nothing to set up per developer.
 
 ### How it works
 
-Every `niwa apply` writes per-repo `WorktreeCreate` and `WorktreeRemove` hooks
-into each repo's Claude Code settings. The hooks call an internal command,
+Every `niwa apply` writes `WorktreeCreate` and `WorktreeRemove` hooks into each
+repo's Claude Code settings (`.claude/settings.local.json`) and into the
+instance root's `.claude/settings.json`, and the workspace root's settings get
+them too. Claude Code reads hooks only from the settings of the directory a
+session was launched in, so each of those places needs its own copy; see
+[Worktrees from a session at a root](#worktrees-from-a-session-at-a-root) for
+how a root session names the repo it wants. The hooks call an internal command,
 `niwa worktree from-hook`, which is wired only for Claude to invoke — don't run
 it yourself. On create, it routes the agent's request through the same
 create flow `niwa worktree create` uses and hands the worktree path back to the
@@ -282,7 +287,9 @@ The hooks need a Claude Code version that supports per-repo worktree hooks. On
 each apply, niwa runs `claude --version` once to check. Above the known-good
 baseline, it installs the hooks. Below it, niwa can't honor the integration, so
 instead of letting the agent make a degraded bare worktree it denies the native
-worktree tool and steers the agent to `niwa worktree create`.
+worktree tool and steers the agent to `niwa worktree create`. The same probe
+result applies to every settings file one command writes, so the instance root,
+the workspace root and each repo all get the hooks or all get the deny.
 
 This fallback is disclosed, not silent. Because an old harness stays old across
 applies, niwa prints the fallback warning on **every** apply, with a one-time
@@ -302,10 +309,306 @@ at init:
 niwa init <name> --no-worktree-delegation
 ```
 
-This skips the whole integration — no probe, no hooks, no deny fallback. It's
-persisted in instance state, like `--skip-global` and `--no-overlay`, and
-carried forward on every apply. It's reversible: re-run `niwa init` without the
-flag, then `niwa apply`, and the integration installs again.
+This skips the whole integration — no probe, no hooks, no deny fallback, and at
+the instance root no guard and no worktree sentence in the session-start context
+(both described below). It's persisted in state, like `--skip-global` and
+`--no-overlay`: `niwa init` records it at the workspace root, and `niwa create`
+copies it into each instance it creates. From then on it belongs to the
+instance. Every apply reads it from the instance's own state, and the hooks at
+the shared workspace root check it at runtime, so a session launched there can't
+create a niwa worktree in an opted-out instance either. `niwa apply` never
+changes the setting, and no other command does; an instance keeps the choice it
+was created with.
+
+`--no-worktree-delegation` is per instance. The workspace root has a separate
+switch, [`worktree_delegation`](#turning-off-the-workspace-root-integration),
+that leaves every instance alone.
+
+## Worktrees from a session at a root
+
+A Claude Code session doesn't have to start inside a repo. `niwa dispatch`
+starts its workers at an instance root, the directory holding the
+`<group>/<repo>` clones, and an ephemeral session starts at the workspace root
+before it moves into the instance it was given. Neither directory is a repo, so
+niwa has to be told which repo a worktree is for. It also has to stop the two
+ways of building a worktree by hand that can't work from there.
+
+niwa writes three things into the root settings for this:
+
+| Entry | Instance root | Workspace root |
+|---|---|---|
+| `WorktreeCreate` / `WorktreeRemove` hooks (`niwa worktree from-hook`) | Yes | Yes |
+| `PreToolUse` guard (`niwa worktree guard`), matcher `EnterWorktree\|Bash` | Yes | Yes |
+| `SessionStart` context (`niwa instance context`) | Yes | No |
+
+Every create or apply of an instance writes its instance root. `niwa init`
+writes the workspace root (unless you pass `--no-ephemeral-sessions`), and
+`niwa apply` run from the workspace root rewrites it. Repo settings keep the
+`WorktreeCreate`/`WorktreeRemove` hooks they've always had and never get the
+guard or the context hook, so a session launched inside a repo or inside a niwa
+worktree behaves exactly as before.
+
+### Naming the repo
+
+From a root, name the worktree after the repo it's for when calling
+`EnterWorktree`:
+
+```text
+EnterWorktree(name: "niwa/fix-login")          # <repo>/<slug>
+EnterWorktree(name: "public/niwa/fix-login")   # <group>/<repo>/<slug>
+```
+
+The prefix picks the repo and the rest of the name becomes the slug, which niwa
+records as the worktree's purpose. You get an ordinary niwa worktree: a
+`session/<id>` branch, a directory under `<instance>/.niwa/worktrees/`, the
+inherited environment and CLAUDE content, and a row in `niwa worktree list`.
+The slug never reaches a branch name or a path, so it can contain more slashes
+(`niwa/fix/login` has the slug `fix/login`).
+
+`niwa worktree from-hook` picks the repo in this order and stops at the first
+rule that applies:
+
+1. A `<group>/<repo>/` prefix, then a `<repo>/` prefix, matched exactly and
+   case-sensitively against the repos cloned in the instance. `Niwa/fix-x`
+   doesn't match `niwa`; it's treated as a name with no prefix. A prefix is
+   only ever compared against that list; niwa never builds a path from it.
+2. A prefix naming a repo the instance lists but hasn't cloned is refused with
+   `repo "<name>" is configured in this instance but its clone is missing; run
+   niwa apply`, rather than falling through to the rules below.
+3. The repo whose clone contains the session's current directory. A session
+   that has `cd`'d into `public/koto` gets a `koto` worktree from an unprefixed
+   name. A directory inside the instance but outside every repo (the instance
+   root, a group directory, `.niwa/`) counts as no repo.
+4. The only repo, when the instance has exactly one.
+
+If none applies, the create fails and the tool call returns an error starting
+`no repo selected` that lists the instance's repos and gives an example using
+the alphabetically first one:
+
+```text
+niwa: error: no repo selected; name the worktree <repo>/<slug> or <group>/<repo>/<slug>, for example koto/<slug>. Repos in this instance: koto, niwa
+```
+
+A name with an empty slug, such as `niwa/`, gets the same refusal. When the
+prefix and the current directory point at different repos, the prefix wins,
+since it's what the agent asked for at the moment of the call. A name whose
+leading segments match no repo has no prefix at all, and its whole text is the
+slug.
+
+### Which instance a hook acts on
+
+The hook doesn't trust the payload's `cwd` to find the instance, because `cwd`
+follows whatever directory the agent `cd`'d into. It anchors on the directory
+the session was launched in instead: `CLAUDE_PROJECT_DIR`, which Claude Code
+sets for hooks, or, when that's unset, the hook process's own working directory,
+which Claude Code starts in the launch directory. Both are fixed by the harness.
+
+- **Launched at an instance root, in a repo, or in a niwa worktree.** The
+  instance is the nearest one at or above the launch directory. The payload's
+  `cwd` must lie inside it, or the call is refused as outside the instance the
+  session was launched in. That stops a session from planting a fake
+  `.niwa/instance.json` somewhere else and pointing the hook at it.
+- **Launched at the workspace root.** There's no instance above the launch
+  directory, so niwa looks for the instance directly under the workspace root
+  that contains `cwd`. An ephemeral session that has moved into its instance
+  resolves to that instance, and the naming rules above apply from there. A
+  session still sitting at the workspace root resolves to nothing, and the
+  create fails with the instances it could move into (up to 20 names, then a
+  count of the rest):
+
+  ```text
+  niwa: error: not inside a niwa instance; cd into one of: rs, rs-2
+  ```
+
+In a single-instance layout the workspace root is the instance, so it resolves
+the way an instance root does.
+
+Removal uses the same anchor, but finds the instance from the worktree's path
+rather than from `cwd`, so a `WorktreeRemove` sent from the workspace root still
+reaches a worktree inside an instance. Teardown is the usual one: a clean
+worktree is removed, one with uncommitted work is kept and logged (see
+[Teardown: clean vs. dirty](#teardown-clean-vs-dirty)).
+
+### The guard
+
+Two routes look reasonable from a root and don't work there. A worktree built
+with `git worktree add` isn't one niwa tracks, and entering it with
+`EnterWorktree(path: ...)` raises Claude Code's relocation prompt, which no
+permission rule can approve ahead of time outside bypass mode. The guard is a
+`PreToolUse` hook that refuses both at the call, before anything happens, and
+tells the agent the form that works:
+
+- **`git worktree add`.** A Bash command is refused when any simple command in
+  it runs `git`, optionally followed by global options (`-C <dir>`,
+  `-c <key=value>`, `--git-dir=...`, `--work-tree=...`, or any other option),
+  then `worktree add`. The command line is split on unquoted `;`, `&&`, `||`,
+  `|`, `&` and newlines. Leading `VAR=value` assignments and an `env` word are
+  skipped, heredoc bodies are skipped, and `git` matches by basename, so
+  `/usr/bin/git` counts.
+- **`EnterWorktree` with a `path`.** The path is joined with `cwd`, cleaned and
+  symlink-resolved, and the call is refused unless the result is a directory
+  under the instance's `.niwa/worktrees/`. Entering a niwa worktree that
+  already exists by path is allowed. A path that doesn't exist is refused,
+  since every allowed target exists.
+
+Everything else passes: `EnterWorktree` with a `name` or with neither field,
+the other `git worktree` subcommands (`list`, `move`, `remove`, `lock`,
+`unlock`, `prune`, `repair`), and text that only mentions the words, like
+`grep "git worktree add"`. A refusal is a tool error the agent reads, not a
+permission prompt:
+
+```text
+niwa: a worktree built with git worktree add isn't one niwa manages. Instead, use EnterWorktree with name koto/<slug> (or <group>/<repo>/<slug>); niwa creates and tracks the worktree. Repos in this instance: koto, niwa.
+```
+
+At the workspace root, with no instance resolved, the same two forms are
+refused with the instance names in place of repos (`This session is at a
+workspace root; cd into one of: ...`). In an opted-out instance the guard
+allows every call.
+
+The guard steers agents toward the form that works. It isn't a security
+boundary, and it doesn't try to be. It reads plain simple commands only, so it
+doesn't inspect:
+
+- strings passed to `bash -c`, `sh -c` or `eval`
+- command substitution, subshells, variables and shell aliases, including a
+  command that builds the word `worktree` at run time
+- commands run through a wrapper such as `exec`, `command`, `time`, `nice` or
+  `nohup`
+- a command line it can't tokenize, such as one with an unclosed quote
+
+Any of those goes through. For the `EnterWorktree` route, the `WorktreeCreate`
+hook is still what makes the worktree a niwa one.
+
+The guard runs on every Bash call in a root session, so it's built to stay out
+of the way. It only looks further at an `EnterWorktree` call or a Bash command
+containing the word `worktree`; everything else returns at once. Its decision
+starts no process and makes no network call. It has a 5-second timeout instead
+of Claude Code's 600-second default, and it fails open: input it can't read or
+parse, an internal error, a timeout, or a niwa too old to have the subcommand
+all let the call proceed, with any error on stderr. It blocks only by exiting 2,
+which Claude Code honors in every permission mode.
+
+### Session-start context
+
+A session at an instance root starts with three facts about where it is,
+delivered by the `niwa instance context` hook as `SessionStart` context:
+
+```text
+This directory is a niwa instance root.
+Repos in this instance:
+- public/koto
+- public/niwa
+Worktrees here are created with EnterWorktree using a name of the form <repo>/<slug>.
+```
+
+The hook is registered for the `startup`, `resume`, `clear` and `compact`
+sources, so the facts come back after a compaction instead of living in a file
+the session read once. The repo list stops at 50 entries and counts the rest. In
+an opted-out instance the last sentence is left out. The text states facts
+rather than giving orders, because imperative text injected into a session's
+context can look like a prompt injection to the model.
+
+This replaces two bullets the generated `workspace-context.md` used to carry,
+telling agents to move into a repo before running git commands and before
+making changes. They're gone.
+
+An ephemeral session gets the same block appended to the provisioning context
+it already receives, for the instance it was given. The workspace root's own
+settings carry no context hook: run there outside an instance, the command
+prints nothing.
+
+The hook command keeps niwa's output only when it starts with `{`, so a niwa too
+old to have `niwa instance context` can't leak its help text into the session's
+context. It has a 10-second timeout.
+
+### Turning off the workspace-root integration
+
+The workspace root is shared by every instance, so it has its own switch in
+`workspace.toml`:
+
+```toml
+[claude]
+worktree_delegation = false
+```
+
+With it off, the workspace root's settings carry no `WorktreeCreate` or
+`WorktreeRemove` hook, no deny fallback and no guard, and the next `niwa apply`
+from the workspace root removes them from a root that had them. It's on when the
+key is absent. The switch covers the workspace root only: every instance still
+gets the integration at its own root and in its repos. To opt one instance out
+entirely, use [`niwa init --no-worktree-delegation`](#opting-out).
+
+### When the root isn't trusted
+
+Claude Code checks workspace trust before it resolves any hook source. In a
+directory where neither the directory itself nor anything above it is trusted,
+it runs none of the root hooks: no worktree integration, no guard, no context.
+It also won't start a background session there, so a `niwa dispatch` worker
+that's running at all is under a trusted directory.
+
+niwa doesn't change your trust records to work around this. Instead, after it
+writes the integration into a root, it reads Claude Code's user config
+(read-only) and warns when the root has no trusted ancestor:
+
+```text
+warning: /home/me/ws/rs is untrusted in Claude Code, so it won't run niwa's worktree hooks there; trust the workspace root in Claude Code, or set [claude] trust_instances = true
+```
+
+The instance-root check runs on every create and apply of an instance; the
+workspace-root check runs on `niwa init` and on `niwa apply` from the workspace
+root. If the config can't be read or parsed, niwa says nothing rather than
+guess.
+
+There are two fixes. Trusting the workspace root in Claude Code covers it and
+every instance under it. Setting `trust_instances = true` has niwa mark each
+instance root and its repos trusted (see [Instance trust](instance-trust.md)),
+which covers sessions launched at an instance root but not the workspace root
+itself.
+
+### Native checkouts from earlier sessions
+
+Before niwa wrote hooks at the roots, a root session's settings had no
+`WorktreeCreate` hook. A session that `cd`'d into a repo and called
+`EnterWorktree(name: ...)` therefore took Claude Code's built-in path, which
+creates a plain git worktree at `<repo>/.claude/worktrees/<name>`. That's
+where the checkouts you may find in older instances came from. The same thing
+still happens wherever no niwa `WorktreeCreate` hook is installed: an opted-out
+instance, or a workspace root with `worktree_delegation = false`.
+
+niwa doesn't track these checkouts. They don't appear in `niwa worktree list`,
+`niwa apply` doesn't refresh their environment, and `niwa worktree destroy`
+can't name them. After upgrading, the same request from a root session gets a
+niwa worktree instead, but the old checkouts stay until you remove them
+yourself or the whole instance goes away.
+
+From the repo's main checkout, list them:
+
+```bash
+git worktree list
+```
+
+Before removing one, check it for work you'd lose. `git worktree remove`
+refuses a worktree with uncommitted changes, but it won't warn you about
+commits that were never pushed:
+
+```bash
+git -C .claude/worktrees/<name> status --short
+git -C .claude/worktrees/<name> log --oneline @{upstream}..   # unpushed commits, if the branch tracks one
+git log --oneline <branch> --not --remotes                    # commits on the branch no remote has
+```
+
+Then remove the worktree and, once you're sure its commits are merged or
+pushed, its branch (the branch name is the one `git worktree list` shows in
+brackets):
+
+```bash
+git worktree remove .claude/worktrees/<name>
+git branch -d <branch>     # refuses an unmerged branch; -D deletes regardless
+```
+
+If the directory was already deleted by hand, `git worktree prune` clears the
+stale entry.
 
 ## Customizing the worktree content layer
 
