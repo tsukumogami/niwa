@@ -207,11 +207,111 @@ func TestCreate_InstanceRootGetsWorktreeIntegration(t *testing.T) {
 		}
 	})
 	t.Run("applier probes when none supplied", func(t *testing.T) {
+		// The provisioning path (newProvisionApplier) and create/reset build
+		// Appliers with no Harness; the Applier must probe itself.
+		probes := 0
+		restore := probeHarness
+		probeHarness = func(context.Context) HarnessSupport {
+			probes++
+			return HarnessSupport{WorktreeHooks: true}
+		}
+		t.Cleanup(func() { probeHarness = restore })
+
 		rootText, repoText := createWithHarness(t, nil, false)
 		for name, text := range map[string]string{"instance root": rootText, "repo": repoText} {
-			if !strings.Contains(text, "WorktreeCreate") && !strings.Contains(text, `"EnterWorktree"`) {
-				t.Errorf("%s settings should carry the hook or the deny:\n%s", name, text)
+			if !strings.Contains(text, "WorktreeCreate") {
+				t.Errorf("%s settings should carry the WorktreeCreate hook:\n%s", name, text)
 			}
 		}
+		if probes != 1 {
+			t.Errorf("Applier probed %d times, want exactly 1", probes)
+		}
 	})
+}
+
+// TestApply_WorktreeIntegrationIsIdempotent checks that a second apply leaves
+// the instance root's and the repo's settings byte-identical.
+func TestApply_WorktreeIntegrationIsIdempotent(t *testing.T) {
+	tmpDir := t.TempDir()
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configTOML := `
+[workspace]
+name = "test-ws"
+
+[[sources]]
+org = "testorg"
+
+[groups.public]
+visibility = "public"
+`
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte(configTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	cfg := result.Config
+	mockClient := &mockGitHubClient{
+		repos: map[string][]github.Repo{
+			"testorg": {{Name: "app", Visibility: "public", SSHURL: "git@github.com:testorg/app.git"}},
+		},
+	}
+	applier := NewApplier(mockClient)
+	applier.Cloner = &Cloner{}
+	applier.NoPull = true
+	applier.Harness = &HarnessSupport{WorktreeHooks: true}
+
+	instanceRoot := filepath.Join(tmpDir, "test-ws")
+	repoDir := filepath.Join(instanceRoot, "public", "app")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("*.local*\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applier.Create(context.Background(), cfg, niwaDir, tmpDir, cfg.Workspace.Name); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	rootPath := filepath.Join(instanceRoot, ".claude", "settings.json")
+	repoPath := filepath.Join(repoDir, ".claude", "settings.local.json")
+	firstRoot, firstRepo := readSettingsText(t, rootPath), readSettingsText(t, repoPath)
+
+	if err := applier.Apply(context.Background(), cfg, niwaDir, instanceRoot); err != nil {
+		t.Fatalf("apply failed: %v", err)
+	}
+	if got := readSettingsText(t, rootPath); got != firstRoot {
+		t.Errorf("instance root settings changed on a second apply:\nbefore:\n%s\nafter:\n%s", firstRoot, got)
+	}
+	if got := readSettingsText(t, repoPath); got != firstRepo {
+		t.Errorf("repo settings changed on a second apply:\nbefore:\n%s\nafter:\n%s", firstRepo, got)
+	}
+}
+
+// TestMaterializeWorkspaceRoot_SwitchingOffRemovesIntegration checks that a
+// workspace root written with the integration loses it when the next write
+// carries none, as an apply does after worktree_delegation is turned off.
+func TestMaterializeWorkspaceRoot_SwitchingOffRemovesIntegration(t *testing.T) {
+	cfg := &config.WorkspaceConfig{Workspace: config.WorkspaceMeta{Name: "ws"}}
+	root := t.TempDir()
+	settingsPath := filepath.Join(root, rootClaudeDir, rootSettingsFile)
+
+	if _, err := MaterializeWorkspaceRoot(cfg, root, RootMaterializeOptions{
+		NiwaPath:           "/abs/niwa",
+		WorktreeDelegation: &WorktreeDelegation{Supported: true, NiwaPath: "/abs/niwa"},
+	}); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if !strings.Contains(readSettingsText(t, settingsPath), "WorktreeCreate") {
+		t.Fatal("first write should carry the hook")
+	}
+	if _, err := MaterializeWorkspaceRoot(cfg, root, RootMaterializeOptions{NiwaPath: "/abs/niwa"}); err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	if text := readSettingsText(t, settingsPath); strings.Contains(text, "WorktreeCreate") {
+		t.Errorf("integration should be gone after switching off:\n%s", text)
+	}
 }

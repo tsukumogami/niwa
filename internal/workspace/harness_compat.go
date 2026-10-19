@@ -116,6 +116,12 @@ type HarnessSupport struct {
 
 // ProbeHarness runs the harness probe once.
 func ProbeHarness(ctx context.Context) HarnessSupport {
+	return probeHarness(ctx)
+}
+
+// probeHarness is the probe ProbeHarness runs. Tests replace it to stand in
+// for a harness that does or doesn't support worktree hooks.
+var probeHarness = func(ctx context.Context) HarnessSupport {
 	return HarnessSupport{WorktreeHooks: SupportsWorktreeHooks(ctx)}
 }
 
