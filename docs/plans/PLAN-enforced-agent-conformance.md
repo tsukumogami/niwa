@@ -215,7 +215,7 @@ and never in an opted-out instance. Covers R8, R9, R10, R15.
 
 **Complexity**: testable
 
-**Goal**: Add `BuildRootContext(instance, optedOut)` in
+**Goal**: Add `BuildRootContext(instanceRoot)` in
 `internal/workspace/session_context.go`, built with `encoding/json`,
 emitting the R11 sentences and the `<group>/<repo>` list (capped at
 50). Add the hidden `niwa instance context` command

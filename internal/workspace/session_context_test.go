@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/github"
 )
 
 // imperativeStart matches a line that starts with one of the imperative verbs
@@ -178,8 +180,102 @@ func TestGuardedNiwaContextCommand(t *testing.T) {
 			if string(out) != tc.want {
 				t.Errorf("stdout = %q, want %q", out, tc.want)
 			}
+
+			// The same with no niwa on PATH: the quoted absolute path runs.
+			cmd = exec.Command("/bin/sh", "-c", guardedNiwaContextCommand(stub))
+			cmd.Env = []string{"PATH=" + t.TempDir()}
+			out, err = cmd.Output()
+			if err != nil {
+				t.Fatalf("command failed with no niwa on PATH: %v", err)
+			}
+			if string(out) != tc.want {
+				t.Errorf("no niwa on PATH: stdout = %q, want %q", out, tc.want)
+			}
 		})
 	}
+}
+
+// TestGeneratedContextFilesGiveNoWorktreeInstructions scans every context
+// file niwa generates at the instance root and the workspace root, plus the
+// session-start context, and fails on any line that mentions worktrees and
+// begins with an imperative verb. Worktree guidance is the guard's and the
+// session context's job, stated as fact, not instructions in a generated file.
+func TestGeneratedContextFilesGiveNoWorktreeInstructions(t *testing.T) {
+	worktreeLine := regexp.MustCompile(`(?i)worktree`)
+	check := func(name, text string) {
+		t.Helper()
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimLeft(line, " \t#>*-")
+			trimmed = strings.TrimSpace(trimmed)
+			if worktreeLine.MatchString(line) && imperativeStart.MatchString(trimmed) {
+				t.Errorf("%s gives a worktree instruction: %q", name, line)
+			}
+		}
+	}
+
+	instanceFiles := generatedInstanceContextFiles(t)
+	for name, text := range instanceFiles {
+		check(name, text)
+	}
+
+	cfg := &config.WorkspaceConfig{Workspace: config.WorkspaceMeta{Name: "ws"}}
+	_, wsRoot := materializeRoot(t, cfg, RootMaterializeOptions{
+		WorktreeDelegation: &WorktreeDelegation{Supported: true, NiwaPath: "/abs/niwa"},
+	})
+	for _, name := range []string{"CLAUDE.md", "AGENTS.md"} {
+		data, err := os.ReadFile(filepath.Join(wsRoot, name))
+		if err != nil {
+			continue
+		}
+		check("workspace root "+name, string(data))
+	}
+
+	f := newHookFixture(t)
+	ctx, err := BuildRootContext(f.alpha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("session-start context", ctx)
+}
+
+// generatedInstanceContextFiles runs Create for a one-repo workspace and
+// returns the context files niwa wrote at the instance root.
+func generatedInstanceContextFiles(t *testing.T) map[string]string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	niwaDir := filepath.Join(tmpDir, ".niwa")
+	if err := os.MkdirAll(niwaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(niwaDir, "workspace.toml"), []byte("[workspace]\nname = \"test-ws\"\n\n[[sources]]\norg = \"testorg\"\n\n[groups.public]\nvisibility = \"public\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := config.Load(filepath.Join(niwaDir, "workspace.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	applier := NewApplier(&mockGitHubClient{repos: map[string][]github.Repo{
+		"testorg": {{Name: "app", Visibility: "public", SSHURL: "git@github.com:testorg/app.git"}},
+	}})
+	applier.Cloner = &Cloner{}
+	applier.Harness = &HarnessSupport{WorktreeHooks: true}
+	instanceRoot := filepath.Join(tmpDir, "test-ws")
+	if err := os.MkdirAll(filepath.Join(instanceRoot, "public", "app", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applier.Create(context.Background(), result.Config, niwaDir, tmpDir, "test-ws"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	files := map[string]string{}
+	for _, name := range []string{"CLAUDE.md", "AGENTS.md", "workspace-context.md"} {
+		if data, err := os.ReadFile(filepath.Join(instanceRoot, name)); err == nil {
+			files["instance "+name] = string(data)
+		}
+	}
+	if len(files) == 0 {
+		t.Fatal("Create wrote no context files to read")
+	}
+	return files
 }
 
 // TestWorkspaceContextHasNoMoveIntoRepoBullets pins the removal of the two

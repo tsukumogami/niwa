@@ -287,7 +287,7 @@ won't run any of this.
 | `from-hook` | `internal/cli/session_from_hook_cmd.go` | Use the resolver for create and remove; purpose from slug; opt-out check. |
 | Guard decision | `internal/worktreeguard/` (new) | Tokenizer and `Decide`; path check does filesystem lookups only. |
 | Guard command | `internal/cli/worktree_guard.go` (new) | Hidden `niwa worktree guard`. |
-| Context builder | `internal/workspace/session_context.go` (new) | `BuildRootContext(instance, optedOut)`. |
+| Context builder | `internal/workspace/session_context.go` (new) | `BuildRootContext(instanceRoot)`, reading the opt-out from instance state. |
 | Context command | `internal/cli/instance_context.go` (new) | Hidden `niwa instance context`. |
 | Ephemeral injection | `internal/cli/instance_from_hook.go` | Append `BuildRootContext` output. |
 | Trust read | `internal/claudetrust/` | Read-only `IsTrusted` with ancestor walk; apply warns. |
