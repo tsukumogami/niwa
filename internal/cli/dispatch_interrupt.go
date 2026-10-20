@@ -48,6 +48,11 @@ func (e *dispatchInterruptedError) Error() string {
 func (e *dispatchInterruptedError) exit() {
 	signal.Reset(e.sig)
 	_ = syscall.Kill(os.Getpid(), e.sig)
+	// The kill can return before the process ends: Go's runtime takes the
+	// signal on a thread of its own and only then applies the default
+	// action. Exiting at once would beat it (measured on Linux), so wait for
+	// it, and fall back to the status a shell would have reported.
+	time.Sleep(time.Second)
 	os.Exit(128 + int(e.sig))
 }
 
