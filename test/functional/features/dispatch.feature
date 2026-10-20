@@ -435,6 +435,80 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     And the dispatch instance still exists
     And a dispatch-origin mapping exists for session "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 
+  # --- destroy removes the Claude session that owns the instance ---
+  # The dispatch mapping names the session that owns the instance. Once its
+  # process has exited, destroy removes it with a bare `claude rm <id>`, so it
+  # leaves the agents view with the instance, and deletes the mapping. A
+  # session still running is never removed, and --keep-session keeps a
+  # finished one.
+
+  @critical
+  Scenario: niwa destroy removes the finished Claude session that owns the instance
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+    When I run "niwa dispatch finish-me --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When the dispatch session "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" has exited
+    And I destroy the dispatch instance from the workspace root with ""
+    Then the exit code is 0
+    And no dispatch instance remains
+    And the fake claude removed session "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+    And no dispatch-origin mapping remains
+    And the error output contains "removed Claude session eeeeeeee; its transcript is kept: claude --resume eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+
+  @critical
+  Scenario: niwa destroy keeps the owning Claude session while it is still running
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "ffffffff-ffff-4fff-8fff-ffffffffffff"
+    When I run "niwa dispatch still-going --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When I destroy the dispatch instance from the workspace root with ""
+    Then the exit code is 0
+    And no dispatch instance remains
+    And the fake claude removed no session
+    And the dispatch session "ffffffff-ffff-4fff-8fff-ffffffffffff" is still listed
+    And the error output contains "kept Claude session ffffffff: it is still running; once it stops, remove it with claude rm ffffffff"
+
+  Scenario: niwa destroy --keep-session keeps a finished owning Claude session
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "abababab-abab-4bab-8bab-abababababab"
+    When I run "niwa dispatch keep-it --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When the dispatch session "abababab-abab-4bab-8bab-abababababab" has exited
+    And I destroy the dispatch instance from the workspace root with "--keep-session"
+    Then the exit code is 0
+    And no dispatch instance remains
+    And the fake claude removed no session
+    And the dispatch session "abababab-abab-4bab-8bab-abababababab" is still listed
+    And a dispatch-origin mapping exists for session "abababab-abab-4bab-8bab-abababababab"
+
   # --- Reaper spares a live worker whose mapping was lost (backstop liveness) ---
   # Regression guard for the data-loss bug. An UNMAPPED, past-TTL dispatch
   # instance that a live worker is still rooted in must NOT be reclaimed by the
