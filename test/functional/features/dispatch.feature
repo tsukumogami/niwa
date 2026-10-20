@@ -485,7 +485,7 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     And no dispatch instance remains
     And the fake claude removed no session
     And the dispatch session "ffffffff-ffff-4fff-8fff-ffffffffffff" is still listed
-    And the error output contains "kept Claude session ffffffff: it is still running; once it stops, remove it with claude rm ffffffff"
+    And the error output contains "kept Claude session ffffffff: it is still running; once it stops (claude stop ffffffff), remove it with claude rm ffffffff"
 
   Scenario: niwa destroy --keep-session keeps a finished owning Claude session
     Given a clean niwa environment

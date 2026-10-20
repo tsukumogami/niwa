@@ -88,7 +88,7 @@ func TestRemoveOwningSessions(t *testing.T) {
 			fake:        fakeClaudeSessions{rows: []claudeSessionRow{{ID: "11111111", SessionID: ownerSID, PID: 4242, Status: "idle"}}},
 			wantList:    true,
 			wantMapping: true,
-			wantOut:     []string{"kept Claude session 11111111: it is still running; once it stops, remove it with claude rm 11111111"},
+			wantOut:     []string{"kept Claude session 11111111: it is still running; once it stops (claude stop 11111111), remove it with claude rm 11111111"},
 		},
 		{
 			name:        "session with only a status is kept",
@@ -257,6 +257,60 @@ func TestRunDestroy_WorkspaceRemovesEveryOwningSession(t *testing.T) {
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Errorf("workspace should be gone: %v", err)
 	}
+}
+
+// TestRunDestroy_FailedRemovalStillDestroys pins the fail-safe contract at
+// the command level: a claude rm or listing that fails is reported, and the
+// instance is removed anyway.
+func TestRunDestroy_FailedRemovalStillDestroys(t *testing.T) {
+	for name, fake := range map[string]fakeClaudeSessions{
+		"rm fails":   {rows: []claudeSessionRow{{ID: "11111111", SessionID: ownerSID}}, rmErr: errors.New("exit status 1")},
+		"list fails": {listErr: errors.New("claude binary not found in PATH")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := destroyTestSetup(t, []string{"alpha", "beta"})
+			instance := filepath.Join(root, "alpha")
+			writeTestMapping(t, root, ownerSID, instance, "")
+			installFakeClaudeSessions(t, &fake)
+			chdirTo(t, root)
+			stderr := quietDestroyCmd()
+			setDestroyFlags(t, true, false, "")
+
+			if err := runDestroy(destroyCmd, []string{"alpha"}); err != nil {
+				t.Fatalf("destroy should succeed despite the session failure: %v", err)
+			}
+			if _, err := os.Stat(instance); !os.IsNotExist(err) {
+				t.Errorf("instance should be gone: %v", err)
+			}
+			if !strings.Contains(stderr.String(), "warning: could not") {
+				t.Errorf("stderr should carry the warning; got:\n%s", stderr.String())
+			}
+			if !mappingExists(t, root, ownerSID) {
+				t.Errorf("a session that wasn't removed should keep its mapping")
+			}
+		})
+	}
+}
+
+// TestRunDestroy_RefusedDestroyNeverReachesClaude pins the ordering: a
+// destroy that is refused before anything is removed must not have removed
+// the session either.
+func TestRunDestroy_RefusedDestroyNeverReachesClaude(t *testing.T) {
+	root := destroyTestSetup(t, []string{"alpha"})
+	writeTestMapping(t, root, ownerSID, filepath.Join(root, "alpha"), "")
+	fake := fakeClaudeSessions{rows: []claudeSessionRow{{ID: "11111111", SessionID: ownerSID}}}
+	installFakeClaudeSessions(t, &fake)
+	chdirTo(t, root)
+	quietDestroyCmd()
+	setDestroyFlags(t, false, true, "not-the-workspace")
+
+	if err := runDestroy(destroyCmd, nil); err == nil {
+		t.Fatal("a mismatched --confirm should refuse")
+	}
+	if fake.listCalls != 0 || len(fake.removed) != 0 {
+		t.Errorf("a refused destroy reached claude: list=%d rm=%v", fake.listCalls, fake.removed)
+	}
+	assertInstancesExist(t, root, "alpha")
 }
 
 // TestRunDestroy_RemovesOwningSession drives `niwa destroy <name>` from the

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -88,8 +87,16 @@ func realRemoveClaudeSession(ctx context.Context, id string) (string, error) {
 // listed in the agents view against a directory that no longer exists.
 //
 // An instance's owners are the sessions the workspace's session store maps to
-// it (written by the SessionStart hook and by dispatch). A session started by
-// hand inside an instance has no mapping and is never touched.
+// it (written by the SessionStart hook and by dispatch). Every mapping that
+// names the instance counts, not only the newest: each dispatch into an
+// instance writes one, and an older session is just as stale a row once the
+// directory is gone. A session started by hand inside an instance has no
+// mapping and is never touched.
+//
+// This lives here rather than in workspace.DestroyInstance because it needs
+// the workspace root, for the session store, and because the reaper calls
+// DestroyInstance too: the reaper only reclaims an instance once its session
+// is already gone, so it has nothing for this step to do.
 //
 // For each owner:
 //   - gone from `claude agents` already: its mapping is deleted;
@@ -129,12 +136,14 @@ func removeOwningSessions(reporter *workspace.Reporter, workspaceRoot string, in
 			deleteMappingReporting(reporter, workspaceRoot, m.SessionID)
 			continue
 		}
+		// The id comes from another program's output and becomes an argv
+		// element, so a value that could read as a flag is refused.
 		if !watch.IsSafeHandle(row.ID) {
 			reporter.Warn("could not remove Claude session %s: claude reported an unusable id %q", m.SessionID, row.ID)
 			continue
 		}
 		if row.running() {
-			reporter.Log("kept Claude session %s: it is still running; once it stops, remove it with claude rm %s", row.ID, row.ID)
+			reporter.Log("kept Claude session %s: it is still running; once it stops (claude stop %s), remove it with claude rm %s", row.ID, row.ID, row.ID)
 			continue
 		}
 		out, err := removeClaudeSessionFunc(context.Background(), row.ID)
@@ -182,7 +191,7 @@ func deleteMappingReporting(reporter *workspace.Reporter, workspaceRoot, session
 // firstLine returns the first non-empty line of a command's output, falling
 // back to the error when the command printed nothing.
 func firstLine(out string, err error) string {
-	for _, l := range strings.Split(string(bytes.TrimSpace([]byte(out))), "\n") {
+	for _, l := range strings.Split(out, "\n") {
 		if l = strings.TrimSpace(l); l != "" {
 			return l
 		}

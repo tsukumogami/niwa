@@ -56,7 +56,8 @@ niwa reap  (on demand, or at the next niwa create)
            sees the job entry gone, niwa destroy --force, delete mapping
 ```
 
-The reaper is the single teardown path. It runs on demand and opportunistically at
+The reaper is the single automatic teardown path; `niwa destroy` is the manual one
+(see [Destroying an instance by hand](#destroying-an-instance-by-hand)). It runs on demand and opportunistically at
 the next `niwa create`. Until you delete the session, its instance survives — a
 completed-but-resumable session can be re-opened into the same clone.
 
@@ -185,7 +186,8 @@ the session the mapping store names for the instance. A session you started by
 hand inside an instance has no mapping, and destroy leaves it alone.
 
 - **Transcript.** destroy removes the session with `claude rm <id>`, which deletes
-  the Agent View entry and the session's job entry but not its transcript. The
+  the Agent View entry, the session's job entry and any worktree Claude Code
+  created for it, but not its transcript. The
   conversation stays under `~/.claude/projects/`, and `claude --resume
   <session-id>` still opens it until Claude Code's own transcript retention
   removes it. destroy prints the command:
@@ -196,11 +198,13 @@ hand inside an instance has no mapping, and destroy leaves it alone.
 
 - **A running session is never removed.** destroy reads `claude agents --json
   --all`, and a session whose process is still alive (the row carries a `pid` or
-  `status`) is left in place, finished or not. destroy never stops a session for
-  you. That's also what happens when a session destroys its own instance:
+  `status`) is left in place, finished or not. A worker that has finished its task
+  often keeps an idle process alive for a while, so this is common right after a
+  dispatch completes. destroy never stops a session for you. That's also what
+  happens when a session destroys its own instance:
 
   ```
-  kept Claude session 7a920b0c: it is still running; once it stops, remove it with claude rm 7a920b0c
+  kept Claude session 7a920b0c: it is still running; once it stops (claude stop 7a920b0c), remove it with claude rm 7a920b0c
   ```
 
 - **Unpushed work.** destroy's own unpushed-work check runs first and is
