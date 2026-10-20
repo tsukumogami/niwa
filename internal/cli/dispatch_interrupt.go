@@ -8,12 +8,24 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // dispatchInterruptSignals are the signals that stop a dispatch while it is
 // still preparing its instance: what a terminal's Ctrl-C sends, and what a
 // caller's deadline sends.
 var dispatchInterruptSignals = []os.Signal{syscall.SIGINT, syscall.SIGTERM}
+
+// dispatchInterruptGrace is how long a signalled dispatch has to clean up
+// before niwa ends by the signal regardless. The git commands it stops take at
+// most gitWaitDelay (internal/workspace) once killed, and the rollback is local
+// work, so this is room for those with a margin, not for a stage that ignores
+// the signal. A variable so tests can shorten it.
+var dispatchInterruptGrace = 10 * time.Second
+
+// dispatchInterruptExit is what the grace period ends with. A variable so a
+// test can watch it fire without the test binary being killed.
+var dispatchInterruptExit = (*dispatchInterruptedError).exit
 
 // dispatchInterruptedError is the cause of a dispatch context cancelled by a
 // signal, and the error such a dispatch returns. Execute recognises it and ends
@@ -49,17 +61,30 @@ func (e *dispatchInterruptedError) exit() {
 // finish or remove.
 //
 // The first signal also puts the default action back, so a second one ends
-// niwa at once, as one did before this handler existed. release does the same,
-// and a signal that arrives as it runs still cancels the context, so after
-// release ctx.Err() says whether one came. Calling it more than once is safe.
+// niwa at once, as one did before this handler existed. And it starts a grace
+// period: not every stage of a dispatch watches the context (a setup script
+// runs to its end), and a caller that sends one TERM and waits must not wait on
+// such a stage, so if the dispatch hasn't released the handler within
+// dispatchInterruptGrace of the signal, niwa ends by the signal there and then,
+// cleaned up or not, as it did before.
+//
+// release stops listening and stops the grace period. A signal that arrives as
+// it runs still cancels the context, so after release ctx.Err() says whether
+// one came. Calling it more than once is safe.
 func interruptOnSignal(parent context.Context) (context.Context, func()) {
 	ctx, cancel := context.WithCancelCause(parent)
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, dispatchInterruptSignals...)
 
+	var mu sync.Mutex
+	var grace *time.Timer
 	interrupt := func(sig os.Signal) {
 		signal.Stop(ch)
-		cancel(&dispatchInterruptedError{sig: sig.(syscall.Signal)})
+		die := &dispatchInterruptedError{sig: sig.(syscall.Signal)}
+		cancel(die)
+		mu.Lock()
+		defer mu.Unlock()
+		grace = time.AfterFunc(dispatchInterruptGrace, func() { dispatchInterruptExit(die) })
 	}
 	done := make(chan struct{})
 	exited := make(chan struct{})
@@ -84,6 +109,11 @@ func interruptOnSignal(parent context.Context) (context.Context, func()) {
 			case sig := <-ch:
 				interrupt(sig)
 			default:
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if grace != nil {
+				grace.Stop()
 			}
 		})
 	}

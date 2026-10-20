@@ -65,6 +65,53 @@ func TestInterruptOnSignal_ReleaseWithoutASignalLeavesTheContextLive(t *testing.
 	}
 }
 
+// stubInterruptExit replaces the grace period's exit with one that records the
+// error it was given, and sets the grace period to grace.
+func stubInterruptExit(t *testing.T, grace time.Duration) <-chan *dispatchInterruptedError {
+	t.Helper()
+	prevGrace, prevExit := dispatchInterruptGrace, dispatchInterruptExit
+	fired := make(chan *dispatchInterruptedError, 1)
+	dispatchInterruptGrace = grace
+	dispatchInterruptExit = func(e *dispatchInterruptedError) { fired <- e }
+	t.Cleanup(func() { dispatchInterruptGrace, dispatchInterruptExit = prevGrace, prevExit })
+	return fired
+}
+
+// A dispatch stuck in a stage that ignores its context still ends: once the
+// grace period passes after the signal, niwa ends by that signal.
+func TestInterruptOnSignal_GracePeriodEndsAStuckDispatch(t *testing.T) {
+	fired := stubInterruptExit(t, 50*time.Millisecond)
+	ctx, release := interruptOnSignal(context.Background())
+	defer release()
+
+	signalSelf(t, syscall.SIGTERM)
+	waitDone(t, ctx)
+	select {
+	case e := <-fired:
+		if e.sig != syscall.SIGTERM {
+			t.Errorf("grace exit with %v, want SIGTERM", e.sig)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the grace period did not end the dispatch")
+	}
+}
+
+// A dispatch that finishes its failure path within the grace period releases
+// the handler, and the grace period never fires.
+func TestInterruptOnSignal_ReleaseStopsTheGracePeriod(t *testing.T) {
+	fired := stubInterruptExit(t, 200*time.Millisecond)
+	ctx, release := interruptOnSignal(context.Background())
+
+	signalSelf(t, syscall.SIGTERM)
+	waitDone(t, ctx)
+	release()
+	select {
+	case <-fired:
+		t.Fatal("the grace period fired after the handler was released")
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
 // A signal while the instance is being provisioned stops the dispatch there:
 // provisioning sees its context cancelled, nothing is launched, and since the
 // provisioner returned no instance there is nothing for the rollback to remove

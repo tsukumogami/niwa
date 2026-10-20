@@ -33,8 +33,13 @@ func WithDisposableGit(ctx context.Context) context.Context {
 	return context.WithValue(ctx, disposableGitKey{}, true)
 }
 
+// gitKillDelay is how long a cancelled disposable git command's process group
+// has to end on SIGTERM before it is sent SIGKILL.
+const gitKillDelay = time.Second
+
 // gitWaitDelay bounds how long a disposable git command's Wait waits for its
-// output pipes once its process group has been killed.
+// output pipes once it has been cancelled. It is longer than gitKillDelay, so
+// Wait doesn't give up on the pipes before the group has been killed.
 const gitWaitDelay = 3 * time.Second
 
 // gitCommand returns exec.CommandContext(ctx, "git", args...), set up as
@@ -48,11 +53,17 @@ func gitCommand(ctx context.Context, args ...string) *exec.Cmd {
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Cancel = func() error {
-		// Setsid makes git's pid its process group id.
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		// Setsid makes git's pid its process group id. TERM first: git removes
+		// its lock files on TERM, and not every repository it works on is
+		// thrown away afterwards (the managed marketplace copies outlive the
+		// instance). KILL follows for anything in the group that ignored it;
+		// by then the group is normally gone, and the KILL finds no one.
+		pgid := cmd.Process.Pid
+		err := syscall.Kill(-pgid, syscall.SIGTERM)
 		if errors.Is(err, syscall.ESRCH) {
 			return os.ErrProcessDone
 		}
+		time.AfterFunc(gitKillDelay, func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) })
 		return err
 	}
 	cmd.WaitDelay = gitWaitDelay

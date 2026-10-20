@@ -542,7 +542,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// group, which takes the https remote helper git leaves running when only
 	// git is killed. The handler is released before the launch (9b), so it
 	// never reaches a worker: the launch is not given prepCtx, and from then on
-	// a signal has its default action again.
+	// a signal has its default action again. Deferred before the rollback at
+	// (7), so on a signalled return the rollback runs first, inside the
+	// handler's grace period.
 	prepCtx, releaseInterrupt := interruptOnSignal(cmd.Context())
 	defer releaseInterrupt()
 
@@ -901,8 +903,12 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// The last point a signal stops the dispatch rather than niwa. Nothing
 	// between provisioning and here watches prepCtx, so a signal that came
 	// meanwhile is read now, and the rollback armed at (7) removes the
-	// instance before any worker exists in it.
-	releaseInterrupt()
+	// instance before any worker exists in it. The handler is only released
+	// when no signal came: after one, the deferred release runs after the
+	// rollback, so the grace period still bounds it.
+	if !dispatchInterrupted(prepCtx) {
+		releaseInterrupt()
+	}
 	if dispatchInterrupted(prepCtx) {
 		return interruptedDispatchError(prepCtx, "before its worker was launched; the instance was removed")
 	}
