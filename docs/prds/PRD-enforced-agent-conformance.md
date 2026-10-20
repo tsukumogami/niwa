@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: In Progress
+status: Done
 problem: |
   A Claude Code session launched at a niwa instance root -- every
   `niwa dispatch` worker, and every interactive session opened there --
@@ -22,7 +22,7 @@ upstream: docs/briefs/BRIEF-enforced-agent-conformance.md
 
 ## Status
 
-In Progress
+Done
 
 ## Problem Statement
 

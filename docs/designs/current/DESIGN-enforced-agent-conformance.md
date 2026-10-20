@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Planned
+status: Current
 upstream: docs/prds/PRD-enforced-agent-conformance.md
 problem: |
   niwa writes its WorktreeCreate/WorktreeRemove delegation only into each
@@ -44,7 +44,7 @@ rationale: |
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 

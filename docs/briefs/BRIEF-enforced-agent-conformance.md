@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   A session launched at a niwa instance root -- every dispatched and
   ephemeral worker -- can't isolate its work in a niwa worktree. It either
@@ -25,7 +25,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 Four framing details are left to the downstream PRD: which repo wins
 when a worktree request names one and the session sits in another,
