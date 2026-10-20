@@ -56,7 +56,8 @@ niwa reap  (on demand, or at the next niwa create)
            sees the job entry gone, niwa destroy --force, delete mapping
 ```
 
-The reaper is the single teardown path. It runs on demand and opportunistically at
+The reaper is the single automatic teardown path; `niwa destroy` is the manual one
+(see [Destroying an instance by hand](#destroying-an-instance-by-hand)). It runs on demand and opportunistically at
 the next `niwa create`. Until you delete the session, its instance survives — a
 completed-but-resumable session can be re-opened into the same clone.
 
@@ -176,6 +177,55 @@ behavior fixes.)
 
 See [`niwa reap`](#niwa-reap) for the reclamation mechanics and the liveness rule.
 
+### Destroying an instance by hand
+
+`niwa destroy` (and `niwa destroy --workspace`, for every instance) also removes
+the Claude Code background session that owns the instance, so the session doesn't
+stay in the Agent View pointing at a directory that no longer exists. The owner is
+the session the mapping store names for the instance. A session you started by
+hand inside an instance has no mapping, and destroy leaves it alone.
+
+- **Transcript.** destroy removes the session with `claude rm <id>`, which deletes
+  the Agent View entry, the session's job entry and any worktree Claude Code
+  created for it, but not its transcript. The
+  conversation stays under `~/.claude/projects/`, and `claude --resume
+  <session-id>` still opens it until Claude Code's own transcript retention
+  removes it. destroy prints the command:
+
+  ```
+  removed Claude session 7a920b0c; its transcript is kept: claude --resume <session-id>
+  ```
+
+- **A running session is never removed.** destroy reads `claude agents --json
+  --all`, and a session whose process is still alive (the row carries a `pid` or
+  `status`) is left in place, finished or not. A worker that has finished its task
+  often keeps an idle process alive for a while, so this is common right after a
+  dispatch completes. destroy never stops a session for you. That's also what
+  happens when a session destroys its own instance:
+
+  ```
+  kept Claude session 7a920b0c: it is still running; once it stops (claude stop 7a920b0c), remove it with claude rm 7a920b0c
+  ```
+
+- **Unpushed work.** destroy's own unpushed-work check runs first and is
+  unchanged. It covers linked worktrees inside the instance, which is where a
+  session's worktree lives. destroy never passes `--discard-unpushed` or
+  `--force-remove-worktree` to `claude rm`. If Claude Code still refuses, destroy
+  reports the refusal and the session stays listed.
+- **Failures don't block the teardown.** If `claude` isn't on `PATH`, its listing
+  can't be read, or `claude rm` fails, destroy warns, leaves the session, and still
+  removes the instance:
+
+  ```
+  warning: could not remove Claude session 7a920b0c: <claude's message>; remove it with claude rm 7a920b0c
+  ```
+
+- **Keeping it.** `niwa destroy --keep-session` skips all of this and leaves the
+  session listed.
+
+When destroy removes a session, or finds it already gone from the Agent View, it
+also deletes the session's mapping. A kept session keeps its mapping.
+
 ## `niwa reap`
 
 ```bash
@@ -229,6 +279,12 @@ a long-lived worker was guaranteed to age into a reap. Because the caller of a
 reap is itself a live session rooted in its own instance, this guard is also what
 stops `niwa dispatch` (which reaps opportunistically before provisioning) from
 deleting the instance it is running inside.
+
+Unlike `niwa destroy`, `reap` never removes a Claude session, because it never
+needs to. It reclaims an instance only after the session's job entry is gone, which
+is what deleting the session does, and it spares any instance a job is still rooted
+in. A finished session you haven't looked at yet keeps both its Agent View entry and
+its instance until you delete it.
 
 `reap` runs on demand and is also invoked opportunistically at the start of
 `niwa create`, so session fan-out self-bounds. The opportunistic call never

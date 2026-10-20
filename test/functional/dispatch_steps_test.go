@@ -68,7 +68,11 @@ var dispatchInstanceNameRe = regexp.MustCompile(`\+[a-z0-9_]*-[0-9a-f]{8}$`)
 // completeness). stop rewrites the job state to a terminal "done" (the shape a
 // real `claude stop` produces); note that under delete-only teardown a terminal
 // state keeps the instance -- only deleting the session (its job entry gone)
-// makes a later reap reclaim it. Any other invocation exits non-zero so a stray
+// makes a later reap reclaim it. A launch also leaves a `running` marker in the
+// job dir, standing for a live process: `agents` (the `--json --all` listing
+// destroy reads) reports a pid for a job while the marker is there, and stop
+// removes it. `rm <id>` deletes the job dir and appends its argv to
+// $HOME/claude-rm-argv. Any other invocation exits non-zero so a stray
 // real code path fails loudly rather than silently hitting the network.
 func dispatchFakeClaudeScript(behaviour string) string {
 	pickSession := `  sid="${FAKE_CLAUDE_SESSION_ID:-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}"`
@@ -104,6 +108,9 @@ func dispatchFakeClaudeScript(behaviour string) string {
   fi
   cwd=$(pwd)
   printf '{"sessionId":"%s","template":"bg","state":"running","cwd":"%s"}\n' "$sid" "$cwd" > "$jobdir/state.json"
+  # A live process: agents reports a pid until stop, or a scenario step,
+  # removes this marker.
+  : > "$jobdir/running"
   printf 'backgrounded · %s\n' "$short"
   exit 0`
 	if behaviour == "launch-fail" {
@@ -124,7 +131,37 @@ case "$1" in
     jobdir="$HOME/.claude/jobs/$short"
     if [ -f "$jobdir/state.json" ]; then
       printf '{"sessionId":"%%s","template":"bg","state":"done","cwd":""}\n' "$sid" > "$jobdir/state.json"
+      rm -f "$jobdir/running"
     fi
+    exit 0
+    ;;
+  agents)
+    # claude agents --json --all: one row per job entry, with pid and status
+    # only while the session's process is alive, as Claude Code reports them.
+    printf '['
+    sep=''
+    for st in "$HOME"/.claude/jobs/*/state.json; do
+      [ -f "$st" ] || continue
+      d=$(dirname "$st")
+      id=$(basename "$d")
+      sid=$(sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p' "$st")
+      live=''
+      [ -f "$d/running" ] && live=',"pid":4242,"status":"busy"'
+      printf '%%s{"id":"%%s","sessionId":"%%s","kind":"background","state":"done"%%s}' "$sep" "$id" "$sid" "$live"
+      sep=','
+    done
+    printf ']\n'
+    exit 0
+    ;;
+  rm)
+    # claude rm <id>: deletes the job entry (the agents-view row) and logs
+    # the argv so a scenario can assert what niwa passed.
+    printf '%%s\n' "$*" >> "$HOME/claude-rm-argv"
+    case "$2" in
+      ''|*/*|.*) echo "fake claude: bad rm id" >&2; exit 1 ;;
+    esac
+    rm -rf "$HOME/.claude/jobs/$2"
+    printf 'removed %%s\n' "$2"
     exit 0
     ;;
   *)
@@ -395,6 +432,101 @@ func theDispatchSessionIsDeleted(ctx context.Context, sessionID string) (context
 	return ctx, nil
 }
 
+// theDispatchSessionHasExited removes the fake claude's `running` marker for
+// the session: the session finished and its process exited, so the agents
+// listing reports it with no pid while its job entry, the agents-view row,
+// stays.
+func theDispatchSessionHasExited(ctx context.Context, sessionID string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	short := sessionID
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	marker := filepath.Join(s.homeDir, ".claude", "jobs", short, "running")
+	if err := os.Remove(marker); err != nil {
+		return ctx, fmt.Errorf("removing the running marker %q: %w", marker, err)
+	}
+	return ctx, nil
+}
+
+// iDestroyTheDispatchInstanceFromTheWorkspaceRoot runs `niwa destroy <name>`
+// at the workspace root for the instance the last dispatch created, with any
+// extra flags. The name is read from the instance's own state, since the
+// dispatch picks a random suffix.
+func iDestroyTheDispatchInstanceFromTheWorkspaceRoot(ctx context.Context, flags string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	if s.lastDispatchInstancePath == "" {
+		return ctx, fmt.Errorf("no dispatch instance recorded to destroy")
+	}
+	data, err := os.ReadFile(filepath.Join(s.lastDispatchInstancePath, ".niwa", "instance.json"))
+	if err != nil {
+		return ctx, fmt.Errorf("reading the dispatch instance's state: %w", err)
+	}
+	var st struct {
+		InstanceName string `json:"instance_name"`
+	}
+	if err := json.Unmarshal(data, &st); err != nil || st.InstanceName == "" {
+		return ctx, fmt.Errorf("the dispatch instance's state has no instance name (err %v)", err)
+	}
+	command := strings.TrimSpace("niwa destroy " + flags + " " + st.InstanceName)
+	return ctx, runNiwa(s, s.workspaceRoot, command)
+}
+
+// theFakeClaudeRemovedSession asserts `claude rm <short id>` was run, and
+// with nothing else: niwa must never add --discard-unpushed or
+// --force-remove-worktree.
+func theFakeClaudeRemovedSession(ctx context.Context, sessionID string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	data, err := os.ReadFile(filepath.Join(s.homeDir, "claude-rm-argv"))
+	if err != nil {
+		return fmt.Errorf("claude rm was never run: %w\nstderr:\n%s", err, s.stderr)
+	}
+	want := "rm " + sessionID[:8]
+	if got := strings.TrimSpace(string(data)); got != want {
+		return fmt.Errorf("claude rm argv = %q, want exactly %q", got, want)
+	}
+	return nil
+}
+
+// theFakeClaudeRemovedNoSession asserts `claude rm` was never run.
+func theFakeClaudeRemovedNoSession(ctx context.Context) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	data, err := os.ReadFile(filepath.Join(s.homeDir, "claude-rm-argv"))
+	if err == nil {
+		return fmt.Errorf("claude rm was run: %q", strings.TrimSpace(string(data)))
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("reading claude-rm-argv: %w", err)
+	}
+	return nil
+}
+
+// theDispatchSessionIsStillListed asserts the session's job entry, its
+// agents-view row, is still there.
+func theDispatchSessionIsStillListed(ctx context.Context, sessionID string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	st := filepath.Join(s.homeDir, ".claude", "jobs", sessionID[:8], "state.json")
+	if _, err := os.Stat(st); err != nil {
+		return fmt.Errorf("the session's job entry should still exist: %w", err)
+	}
+	return nil
+}
+
 // theDispatchOriginMappingIsRemoved deletes every session mapping under the
 // workspace root's .niwa/sessions store, modeling a dispatch instance whose
 // mapping was lost while its worker keeps running -- the unmapped-but-live shape
@@ -591,6 +723,11 @@ func registerDispatchSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^a dispatch-origin mapping exists for session "([^"]*)"$`, aDispatchOriginMappingExistsForSession)
 	ctx.Step(`^no dispatch-origin mapping remains$`, noDispatchOriginMappingRemains)
 	ctx.Step(`^the dispatch session "([^"]*)" is deleted from the Agent View$`, theDispatchSessionIsDeleted)
+	ctx.Step(`^the dispatch session "([^"]*)" has exited$`, theDispatchSessionHasExited)
+	ctx.Step(`^I destroy the dispatch instance from the workspace root with "([^"]*)"$`, iDestroyTheDispatchInstanceFromTheWorkspaceRoot)
+	ctx.Step(`^the fake claude removed session "([^"]*)"$`, theFakeClaudeRemovedSession)
+	ctx.Step(`^the fake claude removed no session$`, theFakeClaudeRemovedNoSession)
+	ctx.Step(`^the dispatch session "([^"]*)" is still listed$`, theDispatchSessionIsStillListed)
 	ctx.Step(`^the dispatch-origin mapping is removed$`, theDispatchOriginMappingIsRemoved)
 	ctx.Step(`^the dispatch instance is aged past the backstop TTL$`, theDispatchInstanceIsAgedPastTheBackstopTTL)
 	ctx.Step(`^the codex session was last worked in "([^"]*)" ago$`, theCodexSessionWasLastWorkedInAgo)
