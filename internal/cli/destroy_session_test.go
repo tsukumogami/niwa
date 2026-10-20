@@ -313,6 +313,40 @@ func TestRunDestroy_RefusedDestroyNeverReachesClaude(t *testing.T) {
 	assertInstancesExist(t, root, "alpha")
 }
 
+// TestRunDestroy_UnpushedRefusalKeepsSession pins the settled order: the
+// unpushed-work check runs first, so a destroy it refuses (no --force, no
+// terminal to confirm on) leaves both the instance and its owning session.
+func TestRunDestroy_UnpushedRefusalKeepsSession(t *testing.T) {
+	root := destroyTestSetup(t, []string{"alpha"})
+	instance := filepath.Join(root, "alpha")
+	repoDir := filepath.Join(instance, "myrepo")
+	scanInitGitRepoForCLITest(t, repoDir)
+	if err := os.WriteFile(filepath.Join(repoDir, "second.txt"), []byte("ahead\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRunForCLITest(t, repoDir, "add", "second.txt")
+	gitRunForCLITest(t, repoDir, "commit", "-m", "ahead")
+
+	writeTestMapping(t, root, ownerSID, instance, "")
+	fake := fakeClaudeSessions{rows: []claudeSessionRow{{ID: "11111111", SessionID: ownerSID}}}
+	installFakeClaudeSessions(t, &fake)
+	chdirTo(t, root)
+	quietDestroyCmd()
+	setDestroyFlags(t, false, false, "")
+
+	err := runDestroy(destroyCmd, []string{"alpha"})
+	if err == nil || !strings.Contains(err.Error(), "unpushed work") {
+		t.Fatalf("destroy should refuse over unpushed work; got: %v", err)
+	}
+	if fake.listCalls != 0 || len(fake.removed) != 0 {
+		t.Errorf("an unpushed refusal reached claude: list=%d rm=%v", fake.listCalls, fake.removed)
+	}
+	if !mappingExists(t, root, ownerSID) {
+		t.Errorf("an unpushed refusal should keep the session's mapping")
+	}
+	assertInstancesExist(t, root, "alpha")
+}
+
 // TestRunDestroy_RemovesOwningSession drives `niwa destroy <name>` from the
 // workspace root: the owning session is removed before the instance goes,
 // and --keep-session skips the step without asking claude anything.
