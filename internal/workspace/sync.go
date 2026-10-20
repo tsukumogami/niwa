@@ -64,7 +64,7 @@ func InspectRepo(repoDir, defaultBranch string) (RepoSyncStatus, error) {
 // FetchRepo runs git fetch origin for the given repository directory.
 // r receives all git output; pass a non-nil *Reporter.
 func FetchRepo(ctx context.Context, repoDir string, r *Reporter) error {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "fetch", "origin")
+	cmd := gitCommand(ctx, "-C", repoDir, "fetch", "origin")
 	if err := runGitWithReporter(r, cmd); err != nil {
 		return fmt.Errorf("fetching %s: %w", repoDir, err)
 	}
@@ -88,7 +88,7 @@ func PullRepo(ctx context.Context, repoDir, branch string, r *Reporter) (int, er
 	oldCommit := strings.TrimSpace(string(out))
 
 	// Pull with fast-forward only.
-	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "pull", "--ff-only", "origin", branch)
+	cmd := gitCommand(ctx, "-C", repoDir, "pull", "--ff-only", "origin", branch)
 	if err := runGitWithReporter(r, cmd); err != nil {
 		return 0, fmt.Errorf("pulling %s: %w", branch, err)
 	}

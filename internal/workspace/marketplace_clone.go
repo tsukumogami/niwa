@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -362,7 +361,7 @@ func managedGit(ctx context.Context, dir string, args ...string) (string, error)
 	if dir != "" {
 		args = append([]string{"-C", dir}, args...)
 	}
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := gitCommand(ctx, args...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

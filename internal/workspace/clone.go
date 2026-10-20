@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -60,13 +59,13 @@ func (c *Cloner) CloneWith(ctx context.Context, url, targetDir string, opts Clon
 	}
 	args = append(args, url, targetDir)
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := gitCommand(ctx, args...)
 	if err := runGitWithReporter(r, cmd); err != nil {
 		return false, fmt.Errorf("cloning %s: %w", url, err)
 	}
 
 	if sha {
-		checkout := exec.CommandContext(ctx, "git", "-C", targetDir, "checkout", opts.Ref)
+		checkout := gitCommand(ctx, "-C", targetDir, "checkout", opts.Ref)
 		if err := runGitWithReporter(r, checkout); err != nil {
 			return false, fmt.Errorf("checking out %s: %w", opts.Ref, err)
 		}

@@ -114,6 +114,14 @@ func Execute() {
 			}
 			os.Exit(oce.Code)
 		}
+		// A dispatch a signal stopped has run its failure path by the time
+		// its error gets here; niwa then ends by that signal, as it did
+		// before dispatch handled it.
+		var die *dispatchInterruptedError
+		if errors.As(err, &die) {
+			fmt.Fprintln(os.Stderr, err)
+			die.exit()
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
