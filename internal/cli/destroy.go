@@ -21,13 +21,16 @@ func init() {
 		"at the workspace root, destroy every instance and the workspace itself; always asks for the workspace name")
 	destroyCmd.Flags().StringVar(&destroyConfirm, "confirm", "",
 		"with --workspace, the workspace name, given up front instead of typed at the prompt (for non-interactive use)")
+	destroyCmd.Flags().BoolVar(&destroyKeepSession, "keep-session", false,
+		"keep the Claude Code background session that owns the instance instead of removing it")
 	destroyCmd.ValidArgsFunction = completeInstanceNames
 }
 
 var (
-	destroyForce     bool
-	destroyWorkspace bool
-	destroyConfirm   string
+	destroyForce       bool
+	destroyWorkspace   bool
+	destroyConfirm     string
+	destroyKeepSession bool
 )
 
 var destroyCmd = &cobra.Command{
@@ -65,6 +68,12 @@ By default, destroy refuses to proceed if any cloned repository has
 uncommitted changes. Use --force <name> to skip this check for one instance.
 --force never wipes the workspace: without an instance name at the workspace
 root it refuses and points at --workspace.
+
+Destroying an instance also removes the Claude Code background session that
+owns it (the one niwa recorded when it provisioned or dispatched into the
+instance), with ` + "`claude rm`" + `. Claude Code keeps the session's transcript, so
+` + "`claude --resume <session-id>`" + ` still opens it. A session that is still
+running is left in place. Use --keep-session to keep the session.
 
 Non-TTY behavior: the picker and typed-confirmation prompt require a
 terminal on stdin. In CI or scripted environments, pass an explicit
@@ -126,7 +135,7 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("instance name is only valid from the workspace root; " +
 				"run `niwa destroy` (no arguments) to destroy the enclosing instance")
 		}
-		return runDestroyInstance(cmd, class.InstanceDir, class.WorkspaceRoot, destroyForce)
+		return runDestroyInstance(cmd, class.InstanceDir, class.WorkspaceRoot, class.WorkspaceRoot, destroyForce)
 
 	case workspace.CwdAtWorkspaceRoot:
 		return runDestroyAtRoot(cmd, class.WorkspaceRoot, nameArg, destroyForce)
@@ -146,10 +155,11 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 //   - destroy with no name from workspace root when only one instance exists
 //     (no landing path written)
 //
-// landingPath, when non-empty, is written via writeLandingPath after a
-// successful RemoveAll so the shell wrapper drops the user out of any
-// directory destroy just removed.
-func runDestroyInstance(cmd *cobra.Command, instanceDir, landingPath string, force bool) error {
+// workspaceRoot locates the session store, so the Claude session that owns
+// the instance can be removed with it. landingPath, when non-empty, is
+// written via writeLandingPath after a successful RemoveAll so the shell
+// wrapper drops the user out of any directory destroy just removed.
+func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingPath string, force bool) error {
 	if err := workspace.ValidateInstanceDir(instanceDir); err != nil {
 		return err
 	}
@@ -176,8 +186,13 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, landingPath string, for
 		}
 	}
 
+	reporter := workspace.NewReporter(cmd.ErrOrStderr())
+	if !destroyKeepSession {
+		removeOwningSessions(reporter, workspaceRoot, []string{instanceDir})
+	}
+
 	if err := workspace.DestroyInstance(instanceDir,
-		workspace.WithDestroyReporter(workspace.NewReporter(cmd.ErrOrStderr()))); err != nil {
+		workspace.WithDestroyReporter(reporter)); err != nil {
 		return err
 	}
 
@@ -222,7 +237,7 @@ func runDestroyAtRoot(cmd *cobra.Command, workspaceRoot, nameArg string, force b
 		if err != nil {
 			return err
 		}
-		return runDestroyInstance(cmd, instanceDir, "", force)
+		return runDestroyInstance(cmd, instanceDir, workspaceRoot, "", force)
 	}
 
 	// No name and no --force. Branch by instance count.
@@ -233,10 +248,10 @@ func runDestroyAtRoot(cmd *cobra.Command, workspaceRoot, nameArg string, force b
 		return runDestroyEmptyWorkspace(cmd, workspaceRoot)
 	case 1:
 		// Single-instance shortcut: skip the picker.
-		return runDestroyInstance(cmd, instances[0], "", force)
+		return runDestroyInstance(cmd, instances[0], workspaceRoot, "", force)
 	default:
 		// Picker case.
-		return runDestroyPick(cmd, instances, force)
+		return runDestroyPick(cmd, workspaceRoot, instances, force)
 	}
 }
 
@@ -274,7 +289,7 @@ func resolveInstanceByNameAtRoot(instances []string, nameArg string) (string, er
 // runDestroyPick presents an interactive picker over the given instances
 // and destroys the chosen one. Refuses with a helpful error when stdin
 // is not a TTY.
-func runDestroyPick(cmd *cobra.Command, instances []string, force bool) error {
+func runDestroyPick(cmd *cobra.Command, workspaceRoot string, instances []string, force bool) error {
 	type entry struct {
 		dir  string
 		name string
@@ -310,7 +325,7 @@ func runDestroyPick(cmd *cobra.Command, instances []string, force bool) error {
 		return err
 	}
 
-	return runDestroyInstance(cmd, entries[idx].dir, "", force)
+	return runDestroyInstance(cmd, entries[idx].dir, workspaceRoot, "", force)
 }
 
 // runDestroyEmptyWorkspace deletes the workspace root when no instances
@@ -405,8 +420,13 @@ func runDestroyWorkspace(cmd *cobra.Command, workspaceRoot, confirm string) erro
 
 	parent := filepath.Dir(workspaceRoot)
 
+	reporter := workspace.NewReporter(cmd.ErrOrStderr())
+	if !destroyKeepSession {
+		removeOwningSessions(reporter, workspaceRoot, instances)
+	}
+
 	if err := workspace.DestroyWorkspace(workspaceRoot, workspace.DestroyWorkspaceOpts{
-		Reporter:    workspace.NewReporter(cmd.ErrOrStderr()),
+		Reporter:    reporter,
 		ProgressOut: cmd.ErrOrStderr(),
 	}); err != nil {
 		return err
