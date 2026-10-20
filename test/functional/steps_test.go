@@ -119,6 +119,10 @@ func (s *testState) buildEnv() []string {
 			strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR=") ||
 			strings.HasPrefix(kv, "OTEL_RESOURCE_ATTRIBUTES=") ||
 			strings.HasPrefix(kv, "CLAUDE_CODE_SESSION_ID=") ||
+			// The worktree hooks anchor on this. A suite run from inside a
+			// Claude Code session would otherwise point every hook scenario
+			// at the developer's own project.
+			strings.HasPrefix(kv, "CLAUDE_PROJECT_DIR=") ||
 			// ssh finds the operator's agent through this, not through HOME,
 			// so a scenario whose clone reaches ssh would otherwise wait on an
 			// agent that asks the operator to confirm each use.

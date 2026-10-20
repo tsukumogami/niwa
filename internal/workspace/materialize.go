@@ -130,7 +130,8 @@ type MaterializeContext struct {
 
 	// WorktreeDelegation carries the apply-time worktree-integration decision
 	// (probe result + niwa absolute path), computed ONCE per apply and threaded
-	// to every repo's SettingsMaterializer. nil installs neither hook nor deny.
+	// to the instance root's RootSettingsMaterializer and every repo's
+	// SettingsMaterializer. nil installs neither hook nor deny.
 	// See WorktreeDelegation for the supported/unsupported branch contract.
 	WorktreeDelegation *WorktreeDelegation
 
@@ -392,6 +393,20 @@ const (
 	// function for the PATH-first shape.
 	worktreeFromHookCommandSuffix = "worktree from-hook"
 
+	// worktreeGuardCommandSuffix, worktreeGuardMatcher and
+	// worktreeGuardTimeoutSeconds describe the root-scope PreToolUse guard.
+	worktreeGuardCommandSuffix  = "worktree guard"
+	worktreeGuardMatcher        = "EnterWorktree|Bash"
+	worktreeGuardTimeoutSeconds = 5
+
+	// rootContextCommandSuffix, rootContextMatcher and rootContextTimeoutSeconds
+	// describe the instance root's SessionStart context hook. The matcher
+	// names every SessionStart source that starts or restarts a session's
+	// context.
+	rootContextCommandSuffix  = "instance context"
+	rootContextMatcher        = "startup|resume|clear|compact"
+	rootContextTimeoutSeconds = 10
+
 	// denyEnterWorktree / denyExitWorktree are the Claude Code tool names denied
 	// when the harness does NOT support the worktree hooks. Denying these steers
 	// agents to `niwa worktree create` instead of a competing bare checkout.
@@ -399,9 +414,11 @@ const (
 	denyExitWorktree  = "ExitWorktree"
 )
 
-// WorktreeDelegation carries the apply-time decision for the per-repo worktree
-// integration, computed once per apply (not per repo) and threaded into each
-// repo's MaterializeContext. Hook and deny are MUTUALLY EXCLUSIVE: when
+// WorktreeDelegation carries the apply-time decision for the worktree
+// integration, computed once per apply (not per repo) and written into every
+// settings document a session can be launched under: each repo's, the
+// instance root's, and (through RootMaterializeOptions) the workspace root's.
+// Hook and deny are MUTUALLY EXCLUSIVE: when
 // Supported is true the materializer writes the WorktreeCreate/WorktreeRemove
 // hook entries; when false it writes permissions.deny instead. The zero value
 // (nil pointer on the context) installs neither, leaving settings unchanged.
@@ -461,6 +478,21 @@ func guardedNiwaHookCommand(niwaPath, suffix string) string {
 		"; exec " + shellSingleQuote(normalized) + " " + suffix
 }
 
+// guardedNiwaContextCommand builds the session-context hook command. It
+// resolves niwa the same PATH-first way guardedNiwaHookCommand does, but it
+// can't exec: SessionStart adds a hook's stdout to the session's context, and
+// a niwa too old to have `instance context` prints help text there. So the
+// output is captured and printed only when it is the JSON the hook emits
+// (it starts with "{"); anything else is dropped and the hook exits 0.
+//
+//	out=$(if command -v niwa >/dev/null 2>&1; then niwa instance context; else '<abs>' instance context; fi 2>/dev/null); case "$out" in "{"*) printf '%s\n' "$out";; esac
+func guardedNiwaContextCommand(niwaPath string) string {
+	abs := shellSingleQuote(filepath.ToSlash(niwaPath))
+	return "out=$(if command -v niwa >/dev/null 2>&1; then niwa " + rootContextCommandSuffix +
+		"; else " + abs + " " + rootContextCommandSuffix + "; fi 2>/dev/null); " +
+		`case "$out" in "{"*) printf '%s\n' "$out";; esac`
+}
+
 // shellSingleQuote wraps s in single quotes for safe interpolation into a shell
 // command. An embedded single quote is escaped the standard way: close the
 // quoted run, emit a backslash-escaped quote, reopen the run.
@@ -505,6 +537,19 @@ type BuildSettingsConfig struct {
 	// Unsupported => permissions.deny: ["EnterWorktree","ExitWorktree"]. Hook and
 	// deny are mutually exclusive; nil installs neither.
 	WorktreeDelegation *WorktreeDelegation
+
+	// WorktreeGuard, when true and WorktreeDelegation is non-nil, adds the
+	// `niwa worktree guard` PreToolUse entry. Only the instance root's and
+	// workspace root's documents set it: a session launched inside a repo
+	// already gets working worktrees, and a hand-run `git worktree add` there
+	// may be legitimate. An opted-out instance has no delegation, so no guard.
+	WorktreeGuard bool
+
+	// RootContextNiwaPath, when non-empty, adds the `niwa instance context`
+	// SessionStart entry, which states the instance's layout at session start
+	// and after compaction. Only the instance root's document sets it; the
+	// value is the absolute niwa path the PATH-first command falls back to.
+	RootContextNiwaPath string
 
 	// SessionHooks, when non-nil, installs the workspace-root
 	// SessionStart/SessionEnd hook entries (the ephemeral-session integration).
@@ -889,6 +934,61 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 		}
 		hooksDoc[worktreeCreateEvent] = worktreeEntry
 		hooksDoc[worktreeRemoveEvent] = worktreeEntry
+	}
+
+	// Worktree guard (root scopes only): refuse EnterWorktree with a path and a
+	// hand-run `git worktree add`, which can't work from a root. Appended to
+	// PreToolUse so it composes with any installed entries. The matcher names
+	// both tools rather than "Bash" alone, so `niwa watch`, which dedupes its
+	// own Bash guard by matcher, never mistakes this entry for its own. The
+	// short timeout keeps a hung niwa from stalling Bash; an expired hook
+	// doesn't block. A deny branch caused by an unresolvable niwa path has no
+	// path to fall back to, so it gets no guard.
+	if wd := cfg.WorktreeDelegation; cfg.WorktreeGuard && wd != nil && wd.NiwaPath != "" {
+		pascalEvent, ok := hookEventMapping["pre_tool_use"]
+		if !ok {
+			pascalEvent = snakeToPascal("pre_tool_use")
+		}
+		entry := map[string]any{
+			"matcher": worktreeGuardMatcher,
+			"hooks": []map[string]any{
+				{
+					"type":    "command",
+					"command": guardedNiwaHookCommand(wd.NiwaPath, worktreeGuardCommandSuffix),
+					"timeout": worktreeGuardTimeoutSeconds,
+				},
+			},
+		}
+		if existing, ok := hooksDoc[pascalEvent].([]map[string]any); ok {
+			hooksDoc[pascalEvent] = append(existing, entry)
+		} else {
+			hooksDoc[pascalEvent] = []map[string]any{entry}
+		}
+	}
+
+	// Root session context (instance root only): state the instance's layout
+	// on every session start and again after compaction, resume and clear, so
+	// the facts survive compaction instead of living in a file read once.
+	if cfg.RootContextNiwaPath != "" {
+		pascalEvent, ok := hookEventMapping["session_start"]
+		if !ok {
+			pascalEvent = snakeToPascal("session_start")
+		}
+		entry := map[string]any{
+			"matcher": rootContextMatcher,
+			"hooks": []map[string]any{
+				{
+					"type":    "command",
+					"command": guardedNiwaContextCommand(cfg.RootContextNiwaPath),
+					"timeout": rootContextTimeoutSeconds,
+				},
+			},
+		}
+		if existing, ok := hooksDoc[pascalEvent].([]map[string]any); ok {
+			hooksDoc[pascalEvent] = append(existing, entry)
+		} else {
+			hooksDoc[pascalEvent] = []map[string]any{entry}
+		}
 	}
 
 	// Work-summary hooks (default-on for shirabe adopters): inject the built-in

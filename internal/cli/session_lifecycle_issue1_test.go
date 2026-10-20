@@ -68,7 +68,7 @@ func newCreateFlowFixture(t *testing.T) *createFlowFixture {
 	if err := os.MkdirAll(filepath.Join(niwaDir, "sessions"), 0o700); err != nil {
 		t.Fatalf("mkdir .niwa/sessions: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(niwaDir, "instance.json"), []byte("{}"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(niwaDir, "instance.json"), []byte(`{"instance_name":"testws"}`), 0o600); err != nil {
 		t.Fatalf("write instance.json: %v", err)
 	}
 	// Minimal workspace config. Disabling Claude content for the repo keeps the

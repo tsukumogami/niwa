@@ -403,6 +403,12 @@ func buildSessionStartInjection(instancePath string, keys []keyreport.Entry, not
 		b = append(b, text...)
 		b = append(b, "\n\n"...)
 	}
+	// The same layout facts a session launched at the instance root gets from
+	// its own SessionStart hook, for the instance this session was given.
+	if text, err := workspace.BuildRootContext(instancePath); err == nil {
+		b = append(b, text...)
+		b = append(b, '\n')
+	}
 	if claudeMD != "" {
 		b = append(b, "The instance's CLAUDE.md follows; treat it as the authoritative guidance for this session:\n\n"...)
 		b = append(b, claudeMD...)

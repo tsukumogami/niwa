@@ -15,7 +15,7 @@ func TestSessionList_FlaglessShowsLifecycleView(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, ".niwa", "sessions"), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".niwa", "instance.json"), []byte("{}"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".niwa", "instance.json"), []byte(`{"instance_name":"testws"}`), 0o600); err != nil {
 		t.Fatalf("write instance.json: %v", err)
 	}
 	t.Setenv("NIWA_INSTANCE_ROOT", root)

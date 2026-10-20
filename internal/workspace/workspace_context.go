@@ -446,6 +446,13 @@ func (m *RootSettingsMaterializer) Materialize(ctx *MaterializeContext) ([]strin
 		UseAbsolutePaths:       true,
 		Reports:                &reports,
 		ApprovedMCPServers:     approvedMCP,
+		// A session launched at the instance root reads only this document,
+		// so it carries the same worktree integration each repo gets.
+		WorktreeDelegation: ctx.WorktreeDelegation,
+		WorktreeGuard:      true,
+		// The layout context goes to every instance root, opted out or not;
+		// BuildRootContext leaves the worktree sentence out when it is.
+		RootContextNiwaPath: rootContextNiwaPath(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("building workspace root settings: %w", err)
@@ -711,11 +718,13 @@ func generateWorkspaceContext(cfg *config.WorkspaceConfig, classified []Classifi
 		b.WriteString("\n")
 	}
 
+	// The bullets that told agents to move into a repo before running git or
+	// making changes are gone: the worktree guard refuses the routes that
+	// can't work from the root, and the session-start context (see
+	// BuildRootContext) states how worktrees are named here.
 	b.WriteString("## Working in this workspace\n\n")
 	b.WriteString("- Each repo is a separate git repo at `{group}/{repo}/`\n")
-	b.WriteString("- Navigate into a repo before running git commands\n")
 	b.WriteString("- To search across repos, use tools from this directory\n")
-	b.WriteString("- To make changes, navigate into the specific repo first\n")
 
 	return b.String()
 }

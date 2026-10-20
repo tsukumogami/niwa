@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -102,4 +103,37 @@ func cmpInt(a, b int) int {
 	default:
 		return 0
 	}
+}
+
+// HarnessSupport is one probe of what the installed Claude Code can run. A
+// command probes once and hands the result to every settings document it
+// writes -- the workspace root, each instance root and each repo -- so all of
+// them make the same hook-or-deny choice.
+type HarnessSupport struct {
+	// WorktreeHooks is SupportsWorktreeHooks' answer.
+	WorktreeHooks bool
+}
+
+// ProbeHarness runs the harness probe once.
+func ProbeHarness(ctx context.Context) HarnessSupport {
+	return probeHarness(ctx)
+}
+
+// probeHarness is the probe ProbeHarness runs. Tests replace it to stand in
+// for a harness that does or doesn't support worktree hooks.
+var probeHarness = func(ctx context.Context) HarnessSupport {
+	return HarnessSupport{WorktreeHooks: SupportsWorktreeHooks(ctx)}
+}
+
+// WorktreeDelegationFor builds the worktree-integration decision for a probe
+// result. When niwa's own path can't be resolved it returns the deny branch
+// together with the error, so the caller can warn: a hook with no absolute
+// fallback arm fails loudly in exactly the environments the fallback exists
+// for, and deny-and-steer is the graceful degradation.
+func WorktreeDelegationFor(h HarnessSupport) (*WorktreeDelegation, error) {
+	niwaPath, err := os.Executable()
+	if err != nil {
+		return &WorktreeDelegation{Supported: false}, err
+	}
+	return &WorktreeDelegation{Supported: h.WorktreeHooks, NiwaPath: niwaPath}, nil
 }

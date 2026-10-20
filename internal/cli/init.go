@@ -799,11 +799,24 @@ func runInit(cmd *cobra.Command, args []string) error {
 	// the workspace is fully usable without the root config, and `niwa apply`
 	// from the root re-converges it.
 	if !initNoEphemeralSessions && rootConfigInstalls(mode) {
+		rootDelegation, delegationErr := rootWorktreeDelegation(result.Config, workspace.ProbeHarness(contextOrBackground(cmd.Context())))
+		if delegationErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not resolve niwa binary path for worktree hooks (%v); installing deny fallback\n", delegationErr)
+		}
 		if _, mErr := workspace.MaterializeWorkspaceRoot(result.Config, workspaceRoot, workspace.RootMaterializeOptions{
 			EphemeralSessionMode: true,
 			ConfigDir:            filepath.Join(workspaceRoot, workspace.StateDir),
+			WorktreeDelegation:   rootDelegation,
 		}); mErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not install workspace-root session config: %v\n", mErr)
+		} else if rootDelegation != nil {
+			// init builds no Applier, so there's no DeveloperHome to read;
+			// the user's home is the one Claude Code itself reads.
+			if home, err := os.UserHomeDir(); err == nil {
+				if w := workspace.RootTrustWarning(home, workspaceRoot); w != "" {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", w)
+				}
+			}
 		}
 	}
 
@@ -1025,6 +1038,27 @@ func bootstrapCommandFor(kind string) string {
 // minimal, state-free contract.
 func rootConfigInstalls(mode initMode) bool {
 	return mode == modeNamed || mode == modeClone
+}
+
+// rootWorktreeDelegation decides the worktree integration the workspace
+// root's settings carry: none when the workspace sets
+// [claude] worktree_delegation = false, otherwise the hook or the deny
+// fallback for the probe result. A non-nil error means niwa's own path could
+// not be resolved and the deny fallback was chosen; the caller warns.
+func rootWorktreeDelegation(cfg *config.WorkspaceConfig, harness workspace.HarnessSupport) (*workspace.WorktreeDelegation, error) {
+	if cfg == nil || !cfg.Claude.WorktreeDelegationEnabled() {
+		return nil, nil
+	}
+	return workspace.WorktreeDelegationFor(harness)
+}
+
+// contextOrBackground returns ctx, or context.Background() when a command was
+// run without one (unit tests call run functions on bare cobra commands).
+func contextOrBackground(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }
 
 // buildInitState constructs an InstanceState for the flags that require

@@ -22,7 +22,7 @@ func seedSessionList(t *testing.T) string {
 	if err := os.MkdirAll(filepath.Join(root, ".niwa", "sessions"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".niwa", "instance.json"), []byte("{}"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".niwa", "instance.json"), []byte(`{"instance_name":"testws"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	sessionsDir := filepath.Join(root, ".niwa", "sessions")

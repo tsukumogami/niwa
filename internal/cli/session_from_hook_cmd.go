@@ -19,10 +19,14 @@ func init() {
 }
 
 // sessionFromHookCmd is the thin entry Claude Code invokes DIRECTLY as the
-// per-repo WorktreeCreate/WorktreeRemove hook command (an absolute-path
-// `niwa worktree from-hook`, with NO shim script). It reads the Claude hook
-// JSON on stdin and dispatches on hook_event_name to the same create/destroy
-// core the human `niwa worktree create`/`destroy` commands use.
+// WorktreeCreate/WorktreeRemove hook command (`niwa worktree from-hook`, with
+// NO shim script) written into each repo's settings and into the instance
+// root's and workspace root's settings. A session launched at a root has no
+// repo for its working directory, so the repo can come from a `<repo>/`
+// prefix in the worktree name or from a one-repo instance as well as from
+// cwd; see workspace.ResolveHookTarget. It reads the Claude hook JSON on
+// stdin and dispatches on hook_event_name to the same create/destroy core the
+// human `niwa worktree create`/`destroy` commands use.
 //
 // The hook I/O contract is the only thing this command owns:
 //   - WorktreeCreate: print ONLY the absolute worktree path to stdout, exit 0
@@ -34,13 +38,14 @@ var sessionFromHookCmd = &cobra.Command{
 	Use:    "from-hook",
 	Short:  "Internal: dispatch a Claude Code worktree hook (reads JSON on stdin)",
 	Hidden: true,
-	Long: `Internal entry point invoked directly by Claude Code's per-repo
+	Long: `Internal entry point invoked directly by Claude Code's
 WorktreeCreate/WorktreeRemove hooks.
 
 Reads the Claude hook JSON payload on stdin and dispatches on
-hook_event_name. Not intended for direct human use; the hook command is an
-absolute-path "niwa worktree from-hook" written into a repo's
-settings.local.json by niwa apply.`,
+hook_event_name. Not intended for direct human use; niwa apply writes the
+hook command into each repo's settings.local.json and into the instance
+root's and workspace root's settings.json. From an instance or workspace
+root, name the worktree <repo>/<slug> to pick the repo.`,
 	Args:          cobra.NoArgs,
 	SilenceErrors: true,
 	SilenceUsage:  true,
@@ -114,17 +119,21 @@ func runSessionFromHook(cmd *cobra.Command, _ []string) error {
 // a git ref (branches are prefix + random-hex), so control-char stripping
 // covers the residual stored/displayed-metadata concern.
 func runFromHookCreate(cmd *cobra.Command, payload hookPayload) error {
-	// Resolve both the instance root and the owning repo from the untrusted
-	// cwd. ResolveRepoFromCwd discovers the instance, then applies the
-	// canonicalizing longest-prefix match; a cwd outside every workspace repo
-	// is rejected here. On no match we return an error (non-zero exit), so
-	// Claude's creation fails rather than producing a wrong worktree.
-	instanceRoot, repo, err := workspace.ResolveRepoFromCwd(payload.Cwd)
+	// Resolve the instance from the launch directory and the repo from a
+	// `<repo>/` prefix in the name, the untrusted cwd, or a one-repo instance.
+	// The instance is anchored on CLAUDE_PROJECT_DIR, which the harness fixes,
+	// so a model-chosen cwd can't point the hook at a planted instance; the
+	// canonicalizing cwd match stays the gate for picking a repo from cwd. On
+	// no match we return an error (non-zero exit) whose text lists the repos,
+	// so Claude's creation fails with guidance rather than producing a wrong
+	// worktree.
+	target, err := workspace.ResolveHookTarget(workspace.HookAnchor(), payload.Cwd, payload.Name)
 	if err != nil {
-		return fmt.Errorf("niwa: error: resolving repo from hook cwd %q: %w", payload.Cwd, err)
+		return fmt.Errorf("niwa: error: %w", err)
 	}
+	instanceRoot, repo := target.InstanceRoot, target.Repo
 
-	purpose := purposeFromHookName(payload.Name)
+	purpose := purposeFromHookName(target.Slug)
 
 	sessionID, worktreePath, branch, err := worktree.CreateSession(context.Background(), worktree.CreateSessionParams{
 		InstanceRoot: instanceRoot,
@@ -260,9 +269,27 @@ func runFromHookRemove(cmd *cobra.Command, payload hookPayload) error {
 		return nil
 	}
 
-	instanceRoot, err := resolveInstanceRoot()
+	// The instance comes from the launch directory and the worktree path, so
+	// a remove sent from the workspace root (where the process's own working
+	// directory is in no instance) still finds it. When that fails, fall back
+	// to NIWA_INSTANCE_ROOT or the process's working directory, as before.
+	// The fallback deliberately does not enforce the anchor refusal that create
+	// does ("outside the instance this session was launched in"). That is safe
+	// for remove in a way it wouldn't be for create: remove only tears down a
+	// worktree that matches a session record in the instance it found, and
+	// keeps any worktree with uncommitted work. Don't copy this into create.
+	instanceRoot, err := workspace.ResolveHookInstance(workspace.HookAnchor(), wantPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "niwa: warning: WorktreeRemove could not resolve instance root: %v\n", err)
+		var fallbackErr error
+		instanceRoot, fallbackErr = resolveInstanceRoot()
+		if fallbackErr != nil {
+			fmt.Fprintf(stderr, "niwa: warning: WorktreeRemove could not resolve instance root: %v (fallback: %v)\n", err, fallbackErr)
+			return nil
+		}
+	}
+	if state, stateErr := workspace.LoadState(instanceRoot); stateErr == nil && state.NoWorktreeDelegation {
+		// The workspace root's hooks are shared by every instance; an
+		// opted-out instance's worktrees aren't niwa's to reconcile here.
 		return nil
 	}
 
