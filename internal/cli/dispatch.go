@@ -535,13 +535,26 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// of those can serve as the separator).
 	const sep = "+"
 
+	// (4b) From here until the worker is launched, a SIGINT or SIGTERM cancels
+	// prepCtx rather than ending niwa on the spot, so the git commands
+	// provisioning started are killed and this dispatch's own failure path
+	// runs. Under WithDisposableGit each of them is killed with its process
+	// group, which takes the https remote helper git leaves running when only
+	// git is killed. The handler is released before the launch (9b), so it
+	// never reaches a worker: the launch is not given prepCtx, and from then on
+	// a signal has its default action again. Deferred before the rollback at
+	// (7), so on a signalled return the rollback runs first, inside the
+	// handler's grace period.
+	prepCtx, releaseInterrupt := interruptOnSignal(cmd.Context())
+	defer releaseInterrupt()
+
 	// (5) Self-bound orphans: run the opportunistic reclamation sweep the same
 	// way runCreate does, before creating the new instance (R12).
 	reapOpportunistically(workspaceRoot)
 
 	// (6) Create the instance through the existing provision path, passing
 	// --parallel straight through as this call's clone concurrency.
-	res, err := provisionInstanceFunc(cmd.Context(), workspaceRoot, cwd, namePrefix, sep, dispatchParallel)
+	res, err := provisionInstanceFunc(workspace.WithDisposableGit(prepCtx), workspaceRoot, cwd, namePrefix, sep, dispatchParallel)
 	// Dispatch has a terminal, unlike the hook that shares this provisioner, so
 	// the report goes to stderr here rather than into the worker's context.
 	// Rendered before the error is returned, not after the success path begins:
@@ -550,6 +563,11 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	fmt.Fprint(cmd.ErrOrStderr(), keyreport.RenderText(res.Keys))
 	renderNotices(cmd.ErrOrStderr(), res.Notices)
 	if err != nil {
+		if dispatchInterrupted(prepCtx) {
+			// Create removes the instance directory on any failure, this one
+			// included, and no mapping exists yet.
+			return interruptedDispatchError(prepCtx, "while provisioning its instance; no instance was created")
+		}
 		return fmt.Errorf("niwa: error: provisioning dispatch instance: %w", err)
 	}
 	instancePath := res.Path
@@ -881,6 +899,19 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// and this call does not return until it ends. The developer watches the
 	// work; for that runner, that is what attaching would have been.
 	launchMode := spec.Runner.ModeFor(dispatchDetach)
+
+	// The last point a signal stops the dispatch rather than niwa. Nothing
+	// between provisioning and here watches prepCtx, so a signal that came
+	// meanwhile is read now, and the rollback armed at (7) removes the
+	// instance before any worker exists in it. The handler is only released
+	// when no signal came: after one, the deferred release runs after the
+	// rollback, so the grace period still bounds it.
+	if !dispatchInterrupted(prepCtx) {
+		releaseInterrupt()
+	}
+	if dispatchInterrupted(prepCtx) {
+		return interruptedDispatchError(prepCtx, "before its worker was launched; the instance was removed")
+	}
 
 	if err := dispatchLaunch(cmd.Context(), launchRequest{
 		Spec:        spec,

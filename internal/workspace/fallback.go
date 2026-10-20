@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -145,13 +144,13 @@ func shallowCloneToTemp(ctx context.Context, cloneURL, ref string) (tmp, oid str
 	}
 	args = append(args, cloneURL, tmp)
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := gitCommand(ctx, args...)
 	if out, cloneErr := cmd.CombinedOutput(); cloneErr != nil {
 		_ = os.RemoveAll(tmp)
 		return "", "", fmt.Errorf("fallback: git clone %s: %w\n%s", cloneURL, cloneErr, out)
 	}
 
-	revParse := exec.CommandContext(ctx, "git", "-C", tmp, "rev-parse", "HEAD")
+	revParse := gitCommand(ctx, "-C", tmp, "rev-parse", "HEAD")
 	headBytes, revErr := revParse.Output()
 	if revErr != nil {
 		_ = os.RemoveAll(tmp)

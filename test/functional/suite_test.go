@@ -157,6 +157,17 @@ type testState struct {
 	// that took it. Released when the scenario ends.
 	heldLocks []*os.File
 
+	// background is the niwa command a scenario started without waiting for
+	// it, and interrupt the fakes the interrupt scenarios stand up; see
+	// dispatch_interrupt_steps_test.go.
+	background *backgroundNiwa
+	interrupt  interruptFakes
+
+	// cleanups run in the After hook, last registered first, so a scenario
+	// that started a process or a listener stops it however the scenario
+	// ended.
+	cleanups []func()
+
 	// Codex acceptance state. See codex_agent_steps_test.go.
 
 	// stagedFiles and stagedSymlinks accumulate fixture content (repo-relative
@@ -337,6 +348,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 			_ = f.Close()
 		}
 		s.heldLocks = nil
+		for i := len(s.cleanups) - 1; i >= 0; i-- {
+			s.cleanups[i]()
+		}
+		s.cleanups = nil
 		// A scenario that made a directory read-only to force a delivery
 		// failure has to hand it back, or the sandbox it lives in outlives the
 		// run.
@@ -529,6 +544,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// --- dispatch lifecycle: niwa dispatch provision/rollback and reaper
 	// reclamation, driven offline against the localGitServer with a fake claude ---
 	registerDispatchSteps(ctx)
+	registerDispatchInterruptSteps(ctx)
 	registerDispatchSpillSteps(ctx)
 	registerDispatchLineageSteps(ctx)
 	registerKeepAliveSteps(ctx)
