@@ -35,9 +35,11 @@ func init() {
 //     which is correct: a partial/wrong worktree is worse than none).
 //   - WorktreeRemove: non-blocking, ALWAYS exit 0 (errors are logged to
 //     stderr but never fail teardown).
-//   - SubagentStop: ALWAYS exit 0 with nothing on stdout. It removes the
-//     finished Agent-tool subagent's worktree when it is unchanged; exit 2
-//     would send the subagent back to work instead.
+//   - SubagentStop: exit 0 with nothing on stdout once the payload parses,
+//     and never exit 2, the code that would send the subagent back to work.
+//     It removes the finished Agent-tool subagent's worktree when it is
+//     unchanged. An unreadable payload exits 1 like any other event, which
+//     Claude Code treats as a non-blocking hook error.
 var sessionFromHookCmd = &cobra.Command{
 	Use:    "from-hook",
 	Short:  "Internal: dispatch a Claude Code worktree hook (reads JSON on stdin)",
@@ -388,8 +390,8 @@ func teardownHookSession(stderr io.Writer, instanceRoot, sessionID, event string
 // session is still working in. The worktree must also be unchanged
 // (worktree.WorktreeUnchanged); a changed one is kept and said so on stderr.
 //
-// SubagentStop must never send the subagent back to work, so this always
-// exits 0: exit 2 is the code that would.
+// SubagentStop must never send the subagent back to work, so this returns nil
+// on every path: exit 2 is the code that would.
 func runFromHookSubagentStop(cmd *cobra.Command, payload hookPayload) error {
 	stderr := cmd.ErrOrStderr()
 	if payload.AgentID == "" || payload.Cwd == "" {

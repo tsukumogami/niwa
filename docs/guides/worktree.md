@@ -296,23 +296,29 @@ That teardown is stricter than the clean check above. The worktree is removed
 only when it holds nothing beyond what it was created with:
 
 - `git status` shows nothing, untracked files included;
+- no git-ignored file exists beyond the ones niwa's own exclude patterns in the
+  repo's `info/exclude` cover. Removing a worktree deletes its ignored files, so
+  build output or an env file a subagent left under a `.gitignore` pattern
+  keeps it;
 - its HEAD and its `session/<id>` branch still point at the commit it started
   from, so nothing was committed and nothing was checked out;
 - no stash entry was made from its branch.
 
 Anything else keeps the worktree, and niwa says on stderr why. Remove a kept one
-with `niwa worktree destroy <id>` once you're done with it. The hook always
-exits 0, so it never sends the subagent back to work.
+with `niwa worktree destroy <id>` once you're done with it. The hook never exits
+2, so it never sends the subagent back to work.
 
 `niwa reap`, and the reap that runs at the start of `niwa create`, `niwa
 dispatch` and `niwa watch`, is the backstop for a subagent that ended without a
 `SubagentStop`, such as an interrupted run. It also covers a session that
 entered a hook-made worktree and never left. It removes an unchanged hook-made
-worktree once the Claude Code session that asked for it has ended: that
-session's transcript is gone, or hasn't been written for the reap idle grace
-(`NIWA_REAP_IDLE_GRACE`, a day by default). Worktrees from `niwa worktree
-create`, and hook-made ones recorded before this release, are never removed
-this way.
+worktree once the Claude Code session that asked for it has ended: the worktree
+is older than the reap idle grace (`NIWA_REAP_IDLE_GRACE`, a day by default),
+and that session's transcript is gone or hasn't been written for that long. A
+session you leave idle for longer than the grace and then resume finds a clean
+worktree it was in gone, the same rule reap applies to idle ephemeral instances.
+Worktrees from `niwa worktree create`, and hook-made ones recorded before this
+release, are never removed this way.
 
 ### Fallback on an older harness
 

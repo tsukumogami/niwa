@@ -110,8 +110,9 @@ there, reap leaves the directory alone.
 
 reap also removes worktrees niwa's WorktreeCreate hook made that are
 unchanged since they were created and whose Claude Code session has ended:
-its transcript is gone or idle past the same grace period. A worktree with
-any change, or one made with niwa worktree create, is never removed this way.
+the worktree is older than the same grace period, and the session's
+transcript is gone or idle for that long. A worktree with any change, or one
+made with niwa worktree create, is never removed this way.
 
 reap runs on demand and is also invoked opportunistically at the start of
 niwa create, niwa dispatch, and niwa watch so session fan-out self-bounds.`,

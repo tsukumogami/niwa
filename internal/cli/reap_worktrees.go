@@ -19,14 +19,17 @@ import (
 // covers a subagent that ended without a SubagentStop, such as an interrupted
 // run, and a session that entered a worktree and never left it.
 //
-// A session counts as ended when the transcript recorded at create time is
-// gone, or hasn't been written for the reap idle grace (NIWA_REAP_IDLE_GRACE,
-// 24h by default). A record with no transcript can't be judged and is left
-// alone, as is every record without the hook's marker or a base commit.
+// A session counts as ended when its record is older than the reap idle grace
+// (NIWA_REAP_IDLE_GRACE, 24h by default) and the transcript recorded at create
+// time is gone or hasn't been written for that long; see claudeSessionEnded.
+// A record with no transcript can't be judged and is left alone, as is every
+// record without the hook's marker or a base commit.
 //
 // The destroy is DestroySession without force, so its attach-lock and dirty
-// guards still apply on top of the unchanged check. It returns how many
-// worktrees it removed; failures are reported on stderr and skipped.
+// guards still apply on top of the unchanged check. The check and the removal
+// aren't atomic, but a session idle for the whole grace period is not writing
+// into the worktree in between. It returns how many worktrees it removed;
+// failures are reported on stderr and skipped.
 func sweepHookWorktrees(workspaceRoot string, now time.Time, stderr io.Writer) int {
 	instances, err := workspace.EnumerateInstances(workspaceRoot)
 	if err != nil {
@@ -52,7 +55,7 @@ func sweepHookWorktreesIn(instances []string, now time.Time, stderr io.Writer) i
 			if st.Status != worktree.SessionStatusActive || st.CreatedBy != worktree.CreatedByWorktreeHook {
 				continue
 			}
-			if !claudeSessionEnded(st.ClaudeTranscriptPath, now, grace) {
+			if !claudeSessionEnded(st, now, grace) {
 				continue
 			}
 			unchanged, _, err := worktree.WorktreeUnchanged(ctx, st, worktree.StdGitInvoker{})
@@ -70,14 +73,22 @@ func sweepHookWorktreesIn(instances []string, now time.Time, stderr io.Writer) i
 	return removed
 }
 
-// claudeSessionEnded reports whether the session that wrote transcript has
-// ended: the file is gone, or idle for at least grace. An empty path or an
-// unreadable file is "can't tell", which is never ended.
-func claudeSessionEnded(transcript string, now time.Time, grace time.Duration) bool {
-	if transcript == "" {
+// claudeSessionEnded reports whether the Claude Code session that asked for
+// the worktree has ended. The record must be at least grace old, and then its
+// transcript must be gone or idle for at least grace. The age floor matters:
+// Claude Code may not have written the transcript yet when the hook runs, and
+// a missing file alone must never read as an ended session. An empty path, an
+// unreadable file or an unparseable creation time is "can't tell", which is
+// never ended.
+func claudeSessionEnded(st worktree.SessionLifecycleState, now time.Time, grace time.Duration) bool {
+	if st.ClaudeTranscriptPath == "" {
 		return false
 	}
-	info, err := os.Stat(transcript)
+	created, err := time.Parse(time.RFC3339, st.CreationTime)
+	if err != nil || now.Sub(created) < grace {
+		return false
+	}
+	info, err := os.Stat(st.ClaudeTranscriptPath)
 	if errors.Is(err, fs.ErrNotExist) {
 		return true
 	}

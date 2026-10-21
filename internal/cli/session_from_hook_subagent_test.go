@@ -127,22 +127,36 @@ func TestFromHookSubagentStop_RemovesUnchangedWorktree(t *testing.T) {
 	f := newCreateFlowFixture(t)
 	resetSessionCreateFlags(t)
 	defer resetSessionCreateFlags(t)
+	commitGitignore(t, f, "build/\n")
 
 	st := createAgentWorktree(t, f, testAgentID, "")
+	// A file niwa's own info/exclude patterns cover is niwa's, not a change.
+	writeFile(t, filepath.Join(st.WorktreePath, "notes.local.md"))
 	sub := filepath.Join(st.WorktreePath, ".niwa")
 	subagentStop(t, f, testAgentID, sub)
 	assertRemoved(t, f, st)
 }
 
 // TestFromHookSubagentStop_KeepsChangedWorktree pins that a worktree with
-// anything in it is never removed: untracked or staged files, a commit, or a
-// stash made from its branch.
+// anything in it is never removed: untracked or staged files, a file only a
+// .gitignore hides, a commit, a branch moved under a detached HEAD, or a stash
+// made from its branch.
 func TestFromHookSubagentStop_KeepsChangedWorktree(t *testing.T) {
 	cases := []struct {
 		name   string
 		change func(t *testing.T, wt string)
 		reason string
 	}{
+		{"file only a .gitignore hides", func(t *testing.T, wt string) {
+			if err := os.MkdirAll(filepath.Join(wt, "build"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(wt, "build", "out.txt"))
+		}, "git-ignored files niwa didn't write, such as build/out.txt"},
+		{"branch moved under a detached HEAD", func(t *testing.T, wt string) {
+			gitIn(t, wt, "commit", "--allow-empty", "-m", "work")
+			gitIn(t, wt, "checkout", "--detach", "HEAD~1")
+		}, "has moved off the commit it started at"},
 		{"untracked file", func(t *testing.T, wt string) {
 			writeFile(t, filepath.Join(wt, "new.txt"))
 		}, "uncommitted or untracked"},
@@ -163,6 +177,7 @@ func TestFromHookSubagentStop_KeepsChangedWorktree(t *testing.T) {
 			f := newCreateFlowFixture(t)
 			resetSessionCreateFlags(t)
 			defer resetSessionCreateFlags(t)
+			commitGitignore(t, f, "build/\n")
 
 			st := createAgentWorktree(t, f, testAgentID, "")
 			tc.change(t, st.WorktreePath)
@@ -208,9 +223,11 @@ func TestFromHookSubagentStop_LeavesOtherWorktreesAlone(t *testing.T) {
 }
 
 // TestSweepHookWorktrees covers the reap backstop: an unchanged hook-made
-// worktree goes once its session's transcript is gone or idle past the
-// grace, and stays while the transcript is fresh, when it has changes, or when
-// no transcript was recorded.
+// worktree whose record is older than the grace goes once its session's
+// transcript is gone or idle past the grace. It stays while the transcript is
+// fresh, when it has changes, when no transcript was recorded, and when the
+// record itself is younger than the grace, since a transcript Claude Code
+// hasn't written yet looks exactly like a gone one.
 func TestSweepHookWorktrees(t *testing.T) {
 	f := newCreateFlowFixture(t)
 	resetSessionCreateFlags(t)
@@ -237,8 +254,13 @@ func TestSweepHookWorktrees(t *testing.T) {
 
 	unknown := createAgentWorktree(t, f, "a5555555555555555", "")
 
-	// The fixture's instance is its own root; sweep from a workspace whose
-	// only instance it is.
+	for _, st := range []worktree.SessionLifecycleState{gone, idle, fresh, changed, unknown} {
+		backdate(t, f, st, 2*time.Hour)
+	}
+	young := createAgentWorktree(t, f, "a6666666666666666", filepath.Join(dir, "not-written-yet.jsonl"))
+
+	// The fixture's root is the instance itself, so the sweep gets it as its
+	// one instance.
 	var stderr bytes.Buffer
 	n := sweepHookWorktreesIn([]string{f.root}, time.Now(), &stderr)
 	if n != 2 {
@@ -249,6 +271,31 @@ func TestSweepHookWorktrees(t *testing.T) {
 	assertKept(t, f, fresh)
 	assertKept(t, f, changed)
 	assertKept(t, f, unknown)
+	assertKept(t, f, young)
+}
+
+// commitGitignore commits a .gitignore to the fixture repo, so worktrees made
+// afterwards start from a commit that has it.
+func commitGitignore(t *testing.T, f *createFlowFixture, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(f.repoPath, ".gitignore"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, f.repoPath, "add", ".gitignore")
+	gitIn(t, f.repoPath, "commit", "-m", "ignore")
+}
+
+// backdate moves a session record's creation time into the past.
+func backdate(t *testing.T, f *createFlowFixture, st worktree.SessionLifecycleState, age time.Duration) {
+	t.Helper()
+	got, err := worktree.ReadSessionLifecycleState(f.sessionsDir, st.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got.CreationTime = time.Now().Add(-age).UTC().Format(time.RFC3339)
+	if err := worktree.WriteSessionLifecycleState(f.sessionsDir, got); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func writeFile(t *testing.T, path string) {

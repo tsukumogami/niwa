@@ -389,8 +389,9 @@ const (
 	worktreeRemoveEvent = "WorktreeRemove"
 
 	// subagentStopEvent runs the same from-hook command when a subagent
-	// finishes; subagentStopTimeoutSeconds bounds its teardown, and an expired
-	// SubagentStop hook doesn't block the subagent.
+	// finishes. subagentStopTimeoutSeconds bounds its teardown (a few git
+	// commands and a `git worktree remove`) well under Claude Code's
+	// 600-second default; a timed-out hook is a non-blocking error.
 	subagentStopEvent          = "SubagentStop"
 	subagentStopTimeoutSeconds = 60
 

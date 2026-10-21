@@ -103,6 +103,40 @@ func TestBuildSettingsDoc_WorktreeGuardKeepsOtherBashEntries(t *testing.T) {
 	}
 }
 
+// TestBuildSettingsDoc_SubagentStopKeepsOtherEntries checks niwa's SubagentStop
+// entry is appended beside a workspace's own SubagentStop hook rather than
+// replacing it.
+func TestBuildSettingsDoc_SubagentStopKeepsOtherEntries(t *testing.T) {
+	doc, err := buildSettingsDoc(BuildSettingsConfig{
+		InstalledHooks: map[string][]InstalledHookEntry{
+			"subagent_stop": {{Paths: []string{"/abs/notify.sh"}}},
+		},
+		UseAbsolutePaths:   true,
+		WorktreeDelegation: &WorktreeDelegation{Supported: true, NiwaPath: "/abs/niwa"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks, _ := doc["hooks"].(map[string]any)
+	entries, _ := hooks[subagentStopEvent].([]map[string]any)
+	var commands []string
+	for _, e := range entries {
+		switch hs := e["hooks"].(type) {
+		case []map[string]string:
+			for _, h := range hs {
+				commands = append(commands, h["command"])
+			}
+		case []map[string]any:
+			for _, h := range hs {
+				commands = append(commands, h["command"].(string))
+			}
+		}
+	}
+	if len(commands) != 2 || commands[0] != "/abs/notify.sh" || !strings.HasSuffix(commands[1], "worktree from-hook") {
+		t.Errorf("SubagentStop commands = %q, want the workspace's hook then niwa's", commands)
+	}
+}
+
 // TestRootDocuments_CarryTheGuard checks the instance root and workspace root
 // get the guard and a repo's settings never do.
 func TestRootDocuments_CarryTheGuard(t *testing.T) {
