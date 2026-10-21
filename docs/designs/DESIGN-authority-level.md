@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 problem: |
   `niwa dispatch` has no notion of how much a dispatched session may decide.
   The PRD asks for an ordered authority level set in the workspace config,
@@ -41,7 +41,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
