@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/BurntSushi/toml"
+	"github.com/tsukumogami/niwa/internal/authority"
 )
 
 // GlobalConfig is the top-level structure parsed from ~/.config/niwa/config.toml.
@@ -142,6 +143,19 @@ type GlobalSettings struct {
 	// validation boundary (ParseDispatchPermissionMode) via the accessor of the
 	// same name. "" (the default) means no machine-wide preference.
 	DispatchPermissionMode string `toml:"dispatch_permission_mode,omitempty"`
+	// AuthorityLevel is the machine's authority-level ceiling for sessions
+	// `niwa dispatch` launches, written by `niwa config set authority-level`
+	// and removed by `niwa config unset authority-level`. It only ever
+	// narrows: the level a dispatch runs at is the narrowest of the workspace
+	// level, this value and the --authority flag, so a machine owner can make
+	// their own dispatches stricter but cannot loosen a team's rule about who
+	// decides. That is deliberately not DispatchPermissionMode's polarity,
+	// where the machine outranks the workspace in both directions.
+	//
+	// It is stored raw, like DispatchPermissionMode, and goes through the one
+	// validation boundary (authority.Parse) via the accessor of the same name
+	// on GlobalConfig. "" (the default) means no machine ceiling.
+	AuthorityLevel string `toml:"authority_level,omitempty"`
 }
 
 // DispatchPermissionModes is the closed set of values
@@ -181,6 +195,18 @@ func (g *GlobalConfig) DispatchPermissionMode() (string, error) {
 		return "", nil
 	}
 	return ParseDispatchPermissionMode(g.Global.DispatchPermissionMode)
+}
+
+// AuthorityLevel returns the validated machine authority-level ceiling from
+// ~/.config/niwa/config.toml, or nil when the file, the section, or the key
+// is absent or blank. A value outside the three level names is an
+// *InvalidAuthorityLevelError, so callers can fail closed rather than treat a
+// broken ceiling as no ceiling. A nil receiver is unset.
+func (g *GlobalConfig) AuthorityLevel() (*authority.Level, error) {
+	if g == nil {
+		return nil, nil
+	}
+	return parseAuthorityLevel("global", g.Global.AuthorityLevel)
 }
 
 // DefaultDispatchHarness returns the machine-wide default dispatch harness

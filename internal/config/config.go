@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/tsukumogami/niwa/internal/authority"
 )
 
 // NamePattern matches names that contain only alphanumerics, dots,
@@ -435,6 +436,15 @@ type WorkspaceMeta struct {
 	// would put it inside a table overlays do merge into, and the guarantee
 	// would then rest on a check someone could later forget.
 	StrictSecrets *bool `toml:"strict_secrets,omitempty"`
+	// AuthorityLevel is how much the workspace's dispatched sessions may
+	// decide on their own: "autonomous", "supervised" or "strict". Blank means
+	// the workspace contributes nothing and the autonomous default applies.
+	// It is stored raw and checked by validate() through authority.Parse, the
+	// one boundary every authority setting goes through, so an invalid value
+	// fails the load instead of quietly falling back to the widest level. Like
+	// StrictSecrets it lives on [workspace], which the overlay merge never
+	// assigns, so only the base config can declare it.
+	AuthorityLevel string `toml:"authority_level,omitempty"`
 }
 
 // ResolveStrictSecrets decides whether a run fails on a shortfall, from the
@@ -457,6 +467,45 @@ func ResolveStrictSecrets(setting *bool, flagChanged, flagValue bool) bool {
 		return *setting
 	}
 	return false
+}
+
+// InvalidAuthorityLevelError reports an authority_level value outside the
+// three level names, in the workspace config or the personal niwa config. It
+// is a type rather than a plain error so a caller that has to refuse on it,
+// such as dispatch, can recognize it with errors.As however far it was
+// wrapped.
+type InvalidAuthorityLevelError struct {
+	// Table is the TOML table that holds the key: "workspace" or "global".
+	Table string
+	// Value is the offending value with surrounding whitespace trimmed.
+	Value string
+}
+
+func (e *InvalidAuthorityLevelError) Error() string {
+	return fmt.Sprintf("invalid [%s] authority_level %q; accepted values are %s",
+		e.Table, e.Value, strings.Join(authority.Names(), ", "))
+}
+
+// parseAuthorityLevel runs raw through authority.Parse and turns a rejection
+// into an *InvalidAuthorityLevelError naming the table the key sits in, so
+// the message says which file to fix.
+func parseAuthorityLevel(table, raw string) (*authority.Level, error) {
+	l, err := authority.Parse(raw)
+	if err != nil {
+		return nil, &InvalidAuthorityLevelError{Table: table, Value: strings.TrimSpace(raw)}
+	}
+	return l, nil
+}
+
+// AuthorityLevel returns the workspace's authority level, or nil when the key
+// is absent or blank. A config that came through Parse has already been
+// checked, so the error only fires for one built in memory with a bad value.
+// A nil receiver is unset.
+func (c *WorkspaceConfig) AuthorityLevel() (*authority.Level, error) {
+	if c == nil {
+		return nil, nil
+	}
+	return parseAuthorityLevel("workspace", c.Workspace.AuthorityLevel)
 }
 
 // ParseResult holds the parsed config and any non-fatal warnings.
@@ -783,6 +832,10 @@ func validate(cfg *WorkspaceConfig) error {
 
 	if !NamePattern.MatchString(cfg.Workspace.Name) {
 		return fmt.Errorf("workspace.name %q: must match [a-zA-Z0-9._-]+", cfg.Workspace.Name)
+	}
+
+	if _, err := parseAuthorityLevel("workspace", cfg.Workspace.AuthorityLevel); err != nil {
+		return err
 	}
 
 	for _, s := range cfg.Sources {
