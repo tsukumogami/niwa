@@ -114,6 +114,16 @@ func Execute() {
 			}
 			os.Exit(oce.Code)
 		}
+		// `niwa authority decide` answers with its exit code: 3 when the
+		// point is someone else's, 2 on a usage error. Exit 3 carries no
+		// message, so only the answer's five lines reach the caller.
+		var aee *authorityExitError
+		if errors.As(err, &aee) {
+			if aee.msg != "" {
+				fmt.Fprintln(os.Stderr, aee.msg)
+			}
+			os.Exit(aee.code)
+		}
 		// A dispatch a signal stopped has run its failure path by the time
 		// its error gets here; niwa then ends by that signal, as it did
 		// before dispatch handled it.

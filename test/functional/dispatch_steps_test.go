@@ -41,7 +41,10 @@ var dispatchInstanceNameRe = regexp.MustCompile(`\+[a-z0-9_]*-[0-9a-f]{8}$`)
 //     instead of using the pinned one, so several concurrent launches produce
 //     several distinct sessions (see dispatchFakeClaudeMintedSession);
 //   - "launch-fail": --bg exits non-zero, writing nothing (the induced launch
-//     failure that must roll the instance back).
+//     failure that must roll the instance back);
+//   - "decide": as "ok", and the agent also reaches a merge decision: it runs
+//     `niwa authority decide merge` from its cwd, the instance, and records
+//     what it would do (see dispatchFakeClaudeDecideHook).
 //
 // Every --bg also records its OTEL_RESOURCE_ATTRIBUTES, when it has one, at
 // $HOME/dispatch-launch-otel, for the lineage scenarios.
@@ -75,6 +78,10 @@ var dispatchInstanceNameRe = regexp.MustCompile(`\+[a-z0-9_]*-[0-9a-f]{8}$`)
 // $HOME/claude-rm-argv. Any other invocation exits non-zero so a stray
 // real code path fails loudly rather than silently hitting the network.
 func dispatchFakeClaudeScript(behaviour string) string {
+	decideHook := ""
+	if behaviour == dispatchFakeClaudeDecides {
+		decideHook = dispatchFakeClaudeDecideHook
+	}
 	pickSession := `  sid="${FAKE_CLAUDE_SESSION_ID:-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}"`
 	if behaviour == dispatchFakeClaudeMintedSession {
 		// A fresh id per invocation, so concurrent launches cannot collide on
@@ -111,7 +118,7 @@ func dispatchFakeClaudeScript(behaviour string) string {
   # A live process: agents reports a pid until stop, or a scenario step,
   # removes this marker.
   : > "$jobdir/running"
-  printf 'backgrounded · %s\n' "$short"
+` + decideHook + `  printf 'backgrounded · %s\n' "$short"
   exit 0`
 	if behaviour == "launch-fail" {
 		bg = `  echo "fake claude: induced launch failure" >&2

@@ -93,3 +93,69 @@ Feature: niwa dispatch: the authority level is resolved, refused and read back
     When I run "niwa list --json" from the workspace root
     Then the exit code is 0
     And the list JSON reports the dispatch instance at authority level "supervised" from "flag"
+
+  # The decision-point scenarios dispatch a fake agent that reaches a merge,
+  # runs `niwa authority decide merge` from inside its instance, and writes
+  # settled on exit 0 or waiting-for-person on exit 3. The launch runs before
+  # the session mapping exists, so the answer comes from the instance's
+  # authority record.
+
+  @critical
+  Scenario: a session dispatched in an autonomous workspace settles a merge itself
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      authority_level = "autonomous"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch that decides a merge with session "a5a5a5a5-a5a5-4a5a-8a5a-a5a5a5a5a5a5"
+    When I run "niwa dispatch merge-task --detach" from the workspace root
+    Then the exit code is 0
+    And the fake agent's merge marker reads "settled"
+    And the fake agent's decide answer contains "level=autonomous"
+    And the fake agent's decide answer contains "decider=session"
+    And the fake agent's decide answer contains "source=workspace"
+
+  @critical
+  Scenario: a session dispatched in a strict workspace waits for a person
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      authority_level = "strict"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch that decides a merge with session "a6a6a6a6-a6a6-4a6a-8a6a-a6a6a6a6a6a6"
+    When I run "niwa dispatch merge-task --detach" from the workspace root
+    Then the exit code is 0
+    And the fake agent's merge marker reads "waiting-for-person"
+    And the fake agent's decide answer contains "level=strict"
+    And the fake agent's decide answer contains "decider=person"
+    And the fake agent's decide answer contains "author_exclusion=on"
+    And the fake agent's decide answer contains "source=workspace"
+    And the fake agent's decide call printed nothing on stderr
+
+  Scenario: a session dispatched with --authority strict in an autonomous workspace waits for a person
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch that decides a merge with session "a7a7a7a7-a7a7-4a7a-8a7a-a7a7a7a7a7a7"
+    When I run "niwa dispatch merge-task --detach --authority strict" from the workspace root
+    Then the exit code is 0
+    And the fake agent's merge marker reads "waiting-for-person"
+    And the fake agent's decide answer contains "level=strict"
+    And the fake agent's decide answer contains "source=flag"
+    And the fake agent's decide call printed nothing on stderr

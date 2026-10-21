@@ -15,15 +15,12 @@ import (
 func init() {
 	rootCmd.AddCommand(authorityCmd)
 	authorityCmd.AddCommand(authorityShowCmd)
-	// The decide subcommand, which answers who settles one decision point for
-	// the calling session, registers here beside show once it exists. It
-	// reads the same configuration through loadAuthorityConfig, then the
-	// caller's dispatch record ahead of it.
+	authorityCmd.AddCommand(authorityDecideCmd)
 }
 
 var authorityCmd = &cobra.Command{
 	Use:   "authority",
-	Short: "Inspect how much dispatched sessions may decide",
+	Short: "Inspect and ask how much dispatched sessions may decide",
 	Long: `Inspect the authority level: how much a session launched by "niwa dispatch"
 may decide on its own.
 
@@ -32,7 +29,10 @@ decision point itself), supervised (the session that dispatched it decides) and
 strict (a person decides). A dispatch runs at the narrowest of the workspace's
 [workspace].authority_level (autonomous when unset), this machine's
 [global].authority_level, and "niwa dispatch --authority <level>". A flag wider
-than the other two is refused.`,
+than the other two is refused.
+
+"niwa authority show" prints the configured levels; "niwa authority decide
+<point>" answers who settles one decision point for the calling session.`,
 }
 
 var authorityShowCmd = &cobra.Command{
