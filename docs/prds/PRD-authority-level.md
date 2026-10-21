@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: In Progress
 problem: |
   A session `niwa dispatch` launches settles every decision point it reaches
   the same way in every workspace, because nothing tells it how much it may
@@ -22,7 +22,7 @@ absorbed:
 
 ## Status
 
-Accepted
+In Progress
 
 Absorbed [BRIEF-authority-level](docs/briefs/BRIEF-authority-level.md); carried in Absorbed Brief.
 
@@ -166,7 +166,10 @@ resolved answer from.
   empty or whitespace-only value means not set. An invalid workspace value is
   a configuration error: workspace config loading fails with a message naming
   the key, the value and the three accepted names, so `niwa dispatch`,
-  `niwa apply` and `niwa authority show` each exit non-zero on it. An invalid
+  `niwa apply` and `niwa authority show` each exit non-zero on it. A
+  workspace config that can't be loaded for any reason refuses the dispatch
+  before any instance is created, so the level never falls back to the
+  default because the file was unreadable. An invalid
   machine value or `--authority` value refuses the dispatch with exit code 1
   before any instance is created, with a message naming the setting and the
   accepted names. `niwa authority show` and `niwa authority decide` exit 1 on
@@ -213,14 +216,23 @@ resolved answer from.
   `source=<source>`. It exits 0 when the decider is `session` and 3 otherwise.
   It exits 2 on a usage error (missing or invalid point name), checked first,
   and 1 on a configuration error or outside a workspace.
-- **R15. Whose level it uses.** The calling session is identified by
-  `CLAUDE_CODE_SESSION_ID`, the variable niwa's dispatch lineage already reads,
-  or by `--session <id>` when given. When a session mapping in the workspace
-  has that session id and carries `authority_level`, the answer uses its level
-  and source; if several do, the one created most recently wins. Otherwise (no id, no matching mapping, or a mapping written
-  before this feature, including after reap) it uses the level a dispatch with
-  no flag would resolve to, and the source carries the suffix
-  `(no dispatch record)`, for example `source=workspace (no dispatch record)`.
+- **R15. Whose level it uses.** The answer uses the first of these that
+  exists:
+  1. The session mapping for the calling session, identified by `--session
+     <id>` when given and otherwise by `CLAUDE_CODE_SESSION_ID` (the variable
+     niwa's dispatch lineage already reads), when it carries
+     `authority_level`. Mappings are stored one per session id.
+  2. The authority record of the dispatched instance containing the working
+     directory. Dispatch writes it before it launches the worker, so a
+     session that asks before its mapping exists, or an agent that sets no
+     session id, still gets its dispatch's level.
+  3. The level a dispatch with no flag would resolve to, with the source
+     suffix `(no dispatch record)`, for example
+     `source=workspace (no dispatch record)`. This covers sessions niwa didn't
+     dispatch and instances already reaped.
+
+  A record that holds a value outside the three levels is a configuration
+  error (exit 1), never a fallback.
 - **R16. Decision point names.** A decision point name matches
   `^[a-z][a-z0-9-]{0,63}$`. Any matching name is accepted; until an
   organization declaration names its points, every name resolves by R2.
@@ -327,15 +339,21 @@ The decision-point question
   `decider=coordinator`, `author_exclusion=on` and exits 3.
 - [ ] `--session <id>` selects the mapping in place of the environment
   variable.
-- [ ] With no session id, or an id with no mapping, or a mapping without
-  `authority_level`, in a `strict` workspace, it prints `level=strict` and
+- [ ] With an `autonomous` workspace and a dispatch run with `--authority
+  strict`, `niwa authority decide merge` run inside that instance with no
+  session id, before any session mapping exists, prints `level=strict` and
+  `source=flag` and exits 3.
+- [ ] Run from the workspace root with no session id, or with an id that has
+  no mapping, in a `strict` workspace, it prints `level=strict` and
   `source=workspace (no dispatch record)` and exits 3.
+- [ ] A session mapping or instance record holding `authority_level: bogus`
+  makes `niwa authority decide merge` exit 1.
+- [ ] A workspace config with a TOML syntax error refuses `niwa dispatch`
+  with exit 1 before any instance is created.
 - [ ] Point names: `a`, `merge-2` and a 64-character name are accepted;
   `Merge_Now`, `2merge`, `-merge`, an empty name and a 65-character name each
   exit 2. No point argument exits 2. Outside a workspace, or with an invalid
   workspace or machine value, it exits 1.
-- [ ] Two mappings with the same session id, recording `strict` (older) and
-  `supervised` (newer): the answer uses `supervised`.
 - [ ] With 100 session mappings in a test workspace, `niwa authority decide
   merge` completes in under one second in CI, and the command's code path
   makes no network call (no network client is constructed).
@@ -391,9 +409,12 @@ End to end
   own instance's files; within one operator's workspace that's no escalation,
   since anything running as the operator already holds their rights. Making
   the strict end hold against the session itself is the later locking work.
-- A session's level is found by its id from the dispatch record, which is
-  deleted at reap. After reap only the telemetry attribute remains, and a
-  question asked then falls back under R15.
+- A session's dispatch record and instance record are deleted at reap. After
+  reap only the telemetry attribute remains, and a question asked then falls
+  back under R15. Telemetry is best-effort and is no audit log.
+- A caller that treats only exit 0 as permission is safe under every
+  fallback; one that parses the output should read `source` before trusting a
+  `(no dispatch record)` answer.
 - `coordinator` names a role, not a session. A session dispatched straight
   from a person's own session hands its points to that session, which in
   practice means the person; finding and reaching it is the routing work.
