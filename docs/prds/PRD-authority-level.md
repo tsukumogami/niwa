@@ -14,7 +14,8 @@ goals: |
   excluded, and gets an answer that is "settle it yourself" at the autonomous
   end and "a person" at the strict end. Workspaces that set nothing behave
   exactly as they do today.
-upstream: docs/briefs/BRIEF-authority-level.md
+absorbed:
+  - docs/briefs/BRIEF-authority-level.md
 ---
 
 # PRD: authority-level
@@ -22,6 +23,29 @@ upstream: docs/briefs/BRIEF-authority-level.md
 ## Status
 
 Accepted
+
+Absorbed [BRIEF-authority-level](docs/briefs/BRIEF-authority-level.md); carried in Absorbed Brief.
+
+## Absorbed Brief
+
+The same toolkit serves a solo maintainer who lets agents finish their own
+work and a team that wants a person at every gate. Both run the same decision
+points; what differs is who may decide. niwa launches every delegated
+session, so niwa is where that answer has to be set and recorded. The brief
+framed the gap as an operator having no way to say how much a dispatched
+session may decide: every worker settles every point the same way, the one
+per-machine knob governs only tool-call approval, and nothing records or
+narrows what a dispatch was allowed.
+
+The outcome it set: an operator sets the workspace's authority once, narrows
+it for one dispatch, and reads back what each dispatch resolved to; a session
+at a decision point learns whether it settles the point or hands it on; a
+workspace that sets nothing keeps today's behavior, and nothing added is
+paperwork for its own sake. Its four journeys (a solo maintainer working
+unattended, a team lead setting the strict end in shared config, an operator
+narrowing one risky dispatch, and a later enforcement feature reading the
+answer) are the user stories below, and its scope boundary is the
+requirements and Out of Scope below.
 
 ## Problem Statement
 
