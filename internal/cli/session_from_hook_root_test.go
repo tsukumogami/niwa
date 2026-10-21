@@ -155,6 +155,8 @@ func TestFromHookCreate_BareNameAtMultiRepoRoot(t *testing.T) {
 		"cwd":             f.root,
 		"worktree_path":   printed,
 	})
+	// Clear the fixture's NIWA_INSTANCE_ROOT so remove has to find the
+	// instance from the launch directory, as a root session's hook does.
 	t.Setenv("NIWA_INSTANCE_ROOT", "")
 	if _, errOut, err := runFromHook(t, f.root, removeJSON); err != nil {
 		t.Fatalf("remove must exit 0: %v\nstderr:\n%s", err, errOut)

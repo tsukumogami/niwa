@@ -155,6 +155,12 @@ func TestResolveHookTarget_BareNameDefault(t *testing.T) {
 			t.Errorf("cwd %s name %q: got %+v (%v), want repo %s not Defaulted", tc.cwd, tc.name, got, err, tc.repo)
 		}
 	}
+
+	// The refusal's example names the same repo the default picks.
+	_, err = ResolveHookTarget(root, root, "nosuch/x")
+	if err == nil || !strings.Contains(err.Error(), "for example zeta/<slug>") {
+		t.Errorf("refusal %v should give zeta/<slug> as its example", err)
+	}
 }
 
 // TestResolveHookTarget_WorktreeRepoEnv covers NIWA_WORKTREE_REPO: it picks

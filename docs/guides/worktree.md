@@ -387,7 +387,7 @@ rule that applies:
 A name with a `/` that none of these rules resolved, such as
 `nosuchrepo/fix-x`, fails here: the tool call returns an error starting
 `no repo selected` that lists the instance's repos and gives an example using
-the alphabetically first one:
+the repo a bare name would land in (rule 7 below):
 
 ```text
 niwa: error: no repo selected; name the worktree <repo>/<slug> or <group>/<repo>/<slug>, for example koto/<slug>. Repos in this instance: koto, niwa
@@ -411,8 +411,9 @@ A name with an empty slug, such as `niwa/`, is refused with `no repo selected`
 whatever the other rules say. When the
 prefix and the current directory point at different repos, the prefix wins,
 since it's what the agent asked for at the moment of the call. A name whose
-leading segments match no repo has no prefix at all, and its whole text is the
-slug.
+leading segments match no repo has no prefix at all: when the current
+directory picks the repo (rule 3 or 5), its whole text is the slug, and
+otherwise it's refused as above.
 
 ### Which instance a hook acts on
 

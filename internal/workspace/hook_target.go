@@ -24,8 +24,8 @@ type HookTarget struct {
 }
 
 // WorktreeRepoEnv names the environment variable that picks the repo for a
-// worktree name with no repo prefix, sent from a directory in no repo. It is
-// read from the hook process's environment, which Claude Code inherits from
+// bare worktree name (no `/`) that no earlier rule of ResolveHookTarget
+// resolved, such as one sent from the instance root. It is read from the hook process's environment, which Claude Code inherits from
 // the session's launch, so an agent's shell `export` can't change it.
 const WorktreeRepoEnv = "NIWA_WORKTREE_REPO"
 
@@ -368,14 +368,15 @@ func missingClone(instanceRoot, name string) bool {
 }
 
 // noRepoSelectedError is the refusal for a request that names no repo the
-// resolver can use. It lists the repos and shows the form that works.
+// resolver can use. It lists the repos and shows the form that works, with
+// the repo a bare name would default to as the example, so the two agree.
 func noRepoSelectedError(repos []hookRepo) error {
 	if len(repos) == 0 {
 		return errors.New("no repo selected: this instance has no cloned repos")
 	}
 	names := hookRepoNames(repos)
 	return fmt.Errorf("no repo selected; name the worktree <repo>/<slug> or <group>/<repo>/<slug>, for example %s/<slug>. Repos in this instance: %s",
-		repos[0].name, strings.Join(names, ", "))
+		defaultHookRepo(repos).name, strings.Join(names, ", "))
 }
 
 // HookScope is what the worktree guard needs to know about where a session
