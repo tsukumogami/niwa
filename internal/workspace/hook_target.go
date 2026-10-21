@@ -19,7 +19,7 @@ type HookTarget struct {
 	Slug         string
 	// Defaulted is set when nothing in the request or the environment named
 	// the repo and the resolver fell back to the instance's first repo. The
-	// caller tells the agent which repo it got and how to choose another.
+	// caller reports on stderr which repo it got and how to choose another.
 	Defaulted bool
 }
 
@@ -279,9 +279,12 @@ func ResolveHookTarget(anchor, cwd, name string) (HookTarget, error) {
 }
 
 // worktreeRepoFromCwd returns the repo of the instance's live niwa worktree
-// whose directory contains cwd. A worktree lives under .niwa/worktrees, in
-// no clone, so the clone match never sees it. Only a repo still cloned in
-// the instance counts; the deepest matching worktree wins.
+// whose directory contains cwd. A root session that entered a niwa worktree
+// has its cwd there, so the worktrees it asks for next, such as an Agent
+// tool's isolated subagent, belong with the same repo rather than the
+// default. A worktree lives under .niwa/worktrees, in no clone, so the clone
+// match never sees it. Only a repo still cloned in the instance counts; the
+// deepest matching worktree wins.
 func worktreeRepoFromCwd(instanceRoot, cwd string, repos []hookRepo) (string, bool) {
 	canonCwd, err := canonicalize(cwd)
 	if err != nil {
