@@ -451,13 +451,15 @@ func findAgentWorktreeSession(instanceRoot, cwd, purpose string) (worktree.Sessi
 	return worktree.SessionLifecycleState{}, false
 }
 
-// recordIgnoredBaseline stores the git-ignored files the worktree holds now
-// that niwa has finished setting it up (its materialized content and any
-// setup-script output), so automatic teardown can tell them from files the
-// agent leaves behind later. On any failure the record keeps no baseline,
-// which only means the worktree is never removed automatically.
+// recordIgnoredBaseline fingerprints the git-ignored files the worktree holds
+// now that niwa has finished setting it up (its materialized content and any
+// setup-script output), so automatic teardown can tell them, and their
+// contents, from what the agent changes later. It runs before the hook prints
+// the path, so the agent hasn't touched the worktree yet. On any failure the
+// record keeps no fingerprints, which only means the worktree is never
+// removed automatically.
 func recordIgnoredBaseline(stderr io.Writer, instanceRoot, sessionID, worktreePath string) {
-	ignored, err := worktree.ListIgnoredFiles(context.Background(), worktreePath, worktree.StdGitInvoker{})
+	fingerprints, err := worktree.FingerprintIgnoredFiles(context.Background(), worktreePath, worktree.StdGitInvoker{})
 	if err != nil {
 		fmt.Fprintf(stderr, "niwa: warning: %v; the worktree won't be removed automatically\n", err)
 		return
@@ -465,7 +467,7 @@ func recordIgnoredBaseline(stderr io.Writer, instanceRoot, sessionID, worktreePa
 	sessionsDir := filepathJoinSessions(instanceRoot)
 	state, err := worktree.ReadSessionLifecycleState(sessionsDir, sessionID)
 	if err == nil {
-		state.IgnoredBaseline = &ignored
+		state.IgnoredFingerprints = &fingerprints
 		err = worktree.WriteSessionLifecycleState(sessionsDir, state)
 	}
 	if err != nil {

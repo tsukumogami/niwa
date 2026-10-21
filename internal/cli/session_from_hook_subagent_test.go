@@ -3,9 +3,11 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -119,14 +121,119 @@ func TestFromHookCreate_RecordsTeardownFields(t *testing.T) {
 	if st.ClaudeTranscriptPath != transcript {
 		t.Errorf("ClaudeTranscriptPath = %q, want %q", st.ClaudeTranscriptPath, transcript)
 	}
-	// The baseline is what niwa left ignored after setting the worktree up.
-	want, err := worktree.ListIgnoredFiles(context.Background(), st.WorktreePath, worktree.StdGitInvoker{})
+	// The fingerprints are of what niwa left ignored after setting the
+	// worktree up.
+	want, err := worktree.FingerprintIgnoredFiles(context.Background(), st.WorktreePath, worktree.StdGitInvoker{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.IgnoredBaseline == nil || strings.Join(*st.IgnoredBaseline, ",") != strings.Join(want, ",") {
-		t.Errorf("IgnoredBaseline = %v, want %v", st.IgnoredBaseline, want)
+	if st.IgnoredFingerprints == nil || !reflect.DeepEqual(st.IgnoredFingerprints.Files, want.Files) {
+		t.Errorf("IgnoredFingerprints = %+v, want %+v", st.IgnoredFingerprints, want)
 	}
+}
+
+// seedIgnoredFile gives the worktree an ignored file as if niwa's setup had
+// written it, by writing it and recording the fingerprints again the way the
+// hook does at the end of setup.
+func seedIgnoredFile(t *testing.T, f *createFlowFixture, st worktree.SessionLifecycleState, name, content string) worktree.SessionLifecycleState {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(st.WorktreePath, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recordIgnoredBaseline(io.Discard, f.root, st.SessionID, st.WorktreePath)
+	got, err := worktree.ReadSessionLifecycleState(f.sessionsDir, st.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IgnoredFingerprints == nil || !strings.HasPrefix(got.IgnoredFingerprints.Files[name], "sha256:") {
+		t.Fatalf("seeded file %s has no fingerprint: %+v", name, got.IgnoredFingerprints)
+	}
+	return got
+}
+
+// TestFromHookSubagentStop_PreExistingIgnoredFiles covers an ignored file that
+// was there when niwa set the worktree up: an edit or a deletion keeps the
+// worktree, and the notice says which file; rewriting it with the same bytes
+// is no change, so the worktree goes.
+func TestFromHookSubagentStop_PreExistingIgnoredFiles(t *testing.T) {
+	cases := []struct {
+		name    string
+		change  func(t *testing.T, path string)
+		removed bool
+		reason  string
+	}{
+		{"edited", func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte(`{"permissions":{"allow":["Bash"]}}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, false, "has changed: settings.local.json"},
+		{"deleted", func(t *testing.T, path string) {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+		}, false, "has been deleted: settings.local.json"},
+		{"rewritten with the same bytes", func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte(`{}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			later := time.Now().Add(time.Hour)
+			if err := os.Chtimes(path, later, later); err != nil {
+				t.Fatal(err)
+			}
+		}, true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCreateFlowFixture(t)
+			resetSessionCreateFlags(t)
+			defer resetSessionCreateFlags(t)
+
+			st := createAgentWorktree(t, f, testAgentID, "")
+			st = seedIgnoredFile(t, f, st, "settings.local.json", `{}`)
+			tc.change(t, filepath.Join(st.WorktreePath, "settings.local.json"))
+			errOut := subagentStop(t, f, testAgentID, st.WorktreePath)
+			if tc.removed {
+				assertRemoved(t, f, st)
+				return
+			}
+			assertKept(t, f, st)
+			if !strings.Contains(errOut, "keeping worktree") || !strings.Contains(errOut, tc.reason) {
+				t.Errorf("stderr should say it kept the worktree because %q:\n%s", tc.reason, errOut)
+			}
+		})
+	}
+}
+
+// TestAutomaticTeardown_RequiresFingerprints checks that a record without
+// ignored-file fingerprints, as one written by an earlier niwa is, is never
+// removed by either path, unchanged worktree or not.
+func TestAutomaticTeardown_RequiresFingerprints(t *testing.T) {
+	f := newCreateFlowFixture(t)
+	resetSessionCreateFlags(t)
+	defer resetSessionCreateFlags(t)
+	t.Setenv("NIWA_REAP_IDLE_GRACE", "1h")
+
+	st := createAgentWorktree(t, f, testAgentID, filepath.Join(t.TempDir(), "gone.jsonl"))
+	got, err := worktree.ReadSessionLifecycleState(f.sessionsDir, st.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got.IgnoredFingerprints = nil
+	if err := worktree.WriteSessionLifecycleState(f.sessionsDir, got); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, f, st, 2*time.Hour)
+
+	errOut := subagentStop(t, f, testAgentID, st.WorktreePath)
+	assertKept(t, f, st)
+	if !strings.Contains(errOut, "no fingerprints of its ignored files") {
+		t.Errorf("stderr should name the missing fingerprints:\n%s", errOut)
+	}
+	var stderr bytes.Buffer
+	if n := sweepHookWorktreesIn([]string{f.root}, time.Now(), &stderr); n != 0 {
+		t.Errorf("sweep removed %d worktrees without fingerprints", n)
+	}
+	assertKept(t, f, st)
 }
 
 // TestFromHookSubagentStop_RemovesUnchangedWorktree covers the case the hook

@@ -296,10 +296,12 @@ That teardown is stricter than the clean check above. The worktree is removed
 only when it holds nothing beyond what it was created with:
 
 - `git status` shows nothing, untracked files included;
-- every git-ignored file in it was already there when niwa finished setting it
-  up, which niwa records at create time. Removing a worktree deletes its
-  ignored files, so build output, a `.env.local` or notes a subagent left under
-  any ignore pattern, niwa's own `*.local*` included, keep it;
+- its git-ignored files are exactly the ones there when niwa finished setting
+  it up, with the same contents. niwa records a sha256 of each at create time.
+  Removing a worktree deletes its ignored files, so an ignored file added since
+  (build output, a `.env.local`, notes, under any ignore pattern, niwa's own
+  `*.local*` included), deleted since, or edited since (a `settings.local.json`,
+  a copied env file) keeps it;
 - its HEAD and its `session/<id>` branch still point at the commit it started
   from, so nothing was committed and nothing was checked out;
 - no stash entry was made from its branch.

@@ -66,12 +66,13 @@ type SessionLifecycleState struct {
 	// asked the hook for this worktree. The reap sweep reads its modification
 	// time to tell whether that session has ended.
 	ClaudeTranscriptPath string `json:"claude_transcript_path,omitempty"`
-	// IgnoredBaseline lists the git-ignored files the worktree held once niwa
-	// finished setting it up (its own materialized files). Automatic teardown
-	// treats any other ignored file as a change. nil means no baseline was
-	// recorded, which never qualifies; an empty list is a recorded baseline
-	// with nothing in it, hence the pointer.
-	IgnoredBaseline *[]string `json:"ignored_baseline,omitempty"`
+	// IgnoredFingerprints records the git-ignored files the worktree held once
+	// niwa finished setting it up (its own materialized files and any setup
+	// output), each with a fingerprint of its contents. Automatic teardown
+	// treats any ignored file added, deleted or changed since as a change. nil
+	// means none was recorded, which never qualifies; a baseline with no files
+	// is still a recorded one, hence the pointer.
+	IgnoredFingerprints *IgnoredFingerprints `json:"ignored_fingerprints,omitempty"`
 	// BranchWarning is set in the destroy response when git branch -d fails
 	// (unmerged commits remain). Never written to disk; only present in the
 	// CLI response for that call. The json tag is intentionally omitted
@@ -85,6 +86,14 @@ type SessionLifecycleState struct {
 	// key (not "null") when nil, matching the "absent, not null" contract
 	// documented in the PRD.
 	Attach *AttachState `json:"attach,omitempty"`
+}
+
+// IgnoredFingerprints maps each git-ignored file in a worktree, relative to
+// it, to a fingerprint of what it is: "sha256:<hex>" of a regular file's
+// contents, "symlink:<hex>" of a link's target, or "mode:<mode>" for anything
+// else. See WorktreeUnchanged.
+type IgnoredFingerprints struct {
+	Files map[string]string `json:"files"`
 }
 
 // WriteSessionLifecycleState atomically persists state to
