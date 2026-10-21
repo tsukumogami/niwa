@@ -35,12 +35,17 @@ func init() {
 //     which is correct: a partial/wrong worktree is worse than none).
 //   - WorktreeRemove: non-blocking, ALWAYS exit 0 (errors are logged to
 //     stderr but never fail teardown).
+//   - SubagentStop: ALWAYS exit 0 with nothing on stdout. It removes the
+//     finished Agent-tool subagent's worktree when it is unchanged; exit 2
+//     would send the subagent back to work instead.
 var sessionFromHookCmd = &cobra.Command{
 	Use:    "from-hook",
 	Short:  "Internal: dispatch a Claude Code worktree hook (reads JSON on stdin)",
 	Hidden: true,
 	Long: `Internal entry point invoked directly by Claude Code's
-WorktreeCreate/WorktreeRemove hooks.
+WorktreeCreate, WorktreeRemove and SubagentStop hooks. On SubagentStop it
+removes the worktree it made for that Agent-tool subagent when the subagent
+left it unchanged.
 
 Reads the Claude hook JSON payload on stdin and dispatches on
 hook_event_name. Not intended for direct human use; niwa apply writes the
@@ -66,17 +71,27 @@ first repo by group and name.`,
 // WorktreeRemove stdin schema was NOT exercised by the spike (design flagged
 // this as a plan-time risk). We accept `worktree_path` as the primary carrier
 // of the worktree directory and fall back to `cwd`. See runFromHookRemove.
+//
+// SubagentStop stdin (observed with Claude Code 2.1.305): `cwd` is the
+// subagent's working directory, which for an Agent-tool subagent with
+// worktree isolation is the worktree the WorktreeCreate hook made, and
+// `agent_id` is the id Claude Code also used to name that worktree
+// (`agent-<agent_id>`). A subagent without isolation reports its parent's
+// directory, which is why the id, not the directory, picks the worktree.
 type hookPayload struct {
-	HookEventName string `json:"hook_event_name"`
-	SessionID     string `json:"session_id"`
-	Cwd           string `json:"cwd"`
-	Name          string `json:"name"`
-	WorktreePath  string `json:"worktree_path"`
+	HookEventName  string `json:"hook_event_name"`
+	SessionID      string `json:"session_id"`
+	TranscriptPath string `json:"transcript_path"`
+	Cwd            string `json:"cwd"`
+	Name           string `json:"name"`
+	WorktreePath   string `json:"worktree_path"`
+	AgentID        string `json:"agent_id"`
 }
 
 const (
 	hookEventWorktreeCreate = "WorktreeCreate"
 	hookEventWorktreeRemove = "WorktreeRemove"
+	hookEventSubagentStop   = "SubagentStop"
 )
 
 func runSessionFromHook(cmd *cobra.Command, _ []string) error {
@@ -95,6 +110,8 @@ func runSessionFromHook(cmd *cobra.Command, _ []string) error {
 		return runFromHookCreate(cmd, payload)
 	case hookEventWorktreeRemove:
 		return runFromHookRemove(cmd, payload)
+	case hookEventSubagentStop:
+		return runFromHookSubagentStop(cmd, payload)
 	default:
 		// An unrecognized event is a configuration error on the create side
 		// (we cannot know whether it should block), so fail loudly rather than
@@ -151,6 +168,10 @@ func runFromHookCreate(cmd *cobra.Command, payload hookPayload) error {
 		Repo:         repo,
 		Purpose:      purpose,
 		GitInvoker:   worktree.StdGitInvoker{},
+		// Marks the session as the hook's, which is what lets the
+		// SubagentStop hook and the reap sweep remove it later.
+		CreatedBy:            worktree.CreatedByWorktreeHook,
+		ClaudeTranscriptPath: hookTranscriptPath(payload.TranscriptPath),
 	})
 	if err != nil {
 		return fmt.Errorf("niwa: error: creating session for hook worktree: %w", err)
@@ -312,10 +333,25 @@ func runFromHookRemove(cmd *cobra.Command, payload hookPayload) error {
 		return nil
 	}
 
-	// Step 1: release the agent's own attach lock so the attach-lock guard in
-	// DestroySession does not block this teardown. The exiting agent is the
-	// lock holder, so bypassing only this guard is safe. We do NOT pass
-	// force=true (which would also bypass the dirty guard).
+	teardownHookSession(stderr, instanceRoot, sessionID, hookEventWorktreeRemove)
+	return nil
+}
+
+// teardownHookSession is the guarded teardown both WorktreeRemove and
+// SubagentStop run. It never forces past a guard and never fails: errors are
+// logged to stderr.
+//
+//  1. Release the agent's own attach lock so the attach-lock guard in
+//     DestroySession does not block this teardown. The exiting agent is the
+//     lock holder, so bypassing only this guard is safe. force=true is NOT
+//     passed, since it would also bypass the dirty guard.
+//  2. Destroy without force. The dirty guard stays armed, and an unmerged
+//     branch survives (`git branch -d`).
+//  3. A dirty rejection means real uncommitted work: log and retain rather
+//     than force-delete. The developer reclaims it with `niwa worktree
+//     destroy --force`; the session record persists, so this is a surfaced
+//     orphan, not a silent one.
+func teardownHookSession(stderr io.Writer, instanceRoot, sessionID, event string) {
 	state, readErr := worktree.ReadSessionLifecycleState(
 		filepathJoinSessions(instanceRoot), sessionID)
 	if readErr == nil && state.WorktreePath != "" {
@@ -324,27 +360,97 @@ func runFromHookRemove(cmd *cobra.Command, payload hookPayload) error {
 		}
 	}
 
-	// Step 2: guarded (non-force) destroy. The dirty guard stays armed.
-	_, err = worktree.DestroySession(context.Background(), instanceRoot, sessionID, false /* force */, worktree.StdGitInvoker{})
+	_, err := worktree.DestroySession(context.Background(), instanceRoot, sessionID, false /* force */, worktree.StdGitInvoker{})
+	if err == nil {
+		return
+	}
+	if errors.Is(err, worktree.ErrWorktreeDirty) {
+		fmt.Fprintf(stderr,
+			"niwa: notice: worktree for session %s has uncommitted changes; "+
+				"retaining it (not deleted). Reclaim it with `niwa worktree destroy %s --force` once reviewed.\n",
+			sessionID, sessionID)
+		return
+	}
+	fmt.Fprintf(stderr, "niwa: warning: reconciling session %s on %s: %v\n", sessionID, event, err)
+}
+
+// runFromHookSubagentStop removes the worktree an Agent-tool subagent ran in,
+// once it finishes, when the subagent left it unchanged. Claude Code doesn't
+// send WorktreeRemove for a worktree a WorktreeCreate hook made when that
+// worktree is a git checkout, so without this every isolated subagent leaves
+// its niwa worktree behind.
+//
+// It acts on one session only: the active session this hook created whose
+// purpose is `agent-<agent_id>` (the name Claude Code gave the worktree) and
+// whose worktree contains the payload's cwd. Matching on the id rather than
+// on cwd alone matters, because a subagent without isolation reports its
+// parent's directory, which can itself be a hook-made worktree the parent
+// session is still working in. The worktree must also be unchanged
+// (worktree.WorktreeUnchanged); a changed one is kept and said so on stderr.
+//
+// SubagentStop must never send the subagent back to work, so this always
+// exits 0: exit 2 is the code that would.
+func runFromHookSubagentStop(cmd *cobra.Command, payload hookPayload) error {
+	stderr := cmd.ErrOrStderr()
+	if payload.AgentID == "" || payload.Cwd == "" {
+		return nil
+	}
+	instanceRoot, err := workspace.ResolveHookInstance(workspace.HookAnchor(), payload.Cwd)
 	if err != nil {
-		// Step 3: a genuine dirty rejection means real uncommitted work.
-		// Log-and-retain rather than force-deleting — never silently discard
-		// the developer's work. They reclaim it with `niwa worktree destroy
-		// --force`. The session record persists, so this is a SURFACED orphan,
-		// not a silent one.
-		if errors.Is(err, worktree.ErrWorktreeDirty) {
-			fmt.Fprintf(stderr,
-				"niwa: notice: worktree for session %s has uncommitted changes; "+
-					"retaining it (not deleted). Reclaim it with `niwa worktree destroy %s --force` once reviewed.\n",
-				sessionID, sessionID)
-			return nil
-		}
-		// Any other destroy error is logged but still non-blocking.
-		fmt.Fprintf(stderr, "niwa: warning: reconciling session %s on WorktreeRemove: %v\n", sessionID, err)
+		// Not in a niwa instance: no worktree of ours to look at.
+		return nil
+	}
+	if state, stateErr := workspace.LoadState(instanceRoot); stateErr == nil && state.NoWorktreeDelegation {
 		return nil
 	}
 
+	state, ok := findAgentWorktreeSession(instanceRoot, payload.Cwd, "agent-"+payload.AgentID)
+	if !ok {
+		return nil
+	}
+	unchanged, reason, err := worktree.WorktreeUnchanged(context.Background(), state, worktree.StdGitInvoker{})
+	if err != nil {
+		fmt.Fprintf(stderr, "niwa: warning: keeping worktree %s: could not check it for changes: %v\n", state.WorktreePath, err)
+		return nil
+	}
+	if !unchanged {
+		fmt.Fprintf(stderr, "niwa: notice: keeping worktree %s because %s. Remove it with `niwa worktree destroy %s` when it's no longer needed.\n",
+			state.WorktreePath, reason, state.SessionID)
+		return nil
+	}
+	teardownHookSession(stderr, instanceRoot, state.SessionID, hookEventSubagentStop)
 	return nil
+}
+
+// findAgentWorktreeSession returns the active, hook-made session with the
+// given purpose whose worktree contains cwd.
+func findAgentWorktreeSession(instanceRoot, cwd, purpose string) (worktree.SessionLifecycleState, bool) {
+	states, err := worktree.ListSessionLifecycleStates(filepathJoinSessions(instanceRoot))
+	if err != nil {
+		return worktree.SessionLifecycleState{}, false
+	}
+	canonCwd := canonicalizeWorktreePath(cwd)
+	for _, st := range states {
+		if st.Status != worktree.SessionStatusActive || st.CreatedBy != worktree.CreatedByWorktreeHook ||
+			st.Purpose != purpose || st.WorktreePath == "" {
+			continue
+		}
+		wt := canonicalizeWorktreePath(st.WorktreePath)
+		if canonCwd == wt || strings.HasPrefix(canonCwd, wt+string(filepath.Separator)) {
+			return st, true
+		}
+	}
+	return worktree.SessionLifecycleState{}, false
+}
+
+// hookTranscriptPath keeps the payload's transcript path only when it is an
+// absolute, clean path. The reap sweep only ever stats it, but a value that
+// isn't a plain absolute path is not one Claude Code wrote.
+func hookTranscriptPath(p string) string {
+	if p == "" || !filepath.IsAbs(p) || filepath.Clean(p) != p {
+		return ""
+	}
+	return p
 }
 
 // purposeFromHookName derives a session purpose from Claude's untrusted

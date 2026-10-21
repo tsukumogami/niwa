@@ -242,6 +242,51 @@ func iPipeRootWorktreeRemoveHook(ctx context.Context, where string) (context.Con
 	return ctx, nil
 }
 
+// iPipeRootSubagentStopHook fires a SubagentStop hook for an Agent-tool
+// subagent whose cwd is the worktree the last create printed, as Claude Code
+// sends it when that subagent finishes.
+func iPipeRootSubagentStopHook(ctx context.Context, agentID, where string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	if s.printedWorktreePath == "" {
+		return ctx, fmt.Errorf("no printed worktree path stored; run a WorktreeCreate hook first")
+	}
+	dir, err := rootDir(s, where)
+	if err != nil {
+		return ctx, err
+	}
+	payload, err := json.Marshal(map[string]any{
+		"hook_event_name":  "SubagentStop",
+		"session_id":       "x",
+		"cwd":              s.printedWorktreePath,
+		"agent_id":         agentID,
+		"agent_type":       "general-purpose",
+		"stop_hook_active": false,
+	})
+	if err != nil {
+		return ctx, err
+	}
+	if err := runHookFrom(s, dir, "niwa worktree from-hook", string(payload)); err != nil {
+		return ctx, fmt.Errorf("niwa worktree from-hook (subagent stop): %w", err)
+	}
+	return ctx, nil
+}
+
+// thePrintedWorktreeHasAnUntrackedFile writes a file git doesn't track into
+// the worktree the last create printed.
+func thePrintedWorktreeHasAnUntrackedFile(ctx context.Context, name string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	if s.printedWorktreePath == "" {
+		return ctx, fmt.Errorf("no printed worktree path stored; run a WorktreeCreate hook first")
+	}
+	return ctx, os.WriteFile(filepath.Join(s.printedWorktreePath, name), []byte("work\n"), 0o644)
+}
+
 // pipeGuard sends one PreToolUse payload to `niwa worktree guard` from a root
 // session whose cwd is that root.
 func pipeGuard(ctx context.Context, where, tool string, input map[string]string) (context.Context, error) {
@@ -553,6 +598,8 @@ func registerRootSessionWorktreeSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^`+settingsPhrase+` settings register no hook running "([^"]*)"$`, theSettingsRegisterNoHookRunning)
 	ctx.Step(`^I pipe a WorktreeCreate hook with cwd "([^"]*)" and name "([^"]*)" from `+rootPhrase+`$`, iPipeRootWorktreeCreateHook)
 	ctx.Step(`^I pipe a WorktreeRemove hook for the printed worktree path from `+rootPhrase+`$`, iPipeRootWorktreeRemoveHook)
+	ctx.Step(`^I pipe a SubagentStop hook for agent "([^"]*)" in the printed worktree from `+rootPhrase+`$`, iPipeRootSubagentStopHook)
+	ctx.Step(`^the printed worktree has an untracked file "([^"]*)"$`, thePrintedWorktreeHasAnUntrackedFile)
 	ctx.Step(`^I pipe a Bash call running "([^"]*)" to the worktree guard from `+rootPhrase+`$`, iPipeGuardBash)
 	ctx.Step(`^I pipe an EnterWorktree call with path "([^"]*)" to the worktree guard from `+rootPhrase+`$`, iPipeGuardEnterWorktreePath)
 	ctx.Step(`^I pipe an EnterWorktree call with the printed worktree path to the worktree guard from `+rootPhrase+`$`, iPipeGuardEnterWorktreePrintedPath)

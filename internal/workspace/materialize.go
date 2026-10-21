@@ -388,6 +388,12 @@ const (
 	worktreeCreateEvent = "WorktreeCreate"
 	worktreeRemoveEvent = "WorktreeRemove"
 
+	// subagentStopEvent runs the same from-hook command when a subagent
+	// finishes; subagentStopTimeoutSeconds bounds its teardown, and an expired
+	// SubagentStop hook doesn't block the subagent.
+	subagentStopEvent          = "SubagentStop"
+	subagentStopTimeoutSeconds = 60
+
 	// worktreeFromHookCommandSuffix is the niwa subcommand the hook invokes.
 	// guardedNiwaHookCommand composes the full command from it; see that
 	// function for the PATH-first shape.
@@ -934,6 +940,21 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 		}
 		hooksDoc[worktreeCreateEvent] = worktreeEntry
 		hooksDoc[worktreeRemoveEvent] = worktreeEntry
+
+		// SubagentStop runs the same command, which removes an Agent-tool
+		// subagent's unchanged worktree when it finishes: Claude Code sends no
+		// WorktreeRemove for a hook-made worktree that is a git checkout.
+		// Appended so it composes with a workspace's own SubagentStop hooks.
+		entry := map[string]any{
+			"hooks": []map[string]any{
+				{"type": "command", "command": command, "timeout": subagentStopTimeoutSeconds},
+			},
+		}
+		if existing, ok := hooksDoc[subagentStopEvent].([]map[string]any); ok {
+			hooksDoc[subagentStopEvent] = append(existing, entry)
+		} else {
+			hooksDoc[subagentStopEvent] = []map[string]any{entry}
+		}
 	}
 
 	// Worktree guard (root scopes only): refuse EnterWorktree with a path and a

@@ -53,6 +53,19 @@ type SessionLifecycleState struct {
 	ClaudeConversationID string `json:"claude_conversation_id,omitempty"`
 	CreatorPID           int    `json:"creator_pid"`
 	CreatorStartTime     int64  `json:"creator_start_time"`
+	// CreatedBy is CreatedByWorktreeHook for a worktree niwa's WorktreeCreate
+	// hook made, and empty for `niwa worktree create` and for records written
+	// before the field existed. Automatic teardown (the SubagentStop hook and
+	// the reap sweep) only ever acts on sessions that carry it.
+	CreatedBy string `json:"created_by,omitempty"`
+	// BaseCommit is the commit the session branch started at. Automatic
+	// teardown treats a worktree whose HEAD or branch has moved off it as
+	// changed, and a record without it as never safe to remove.
+	BaseCommit string `json:"base_commit,omitempty"`
+	// ClaudeTranscriptPath is the transcript of the Claude Code session that
+	// asked the hook for this worktree. The reap sweep reads its modification
+	// time to tell whether that session has ended.
+	ClaudeTranscriptPath string `json:"claude_transcript_path,omitempty"`
 	// BranchWarning is set in the destroy response when git branch -d fails
 	// (unmerged commits remain). Never written to disk; only present in the
 	// CLI response for that call. The json tag is intentionally omitted
@@ -166,6 +179,12 @@ const (
 	SessionStatusActive    = "active"
 	SessionStatusEnded     = "ended"
 	SessionStatusAbandoned = "abandoned"
+)
+
+// CreatedByWorktreeHook is SessionLifecycleState.CreatedBy for a session made
+// by `niwa worktree from-hook` on a WorktreeCreate event.
+const (
+	CreatedByWorktreeHook = "worktree-create-hook"
 )
 
 // NewSessionLifecycleState creates a SessionLifecycleState with V=1 and

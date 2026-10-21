@@ -281,6 +281,39 @@ When an agent finishes and its worktree teardown fires:
   `niwa worktree list` — it's a surfaced orphan you can act on, never a silent
   delete.
 
+### Agent-tool subagents
+
+Claude Code doesn't send `WorktreeRemove` for an Agent-tool subagent's worktree
+when a `WorktreeCreate` hook made it and it's a git checkout, which every niwa
+worktree is. So `niwa apply` also writes a `SubagentStop` hook running the same
+`niwa worktree from-hook` command, and niwa removes the subagent's worktree
+there when the subagent finishes. It only ever touches the worktree its own
+`WorktreeCreate` hook made for that subagent: Claude Code names an Agent-tool
+worktree `agent-<agent id>`, and `SubagentStop` carries the same id. A subagent
+without isolation, whose directory is its parent's, matches nothing.
+
+That teardown is stricter than the clean check above. The worktree is removed
+only when it holds nothing beyond what it was created with:
+
+- `git status` shows nothing, untracked files included;
+- its HEAD and its `session/<id>` branch still point at the commit it started
+  from, so nothing was committed and nothing was checked out;
+- no stash entry was made from its branch.
+
+Anything else keeps the worktree, and niwa says on stderr why. Remove a kept one
+with `niwa worktree destroy <id>` once you're done with it. The hook always
+exits 0, so it never sends the subagent back to work.
+
+`niwa reap`, and the reap that runs at the start of `niwa create`, `niwa
+dispatch` and `niwa watch`, is the backstop for a subagent that ended without a
+`SubagentStop`, such as an interrupted run. It also covers a session that
+entered a hook-made worktree and never left. It removes an unchanged hook-made
+worktree once the Claude Code session that asked for it has ended: that
+session's transcript is gone, or hasn't been written for the reap idle grace
+(`NIWA_REAP_IDLE_GRACE`, a day by default). Worktrees from `niwa worktree
+create`, and hook-made ones recorded before this release, are never removed
+this way.
+
 ### Fallback on an older harness
 
 The hooks need a Claude Code version that supports per-repo worktree hooks. On

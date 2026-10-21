@@ -155,6 +155,36 @@ Feature: worktrees from sessions launched at a root
     Then the exit code is 0
     And the printed worktree path does not exist
 
+  Scenario: an Agent-tool subagent's unchanged worktree goes when the subagent stops
+    Given a root-session workspace "rs" exists with repos "niwa,koto" in group "public"
+    When I run "niwa create rs"
+    Then the exit code is 0
+    And the instance "rs" settings register a "SubagentStop" hook running "worktree from-hook"
+    And the workspace root settings register a "SubagentStop" hook running "worktree from-hook"
+    When I pipe a WorktreeCreate hook with cwd "." and name "agent-a0123456789abcdef" from the root of instance "rs"
+    Then the exit code is 0
+    When I pipe a SubagentStop hook for agent "afedcba9876543210" in the printed worktree from the root of instance "rs"
+    Then the exit code is 0
+    And the output is empty
+    And the printed worktree path exists
+    When I pipe a SubagentStop hook for agent "a0123456789abcdef" in the printed worktree from the root of instance "rs"
+    Then the exit code is 0
+    And the output is empty
+    And the printed worktree path does not exist
+
+  Scenario: an Agent-tool subagent's changed worktree is kept when the subagent stops
+    Given a root-session workspace "rs" exists with repos "niwa,koto" in group "public"
+    When I run "niwa create rs"
+    Then the exit code is 0
+    When I pipe a WorktreeCreate hook with cwd "." and name "agent-a0123456789abcdef" from the root of instance "rs"
+    Then the exit code is 0
+    And the printed worktree has an untracked file "notes.txt"
+    When I pipe a SubagentStop hook for agent "a0123456789abcdef" in the printed worktree from the root of instance "rs"
+    Then the exit code is 0
+    And the output is empty
+    And the error output contains "keeping worktree"
+    And the printed worktree path exists
+
   Scenario: with several repos an unknown prefix is refused and the repos are listed
     Given a root-session workspace "rs" exists with repos "niwa,koto" in group "public"
     When I run "niwa create rs"
