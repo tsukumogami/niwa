@@ -433,25 +433,58 @@ rule that applies:
 A name with a `/` that none of these rules resolved, such as
 `nosuchrepo/fix-x`, fails here: the tool call returns an error starting
 `no repo selected` that lists the instance's repos and gives an example using
-the repo a bare name would land in (rule 7 below):
+the repo a bare name would land in without `NIWA_WORKTREE_REPO` (rule 7 or 8
+below):
 
 ```text
 niwa: error: no repo selected; name the worktree <repo>/<slug> or <group>/<repo>/<slug>, for example koto/<slug>. Repos in this instance: koto, niwa
 ```
 
-A name with no `/` goes on to two more rules:
+A name with no `/` goes on to three more rules:
 
 6. The repo the `NIWA_WORKTREE_REPO` environment variable names. The hook
    reads it from the environment Claude Code runs hooks in, which is the one
    the session was launched with, so set it in the shell that starts
    `claude`. A value that names no repo cloned in the instance fails the
    create with an error naming the variable.
-7. The instance's first repo, ordered by group and then by name. Claude Code's
+7. The repo the workspace config names in `[workspace] default_worktree_repo`
+   (see below). A value that names no repo cloned in the instance fails the
+   create with an error naming the key.
+8. The instance's first repo, ordered by group and then by name. Claude Code's
    Agent tool picks a bare name such as `agent-a1b2c3` itself when it isolates
    a subagent, and fails the subagent if the hook refuses, so a session at the
    root of a multi-repo instance gets a worktree in a fixed repo rather than an
-   error. niwa prints a notice on stderr naming that repo and the two ways to
-   choose another: a `<repo>/<slug>` name or `NIWA_WORKTREE_REPO`.
+   error. niwa prints a notice on stderr naming that repo and the three ways to
+   choose another: a `<repo>/<slug>` name, `NIWA_WORKTREE_REPO`, or
+   `default_worktree_repo`.
+
+### Choosing the default repo for a workspace
+
+The first-repo rule always picks the same repo, but nobody chose it: sorting by
+group puts a `private` group ahead of `public`, for example. A workspace that
+wants its root sessions' subagents somewhere else names the repo in its
+`workspace.toml`:
+
+```toml
+[workspace]
+name = "my-project"
+default_worktree_repo = "app"
+```
+
+Run `niwa apply` after changing it. The hook doesn't load the workspace config,
+so apply records the value in each instance's `.niwa/instance.json`, and the
+hook reads it from there. A bare name from the root then lands in `app` with no
+notice. Removing the key and applying again goes back to the first-repo rule.
+If the value names no repo in the workspace, apply warns, and the hook refuses
+bare names from the root until it's fixed, rather than quietly using another
+repo.
+
+`NIWA_WORKTREE_REPO` still wins over the configured default, so one session can
+pick its own repo by setting it in the shell that starts `claude`. niwa doesn't
+write the default into the root settings' `env` for this reason: Claude Code
+applies a settings `env` value over the variable the session was launched
+with, and the session's own choice would lose. The key lives on `[workspace]`,
+which a workspace overlay can't set.
 
 A name with an empty slug, such as `niwa/`, is refused with `no repo selected`
 whatever the other rules say. When the

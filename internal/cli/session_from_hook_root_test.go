@@ -111,7 +111,7 @@ func TestFromHookRemove_ResolvesInstanceFromAnchor(t *testing.T) {
 // TestFromHookCreate_BareNameAtMultiRepoRoot covers Claude Code's Agent tool
 // asking for a worktree from the root of a multi-repo instance, with a bare
 // name it picked itself: the hook creates it in the instance's first repo,
-// says so on stderr with both ways to choose another, and keeps stdout to the
+// says so on stderr with the three ways to choose another, and keeps stdout to the
 // path. A WorktreeRemove sent from the same root then tears it down.
 func TestFromHookCreate_BareNameAtMultiRepoRoot(t *testing.T) {
 	f := newCreateFlowFixture(t)
@@ -138,7 +138,7 @@ func TestFromHookCreate_BareNameAtMultiRepoRoot(t *testing.T) {
 	if strings.Contains(printed, "\n") || !filepath.IsAbs(printed) {
 		t.Fatalf("stdout must be exactly one absolute path, got %q", out)
 	}
-	for _, want := range []string{f.repo, workspace.WorktreeRepoEnv, "<repo>/<slug>"} {
+	for _, want := range []string{f.repo, workspace.WorktreeRepoEnv, "<repo>/<slug>", workspace.DefaultWorktreeRepoKey} {
 		if !strings.Contains(errOut, want) {
 			t.Errorf("stderr notice lacks %q:\n%s", want, errOut)
 		}
@@ -170,6 +170,46 @@ func TestFromHookCreate_BareNameAtMultiRepoRoot(t *testing.T) {
 	}
 	if _, statErr := os.Stat(created.WorktreePath); !os.IsNotExist(statErr) {
 		t.Errorf("worktree still present: %v", statErr)
+	}
+}
+
+// TestFromHookCreate_BareNameTakesConfiguredDefault covers a workspace that
+// configured [workspace].default_worktree_repo, as apply records it in the
+// instance state: a bare name from a multi-repo root lands in that repo, not
+// in "aa-other", the first by group and name, and stderr carries no notice.
+func TestFromHookCreate_BareNameTakesConfiguredDefault(t *testing.T) {
+	f := newCreateFlowFixture(t)
+	resetSessionCreateFlags(t)
+	defer resetSessionCreateFlags(t)
+	t.Setenv("CLAUDE_PROJECT_DIR", f.root)
+	t.Setenv(workspace.WorktreeRepoEnv, "")
+	if err := os.MkdirAll(filepath.Join(f.root, f.group, "aa-other", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := `{"instance_name":"testws","default_worktree_repo":"` + f.repo + `"}`
+	if err := os.WriteFile(filepath.Join(f.root, ".niwa", "instance.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	hookJSON := mustHookJSON(t, map[string]any{
+		"hook_event_name": "WorktreeCreate",
+		"session_id":      "claude-sid",
+		"cwd":             f.root,
+		"name":            "agent-a1b2c3",
+	})
+	out, errOut, err := runFromHook(t, f.root, hookJSON)
+	if err != nil {
+		t.Fatalf("bare name with a configured default: %v\nstderr:\n%s", err, errOut)
+	}
+	if printed := strings.TrimSuffix(out, "\n"); strings.Contains(printed, "\n") || !filepath.IsAbs(printed) {
+		t.Fatalf("stdout must be exactly one absolute path, got %q", out)
+	}
+	if strings.Contains(errOut, "notice") {
+		t.Errorf("a configured default must not print the fallback notice:\n%s", errOut)
+	}
+	states, err := worktree.ListSessionLifecycleStates(f.sessionsDir)
+	if err != nil || len(states) != 1 || states[0].Repo != f.repo {
+		t.Fatalf("want one session for %q, got %+v (%v)", f.repo, states, err)
 	}
 }
 
