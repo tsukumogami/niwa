@@ -66,6 +66,12 @@ type SessionLifecycleState struct {
 	// asked the hook for this worktree. The reap sweep reads its modification
 	// time to tell whether that session has ended.
 	ClaudeTranscriptPath string `json:"claude_transcript_path,omitempty"`
+	// IgnoredBaseline lists the git-ignored files the worktree held once niwa
+	// finished setting it up (its own materialized files). Automatic teardown
+	// treats any other ignored file as a change. nil means no baseline was
+	// recorded, which never qualifies; an empty list is a recorded baseline
+	// with nothing in it, hence the pointer.
+	IgnoredBaseline *[]string `json:"ignored_baseline,omitempty"`
 	// BranchWarning is set in the destroy response when git branch -d fails
 	// (unmerged commits remain). Never written to disk; only present in the
 	// CLI response for that call. The json tag is intentionally omitted

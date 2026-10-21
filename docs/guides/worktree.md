@@ -296,10 +296,10 @@ That teardown is stricter than the clean check above. The worktree is removed
 only when it holds nothing beyond what it was created with:
 
 - `git status` shows nothing, untracked files included;
-- no git-ignored file exists beyond the ones niwa's own exclude patterns in the
-  repo's `info/exclude` cover. Removing a worktree deletes its ignored files, so
-  build output or an env file a subagent left under a `.gitignore` pattern
-  keeps it;
+- every git-ignored file in it was already there when niwa finished setting it
+  up, which niwa records at create time. Removing a worktree deletes its
+  ignored files, so build output, a `.env.local` or notes a subagent left under
+  any ignore pattern, niwa's own `*.local*` included, keep it;
 - its HEAD and its `session/<id>` branch still point at the commit it started
   from, so nothing was committed and nothing was checked out;
 - no stash entry was made from its branch.
@@ -317,8 +317,10 @@ is older than the reap idle grace (`NIWA_REAP_IDLE_GRACE`, a day by default),
 and that session's transcript is gone or hasn't been written for that long. A
 session you leave idle for longer than the grace and then resume finds a clean
 worktree it was in gone, the same rule reap applies to idle ephemeral instances.
-Worktrees from `niwa worktree create`, and hook-made ones recorded before this
-release, are never removed this way.
+A hook-made worktree whose payload carried no transcript path can't be judged
+and stays. Worktrees from `niwa worktree create`, hook-made ones recorded
+before this release, and those in an instance created with
+`--no-worktree-delegation` are never removed this way.
 
 ### Fallback on an older harness
 

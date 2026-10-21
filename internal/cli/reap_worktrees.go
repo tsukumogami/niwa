@@ -26,7 +26,9 @@ import (
 // record without the hook's marker or a base commit.
 //
 // The destroy is DestroySession without force, so its attach-lock and dirty
-// guards still apply on top of the unchanged check. The check and the removal
+// guards still apply on top of the unchanged check. Unlike the hook's
+// teardown it doesn't release an attach lock first: it acts for no agent, so
+// a held lock is someone else's and keeps the worktree. The check and the removal
 // aren't atomic, but a session idle for the whole grace period is not writing
 // into the worktree in between. It returns how many worktrees it removed;
 // failures are reported on stderr and skipped.
@@ -47,6 +49,11 @@ func sweepHookWorktreesIn(instances []string, now time.Time, stderr io.Writer) i
 	ctx := context.Background()
 	removed := 0
 	for _, instance := range instances {
+		// An opted-out instance's worktrees aren't niwa's to tear down, as
+		// on WorktreeRemove and SubagentStop.
+		if state, err := workspace.LoadState(instance); err == nil && state.NoWorktreeDelegation {
+			continue
+		}
 		states, err := worktree.ListSessionLifecycleStates(filepathJoinSessions(instance))
 		if err != nil {
 			continue

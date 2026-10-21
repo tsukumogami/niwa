@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tsukumogami/niwa/internal/workspace"
 	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
@@ -118,6 +119,14 @@ func TestFromHookCreate_RecordsTeardownFields(t *testing.T) {
 	if st.ClaudeTranscriptPath != transcript {
 		t.Errorf("ClaudeTranscriptPath = %q, want %q", st.ClaudeTranscriptPath, transcript)
 	}
+	// The baseline is what niwa left ignored after setting the worktree up.
+	want, err := worktree.ListIgnoredFiles(context.Background(), st.WorktreePath, worktree.StdGitInvoker{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.IgnoredBaseline == nil || strings.Join(*st.IgnoredBaseline, ",") != strings.Join(want, ",") {
+		t.Errorf("IgnoredBaseline = %v, want %v", st.IgnoredBaseline, want)
+	}
 }
 
 // TestFromHookSubagentStop_RemovesUnchangedWorktree covers the case the hook
@@ -130,17 +139,16 @@ func TestFromHookSubagentStop_RemovesUnchangedWorktree(t *testing.T) {
 	commitGitignore(t, f, "build/\n")
 
 	st := createAgentWorktree(t, f, testAgentID, "")
-	// A file niwa's own info/exclude patterns cover is niwa's, not a change.
-	writeFile(t, filepath.Join(st.WorktreePath, "notes.local.md"))
 	sub := filepath.Join(st.WorktreePath, ".niwa")
 	subagentStop(t, f, testAgentID, sub)
 	assertRemoved(t, f, st)
 }
 
 // TestFromHookSubagentStop_KeepsChangedWorktree pins that a worktree with
-// anything in it is never removed: untracked or staged files, a file only a
-// .gitignore hides, a commit, a branch moved under a detached HEAD, or a stash
-// made from its branch.
+// anything in it is never removed: untracked or staged files, an ignored file
+// that wasn't there when niwa set it up (under a .gitignore pattern or under
+// niwa's own *.local* pattern), a commit, a branch moved under a detached
+// HEAD, or a stash made from its branch.
 func TestFromHookSubagentStop_KeepsChangedWorktree(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -152,7 +160,10 @@ func TestFromHookSubagentStop_KeepsChangedWorktree(t *testing.T) {
 				t.Fatal(err)
 			}
 			writeFile(t, filepath.Join(wt, "build", "out.txt"))
-		}, "git-ignored files niwa didn't write, such as build/out.txt"},
+		}, "weren't there when niwa set it up, such as build/out.txt"},
+		{"file niwa's own *.local* exclude pattern hides", func(t *testing.T, wt string) {
+			writeFile(t, filepath.Join(wt, ".env.local"))
+		}, "weren't there when niwa set it up, such as .env.local"},
 		{"branch moved under a detached HEAD", func(t *testing.T, wt string) {
 			gitIn(t, wt, "commit", "--allow-empty", "-m", "work")
 			gitIn(t, wt, "checkout", "--detach", "HEAD~1")
@@ -272,6 +283,32 @@ func TestSweepHookWorktrees(t *testing.T) {
 	assertKept(t, f, changed)
 	assertKept(t, f, unknown)
 	assertKept(t, f, young)
+}
+
+// TestSweepHookWorktrees_OptedOutInstance checks the sweep leaves an instance
+// that opted out of worktree delegation alone, as the hooks do.
+func TestSweepHookWorktrees_OptedOutInstance(t *testing.T) {
+	f := newCreateFlowFixture(t)
+	resetSessionCreateFlags(t)
+	defer resetSessionCreateFlags(t)
+	t.Setenv("NIWA_REAP_IDLE_GRACE", "1h")
+
+	st := createAgentWorktree(t, f, testAgentID, filepath.Join(t.TempDir(), "gone.jsonl"))
+	backdate(t, f, st, 2*time.Hour)
+	state, err := workspace.LoadState(f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.NoWorktreeDelegation = true
+	if err := workspace.SaveState(f.root, state); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	if n := sweepHookWorktreesIn([]string{f.root}, time.Now(), &stderr); n != 0 {
+		t.Errorf("removed %d from an opted-out instance\nstderr:\n%s", n, stderr.String())
+	}
+	assertKept(t, f, st)
 }
 
 // commitGitignore commits a .gitignore to the fixture repo, so worktrees made

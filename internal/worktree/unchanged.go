@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -14,13 +14,14 @@ import (
 // condition automatic teardown requires, stricter than DestroySession's dirty
 // guard, which only looks at the working tree:
 //
-//   - the record has a base commit (older records never qualify);
+//   - the record has a base commit and an ignored-file baseline (older records
+//     never qualify);
 //   - `git status` shows nothing, untracked files included;
-//   - no git-ignored file exists beyond the ones the repo's info/exclude
-//     covers, which is where niwa writes the patterns for its own files.
-//     `git worktree remove --force` deletes ignored files, so build output,
-//     an env file or notes a subagent left under a .gitignore pattern count
-//     as a change;
+//   - every git-ignored file was already there when niwa finished setting the
+//     worktree up (IgnoredBaseline). `git worktree remove --force` deletes
+//     ignored files, so build output, an env file or notes left under any
+//     ignore pattern count as a change, including one niwa's own `*.local*`
+//     pattern would hide;
 //   - HEAD and the session branch both still point at the base commit, so
 //     nothing was committed and the checkout wasn't moved;
 //   - no stash entry was made from the session branch. The stash is shared by
@@ -32,6 +33,9 @@ import (
 func WorktreeUnchanged(ctx context.Context, state SessionLifecycleState, gitInvoker GitInvoker) (bool, string, error) {
 	if state.BaseCommit == "" {
 		return false, "no base commit is recorded", nil
+	}
+	if state.IgnoredBaseline == nil {
+		return false, "no baseline of its ignored files is recorded", nil
 	}
 	if state.WorktreePath == "" {
 		return false, "", errors.New("worktree path is empty")
@@ -54,10 +58,18 @@ func WorktreeUnchanged(ctx context.Context, state SessionLifecycleState, gitInvo
 	if status != "" {
 		return false, "it has uncommitted or untracked files", nil
 	}
-	if extra, err := ignoredBeyondExclude(state.WorktreePath, git); err != nil {
+	ignored, err := ListIgnoredFiles(ctx, state.WorktreePath, gitInvoker)
+	if err != nil {
 		return false, "", err
-	} else if extra != "" {
-		return false, "it has git-ignored files niwa didn't write, such as " + extra, nil
+	}
+	baseline := make(map[string]bool, len(*state.IgnoredBaseline))
+	for _, p := range *state.IgnoredBaseline {
+		baseline[p] = true
+	}
+	for _, p := range ignored {
+		if !baseline[p] {
+			return false, "it has git-ignored files that weren't there when niwa set it up, such as " + p, nil
+		}
 	}
 	head, err := git("rev-parse", "HEAD")
 	if err != nil {
@@ -86,37 +98,20 @@ func WorktreeUnchanged(ctx context.Context, state SessionLifecycleState, gitInvo
 	return true, "", nil
 }
 
-// ignoredBeyondExclude returns the first git-ignored file in the worktree that
-// the repo's info/exclude patterns don't match, or "" when there is none.
-// niwa writes the patterns for everything it materializes into info/exclude
-// (internal/gitexclude), so a file only a .gitignore or a global excludes file
-// ignores was put there by someone else.
-func ignoredBeyondExclude(worktreePath string, git func(...string) (string, error)) (string, error) {
-	ignored, err := git("ls-files", "-z", "--others", "--ignored", "--exclude-standard")
-	if err != nil || ignored == "" {
-		return "", err
-	}
-	excludeFile, err := git("rev-parse", "--git-path", "info/exclude")
+// ListIgnoredFiles returns the git-ignored files in a worktree, sorted, as
+// paths relative to it. The hook records it as the session's IgnoredBaseline
+// once it has set the worktree up.
+func ListIgnoredFiles(ctx context.Context, worktreePath string, gitInvoker GitInvoker) ([]string, error) {
+	out, err := gitInvoker.CommandContext(ctx, "-C", worktreePath, "ls-files", "-z", "--others", "--ignored", "--exclude-standard").Output()
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("listing ignored files in %s: %w", worktreePath, err)
 	}
-	if !filepath.IsAbs(excludeFile) {
-		excludeFile = filepath.Join(worktreePath, excludeFile)
-	}
-	owned := map[string]bool{}
-	if _, statErr := os.Stat(excludeFile); statErr == nil {
-		out, err := git("ls-files", "-z", "--others", "--ignored", "--exclude-from="+excludeFile)
-		if err != nil {
-			return "", err
-		}
-		for _, p := range strings.Split(out, "\x00") {
-			owned[p] = true
+	files := []string{}
+	for _, p := range strings.Split(string(out), "\x00") {
+		if p != "" {
+			files = append(files, p)
 		}
 	}
-	for _, p := range strings.Split(ignored, "\x00") {
-		if p != "" && !owned[p] {
-			return p, nil
-		}
-	}
-	return "", nil
+	sort.Strings(files)
+	return files, nil
 }

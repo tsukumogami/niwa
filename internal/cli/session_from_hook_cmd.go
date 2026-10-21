@@ -212,6 +212,8 @@ func runFromHookCreate(cmd *cobra.Command, payload hookPayload) error {
 	// than having its worktree deleted for a script's failure.
 	reportWorktreeSetup(cmd.ErrOrStderr(), worktreePath, &setup)
 
+	recordIgnoredBaseline(cmd.ErrOrStderr(), instanceRoot, sessionID, worktreePath)
+
 	// Hook contract: stdout carries ONLY the absolute worktree path. Claude
 	// uses this as the session working directory.
 	fmt.Fprintln(cmd.OutOrStdout(), worktreePath)
@@ -344,9 +346,11 @@ func runFromHookRemove(cmd *cobra.Command, payload hookPayload) error {
 // logged to stderr.
 //
 //  1. Release the agent's own attach lock so the attach-lock guard in
-//     DestroySession does not block this teardown. The exiting agent is the
-//     lock holder, so bypassing only this guard is safe. force=true is NOT
-//     passed, since it would also bypass the dirty guard.
+//     DestroySession does not block this teardown. Both events come from
+//     the agent that is leaving the worktree, so it is the only holder the
+//     lock can name, and bypassing only this guard is safe. force=true is
+//     NOT passed, since it would also bypass the dirty guard. The reap sweep
+//     acts for no agent and so leaves the lock, and its guard, alone.
 //  2. Destroy without force. The dirty guard stays armed, and an unmerged
 //     branch survives (`git branch -d`).
 //  3. A dirty rejection means real uncommitted work: log and retain rather
@@ -402,6 +406,8 @@ func runFromHookSubagentStop(cmd *cobra.Command, payload hookPayload) error {
 		// Not in a niwa instance: no worktree of ours to look at.
 		return nil
 	}
+	// The workspace root's hooks are shared by every instance; an opted-out
+	// instance's worktrees aren't niwa's to tear down, as on WorktreeRemove.
 	if state, stateErr := workspace.LoadState(instanceRoot); stateErr == nil && state.NoWorktreeDelegation {
 		return nil
 	}
@@ -443,6 +449,28 @@ func findAgentWorktreeSession(instanceRoot, cwd, purpose string) (worktree.Sessi
 		}
 	}
 	return worktree.SessionLifecycleState{}, false
+}
+
+// recordIgnoredBaseline stores the git-ignored files the worktree holds now
+// that niwa has finished setting it up (its materialized content and any
+// setup-script output), so automatic teardown can tell them from files the
+// agent leaves behind later. On any failure the record keeps no baseline,
+// which only means the worktree is never removed automatically.
+func recordIgnoredBaseline(stderr io.Writer, instanceRoot, sessionID, worktreePath string) {
+	ignored, err := worktree.ListIgnoredFiles(context.Background(), worktreePath, worktree.StdGitInvoker{})
+	if err != nil {
+		fmt.Fprintf(stderr, "niwa: warning: %v; the worktree won't be removed automatically\n", err)
+		return
+	}
+	sessionsDir := filepathJoinSessions(instanceRoot)
+	state, err := worktree.ReadSessionLifecycleState(sessionsDir, sessionID)
+	if err == nil {
+		state.IgnoredBaseline = &ignored
+		err = worktree.WriteSessionLifecycleState(sessionsDir, state)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "niwa: warning: recording the worktree's ignored files: %v; it won't be removed automatically\n", err)
+	}
 }
 
 // hookTranscriptPath keeps the payload's transcript path only when it is an
