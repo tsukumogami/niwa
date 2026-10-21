@@ -89,7 +89,9 @@ func TestSettingsMaterializerWorktreeSupportedWritesHooks(t *testing.T) {
 	// upgrade without a re-apply.
 	wantCmd := "command -v niwa >/dev/null 2>&1 && exec niwa worktree from-hook; " +
 		"exec '/usr/local/bin/niwa' worktree from-hook"
-	for _, event := range []string{"WorktreeCreate", "WorktreeRemove"} {
+	// SubagentStop runs the same command, to remove an Agent-tool subagent's
+	// unchanged worktree, since Claude Code sends no WorktreeRemove for it.
+	for _, event := range []string{"WorktreeCreate", "WorktreeRemove", "SubagentStop"} {
 		cmds := worktreeHookCommands(t, doc, event)
 		if len(cmds) != 1 {
 			t.Fatalf("%s: expected 1 hook command, got %v", event, cmds)
@@ -159,6 +161,9 @@ func TestSettingsMaterializerWorktreeUnsupportedWritesDeny(t *testing.T) {
 	}
 	if cmds := worktreeHookCommands(t, doc, "WorktreeRemove"); cmds != nil {
 		t.Errorf("unsupported branch must not write WorktreeRemove hook, got %v", cmds)
+	}
+	if cmds := worktreeHookCommands(t, doc, "SubagentStop"); cmds != nil {
+		t.Errorf("unsupported branch must not write SubagentStop hook, got %v", cmds)
 	}
 }
 

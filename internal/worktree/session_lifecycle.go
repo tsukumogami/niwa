@@ -53,6 +53,26 @@ type SessionLifecycleState struct {
 	ClaudeConversationID string `json:"claude_conversation_id,omitempty"`
 	CreatorPID           int    `json:"creator_pid"`
 	CreatorStartTime     int64  `json:"creator_start_time"`
+	// CreatedBy is CreatedByWorktreeHook for a worktree niwa's WorktreeCreate
+	// hook made, and empty for `niwa worktree create` and for records written
+	// before the field existed. Automatic teardown (the SubagentStop hook and
+	// the reap sweep) only ever acts on sessions that carry it.
+	CreatedBy string `json:"created_by,omitempty"`
+	// BaseCommit is the commit the session branch started at. Automatic
+	// teardown treats a worktree whose HEAD or branch has moved off it as
+	// changed, and a record without it as never safe to remove.
+	BaseCommit string `json:"base_commit,omitempty"`
+	// ClaudeTranscriptPath is the transcript of the Claude Code session that
+	// asked the hook for this worktree. The reap sweep reads its modification
+	// time to tell whether that session has ended.
+	ClaudeTranscriptPath string `json:"claude_transcript_path,omitempty"`
+	// IgnoredFingerprints records the git-ignored files the worktree held once
+	// niwa finished setting it up (its own materialized files and any setup
+	// output), each with a fingerprint of its contents. Automatic teardown
+	// treats any ignored file added, deleted or changed since as a change. nil
+	// means none was recorded, which never qualifies; a baseline with no files
+	// is still a recorded one, hence the pointer.
+	IgnoredFingerprints *IgnoredFingerprints `json:"ignored_fingerprints,omitempty"`
 	// BranchWarning is set in the destroy response when git branch -d fails
 	// (unmerged commits remain). Never written to disk; only present in the
 	// CLI response for that call. The json tag is intentionally omitted
@@ -66,6 +86,17 @@ type SessionLifecycleState struct {
 	// key (not "null") when nil, matching the "absent, not null" contract
 	// documented in the PRD.
 	Attach *AttachState `json:"attach,omitempty"`
+}
+
+// IgnoredFingerprints maps each git-ignored file in a worktree, relative to
+// it, to a fingerprint of what it is: "sha256:<hex> <perm>" of a regular
+// file's contents and permission bits, "symlink:<hex>" of a link's target, or
+// "mode:<mode>" for anything else, which records only its type. See
+// WorktreeUnchanged. It is its own key rather than a reuse of an earlier
+// path-only list, so a record holding only that list decodes with no
+// fingerprints and never qualifies.
+type IgnoredFingerprints struct {
+	Files map[string]string `json:"files"`
 }
 
 // WriteSessionLifecycleState atomically persists state to
@@ -166,6 +197,12 @@ const (
 	SessionStatusActive    = "active"
 	SessionStatusEnded     = "ended"
 	SessionStatusAbandoned = "abandoned"
+)
+
+// CreatedByWorktreeHook is SessionLifecycleState.CreatedBy for a session made
+// by `niwa worktree from-hook` on a WorktreeCreate event.
+const (
+	CreatedByWorktreeHook = "worktree-create-hook"
 )
 
 // NewSessionLifecycleState creates a SessionLifecycleState with V=1 and

@@ -108,6 +108,12 @@ The same care applies to a dispatch instance with no mapping at all, which reap
 otherwise reclaims on age: if an agent's records say a worker is still writing
 there, reap leaves the directory alone.
 
+reap also removes worktrees niwa's WorktreeCreate hook made that are
+unchanged since they were created and whose Claude Code session has ended:
+the worktree is older than the same grace period, and the session's
+transcript is gone or idle for that long. A worktree with any change, or one
+made with niwa worktree create, is never removed this way.
+
 reap runs on demand and is also invoked opportunistically at the start of
 niwa create, niwa dispatch, and niwa watch so session fan-out self-bounds.`,
 	Args:          cobra.NoArgs,
@@ -136,6 +142,9 @@ func runReap(cmd *cobra.Command, _ []string) error {
 	}
 	if n > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Reaped %d orphaned ephemeral instance(s)\n", n)
+	}
+	if m := sweepHookWorktrees(class.WorkspaceRoot, time.Now(), cmd.ErrOrStderr()); m > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "Removed %d unchanged worktree(s) whose session has ended\n", m)
 	}
 	return nil
 }
@@ -755,10 +764,9 @@ func reapOpportunistically(workspaceRoot string) {
 		return
 	}
 	n, err := reapWorkspace(workspaceRoot, defaultJobsDir(), time.Now())
-	if err != nil {
-		return
-	}
-	if n > 0 {
+	if err == nil && n > 0 {
 		fmt.Fprintf(os.Stderr, "niwa: reaped %d orphaned ephemeral instance(s)\n", n)
 	}
+	// The worktree sweep prints a line per worktree it removes.
+	sweepHookWorktrees(workspaceRoot, time.Now(), os.Stderr)
 }
