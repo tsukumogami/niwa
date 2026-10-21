@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
@@ -186,6 +187,117 @@ func TestResolveHookTarget_WorktreeRepoEnv(t *testing.T) {
 	_, err := ResolveHookTarget(f.alpha, f.alpha, "fix-x")
 	if err == nil || !strings.Contains(err.Error(), WorktreeRepoEnv) || !strings.Contains(err.Error(), "koto, niwa") {
 		t.Fatalf("err = %v, want a refusal naming %s and the repos", err, WorktreeRepoEnv)
+	}
+}
+
+// setDefaultWorktreeRepo records repo as the instance's configured default,
+// as apply does from [workspace].default_worktree_repo.
+func setDefaultWorktreeRepo(t *testing.T, instanceRoot, repo string) {
+	t.Helper()
+	state, err := LoadState(instanceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.DefaultWorktreeRepo = repo
+	if err := SaveState(instanceRoot, state); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestResolveHookTarget_ConfiguredDefault covers the workspace's configured
+// default repo for a bare name. In the fixture the group/name fallback is
+// koto, so the default is set to niwa: a bare name from the root lands there
+// without Defaulted, and the refusal's example follows it. NIWA_WORKTREE_REPO
+// overrides it; a prefix, a cwd in a clone and a cwd in a live niwa worktree
+// all still win over both.
+func TestResolveHookTarget_ConfiguredDefault(t *testing.T) {
+	t.Setenv(WorktreeRepoEnv, "")
+	f := newHookFixture(t)
+	setDefaultWorktreeRepo(t, f.alpha, "niwa")
+
+	sessionsDir := filepath.Join(f.alpha, StateDir, "sessions")
+	mustMkdir(t, sessionsDir)
+	kotoWT := filepath.Join(f.alpha, StateDir, "worktrees", "koto-cccc3333")
+	mustMkdir(t, kotoWT)
+	if err := worktree.WriteSessionLifecycleState(sessionsDir, worktree.NewSessionLifecycleState("cccc3333", "koto", "p", "", kotoWT, "")); err != nil {
+		t.Fatal(err)
+	}
+	kotoDir := filepath.Join(f.alpha, "public", "koto")
+
+	cases := []struct{ env, cwd, name, repo string }{
+		{"", f.alpha, "agent-a1b2c3", "niwa"},
+		{"koto", f.alpha, "agent-a1b2c3", "koto"},
+		{"", f.alpha, "koto/fix-x", "koto"},
+		{"", kotoDir, "fix-x", "koto"},
+		{"", kotoWT, "agent-a1b2c3", "koto"},
+		{"niwa", kotoWT, "agent-a1b2c3", "koto"},
+	}
+	for _, tc := range cases {
+		t.Setenv(WorktreeRepoEnv, tc.env)
+		got, err := ResolveHookTarget(f.alpha, tc.cwd, tc.name)
+		if err != nil || got.Repo != tc.repo || got.Defaulted {
+			t.Errorf("env %q cwd %s name %q: got %+v (%v), want repo %s not Defaulted", tc.env, tc.cwd, tc.name, got, err, tc.repo)
+		}
+	}
+
+	t.Setenv(WorktreeRepoEnv, "")
+	_, err := ResolveHookTarget(f.alpha, f.alpha, "nosuch/x")
+	if err == nil || !strings.Contains(err.Error(), "for example niwa/<slug>") {
+		t.Errorf("refusal %v should give the configured niwa/<slug> as its example", err)
+	}
+}
+
+// TestResolveHookTarget_ConfiguredDefaultWithoutClone covers a configured
+// default that names no repo cloned in the instance, whether the instance
+// lists it ("ghost") or not: a bare name from the root is refused with the
+// key and the repos, rather than landing in the fallback. NIWA_WORKTREE_REPO
+// still resolves first, and a prefix is unaffected.
+func TestResolveHookTarget_ConfiguredDefaultWithoutClone(t *testing.T) {
+	for _, configured := range []string{"ghost", "nosuch"} {
+		t.Run(configured, func(t *testing.T) {
+			t.Setenv(WorktreeRepoEnv, "")
+			f := newHookFixture(t)
+			setDefaultWorktreeRepo(t, f.alpha, configured)
+
+			_, err := ResolveHookTarget(f.alpha, f.alpha, "agent-a1b2c3")
+			if err == nil {
+				t.Fatal("expected a refusal")
+			}
+			for _, want := range []string{DefaultWorktreeRepoKey, `"` + configured + `"`, "koto, niwa", "niwa apply"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal %q lacks %q", err, want)
+				}
+			}
+			// The fallback example doesn't name a repo with no clone.
+			_, err = ResolveHookTarget(f.alpha, f.alpha, "nosuchrepo/x")
+			if err == nil || !strings.Contains(err.Error(), "for example koto/<slug>") {
+				t.Errorf("refusal %v should fall back to koto/<slug> as its example", err)
+			}
+
+			if got, err := ResolveHookTarget(f.alpha, f.alpha, "niwa/fix-x"); err != nil || got.Repo != "niwa" {
+				t.Errorf("prefix: got %+v (%v), want niwa", got, err)
+			}
+			t.Setenv(WorktreeRepoEnv, "niwa")
+			if got, err := ResolveHookTarget(f.alpha, f.alpha, "agent-a1b2c3"); err != nil || got.Repo != "niwa" {
+				t.Errorf("%s=niwa: got %+v (%v), want niwa", WorktreeRepoEnv, got, err)
+			}
+		})
+	}
+}
+
+// TestWarnUnknownWorktreeDefault covers apply's warning for a configured
+// default that names no repo the apply classified.
+func TestWarnUnknownWorktreeDefault(t *testing.T) {
+	classified := []ClassifiedRepo{{Repo: github.Repo{Name: "niwa"}, Group: "public"}}
+	if w := warnUnknownWorktreeDefault("", classified); w != "" {
+		t.Errorf("unset: got %q, want no warning", w)
+	}
+	if w := warnUnknownWorktreeDefault("niwa", classified); w != "" {
+		t.Errorf("known repo: got %q, want no warning", w)
+	}
+	w := warnUnknownWorktreeDefault("nosuch", classified)
+	if !strings.Contains(w, DefaultWorktreeRepoKey) || !strings.Contains(w, `"nosuch"`) {
+		t.Errorf("unknown repo: got %q, want a warning naming the key and value", w)
 	}
 }
 

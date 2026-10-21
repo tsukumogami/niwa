@@ -155,6 +155,35 @@ Feature: worktrees from sessions launched at a root
     Then the exit code is 0
     And the printed worktree path does not exist
 
+  Scenario: a bare name from the root lands in the workspace's configured default repo without a notice
+    Given a root-session workspace "rs" exists with repos "niwa,koto" in group "public" and default worktree repo "niwa"
+    When I run "niwa create rs"
+    Then the exit code is 0
+    When I pipe a WorktreeCreate hook with cwd "." and name "agent-a1b2c3" from the root of instance "rs"
+    Then the exit code is 0
+    And the printed worktree is a session of repo "niwa" with purpose "agent-a1b2c3" in instance "rs"
+    And the error output does not contain "notice"
+
+  Scenario: NIWA_WORKTREE_REPO in the session's environment overrides the configured default repo
+    Given a root-session workspace "rs" exists with repos "niwa,koto" in group "public" and default worktree repo "niwa"
+    When I run "niwa create rs"
+    Then the exit code is 0
+    Given I set env "NIWA_WORKTREE_REPO" to "koto"
+    When I pipe a WorktreeCreate hook with cwd "." and name "agent-d4e5f6" from the root of instance "rs"
+    Then the exit code is 0
+    And the printed worktree is a session of repo "koto" with purpose "agent-d4e5f6" in instance "rs"
+    And the error output does not contain "notice"
+
+  Scenario: a configured default repo with no clone refuses a bare name from the root and names the key
+    Given a root-session workspace "rs" exists with repos "niwa,koto" in group "public" and default worktree repo "nosuch"
+    When I run "niwa create rs"
+    Then the exit code is 0
+    And the error output contains "default_worktree_repo"
+    When I pipe a WorktreeCreate hook with cwd "." and name "agent-a1b2c3" from the root of instance "rs"
+    Then the exit code is not 0
+    And the error output contains "default_worktree_repo"
+    And no worktree was created in instance "rs"
+
   Scenario: an Agent-tool subagent's unchanged worktree goes when the subagent stops
     Given a root-session workspace "rs" exists with repos "niwa,koto" in group "public"
     When I run "niwa create rs"

@@ -54,8 +54,9 @@ hook_event_name. Not intended for direct human use; niwa apply writes the
 hook command into each repo's settings.local.json and into the instance
 root's and workspace root's settings.json. From an instance or workspace
 root, name the worktree <repo>/<slug> to pick the repo. A bare name from
-there goes to the repo NIWA_WORKTREE_REPO names, or else to the instance's
-first repo by group and name.`,
+there goes to the repo NIWA_WORKTREE_REPO names, then to the workspace
+config's [workspace] default_worktree_repo, or else to the instance's first
+repo by group and name.`,
 	Args:          cobra.NoArgs,
 	SilenceErrors: true,
 	SilenceUsage:  true,
@@ -143,7 +144,8 @@ func runSessionFromHook(cmd *cobra.Command, _ []string) error {
 func runFromHookCreate(cmd *cobra.Command, payload hookPayload) error {
 	// Resolve the instance from the launch directory and the repo from a
 	// `<repo>/` prefix in the name, the untrusted cwd, a one-repo instance,
-	// NIWA_WORKTREE_REPO, or the instance's first repo for a bare name.
+	// NIWA_WORKTREE_REPO, the workspace's configured default, or the
+	// instance's first repo for a bare name.
 	// The instance is anchored on CLAUDE_PROJECT_DIR, which the harness fixes,
 	// so a model-chosen cwd can't point the hook at a planted instance; the
 	// canonicalizing cwd match stays the gate for picking a repo from cwd. On
@@ -159,8 +161,9 @@ func runFromHookCreate(cmd *cobra.Command, payload hookPayload) error {
 		// stderr only: stdout carries nothing but the worktree path.
 		fmt.Fprintf(cmd.ErrOrStderr(),
 			"niwa: notice: worktree %q names no repo, so it was created in %s, this instance's first repo by group and name. "+
-				"To choose another repo, name the worktree <repo>/<slug> or set %s=<repo> in the session's environment.\n",
-			payload.Name, repo, workspace.WorktreeRepoEnv)
+				"To choose another repo, name the worktree <repo>/<slug>, set %s=<repo> in the session's environment, "+
+				"or set [workspace] %s in the workspace config and run niwa apply.\n",
+			payload.Name, repo, workspace.WorktreeRepoEnv, workspace.DefaultWorktreeRepoKey)
 	}
 
 	purpose := purposeFromHookName(target.Slug)

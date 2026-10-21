@@ -211,6 +211,20 @@ type InstanceState struct {
 	// is the one the pipeline computed. omitempty keeps the field invisible to
 	// old binaries reading new state files.
 	ApprovedMCPServers []string `json:"approved_mcp_servers,omitempty"`
+	// DefaultWorktreeRepo records the workspace config's
+	// [workspace].default_worktree_repo, the repo a bare worktree name lands
+	// in at a multi-repo instance root. The WorktreeCreate hook loads no
+	// config, so it reads the value here, after NIWA_WORKTREE_REPO and before
+	// its first-repo fallback. It is recorded here rather than as an env
+	// value in the root settings because Claude Code would apply a settings
+	// env value over the variable exported in the session's launch shell,
+	// which must stay the override.
+	//
+	// The instance pipeline recomputes it on every Create and Apply; it is
+	// never carried over from an earlier state file, so removing the key
+	// from the config clears it on the next apply. omitempty keeps the field
+	// invisible to old binaries reading new state files.
+	DefaultWorktreeRepo string `json:"default_worktree_repo,omitempty"`
 }
 
 // AuthSourceRecord is one row of the credential-source audit map

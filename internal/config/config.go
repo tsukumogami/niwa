@@ -400,6 +400,19 @@ type WorkspaceMeta struct {
 	// has read what a script may assume. Per-repo overrides in
 	// RepoOverride.WorktreeSetup take precedence.
 	WorktreeSetup *bool `toml:"worktree_setup,omitempty"`
+	// DefaultWorktreeRepo names the repo a bare worktree name (no `/`) lands
+	// in when the WorktreeCreate hook resolves it at a multi-repo instance
+	// root, such as the name Claude Code's Agent tool picks for an isolated
+	// subagent. The hook loads no workspace config, so apply records the
+	// value in each instance's state file, where the hook reads it.
+	// NIWA_WORKTREE_REPO in the session's environment still overrides it.
+	// Empty means the hook's own fallback: the first repo by group, then
+	// name. It is a raw repo name, not checked at parse time, because org
+	// discovery decides the repo set after the config is parsed: apply warns
+	// when it names no repo the apply classified, and the hook refuses a bare
+	// name while it names no cloned repo. It lives on [workspace], which the
+	// overlay merge never assigns, so only the base config sets it.
+	DefaultWorktreeRepo string `toml:"default_worktree_repo,omitempty"`
 	// EnvExamplePolicy is the workspace-level .env.example failure policy.
 	// nil means inherit (from the global override, then the warn default).
 	// This is a project-scope position: its Vars sub-table is honored.

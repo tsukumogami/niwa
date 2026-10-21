@@ -560,12 +560,26 @@ func theClaudeConfigTrustsTheWorkspaceRoot(ctx context.Context) (context.Context
 // named name declaring them, and `niwa init --from` that config repo from the
 // workspace root. No instance is created; the scenario does that itself.
 func aRootSessionWorkspaceExists(ctx context.Context, name, repos, group string) (context.Context, error) {
+	return rootSessionWorkspace(ctx, name, repos, group, "")
+}
+
+// aRootSessionWorkspaceWithDefaultRepoExists is the same fixture with
+// [workspace] default_worktree_repo set to defaultRepo.
+func aRootSessionWorkspaceWithDefaultRepoExists(ctx context.Context, name, repos, group, defaultRepo string) (context.Context, error) {
+	return rootSessionWorkspace(ctx, name, repos, group, defaultRepo)
+}
+
+func rootSessionWorkspace(ctx context.Context, name, repos, group, defaultRepo string) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
 		return ctx, fmt.Errorf("no test state")
 	}
 	var body strings.Builder
-	fmt.Fprintf(&body, "[workspace]\nname = %q\n\n[groups.%s]\n", name, group)
+	fmt.Fprintf(&body, "[workspace]\nname = %q\n", name)
+	if defaultRepo != "" {
+		fmt.Fprintf(&body, "default_worktree_repo = %q\n", defaultRepo)
+	}
+	fmt.Fprintf(&body, "\n[groups.%s]\n", group)
 	for _, repo := range strings.Split(repos, ",") {
 		repo = strings.TrimSpace(repo)
 		url, err := s.gitServer.SourceRepo(repo)
@@ -593,6 +607,7 @@ func aRootSessionWorkspaceExists(ctx context.Context, name, repos, group string)
 // the scenario context. Called from initializeScenario.
 func registerRootSessionWorktreeSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^a root-session workspace "([^"]*)" exists with repos "([^"]*)" in group "([^"]*)"$`, aRootSessionWorkspaceExists)
+	ctx.Step(`^a root-session workspace "([^"]*)" exists with repos "([^"]*)" in group "([^"]*)" and default worktree repo "([^"]*)"$`, aRootSessionWorkspaceWithDefaultRepoExists)
 	ctx.Step(`^`+settingsPhrase+` settings register a "([^"]*)" hook with matcher "([^"]*)" running "([^"]*)"$`, theSettingsRegisterHook)
 	ctx.Step(`^`+settingsPhrase+` settings register a "([^"]*)" hook running "([^"]*)"$`, theSettingsRegisterHookAnyMatcher)
 	ctx.Step(`^`+settingsPhrase+` settings register no hook running "([^"]*)"$`, theSettingsRegisterNoHookRunning)

@@ -405,6 +405,7 @@ tsuku-root/                       # Workspace root
 name = "tsuku"                        # Workspace name (used for registry, instance naming)
 default_branch = "main"               # Default branch for all repos
 content_dir = "claude"                # Directory containing content source files
+default_worktree_repo = "tsuku"       # Repo a bare worktree name lands in at an instance root (docs/guides/worktree.md)
 
 # --- Sources: where repos come from ---
 

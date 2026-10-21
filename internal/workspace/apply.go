@@ -444,6 +444,10 @@ type pipelineResult struct {
 	// recordedMCPApprovals). Persisted into InstanceState.ApprovedMCPServers
 	// by Create/Apply.
 	approvedMCPServers []string
+	// worktreeDefault is the config's [workspace].default_worktree_repo.
+	// Persisted into InstanceState.DefaultWorktreeRepo by Create/Apply, where
+	// the WorktreeCreate hook reads it.
+	worktreeDefault string
 	// trustInstances is the effective [claude] trust_instances, after the
 	// overlay merge. trustFromOverlay reports that it is true only because
 	// the overlay set it. Create and Apply hand both to deliverClaudeTrust
@@ -677,8 +681,9 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 		// worktree hooks that read it at runtime, keep honoring the opt-out.
 		NoWorktreeDelegation: initNoWorktreeDelegation,
 		// Recomputed from this run's config alone, like Shadows.
-		ClaudePermissions:  result.claudePermissions,
-		ApprovedMCPServers: result.approvedMCPServers,
+		ClaudePermissions:   result.claudePermissions,
+		ApprovedMCPServers:  result.approvedMCPServers,
+		DefaultWorktreeRepo: result.worktreeDefault,
 	}
 
 	if err := a.saveInstanceState(instanceRoot, state); err != nil {
@@ -893,9 +898,11 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 		ClaudeTrustRepos: trust.repos,
 		// Taken from this run's result, never from existingState: a posture
 		// removed from the config must stop being recorded on the next apply.
-		// The same holds for the approved servers.
-		ClaudePermissions:  result.claudePermissions,
-		ApprovedMCPServers: result.approvedMCPServers,
+		// The same holds for the approved servers and the default worktree
+		// repo.
+		ClaudePermissions:   result.claudePermissions,
+		ApprovedMCPServers:  result.approvedMCPServers,
+		DefaultWorktreeRepo: result.worktreeDefault,
 	}
 
 	if err := a.saveInstanceState(instanceRoot, state); err != nil {
@@ -1417,6 +1424,11 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 	known := KnownRepoNames(cfg, discoveredNames)
 	allWarnings = append(allWarnings, WarnUnknownRepos(cfg, known)...)
+	// cfg here and effectiveCfg where the value is recorded carry the same
+	// [workspace] table: the overlay merge never assigns it.
+	if w := warnUnknownWorktreeDefault(cfg.Workspace.DefaultWorktreeRepo, classified); w != "" {
+		allWarnings = append(allWarnings, w)
+	}
 
 	// (Step 2a — sync of the personal-overlay snapshot — moved to Step
 	// 0.3a, alongside the niwa.toml parse at Step 0.3b. The hoist
@@ -2348,6 +2360,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		trustKeys:          trustKeys,
 		claudePermissions:  instancePermissionsPosture(effectiveCfg),
 		approvedMCPServers: approvedMCPServers,
+		worktreeDefault:    effectiveCfg.Workspace.DefaultWorktreeRepo,
 		trustInstances:     trustInstancesOn(effectiveCfg),
 		trustFromOverlay:   effectiveCfg.TrustInstancesFromOverlay,
 		claudeTrustRepos:   claudeTrustRepos,

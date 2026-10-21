@@ -17,9 +17,10 @@ type HookTarget struct {
 	InstanceRoot string
 	Repo         string
 	Slug         string
-	// Defaulted is set when nothing in the request or the environment named
-	// the repo and the resolver fell back to the instance's first repo. The
-	// caller reports on stderr which repo it got and how to choose another.
+	// Defaulted is set when nothing in the request, the environment or the
+	// workspace config named the repo and the resolver fell back to the
+	// instance's first repo. The caller reports on stderr which repo it got
+	// and how to choose another.
 	Defaulted bool
 }
 
@@ -28,6 +29,13 @@ type HookTarget struct {
 // resolved, such as one sent from the instance root. It is read from the hook process's environment, which Claude Code inherits from
 // the session's launch, so an agent's shell `export` can't change it.
 const WorktreeRepoEnv = "NIWA_WORKTREE_REPO"
+
+// DefaultWorktreeRepoKey is the [workspace] key in the workspace config that
+// names the repo a bare worktree name lands in when neither the request nor
+// NIWA_WORKTREE_REPO picks one. The hook loads no config: apply records the
+// value in the instance state file (InstanceState.DefaultWorktreeRepo), and
+// ResolveHookTarget reads it there.
+const DefaultWorktreeRepoKey = "default_worktree_repo"
 
 // ErrDelegationOptedOut is returned when the resolved instance was created
 // with `niwa init --no-worktree-delegation`. The workspace root's settings are
@@ -200,20 +208,29 @@ func enumerateHookRepos(instanceRoot string) ([]hookRepo, error) {
 //
 //  6. the repo NIWA_WORKTREE_REPO names; a value naming no cloned repo is
 //     refused.
-//  7. the instance's first repo ordered by group, then name, with Defaulted
+//  7. the repo the workspace config's [workspace].default_worktree_repo
+//     names, as the last apply recorded it in the instance state; a value
+//     naming no cloned repo is refused, naming the key.
+//  8. the instance's first repo ordered by group, then name, with Defaulted
 //     set. Claude Code's Agent tool picks a bare name itself and has no
 //     fallback when the hook fails, so refusing here would break every
 //     worktree request from a multi-repo instance root.
 //
 // An explicit prefix wins over cwd because it is what the agent asked for at
-// the moment of the call.
+// the moment of the call. NIWA_WORKTREE_REPO wins over the configured default
+// because it is set where this session was launched, which is narrower than
+// the whole workspace.
 func ResolveHookTarget(anchor, cwd, name string) (HookTarget, error) {
 	instanceRoot, err := ResolveHookInstance(anchor, cwd)
 	if err != nil {
 		return HookTarget{}, err
 	}
-	if state, err := LoadState(instanceRoot); err == nil && state.NoWorktreeDelegation {
-		return HookTarget{}, ErrDelegationOptedOut
+	configured := ""
+	if state, err := LoadState(instanceRoot); err == nil {
+		if state.NoWorktreeDelegation {
+			return HookTarget{}, ErrDelegationOptedOut
+		}
+		configured = state.DefaultWorktreeRepo
 	}
 	repos, err := enumerateHookRepos(instanceRoot)
 	if err != nil {
@@ -226,14 +243,20 @@ func ResolveHookTarget(anchor, cwd, name string) (HookTarget, error) {
 	if len(segs) >= 3 {
 		for _, r := range repos {
 			if segs[0] == r.group && segs[1] == r.name {
-				return withSlug(target, r.name, segs[2:], repos)
+				if t, ok := withSlug(target, r.name, segs[2:]); ok {
+					return t, nil
+				}
+				return HookTarget{}, noRepoSelectedError(repos, configured)
 			}
 		}
 	}
 	if len(segs) >= 2 {
 		for _, r := range repos {
 			if segs[0] == r.name {
-				return withSlug(target, r.name, segs[1:], repos)
+				if t, ok := withSlug(target, r.name, segs[1:]); ok {
+					return t, nil
+				}
+				return HookTarget{}, noRepoSelectedError(repos, configured)
 			}
 		}
 		// A prefix naming a repo the instance lists but hasn't cloned gets its
@@ -263,7 +286,7 @@ func ResolveHookTarget(anchor, cwd, name string) (HookTarget, error) {
 		return target, nil
 	}
 	if len(repos) == 0 || len(segs) > 1 {
-		return HookTarget{}, noRepoSelectedError(repos)
+		return HookTarget{}, noRepoSelectedError(repos, configured)
 	}
 	if want := os.Getenv(WorktreeRepoEnv); want != "" {
 		if !hasHookRepo(repos, want) {
@@ -271,6 +294,18 @@ func ResolveHookTarget(anchor, cwd, name string) (HookTarget, error) {
 				WorktreeRepoEnv, want, strings.Join(hookRepoNames(repos), ", "))
 		}
 		target.Repo = want
+		return target, nil
+	}
+	if configured != "" {
+		// Refused rather than passed to the fallback, as an unknown
+		// NIWA_WORKTREE_REPO is: the workspace asked for a repo, and landing
+		// somewhere else would hide a typo behind a notice the agent may
+		// never see. Apply warns about a value naming no repo it classified.
+		if !hasHookRepo(repos, configured) {
+			return HookTarget{}, fmt.Errorf("the workspace config's [workspace] %s = %q names no repo cloned in this instance; set it to one of: %s, then run niwa apply",
+				DefaultWorktreeRepoKey, configured, strings.Join(hookRepoNames(repos), ", "))
+		}
+		target.Repo = configured
 		return target, nil
 	}
 	target.Repo = defaultHookRepo(repos).name
@@ -316,7 +351,8 @@ func worktreeRepoFromCwd(instanceRoot, cwd string, repos []hookRepo) (string, bo
 // defaultHookRepo picks the repo a bare name with nothing else to go on lands
 // in: the first by group, then name. The order is fixed so an instance always
 // picks the same repo. The hook loads no workspace config, so the config's
-// own repo order isn't available here.
+// own repo order isn't available here; a workspace that wants another repo
+// sets [workspace].default_worktree_repo.
 func defaultHookRepo(repos []hookRepo) hookRepo {
 	best := repos[0]
 	for _, r := range repos[1:] {
@@ -325,6 +361,24 @@ func defaultHookRepo(repos []hookRepo) hookRepo {
 		}
 	}
 	return best
+}
+
+// warnUnknownWorktreeDefault returns the apply warning for a
+// [workspace].default_worktree_repo that names none of the repos this apply
+// classified, or "" when it names one or is unset. The hook refuses a bare
+// name at an instance root while the value names no cloned repo, so apply
+// says so first rather than leaving the next isolated subagent to find out.
+func warnUnknownWorktreeDefault(name string, classified []ClassifiedRepo) string {
+	if name == "" {
+		return ""
+	}
+	for _, cr := range classified {
+		if cr.Repo.Name == name {
+			return ""
+		}
+	}
+	return fmt.Sprintf("[workspace] %s = %q names no repo in this workspace, so a bare worktree name at an instance root will be refused until it names one",
+		DefaultWorktreeRepoKey, name)
 }
 
 func hasHookRepo(repos []hookRepo, name string) bool {
@@ -344,16 +398,16 @@ func hookRepoNames(repos []hookRepo) []string {
 	return names
 }
 
-// withSlug finishes a prefix match. An empty slug (`niwa/`) is refused, since
-// it names a repo but no worktree.
-func withSlug(target HookTarget, repo string, rest []string, repos []hookRepo) (HookTarget, error) {
+// withSlug finishes a prefix match. It reports false for an empty slug
+// (`niwa/`), which names a repo but no worktree; the caller refuses it.
+func withSlug(target HookTarget, repo string, rest []string) (HookTarget, bool) {
 	slug := strings.Join(rest, "/")
 	if strings.TrimSpace(slug) == "" {
-		return HookTarget{}, noRepoSelectedError(repos)
+		return HookTarget{}, false
 	}
 	target.Repo = repo
 	target.Slug = slug
-	return target, nil
+	return target, true
 }
 
 // missingClone reports whether name is a repo the instance's state lists but
@@ -369,14 +423,22 @@ func missingClone(instanceRoot, name string) bool {
 
 // noRepoSelectedError is the refusal for a request that names no repo the
 // resolver can use. It lists the repos and shows the form that works, with
-// the repo a bare name would default to as the example, so the two agree.
-func noRepoSelectedError(repos []hookRepo) error {
+// the repo a bare name would default to as the example, so the two agree:
+// the configured default when it names a cloned repo, else the first by
+// group and name. A configured default with no clone isn't used as the
+// example, since it isn't a name that works; that problem is reported by the
+// bare-name refusal, which is where the key matters.
+func noRepoSelectedError(repos []hookRepo, configured string) error {
 	if len(repos) == 0 {
 		return errors.New("no repo selected: this instance has no cloned repos")
 	}
+	example := defaultHookRepo(repos).name
+	if hasHookRepo(repos, configured) {
+		example = configured
+	}
 	names := hookRepoNames(repos)
 	return fmt.Errorf("no repo selected; name the worktree <repo>/<slug> or <group>/<repo>/<slug>, for example %s/<slug>. Repos in this instance: %s",
-		defaultHookRepo(repos).name, strings.Join(names, ", "))
+		example, strings.Join(names, ", "))
 }
 
 // HookScope is what the worktree guard needs to know about where a session
