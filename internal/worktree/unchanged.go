@@ -63,6 +63,18 @@ func WorktreeUnchanged(ctx context.Context, state SessionLifecycleState, gitInvo
 	if status != "" {
 		return false, "it has uncommitted or untracked files", nil
 	}
+	// A tracked file marked assume-unchanged or skip-worktree hides its edits
+	// from `git status`, so such a mark alone counts as a change. `ls-files
+	// -v` tags the first with a lowercase letter and the second with "S".
+	tags, err := git("ls-files", "-v")
+	if err != nil {
+		return false, "", err
+	}
+	for _, line := range strings.Split(tags, "\n") {
+		if line != "" && (line[0] == 'S' || (line[0] >= 'a' && line[0] <= 'z')) {
+			return false, "a tracked file is marked assume-unchanged or skip-worktree: " + strings.TrimSpace(line[1:]), nil
+		}
+	}
 	now, err := FingerprintIgnoredFiles(ctx, state.WorktreePath, gitInvoker)
 	if err != nil {
 		return false, "", err
@@ -130,6 +142,11 @@ func compareFingerprints(baseline, current map[string]string) string {
 // see IgnoredFingerprints for the forms. A link is fingerprinted by its target
 // and never followed, so nothing outside the worktree is read. The hook
 // records the result once it has set the worktree up.
+//
+// Every ignored file is read in full, at create and again at each check. That
+// cost is accepted: the files are local, an agent worktree rarely holds large
+// ignored trees, and a slow or failed check only keeps the worktree (a
+// SubagentStop that times out is a non-blocking error), never removes one.
 func FingerprintIgnoredFiles(ctx context.Context, worktreePath string, gitInvoker GitInvoker) (IgnoredFingerprints, error) {
 	paths, err := ListIgnoredFiles(ctx, worktreePath, gitInvoker)
 	if err != nil {
@@ -162,7 +179,9 @@ func fingerprintFile(path string) (string, error) {
 		if _, err := io.Copy(h, f); err != nil {
 			return "", fmt.Errorf("fingerprinting %s: %w", path, err)
 		}
-		return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
+		// The permission bits are part of the fingerprint, so a chmod
+		// counts as a change too.
+		return fmt.Sprintf("sha256:%s %04o", hex.EncodeToString(h.Sum(nil)), info.Mode().Perm()), nil
 	case info.Mode()&os.ModeSymlink != 0:
 		target, err := os.Readlink(path)
 		if err != nil {

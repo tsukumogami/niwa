@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -162,8 +163,28 @@ func TestFromHookSubagentStop_PreExistingIgnoredFiles(t *testing.T) {
 		removed bool
 		reason  string
 	}{
-		{"edited", func(t *testing.T, path string) {
-			if err := os.WriteFile(path, []byte(`{"permissions":{"allow":["Bash"]}}`), 0o644); err != nil {
+		{"edited, same size and modification time", func(t *testing.T, path string) {
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(`[]`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+		}, false, "has changed: settings.local.json"},
+		{"made executable", func(t *testing.T, path string) {
+			if err := os.Chmod(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, false, "has changed: settings.local.json"},
+		{"replaced by a symlink", func(t *testing.T, path string) {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("/dev/null", path); err != nil {
 				t.Fatal(err)
 			}
 		}, false, "has changed: settings.local.json"},
@@ -205,8 +226,9 @@ func TestFromHookSubagentStop_PreExistingIgnoredFiles(t *testing.T) {
 }
 
 // TestAutomaticTeardown_RequiresFingerprints checks that a record without
-// ignored-file fingerprints, as one written by an earlier niwa is, is never
-// removed by either path, unchanged worktree or not.
+// ignored-file fingerprints is never removed by either path, unchanged
+// worktree or not. The record is rewritten the way an earlier build left it:
+// a path-only ignored_baseline list and no ignored_fingerprints.
 func TestAutomaticTeardown_RequiresFingerprints(t *testing.T) {
 	f := newCreateFlowFixture(t)
 	resetSessionCreateFlags(t)
@@ -214,15 +236,24 @@ func TestAutomaticTeardown_RequiresFingerprints(t *testing.T) {
 	t.Setenv("NIWA_REAP_IDLE_GRACE", "1h")
 
 	st := createAgentWorktree(t, f, testAgentID, filepath.Join(t.TempDir(), "gone.jsonl"))
-	got, err := worktree.ReadSessionLifecycleState(f.sessionsDir, st.SessionID)
+	backdate(t, f, st, 2*time.Hour)
+	recordPath := filepath.Join(f.sessionsDir, st.SessionID+".json")
+	raw, err := os.ReadFile(recordPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got.IgnoredFingerprints = nil
-	if err := worktree.WriteSessionLifecycleState(f.sessionsDir, got); err != nil {
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatal(err)
 	}
-	backdate(t, f, st, 2*time.Hour)
+	delete(doc, "ignored_fingerprints")
+	doc["ignored_baseline"] = []string{}
+	if raw, err = json.Marshal(doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recordPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	errOut := subagentStop(t, f, testAgentID, st.WorktreePath)
 	assertKept(t, f, st)
@@ -271,6 +302,12 @@ func TestFromHookSubagentStop_KeepsChangedWorktree(t *testing.T) {
 		{"file niwa's own *.local* exclude pattern hides", func(t *testing.T, wt string) {
 			writeFile(t, filepath.Join(wt, ".env.local"))
 		}, "weren't there when niwa set it up, such as .env.local"},
+		{"edit hidden by assume-unchanged", func(t *testing.T, wt string) {
+			gitIn(t, wt, "update-index", "--assume-unchanged", ".gitignore")
+			if err := os.WriteFile(filepath.Join(wt, ".gitignore"), []byte("build/\nmore/\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, "marked assume-unchanged or skip-worktree: .gitignore"},
 		{"branch moved under a detached HEAD", func(t *testing.T, wt string) {
 			gitIn(t, wt, "commit", "--allow-empty", "-m", "work")
 			gitIn(t, wt, "checkout", "--detach", "HEAD~1")

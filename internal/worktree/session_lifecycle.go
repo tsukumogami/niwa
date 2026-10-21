@@ -89,9 +89,12 @@ type SessionLifecycleState struct {
 }
 
 // IgnoredFingerprints maps each git-ignored file in a worktree, relative to
-// it, to a fingerprint of what it is: "sha256:<hex>" of a regular file's
-// contents, "symlink:<hex>" of a link's target, or "mode:<mode>" for anything
-// else. See WorktreeUnchanged.
+// it, to a fingerprint of what it is: "sha256:<hex> <perm>" of a regular
+// file's contents and permission bits, "symlink:<hex>" of a link's target, or
+// "mode:<mode>" for anything else, which records only its type. See
+// WorktreeUnchanged. It is its own key rather than a reuse of an earlier
+// path-only list, so a record holding only that list decodes with no
+// fingerprints and never qualifies.
 type IgnoredFingerprints struct {
 	Files map[string]string `json:"files"`
 }
