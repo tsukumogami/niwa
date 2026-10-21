@@ -29,6 +29,7 @@ func init() {
 	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session, sanitized into a slug. The session name is the slug plus the instance's random suffix (<slug>-<id>), and the instance is <config>+<slug>-<id>; with no name the instance is <config>+-<id> and no session name is forwarded -- '+' always marks the end of the config name. An agent with no display-name flag gets no session name, though the slug still names the instance")
 	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", dispatchModelFlagHelp())
 	dispatchCmd.Flags().StringVar(&dispatchPermissionMode, "permission-mode", "", "permission mode to forward to the background worker; dropped for an agent that has no such flag")
+	dispatchCmd.Flags().StringVar(&dispatchAuthority, "authority", "", "authority level for this dispatch: autonomous, supervised or strict. It can only narrow the level the workspace and this machine allow; a wider value is refused. It is independent of --permission-mode")
 	dispatchCmd.Flags().StringVar(&dispatchAgent, "agent", "", "subagent type to forward to the background worker; this selects a role within the launched agent, not which agent is launched (that is --harness). Dropped for an agent that has no such flag")
 	dispatchCmd.Flags().StringVar(&dispatchHarness, harnessFlagName, "", harnessFlagUsage())
 	dispatchCmd.Flags().BoolVarP(&dispatchDetach, "detach", "d", false, "put the worker out of this terminal's reach: for an agent whose runner executes the turn in the foreground, run it detached instead of here; for one that backgrounds its own session, skip the attach. Either way, print hints and return")
@@ -53,6 +54,7 @@ var (
 	dispatchName           string
 	dispatchModel          string
 	dispatchPermissionMode string
+	dispatchAuthority      string
 	dispatchAgent          string
 	dispatchHarness        string
 	dispatchDetach         bool
@@ -337,24 +339,47 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("niwa: error: %w (in %s)", err, cfgPath)
 	}
+	// The machine's authority-level ceiling fails closed the same way: a value
+	// outside the three level names stops the dispatch rather than reading as
+	// "no ceiling", which would let the dispatch run wider than the machine
+	// owner allowed.
+	machineAuthority, err := gc.AuthorityLevel()
+	if err != nil {
+		return fmt.Errorf("niwa: error: %w (in %s)", err, cfgPath)
+	}
 
-	// (2b) Resolve which agent this dispatch launches, from --harness,
+	// (2b) Load the workspace config. It fails closed: a config that cannot be
+	// loaded, for whatever reason, refuses the dispatch here, before anything
+	// is provisioned. It used to be tolerated -- the agent was resolved from
+	// the rungs that did load, and provisioning reported the failure -- but
+	// the config also carries the workspace's authority level, and a level
+	// that silently fell back to the default because the file was unreadable
+	// would be wider than the one the developer wrote. Provisioning would fail
+	// on the same file anyway, so only the point of failure moves.
+	wsConfigPath := filepath.Join(workspaceRoot, workspace.StateDir, workspace.WorkspaceConfigFile)
+	wsCfg, cfgErr := config.Load(wsConfigPath)
+	if cfgErr != nil {
+		return fmt.Errorf("niwa: error: loading %s: %w", wsConfigPath, cfgErr)
+	}
+	wsConfig := wsCfg.Config
+
+	// (2b-authority) Resolve the authority level from the workspace level (or
+	// the default), the machine ceiling read at (2a), and --authority. An
+	// invalid flag, or one wider than the ceiling, refuses the dispatch here,
+	// so a refusal creates no instance, writes no mapping and launches
+	// nothing. The level is independent of the permission mode: nothing here
+	// reads it, and nothing that derives the mode reads the level.
+	authorityResolved, err := resolveDispatchAuthority(dispatchAuthority, wsConfig, wsConfigPath, machineAuthority)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: authority level %s from %s\n", authorityResolved.Level, authorityResolved.Source)
+
+	// (2b-agent) Resolve which agent this dispatch launches, from --harness,
 	// NIWA_DISPATCH_HARNESS, the workspace default_agent, and the host
 	// default_dispatch_harness, in that order. dispatch's own --agent flag is
 	// the launched agent's subagent-type passthrough, a different thing, so it
-	// is deliberately not consulted here. A config that cannot be loaded resolves against the
-	// sources that did load and leaves the failure to the provisioning path to
-	// report -- but it says so first, because a rung that was skipped rather
-	// than consulted is the one case where the resolution's answer is right
-	// about the inputs it had and wrong about the ones the developer wrote.
-	wsConfigPath := filepath.Join(workspaceRoot, workspace.StateDir, workspace.WorkspaceConfigFile)
-	var wsConfig *config.WorkspaceConfig
-	wsCfg, cfgErr := config.Load(wsConfigPath)
-	if cfgErr == nil {
-		wsConfig = wsCfg.Config
-	} else if notice := unreadableAgentRungNotice(wsConfigPath, cfgErr); notice != "" {
-		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", notice)
-	}
+	// is deliberately not consulted here.
 	// A profile that still sets the pre-rename variable is a rung the developer
 	// believes is set and niwa does not read. Say so before resolving, because
 	// resolution reports no error for it -- nothing held a bad value, the
@@ -593,6 +618,17 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if err := writeDispatchMarker(instancePath); err != nil {
 		return fmt.Errorf("niwa: error: writing dispatch pending-marker: %w", err)
 	}
+	// (8a) Beside the marker, record the authority level resolved at (2b) in
+	// the instance. It is written before the worker launches, so a session
+	// that asks for its level before its mapping exists -- or an agent that
+	// sets no session id -- still finds its dispatch's level. It lives inside
+	// the instance, so the rollback armed at (7) removes it with the instance.
+	if err := workspace.WriteAuthorityRecord(instancePath, workspace.AuthorityRecord{
+		Level:  authorityResolved.Level.String(),
+		Source: string(authorityResolved.Source),
+	}); err != nil {
+		return fmt.Errorf("niwa: error: writing the instance's authority record: %w", err)
+	}
 
 	// (9) The host global config was loaded once at (2a), before the agent
 	// resolution that also reads it. gc below is that same result, and it is
@@ -785,6 +821,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			RequestedSkill:  dispatchSkill,
 			BriefID:         briefID,
 			Workspace:       lineageWorkspace(wsConfig, cmd.ErrOrStderr()),
+			AuthorityLevel:  authorityResolved.Level.String(),
 		})
 		if lineageValue != "" {
 			launchSettings["env"] = resourceAttributesEnv{value: lineageValue}
@@ -1025,7 +1062,12 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		// The same boolean that gates the audit line at (12a), so the record
 		// and the line can never disagree about this session.
 		AcceptsSessionMessages: inboundApplied,
-		Created:                time.Now().UTC(),
+		// The level resolved at (2b), for every agent: the lineage attribute
+		// reaches only an agent that receives lineage, but the mapping is
+		// where any session's level is read back from.
+		AuthorityLevel:  authorityResolved.Level.String(),
+		AuthoritySource: string(authorityResolved.Source),
+		Created:         time.Now().UTC(),
 	}
 	if err := workspace.WriteSessionMapping(workspaceRoot, mapping); err != nil {
 		// The same hazard as the capture-failure branch, on a narrower path.

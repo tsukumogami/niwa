@@ -308,17 +308,16 @@ func TestLaunchableAgentsHintOffersTheFlagFirst(t *testing.T) {
 	}
 }
 
-// TestDispatch_UnreadableWorkspaceConfigSaysTheRungWasSkipped covers the one
-// resolution outcome that is right about its inputs and wrong about the
-// developer's: a workspace config that states an agent and does not parse. The
-// rung is not overridden and not empty, it is skipped, so the dispatch launches
-// whatever the broader rungs say while the file the developer would point at
-// says something else.
-//
-// The dispatch still runs -- this is a notice, not a refusal, and the config
-// failure has its own consequences further along -- but the agent question is
-// answered before those, so it is answered out loud.
-func TestDispatch_UnreadableWorkspaceConfigSaysTheRungWasSkipped(t *testing.T) {
+// TestDispatch_UnreadableWorkspaceConfigRefusesBeforeResolvingTheAgent covers
+// a workspace config that states an agent and does not parse. The dispatch
+// used to resolve the agent from the broader rungs and print a notice that the
+// workspace rung was skipped; it now refuses, because the same file carries the
+// workspace's authority level, and a level that fell back to the default
+// because the file was unreadable would be wider than the one the developer
+// wrote. So the agent question is never answered from the rungs that happened
+// to load: no binary is preflighted, nothing is provisioned, and the error
+// names the file.
+func TestDispatch_UnreadableWorkspaceConfigRefusesBeforeResolvingTheAgent(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	cfgPath := filepath.Join(root, config.ConfigDir, config.ConfigFile)
 	// The agent the developer wrote, and a syntax error below it. TOML decoding
@@ -329,24 +328,28 @@ func TestDispatch_UnreadableWorkspaceConfigSaysTheRungWasSkipped(t *testing.T) {
 	}
 	chdir(t, root)
 	setHostConfig(t, "")
-	installDispatchFakes(t, root)
+	f := installDispatchFakes(t, root)
 	var preflighted []string
 	recordPreflightedBinary(t, &preflighted)
 	dispatchDetach = true
 	t.Setenv("NIWA_DISPATCH_HARNESS", "")
 
-	_, stderr, _ := runDispatchCmd(t, "do a thing")
+	_, stderr, err := runDispatchCmd(t, "do a thing")
 
-	// The premise: the stated agent really was dropped. Without this the notice
-	// could be about a rung that was honored anyway.
-	if want := binaryFor(t, agent.AgentClaude); len(preflighted) == 0 || preflighted[0] != want {
-		t.Fatalf("preflighted %v with an unreadable workspace config; this test needs the dispatch to have fallen through to %q", preflighted, want)
+	if err == nil {
+		t.Fatalf("a workspace config that does not parse must refuse the dispatch\nstderr: %s", stderr)
 	}
-	if !strings.Contains(stderr, cfgPath) {
-		t.Errorf("the dispatch never named the config it could not read; a developer looking for why codex was not launched has no file to open.\nstderr: %s", stderr)
+	if !strings.Contains(err.Error(), cfgPath) {
+		t.Errorf("the refusal must name the config it could not read: %v", err)
 	}
-	if !strings.Contains(stderr, "default_agent") {
-		t.Errorf("the notice does not say what was dropped, so it reads as a config problem rather than an agent-selection one.\nstderr: %s", stderr)
+	if len(preflighted) != 0 {
+		t.Errorf("preflighted %v; the agent must not be resolved from the rungs that happened to load", preflighted)
+	}
+	if f.provisionCalled != 0 || f.launchCalled != 0 {
+		t.Errorf("a refusal must come before anything is created: provisioned %d, launched %d", f.provisionCalled, f.launchCalled)
+	}
+	if strings.Contains(stderr, "default_agent in it was not applied") {
+		t.Errorf("the old skipped-rung notice still prints beside the refusal:\n%s", stderr)
 	}
 }
 

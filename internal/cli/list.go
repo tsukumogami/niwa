@@ -15,7 +15,7 @@ import (
 func init() {
 	rootCmd.AddCommand(listCmd)
 	listCmd.Flags().BoolVar(&listJSON, "json", false,
-		"emit a JSON array of {name, path, ephemeral, accepts_session_messages[, keep_alive][, session_name]} records, one per instance")
+		"emit a JSON array of {name, path, ephemeral, accepts_session_messages[, keep_alive][, session_name][, authority_level, authority_source]} records, one per instance")
 }
 
 var listJSON bool
@@ -60,7 +60,10 @@ An instance whose session was dispatched with keep-alive armed and is still
 live additionally carries keep_alive:true (and a "(keep-alive)" marker in
 the human output, placed before the "(accepts session messages)" marker when
 both apply). An instance whose dispatch recorded a session name additionally
-carries session_name, the same value the session name: line shows.`,
+carries session_name, the same value the session name: line shows. An
+instance whose newest dispatch recorded an authority level carries
+authority_level and authority_source: the level the dispatch resolved and the
+setting it came from.`,
 	Args: cobra.NoArgs,
 	RunE: runList,
 }
@@ -210,6 +213,13 @@ func annotateFromSessionMappings(records []workspace.InstanceRecord, workspaceRo
 			}
 			if parentSessionPattern.MatchString(m.ParentSessionID) {
 				records[i].ParentSessionID = m.ParentSessionID
+			}
+			// The authority level and its source are copied as a pair: a
+			// level is meaningless without the setting it came from, so a
+			// mapping where either fails the check reports neither.
+			if rec := (workspace.AuthorityRecord{Level: m.AuthorityLevel, Source: m.AuthoritySource}); rec.Validate() == nil {
+				records[i].AuthorityLevel = rec.Level
+				records[i].AuthoritySource = rec.Source
 			}
 		}
 	}

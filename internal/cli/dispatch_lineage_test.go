@@ -27,6 +27,7 @@ func TestLineageAttributeNamesArePinned(t *testing.T) {
 		"niwa.requested.skill",
 		"niwa.brief.id",
 		"niwa.workspace",
+		"niwa.authority.level",
 	}
 	if !slices.Equal(lineageAttributeNames, want) {
 		t.Fatalf("lineage attribute names = %v, want exactly %v", lineageAttributeNames, want)
@@ -36,14 +37,16 @@ func TestLineageAttributeNamesArePinned(t *testing.T) {
 func TestLineageEntriesOrderAndOmission(t *testing.T) {
 	var warn bytes.Buffer
 	got := lineageEntries(lineageInputs{
-		Workspace:  "acme",
-		DispatchID: "00000000-0000-4000-8000-000000000001",
-		BriefID:    "sha256:abc",
+		Workspace:      "acme",
+		DispatchID:     "00000000-0000-4000-8000-000000000001",
+		BriefID:        "sha256:abc",
+		AuthorityLevel: "strict",
 	}, &warn)
 	want := []string{
 		"niwa.dispatch.id=00000000-0000-4000-8000-000000000001",
 		"niwa.brief.id=sha256:abc",
 		"niwa.workspace=acme",
+		"niwa.authority.level=strict",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("entries = %v, want %v", got, want)

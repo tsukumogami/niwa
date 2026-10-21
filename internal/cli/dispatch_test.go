@@ -155,6 +155,7 @@ func resetDispatchFlags(t *testing.T) {
 	prevName := dispatchName
 	prevModel := dispatchModel
 	prevPerm := dispatchPermissionMode
+	prevAuthority := dispatchAuthority
 	prevAgent := dispatchAgent
 	prevHarness := dispatchHarness
 	prevDetach := dispatchDetach
@@ -167,6 +168,7 @@ func resetDispatchFlags(t *testing.T) {
 	dispatchName = ""
 	dispatchModel = ""
 	dispatchPermissionMode = ""
+	dispatchAuthority = ""
 	dispatchAgent = ""
 	dispatchHarness = ""
 	dispatchDetach = false
@@ -183,6 +185,7 @@ func resetDispatchFlags(t *testing.T) {
 		dispatchName = prevName
 		dispatchModel = prevModel
 		dispatchPermissionMode = prevPerm
+		dispatchAuthority = prevAuthority
 		dispatchAgent = prevAgent
 		dispatchHarness = prevHarness
 		dispatchDetach = prevDetach

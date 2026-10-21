@@ -29,7 +29,7 @@ import (
 // This file resolves the inputs, validates every value, and composes the list.
 // It does not decide where the value goes; the dispatch path does.
 
-// The six lineage attribute names, in the order niwa writes them. They are
+// The seven lineage attribute names, in the order niwa writes them. They are
 // fixed: other tools read them by name, so a rename here breaks every reader
 // silently. lineageAttributeNames pins the order and a test pins the list.
 const (
@@ -39,6 +39,7 @@ const (
 	attrRequestedSkill  = "niwa.requested.skill"
 	attrBriefID         = "niwa.brief.id"
 	attrWorkspace       = "niwa.workspace"
+	attrAuthorityLevel  = "niwa.authority.level"
 )
 
 var lineageAttributeNames = []string{
@@ -48,6 +49,7 @@ var lineageAttributeNames = []string{
 	attrRequestedSkill,
 	attrBriefID,
 	attrWorkspace,
+	attrAuthorityLevel,
 }
 
 // lineageNamespace is the prefix niwa owns. An inherited entry under it is
@@ -77,7 +79,7 @@ var requestedSkillPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*:[a-z0-9][a-z
 // what it claims to be, and reading it whole would be the wrong response.
 const maxLineageFileBytes = 1 << 20
 
-// lineageInputs are the six values before validation. An empty field means
+// lineageInputs are the seven values before validation. An empty field means
 // the value doesn't exist for this dispatch, and its attribute is left out.
 type lineageInputs struct {
 	DispatchID      string
@@ -86,6 +88,9 @@ type lineageInputs struct {
 	RequestedSkill  string
 	BriefID         string
 	Workspace       string
+	// AuthorityLevel is the level the dispatch resolved, as its configuration
+	// spelling. It is always set on a dispatch that launches.
+	AuthorityLevel string
 }
 
 // lineageEntries renders the inputs as `key=value` entries in the fixed order.
@@ -100,6 +105,7 @@ func lineageEntries(in lineageInputs, warn io.Writer) []string {
 		attrRequestedSkill:  in.RequestedSkill,
 		attrBriefID:         in.BriefID,
 		attrWorkspace:       in.Workspace,
+		attrAuthorityLevel:  in.AuthorityLevel,
 	}
 	entries := make([]string, 0, len(lineageAttributeNames))
 	for _, name := range lineageAttributeNames {

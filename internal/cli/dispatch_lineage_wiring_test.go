@@ -105,7 +105,7 @@ func TestDispatch_Lineage_FullSet(t *testing.T) {
 	if !strings.HasPrefix(got.settings, "team.id=platform,host.name=h1,extra.key=1,") {
 		t.Errorf("inherited entries must come first, settings before environment, conflicts to settings: %q", got.settings)
 	}
-	wantOrder := []string{"team.id", "host.name", "extra.key", "niwa.dispatch.id", "niwa.dispatch.slug", "niwa.parent.session.id", "niwa.requested.skill", "niwa.brief.id", "niwa.workspace"}
+	wantOrder := []string{"team.id", "host.name", "extra.key", "niwa.dispatch.id", "niwa.dispatch.slug", "niwa.parent.session.id", "niwa.requested.skill", "niwa.brief.id", "niwa.workspace", "niwa.authority.level"}
 	if strings.Join(order, ",") != strings.Join(wantOrder, ",") {
 		t.Errorf("key order = %v, want %v", order, wantOrder)
 	}
@@ -118,6 +118,7 @@ func TestDispatch_Lineage_FullSet(t *testing.T) {
 		"niwa.requested.skill":   "shirabe:scope",
 		"niwa.brief.id":          briefDigest([]byte("the brief\n")),
 		"niwa.workspace":         "test-ws",
+		"niwa.authority.level":   "autonomous",
 	}
 	for k, want := range checks {
 		if attrs[k] != want {
