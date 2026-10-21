@@ -291,6 +291,10 @@ func ResolveHookTarget(anchor, cwd, name string) (HookTarget, error) {
 		return target, nil
 	}
 	if configured != "" {
+		// Refused rather than passed to the fallback, as an unknown
+		// NIWA_WORKTREE_REPO is: the workspace asked for a repo, and landing
+		// somewhere else would hide a typo behind a notice the agent may
+		// never see. Apply warns about a value naming no repo it classified.
 		if !hasHookRepo(repos, configured) {
 			return HookTarget{}, fmt.Errorf("the workspace config's [workspace] %s = %q names no repo cloned in this instance; set it to one of: %s, then run niwa apply",
 				DefaultWorktreeRepoKey, configured, strings.Join(hookRepoNames(repos), ", "))

@@ -475,9 +475,10 @@ Run `niwa apply` after changing it. The hook doesn't load the workspace config,
 so apply records the value in each instance's `.niwa/instance.json`, and the
 hook reads it from there. A bare name from the root then lands in `app` with no
 notice. Removing the key and applying again goes back to the first-repo rule.
-If the value names no repo in the workspace, apply warns, and the hook refuses
-bare names from the root until it's fixed, rather than quietly using another
-repo.
+If the value names no repo in the workspace, apply warns. While it names no
+repo cloned in the instance, the hook refuses bare names from the root, as it
+does for an unknown `NIWA_WORKTREE_REPO`, rather than quietly using another
+repo. A single-repo instance uses its one repo whatever the key says (rule 4).
 
 `NIWA_WORKTREE_REPO` still wins over the configured default, so one session can
 pick its own repo by setting it in the shell that starts `claude`. niwa doesn't

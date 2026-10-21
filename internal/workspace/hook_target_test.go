@@ -230,6 +230,7 @@ func TestResolveHookTarget_ConfiguredDefault(t *testing.T) {
 		{"", f.alpha, "koto/fix-x", "koto"},
 		{"", kotoDir, "fix-x", "koto"},
 		{"", kotoWT, "agent-a1b2c3", "koto"},
+		{"niwa", kotoWT, "agent-a1b2c3", "koto"},
 	}
 	for _, tc := range cases {
 		t.Setenv(WorktreeRepoEnv, tc.env)
