@@ -115,6 +115,15 @@ type SessionMapping struct {
 	// and dispatches with no caller session, byte-identical.
 	DispatchID      string `json:"dispatch_id,omitempty"`
 	ParentSessionID string `json:"parent_session_id,omitempty"`
+	// AuthorityLevel and AuthoritySource are the authority level the dispatch
+	// resolved for this session and the setting it came from, the same pair
+	// the instance's authority record holds (see AuthorityRecord). Dispatch
+	// records them for every agent it launches. A reader validates them with
+	// AuthorityRecord.Validate before using them. omitempty keeps mappings
+	// written before these fields existed, and hook-written mappings,
+	// byte-identical.
+	AuthorityLevel  string `json:"authority_level,omitempty"`
+	AuthoritySource string `json:"authority_source,omitempty"`
 }
 
 // sessionsDirName is the directory under the config dir that holds the session

@@ -502,6 +502,13 @@ type InstanceRecord struct {
 	// for the same instance recorded a valid name. omitempty keeps the --json
 	// shape unchanged for those instances.
 	SessionName string `json:"session_name,omitempty"`
+	// AuthorityLevel and AuthoritySource are the authority level and its
+	// source recorded on the newest session mapping for the instance.
+	// EnumerateInstanceRecords leaves them empty; the list command fills them
+	// in, only when the pair passes AuthorityRecord.Validate. omitempty keeps
+	// instances whose newest mapping predates these fields unchanged.
+	AuthorityLevel  string `json:"authority_level,omitempty"`
+	AuthoritySource string `json:"authority_source,omitempty"`
 }
 
 // EnumerateInstanceRecords enumerates the instances under workspaceRoot as
