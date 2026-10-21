@@ -1424,6 +1424,8 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	}
 	known := KnownRepoNames(cfg, discoveredNames)
 	allWarnings = append(allWarnings, WarnUnknownRepos(cfg, known)...)
+	// cfg here and effectiveCfg where the value is recorded carry the same
+	// [workspace] table: the overlay merge never assigns it.
 	if w := warnUnknownWorktreeDefault(cfg.Workspace.DefaultWorktreeRepo, classified); w != "" {
 		allWarnings = append(allWarnings, w)
 	}

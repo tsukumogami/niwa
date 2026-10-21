@@ -243,14 +243,20 @@ func ResolveHookTarget(anchor, cwd, name string) (HookTarget, error) {
 	if len(segs) >= 3 {
 		for _, r := range repos {
 			if segs[0] == r.group && segs[1] == r.name {
-				return withSlug(target, r.name, segs[2:], repos, configured)
+				if t, ok := withSlug(target, r.name, segs[2:]); ok {
+					return t, nil
+				}
+				return HookTarget{}, noRepoSelectedError(repos, configured)
 			}
 		}
 	}
 	if len(segs) >= 2 {
 		for _, r := range repos {
 			if segs[0] == r.name {
-				return withSlug(target, r.name, segs[1:], repos, configured)
+				if t, ok := withSlug(target, r.name, segs[1:]); ok {
+					return t, nil
+				}
+				return HookTarget{}, noRepoSelectedError(repos, configured)
 			}
 		}
 		// A prefix naming a repo the instance lists but hasn't cloned gets its
@@ -392,16 +398,16 @@ func hookRepoNames(repos []hookRepo) []string {
 	return names
 }
 
-// withSlug finishes a prefix match. An empty slug (`niwa/`) is refused, since
-// it names a repo but no worktree.
-func withSlug(target HookTarget, repo string, rest []string, repos []hookRepo, configured string) (HookTarget, error) {
+// withSlug finishes a prefix match. It reports false for an empty slug
+// (`niwa/`), which names a repo but no worktree; the caller refuses it.
+func withSlug(target HookTarget, repo string, rest []string) (HookTarget, bool) {
 	slug := strings.Join(rest, "/")
 	if strings.TrimSpace(slug) == "" {
-		return HookTarget{}, noRepoSelectedError(repos, configured)
+		return HookTarget{}, false
 	}
 	target.Repo = repo
 	target.Slug = slug
-	return target, nil
+	return target, true
 }
 
 // missingClone reports whether name is a repo the instance's state lists but
@@ -419,7 +425,9 @@ func missingClone(instanceRoot, name string) bool {
 // resolver can use. It lists the repos and shows the form that works, with
 // the repo a bare name would default to as the example, so the two agree:
 // the configured default when it names a cloned repo, else the first by
-// group and name.
+// group and name. A configured default with no clone isn't used as the
+// example, since it isn't a name that works; that problem is reported by the
+// bare-name refusal, which is where the key matters.
 func noRepoSelectedError(repos []hookRepo, configured string) error {
 	if len(repos) == 0 {
 		return errors.New("no repo selected: this instance has no cloned repos")

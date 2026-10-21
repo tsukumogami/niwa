@@ -407,10 +407,11 @@ type WorkspaceMeta struct {
 	// value in each instance's state file, where the hook reads it.
 	// NIWA_WORKTREE_REPO in the session's environment still overrides it.
 	// Empty means the hook's own fallback: the first repo by group, then
-	// name. It is a raw repo name, checked against the cloned repos only
-	// when the hook runs, because org discovery decides the repo set after
-	// the config is parsed. It lives on [workspace], which the overlay merge
-	// never assigns, so only the base config sets it.
+	// name. It is a raw repo name, not checked at parse time, because org
+	// discovery decides the repo set after the config is parsed: apply warns
+	// when it names no repo the apply classified, and the hook refuses a bare
+	// name while it names no cloned repo. It lives on [workspace], which the
+	// overlay merge never assigns, so only the base config sets it.
 	DefaultWorktreeRepo string `toml:"default_worktree_repo,omitempty"`
 	// EnvExamplePolicy is the workspace-level .env.example failure policy.
 	// nil means inherit (from the global override, then the warn default).
