@@ -108,10 +108,72 @@ func TestFromHookRemove_ResolvesInstanceFromAnchor(t *testing.T) {
 	}
 }
 
+// TestFromHookCreate_BareNameAtMultiRepoRoot covers Claude Code's Agent tool
+// asking for a worktree from the root of a multi-repo instance, with a bare
+// name it picked itself: the hook creates it in the instance's first repo,
+// says so on stderr with both ways to choose another, and keeps stdout to the
+// path. A WorktreeRemove sent from the same root then tears it down.
+func TestFromHookCreate_BareNameAtMultiRepoRoot(t *testing.T) {
+	f := newCreateFlowFixture(t)
+	resetSessionCreateFlags(t)
+	defer resetSessionCreateFlags(t)
+	t.Setenv("CLAUDE_PROJECT_DIR", f.root)
+	t.Setenv(workspace.WorktreeRepoEnv, "")
+	// "zz-other" sorts after f.repo in the same group, so f.repo is the default.
+	if err := os.MkdirAll(filepath.Join(f.root, f.group, "zz-other", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	hookJSON := mustHookJSON(t, map[string]any{
+		"hook_event_name": "WorktreeCreate",
+		"session_id":      "claude-sid",
+		"cwd":             f.root,
+		"name":            "agent-a1b2c3",
+	})
+	out, errOut, err := runFromHook(t, f.root, hookJSON)
+	if err != nil {
+		t.Fatalf("bare name at a multi-repo root: %v\nstderr:\n%s", err, errOut)
+	}
+	printed := strings.TrimSuffix(out, "\n")
+	if strings.Contains(printed, "\n") || !filepath.IsAbs(printed) {
+		t.Fatalf("stdout must be exactly one absolute path, got %q", out)
+	}
+	for _, want := range []string{f.repo, workspace.WorktreeRepoEnv, "<repo>/<slug>"} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("stderr notice lacks %q:\n%s", want, errOut)
+		}
+	}
+	states, err := worktree.ListSessionLifecycleStates(f.sessionsDir)
+	if err != nil || len(states) != 1 || states[0].Repo != f.repo {
+		t.Fatalf("want one session for %q, got %+v (%v)", f.repo, states, err)
+	}
+	created := states[0]
+
+	removeJSON := mustHookJSON(t, map[string]any{
+		"hook_event_name": "WorktreeRemove",
+		"session_id":      "claude-sid",
+		"cwd":             f.root,
+		"worktree_path":   printed,
+	})
+	t.Setenv("NIWA_INSTANCE_ROOT", "")
+	if _, errOut, err := runFromHook(t, f.root, removeJSON); err != nil {
+		t.Fatalf("remove must exit 0: %v\nstderr:\n%s", err, errOut)
+	}
+	state, err := worktree.ReadSessionLifecycleState(f.sessionsDir, created.SessionID)
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	if state.Status != worktree.SessionStatusEnded {
+		t.Errorf("status = %q, want ended", state.Status)
+	}
+	if _, statErr := os.Stat(created.WorktreePath); !os.IsNotExist(statErr) {
+		t.Errorf("worktree still present: %v", statErr)
+	}
+}
+
 // TestFromHookCreate_RefusalsThroughTheCommand covers the refusals end to end:
-// a second repo makes the instance root ambiguous, an unknown prefix is
-// refused without creating anything named after it, and the stderr names the
-// repos and an example.
+// in a multi-repo instance an unknown prefix is refused without creating
+// anything named after it, and the stderr names the repos and an example.
 func TestFromHookCreate_RefusalsThroughTheCommand(t *testing.T) {
 	f := newCreateFlowFixture(t)
 	resetSessionCreateFlags(t)
@@ -121,7 +183,7 @@ func TestFromHookCreate_RefusalsThroughTheCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{"plain", "nosuchrepo/fix-x"} {
+	for _, name := range []string{"nosuchrepo/fix-x", "public/nosuch/fix-x"} {
 		hookJSON := mustHookJSON(t, map[string]any{
 			"hook_event_name": "WorktreeCreate",
 			"session_id":      "claude-sid",

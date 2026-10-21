@@ -380,8 +380,12 @@ rule that applies:
    name. A directory inside the instance but outside every repo (the instance
    root, a group directory, `.niwa/`) counts as no repo.
 4. The only repo, when the instance has exactly one.
+5. The repo of the niwa worktree that contains the session's current
+   directory. A session that entered `niwa/fix-x` and then asks for another
+   worktree gets one in `niwa`.
 
-If none applies, the create fails and the tool call returns an error starting
+A name with a `/` that none of these rules resolved, such as
+`nosuchrepo/fix-x`, fails here: the tool call returns an error starting
 `no repo selected` that lists the instance's repos and gives an example using
 the alphabetically first one:
 
@@ -389,7 +393,22 @@ the alphabetically first one:
 niwa: error: no repo selected; name the worktree <repo>/<slug> or <group>/<repo>/<slug>, for example koto/<slug>. Repos in this instance: koto, niwa
 ```
 
-A name with an empty slug, such as `niwa/`, gets the same refusal. When the
+A name with no `/` goes on to two more rules:
+
+6. The repo the `NIWA_WORKTREE_REPO` environment variable names. The hook
+   reads it from the environment Claude Code runs hooks in, which is the one
+   the session was launched with, so set it in the shell that starts
+   `claude`. A value that names no repo cloned in the instance fails the
+   create with an error naming the variable.
+7. The instance's first repo, ordered by group and then by name. Claude Code's
+   Agent tool picks a bare name such as `agent-a1b2c3` itself when it isolates
+   a subagent, and fails the subagent if the hook refuses, so a session at the
+   root of a multi-repo instance gets a worktree in a fixed repo rather than an
+   error. niwa prints a notice on stderr naming that repo and the two ways to
+   choose another: a `<repo>/<slug>` name or `NIWA_WORKTREE_REPO`.
+
+A name with an empty slug, such as `niwa/`, is refused with `no repo selected`
+whatever the other rules say. When the
 prefix and the current directory point at different repos, the prefix wins,
 since it's what the agent asked for at the moment of the call. A name whose
 leading segments match no repo has no prefix at all, and its whole text is the
