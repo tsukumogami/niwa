@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 // hookFixture builds a workspace root holding instance "alpha" (repos niwa
@@ -55,6 +57,7 @@ func newHookFixture(t *testing.T) hookFixture {
 }
 
 func TestResolveHookTarget(t *testing.T) {
+	t.Setenv(WorktreeRepoEnv, "")
 	f := newHookFixture(t)
 	niwaDir := filepath.Join(f.alpha, "public", "niwa")
 	kotoDir := filepath.Join(f.alpha, "public", "koto")
@@ -74,8 +77,8 @@ func TestResolveHookTarget(t *testing.T) {
 		{"prefix wins over cwd", f.alpha, kotoDir, "niwa/fix-x", "niwa", "fix-x", ""},
 		{"cwd picks repo without prefix", f.alpha, kotoDir, "fix-x", "koto", "fix-x", ""},
 		{"repo-launched session", niwaDir, niwaDir, "fix-x", "niwa", "fix-x", ""},
-		{"group dir is no repo", f.alpha, filepath.Join(f.alpha, "public"), "fix-x", "", "", "no repo selected"},
-		{"multi-repo root without prefix", f.alpha, f.alpha, "fix-x", "", "", "no repo selected"},
+		{"group dir takes the default repo", f.alpha, filepath.Join(f.alpha, "public"), "fix-x", "koto", "fix-x", ""},
+		{"multi-repo root takes the default repo", f.alpha, f.alpha, "fix-x", "koto", "fix-x", ""},
 		{"unknown prefix", f.alpha, f.alpha, "nosuchrepo/fix-x", "", "", "no repo selected"},
 		{"unknown group and repo", f.alpha, f.alpha, "public/nosuch/fix-x", "", "", "no repo selected"},
 		{"empty slug", f.alpha, f.alpha, "niwa/", "", "", "no repo selected"},
@@ -108,8 +111,9 @@ func TestResolveHookTarget(t *testing.T) {
 }
 
 func TestResolveHookTarget_RefusalListsRepos(t *testing.T) {
+	t.Setenv(WorktreeRepoEnv, "")
 	f := newHookFixture(t)
-	_, err := ResolveHookTarget(f.alpha, f.alpha, "fix-x")
+	_, err := ResolveHookTarget(f.alpha, f.alpha, "nosuchrepo/fix-x")
 	if err == nil {
 		t.Fatal("expected a refusal")
 	}
@@ -117,6 +121,104 @@ func TestResolveHookTarget_RefusalListsRepos(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal %q lacks %q", err, want)
 		}
+	}
+}
+
+// TestResolveHookTarget_BareNameDefault pins the repo a bare name from a
+// multi-repo instance root lands in: the first by group, then name, so
+// "zeta" in group "lib" beats "alpha" in group "public". Only that path sets
+// Defaulted.
+func TestResolveHookTarget_BareNameDefault(t *testing.T) {
+	t.Setenv(WorktreeRepoEnv, "")
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, "public", "alpha", ".git"))
+	mustMkdir(t, filepath.Join(root, "public", "beta", ".git"))
+	mustMkdir(t, filepath.Join(root, "lib", "zeta", ".git"))
+	if err := SaveState(root, &InstanceState{SchemaVersion: SchemaVersion, InstanceName: "inst"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ResolveHookTarget(root, root, "agent-a1b2c3")
+	if err != nil {
+		t.Fatalf("bare name at the root: %v", err)
+	}
+	if got.Repo != "zeta" || got.Slug != "agent-a1b2c3" || !got.Defaulted {
+		t.Errorf("got %+v, want repo zeta, slug agent-a1b2c3, Defaulted", got)
+	}
+
+	for _, tc := range []struct{ cwd, name, repo string }{
+		{root, "beta/x", "beta"},
+		{filepath.Join(root, "public", "beta"), "x", "beta"},
+	} {
+		got, err := ResolveHookTarget(root, tc.cwd, tc.name)
+		if err != nil || got.Repo != tc.repo || got.Defaulted {
+			t.Errorf("cwd %s name %q: got %+v (%v), want repo %s not Defaulted", tc.cwd, tc.name, got, err, tc.repo)
+		}
+	}
+
+	// The refusal's example names the same repo the default picks.
+	_, err = ResolveHookTarget(root, root, "nosuch/x")
+	if err == nil || !strings.Contains(err.Error(), "for example zeta/<slug>") {
+		t.Errorf("refusal %v should give zeta/<slug> as its example", err)
+	}
+}
+
+// TestResolveHookTarget_WorktreeRepoEnv covers NIWA_WORKTREE_REPO: it picks
+// the repo for a bare name from the root, never overrides a prefix or a cwd
+// in a clone, and a value naming no cloned repo is refused by name.
+func TestResolveHookTarget_WorktreeRepoEnv(t *testing.T) {
+	f := newHookFixture(t)
+	kotoDir := filepath.Join(f.alpha, "public", "koto")
+
+	t.Setenv(WorktreeRepoEnv, "niwa")
+	for _, tc := range []struct{ cwd, name, repo string }{
+		{f.alpha, "fix-x", "niwa"},
+		{f.alpha, "koto/fix-x", "koto"},
+		{kotoDir, "fix-x", "koto"},
+	} {
+		got, err := ResolveHookTarget(f.alpha, tc.cwd, tc.name)
+		if err != nil || got.Repo != tc.repo || got.Defaulted {
+			t.Errorf("cwd %s name %q: got %+v (%v), want repo %s not Defaulted", tc.cwd, tc.name, got, err, tc.repo)
+		}
+	}
+
+	t.Setenv(WorktreeRepoEnv, "nosuch")
+	_, err := ResolveHookTarget(f.alpha, f.alpha, "fix-x")
+	if err == nil || !strings.Contains(err.Error(), WorktreeRepoEnv) || !strings.Contains(err.Error(), "koto, niwa") {
+		t.Fatalf("err = %v, want a refusal naming %s and the repos", err, WorktreeRepoEnv)
+	}
+}
+
+// TestResolveHookTarget_CwdInNiwaWorktree covers a session that moved into
+// one of the instance's niwa worktrees: a bare name resolves to that
+// worktree's repo, not to the default. An ended session's worktree doesn't
+// count.
+func TestResolveHookTarget_CwdInNiwaWorktree(t *testing.T) {
+	t.Setenv(WorktreeRepoEnv, "")
+	f := newHookFixture(t)
+	sessionsDir := filepath.Join(f.alpha, StateDir, "sessions")
+	mustMkdir(t, sessionsDir)
+
+	live := filepath.Join(f.alpha, StateDir, "worktrees", "niwa-aaaa1111")
+	mustMkdir(t, filepath.Join(live, "sub"))
+	if err := worktree.WriteSessionLifecycleState(sessionsDir, worktree.NewSessionLifecycleState("aaaa1111", "niwa", "p", "", live, "")); err != nil {
+		t.Fatal(err)
+	}
+	ended := filepath.Join(f.alpha, StateDir, "worktrees", "niwa-bbbb2222")
+	mustMkdir(t, ended)
+	endedState := worktree.NewSessionLifecycleState("bbbb2222", "niwa", "p", "", ended, "")
+	endedState.Status = worktree.SessionStatusEnded
+	if err := worktree.WriteSessionLifecycleState(sessionsDir, endedState); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ResolveHookTarget(f.alpha, filepath.Join(live, "sub"), "agent-x")
+	if err != nil || got.Repo != "niwa" || got.Defaulted {
+		t.Fatalf("cwd in a live niwa worktree: got %+v (%v), want repo niwa not Defaulted", got, err)
+	}
+	got, err = ResolveHookTarget(f.alpha, ended, "agent-x")
+	if err != nil || got.Repo != "koto" || !got.Defaulted {
+		t.Fatalf("cwd in an ended worktree: got %+v (%v), want the default koto", got, err)
 	}
 }
 

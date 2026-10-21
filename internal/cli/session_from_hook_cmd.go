@@ -23,8 +23,9 @@ func init() {
 // NO shim script) written into each repo's settings and into the instance
 // root's and workspace root's settings. A session launched at a root has no
 // repo for its working directory, so the repo can come from a `<repo>/`
-// prefix in the worktree name or from a one-repo instance as well as from
-// cwd; see workspace.ResolveHookTarget. It reads the Claude hook JSON on
+// prefix in the worktree name, a one-repo instance, a niwa worktree holding
+// cwd, NIWA_WORKTREE_REPO or, for a bare name, the instance's first repo, as
+// well as from cwd; see workspace.ResolveHookTarget. It reads the Claude hook JSON on
 // stdin and dispatches on hook_event_name to the same create/destroy core the
 // human `niwa worktree create`/`destroy` commands use.
 //
@@ -45,7 +46,9 @@ Reads the Claude hook JSON payload on stdin and dispatches on
 hook_event_name. Not intended for direct human use; niwa apply writes the
 hook command into each repo's settings.local.json and into the instance
 root's and workspace root's settings.json. From an instance or workspace
-root, name the worktree <repo>/<slug> to pick the repo.`,
+root, name the worktree <repo>/<slug> to pick the repo. A bare name from
+there goes to the repo NIWA_WORKTREE_REPO names, or else to the instance's
+first repo by group and name.`,
 	Args:          cobra.NoArgs,
 	SilenceErrors: true,
 	SilenceUsage:  true,
@@ -120,7 +123,8 @@ func runSessionFromHook(cmd *cobra.Command, _ []string) error {
 // covers the residual stored/displayed-metadata concern.
 func runFromHookCreate(cmd *cobra.Command, payload hookPayload) error {
 	// Resolve the instance from the launch directory and the repo from a
-	// `<repo>/` prefix in the name, the untrusted cwd, or a one-repo instance.
+	// `<repo>/` prefix in the name, the untrusted cwd, a one-repo instance,
+	// NIWA_WORKTREE_REPO, or the instance's first repo for a bare name.
 	// The instance is anchored on CLAUDE_PROJECT_DIR, which the harness fixes,
 	// so a model-chosen cwd can't point the hook at a planted instance; the
 	// canonicalizing cwd match stays the gate for picking a repo from cwd. On
@@ -132,6 +136,13 @@ func runFromHookCreate(cmd *cobra.Command, payload hookPayload) error {
 		return fmt.Errorf("niwa: error: %w", err)
 	}
 	instanceRoot, repo := target.InstanceRoot, target.Repo
+	if target.Defaulted {
+		// stderr only: stdout carries nothing but the worktree path.
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"niwa: notice: worktree %q names no repo, so it was created in %s, this instance's first repo by group and name. "+
+				"To choose another repo, name the worktree <repo>/<slug> or set %s=<repo> in the session's environment.\n",
+			payload.Name, repo, workspace.WorktreeRepoEnv)
+	}
 
 	purpose := purposeFromHookName(target.Slug)
 

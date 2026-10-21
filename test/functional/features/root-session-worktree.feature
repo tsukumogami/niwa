@@ -141,21 +141,31 @@ Feature: worktrees from sessions launched at a root
     Then the exit code is 0
     And the printed worktree is a session of repo "niwa" with purpose "fix-x" in instance "solo"
 
-  Scenario: with several repos and none selected, create refuses and lists them
+  Scenario: with several repos a bare name from the root lands in the first repo and says so
     Given a root-session workspace "rs" exists with repos "niwa,koto" in group "public"
     When I run "niwa create rs"
     Then the exit code is 0
-    When I pipe a WorktreeCreate hook with cwd "." and name "fix-x" from the root of instance "rs"
+    When I pipe a WorktreeCreate hook with cwd "." and name "agent-a1b2c3" from the root of instance "rs"
+    Then the exit code is 0
+    And the printed worktree is a session of repo "koto" with purpose "agent-a1b2c3" in instance "rs"
+    And the error output contains "koto"
+    And the error output contains "NIWA_WORKTREE_REPO"
+    And the error output contains "<repo>/<slug>"
+    When I pipe a WorktreeRemove hook for the printed worktree path from the root of instance "rs"
+    Then the exit code is 0
+    And the printed worktree path does not exist
+
+  Scenario: with several repos an unknown prefix is refused and the repos are listed
+    Given a root-session workspace "rs" exists with repos "niwa,koto" in group "public"
+    When I run "niwa create rs"
+    Then the exit code is 0
+    When I pipe a WorktreeCreate hook with cwd "." and name "nosuchrepo/fix-x" from the root of instance "rs"
     Then the exit code is not 0
     And the output is empty
     And the error output contains "no repo selected"
     And the error output contains "koto"
     And the error output contains "niwa"
     And the error output contains "koto/<slug>"
-    And no worktree was created in instance "rs"
-    When I pipe a WorktreeCreate hook with cwd "." and name "nosuchrepo/fix-x" from the root of instance "rs"
-    Then the exit code is not 0
-    And the error output contains "no repo selected"
     And no worktree was created in instance "rs"
     And no path named "nosuchrepo" exists under the workspace root
 
