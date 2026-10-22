@@ -582,7 +582,8 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 		}
 		// The same lookup dispatch's authority step uses to find the overlay,
 		// so the overlay provisioning applies is the one authority resolved
-		// against.
+		// against. Its only error is a tampered name override, which
+		// resolveEffectiveWorkspaceName above has already returned on.
 		if url, err := registeredConfigSourceURL(workspaceRoot, cfg, globalCfg); err == nil {
 			applier.ConfigSourceURL = url
 		}

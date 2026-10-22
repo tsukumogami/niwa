@@ -21,12 +21,12 @@ import (
 
 // authorityScenario is what these steps remember between steps.
 type authorityScenario struct {
-	rootEntries    []string // the workspace root's entries before the dispatch under test
-	mappings       []string // the session mappings before it
-	recordPath     string   // a remembered instance's record path
-	record         []byte   // and its bytes
-	instancePath   string   // the remembered instance
-	firstInstance  string   // an earlier dispatch's instance, kept for comparison
+	rootEntries   []string // the workspace root's entries before the dispatch under test
+	mappings      []string // the session mappings before it
+	recordPath    string   // a remembered instance's record path
+	record        []byte   // and its bytes
+	instancePath  string   // the remembered instance
+	firstInstance string   // an earlier dispatch's instance, kept for comparison
 }
 
 // authorityFixtures are the workspace configs the scenarios dispatch under,
