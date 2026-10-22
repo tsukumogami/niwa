@@ -451,6 +451,21 @@ the wrong shape for a team's rule about who decides.
   held. An unknown name in
   `grant_ceiling` is dropped from the ceiling and not listed anywhere,
   since nothing asked for it.
+  A record whose `schema` is a later version (`niwa.authority.record/v2`
+  or above) isn't malformed: a v1 reader reads it as holding no grant.
+  It reads only `schema` and the version-independent `dispatch_id` from
+  it, and needs the file to be a JSON object with a UUID `dispatch_id`;
+  otherwise it's malformed. `niwa authority show` then exits 0 and prints
+  `dispatch record: newer version niwa.authority.record/v2; grant none`,
+  and `--json` prints a v1 document with `"record": true`, the stored
+  version in `record_version`, that `dispatch_id`, and empty `grant` and
+  `unknown_grant`; `niwa authority decide` answers as at `strict`, the
+  narrowest level. After a version bump, then, an older and a newer niwa
+  on one host don't strand each other's seats, and reading the record as
+  granting nothing gives up no authority. A dispatch from such an
+  instance proceeds and records that `dispatch_id` as its
+  `parent_dispatch_id` with its usual source (R17); the child inherits
+  no grant from it.
 - **R18. The record is fixed for the session's life.** niwa never rewrites
   an authority record after it's written. A later `niwa apply`, a change
   to the workspace or machine config, a resume of the session, or a
@@ -520,7 +535,9 @@ the wrong shape for a team's rule about who decides.
   with its plain source in `level_source`; `record` is what marks it. A
   record that exists but can't be read or is malformed (R17a) makes it
   exit 1, never fall back to the no-record answer; an unknown authority
-  or source kind is not malformed and lands in `unknown_grant`.
+  or source kind is not malformed and lands in `unknown_grant`, and a
+  later schema version is read as holding no grant (R17a), never as no
+  record.
 - **R24. "Held" is never inferred from an exit code.** A caller treats an
   authority as held only when `niwa authority show --json` exits 0 and
   prints a document with the documented schema name whose grant names that
@@ -772,6 +789,17 @@ Read-back
 - [ ] A record holding `level: bogus`, truncated JSON, a missing
   `dispatch_id`, or an authority name with an uppercase letter makes `niwa
   authority show` and `niwa authority decide merge-own-pr` exit 1.
+- [ ] A record with `schema: "niwa.authority.record/v2"`, a valid
+  `dispatch_id` and a `grant` naming `merge-pr` makes `niwa authority
+  show` exit 0 and print `dispatch record: newer version
+  niwa.authority.record/v2; grant none`; `--json` carries `"record":
+  true`, `"record_version": "niwa.authority.record/v2"`, that
+  `dispatch_id` and an empty `grant`; the guide's held check reads
+  `merge-pr` as not held; `decide merge-own-pr` prints `decider=person`.
+  A dispatch from that instance proceeds and records that `dispatch_id`
+  as `parent_dispatch_id` with `parent_dispatch_source: cwd`. The same
+  record with a missing or non-UUID `dispatch_id` makes `show` exit 1
+  and refuses the dispatch.
 - [ ] A v1 record that grants `close-issue` (source `dispatch`) and
   `teardown` (source `dispatch`), has a `merge-pr` entry whose only source
   is `delegated:x`, and carries an extra top-level field `supervisor`

@@ -461,7 +461,11 @@ coordinator that runs `niwa dispatch` from the workspace root, as
 shirabe's does today, would otherwise record no parent. An instance with
 no record gives an empty `parent_dispatch_id` and `none`; a record that
 exists but can't be read or is malformed refuses the dispatch rather than
-recording an empty parent.
+recording an empty parent. A record with a later schema version is not
+"no record": dispatch takes its version-independent `dispatch_id` as
+`parent_dispatch_id` with the usual `cwd` or `anchor` source and
+proceeds, and refuses if even that doesn't parse, so an older niwa never
+records an empty parent for a newer niwa's seat.
 
 `Resolve` returns the record's policy fields (level, ceilings, sources,
 roles, grant). Dispatch stamps the identity fields at (8a): the
@@ -686,6 +690,7 @@ type Record struct {
     Roles             []string // name order
     Grant             []GrantEntry
     UnknownGrant      []RawGrantEntry // read-side only: entries this build can't hold
+    NewerVersion      string // read-side only: a later stored schema, read as holding nothing
 }
 type RawGrantEntry struct {           // as stored, names unchecked against the vocabulary
     Authority string; Sources []string
@@ -708,9 +713,12 @@ func (r Record) MarshalJSON() ([]byte, error)
 // parent_dispatch_source reads as "none" with an empty
 // ParentDispatchID. Every field R17 lists is required; only fields
 // added within v1 later are optional. Every name must still match
-// its pattern. A malformed record still fails:
-// not JSON, a schema other than v1, a missing or wrongly typed known
-// field, an unknown level, a name failing the pattern, or a bad id.
+// its pattern. A schema of niwa.authority.record/v<N>, N >= 2, returns
+// a Record with NewerVersion set, DispatchID read, and an empty Grant
+// (nothing held). A malformed record still fails: not a JSON object, a
+// schema matching no version, a later version without a UUID
+// dispatch_id, a v1 record with a missing or wrongly typed known field,
+// an unknown level, a name failing the pattern, or a bad id.
 func ParseRecord(b []byte) (Record, error)
 
 type Declared struct{ Decider Decider; AuthorExclusion bool }
@@ -821,8 +829,19 @@ v1 is additive. A later niwa may add fields, authority names and source
 kinds without changing the schema string; a reader ignores fields it
 doesn't know, never treats an unknown authority as held, and lists it
 under `unknown_grant`. Only renaming a field or changing what one means
-moves the schema to v2, and a v1 reader treats v2 as malformed. A field
-added within v1 is optional, and a reader that knows it defaults it when
+moves the schema to v2. A v1 reader doesn't treat v2 or later as
+malformed: it reads only `schema` and the version-independent
+`dispatch_id` (which must be a UUID, or the record is malformed) and
+treats the record as holding no grant. `show` prints `dispatch record:
+newer version <schema>; grant none`, and `--json` prints a v1 document
+with `"record": true`, `record_version` naming the stored schema, that
+`dispatch_id`, and empty `grant` and `unknown_grant`; `decide` answers
+as at `strict`; `niwa list --json` carries the same document. That way
+an older and a newer niwa on one host don't strand each other's seats
+after a bump, and reading the record as granting nothing gives up no
+authority. A record that is actually malformed (not a JSON object, a
+schema matching no version, a v1 record missing a required field) still
+fails closed. A field added within v1 is optional, and a reader that knows it defaults it when
 an older niwa's record lacks it. The
 guide's held check reads `grant[].authority` only, so a v1 record with
 entries it doesn't know still answers for the ones it does.
@@ -922,7 +941,9 @@ way), `--parent-from <abs dir>`.
   doesn't walk older ancestors. `parent_dispatch_id` can dangle, because
   a coordinator usually reaps its predecessor, so nothing resolves it as
   a live session, and a missing parent or ancestor record means no cap,
-  never a refusal.
+  never a refusal. A dispatcher record with a later schema version is the
+  narrowest case, never an uncapped one: the child can be granted
+  nothing, and its level can be no wider than `strict`.
 
 ### Lineage and where authority lives
 
@@ -956,8 +977,9 @@ and `authority_*` and wrong-typed values reaching `ValidateConfig` (and
 validation and its additive rule (a v1 record with an unknown field, an
 unknown authority such as `teardown`, or an unknown source kind such as
 `delegated:x` parses, holds only the known entries and lists the rest in
-`unknown_grant`; truncated JSON, a v2 schema, an unknown level or a name
-failing the pattern fails), the `niwa.authority.policy/v1` document, the
+`unknown_grant`; a v2 record with a UUID `dispatch_id` parses as holding
+nothing; truncated JSON, a v2 record without a UUID `dispatch_id`, an
+unknown level or a name failing the pattern fails), the `niwa.authority.policy/v1` document, the
 warning for an overlay ceiling naming an authority the base lacks, and
 `ResolveAuthorityOverlay` across its three branches. No change to
 dispatch.
