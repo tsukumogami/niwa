@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Draft
+status: Accepted
 problem: |
   A session `niwa dispatch` launches runs as the operator and settles every
   decision point the same way in every workspace, because nothing tells it
@@ -24,7 +24,7 @@ upstream: docs/briefs/BRIEF-authority-grants.md
 
 ## Status
 
-Draft
+Accepted
 
 ## Problem Statement
 
