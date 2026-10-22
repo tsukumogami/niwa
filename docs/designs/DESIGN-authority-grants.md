@@ -179,8 +179,8 @@ both, and the PRD ties them (R4).
 Delegated to /decision.
 
 Four readers outside dispatch need a dispatch's record: the session
-reading its own grant, a later gate hook deciding whether to lift a merge
-deny, a later coordinator's posture script predicting that gate, and a
+reading its own grant, a later gate hook deciding whether to allow a
+merge, a later coordinator's posture script predicting that gate, and a
 later never-wider check inside `niwa dispatch`. The PRD already says the
 record is one copy, written into the instance before launch (R17), that
 self-read resolves by the instance containing the working directory
@@ -198,8 +198,9 @@ Key assumptions:
   fails closed: a directory in no instance gives the no-record answer
   (the lookup never reads the session id variable), and no record exists
   outside a dispatched instance.
-- A later gate consults the grant only to lift a deny it has already
-  decided on, so a missing, old or hung niwa leaves today's verdict.
+- A later gate lets the grant decide only when the lookup positively
+  reports a record (`"record": true`), so a missing, old or hung niwa,
+  and a session with no record, leave today's verdict.
 - niwa's startup stays free of network calls and config loading.
 - Codex has no hook niwa gates today, so a Codex grant is readable but
   not enforced anywhere.
@@ -255,10 +256,15 @@ niwa_holds() {
 }
 ```
 
-It's a function that returns, never one that exits: pasted into a gate
-hook, an `exit 1` is a non-blocking hook error that would drop a deny the
-gate had already reached. The CI test runs it inside a stub gate and
-checks that an already-decided deny survives every failure case.
+Beside it the guide ships `niwa_has_record <absolute-dir>`, which runs
+the same lookup and returns 0 only for a document with that schema and
+`.record == true`. A gate uses it to tell "a record exists and doesn't
+hold this" (the grant decides, so deny) from every failure and the
+no-record answer (today's behaviour). Both are functions that return,
+never ones that exit: pasted into a gate hook, an `exit 1` is a
+non-blocking hook error that would drop a deny the gate had already
+reached. The CI test runs them inside a stub gate and checks that every
+failure case leaves the stub's today's-behaviour verdict in place.
 
 For never-wider, the record gains `parent_dispatch_id`, the dispatch id of
 the dispatched instance `niwa dispatch` was run from, or the one
@@ -549,6 +555,45 @@ that needs a dispatched session's answer tell the two apart.
 because it would tell the operator's own session, in an autonomous
 workspace, to ask a person before every decision.
 
+### Decision 6: An authority name this niwa doesn't know, in config
+
+Resolved inline, from the merger's review.
+
+The record already reads an unknown authority as present but not held
+(R17a). The workspace config is shared the same way records are: once a
+newer niwa adds an authority (`teardown`, say) and the shared base
+config's ceiling or a role lists it, every teammate on an older niwa
+reads that config. The question is what the older niwa does with the
+name.
+
+#### Chosen: ignore it with a warning, and refuse it only on the flag
+
+An authority name that matches the name pattern but isn't one of R3's
+is dropped from the ceiling or role that lists it, with a warning naming
+the name and the key, printed by `niwa apply`, `niwa dispatch` and `niwa
+authority policy`. Dropping it grants nothing: a ceiling entry this niwa
+can't grant can't widen anything, a narrowing ceiling (overlay or
+machine) that lists only unknown names is a present, empty list rather
+than an unset one, so it still narrows to nothing, and a role keeps its
+known authorities. Only the dispatcher's own request is refused: an
+unknown name on `--grant`, or in `niwa config set authority-ceiling`,
+exits 1 as today, because that's a person typing on this niwa. A name
+that fails the pattern (uppercase, spaces, a misspelt key) is still an
+invalid value, and an unknown level still refuses, since a level this
+niwa can't order can't be narrowed safely.
+
+#### Alternatives Considered
+
+**Refuse any unknown name, as before**: keeps every typo loud. Rejected
+because it makes a config change that is correct for a newer niwa stop
+every older niwa from dispatching at all, which is the failure the
+record's additive rule already avoids. A misspelt known name in a
+ceiling only narrows, and the warning names it.
+
+**Ignore it silently**: no noise for teammates who haven't upgraded.
+Rejected because a misspelt `merge-pr` in a role would then grant less
+than the operator meant with nothing saying why.
+
 ## Decision Outcome
 
 niwa gains a small, pure `internal/authority` package and wires it into
@@ -559,12 +604,16 @@ level and shrink the ceiling, the personal config can do the same through
 `[global] authority_level` and `authority_ceiling`, and nothing anywhere
 can widen what the base config allows. A bad value stops `niwa dispatch`
 and the authority commands with a message naming the key, the value and
-the accepted values, while `apply` warns and carries on.
+the accepted values, while `apply` warns and carries on. An authority
+name this niwa doesn't know, in a ceiling or a role, is only warned
+about and grants nothing (Decision 6), so a config written for a newer
+niwa doesn't stop an older one.
 
 At dispatch, step (2e) loads all three layers, parses `--level`,
 `--grant` and `--role`, and resolves the level and the grant. A wider
 level, an authority outside the ceiling (directly or through a role), an
-unknown authority or role, or an unreadable overlay ends the dispatch
+unknown authority on `--grant`, an unknown role, or an unreadable
+overlay ends the dispatch
 with exit 1 before the prompt is captured, before the sweep and before an
 instance exists. A successful dispatch prints one line, for example
 `niwa dispatch: authority level strict from flag; grant merge-pr
@@ -644,7 +693,8 @@ func ParseAuthority(raw string) (Authority, error)   // trimmed, exact case
 // `config set` gives "none" a meaning (the empty list).
 func ParseNameList(raw []string) ([]string, error)
 
-type Layer string // "flag", "machine", "overlay", "workspace", "built-in"
+type Layer string // "flag", "machine", "overlay", "workspace", "built-in";
+                   // a reader also uses "newer-version" (never written)
 
 type RawLayer struct {               // one layer as decoded, values untyped
     Level       any                  // nil when absent
@@ -653,9 +703,11 @@ type RawLayer struct {               // one layer as decoded, values untyped
     UnknownKeys []string             // undecoded keys under [authority] / authority_*
 }
 // ValidateConfig checks the three raw layers (types, vocabularies, role
-// names, unknown keys) and returns the typed Policy or an error naming
-// the key, the quoted value and the accepted values.
-func ValidateConfig(base, overlay, machine RawLayer) (Policy, error)
+// names, unknown keys) and returns the typed Policy, with warnings for
+// unknown authority names it dropped from ceilings and roles (Decision
+// 6), or an error naming the key, the quoted value and the accepted
+// values.
+func ValidateConfig(base, overlay, machine RawLayer) (Policy, []string, error)
 
 type Policy struct {                 // what the three config layers declare
     BaseLevel, OverlayLevel, MachineLevel *Level
@@ -714,8 +766,11 @@ func (r Record) MarshalJSON() ([]byte, error)
 // ParentDispatchID. Every field R17 lists is required; only fields
 // added within v1 later are optional. Every name must still match
 // its pattern. A schema of niwa.authority.record/v<N>, N >= 2, returns
-// a Record with NewerVersion set, DispatchID read, and an empty Grant
-// (nothing held). A malformed record still fails: not a JSON object, a
+// a Record with NewerVersion set, DispatchID read, and every other field
+// at its narrowest: Level and LevelCeiling Strict, every source
+// "newer-version", empty parents (ParentDispatchSource "none"), and
+// empty GrantCeiling, Roles, Grant and UnknownGrant. schema and
+// dispatch_id are fixed across every version. A malformed record still fails: not a JSON object, a
 // schema matching no version, a later version without a UUID
 // dispatch_id, a v1 record with a missing or wrongly typed known field,
 // an unknown level, a name failing the pattern, or a bad id.
@@ -833,10 +888,18 @@ moves the schema to v2. A v1 reader doesn't treat v2 or later as
 malformed: it reads only `schema` and the version-independent
 `dispatch_id` (which must be a UUID, or the record is malformed) and
 treats the record as holding no grant. `show` prints `dispatch record:
-newer version <schema>; grant none`, and `--json` prints a v1 document
-with `"record": true`, `record_version` naming the stored schema, that
-`dispatch_id`, and empty `grant` and `unknown_grant`; `decide` answers
-as at `strict`; `niwa list --json` carries the same document. That way
+newer version <schema>; grant none`, and `--json` prints a complete v1
+document: `"record": true`, then `record_version` naming the stored
+schema (a v1 record's document has no such key), that `dispatch_id`,
+empty parent fields with `parent_dispatch_source: none`, `level` and
+`level_ceiling` both `strict` with sources `newer-version`, and empty
+`grant_ceiling` (source `newer-version`), `roles`, `grant` and
+`unknown_grant`. `decide` answers from that `strict` with
+`source=newer-version` and `record=present`; `niwa list --json` carries
+the same document. `WriteAuthorityRecord` refuses a record with
+`NewerVersion` set, so none is ever stored. `schema`, in the
+`niwa.authority.record/v<N>` form, and `dispatch_id`, a UUID, are fixed
+across every version. That way
 an older and a newer niwa on one host don't strand each other's seats
 after a bump, and reading the record as granting nothing gives up no
 authority. A record that is actually malformed (not a JSON object, a
@@ -905,16 +968,22 @@ way), `--parent-from <abs dir>`.
 
 ### What later work consumes
 
-- **Gates honouring the grant.** A gate keeps today's text match, and only
-  when it has reached a merge, close or release verdict does it run the
-  held check (guarded by `command -v niwa`) and `niwa authority decide
-  <point>` with the same `-C` anchor; it lifts its verdict only on held
-  plus `decider=session`. A missing, old or failing niwa leaves today's
-  verdict, so the gate can't end up weaker than the current hook. The
+- **Gates honouring the grant.** A gate keeps today's text match to spot
+  a merge, close or release, then runs the lookup (guarded by `command -v
+  niwa`) with the same `-C` anchor. For a session whose record exists
+  (`"record": true`), the grant decides, not the instance exemption list
+  today's hook keeps: the action is allowed only when the held check
+  finds the authority and `niwa authority decide <point>` prints
+  `decider=session`, and denied otherwise, even for an instance on the
+  exempt list. Otherwise a dispatched session on that list without
+  `merge-pr` could still merge. A session with no record (`"record":
+  false`), and every lookup that fails, keeps today's behaviour,
+  exemption list included, so a missing, old or failing niwa leaves the
+  gate exactly as strong as the current hook. The
   gate must bound the lookup itself, behind niwa's own watchdog, because a
   harness that kills a slow hook drops its deny; where it can't bound it
   (no `timeout` and no background-job fallback), it skips the lookup and
-  keeps its deny. `$0` anchoring works for hooks niwa copies into the
+  keeps today's behaviour. `$0` anchoring works for hooks niwa copies into the
   instance; a gate shipped some other way (as a plugin hook, or through a
   symlinked tree) resolves outside the instance and reads as not held,
   so such a gate has to be installed into the instance to honour a grant.
@@ -936,12 +1005,14 @@ way), `--parent-from <abs dir>`.
   `--parent-from` or the dispatcher's working directory (never the
   session id variable),
   refuses a child whose level or grant is wider. With no dispatcher record
-  it adds no cap. Records link child to parent through
+  it provisionally adds no cap. Records link child to parent through
   `parent_dispatch_id`. (2e) covers the dispatcher's own record only; it
   doesn't walk older ancestors. `parent_dispatch_id` can dangle, because
   a coordinator usually reaps its predecessor, so nothing resolves it as
-  a live session, and a missing parent or ancestor record means no cap,
-  never a refusal. A dispatcher record with a later schema version is the
+  a live session. That a missing parent or ancestor record means no cap,
+  never a refusal, is this design's provisional reading, and the
+  re-delegation work decides it. A dispatcher record with a later schema
+  version is the
   narrowest case, never an uncapped one: the child can be granted
   nothing, and its level can be no wider than `strict`.
 
@@ -979,7 +1050,9 @@ unknown authority such as `teardown`, or an unknown source kind such as
 `delegated:x` parses, holds only the known entries and lists the rest in
 `unknown_grant`; a v2 record with a UUID `dispatch_id` parses as holding
 nothing; truncated JSON, a v2 record without a UUID `dispatch_id`, an
-unknown level or a name failing the pattern fails), the `niwa.authority.policy/v1` document, the
+unknown level or a name failing the pattern fails), unknown authority names in a ceiling or role
+dropped with a warning (Decision 6) while `--grant` and `config set`
+still refuse them, the `niwa.authority.policy/v1` document, the
 warning for an overlay ceiling naming an authority the base lacks, and
 `ResolveAuthorityOverlay` across its three branches. No change to
 dispatch.
@@ -1046,8 +1119,9 @@ Deliverables: `internal/cli/authority.go` (`show`, `decide`,
 coverage, the R8a example, the JSON document and schema, the selection
 order and `-C`, the no-record answer, the held rule and the reference
 check, the settle rule, R4's combination, and what the record does and
-doesn't guarantee, including that a gate only ever lifts a verdict on a
-held authority and never denies on "not held", bounds the lookup itself,
+doesn't guarantee, including that a gate lets the grant decide only for
+a session whose lookup printed `"record": true` and otherwise keeps
+today's behaviour, exemption list included, bounds the lookup itself,
 and labels the grant "recorded, not enforced". It also says that no ceiling
 means nobody can be granted anything, that a successor coordinator gets
 a fresh grant with `--role coordinator` and no config edit, that a seat
@@ -1055,10 +1129,12 @@ started by hand or an instance from `niwa create` has no record, that
 `--parent-from` records the parent for a dispatch run from the workspace
 root, that v1 is additive, and that `niwa authority show --json -C
 <instance>` saved before `niwa destroy` keeps the record. A CI test runs
-the guide's held check and its exact-line `decider=session` check, as
+the guide's held, record and exact-line `decider=session` checks, as
 shell functions inside a stub gate, against real `show` and `decide`
 output, against a v1 record carrying entries this build doesn't know,
-and against each failure, and checks a decided deny survives. A CI job runs the
+against a later-version record, and against each failure. It checks
+that a present record decides even for an exempt instance and that
+every failure keeps the stub's today's-behaviour verdict. A CI job runs the
 authority unit and functional tests with no koto binary on `PATH`. The
 one-time live check with a real Claude Code session is recorded in the
 implementing pull request.
@@ -1168,18 +1244,21 @@ than found; a never-wider check reading it caps by a record the
 dispatcher picked, which is why that work has to decide whether an
 `anchor` parent is trusted the same as a `cwd` one.
 
-**Failing toward today's behaviour.** Every failure reads as "not held": a
-missing or older niwa, a missing `jq`, a non-zero exit, help text, an
-unknown schema, a malformed or unreadable record, or the watchdog. The
-guide states that a gate may use the lookup only to lift a verdict it has
-already reached on its own text match, and only on a held authority plus
-an exact `decider=session` line; it must never treat "not held" as a
-reason to deny, and must bound the lookup's time itself (skipping it and
-keeping its deny when it can't), since a harness that kills a hung hook
-drops the hook's verdict. The guide ships both checks as shell functions
-that return rather than exit, and niwa's CI runs them inside a stub gate
-against real and failing output, checking that a decided deny survives
-each failure. `decide` also prints a `record=present|none` line, so a
+**Failing toward today's behaviour.** Every failure reads as "not held"
+and as "no record": a missing or older niwa, a missing `jq`, a non-zero
+exit, help text, an unknown schema, a malformed or unreadable record, or
+the watchdog. The guide states that a gate lets the grant decide only
+when the lookup positively printed a document with `"record": true`:
+then it allows a merge, close or release only on a held authority plus
+an exact `decider=session` line, and denies otherwise, the instance
+exemption list included. Every other outcome, `"record": false` among
+them, leaves today's behaviour, exemption list and all. The gate must
+bound the lookup's time itself (skipping it and keeping today's
+behaviour when it can't), since a harness that kills a hung hook drops
+the hook's verdict. The guide ships the checks as shell functions that
+return rather than exit, and niwa's CI runs them inside a stub gate
+against real and failing output, checking that each failure keeps the
+stub's today's-behaviour verdict. `decide` also prints a `record=present|none` line, so a
 caller that needs a dispatched session's answer rejects the no-record
 case without parsing `source=`. With no record, `decide`
 answers from the level a no-flag dispatch would get and marks the source,
@@ -1226,8 +1305,12 @@ enforcement, anything running as the operator holds the operator's rights.
 ### Positive
 
 - An operator can declare, narrow, grant and read back authority, and a
-  successor coordinator can be handed merge, close and release with no
-  config edit between sessions.
+  successor coordinator can be granted merge, close and release with no
+  config edit between sessions. Merging itself still goes through the
+  workspace hook and its exemption list until gates honour the grant, so
+  until then a successor that has to merge still needs the exemption.
+- A shared config that names an authority a newer niwa added doesn't
+  stop older niwas from dispatching (Decision 6).
 - Later gate, coordinator and never-wider work build on one package, one
   versioned document and one tested held check, and none of them needs a
   PRD change to handle an old or missing niwa.

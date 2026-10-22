@@ -29,6 +29,8 @@ In Progress
 
 Absorbed [BRIEF-authority-grants](docs/briefs/BRIEF-authority-grants.md); carried in Absorbed Brief.
 
+The brief was folded into this PRD and has no separate file; the link above is the absorption record the document format requires, and the brief's content is the Absorbed Brief section below.
+
 ## Absorbed Brief
 
 A session `niwa dispatch` launches can do anything its operator can, and
@@ -132,8 +134,10 @@ the wrong shape for a team's rule about who decides.
   shows up as an error now rather than as a refusal later.
 - As a coordinating session handing off to a successor, I want to dispatch
   it with the `coordinator` role and have it read back merge, close and
-  release, each attributed to the role, so that the handoff needs no edit
-  to shared config.
+  release, each attributed to the role, so that the grant needs no edit
+  to shared config. Merging itself still goes through the workspace hook
+  and its exemption list until gates honour the grant (Out of Scope), so
+  until then a successor that has to merge still needs that exemption.
 - As an operator in an autonomous workspace, I want to dispatch one session
   into an unfamiliar repository at the strict level, so that its decision
   points go to a person while my other sessions keep settling theirs.
@@ -192,7 +196,7 @@ the wrong shape for a team's rule about who decides.
   are ordered `session` < `dispatcher` < `person` and author exclusion
   `off` < `on`, widest first. Decision point names are an open vocabulary
   that callers choose; this feature maps no point to a named authority.
-- **R3. Named authorities are a closed set.** niwa defines the named
+- **R3. Named authorities are a fixed set per niwa version.** niwa defines the named
   authorities a grant may hold, each by the actions it covers. This
   feature defines exactly three:
 
@@ -204,8 +208,13 @@ the wrong shape for a team's rule about who decides.
 
   The routes in the first row are what the authority means to a later
   gate; this feature tests none of them, since nothing here gates an
-  action. Any other name in a config value or a flag is refused under R11
-  or R14. Adding an authority is a niwa change, and it doesn't change the
+  action. Any other name on `--grant` or in `niwa config set
+  authority-ceiling`, which a person types on this niwa, is refused under
+  R11 or R14. In a ceiling or role in the workspace, overlay or machine
+  config, a name that matches the name pattern but isn't one of these is
+  ignored with a warning and grants nothing (R11), because a config
+  written for a newer niwa is read by every older niwa sharing it.
+  Adding an authority is a niwa change, and it doesn't change the
   record's version (R17a): a record written by a newer niwa may name an
   authority this niwa doesn't know. niwa's own reader reports such an
   entry as unknown and not held, and the rest of the record stays valid;
@@ -295,13 +304,21 @@ the wrong shape for a team's rule about who decides.
 - **R11. Values are checked exactly.** Every level value accepts only the
   three names of R1 and every authority value only the names of R3, both
   lowercase, after trimming surrounding whitespace; an empty or
-  whitespace-only level means not set. An unknown key inside a base or
+  whitespace-only level means not set. One exception keeps a shared
+  config usable across niwa versions: an authority name in a ceiling or
+  a role that matches `^[a-z][a-z0-9-]{0,63}$` but isn't one of R3's is
+  dropped from that list with a warning naming the name and the key,
+  printed by `niwa apply`, `niwa dispatch` and `niwa authority policy`,
+  and grants nothing. A narrowing ceiling (overlay or machine) left
+  empty by the drop is an empty list, so it narrows to nothing rather
+  than counting as unset; a role keeps its known authorities. A name
+  failing the pattern is still an invalid value. An unknown key inside a base or
   overlay `[authority]` table, or an unknown `authority_`-prefixed key
   under `[global]`, counts as an invalid value rather than the usual
   unknown-key warning, since a misspelt narrowing key would otherwise
   leave policy silently wider. An invalid workspace value (level,
-  ceiling entry, role name, role authority, unknown key, or a value of the
-  wrong type) refuses `niwa dispatch` and `niwa authority policy` with exit
+  ceiling entry or role authority failing the name pattern, role name,
+  unknown key, or a value of the wrong type) refuses `niwa dispatch` and `niwa authority policy` with exit
   1 and a message naming the key, the value and the accepted values. `niwa
   authority show` and `decide` refuse the same way only when they need the
   config, which is for the no-record answer (R23, R26); reading an existing
@@ -324,7 +341,8 @@ the wrong shape for a team's rule about who decides.
   `authority_level`, each taking part only when set; when none is set it
   is the built-in `autonomous`. Its source is whichever of `machine`,
   `overlay`, `workspace` or `built-in` supplied it, a tie going to the
-  first of that list. A `--level` value wider than the ceiling refuses
+  first of that list. (A reader also reports `newer-version` for a record
+  written in a later schema version, R17a; dispatch never records it.) A `--level` value wider than the ceiling refuses
   the dispatch with exit 1, naming the requested level, the ceiling level
   and the ceiling's source. Otherwise the resolved level is the narrower
   of the ceiling and the `--level` value, with source `flag` when the
@@ -349,8 +367,9 @@ the wrong shape for a team's rule about who decides.
   directly or through a role, is outside the effective ceiling, the
   dispatch is refused with exit 1, and the message names each such
   authority, how it was requested (`--grant` or `role <name>`), the
-  effective ceiling and its source (R13). An unknown authority, an
-  undeclared role, or a `--level` value outside R1 refuses the dispatch
+  effective ceiling and its source (R13). An unknown authority on
+  `--grant`, an undeclared role, or a `--level` value outside R1 refuses
+  the dispatch
   with exit 1 naming it and the accepted values, checked with the same
   trimming and case rules as R11. Requests are never trimmed: a dispatch
   either gets everything it asked for or launches nothing.
@@ -451,16 +470,24 @@ the wrong shape for a team's rule about who decides.
   held. An unknown name in
   `grant_ceiling` is dropped from the ceiling and not listed anywhere,
   since nothing asked for it.
-  A record whose `schema` is a later version (`niwa.authority.record/v2`
-  or above) isn't malformed: a v1 reader reads it as holding no grant.
+  Two fields are fixed across every version, present and with the same
+  meaning: `schema`, in the form `niwa.authority.record/v<N>`, and
+  `dispatch_id`, a UUID. A record whose `schema` is a later version
+  (`niwa.authority.record/v2` or above) isn't malformed: a v1 reader reads it as holding no grant.
   It reads only `schema` and the version-independent `dispatch_id` from
   it, and needs the file to be a JSON object with a UUID `dispatch_id`;
   otherwise it's malformed. `niwa authority show` then exits 0 and prints
   `dispatch record: newer version niwa.authority.record/v2; grant none`,
-  and `--json` prints a v1 document with `"record": true`, the stored
-  version in `record_version`, that `dispatch_id`, and empty `grant` and
-  `unknown_grant`; `niwa authority decide` answers as at `strict`, the
-  narrowest level. After a version bump, then, an older and a newer niwa
+  and `--json` prints a complete v1 document, every R17 field present:
+  `"record": true`, then `record_version` holding the stored version
+  (the one place that key appears; a v1 record's document has none),
+  that `dispatch_id`, empty `parent_session_id` and `parent_dispatch_id`,
+  `parent_dispatch_source: none`, `level` and `level_ceiling` both
+  `strict`, the narrowest level, with sources `newer-version`, an empty
+  `grant_ceiling` with source `newer-version`, and empty `roles`, `grant`
+  and `unknown_grant`. `newer-version` is a source only this case gives.
+  `niwa authority decide` answers from that `strict`, with
+  `source=newer-version` and `record=present`. After a version bump, then, an older and a newer niwa
   on one host don't strand each other's seats, and reading the record as
   granting nothing gives up no authority. A dispatch from such an
   instance proceeds and records that `dispatch_id` as its
@@ -631,7 +658,9 @@ the wrong shape for a team's rule about who decides.
   (R14a), and what the record does and doesn't guarantee. It says plainly
   that until a workspace adds an `[authority]` ceiling nobody can be
   granted anything, and that once it exists a successor gets a fresh
-  grant with `--role coordinator` and no config edit. It tells anyone
+  grant with `--role coordinator` and no config edit, while merging
+  still goes through the workspace hook and its exemption list until
+  gates honour the grant. It tells anyone
   archiving an instance to save `niwa authority show --json -C
   <instance>` before `niwa destroy`, since the record goes with the
   instance. It tells callers that dispatch refuses an unknown flag, and
@@ -795,7 +824,10 @@ Read-back
   niwa.authority.record/v2; grant none`; `--json` carries `"record":
   true`, `"record_version": "niwa.authority.record/v2"`, that
   `dispatch_id` and an empty `grant`; the guide's held check reads
-  `merge-pr` as not held; `decide merge-own-pr` prints `decider=person`.
+  `merge-pr` as not held; `level` and `level_ceiling` are `strict` (never
+  `autonomous`) with source `newer-version` in both `show --json` and
+  `niwa list --json`; `decide merge-own-pr` prints `level=strict`,
+  `decider=person`, `source=newer-version` and `record=present`.
   A dispatch from that instance proceeds and records that `dispatch_id`
   as `parent_dispatch_id` with `parent_dispatch_source: cwd`. The same
   record with a missing or non-UUID `dispatch_id` makes `show` exit 1
@@ -809,6 +841,17 @@ Read-back
   ["dispatch"]}]`, and the extra field ignored; the guide's held check reads `close-issue` as held and
   `teardown` and `merge-pr` as not held; a dispatch run from inside that
   instance proceeds and records its `parent_dispatch_id`.
+- [ ] With base `ceiling = ["merge-pr", "teardown"]` and a role
+  `coordinator` naming `merge-pr` and `teardown`, `niwa apply`, `niwa
+  authority policy` and `niwa dispatch --role coordinator` each print a
+  warning naming `teardown` and the key, none of them exits non-zero for
+  it, and the dispatch records a grant of `merge-pr` only, with `teardown`
+  in neither `grant_ceiling` nor `grant`. `niwa dispatch --grant teardown`
+  and `niwa config set authority-ceiling teardown` each exit 1 naming
+  `teardown` and the accepted values. A machine `authority_ceiling =
+  ["teardown"]` narrows the ceiling to nothing (a later `--grant
+  merge-pr` is refused naming the machine ceiling), and a ceiling entry
+  `Merge-PR` is still an invalid value.
 - [ ] After the dispatch, editing the workspace ceiling to empty and
   running `niwa apply` leaves `niwa authority show` for the existing
   dispatch unchanged.
@@ -1018,16 +1061,23 @@ Unchanged behaviour
   closes and releases exactly as today. Making it, a niwa-owned gate, or a
   coordinator's posture read honour the grant is separate work; R17, R21,
   R23 and R24 are what it will consume, and it will combine grant and
-  level as R4 states.
+  level as R4 states. For a session whose record exists (`"record":
+  true`) that gate lets the grant decide and ignores the instance
+  exemption list, so a dispatched session on that list without
+  `merge-pr` can't still merge; a session with no record, and every
+  failed lookup, keeps today's behaviour.
 - **Capping a child at its parent.** A session that dispatches again gets
   the workspace and machine ceilings, not its own grant or level as a cap.
   Refusing a child wider than its parent is separate work. It reads the
-  dispatcher's record from the instance `niwa dispatch` is run from, by
-  working directory only and never through the session id variable, and
+  dispatcher's record from the instance `niwa dispatch` is run from, or
+  the one `--parent-from` names, never through the session id variable,
+  and
   the `parent_dispatch_id` R17 keeps links a child's record to its
   parent's. That link can dangle, since a coordinator usually reaps its
-  predecessor: nothing resolves it as a live session, and a missing
-  parent or older ancestor record means no cap, never a refusal. Routing a
+  predecessor, so nothing resolves it as a live session. Reading a
+  missing parent or older ancestor record as no cap, never a refusal, is
+  provisional here; the re-delegation work decides it. A parent record in
+  a later schema version is the narrowest case, never uncapped. Routing a
   decision to the dispatcher (R2) is also separate work, and so is
   shirabe's coordinator passing `--parent-from` with its own instance,
   which lands with or after shirabe's coordinator record teardown
@@ -1072,7 +1122,8 @@ Unchanged behaviour
   about another session has to account for it. `--parent-from` is
   likewise advisory: it records the parent the dispatcher names.
 - A session started by hand, or an instance made by `niwa create`, has no
-  record: no grant and no cap. A later command that attaches a record to
+  record: no grant, and no cap on what it dispatches (provisionally; the
+  re-delegation work decides). A later command that attaches a record to
   such an instance needs no format change.
 - A child dispatch isn't capped at its parent's grant or level, so a
   session granted nothing can still dispatch a child granted anything
