@@ -452,7 +452,9 @@ how it was found as `parent_dispatch_source` (`anchor`, `cwd` or `none`).
 nonexistent path exits 1 before anything is created. It's stricter than
 `-C` in three ways, since the dispatcher passes it on purpose: a path in
 no instance, an instance under a workspace root other than the
-dispatch's (`class.WorkspaceRoot`), and, when the working directory is
+dispatch's (`class.WorkspaceRoot`, compared after resolving symlinks on
+both sides, since `ClassifyCwd` leaves them and `FindInstance` resolves
+them), and, when the working directory is
 already in a dispatched instance, a different instance, each exit 1. So
 `anchor` and `cwd` never disagree. It exists because a
 coordinator that runs `niwa dispatch` from the workspace root, as
@@ -703,7 +705,9 @@ func (r Record) MarshalJSON() ([]byte, error)
 // and listed in UnknownGrant as stored; an entry with at least one known
 // source stays in Grant with its known sources; an unknown name in
 // grant_ceiling is dropped and listed nowhere; an unknown
-// parent_dispatch_source reads as "none". Every name must still match
+// parent_dispatch_source reads as "none" with an empty
+// ParentDispatchID. Every field R17 lists is required; only fields
+// added within v1 later are optional. Every name must still match
 // its pattern. A malformed record still fails:
 // not JSON, a schema other than v1, a missing or wrongly typed known
 // field, an unknown level, a name failing the pattern, or a bad id.
@@ -729,8 +733,10 @@ parsers move to `toml.Decode` for that, and the base parser's generic
 "unknown config field" warning skips `authority.*` keys).
 `authority_ceiling` is stored without `omitempty` so an empty list
 survives a rewrite, and the config writer keeps using the TOML encoder.
-`config.AuthorityWarnings(cfg, overlay)` returns the authority
-validation errors and the overlay `roles` tombstone as strings (the
+`config.AuthorityWarnings(cfg, overlay, global)` returns the authority
+validation errors, the warning for an overlay or machine ceiling naming
+an authority the base ceiling lacks, and the overlay `roles` tombstone
+as strings (the
 tombstone is reported here only, not by `TombstoneWarnings`); the apply
 pipeline calls it whether or not an overlay is present and prints its
 lines with its other deferred warnings, so every loader that isn't
@@ -785,7 +791,9 @@ authorities = ["merge-pr", "close-issue", "cut-release"]
 ```
 
 **The record document** (what `show --json` prints; the stored file is
-private):
+private). This build always writes `"unknown_grant": []`; the example
+shows what a niwa that doesn't know `teardown` prints when it reads a
+record a newer niwa wrote:
 
 ```json
 {

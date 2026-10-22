@@ -179,8 +179,8 @@ the wrong shape for a team's rule about who decides.
   | `strict` | `person` | `on` |
 
   `dispatcher` is the seat that launched this session. A seat is the
-  coordinating position, whichever session currently fills it: the role
-  that ran the `niwa dispatch`, or the person at that shell when it ran
+  coordinating position, whichever session currently fills it: the
+  session that ran the `niwa dispatch`, or the person at that shell when it ran
   outside any session. It names the seat, not one session or instance,
   so a successor that takes over the seat is the dispatcher from then on. The
   record (R17) names only the original parent and keeps no "who
@@ -438,9 +438,11 @@ the wrong shape for a team's rule about who decides.
   reads. A record that is actually malformed (unreadable JSON, a missing
   required field, a value of the wrong type, an unknown level, an id or
   name with characters outside its pattern) still fails closed (R23).
-  An unknown `parent_dispatch_source` value is read as `none`, so a
-  later value there costs only the parent link. A field added within v1
-  is optional: a reader that knows it treats it
+  An unknown `parent_dispatch_source` value is read as `none` with an
+  empty `parent_dispatch_id`, so a later value there costs only the
+  parent link. Every field R17 lists, `parent_dispatch_source` and
+  `unknown_grant` included, is required in v1, and niwa always writes
+  them. A field added within v1 later is optional: a reader that knows it treats it
   as absent, with its documented default, in a record an older niwa
   wrote. `unknown_grant` entries keep the `grant` shape, an object with
   `authority` and `sources`, so a known authority listed there shows the
@@ -751,8 +753,8 @@ Read-back
   `parent_dispatch_source: anchor`; the same flag run from inside that
   instance also records `anchor`. `--parent-from` with an empty,
   relative or nonexistent path, a directory in no instance, an instance
-  under another workspace root, or (from inside instance X) an instance
-  other than X exits 1 with nothing created; `--parent-from` naming an
+  under another workspace root, or (from inside dispatched instance X)
+  an instance other than X exits 1 with nothing created; `--parent-from` naming an
   instance with no record records `none`; naming one whose record is
   malformed refuses the dispatch.
 - [ ] `--grant merge-pr,close-issue` records the same grant as `--grant
