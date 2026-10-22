@@ -114,6 +114,13 @@ func Execute() {
 			}
 			os.Exit(oce.Code)
 		}
+		// *exitCodeError carries the niwa authority group's exit codes (2
+		// for usage, 1 for a config error).
+		var xe *exitCodeError
+		if errors.As(err, &xe) {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(xe.code)
+		}
 		// A dispatch a signal stopped has run its failure path by the time
 		// its error gets here; niwa then ends by that signal, as it did
 		// before dispatch handled it.
