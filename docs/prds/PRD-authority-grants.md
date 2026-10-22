@@ -109,8 +109,9 @@ the wrong shape for a team's rule about who decides.
   says, so that a workspace config can't make my machine's workers settle
   things on their own or grant releases.
 - As an operator reviewing finished work, I want to read the level and
-  each named authority a dispatch held, with where each came from, so that
-  I can tell whether a session that merged its own work was granted it.
+  each named authority a dispatch held, with where each came from, by its
+  instance or session from the workspace root, so that I can tell whether
+  a session that merged its own work was granted it.
 - As a dispatched session, I want to read back my own grant with one
   command that works whether I'm a Claude or a Codex session, so that I
   act on what I hold instead of guessing from my brief.
@@ -140,9 +141,14 @@ the wrong shape for a team's rule about who decides.
   | `supervised` | `dispatcher` | `on` |
   | `strict` | `person` | `on` |
 
-  `dispatcher` is the session that dispatched this one. Deciders are
-  ordered `session` < `dispatcher` < `person` and author exclusion `off` <
-  `on`, widest first.
+  `dispatcher` is whoever ran the `niwa dispatch` that launched this
+  session: the session recorded as its parent, or, when the dispatch ran
+  outside any session and the record has no parent session id, the person
+  at that shell. Author exclusion `on` means whoever settles the point may
+  not be the session that authored the work the point is about. Deciders
+  are ordered `session` < `dispatcher` < `person` and author exclusion
+  `off` < `on`, widest first. Decision point names are an open vocabulary
+  that callers choose; this feature maps no point to a named authority.
 - **R3. Named authorities are a closed set.** niwa defines the named
   authorities a grant may hold, each by the actions it covers. This
   feature defines exactly three:
@@ -153,9 +159,15 @@ the wrong shape for a team's rule about who decides.
   | `close-issue` | closing an issue; closing a pull request without merging is not covered |
   | `cut-release` | publishing a release or a release tag |
 
-  Any other name in a config value or a flag is refused under R11 or R14.
-  Adding an authority is a niwa change, and a reader of the record (R17)
-  treats a name it doesn't know as an authority it doesn't act on.
+  The routes in the first row are what the authority means to a later
+  gate; this feature tests none of them, since nothing here gates an
+  action. Any other name in a config value or a flag is refused under R11
+  or R14. Adding an authority is a niwa change. niwa's own reader treats a
+  record naming an authority it doesn't know as malformed (R23), so it
+  reports nothing held; a tool reading the JSON ignores a name it doesn't
+  know and never treats it as one it does. Wherever niwa lists
+  authorities (the record, the read-back, the stderr line, telemetry) it
+  lists them in this table's order.
 - **R4. The level and the grant are separate and both apply.** The grant
   names the actions a session may take; the level decides who settles a
   decision point. No level adds or removes a named authority, and no grant
@@ -165,7 +177,9 @@ the wrong shape for a team's rule about who decides.
   at `strict` holding `merge-pr` still resolves its merge decision to
   `person`, and a session at `autonomous` holding no `merge-pr` resolves
   it to `session` and still doesn't hold the action. This feature records
-  both halves; enforcing their combination is later work (Out of Scope).
+  both halves and states this rule as the contract later gate work
+  follows; which decision point stands for which action, and enforcing
+  the combination, are that work's (Out of Scope).
 
 **Declaring the policy**
 
@@ -183,11 +197,31 @@ the wrong shape for a team's rule about who decides.
   can narrow the ceiling further (R9) and the check happens at grant time
   (R14). A role with an empty `authorities` list is valid and grants
   nothing.
-- **R8. Only the base config declares authority.** `[authority]` is read
-  from the workspace's base config alone. An `[authority]` table in a
-  workspace overlay is ignored, and every command that loads the overlay
-  warns that it has no effect, the way an overlay's `[workspace]` settings
-  are warned about today.
+- **R8. The base config declares; an overlay can only narrow.** Roles, the
+  workspace level and the workspace ceiling are declared in the
+  workspace's base config. A workspace overlay may set `level` and
+  `ceiling` under its own `[authority]` table, and they only narrow: the
+  level ceiling is the narrower of the base and overlay levels, and the
+  ceiling is the authorities in both lists, with source `overlay` when the
+  overlay is what narrowed it. An overlay can't declare or change a role;
+  an `[authority.roles]` table in an overlay is ignored, and every command
+  that loads the overlay warns that it has no effect.
+- **R8a. Making authorities grantable.** A workspace makes merging,
+  closing issues and cutting releases grantable, and gives coordinating
+  sessions a role for all three, by adding this to its base config:
+
+  ```toml
+  [authority]
+  level = "autonomous"
+  ceiling = ["merge-pr", "close-issue", "cut-release"]
+
+  [authority.roles.coordinator]
+  authorities = ["merge-pr", "close-issue", "cut-release"]
+  ```
+
+  after which `niwa dispatch --role coordinator "<task>"` launches a
+  session whose record holds all three. The guide (R34) carries this
+  example.
 - **R9. Machine limits.** The personal niwa config (the file that holds
   `[global] dispatch_permission_mode`) may declare `authority_level` and
   `authority_ceiling` under `[global]`. `authority_level` caps the level;
@@ -196,9 +230,11 @@ the wrong shape for a team's rule about who decides.
   workspace ceiling; it can never add an authority. An absent key limits
   nothing; `authority_ceiling = []` limits the effective ceiling to empty.
   `niwa config set authority-level <level>`, `niwa config set
-  authority-ceiling <a,b,...>` and the matching `niwa config unset`
-  commands write and clear them, refusing an invalid value with a non-zero
-  exit and the file unchanged.
+  authority-ceiling <a,b,...>` (or `none` for an empty list) and the
+  matching `niwa config unset` commands write and clear them, trimming
+  whitespace around each entry and refusing an invalid value with a
+  non-zero exit and the file unchanged. A duplicate entry in any ceiling
+  or role list is kept once.
 - **R10. Checking the policy.** `niwa authority policy`, run inside a
   workspace, prints the workspace level and ceiling, the machine's
   `authority_level` and `authority_ceiling` (or `not set`), the effective
@@ -217,34 +253,41 @@ the wrong shape for a team's rule about who decides.
   workspace config, `niwa apply` among them, print the same message as a
   warning and carry on, so a fix can still be pulled from the config's
   source. An invalid machine value refuses `niwa dispatch` and the `niwa
-  authority` commands the same way. A workspace config that can't be
-  loaded for any reason refuses a dispatch before any instance is created,
-  so neither the level nor the ceiling ever falls back to a default
-  because the file was unreadable.
+  authority` commands the same way. A workspace config that exists but
+  can't be read or parsed refuses a dispatch with exit 1 before any
+  instance is created, so neither the level nor the ceiling ever falls
+  back to a default because the file was unreadable.
 
 **Narrowing and granting at dispatch**
 
 - **R12. Per-dispatch level.** `niwa dispatch --level <level>` narrows the
   level for that one dispatch. A value equal to or narrower than the level
   ceiling (R13) is accepted.
-- **R13. Level resolution and refusal.** The level ceiling is the narrower
-  of the workspace level (or the built-in level) and the machine
-  `authority_level` when set. A `--level` value wider than it refuses the
-  dispatch with exit 1, naming the requested level, the ceiling level and
-  the ceiling's source. Otherwise the resolved level is the narrowest of
-  the three inputs, with source `flag`, `machine`, `workspace` or
-  `built-in`: the input that supplied the resolved value, and on a tie the
-  first of that list.
+- **R13. Level resolution and refusal.** The level ceiling is the
+  narrowest of the workspace level, the overlay level and the machine
+  `authority_level`, each taking part only when set; when none is set it
+  is the built-in `autonomous`. Its source is whichever of `machine`,
+  `overlay`, `workspace` or `built-in` supplied it, a tie going to the
+  first of that list. A `--level` value wider than the ceiling refuses
+  the dispatch with exit 1, naming the requested level, the ceiling level
+  and the ceiling's source. Otherwise the resolved level is the narrower
+  of the ceiling and the `--level` value, with source `flag` when the
+  flag supplied it (a tie goes to the flag) and the ceiling's source
+  otherwise. The grant ceiling's source is `machine` when the machine
+  list removed any authority from the workspace ceiling, else `overlay`
+  when the overlay list did, else `workspace`. These are the only source
+  values the record and the read-back carry for a level or a ceiling.
 - **R14. Granting.** `niwa dispatch --grant <authority>` and `--role
   <name>`, each repeatable, grant the named authority, or every authority
   the role names, to that one dispatch. If any requested authority,
   directly or through a role, is outside the effective ceiling, the
   dispatch is refused with exit 1, and the message names each such
   authority, how it was requested (`--grant` or the role's name), the
-  effective ceiling and which setting narrowed it (workspace or machine).
-  An unknown authority or an undeclared role refuses the dispatch with
-  exit 1 naming it and the accepted values. Requests are never trimmed: a
-  dispatch either gets everything it asked for or launches nothing.
+  effective ceiling and its source (R13). An unknown authority, an
+  undeclared role, or a `--level` value outside R1 refuses the dispatch
+  with exit 1 naming it and the accepted values, checked with the same
+  trimming and case rules as R11. Requests are never trimmed: a dispatch
+  either gets everything it asked for or launches nothing.
 - **R15. Empty grant.** A dispatch with no `--grant` and no `--role` holds
   no named authority. No setting grants an authority by default.
 - **R16. Refusals leave nothing behind.** A dispatch refused under R11,
@@ -263,8 +306,15 @@ the wrong shape for a team's rule about who decides.
   granted authority with every source it came from (`dispatch` for
   `--grant`, `role:<name>` for a role). An authority requested both
   directly and through a role, or through two roles, appears once with all
-  its sources. The record is the only copy; every reader in R20 to R26
-  reads it.
+  its sources, `dispatch` first and then roles in name order. A dispatch
+  that ran outside any session records an empty parent session id. The
+  record is the only copy; every reader in R20 to R26 reads it. Its JSON
+  form, the one `niwa authority show --json` prints, carries `schema:
+  "niwa.authority.record/v1"` and the top-level fields `dispatch_id`,
+  `parent_session_id`, `level`, `level_source`, `level_ceiling`,
+  `level_ceiling_source`, `grant_ceiling`, `grant_ceiling_source`,
+  `roles` and `grant` (a list of objects with `authority` and
+  `sources`); the design may add fields but not rename these.
 - **R18. The record is fixed for the session's life.** niwa never rewrites
   an authority record after it's written. A later `niwa apply`, a change
   to the workspace or machine config, a resume of the session, or a
@@ -277,26 +327,34 @@ the wrong shape for a team's rule about who decides.
   worker prints exactly one stderr line of the form
   `niwa dispatch: authority level <level> from <source>; grant <list>`,
   where `<list>` is `none` or each authority followed by its sources in
-  parentheses, for example
+  parentheses, written `dispatch` and `role <name>` (the record writes
+  `dispatch` and `role:<name>`), for example
   `merge-pr (role coordinator), close-issue (dispatch, role coordinator)`.
   A refused dispatch prints its refusal instead.
 - **R20. The operator reads it across instances.** `niwa list --json`
   includes each dispatched instance's resolved level, level source and
   grant with sources, under one `authority` object read from the record,
   and omits the object for an instance with no record (one dispatched
-  before this feature, or one niwa didn't dispatch).
+  before this feature, or one niwa didn't dispatch). An instance whose
+  record can't be read or is malformed gets an `authority` object holding
+  only an `error` naming why, and the rest of the listing is unaffected.
 - **R21. Anyone reads one dispatch.** `niwa authority show` prints a
   dispatch's resolved level and source, its grant with each authority's
   sources (or `none`), its granted roles, the ceilings recorded with it,
   its dispatch id and parent session id. It selects the dispatch, in this
   order: the session named by `--session <id>`; the instance named by
-  `--instance <name>`; the dispatched instance containing the working
-  directory; and, only when the working directory is in no instance, the
-  calling session, by the session id variable dispatch lineage already
-  reads. The working directory comes before the variable because a worker
-  can inherit its dispatcher's variable. `--json` prints the record as one
-  JSON document whose shape is documented and carries a schema name and
-  version. It reads only local files and makes no network call.
+  `--instance <name>`; the instance containing the working directory; and,
+  only when the working directory is in no instance, the calling session,
+  by the session id variable dispatch lineage already reads. The working
+  directory comes before the variable because a worker can inherit its
+  dispatcher's variable. `--session` and `--instance` together are a usage
+  error (exit 2). A working directory in an instance that has no record
+  gives the no-record answer (R23) and doesn't fall through to the
+  variable; a `--session` with no mapping gives the no-record answer; an
+  `--instance` naming no instance exits 1. `--json` prints the record
+  (R17) or, with no record, a document with the same schema and
+  `"record": false`. It reads only local files and makes no network call,
+  and run outside a workspace it exits 1 naming the missing workspace.
 - **R22. A session reads its own grant.** Run with no selector from inside
   a dispatched instance, by a Claude or a Codex session, from the instance
   root, a repository inside it, or a worktree of one, `niwa authority
@@ -308,11 +366,11 @@ the wrong shape for a team's rule about who decides.
 - **R23. No record means no named authority.** When no record is found for
   the selected session or instance (a session niwa didn't dispatch, a
   person's own session, or an instance dispatched before this feature),
-  `niwa authority show` exits 0 and reports `no dispatch record`, an empty
-  grant, and the level a no-flag dispatch would resolve to, marked as
-  coming from no record. A record that exists but can't be read, or holds
-  a value outside R1 or R3, makes it exit 1, never fall back to the
-  no-record answer.
+  `niwa authority show` exits 0 and prints the line `dispatch record:
+  none`, an empty grant, and the level a no-flag dispatch would resolve to
+  with its source followed by ` (no dispatch record)`. A record that
+  exists but can't be read, or holds a value outside R1 or R3, makes it
+  exit 1, never fall back to the no-record answer.
 - **R24. "Held" is never inferred from an exit code.** A caller treats an
   authority as held only when `niwa authority show --json` exits 0 and
   prints a document with the documented schema name whose grant names that
@@ -324,8 +382,8 @@ the wrong shape for a team's rule about who decides.
 - **R25. Telemetry carries it as observability.** A dispatch whose agent
   receives niwa's lineage resource attributes (Claude Code today) adds
   `niwa.authority.level=<level>` and `niwa.authority.grant=<a,b,...>` (the
-  granted authorities sorted, or `none`) to the attributes it sends the
-  worker. An agent that receives no lineage attributes (Codex today) gets
+  granted authorities in R3's order, or `none`) to the attributes it sends
+  the worker, alongside the lineage attributes it already sends. An agent that receives no lineage attributes (Codex today) gets
   none, and its record carries the same values. Telemetry is best-effort
   and isn't the record.
 
@@ -347,7 +405,9 @@ the wrong shape for a team's rule about who decides.
   one exists for that point, and from R2 otherwise. A level narrower than
   the declaration narrows each component to the stricter of the two;
   nothing makes a declared answer wider. A declared point the level didn't
-  narrow reports `source=declaration`. No declaration source exists in any
+  narrow (including a level whose value equals the declared one) reports
+  `source=declaration`; one where the level narrowed either component
+  reports the level's source. No declaration source exists in any
   workspace today, so every point resolves by R2.
 
 ### Non-functional
@@ -359,7 +419,8 @@ the wrong shape for a team's rule about who decides.
   tracked, readable record; the workspace's gates decide exactly as they
   did before until separate work makes them read it, and a session
   holding an authority can still be stopped by its permission mode or by
-  a gate.
+  a gate. Nothing here promises that a session can't get past the
+  workspace hook, or can't take an action its grant leaves out.
 - **R29. Independent of the permission mode.** The authority level and
   grant never change the permission mode a worker launches with, and no
   permission-mode setting (including a `bypass` workspace posture) changes
@@ -382,10 +443,14 @@ the wrong shape for a team's rule about who decides.
   dispatch` can launch (Claude Code and Codex today).
 - **R33. Cheap and offline lookups.** `niwa authority show` and `niwa
   authority decide` read only local files, open no network connection,
-  start no other process, and finish in under 200 milliseconds on a
-  workspace with 250 session mappings on the CI runners niwa's tests use,
-  so a hook can call them on the commands it gates.
-- **R34. The record format is documented.** A guide documents the
+  start no other process, and read no more session mappings than the one
+  a `--session` or session-id lookup names, so their cost doesn't grow
+  with the number of sessions in the workspace and a hook can call them
+  on the commands it gates. Measured through the built binary, the median
+  of ten runs on a workspace with 250 session mappings is under 200
+  milliseconds on the CI runners niwa's tests use.
+- **R34. The record format is documented.** A guide at
+  `docs/guides/authority-grants.md` documents the
   `[authority]` keys, the machine keys, the flags, what each named
   authority covers, the record's JSON shape and schema version, the
   selection order of R21, the no-record answer, the "held" rule of R24,
@@ -413,9 +478,15 @@ Declaring the policy
   and the accepted values, and makes `niwa apply` print that message as a
   warning and exit as it would without the bad value. `level = " strict "`
   loads as `strict`, and `level = ""` loads as not set.
-- [ ] An `[authority]` table in the workspace overlay has no effect on
-  `niwa authority policy`'s output, and loading the overlay prints a
-  warning naming `[authority]`.
+- [ ] With a base ceiling of all three and an overlay `[authority]
+  ceiling = ["merge-pr"]` and `level = "strict"`, `niwa authority policy`
+  prints the effective ceiling `merge-pr` and level ceiling `strict`, both
+  from `overlay`; an overlay ceiling naming an authority the base ceiling
+  lacks adds nothing; an overlay `[authority.roles.x]` table changes no
+  role and loading the overlay prints a warning naming it.
+- [ ] A workspace whose base config holds exactly R8a's example dispatches
+  with `--role coordinator` and records all three authorities from
+  `role:coordinator`.
 - [ ] `niwa config set authority-level strict` writes `authority_level =
   "strict"` under `[global]`; `niwa config set authority-ceiling
   merge-pr,close-issue` writes the two-entry list; `niwa config set
@@ -474,9 +545,13 @@ Granting and refusal
 
 Read-back
 
-- [ ] Every launching dispatch's stderr contains exactly one line matching
-  `^niwa dispatch: authority level (autonomous|supervised|strict) from (flag|machine|workspace|built-in); grant .+$`,
-  and a refused dispatch's stderr contains none.
+- [ ] Every launching dispatch's stderr contains exactly one line starting
+  `niwa dispatch: authority level `, and a refused dispatch's stderr
+  contains none. A dispatch with no authority settings or flags prints
+  exactly `niwa dispatch: authority level autonomous from built-in; grant
+  none`; one with `--level strict --grant merge-pr` in a workspace whose
+  ceiling holds `merge-pr` prints exactly `niwa dispatch: authority level
+  strict from flag; grant merge-pr (dispatch)`.
 - [ ] A fake agent that runs `niwa authority show --json` as the first
   command of its launch, before niwa has written its session mapping,
   receives the record for its own dispatch, with the level and grant the
@@ -488,7 +563,7 @@ Read-back
   return the matching dispatch's record from the workspace root.
 - [ ] Run from the workspace root with no selector and no session id, or
   with a session id that has no record, `niwa authority show` exits 0 and
-  reports `no dispatch record` and an empty grant.
+  prints `dispatch record: none` and an empty grant.
 - [ ] A record holding `level: bogus`, or a granted authority `merge`, or
   truncated JSON, makes `niwa authority show` and `niwa authority decide
   merge-own-pr` exit 1.
@@ -496,14 +571,20 @@ Read-back
   running `niwa apply` leaves `niwa authority show` for the existing
   dispatch unchanged.
 - [ ] After `niwa reset` of a dispatched instance, `niwa authority show`
-  inside it reports `no dispatch record`.
+  inside it prints `dispatch record: none`.
 - [ ] `niwa list --json` omits `authority` for an instance with no record
   and includes it, with level, source and grant, for a dispatched one.
-- [ ] `niwa authority show --json`'s output carries the documented schema
-  name and version, and a test asserts that a script following R24's rule
-  reads `merge-pr` as held for a `--grant merge-pr` dispatch, and as not
-  held for a no-grant dispatch, for a no-record directory, and when `niwa`
-  is replaced by a stub that prints help and exits 0.
+- [ ] `niwa authority show --json` for a `--grant merge-pr` dispatch exits
+  0 and prints a document with `schema` equal to
+  `niwa.authority.record/v1`, every field R17 names, `parent_session_id`
+  equal to the dispatching session's id (empty for a dispatch run from a
+  plain shell), and `grant` holding one entry with `authority` `merge-pr`
+  and `sources` `["dispatch"]`; for a no-grant dispatch `grant` is empty;
+  in a no-record directory it exits 0 with `"record": false` and an empty
+  `grant`.
+- [ ] Editing only the instance's record file (changing the level) changes
+  what `niwa authority show` and `niwa list --json` report for that
+  instance, showing they read the one copy.
 - [ ] A Claude dispatch's `OTEL_RESOURCE_ATTRIBUTES`, in both the launch
   environment and the settings document's `env`, contains
   `niwa.authority.level=<level>` and `niwa.authority.grant=<list>`; a
@@ -514,8 +595,8 @@ Decision points at the two ends
 - [ ] In a dispatched instance whose record says `autonomous`, `niwa
   authority decide merge-own-pr` prints `decider=session` and
   `author_exclusion=off`; at `strict` it prints `decider=person` and
-  `author_exclusion=on`; at `supervised` it prints `decider=dispatcher`.
-  Each exits 0.
+  `author_exclusion=on`; at `supervised` it prints `decider=dispatcher`
+  and `author_exclusion=on`. Each exits 0.
 - [ ] A dispatch at `strict` granted `merge-pr` still gets
   `decider=person` from `niwa authority decide merge-own-pr`.
 - [ ] A functional test dispatches a fake agent whose script runs `niwa
@@ -523,12 +604,23 @@ Decision points at the two ends
   command exits 0 and prints `decider=session`, and `waiting-for-person`
   otherwise. In an `autonomous` workspace the marker reads `settled`;
   dispatched with `--level strict` it reads `waiting-for-person`.
-- [ ] A real Claude Code session dispatched by `niwa dispatch`, briefed to
-  reach a merge decision by running `niwa authority decide merge-own-pr`
-  and to read back its grant with `niwa authority show`, settles the
-  point itself at `autonomous` and stops for a person with `--level
-  strict`, and reports the grant it was dispatched with. The run and both
-  answers are recorded in the implementing pull request.
+- [ ] Live check with a real Claude Code session, in a workspace holding
+  R8a's example: a session dispatched with `--grant merge-pr`, briefed to
+  read back its own grant with `niwa authority show` and to reach a merge
+  decision by running `niwa authority decide merge-own-pr`, reports
+  `merge-pr` from `dispatch`, settles the point itself at `autonomous`,
+  and stops for a person when dispatched with `--level strict`. From
+  inside that session, a dispatch asking for a role or grant past a
+  narrowed ceiling (the overlay or machine ceiling set to `merge-pr`, and
+  `--grant cut-release`) is refused before anything launches, naming
+  `cut-release` and the ceiling. It passes when the recorded transcript
+  shows, at `autonomous`, `decider=session` followed by the session
+  proceeding with the merge step it was briefed on; at `strict`,
+  `decider=person` followed by the session stopping without that step;
+  the session's own `niwa authority show` output naming `merge-pr` from
+  `dispatch`; and the refusal text. The transcript excerpts are recorded
+  in the implementing pull request. This check is run once before merge;
+  the fake-agent test above is what CI runs.
 - [ ] Point names: `a`, `merge-2` and a 64-character name are accepted;
   `Merge_Now`, `2merge`, `-merge`, an empty name, a 65-character name and
   a missing argument each exit 2.
@@ -536,7 +628,97 @@ Decision points at the two ends
   `dispatcher`/`off` for `merge-own-pr` at `autonomous` returns
   `dispatcher`/`off`/`declaration` for `merge-own-pr` and `session`/`off`
   for `accept-prd`; the same declaration at `strict` (source `flag`)
-  returns `person`/`on`/`flag`.
+  returns `person`/`on`/`flag`; at `supervised` (source `workspace`) it
+  returns `dispatcher`/`on`/`workspace`, the level narrowing only author
+  exclusion; a declaration of `person`/`on` at `autonomous` stays
+  `person`/`on`/`declaration`.
+- [ ] `niwa authority decide merge-own-pr` prints `source=flag`,
+  `source=machine`, `source=workspace` and `source=built-in` for records
+  resolved from each; `niwa authority decide Bad_Name` run outside a
+  workspace exits 2, and `niwa authority decide x` outside a workspace,
+  or with an invalid machine value, exits 1.
+
+Edge cases and errors
+
+- [ ] A hand-edited personal config with `authority_level = "loose"`, and
+  separately `authority_ceiling = ["merge"]`, makes `niwa dispatch` and
+  `niwa authority policy` exit 1 naming the key and the value, with
+  nothing created.
+- [ ] A `workspace.toml` with a TOML syntax error, and separately one that
+  can't be read, makes `niwa dispatch` exit 1 before any instance is
+  created.
+- [ ] `--level loose` and `--level Strict` each exit 1 naming the value and
+  the three levels; `--level " strict "` and `--grant " merge-pr "` are
+  accepted as `strict` and `merge-pr`; `--grant Merge-PR` exits 1.
+- [ ] `niwa authority policy --json` emits one JSON document carrying the
+  same values as the text form; `niwa authority policy`, `show` and
+  `decide x` run outside a workspace each exit 1 naming the missing
+  workspace.
+- [ ] Machine `authority_ceiling = []` with a workspace ceiling of all three:
+  `niwa authority policy` prints an empty effective ceiling from
+  `machine`, and `--grant merge-pr` is refused. Machine `authority_level =
+  "autonomous"` with workspace `strict` records `strict` from `workspace`.
+  Machine `authority_ceiling = ["cut-release"]` with workspace ceiling
+  `["merge-pr"]` gives an empty effective ceiling.
+- [ ] Workspace ceiling `["merge-pr"]`: `--grant merge-pr --grant
+  close-issue --grant cut-release` exits 1, names both `close-issue` and
+  `cut-release` with `--grant` as the route, and launches nothing.
+- [ ] A role with `authorities = []` granted with `--role` records an
+  empty grant with the role listed; two roles that both name `merge-pr`
+  record `merge-pr` once with both `role:` sources.
+- [ ] A dispatch's record is gone after the dispatch is rolled back (the
+  fake launcher fails), after `niwa destroy` of the instance, and after
+  `niwa reap` reclaims it; it is unchanged after the session is resumed
+  through `claude attach` or `codex resume`.
+- [ ] `niwa authority show` from a worktree of a repository inside a
+  dispatched instance reports that instance's record.
+- [ ] `niwa authority show --session <a> --instance <b>` reports session
+  `a`'s dispatch; with the working directory in instance `b` and the
+  session id variable naming session `a`, it reports `b`; from the
+  workspace root with the variable naming `a`, it reports `a`.
+- [ ] With no record, `niwa authority decide merge-own-pr` in a `strict`
+  workspace prints `level=strict` and `source=workspace (no dispatch
+  record)`, and `niwa authority show --json` exits 0 with an empty grant
+  and a field stating there's no record.
+- [ ] `niwa authority --help` lists `policy`, `show` and `decide`, and
+  `niwa dispatch --help` lists `--level`, `--grant` and `--role`;
+  `niwa dispatch --no-such-flag` exits non-zero.
+- [ ] A workspace with a bad `[authority]` value and one with a bad machine
+  value each refuse a dispatch with no new instance, record or mapping
+  and no launch.
+- [ ] An overlay `[authority.roles.x]` table produces its warning on `niwa
+  apply` and `niwa dispatch` as well as `niwa authority policy`.
+- [ ] Machine and workspace both `strict`, no flag: records `strict` from
+  `machine`. A role named with 64 characters loads; one with 65 is
+  refused. `--role Bad_Name` exits 1. `--session <a> --instance <b>`
+  exits 2; `--instance missing` exits 1.
+- [ ] A record file made unreadable (mode 000) makes `niwa authority show`
+  exit 1. An instance dispatched by a build without this feature reports
+  `dispatch record: none`.
+- [ ] A later dispatch of another session, and a change to the machine
+  config, leave an existing record byte-identical.
+- [ ] `docs/guides/authority-grants.md` exists and contains each of these
+  strings: `[authority]`, `authority_level`, `authority_ceiling`,
+  `--level`, `--grant`, `--role`, `merge-pr`, `close-issue`,
+  `cut-release`, `niwa.authority.record/v1`, `dispatch record: none`,
+  `decider=session`, and R8a's example block.
+- [ ] `niwa config set authority-ceiling " merge-pr , merge-pr ,close-issue"`
+  writes `["merge-pr", "close-issue"]`; `niwa config set
+  authority-ceiling none` writes `[]`.
+- [ ] Roles `b-role` and `a-role` both naming `merge-pr`, granted with
+  `--grant merge-pr --role b-role --role a-role`, record `merge-pr` with
+  sources `["dispatch", "role:a-role", "role:b-role"]`.
+- [ ] Workspace `strict` and overlay `strict`, no machine key: the level
+  ceiling's source is `overlay`.
+- [ ] A fake agent that resumes under a new session id, then runs `niwa
+  authority show` from its instance, gets the same record.
+- [ ] A detached dispatch and a foreground dispatch each have their record
+  in place when the fake agent's first command runs.
+- [ ] R19's line for a dispatch granted `--grant close-issue --role
+  coordinator` (a role naming `merge-pr` and `close-issue`) reads exactly
+  `grant merge-pr (role coordinator), close-issue (dispatch, role
+  coordinator)`; the record writes the same sources as `dispatch` and
+  `role:coordinator`.
 
 Unchanged behaviour
 
@@ -555,10 +737,23 @@ Unchanged behaviour
   and one with no grant, apart from the lineage attributes.
 - [ ] The authority unit and functional tests pass on a CI runner with no
   koto binary on `PATH`.
-- [ ] With 250 session mappings in a test workspace, `niwa authority show`
-  and `niwa authority decide merge-own-pr` each finish in under 200
-  milliseconds in CI, and their code paths construct no network client
-  and start no process.
+- [ ] With 250 session mappings in a test workspace, the median of ten
+  runs of the built binary's `niwa authority show` and `niwa authority
+  decide merge-own-pr` is each under 200 milliseconds in CI.
+- [ ] A unit test runs `show` and `decide` with the package's network and
+  process seams replaced by doubles that fail the test when called, and
+  passes; a second test counts session-mapping reads and finds at most
+  one.
+- [ ] A dispatch with `--level strict` and one with no flags write
+  byte-identical hook files and settings documents apart from the lineage
+  attributes.
+- [ ] A Codex dispatch with `--grant merge-pr` appears in `niwa list
+  --json` with an `authority` object naming `merge-pr`.
+- [ ] A Claude dispatch whose environment already carries
+  `OTEL_RESOURCE_ATTRIBUTES=team=x` sends the worker a value holding
+  `team=x`, the existing lineage attributes, `niwa.authority.level` and
+  `niwa.authority.grant=merge-pr,close-issue` for a dispatch granted
+  those two.
 
 ## Out of Scope
 
@@ -586,6 +781,12 @@ Unchanged behaviour
   (R3). Teardown of an instance is the likeliest next authority and is
   left to the work that gates it.
 - **Changing a grant while its session runs** (R18).
+- **Declaring a ceiling in this project's own workspace config.** Because
+  an absent ceiling grants nothing, no workspace can grant merge, close or
+  release until its config says so. Adding R8a's `[authority]` table to
+  the tsukumogami workspace's public config (`dot-niwa`), so successor
+  coordinators can be granted merge, is a follow-up once this feature
+  ships, not part of it.
 - **Recording who decided.** R26 says who may decide a point; recording
   who did, and letting a higher authority reverse it, is separate work.
 
@@ -679,11 +880,17 @@ Unchanged behaviour
   neither reads the other (R29).
 - **Refuse, don't trim.** A request past a ceiling launches nothing, so an
   operator never believes a dispatch got authority it didn't.
-- **Base config only.** Authority policy is security-relevant and every
-  contributor should be able to read it, so it follows the precedent of
-  the `[workspace]` settings an overlay can't set. Alternative: let an
-  overlay add roles. Rejected for now; nothing in a role is private, and
-  an overlay that widens policy is invisible to most contributors.
+- **The base config declares, an overlay only narrows.** Authority policy
+  is security-relevant, and an overlay is invisible to most contributors,
+  so anything that widens policy (a role, a ceiling entry, a wider level)
+  lives in the base config everyone can read. An overlay may still make
+  policy stricter, the same way the machine can, so a workspace that keeps
+  private settings in an overlay can tighten its ceiling or level there
+  without publishing why. Nothing in a role is private: a role names
+  public authorities, and instance names, the private part of today's
+  exemption, play no part in a grant. Alternatives: base config only
+  (rejected: a private overlay couldn't narrow anything), or overlays
+  that may add roles (rejected: an invisible widening).
 - **A bad `[authority]` value blocks dispatch, not `niwa apply`.** Failing
   dispatch closed keeps a typo from widening anything; letting apply carry
   on with a warning keeps the workspace able to pull the fix.
