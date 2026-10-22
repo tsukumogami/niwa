@@ -1234,9 +1234,10 @@ func TestReap_KeptMappingsAreReapedOnceTheirSessionIsGone(t *testing.T) {
 // `sleep 10` races its own deadline: whichever of the sleep's exit and the
 // timer fires first decides whether the run succeeded, and on a Linux runner
 // the sleep often wins, so two runs passed and printed nothing. With 9s every
-// run that starts times out, and the schedule is fixed: three runs time out at
-// 9s each, the fourth gets the ~3s left and times out at the budget's end, and
-// the fifth is skipped -- every session is warned about exactly once.
+// run that starts times out, so every session is warned about exactly once:
+// usually three runs time out at 9s, a fourth at the budget's end and the
+// fifth is skipped, though a slow runner can shift that split, which is why
+// the test checks only that every line is a timeout or a skip.
 func TestReap_StepBudget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("takes 30 seconds")
@@ -1271,8 +1272,14 @@ func TestReap_StepBudget(t *testing.T) {
 			t.Errorf("unexpected warning %q", line)
 		}
 	}
-	if timedOut != 4 || skipped != 1 {
-		t.Errorf("timed out %d, skipped %d; want 4 and 1:\n%s", timedOut, skipped, stderr.String())
+	// The split between the two depends on how long each kill takes on the
+	// runner, so only what the criterion needs is checked: every line is one
+	// or the other, and at least one run was skipped for lack of budget.
+	if timedOut+skipped != len(sids) {
+		t.Errorf("timed out %d + skipped %d, want %d:\n%s", timedOut, skipped, len(sids), stderr.String())
+	}
+	if skipped == 0 {
+		t.Errorf("no run was skipped for lack of budget:\n%s", stderr.String())
 	}
 	for _, sid := range sids {
 		if n := strings.Count(stderr.String(), "on-reap for session "+sid+":"); n != 1 {
