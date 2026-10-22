@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/agentplan"
+	"github.com/tsukumogami/niwa/internal/authority"
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
@@ -61,13 +62,10 @@ const lineageNamespace = "niwa."
 // beside it. A value outside it is dropped, not truncated or encoded.
 var lineageValuePattern = regexp.MustCompile(`^[A-Za-z0-9._:/@-]{1,128}$`)
 
-// parentSessionPattern is the shape niwa accepts for a calling session's id,
-// the same one it already accepts for an agent's session ids elsewhere.
-var parentSessionPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,128}$`)
-
-// dispatchIDPattern is the shape newDispatchID produces: a lowercase
-// version-4 UUID.
-var dispatchIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+// The calling session's id and the dispatch id are checked through
+// authority.ValidSessionID and authority.ValidDispatchID: the authority
+// record carries both ids, and its reader and this code share one copy of
+// each format.
 
 // requestedSkillPattern is `<plugin>:<name>`.
 var requestedSkillPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*:[a-z0-9][a-z0-9-]*$`)
@@ -162,7 +160,7 @@ func lineageParentSessionID(spec agentplan.LaunchSpec, getenv func(string) strin
 		return ""
 	}
 	id := getenv(spec.Lineage.ParentSessionEnv)
-	if !parentSessionPattern.MatchString(id) {
+	if !authority.ValidSessionID(id) {
 		return ""
 	}
 	return id

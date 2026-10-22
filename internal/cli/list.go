@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
+	"github.com/tsukumogami/niwa/internal/authority"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -205,10 +206,10 @@ func annotateFromSessionMappings(records []workspace.InstanceRecord, workspaceRo
 		// each checked against the shape niwa writes, for the same reason the
 		// name is: a mapping file is writable by any same-user process.
 		if m, ok := newest[records[i].Path]; ok {
-			if dispatchIDPattern.MatchString(m.DispatchID) {
+			if authority.ValidDispatchID(m.DispatchID) {
 				records[i].DispatchID = m.DispatchID
 			}
-			if parentSessionPattern.MatchString(m.ParentSessionID) {
+			if authority.ValidSessionID(m.ParentSessionID) {
 				records[i].ParentSessionID = m.ParentSessionID
 			}
 		}

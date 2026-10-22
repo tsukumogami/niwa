@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/authority"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -109,7 +110,7 @@ func TestDispatch_Lineage_FullSet(t *testing.T) {
 	if strings.Join(order, ",") != strings.Join(wantOrder, ",") {
 		t.Errorf("key order = %v, want %v", order, wantOrder)
 	}
-	if !dispatchIDPattern.MatchString(attrs["niwa.dispatch.id"]) {
+	if !authority.ValidDispatchID(attrs["niwa.dispatch.id"]) {
 		t.Errorf("niwa.dispatch.id = %q, want a version-4 UUID", attrs["niwa.dispatch.id"])
 	}
 	checks := map[string]string{

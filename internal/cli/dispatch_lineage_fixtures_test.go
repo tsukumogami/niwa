@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tsukumogami/niwa/internal/authority"
 	"github.com/tsukumogami/niwa/internal/otelprecedence"
 )
 
@@ -76,7 +77,7 @@ func dispatchedFixtureSession(t *testing.T, skill string, withBrief bool) lineag
 
 	attrs := otelprecedence.Entries(got.settings)
 	id := attrs[attrDispatchID]
-	if !dispatchIDPattern.MatchString(id) {
+	if !authority.ValidDispatchID(id) {
 		t.Fatalf("%s = %q, want a dispatch id", attrDispatchID, id)
 	}
 	raw := readSingleMappingJSON(t, root)
