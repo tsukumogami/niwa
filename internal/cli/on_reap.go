@@ -38,7 +38,8 @@ import (
 // onReapFailureLimit failed runs the mapping is dropped with a final warning.
 
 const (
-	// onReapFailureLimit is how many failed runs a mapping is kept through.
+	// onReapFailureLimit is the failed run that drops a mapping: it is kept
+	// through the first nine and dropped, with a final warning, on the tenth.
 	onReapFailureLimit = 10
 
 	// onReapWaitDelay bounds how long a run waits, once its shell has exited

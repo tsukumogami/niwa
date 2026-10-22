@@ -53,7 +53,8 @@ agent cd's into the instance and works there in isolation
       | -> its ~/.claude/jobs/<id>/ entry disappears
       v
 niwa reap  (on demand, or at the next niwa create)
-           sees the job entry gone, niwa destroy --force, delete mapping
+           sees the job entry gone, niwa destroy --force, run the on-reap
+           command (if declared), delete mapping once it succeeds
 ```
 
 The reaper is the single automatic teardown path; `niwa destroy` is the manual one
@@ -244,6 +245,11 @@ session mapping, and force-destroys an instance only when BOTH hold:
 - the instance is marked **ephemeral**, and
 - its session is **deleted** by the liveness rule.
 
+It also walks the stored session mappings for those whose instance is already
+gone, and when the workspace declares an on-reap command, it runs it for each
+removed session and keeps the mapping until it succeeds (see
+[The reap key and the on-reap command](#the-reap-key-and-the-on-reap-command)).
+
 ### The liveness rule
 
 A session is **live** as long as its Claude Code job entry at
@@ -364,7 +370,10 @@ also appear in [`[session.dispatch_env]`](session-env-passthrough.md). It gets
 the same load-time refusals as those lists. A `timeout` that doesn't parse or
 isn't positive is refused at load.
 
-The command's standard output goes to niwa's standard error. It has the trust
+The command's standard output, and the warning lines below, go where the
+step's own diagnostics go: niwa's standard error for `niwa reap`, the reaps
+other commands run first, and `niwa destroy`; standard output for `niwa
+watch`'s discard, beside its "discarding staged review" lines. It has the trust
 level of a hook the workspace configuration installs.
 
 **Bounds.** Each run gets its timeout, and on timeout the whole process group is

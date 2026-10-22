@@ -192,6 +192,13 @@ var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // ValidateSessionEnvName reports why name may not be declared in
 // [session.dispatch_env] or [session.on_reap] env, or nil when it may. Letter
 // case never rescues a name: every refusal compares the upper-cased form.
+//
+// The credential refusal exists for the pass-through list, whose values ride
+// a worker's command line. [session.on_reap] env takes the same refusals even
+// though its values reach only the command's environment: one rule for every
+// list a workspace declares names in, so a name that is fine in one is never
+// a surprise in the other, and the close command, which runs unattended on
+// every reap, is not where a credential should be handed out either.
 func ValidateSessionEnvName(name string) error {
 	if !envNamePattern.MatchString(name) {
 		return fmt.Errorf("not a variable name: use letters, digits and '_', not starting with a digit")
@@ -209,12 +216,12 @@ func ValidateSessionEnvName(name string) error {
 	}
 	for _, s := range credentialSuffixes {
 		if strings.HasSuffix(upper, s) {
-			return fmt.Errorf("it looks like a credential (ends %s), and a declared value can reach a command line", s)
+			return fmt.Errorf("it looks like a credential (ends %s); these lists never carry credentials", s)
 		}
 	}
 	for _, p := range credentialPrefixes {
 		if strings.HasPrefix(upper, p) {
-			return fmt.Errorf("it looks like a credential (starts %s), and a declared value can reach a command line", p)
+			return fmt.Errorf("it looks like a credential (starts %s); these lists never carry credentials", p)
 		}
 	}
 	return nil

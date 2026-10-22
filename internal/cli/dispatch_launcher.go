@@ -48,7 +48,10 @@ type launchRequest struct {
 	// full parent environment (os.Environ()); a non-nil Env is used verbatim.
 	// Every launch niwa makes, dispatch and watch alike, sets it through
 	// applyLaunchEnv: the parent environment with the declared unset names
-	// removed, and the lineage value and the reap key set.
+	// removed, and the lineage value and the reap key set. The nil case is
+	// left for a test or a future caller; a new launch path should go
+	// through applyLaunchEnv too, or its worker inherits the shell's
+	// NIWA_REAP_KEY and the names the workspace asked to keep out.
 	Env []string
 
 	// Stdout and Stderr are where a foreground worker's output goes: the
