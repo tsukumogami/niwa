@@ -24,30 +24,36 @@ FUNCTIONAL_LOCK := $(CURDIR)/.functional-test.lock
 FLOCK := $(shell command -v flock >/dev/null 2>&1 && echo flock --nonblock --conflict-exit-code 99 $(FUNCTIONAL_LOCK))
 LOCK_HELD = || { st=$$?; if [ $$st -eq 99 ]; then echo "another functional test run holds $(FUNCTIONAL_LOCK); wait for it to finish before starting this one" >&2; exit 1; fi; exit $$st; }
 
+# The full functional suite outruns go test's default 10-minute timeout: a
+# full run took about 23 minutes on a developer laptop. Every target that runs
+# ./test/functional/... gets this explicit bound instead, with room to spare.
+# Override it on the command line, e.g. make test-functional FUNCTIONAL_TIMEOUT=90m.
+FUNCTIONAL_TIMEOUT ?= 60m
+
 # Run the full functional suite. NIWA_TEST_BINARY points at the prebuilt
 # binary; the suite allocates its own sandbox under the system temp dir and
 # removes it on exit (set NIWA_TEST_KEEP_SANDBOX to keep it).
 test-functional: build-test
 	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test \
-	go test -v ./test/functional/... $(LOCK_HELD)
+	go test -v -timeout $(FUNCTIONAL_TIMEOUT) ./test/functional/... $(LOCK_HELD)
 
 # Run only scenarios tagged @critical — fast feedback for core flows.
 test-functional-critical: build-test
 	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test \
 	NIWA_TEST_TAGS=@critical \
-	go test -v ./test/functional/... $(LOCK_HELD)
+	go test -v -timeout $(FUNCTIONAL_TIMEOUT) ./test/functional/... $(LOCK_HELD)
 
 # Run only scenarios tagged @claude-integration — requires the claude CLI. Locally
 # it uses the CLI's existing login; under CI it also requires ANTHROPIC_API_KEY.
 test-functional-claude-integration: build-test
-	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_TAGS=@claude-integration go test -v ./test/functional/... $(LOCK_HELD)
+	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_TAGS=@claude-integration go test -v -timeout $(FUNCTIONAL_TIMEOUT) ./test/functional/... $(LOCK_HELD)
 
 # Run only install-path integration scenarios. Proves that `niwa shell-init`
 # output contains the wrapper + cobra completion function (the bake target
 # for the tsuku recipe) and that sourcing install.sh's env file in a fresh
 # bash makes `niwa __complete` dispatch correctly.
 test-install: build-test
-	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_PATHS=features/install-integration.feature go test -v ./test/functional/... $(LOCK_HELD)
+	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_PATHS=features/install-integration.feature go test -v -timeout $(FUNCTIONAL_TIMEOUT) ./test/functional/... $(LOCK_HELD)
 
 # Run the gated live dispatch lifecycle test. It is behind the `live` build tag
 # and runs the REAL claude lifecycle (init -> dispatch -> assert instance +
