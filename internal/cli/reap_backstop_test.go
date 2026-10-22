@@ -1296,6 +1296,47 @@ func TestReap_StepBudget(t *testing.T) {
 	}
 }
 
+// TestReap_TwoSecondTimeoutFiveSessions is the criterion as written: five
+// sessions removed in one reap, a command that sleeps 10 seconds and a 2s
+// timeout. Every run times out (2s is far from the sleep's end, so no run can
+// race its deadline), each session gets exactly one timeout line, the reap
+// ends well within 31 seconds, and every mapping is kept with one failure.
+func TestReap_TwoSecondTimeoutFiveSessions(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	stderr := captureReapStderr(t)
+	appendOnReapConfig(t, root, "command = \"sleep 10\"\ntimeout = \"2s\"")
+	sids := []string{reapDeadSessionID, onReapSID2, onReapSID3, onReapSID4, onReapSID5}
+	for _, sid := range sids {
+		writeMapping(t, root, workspace.SessionMapping{SessionID: sid, InstancePath: filepath.Join(root, "gone-"+sid[:4]), Ephemeral: true})
+	}
+
+	start := time.Now()
+	if _, err := reapWorkspace(root, t.TempDir(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 31*time.Second {
+		t.Errorf("the reap's on-reap runs took %s, want at most 31s", elapsed)
+	}
+	w := onReapWarnings(stderr.String())
+	if len(w) != len(sids) {
+		t.Fatalf("warnings = %d, want one per session:\n%s", len(w), stderr.String())
+	}
+	for _, sid := range sids {
+		line := "niwa: warning: on-reap for session " + sid + ": timed out after 2s"
+		if n := strings.Count(stderr.String(), line+"\n"); n != 1 {
+			t.Errorf("session %s: %d %q lines, want exactly one", sid, n, line)
+		}
+		m, err := workspace.ReadSessionMapping(root, sid)
+		if err != nil {
+			t.Errorf("session %s lost its mapping after a timed-out run: %v", sid, err)
+			continue
+		}
+		if m.OnReapFailures != 1 {
+			t.Errorf("session %s: failure count %d, want 1", sid, m.OnReapFailures)
+		}
+	}
+}
+
 // TestReap_StepBudgetScaled is the budget rule at a scale fast enough for
 // every run: with a 3s budget and a 1s timeout, three runs time out and the
 // rest are skipped.
