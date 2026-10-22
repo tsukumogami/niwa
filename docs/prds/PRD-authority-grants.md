@@ -17,7 +17,8 @@ goals: |
   came from, can be read back by the operator and by the session itself.
   A workspace that configures nothing behaves as it does today, and
   enforcement stays exactly where it is.
-upstream: docs/briefs/BRIEF-authority-grants.md
+absorbed:
+  - docs/briefs/BRIEF-authority-grants.md
 ---
 
 # PRD: authority-grants
@@ -25,6 +26,42 @@ upstream: docs/briefs/BRIEF-authority-grants.md
 ## Status
 
 Accepted
+
+Absorbed [BRIEF-authority-grants](docs/briefs/BRIEF-authority-grants.md); carried in Absorbed Brief.
+
+## Absorbed Brief
+
+A session `niwa dispatch` launches can do anything its operator can, and
+nothing tells it how much of that it's meant to use. The brief framed the
+gap from the operator's side. A solo maintainer and a team that wants a
+person at every merge get the same worker. Merging, closing issues and
+cutting releases can't be handed to one session and withheld from
+another. Handing a coordinating session's job to its successor costs a
+config edit and a re-apply, because the only lever is a hook keyed on
+instance names that carry a random token. And nobody can say afterwards
+what a session was allowed or why.
+
+The outcome it set: an operator decides once, for everyone sharing the
+workspace, how much dispatched sessions may decide and which actions may
+ever be handed to one. They give one session less room or exactly the
+actions it needs at dispatch without editing shared config, and they're
+refused before anything launches when they ask for more than the
+workspace allows. For any dispatch the operator, and the session itself,
+can answer "what was this session allowed, and why?". The same decision
+point settles itself at the autonomous end and goes to a person at the
+strict end, and a workspace that configures nothing behaves as it does
+today. The work declares and tracks authority in the right format;
+stronger enforcement is separate, later work, and an earlier unmerged
+draft (pull request #401) covering the level half was input.
+
+Its five scenarios (a solo maintainer who configures nothing, a workspace
+owner declaring policy once, a coordinator handing off to a successor
+with a role, an operator narrowing one risky dispatch, and a dispatch
+refused for asking too much) are the user stories below. Its boundary is
+carried by the requirements and Out of Scope: gates honouring the grant,
+capping a child at its parent, stronger enforcement, the permission mode,
+start-of-session prompts and escalation routing, per-point declarations,
+and changing a grant mid-session all stay out.
 
 ## Problem Statement
 
