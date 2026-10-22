@@ -901,9 +901,9 @@ problems.
 - **Sort quirk:** tracked separately from completion. A future fix to
   `EnumerateInstances` sort order propagates through this design
   automatically.
-- **Cold-start latency:** if user reports surface sluggishness, add the
-  an on-disk cache keyed by config.toml and workspace-root mtimes. Data-layer functions are already factored for
-  easy memoization.
+- **Cold-start latency:** if user reports surface sluggishness, add an
+  on-disk cache keyed by config.toml and workspace-root mtimes. Data-layer
+  functions are already factored for easy memoization.
 - **Destructive-command footgun:** a follow-up design can add
   confirmation, an env-var gate, or completion suppression. Separable and
   non-blocking.

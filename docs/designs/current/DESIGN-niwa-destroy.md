@@ -238,7 +238,7 @@ Decision blocks are recorded inline; the table below summarizes choices.
 **Question:** Branch inside a single `RunE`, or dispatch to mode-specific
 helpers (`runDestroyInstance`, `runDestroyWorkspace`, `runDestroyEmpty`)?
 
-**Evidence:** L3 findings show today's `runDestroy` is a single linear flow
+**Evidence:** Exploration found today's `runDestroy` is a single linear flow
 ~80 LOC. The new control flow has at least three modes plus an early
 rejection branch. A single function would mix concerns and make per-mode
 unit-testing awkward (today's `destroy_test.go` is ~30 LOC of cobra-wiring;
@@ -267,7 +267,7 @@ itself is small (~30 LOC of routing).
 into `ApplySingle`/`ApplyAll`), generalize that helper, or write a fresh
 `ClassifyCwd`?
 
-**Evidence:** L3 findings document `ResolveApplyScope` at
+**Evidence:** Exploration located `ResolveApplyScope` at
 `internal/workspace/scope.go:41`. Its enum doesn't map cleanly to destroy's
 three modes (`InsideInstance`, `AtWorkspaceRoot`, `Outside`). Generalizing
 it would couple two unrelated commands. Inlining the two underlying calls
@@ -309,7 +309,7 @@ without re-deriving the discrimination logic.
 **Question:** Two simple functions (`ScanInstance` + `ScanInstancesParallel`)
 or an options/builder pattern?
 
-**Evidence:** L5 findings propose `ScanInstance(instanceDir) (InstanceScan, error)`
+**Evidence:** Exploration proposed `ScanInstance(instanceDir) (InstanceScan, error)`
 and `ScanInstancesParallel(roots []string, workers int) ([]InstanceScan, error)`.
 The current consumers are exactly one (the workspace-wipe path); future
 expansion would add filter flags (e.g., `--include-untracked`). The simple
@@ -343,7 +343,7 @@ without breaking the simple-function shape.
 **Question:** Show instance name only, or include the active branch / last-
 modified time in each picker row?
 
-**Evidence:** L1 findings document the picker's `Choice` struct as
+**Evidence:** Exploration found the picker's `Choice` struct is
 `{Name, Description}`. Adding branch info means picking which repo's HEAD
 to show (instances have multiple repos) and adds I/O to the picker render
 path. Last-modified is a status-panel feature out of scope for v1. The
@@ -370,7 +370,7 @@ non-breaking change (callers fill `Description`, picker renders if non-empty).
 **Question:** Per-instance synchronous (kill→wipe→next) or batched
 (kill-all → wait → wipe-all)?
 
-**Evidence:** L3 findings note `TerminateDaemon` is idempotent and has up
+**Evidence:** Exploration found `TerminateDaemon` is idempotent and has up
 to 5s grace per call (`NIWA_DESTROY_GRACE_SECONDS`). Batched ordering
 would shave wall-clock time but breaks idempotency on partial failure
 (if instance N's daemon misbehaves, instances 1..N-1 are in an
@@ -406,7 +406,7 @@ After all instances complete, `os.RemoveAll(workspaceRoot)`.
 **Question:** Where do new unit tests live, what `@critical` Gherkin
 scenarios are needed?
 
-**Evidence:** L3 findings show today has one `@critical` scenario in
+**Evidence:** Exploration found today has one `@critical` scenario in
 `completion.feature:57` and ~30 LOC of cobra-wiring tests in
 `destroy_test.go`. The CLAUDE.md guidance says "When you ship a user-facing
 CLI command or fix a regression in the init → create → apply workflow,
@@ -452,7 +452,7 @@ Unit tests:
 
 **Assumptions:** The functional-test harness (`localGitServer`, godog
 runner) handles `NIWA_RESPONSE_FILE` end-to-end the same way `go.feature`
-does today. (Verified in L3.)
+does today. (Verified during exploration.)
 
 **Consequences:** Functional coverage matches the routing matrix's
 critical paths. Unit tests cover each new helper in isolation.
