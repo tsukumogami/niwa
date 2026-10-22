@@ -315,9 +315,10 @@ func TestLaunchableAgentsHintOffersTheFlagFirst(t *testing.T) {
 // whatever the broader rungs say while the file the developer would point at
 // says something else.
 //
-// The dispatch still runs -- this is a notice, not a refusal, and the config
-// failure has its own consequences further along -- but the agent question is
-// answered before those, so it is answered out loud.
+// The notice is not the refusal: the authority step at (2e) is what refuses
+// the dispatch on the unreadable file, before the preflight. But the agent
+// question is answered first, so it is answered out loud, and the developer
+// reads both why the agent wasn't the one written and why nothing launched.
 func TestDispatch_UnreadableWorkspaceConfigSaysTheRungWasSkipped(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	cfgPath := filepath.Join(root, config.ConfigDir, config.ConfigFile)
@@ -329,18 +330,26 @@ func TestDispatch_UnreadableWorkspaceConfigSaysTheRungWasSkipped(t *testing.T) {
 	}
 	chdir(t, root)
 	setHostConfig(t, "")
-	installDispatchFakes(t, root)
+	f := installDispatchFakes(t, root)
 	var preflighted []string
 	recordPreflightedBinary(t, &preflighted)
 	dispatchDetach = true
 	t.Setenv("NIWA_DISPATCH_HARNESS", "")
 
-	_, stderr, _ := runDispatchCmd(t, "do a thing")
+	_, stderr, err := runDispatchCmd(t, "do a thing")
 
 	// The premise: the stated agent really was dropped. Without this the notice
-	// could be about a rung that was honored anyway.
-	if want := binaryFor(t, agent.AgentClaude); len(preflighted) == 0 || preflighted[0] != want {
-		t.Fatalf("preflighted %v with an unreadable workspace config; this test needs the dispatch to have fallen through to %q", preflighted, want)
+	// could be about a rung that was honored anyway. The resolution names the
+	// agent it fell through to in the notice's own terms; the dispatch then
+	// stops at (2e), so nothing is preflighted or provisioned.
+	if err == nil || !strings.Contains(err.Error(), "loading "+cfgPath) {
+		t.Fatalf("err = %v; want the authority step's refusal naming %s", err, cfgPath)
+	}
+	if len(preflighted) != 0 || f.provisionCalled != 0 {
+		t.Fatalf("preflighted %v and provisioned %d times; the refusal must come first", preflighted, f.provisionCalled)
+	}
+	if !strings.Contains(stderr, "The agent is resolved from the rungs that did load") {
+		t.Errorf("the notice did not print before the refusal.\nstderr: %s", stderr)
 	}
 	if !strings.Contains(stderr, cfgPath) {
 		t.Errorf("the dispatch never named the config it could not read; a developer looking for why codex was not launched has no file to open.\nstderr: %s", stderr)

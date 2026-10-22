@@ -580,8 +580,11 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 		if cloneWorkers <= 0 {
 			applier.CloneWorkers = globalCfg.CloneWorkers()
 		}
-		if entry := globalCfg.LookupWorkspace(configName); entry != nil {
-			applier.ConfigSourceURL = entry.SourceURL
+		// The same lookup dispatch's authority step uses to find the overlay,
+		// so the overlay provisioning applies is the one authority resolved
+		// against.
+		if url, err := registeredConfigSourceURL(workspaceRoot, cfg, globalCfg); err == nil {
+			applier.ConfigSourceURL = url
 		}
 	}
 

@@ -126,8 +126,8 @@ func AuthorityPolicy(cfg *WorkspaceConfig, overlay *WorkspaceOverlay, global *Gl
 //
 // The apply pipeline calls it, so every loader that provisions through that
 // pipeline (apply, create, and the provisioning a dispatch runs) prints these
-// lines. Dispatch's own resolution step, which refuses on the invalid values
-// and prints the warnings before provisioning, is not wired yet.
+// lines. Dispatch's own resolution step calls AuthorityPolicy instead, before
+// provisioning, and refuses on the invalid values rather than warning.
 func AuthorityWarnings(cfg *WorkspaceConfig, overlay *WorkspaceOverlay, global *GlobalConfig) []string {
 	_, warnings, err := AuthorityPolicy(cfg, overlay, global)
 	var out []string

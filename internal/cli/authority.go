@@ -95,13 +95,9 @@ func loadAuthorityPolicy(dir string) (authority.Policy, []string, error) {
 		return fail(fmt.Errorf("loading global config: %w", err))
 	}
 	workspaceRoot := filepath.Dir(configDir)
-	var sourceURL string
-	name, err := resolveEffectiveWorkspaceName(workspaceRoot, result.Config)
+	sourceURL, err := registeredConfigSourceURL(workspaceRoot, result.Config, globalCfg)
 	if err != nil {
 		return fail(err)
-	}
-	if entry := globalCfg.LookupWorkspace(name); entry != nil {
-		sourceURL = entry.SourceURL
 	}
 	overlay, err := workspace.ResolveAuthorityOverlay(workspaceRoot, sourceURL)
 	if err != nil {
