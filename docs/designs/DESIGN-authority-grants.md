@@ -419,8 +419,9 @@ first command (R17, R22).
 Key assumptions:
 
 - Provisioning at (6) may refresh the base config or clone a convention
-  overlay after (2e) resolves; the (8a) re-check below catches a
-  narrowing that arrives that way.
+  overlay after (2e) resolves; the (8a) re-check below catches a change
+  that arrives that way (a level change in either direction or a changed
+  grant refuses; a ceiling-only change is recorded).
 
 #### Chosen: resolve at a new step (2e), record at (8a), telemetry through the lineage composer
 

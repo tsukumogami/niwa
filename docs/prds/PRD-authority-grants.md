@@ -318,7 +318,9 @@ the wrong shape for a team's rule about who decides.
   and the ceiling's source. Otherwise the resolved level is the narrower
   of the ceiling and the `--level` value, with source `flag` when the
   flag supplied it (a tie goes to the flag) and the ceiling's source
-  otherwise. The effective grant ceiling is the base config's ceiling
+  otherwise, as resolved at dispatch; R16a's re-check can later record a
+  different `level_ceiling_source` for the same level, so the two fields
+  can differ in a valid record. The effective grant ceiling is the base config's ceiling
   list, intersected with the overlay's list when set and the machine's
   list when set. Its source is `machine` when the machine list removed any
   authority from the base list, else `overlay` when the overlay list did,
@@ -343,7 +345,7 @@ the wrong shape for a team's rule about who decides.
   record or session mapping, removes no other instance and launches
   nothing, and it's refused before dispatch asks for a prompt on the
   terminal and before it prints R19's line.
-- **R16a. A narrower policy found during provisioning still refuses.**
+- **R16a. A policy that changes during provisioning is checked again.**
   Provisioning can refresh the workspace config or bring in an overlay
   after authority is resolved. Before writing the record, dispatch
   resolves the same request again against the config and overlay the new
@@ -539,8 +541,10 @@ the wrong shape for a team's rule about who decides.
   `[authority]` keys, the machine keys, the flags, what each named
   authority covers, the record's JSON shape and schema version, the
   selection order of R21, the no-record answer, the "held" rule of R24,
-  the settle rule of R26, how level and grant combine (R4), and what the
-  record does and doesn't guarantee. It tells callers that dispatch
+  the settle rule of R26, how level and grant combine (R4), that
+  `level_source` describes resolution at dispatch and can differ from
+  `level_ceiling_source` (R13, R16a), and what the record does and
+  doesn't guarantee. It tells callers that dispatch
   refuses an unknown flag, and that a caller unable to pass a narrowing
   flag (`--level`) must not dispatch without it, while one unable to pass
   `--grant` or `--role` may, since the session then holds less.
