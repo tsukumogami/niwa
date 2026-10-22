@@ -283,8 +283,12 @@ the wrong shape for a team's rule about who decides.
 - **R11. Values are checked exactly.** Every level value accepts only the
   three names of R1 and every authority value only the names of R3, both
   lowercase, after trimming surrounding whitespace; an empty or
-  whitespace-only level means not set. An invalid workspace value (level,
-  ceiling entry, role name, or role authority) refuses `niwa dispatch` and
+  whitespace-only level means not set. An unknown key inside a base or
+  overlay `[authority]` table, or an unknown `authority_`-prefixed key
+  under `[global]`, counts as an invalid value rather than the usual
+  unknown-key warning, since a misspelt narrowing key would otherwise
+  leave policy silently wider. An invalid workspace value (level,
+  ceiling entry, role name, role authority, or unknown key) refuses `niwa dispatch` and
   the `niwa authority` commands with exit 1 and a message naming the key,
   the value and the accepted values. Other commands that load the
   workspace config, `niwa apply` among them, print the same message as a
@@ -347,7 +351,8 @@ the wrong shape for a team's rule about who decides.
   that ran outside any session records an empty parent session id. The
   record also holds `parent_dispatch_id`: the dispatch id of the
   dispatched instance `niwa dispatch` was run from, or empty when it was
-  run from outside one. It's the link later never-wider work follows,
+  run from outside one or from one with no record; a record there that
+  exists but is invalid refuses the dispatch. It's the link later never-wider work follows,
   since the parent session id is taken from a variable a Codex worker
   inherits from its own dispatcher. The
   record is the only copy; every reader in R20 to R26 reads it. Its JSON
@@ -397,7 +402,9 @@ the wrong shape for a team's rule about who decides.
   `--instance` naming no instance exits 1. `-C <dir>` makes the command
   resolve exactly as if it were run from `<dir>`, so a hook can anchor the
   lookup to its own script's location rather than to a working directory
-  the model can change. `--json` prints the record
+  the model can change; an empty, relative or nonexistent `-C` exits 1,
+  and `-C` with `--session` or `--instance` is a usage error (exit 2).
+  `--json` prints the record
   (R17) or, with no record, a document with the same schema and
   `"record": false`. It reads only local files and makes no network call,
   and run outside a workspace it exits 1 naming the missing workspace.
@@ -439,9 +446,10 @@ the wrong shape for a team's rule about who decides.
 
 - **R26. The decision-point question.** `niwa authority decide <point>`
   prints, one per line, `point=`, `level=`, `decider=`,
-  `author_exclusion=` and `source=`, using the same dispatch selection as
-  R21 and, with no record, the level a no-flag dispatch would resolve to
-  with source suffix ` (no dispatch record)`. It exits 0 when it printed
+  `author_exclusion=`, `source=` and `record=present` or `record=none`,
+  using the same dispatch selection as R21 and, with no record, the level
+  a no-flag dispatch would resolve to with source suffix ` (no dispatch
+  record)`. It exits 0 when it printed
   an answer, 2 on a usage error (a missing point, or one not matching
   `^[a-z][a-z0-9-]{0,63}$`, checked first), and 1 on a configuration or
   record error or outside a workspace. A caller settles the point itself
@@ -613,6 +621,12 @@ Read-back
   run from the workspace root, prints output byte-identical to running
   `niwa authority show --json` from that directory; `-C` pointing at a
   repository's hook directory inside the instance gives the same record.
+- [ ] An overlay `[authority] ceilng = []` (misspelt) and a machine
+  `authority_celing = []` each make `niwa dispatch` exit 1 naming the key;
+  `niwa authority show -C ""`, `-C relative/dir` and `-C /no/such/dir`
+  exit 1, and `-C <dir> --session <id>` exits 2; `niwa authority decide x`
+  prints `record=present` inside a dispatched instance and `record=none`
+  at the workspace root.
 - [ ] A dispatch run from inside a dispatched instance records that
   instance's `dispatch_id` as `parent_dispatch_id`, including when the
   dispatcher is a Codex worker whose environment carries its own
@@ -729,8 +743,8 @@ Edge cases and errors
   through `claude attach` or `codex resume`.
 - [ ] `niwa authority show` from a worktree of a repository inside a
   dispatched instance reports that instance's record.
-- [ ] `niwa authority show --session <a> --instance <b>` reports session
-  `a`'s dispatch; with the working directory in instance `b` and the
+- [ ] With the working directory in instance `b`, `niwa authority show
+  --session <a>` reports session `a`'s dispatch; with no selector and the
   session id variable naming session `a`, it reports `b`; from the
   workspace root with the variable naming `a`, it reports `a`.
 - [ ] With no record, `niwa authority decide merge-own-pr` in a `strict`
