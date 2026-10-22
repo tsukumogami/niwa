@@ -418,21 +418,19 @@ the wrong shape for a team's rule about who decides.
   sources (or `none`), its granted roles, the ceilings recorded with it,
   its dispatch id and parent session id. It selects the dispatch, in this
   order: the session named by `--session <id>`; the instance named by
-  `--instance <name>`; the instance containing the working directory; and,
-  only when the working directory is in no instance, the calling session,
-  by the session id variable dispatch lineage already reads. The working
-  directory comes before the variable because a worker can inherit its
-  dispatcher's variable. `--session` and `--instance` together are a usage
-  error (exit 2). A working directory in an instance that has no record
-  gives the no-record answer (R23) and doesn't fall through to the
-  variable; a `--session` with no mapping gives the no-record answer; an
+  `--instance <name>`; otherwise the instance containing the working
+  directory. It never reads the session id variable: a working directory
+  in no instance, or in an instance with no record, gives the no-record
+  answer (R23). A worker can inherit its dispatcher's variable (a Codex
+  worker does), so reading it would let a session that left its instance,
+  or one at the workspace root, report its dispatcher's wider record as
+  its own. `--session` and `--instance` together are a usage error (exit
+  2). A `--session` with no mapping gives the no-record answer; an
   `--instance` naming no instance exits 1. `-C <dir>` resolves from
   `<dir>` instead of the working directory, so a hook can anchor the
   lookup to its own script's location rather than to a working directory
-  the model can change; with `-C`, a directory in no instance gives the
-  no-record answer and never falls through to the session id variable.
-  An empty, relative or nonexistent `-C` exits 1, and `-C` with
-  `--session` or `--instance` is a usage error (exit 2).
+  the model can change. An empty, relative or nonexistent `-C` exits 1,
+  and `-C` with `--session` or `--instance` is a usage error (exit 2).
   `--json` prints the record
   (R17) or, with no record, a document with the same schema and
   `"record": false`. It reads only local files and makes no network call,
@@ -530,8 +528,8 @@ the wrong shape for a team's rule about who decides.
   dispatch` can launch (Claude Code and Codex today).
 - **R33. Cheap and offline lookups.** `niwa authority show` and `niwa
   authority decide` read only local files, open no network connection,
-  start no other process, and read no more session mappings than the one
-  a `--session` or session-id lookup names, so their cost doesn't grow
+  start no other process, and read no session mapping except the one a
+  `--session` lookup names, so their cost doesn't grow
   with the number of sessions in the workspace and a hook can call them
   on the commands it gates. Measured through the built binary, the median
   of ten runs on a workspace with 250 session mappings is under 200
@@ -784,9 +782,10 @@ Edge cases and errors
   ["merge-pr"]` and a role naming all three, `niwa authority policy`
   marks `close-issue` and `cut-release` on that role as outside the
   effective ceiling.
-- [ ] `niwa authority show -C <dir>` where `<dir>` is in no instance, with
-  the session id variable naming a session that has a record, prints
-  `dispatch record: none`.
+- [ ] With the session id variable naming a session that has a record,
+  `niwa authority show -C <dir>` where `<dir>` is in no instance, and
+  `niwa authority show` with no selector run from the workspace root,
+  each print `dispatch record: none`.
 - [ ] Workspace ceiling `["merge-pr"]`: `--grant merge-pr --grant
   close-issue --grant cut-release` exits 1, names both `close-issue` and
   `cut-release` with `--grant` as the route, and launches nothing.
@@ -801,8 +800,7 @@ Edge cases and errors
   dispatched instance reports that instance's record.
 - [ ] With the working directory in instance `b`, `niwa authority show
   --session <a>` reports session `a`'s dispatch; with no selector and the
-  session id variable naming session `a`, it reports `b`; from the
-  workspace root with the variable naming `a`, it reports `a`.
+  session id variable naming session `a`, it reports `b`.
 - [ ] With no record, `niwa authority decide merge-own-pr` in a `strict`
   workspace prints `level=strict` and `source=workspace (no dispatch
   record)`, and `niwa authority show --json` exits 0 with an empty grant
@@ -895,8 +893,10 @@ Unchanged behaviour
   dispatcher's record from the instance `niwa dispatch` is run from, by
   working directory only and never through the session id variable, and
   the `parent_dispatch_id` R17 keeps links a child's record to its
-  parent's. Routing a decision to the dispatcher (R2) is also separate
-  work.
+  parent's. That link can dangle, since a coordinator usually reaps its
+  predecessor: nothing resolves it as a live session, and a missing
+  parent or older ancestor record means no cap, never a refusal. Routing a
+  decision to the dispatcher (R2) is also separate work.
 - **Stronger enforcement.** Credential scoping, wrapping forbidden
   commands, a record the session can't edit, and refusing a session whose
   record is missing or malformed at a gate are a separate, later effort.
@@ -1043,7 +1043,16 @@ Unchanged behaviour
   launch environment from niwa and inherits its dispatcher's session id
   variable, and a resumed Claude session can get a new id, so the
   instance containing the working directory is the one key that works for
-  every agent and survives resume.
+  every agent and survives resume. The variable is never a fallback
+  either: outside any instance the answer is no record, so a session can't
+  read its dispatcher's record as its own. Alternative: fall back to the
+  variable outside an instance, with a field saying how the record was
+  selected. Rejected because the only session that would use it is one
+  that left its instance or never had one, and for both the dispatcher's
+  record is the wrong answer; `--session` remains for an explicit lookup.
+- **Authority belongs to the instance.** A session or run carried onto
+  another instance or host reads that instance's record, or none. The
+  record never travels in koto keys or any cloud store.
 - **Read-back goes through one command.** Gates, coordinators and the
   session itself use `niwa authority show` rather than parsing niwa's
   files, so the file layout can change without breaking them.

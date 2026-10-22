@@ -195,9 +195,9 @@ Key assumptions:
 
 - Claude Code runs each hook by the absolute path niwa writes into
   settings, so a hook's `$0` names its own copy. Anchoring wrong still
-  fails closed: with `-C`, a directory in no instance gives the no-record
-  answer and never falls through to the session id variable, and no
-  record exists outside a dispatched instance.
+  fails closed: a directory in no instance gives the no-record answer
+  (the lookup never reads the session id variable), and no record exists
+  outside a dispatched instance.
 - A later gate consults the grant only to lift a deny it has already
   decided on, so a missing, old or hung niwa leaves today's verdict.
 - niwa's startup stays free of network calls and config loading.
@@ -216,9 +216,12 @@ the same document.
 
 Both commands take `-C <dir>`, meaning "find the instance from `<dir>`
 instead of the working directory", tested to give byte-identical output to
-running from `<dir>` inside an instance. Unlike a bare run, `-C` never
-falls through to the session id variable: a `<dir>` in no instance gives
-the no-record answer. A hook anchors on its own
+running from `<dir>` inside an instance; a `<dir>` in no instance gives
+the no-record answer, exactly as a bare run outside an instance does.
+Neither ever reads the session id variable: a worker can inherit its
+dispatcher's (a Codex worker does), so a session that left its instance,
+or one at the workspace root, would otherwise read its dispatcher's wider
+record as its own. A hook anchors on its own
 script path, `niwa authority show --json -C "$(dirname "$0")"`, and never
 on the payload's `cwd` (the model's), `CLAUDE_PROJECT_DIR` (Claude-only and
 the workspace root for ephemeral sessions), `--instance <name>` (needs the
@@ -724,10 +727,9 @@ when it can't.
 (4), the record at (8a), the lineage inputs. `authority.go`: the `niwa
 authority` group with `policy`, `show` and `decide`; one
 `selectDispatch` function, used by `show` and `decide`, that applies
-R21's order (`--session`, `--instance`, `-C` or the working directory,
-then, for a bare run in no instance, the session id variable named by the
-launch specs' `Lineage.ParentSessionEnv`) and returns an instance path or
-"no record"; the `-C`, `--session`, `--instance` and `--json` flags; the
+R21's order (`--session`, `--instance`, then `-C` or the working
+directory, and never the session id variable) and returns an instance
+path or "no record"; the `-C`, `--session`, `--instance` and `--json` flags; the
 watchdog; and the exit-code mapping. Never-wider doesn't use
 `selectDispatch`: it reads the dispatcher's record at (2e) by working
 directory alone.
@@ -828,13 +830,31 @@ reference held check. Neither ever trusts exit 0 alone.
   instance root it found, and the same held check, so its prediction
   matches the gate. With no niwa it predicts not held. It should dispatch
   successors from inside its own instance so `parent_dispatch_id` and the
-  never-wider check find its record.
+  never-wider check find its record. That change to where the coordinator
+  runs `niwa dispatch` belongs with, or after, shirabe's rewrite of its
+  coordinator's dispatch path, not as a separate edit; until then a
+  coordinator that dispatches from the workspace root records an empty
+  parent and gets no cap, which is harmless while nothing enforces one.
 - **Never-wider re-delegation.** A check at step (2e), using the
   dispatcher's record that step already reads through `FindInstance` on
   the dispatcher's working directory (never the session id variable),
   refuses a child whose level or grant is wider. With no dispatcher record
   it adds no cap. Records link child to parent through
-  `parent_dispatch_id`.
+  `parent_dispatch_id`. (2e) covers the dispatcher's own record only; it
+  doesn't walk older ancestors. `parent_dispatch_id` can dangle, because
+  a coordinator usually reaps its predecessor, so nothing resolves it as
+  a live session, and a missing parent or ancestor record means no cap,
+  never a refusal.
+
+### Lineage and where authority lives
+
+niwa's lineage fields (`parent_dispatch_id`, `parent_session_id`) and
+koto's retention links are separate stores that don't read each other:
+koto's retention and anchors never read the authority record, and the
+record never reads koto's links. Authority belongs to the instance. A
+session or run carried onto another instance or another host reads that
+instance's record, or none; the record never travels in koto keys or in
+any cloud store.
 
 ## Implementation Approach
 
@@ -1009,9 +1029,9 @@ unchanged; the two differ on purpose (nearest marker for general cwd
 classification, outermost enumerated instance for authority lookups),
 and a comment in `cwd_classify.go` says so. An empty, relative or nonexistent `-C` argument is an error,
 never a fallback to the working directory; a `-C` directory in no
-instance gives the no-record answer and never falls through to the
-session id variable; and `-C` combined with `--session` or `--instance`
-is a usage error. The guide tells hook
+instance gives the no-record answer, as a bare run outside an instance
+does, since no lookup reads the session id variable; and `-C` combined
+with `--session` or `--instance` is a usage error. The guide tells hook
 authors to anchor on the instance's own hook copy, to check that `$0` is
 absolute, and to pass the anchor after `-C` as an absolute path.
 

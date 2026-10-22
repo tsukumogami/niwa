@@ -133,7 +133,7 @@ _Refusal at (2e), all before the prompt, sweep and provisioning_
 _Re-check at (8a), after provisioning (PRD R16a)_
 
 - [ ] The (8a) re-check: when provisioning applies a convention overlay (not recorded in the root state before the dispatch) whose `[authority] ceiling` leaves out a requested authority, or refreshes a base config whose level is narrower than the one (2e) resolved, the dispatch has already printed its `niwa dispatch: authority level` line, then exits 1 with a message naming the setting that changed, the rollback removes the new instance, no record or mapping exists, and the fake agent records zero launches. When the overlay removes `cut-release` from the ceiling of a dispatch that asked only for `merge-pr`, the dispatch launches and its record's `grant_ceiling` omits `cut-release` with source `overlay`. When the policy the instance was built from matches (2e)'s, the record equals (2e)'s resolution. When the instance state records no overlay URL and no convention clone exists, but (2e) used an overlay, the re-check uses (2e)'s overlay; when a convention clone now exists, the re-check uses it.
-- [ ] A no-flag dispatch at workspace `strict` whose provisioning refreshes the base config to `autonomous` exits 1 at (8a) (a level that widened also refuses). A no-flag dispatch at workspace `strict` whose provisioning brings in an overlay that is also `strict` launches, and its record keeps `level_source: workspace` (the source R19's line printed) while `level_ceiling_source` is `overlay`. A dispatch whose ceiling only widened during provisioning launches and records the wider ceiling with an unchanged grant.
+- [ ] A no-flag dispatch at workspace `strict` whose provisioning refreshes the base config to `autonomous` exits 1 at (8a) (a level that widened also refuses), with the same assertions as the row above: its line already printed, a message naming the setting that changed, the new instance removed, no record or mapping, and zero launches. A no-flag dispatch at workspace `strict` whose provisioning brings in an overlay that is also `strict` launches, and its record keeps `level_source: workspace` (the source R19's line printed) while `level_ceiling_source` is `overlay`. A dispatch whose ceiling only widened during provisioning launches and records the wider ceiling with an unchanged grant.
 - [ ] `ResolveAuthorityOverlay` at (2e) finds the convention overlay through the same effective workspace name and registry entry provisioning uses: a test with a renamed workspace derives the same overlay URL both ways.
 
 _Resolution line, parent link and record_
@@ -175,8 +175,8 @@ _Self-read as the first command (functional tests with a fake agent that runs `n
 
 _Selector precedence and combinations (table test over `selectDispatch` plus command-level tests)_
 
-- [ ] Precedence pairs that can both apply: `--session <a>` run with the working directory in instance `b` reports `a`; `--instance <a>` run with the working directory in instance `b` reports `a`; with no selector, the working directory in instance `b` and the session-id variable naming session `a` reports `b`; from the workspace root with the variable naming `a` (which has a record), it reports `a`; from the workspace root with the variable naming a session with no mapping, it prints `dispatch record: none`. The selector pairs that can't both apply are covered by the usage-error criterion below.
-- [ ] `-C <dir>` where `<dir>` is in no instance, with the session-id variable naming a session that has a record, prints `dispatch record: none` (no fall-through to the variable).
+- [ ] Precedence pairs that can both apply: `--session <a>` run with the working directory in instance `b` reports `a`; `--instance <a>` run with the working directory in instance `b` reports `a`; with no selector, the working directory in instance `b` and the session-id variable naming session `a` reports `b`. The selector pairs that can't both apply are covered by the usage-error criterion below.
+- [ ] The session-id variable is never read: with it naming a session `a` that has a record, `show` with no selector from the workspace root, `show` from a directory outside any instance, and `show -C <dir>` with `<dir>` in no instance each print `dispatch record: none`; a Codex fake that changes directory out of its instance before running `show` gets `dispatch record: none`, not its dispatcher's record.
 - [ ] Any two of `--session`, `--instance`, `-C` together exit 2 with a usage error and empty stdout, for `show` and `decide`.
 - [ ] `-C ""`, a relative `-C`, and a nonexistent `-C` each exit 1 with empty stdout and never fall back to the working directory (run from inside a dispatched instance to prove it).
 - [ ] `show -C <dir>` output is byte-identical to `show` run from `<dir>` when `<dir>` is inside an instance, for `--json` and plain output.
@@ -220,7 +220,7 @@ _`niwa list --json`_
 _Cost and isolation_
 
 - [ ] Benchmark: with 250 session mappings in the workspace, the median of ten runs of the built binary for `show` (and for `decide`) is under 200 ms.
-- [ ] A test that counts session-mapping reads shows zero reads when `--instance`, `-C` or a working directory inside an instance selects the dispatch, and at most one otherwise (`--session`, or the session-id variable from outside any instance).
+- [ ] A test that counts session-mapping reads shows exactly one read for a `--session` lookup and zero for every other selection.
 - [ ] A seam test replaces the network and process-start seams with fakes that fail the test if called; `show`, `decide` and `list` pass it.
 
 **Dependencies**: Blocked by <<ISSUE:2>>
@@ -236,7 +236,7 @@ _Cost and isolation_
 _Guide content_
 
 - [ ] `docs/guides/authority-grants.md` exists and contains each of these strings: `[authority]`, `authority_level`, `authority_ceiling`, `--level`, `--grant`, `--role`, `merge-pr`, `close-issue`, `cut-release`, `niwa.authority.record/v1`, `dispatch record: none`, `decider=session`, and R8a's example block (the `[authority]` table with `level = "autonomous"`, the three-entry `ceiling` and the `coordinator` role), verbatim.
-- [ ] The guide documents the `[authority]` keys, the machine keys, the flags, what each named authority covers, the record's JSON document and schema version, the selection order of R21, `-C`, the no-record answer, the held rule, the settle rule, and how level and grant combine (R4).
+- [ ] The guide documents the `[authority]` keys, the machine keys, the flags, what each named authority covers, the record's JSON document and schema version, the selection order of R21, `-C`, the no-record answer, the held rule, the settle rule, how level and grant combine (R4), and that `level_source` describes resolution at dispatch and can differ from `level_ceiling_source` in a valid record (R13, R16a).
 - [ ] The guide states, where it introduces the stderr line and the telemetry attributes, that the grant is "recorded, not enforced".
 - [ ] The guide states that a gate only lifts a verdict it already reached on its own text match, on a held authority plus an exact `decider=session` line, and never denies on "not held".
 - [ ] The guide states that a gate must bound the lookup time itself and, where it can't (no `timeout` and no background-job fallback), skips the lookup and keeps its deny.
@@ -292,3 +292,10 @@ pull request.
 
 There's no parallel work: each issue consumes the interfaces the one before it
 delivers.
+
+Outside this plan: making shirabe's coordinator run `niwa dispatch` from
+inside its own instance, so never-wider finds its record, belongs with or
+after shirabe's rewrite of the coordinator's dispatch path, not as a
+separate edit. Until then a coordinator that dispatches from the workspace
+root records an empty `parent_dispatch_id` and gets no cap, which is
+harmless while nothing enforces one.
