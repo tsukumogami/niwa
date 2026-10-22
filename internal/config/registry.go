@@ -17,6 +17,11 @@ type GlobalConfig struct {
 	Global       GlobalSettings           `toml:"global"`
 	GlobalConfig GlobalConfigSource       `toml:"global_config"`
 	Registry     map[string]RegistryEntry `toml:"registry"`
+
+	// authorityUnknownKeys are the authority_-prefixed keys under [global]
+	// this build doesn't know. They're invalid values for the authority
+	// policy, since a misspelt narrowing key would leave policy wider.
+	authorityUnknownKeys []string
 }
 
 // GlobalConfigSource records the registered global config repo. The local clone
@@ -142,6 +147,17 @@ type GlobalSettings struct {
 	// validation boundary (ParseDispatchPermissionMode) via the accessor of the
 	// same name. "" (the default) means no machine-wide preference.
 	DispatchPermissionMode string `toml:"dispatch_permission_mode,omitempty"`
+	// AuthorityLevel caps the authority level of every dispatch on this
+	// machine; it can never make a resolved level wider. AuthorityCeiling is
+	// a list that narrows the workspace grant ceiling to the authorities in
+	// both. Both are stored untyped, so a wrong type reaches validation
+	// through the AuthorityLevel and AuthorityCeiling accessors instead of
+	// failing the whole config decode. AuthorityCeiling has no omitempty on
+	// purpose: `authority_ceiling = []` limits the ceiling to nothing, and it
+	// must survive an unrelated `niwa config set` rewriting the file. A nil
+	// value (the key absent) is not written.
+	AuthorityLevel   any `toml:"authority_level,omitempty"`
+	AuthorityCeiling any `toml:"authority_ceiling"`
 }
 
 // DispatchPermissionModes is the closed set of values
@@ -353,10 +369,14 @@ func LoadGlobalConfigFrom(path string) (*GlobalConfig, error) {
 
 // ParseGlobalConfig decodes TOML bytes into a GlobalConfig.
 func ParseGlobalConfig(data []byte) (*GlobalConfig, error) {
+	// toml.Decode rather than Unmarshal so the undecoded authority_ keys are
+	// visible to the authority policy.
 	var cfg GlobalConfig
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		return nil, fmt.Errorf("parsing global config: %w", err)
 	}
+	cfg.authorityUnknownKeys = globalAuthorityKeys(md.Undecoded())
 	return &cfg, nil
 }
 
