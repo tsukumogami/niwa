@@ -163,6 +163,10 @@ type testState struct {
 	background *backgroundNiwa
 	interrupt  interruptFakes
 
+	// authority is what the dispatch-authority scenarios remember between
+	// steps; see dispatch_authority_steps_test.go.
+	authority authorityScenario
+
 	// cleanups run in the After hook, last registered first, so a scenario
 	// that started a process or a listener stops it however the scenario
 	// ended.
@@ -547,6 +551,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	registerDispatchInterruptSteps(ctx)
 	registerDispatchSpillSteps(ctx)
 	registerDispatchLineageSteps(ctx)
+	registerDispatchAuthoritySteps(ctx)
 	registerKeepAliveSteps(ctx)
 
 	// --- vault failure handling: seeding and counting the shared infisical
