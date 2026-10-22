@@ -1,4 +1,5 @@
 ---
+schema: design/v1
 upstream: docs/prds/PRD-workspace-config-sources.md
 status: Current
 problem: |
@@ -45,7 +46,9 @@ rationale: |
 
 ## Status
 
-Accepted (2026-04-23 Amendment in effect)
+Current
+
+The 2026-04-23 amendment below is in effect.
 
 ## Amendments
 
@@ -236,10 +239,8 @@ above.
 ## Considered Options
 
 The design decomposes into five independent decisions, each evaluated
-against the Decision Drivers above. Full per-decision reports live in
-`wip/research/design_workspace-config-sources_decision_<N>_report.md`
-during the active design phase; the summaries below capture the chosen
-option and the alternatives rejected.
+against the Decision Drivers above. The summaries below capture the
+chosen option and the alternatives rejected for each.
 
 ### Decision 1: Provenance marker format and location
 
@@ -973,9 +974,8 @@ Deliverables:
 
 A pass over the architecture and approach text surfaced four
 implicit choices that deserve explicit recognition. Each was
-resolved in `--auto` per the research-first protocol; the decisions
-file (`wip/design_workspace-config-sources_decisions.md`) records
-the reasoning.
+resolved in `--auto` per the research-first protocol, and each entry
+below records the choice and why the alternatives lost.
 
 #### Decision 6: Snapshot write ordering
 
