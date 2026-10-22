@@ -203,6 +203,32 @@ func TestAuthority_GlobalEmptyCeilingRoundTrip(t *testing.T) {
 	}
 }
 
+// TestAuthority_ThreeLayersReachResolve decodes each layer from its own file
+// format and resolves them together: every narrowing is attributed to the
+// layer that made it, which a merged config could not do.
+func TestAuthority_ThreeLayersReachResolve(t *testing.T) {
+	res := parseWorkspace(t, "[authority]\nlevel = \"autonomous\"\nceiling = [\"merge-pr\", \"close-issue\", \"cut-release\"]\n")
+	o := parseOverlayBody(t, "[authority]\nlevel = \"supervised\"\n")
+	g := parseGlobal(t, "[global]\nauthority_ceiling = [\"merge-pr\", \"close-issue\"]\n")
+	p, _, err := AuthorityPolicy(res.Config, o, g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := authority.Resolve(p, authority.Request{Grants: []authority.Authority{authority.CloseIssue}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Level != authority.Supervised || rec.LevelSource != authority.LayerOverlay {
+		t.Errorf("level %s from %s, want supervised from overlay", rec.Level, rec.LevelSource)
+	}
+	if rec.GrantCeilingSource != authority.LayerMachine || !reflect.DeepEqual(rec.GrantCeiling, []authority.Authority{authority.MergePR, authority.CloseIssue}) {
+		t.Errorf("grant ceiling %v from %s", rec.GrantCeiling, rec.GrantCeilingSource)
+	}
+	if _, err := authority.Resolve(p, authority.Request{Grants: []authority.Authority{authority.CutRelease}}); err == nil {
+		t.Error("the machine ceiling did not narrow the grant")
+	}
+}
+
 func TestAuthority_DroppedNameWarnings(t *testing.T) {
 	res := parseWorkspace(t, "[authority]\nceiling = [\"merge-pr\", \"teardown\"]\n")
 	o := parseOverlayBody(t, "[authority]\nceiling = [\"cut-release\"]\n")
