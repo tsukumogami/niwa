@@ -383,7 +383,9 @@ niwa: warning: on-reap for session <id>: <reason>
 **Repeat.** niwa keeps a session's mapping until its on-reap run succeeds. The
 next reap that finds the session gone runs the command again: `niwa reap`, and
 the reaps `niwa dispatch`, `niwa create` and `niwa watch` run first. `niwa
-destroy` itself never retries one. After ten failed runs niwa drops the mapping
+destroy` itself never retries one, and `niwa destroy --workspace` removes the
+mapping store with the workspace, so a run that fails there isn't repeated.
+After ten failed runs niwa drops the mapping
 with a final warning line. A mapping whose stored key fails the pattern gets no
 command run and one warning line, and counts as a failed run, as does a run
 skipped for lack of budget. A `niwa watch` review session normally has no
@@ -394,7 +396,10 @@ line is printed and the command isn't run again for that review.
 instances on disk. A mapping kept because its session was still running when
 destroy ran, one left by `niwa destroy --keep-session`, and one whose instance
 was deleted by hand are each reaped the same way once the session is gone: the
-command runs for it once, and the mapping goes when it succeeds.
+command runs for it once, and the mapping goes when it succeeds. A mapping
+whose session reap can't judge is left alone, as an instance would be: that
+includes an agent whose liveness niwa reads from session records it can no
+longer match to the directory once the instance is gone.
 
 **Where it runs.** The mapped reap (`niwa reap`, the idle-grace reclaim, and the
 reaps `dispatch`, `create` and `watch` run first); `niwa destroy` when it removes

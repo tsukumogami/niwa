@@ -257,9 +257,10 @@ The worker starts with this shell's environment, shaped by the workspace's
 copied into the worker's settings document (for an agent that takes one) and
 launch environment, and each name in its unset list is removed. The worker also
 gets NIWA_REAP_KEY, set to this dispatch's id and replacing any value this shell
-carries. When niwa later removes the worker's session -- niwa reap, and the reap
-dispatch itself runs first -- the workspace's [session.on_reap] command runs
-for it. A dispatch's own rollback runs no such command.
+carries. When niwa later removes the worker's session -- niwa reap, the reap
+that niwa dispatch, niwa create and niwa watch run first, or niwa destroy --
+the workspace's [session.on_reap] command runs for it. A dispatch's own
+rollback runs no such command.
 
 Any failure before the mapping is durable destroys the just-created instance,
 so dispatch never leaves an unreclaimable instance DIRECTORY. One caveat, for a

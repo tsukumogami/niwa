@@ -54,11 +54,13 @@ func dispatchEnvLists(cfg *config.WorkspaceConfig) (passthrough, unset []string)
 // configuration under workspaceRoot, for a launch path that hasn't loaded it.
 //
 // A configuration that can't be loaded declares nothing here, as it does for
-// dispatch. It isn't reported because it can't get this far on its own: both
-// launch paths provision the instance first, from the same file, and a file
-// that doesn't load fails that step. The on-reap path is stricter for the
-// opposite reason: there the file is read after the session is gone, and a
-// silent "nothing declared" would skip a close nobody could repeat.
+// dispatch. It isn't reported because a launch can't get this far with one:
+// dispatch provisions the instance from the same file first, and `niwa watch`
+// loads it at the start of every pass (for the workspace's repository scope)
+// and stops the pass when it can't, before either of its launches. The
+// on-reap path is stricter because there the file is read after the session
+// is gone, and a silent "nothing declared" would skip a close nobody could
+// repeat.
 func loadDispatchEnvLists(workspaceRoot string) (passthrough, unset []string) {
 	cfg, _ := loadWorkspaceConfig(workspaceRoot)
 	return dispatchEnvLists(cfg)
@@ -149,12 +151,6 @@ func (e *launchEnv) Set(name, value string) {
 		e.keys = append(e.keys, name)
 	}
 	e.values[name] = value
-}
-
-// Get returns name's value and whether it is present.
-func (e launchEnv) Get(name string) (string, bool) {
-	v, ok := e.values[name]
-	return v, ok
 }
 
 // Len is the number of entries.
