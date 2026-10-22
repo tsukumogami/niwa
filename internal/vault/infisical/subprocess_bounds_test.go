@@ -119,6 +119,44 @@ func cancelOncePIDRecorded(path string, cancel context.CancelFunc) (stop func())
 	return func() { close(done) }
 }
 
+// waitForPID waits up to timeout for a stub to record a PID in path and
+// reports whether one landed.
+func waitForPID(path string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, ok := recordedPID(path); ok {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// forkGatedCommander runs the production commander, looking "infisical"
+// up on PATH as a nil commander does, but holds back the kill that the
+// call's own deadline triggers until the stub has recorded its child's
+// PID in pidFile (or 15 s pass). Without it a loaded host can reach a
+// short deadline before the stub has forked, so the group kill takes the
+// stub down first and the test has no child to check. The deadline
+// still fires on time and still decides how the call is reported: Run's
+// context is cancelled with the deadline's own cause, and
+// runInfisicalExport judges the timeout from its callCtx, not from this
+// one.
+type forkGatedCommander struct{ pidFile string }
+
+func (g forkGatedCommander) Run(ctx context.Context, name string, args []string) ([]byte, []byte, int, error) {
+	runCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	defer cancel(nil)
+	stop := context.AfterFunc(ctx, func() {
+		waitForPID(g.pidFile, 15*time.Second)
+		cancel(context.Cause(ctx))
+	})
+	defer stop()
+	return defaultCommander{}.Run(runCtx, name, args)
+}
+
 // readPID reads the PID a stub wrote to path, waiting briefly for the
 // write to land.
 func readPID(t *testing.T, path string) int {
@@ -213,7 +251,9 @@ func TestRunInfisicalExport_HangingStubTimesOut(t *testing.T) {
 // first case the stub waits on the child, so the deadline kills the
 // group; in the second it exits at once and leaves the child behind,
 // so WaitDelay cuts the pipes. Either way the call returns in time,
-// reports a timeout, and the child is gone.
+// reports a timeout, and the child is gone. The kill waits for the stub
+// to record its child (forkGatedCommander), so a loaded host can't reach
+// the 500 ms deadline before there is a child to kill.
 func TestRunInfisicalExport_ForkedChildHoldingStdout(t *testing.T) {
 	cases := []struct {
 		name string
@@ -232,7 +272,7 @@ echo $! > "$STUB_CHILD_PID_FILE"
 `+tc.tail))
 
 			start := time.Now()
-			_, _, err := runInfisicalExport(context.Background(), nil, "proj", "dev", "/", "")
+			_, _, err := runInfisicalExport(context.Background(), forkGatedCommander{pidFile: pidFile}, "proj", "dev", "/", "")
 			elapsed := time.Since(start)
 
 			if elapsed > 500*time.Millisecond+5*time.Second {
