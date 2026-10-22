@@ -345,10 +345,16 @@ the wrong shape for a team's rule about who decides.
   directly and through a role, or through two roles, appears once with all
   its sources, `dispatch` first and then roles in name order. A dispatch
   that ran outside any session records an empty parent session id. The
+  record also holds `parent_dispatch_id`: the dispatch id of the
+  dispatched instance `niwa dispatch` was run from, or empty when it was
+  run from outside one. It's the link later never-wider work follows,
+  since the parent session id is taken from a variable a Codex worker
+  inherits from its own dispatcher. The
   record is the only copy; every reader in R20 to R26 reads it. Its JSON
   form, the one `niwa authority show --json` prints, carries `schema:
   "niwa.authority.record/v1"` and the top-level fields `dispatch_id`,
-  `parent_session_id`, `level`, `level_source`, `level_ceiling`,
+  `parent_session_id`, `parent_dispatch_id`, `level`, `level_source`,
+  `level_ceiling`,
   `level_ceiling_source`, `grant_ceiling`, `grant_ceiling_source`,
   `roles` and `grant` (a list of objects with `authority` and
   `sources`); the design may add fields but not rename these.
@@ -388,7 +394,10 @@ the wrong shape for a team's rule about who decides.
   error (exit 2). A working directory in an instance that has no record
   gives the no-record answer (R23) and doesn't fall through to the
   variable; a `--session` with no mapping gives the no-record answer; an
-  `--instance` naming no instance exits 1. `--json` prints the record
+  `--instance` naming no instance exits 1. `-C <dir>` makes the command
+  resolve exactly as if it were run from `<dir>`, so a hook can anchor the
+  lookup to its own script's location rather than to a working directory
+  the model can change. `--json` prints the record
   (R17) or, with no record, a document with the same schema and
   `"record": false`. It reads only local files and makes no network call,
   and run outside a workspace it exits 1 naming the missing workspace.
@@ -598,6 +607,15 @@ Read-back
   id variable, pointing at a session with a different record.
 - [ ] `niwa authority show --session <id>` and `--instance <name>` each
   return the matching dispatch's record from the workspace root.
+- [ ] `niwa authority show --json -C <instance>/.claude/hooks/pre_tool_use`,
+  run from the workspace root, prints output byte-identical to running
+  `niwa authority show --json` from that directory; `-C` pointing at a
+  repository's hook directory inside the instance gives the same record.
+- [ ] A dispatch run from inside a dispatched instance records that
+  instance's `dispatch_id` as `parent_dispatch_id`, including when the
+  dispatcher is a Codex worker whose environment carries its own
+  dispatcher's session id; a dispatch run from the workspace root records
+  an empty `parent_dispatch_id`.
 - [ ] Run from the workspace root with no selector and no session id, or
   with a session id that has no record, `niwa authority show` exits 0 and
   prints `dispatch record: none` and an empty grant.
@@ -801,8 +819,10 @@ Unchanged behaviour
   level as R4 states.
 - **Capping a child at its parent.** A session that dispatches again gets
   the workspace and machine ceilings, not its own grant or level as a cap.
-  Refusing a child wider than its parent is separate work that reads the
-  parent's record through the parent session id R17 keeps.
+  Refusing a child wider than its parent is separate work. It reads the
+  dispatcher's record by the instance `niwa dispatch` is run from (R21's
+  selection, applied to the dispatcher's working directory), and the
+  `parent_dispatch_id` R17 keeps links a child's record to its parent's.
 - **Stronger enforcement.** Credential scoping, wrapping forbidden
   commands, a record the session can't edit, and refusing a session whose
   record is missing or malformed at a gate are a separate, later effort.
