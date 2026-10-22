@@ -1229,13 +1229,21 @@ func TestReap_KeptMappingsAreReapedOnceTheirSessionIsGone(t *testing.T) {
 // TestReap_StepBudget: five sessions removed in one reap with a command that
 // sleeps 10 seconds end within 31 seconds of wall time, and each session whose
 // run timed out or was skipped for lack of budget gets one warning line.
+//
+// The per-run timeout is 9s, not the 10s default. With a 10s timeout a
+// `sleep 10` races its own deadline: whichever of the sleep's exit and the
+// timer fires first decides whether the run succeeded, and on a Linux runner
+// the sleep often wins, so two runs passed and printed nothing. With 9s every
+// run that starts times out, and the schedule is fixed: three runs time out at
+// 9s each, the fourth gets the ~3s left and times out at the budget's end, and
+// the fifth is skipped -- every session is warned about exactly once.
 func TestReap_StepBudget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("takes 30 seconds")
 	}
 	root := setupHookWorkspace(t, true)
 	stderr := captureReapStderr(t)
-	appendOnReapConfig(t, root, `command = "sleep 10"`)
+	appendOnReapConfig(t, root, "command = \"sleep 10\"\ntimeout = \"9s\"")
 	sids := []string{reapDeadSessionID, onReapSID2, onReapSID3, onReapSID4, onReapSID5}
 	for _, sid := range sids {
 		writeMapping(t, root, workspace.SessionMapping{SessionID: sid, InstancePath: filepath.Join(root, "gone-"+sid[:4]), Ephemeral: true})
@@ -1252,20 +1260,31 @@ func TestReap_StepBudget(t *testing.T) {
 	if len(w) != len(sids) {
 		t.Fatalf("warnings = %d, want one per session:\n%s", len(w), stderr.String())
 	}
-	skipped := 0
+	timedOut, skipped := 0, 0
 	for _, line := range w {
-		if strings.Contains(line, "skipped") {
+		switch {
+		case strings.Contains(line, "skipped"):
 			skipped++
-		} else if !strings.Contains(line, "timed out") {
+		case strings.Contains(line, "timed out"):
+			timedOut++
+		default:
 			t.Errorf("unexpected warning %q", line)
 		}
 	}
-	if skipped == 0 {
-		t.Error("no run was skipped for lack of budget")
+	if timedOut != 4 || skipped != 1 {
+		t.Errorf("timed out %d, skipped %d; want 4 and 1:\n%s", timedOut, skipped, stderr.String())
 	}
 	for _, sid := range sids {
-		if !mappingExists(t, root, sid) {
-			t.Errorf("session %s lost its mapping after a failed run", sid)
+		if n := strings.Count(stderr.String(), "on-reap for session "+sid+":"); n != 1 {
+			t.Errorf("session %s: %d warning lines, want exactly one", sid, n)
+		}
+		m, err := workspace.ReadSessionMapping(root, sid)
+		if err != nil {
+			t.Errorf("session %s lost its mapping after a failed run: %v", sid, err)
+			continue
+		}
+		if m.OnReapFailures != 1 {
+			t.Errorf("session %s: failure count %d, want 1", sid, m.OnReapFailures)
 		}
 	}
 }
