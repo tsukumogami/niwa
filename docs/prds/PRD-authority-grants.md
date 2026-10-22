@@ -339,9 +339,23 @@ the wrong shape for a team's rule about who decides.
 - **R15. Empty grant.** A dispatch with no `--grant` and no `--role` holds
   no named authority. No setting grants an authority by default.
 - **R16. Refusals leave nothing behind.** A dispatch refused under R11,
-  R13 or R14 creates no instance, writes no record or session mapping,
-  removes no other instance and launches nothing, and it's refused before
-  dispatch asks for a prompt on the terminal.
+  R13 or R14 when authority is resolved creates no instance, writes no
+  record or session mapping, removes no other instance and launches
+  nothing, and it's refused before dispatch asks for a prompt on the
+  terminal and before it prints R19's line.
+- **R16a. A narrower policy found during provisioning still refuses.**
+  Provisioning can refresh the workspace config or bring in an overlay
+  after authority is resolved. Before writing the record, dispatch
+  resolves the same request again against the config and overlay the new
+  instance was built from. If that resolution refuses the request, or
+  gives a different level or grant than the first one, the dispatch exits
+  1 naming the setting that changed, the new instance is removed, nothing
+  is written and nothing launches. By then the prompt may have been taken,
+  the reclamation sweep may have run, and R19's line has printed; this is
+  the one refusal that comes that late. Otherwise the record carries this
+  second resolution's ceilings and sources, so it never claims a wider
+  ceiling than the instance was built from, while the level and grant
+  stay the ones R19's line printed.
 
 **Recording and reading back**
 
@@ -610,14 +624,22 @@ Granting and refusal
   the value and the accepted values, with nothing created.
 - [ ] A dispatch with no `--grant` and no `--role` records an empty grant,
   and `niwa authority show` and its stderr line both say `none`.
-- [ ] A refused dispatch run with no positional prompt from a terminal
-  exits 1 without prompting for one.
+- [ ] A dispatch refused when authority is resolved (R16), run with no
+  positional prompt from a terminal, exits 1 without prompting for one.
+- [ ] R16a: when provisioning brings in an overlay whose ceiling leaves out
+  a requested authority, the dispatch has printed R19's line, then exits 1
+  naming the overlay's ceiling; the new instance is gone, no record or
+  mapping exists and nothing launched. When provisioning brings in an
+  overlay that removes `cut-release` from the ceiling of a dispatch that
+  asked only for `merge-pr`, the dispatch launches and its record shows
+  the narrower ceiling with source `overlay`.
 
 Read-back
 
 - [ ] Every launching dispatch's stderr contains exactly one line starting
-  `niwa dispatch: authority level `, and a refused dispatch's stderr
-  contains none. A dispatch with no authority settings or flags prints
+  `niwa dispatch: authority level `, and a dispatch refused when authority
+  is resolved (R16) has none on its stderr. A dispatch with no authority
+  settings or flags prints
   exactly `niwa dispatch: authority level autonomous from built-in; grant
   none`; one with `--level strict --grant merge-pr` in a workspace whose
   ceiling holds `merge-pr` prints exactly `niwa dispatch: authority level
@@ -916,9 +938,12 @@ Unchanged behaviour
   later gate decides whether to also check the current ceiling.
 - Dispatch resolves against the workspace config on disk when it starts.
   Provisioning can refresh that config, or bring in an overlay, after
-  that; the design re-checks before writing the record and refuses when
-  the policy the instance was built from is narrower, but a policy that
-  widened during the dispatch only takes effect on the next one.
+  that; R16a re-checks before writing the record, which makes this the
+  one refusal that can come after the prompt and the reclamation sweep. A
+  policy that widened during the dispatch only takes effect on the next
+  one. `niwa authority policy` and the no-record answer have no such
+  re-check, so a convention overlay that isn't cloned yet can make them
+  show a wider policy than a dispatch would end up with.
 - A niwa binary older than this feature ignores `[authority]` with an
   unknown-key warning, and one that rewrites the personal config drops the
   machine keys it doesn't know. Neither can grant a named authority, since

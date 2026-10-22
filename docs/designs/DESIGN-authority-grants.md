@@ -105,8 +105,10 @@ pre-launch instance record.
 
 ## Decision Drivers
 
-1. **Refusals leave nothing behind.** Every refusal happens before the
-   prompt capture, the sweep and provisioning (R16).
+1. **Refusals leave nothing behind.** Every refusal at resolution
+   happens before the prompt capture, the sweep and provisioning (R16).
+   The one later refusal, R16a's re-check against what provisioning
+   actually built, rolls back the instance it created.
 2. **One definition of every rule.** Config validation, dispatch, `policy`,
    `show`, `decide` and `niwa list` share one implementation of ordering,
    ceilings, role expansion and record validation.
@@ -224,10 +226,10 @@ workspace root and names aren't unique) or whatever directory the harness
 starts the hook in.
 
 The reads can't hang, write or leak. `show` and `decide` find the instance
-with stat-only checks and read the record before they touch workspace
-config; they discover the workspace root only for `--session`,
-`--instance` or the no-record level, and load and validate the authority
-config only for the no-record level (PRD R11). A held check against an
+with stat-only checks (which locate the workspace root and its instance
+list without loading any config) and read the record before they touch
+workspace config; they load and validate the authority config only for
+the no-record level (PRD R11). A held check against an
 existing record therefore performs only reads, and a config typo added
 after a dispatch doesn't hide that dispatch's record. The record is opened without following symlinks
 and without blocking, confirmed a regular file, and read up to a size
@@ -349,20 +351,28 @@ policy` refuse on its error with exit 1, as do `show` and `decide` when
 they need the config for a no-record answer; `apply` and every other
 loader print it as a warning and carry on.
 
-One overlay resolver, `workspace.ResolveAuthorityOverlay`, mirrors
-provisioning's three branches and is shared by dispatch, `policy` and the
-no-record level: `NoOverlay` in the workspace root's
-`.niwa/instance.json` means no overlay; else the `overlay_url` it records,
-whose clone must exist and parse or the caller refuses; else the
-convention URL derived from the registered config source, used when its
-clone exists locally and treated as absent when it doesn't. Because
-provisioning can still clone a convention overlay, or refresh the base
-config, after (2e) has resolved, dispatch re-checks at (8a): it reads the
-new instance's own state and the config it was built from, resolves
-again, and if the result is narrower than (2e)'s or refuses the request,
-it refuses and the armed rollback removes the instance. So the record
-never claims more than the policy the instance was actually built
-from.
+One overlay resolver, `workspace.ResolveAuthorityOverlay(stateDir,
+configSourceURL)`, mirrors provisioning's three branches and is shared by
+dispatch, `policy` and the no-record level: `NoOverlay` in the given
+state's `.niwa/instance.json` means no overlay; else the `overlay_url` it
+records, whose clone must exist and parse or the caller refuses; else the
+convention URL derived from the registered config source, looked up by
+the same effective workspace name provisioning uses
+(`resolveEffectiveWorkspaceName`, then `LookupWorkspace`), used when its
+clone exists locally and treated as absent when it doesn't. At (2e) the
+state is the workspace root's. Treating an uncloned convention overlay
+as absent would be the silent widening rejected below if nothing caught
+it, so dispatch re-checks at (8a) (PRD R16a): it calls the resolver with
+the new instance's own state (falling back to the overlay (2e) used when
+that state records none, which happens when provisioning couldn't read
+the overlay's commit), re-reads the config provisioning may have
+refreshed, and resolves the same request again. If that refuses, or the
+level or grant differs from (2e)'s, the dispatch refuses and the armed
+rollback removes the instance; otherwise the record takes the second
+resolution's ceilings and sources. So the record never claims a wider
+ceiling than the instance was built from. `policy` and the no-record
+level have no such re-check and can show a wider policy than a dispatch
+ends up with when a convention overlay isn't cloned yet.
 
 `niwa config set authority-level|authority-ceiling` and `niwa config
 unset` follow `config_permission_mode.go`: validate through the same
@@ -444,12 +454,13 @@ it and then fails to provision or launch has rolled back, and the line
 describes a dispatch that didn't launch.
 
 At a new step (8a), right after `writeDispatchMarker`, dispatch first
-re-checks the policy against what the new instance was built from: it
-reads the instance's own state for the overlay provisioning actually
-applied, re-reads the base config provisioning may have refreshed,
-resolves again, and refuses (and the armed rollback removes the instance)
-if that result is narrower than (2e)'s or refuses the request. Then it
-stamps the identity fields and writes the record to
+re-checks the policy against what the new instance was built from, as
+Decision 3 describes: it resolves the same request against the
+instance's applied overlay and the config provisioning may have
+refreshed, refuses (and the armed rollback removes the instance) if that
+refuses or changes the level or grant, and otherwise keeps that
+resolution's ceilings and sources. Then it stamps the identity fields and
+writes the record to
 `<instance>/.niwa/authority.json` with mode 0600 through a temp file and
 rename. The rollback armed at (7) already removes the instance directory,
 record included, on any later failure. Add `niwa.authority.level` and
@@ -530,8 +541,11 @@ unknown authority or role, or an unreadable overlay ends the dispatch
 with exit 1 before the prompt is captured, before the sweep and before an
 instance exists. A successful dispatch prints one line, for example
 `niwa dispatch: authority level strict from flag; grant merge-pr
-(dispatch)`, then provisions as today and, at step (8a), writes the
-record into `<instance>/.niwa/authority.json` before launch. The record
+(dispatch)`, then provisions as today and, at step (8a), re-checks the
+request against the config and overlay the instance was actually built
+from (refusing and rolling back only if that refuses or changes the level
+or grant) and writes the record into `<instance>/.niwa/authority.json`
+before launch. The record
 holds the schema name, the dispatch id, the parent session id, the parent
 dispatch id, the level and its source, both ceilings and their sources,
 the granted roles, and each granted authority with its sources in a fixed
@@ -984,7 +998,9 @@ under a workspace root and that niwa's own instance enumeration for that
 root returns (or a niwa worktree of one), so a marker planted inside a
 repository can't stand in for its instance. It uses the same marker
 checks as `ClassifyCwd` but leaves `ClassifyCwd`'s own behaviour
-unchanged. An empty, relative or nonexistent `-C` argument is an error,
+unchanged; the two differ on purpose (nearest marker for general cwd
+classification, outermost enumerated instance for authority lookups),
+and a comment in `cwd_classify.go` says so. An empty, relative or nonexistent `-C` argument is an error,
 never a fallback to the working directory; a `-C` directory in no
 instance gives the no-record answer and never falls through to the
 session id variable; and `-C` combined with `--session` or `--instance`
