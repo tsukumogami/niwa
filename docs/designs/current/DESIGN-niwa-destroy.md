@@ -96,8 +96,8 @@ git worktrees the instance owns (niwa itself creates session worktrees under
 
 ## Decision Drivers
 
-Drawn from exploration findings and exploration decision blocks (see
-`wip/explore_niwa-destroy-rework_findings.md` and `_decisions.md`):
+Drawn from the findings and decisions of the exploration that preceded
+this design:
 
 - **Preserve `niwa reset`.** All four destroy helpers
   (`ResolveInstanceTarget`, `ValidateInstanceDir`, `CheckUncommittedChanges`,
@@ -835,16 +835,6 @@ accidental workspace-wipe), not a new attack surface.
 
 ## References
 
-- Exploration scope: `wip/explore_niwa-destroy-rework_scope.md`
-- Round 1 findings: `wip/explore_niwa-destroy-rework_findings.md`
-- Round 1 decisions: `wip/explore_niwa-destroy-rework_decisions.md`
-- Round 1 research:
-  - `wip/research/explore_niwa-destroy-rework_r1_lead-tsuku-picker-reuse.md`
-  - `wip/research/explore_niwa-destroy-rework_r1_lead-shell-wrapper-coverage.md`
-  - `wip/research/explore_niwa-destroy-rework_r1_lead-current-destroy-surface.md`
-  - `wip/research/explore_niwa-destroy-rework_r1_lead-niwa-ux-patterns.md`
-  - `wip/research/explore_niwa-destroy-rework_r1_lead-non-pushed-work-detection.md`
-  - `wip/research/explore_niwa-destroy-rework_r1_lead-prd-impact.md`
 - Existing PRDs to amend: `docs/prds/PRD-shell-integration.md`,
   `docs/prds/PRD-cross-session-communication.md`,
   `docs/prds/PRD-workspace-config-sources.md`

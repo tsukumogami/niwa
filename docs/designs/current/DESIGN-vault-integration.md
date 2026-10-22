@@ -186,8 +186,8 @@ without breaking v0.6 configs that don't use vaults at all.
 ## Considered Options
 
 Six design-level decisions. Each was investigated independently and then
-cross-validated for conflicts. Full decision reports live in `wip/` and
-are consolidated into Phase 4's Solution Architecture.
+cross-validated for conflicts. Their outcomes are consolidated in the
+Solution Architecture section below.
 
 ### Decision 1: Pipeline ordering — where vault:// URI resolution happens
 
@@ -1153,12 +1153,10 @@ offending keys.
   `vault://` migration; `--allow-plaintext-secrets` overrides for
   one apply only (no state write).
 
-### wip/ artifacts
+### Persisted state
 
 Shadow records and source-fingerprint tuples are persisted to
-`state.json` at the end of each apply. No new wip/ artifacts
-introduced by this design beyond the standard `implement-doc`
-flow.
+`state.json` at the end of each apply.
 
 ## Implementation Approach
 

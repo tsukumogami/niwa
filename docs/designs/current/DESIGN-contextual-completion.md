@@ -53,8 +53,8 @@ that niwa doesn't yet attach `ValidArgsFunction` or `RegisterFlagCompletionFunc`
 closures to any command. As a result, `niwa go tsuk<tab>` produces nothing.
 
 Fourteen identifier positions across ten commands are candidates for dynamic
-completion (full table in `wip/research/explore_contextual-completion_r1_lead-command-flag-coverage-map.md`).
-Those positions fall into three kinds, each backed by a single data source:
+completion. Those positions fall into three kinds, each backed by a single
+data source:
 
 1. **Workspace names** — `config.LoadGlobalConfig().Registry` (the global
    config at `$XDG_CONFIG_HOME/niwa/config.toml`). 6 positions.
@@ -67,6 +67,8 @@ Two positions stay out of v1 because their data source is murky at completion
 time (`niwa create -r` before the instance exists) or free-form (`niwa config
 set global <repo>`, which accepts arbitrary URLs/slugs); `niwa init [name]`
 completes only registered workspace names (the re-clone-from-registry case).
+"Completion coverage table (v1)" under Solution Architecture lists what v1
+completes, command by command.
 
 The architectural questions that remain open:
 
@@ -176,8 +178,7 @@ entries so the user sees the collision explicitly.
 **Rationale:** Mirrors the existing `resolveContextAware` stderr hint (the
 CLI already treats collisions as "worth mentioning, not fatal"). Graceful
 cross-shell degradation. Discoverability wins over keystroke economy given
-the small candidate set (tens, not thousands). Source:
-`wip/research/explore_contextual-completion_r1_lead-context-aware-disambiguation.md`.
+the small candidate set (tens, not thousands).
 
 ### Decision 2: Caching policy
 
@@ -205,8 +206,7 @@ a 500-workspace TOML parses in ~3ms; scoped filesystem walks stay under 5ms
 even at 100k repo dirs. The only path that crosses the 100ms perceptibility
 bar is enumerating every repo across every instance across every workspace,
 which no correctly-scoped completion handler needs. Caching would be a
-solution looking for a problem. Source:
-`wip/research/explore_contextual-completion_r1_lead-completion-latency.md`.
+solution looking for a problem.
 
 ### Decision 3: Destructive-command completion behavior
 
@@ -235,8 +235,6 @@ special treatment.
 and two-keystroke behavior (name + Enter) are the existing safety model.
 Adding completion-time friction is a separable UX change; if user reports
 warrant it, it can be addressed independently without changing this design.
-Source: coverage map in
-`wip/research/explore_contextual-completion_r1_lead-command-flag-coverage-map.md`.
 
 **Reconciliation with the destroy rework (DESIGN-niwa-destroy.md):** the
 reworked destroy adds an interactive picker when invoked with no name from
@@ -286,8 +284,7 @@ naturally (closures tested in `cli/completion_test.go`, data fns in their
 own packages). `config.ListRegisteredWorkspaces` deduplicates four existing
 copies of the "iterate Registry keys and sort" idiom in `go.go` and
 `create.go` — net LOC is neutral or negative. Zero new import edges because
-`cli` already imports both `config` and `workspace`. Source:
-`wip/design_contextual-completion_decision_4_report.md`.
+`cli` already imports both `config` and `workspace`.
 
 ### Decision 5: Test strategy
 
@@ -319,8 +316,7 @@ Completion logic without tests will silently regress. How do we cover it?
 **Rationale:** Reuses the existing functional harness — `buildEnv` already
 routes `XDG_CONFIG_HOME` to the sandbox, which is where
 `config.LoadGlobalConfig` reads. No new scaffolding. Unit tests run under
-`go test ./...`; functional tests run under `make test-functional`. Source:
-`wip/research/explore_contextual-completion_r1_lead-completion-test-strategy.md`.
+`go test ./...`; functional tests run under `make test-functional`.
 
 ### Decision 6: Install-path changes
 
@@ -356,8 +352,7 @@ shell-integration wiring.
 For dynamic completion specifically, the tsuku-captured bootstrap is stable
 — only the wrapper itself would need regeneration if the emitted template
 ever changes. Adding `ValidArgsFunction` closures requires no install-path
-work. Source:
-`wip/research/explore_contextual-completion_r1_lead-install-path-integration.md`.
+work.
 
 ### Decision 7: `niwa go -r` scoping when `-w` is set
 
@@ -395,8 +390,7 @@ drift between instances won't see repos unique to non-first instances — but
 the runtime would reject those names anyway. If cross-instance resolution
 is later desired, the fix belongs in `resolveWorkspaceRepo`, not in
 completion. Completion inherits the existing lexicographic-vs-numeric sort
-quirk (`"1" < "10" < "2"`) unchanged. Source:
-`wip/design_contextual-completion_decision_7_report.md`.
+quirk (`"1" < "10" < "2"`) unchanged.
 
 ### Decision 8: Description content in decorated candidates
 
@@ -428,8 +422,7 @@ workspaces don't belong to an instance. No additional filesystem work
 needed: instance number is derivable from the instance root path the
 completion helper already has. Renders cleanly across zsh, fish, bash V2;
 bash V1 drops descriptions silently, which is acceptable because candidate
-names alone still resolve correctly. Source:
-`wip/design_contextual-completion_decision_8_report.md`.
+names alone still resolve correctly.
 
 ## Decision Outcome
 

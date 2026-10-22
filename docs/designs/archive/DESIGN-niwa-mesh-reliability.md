@@ -94,12 +94,11 @@ the mesh subsystem: routing, lifecycle, observability, recovery, and
 worker bootstrap. Issues are #92, #97, #108, #109, #110, #111, #112,
 #113, and #114.
 
-The exploration that produced this design is preserved at
-`wip/explore_niwa-mesh-reliability_findings.md` and the six per-lead
-research files under `wip/research/explore_niwa-mesh-reliability_r1_lead-*.md`.
-The Decision 1 mechanism in particular was validated by direct
-experimentation; the recorded results are at
-`wip/design_niwa-mesh-reliability_claude_config_experiments.md`.
+An exploration with six research leads preceded this design; what it
+found is summarized under "What was discovered" below. The Decision 1
+mechanism in particular was validated by direct experimentation; the
+key results are recorded in "Verification Notes" near the end of this
+document.
 
 ### What was discovered
 
@@ -285,7 +284,7 @@ empirical work; they are constraints, not reopened in design:
   opt-in resurrect primitive).
 - Decision 1's mechanism is empirically verified Claude Code argv
   flags, not a hypothesized environment variable. Verification
-  results are in `wip/design_niwa-mesh-reliability_claude_config_experiments.md`.
+  results are in "Verification Notes" below.
 
 ## Considered Options
 
@@ -1338,8 +1337,9 @@ Depends on Phase 3 (manifest source-of-truth) and Phase 4
 ### Phase 6: Skill text and guides update
 
 Deliverables:
-- `buildSkillContent` rewrite per the contract audit in
-  `wip/research/explore_niwa-mesh-reliability_r1_lead-mesh-skill-contract.md`.
+- `buildSkillContent` rewrite per the skill-contract audit: the
+  broken claims listed under "What was discovered" and the
+  `internal/workspace/channels.go` entry in Components.
 - `docs/guides/sessions.md` update for the new `daemon`
   sub-object, `taskstore_lost` recovery, and the worker config
   inheritance contract.
@@ -1608,11 +1608,8 @@ implementation nor its tests preclude any of the above paths.
 ## Verification Notes
 
 Decision 1's mechanism was validated by direct experiment, not
-inferred. The recorded results live at
-`wip/design_niwa-mesh-reliability_claude_config_experiments.md`
-(visible while the design is on its docs branch; cleaned at PR
-merge per the project convention — but the key results are
-summarized below for the design's permanent record).
+inferred. The key results are summarized below as the design's
+permanent record.
 
 ### What was tested
 
@@ -1679,23 +1676,3 @@ This design closes the following issues:
 - #113 — niwa_delegate should accept required_skills (resolved
   by Decision 3, with reduced urgency framing)
 - #114 — add niwa_redelegate primitive (resolved by Phase 5)
-
-## Exploration Artifacts
-
-- `wip/explore_niwa-mesh-reliability_scope.md`
-- `wip/explore_niwa-mesh-reliability_findings.md`
-- `wip/explore_niwa-mesh-reliability_decisions.md`
-- `wip/explore_niwa-mesh-reliability_crystallize.md`
-- `wip/research/explore_niwa-mesh-reliability_r1_lead-coordinator-routing.md`
-- `wip/research/explore_niwa-mesh-reliability_r1_lead-worker-spawn-environment.md`
-- `wip/research/explore_niwa-mesh-reliability_r1_lead-session-daemon-health.md`
-- `wip/research/explore_niwa-mesh-reliability_r1_lead-task-lifecycle-dangling.md`
-- `wip/research/explore_niwa-mesh-reliability_r1_lead-delegate-api-extensions.md`
-- `wip/research/explore_niwa-mesh-reliability_r1_lead-mesh-skill-contract.md`
-- `wip/design_niwa-mesh-reliability_summary.md`
-- `wip/design_niwa-mesh-reliability_coordination.json`
-- `wip/design_niwa-mesh-reliability_decision_1_report.md`
-- `wip/design_niwa-mesh-reliability_decision_2_report.md`
-- `wip/design_niwa-mesh-reliability_decision_3_report.md`
-- `wip/design_niwa-mesh-reliability_decision_4_report.md`
-- `wip/design_niwa-mesh-reliability_claude_config_experiments.md`

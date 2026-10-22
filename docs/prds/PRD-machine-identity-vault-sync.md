@@ -38,8 +38,7 @@ adopted after the initial Done milestone:
    provider and the credential-bootstrap source. Resolution chain
    unchanged: `provider-auth.toml` → personal-overlay vault →
    `cli-session`. Rationale and rejected alternatives are recorded
-   in the machine-identity-vault-sync opt-in shape decision report
-   (`wip/decision_machine_identity_optin_report.md`).
+   in "Considered Alternatives" and decision D-7 below.
 2. **`p-` prefix on vault credential keys.** Vault credential keys
    are now `Key: p-<project-uuid>` (the path
    `/niwa/provider-auth/<kind>` is unchanged). Infisical and
@@ -903,7 +902,7 @@ redaction logic.
   body schema. They could be added in a future schema version
   without breaking R7.
 - **Per-pair allowlist scoping.** Alt 4 from the opt-in shape
-  decision report (an explicit list of `(kind, project)` pairs the
+  decision (an explicit list of `(kind, project)` pairs the
   user authorizes credential sync for) is deferred to a future
   release. It would block the adversarial-team-config substitution
   attack at the lookup layer rather than the consent layer; v1
@@ -913,11 +912,9 @@ redaction logic.
 
 ## Considered Alternatives
 
-The opt-in shape decision report
-(`wip/decision_machine_identity_optin_report.md` —
-"machine-identity-vault-sync opt-in shape") evaluated four
-alternatives in a parallel-validator bakeoff. Two were rejected
-explicitly enough to record here:
+The machine-identity-vault-sync opt-in shape decision evaluated
+four alternatives in a parallel-validator bakeoff. Two were
+rejected explicitly enough to record here:
 
 - **Alt 1: Explicit opt-in via `[global.machine_identities]` block
   (status quo before this amendment).** The personal overlay
@@ -934,8 +931,8 @@ explicitly enough to record here:
   project, not per-user-allowlist, under any of Alts 1-3). The
   marginal protection over Alt 2 was narrow — only users who
   declared a personal vault for `vault://` URI resolution but
-  never opted in benefit, a population the decision report calls
-  "shrinking."
+  never opted in benefit, a population the opt-in shape decision
+  describes as shrinking.
 - **Alt 4: Per-pair allowlist scoping.** The personal overlay
   would declare an explicit list of `(kind, project)` pairs niwa
   is willing to ask the personal vault about. *Rejected* as
@@ -951,8 +948,7 @@ explicitly enough to record here:
 Alt 3 (implicit + `credential_sync = false` opt-out) was rejected
 as the consensus weakest of the four — it inherits Alt 2's
 security weakness without inheriting Alt 2's simplicity, and is
-dominated on every axis by some other alternative. See the
-decision report for the full bakeoff.
+dominated on every axis by some other alternative.
 
 ## Threat Model and Security Considerations
 
@@ -1008,14 +1004,13 @@ pre-amendment design:
 
 ## Decision References
 
-- **Opt-in shape decision (Alt 2 vs Alt 1/3/4).** The
-  machine-identity-vault-sync opt-in shape decision report
-  (`wip/decision_machine_identity_optin_report.md`) records the
-  full validator bakeoff, the diverging viewpoints on "silent
-  vault extraction," and the explicit acceptance of the
-  adversarial-team-config substitution attack as out of scope.
-  This PRD's R1, R2, R10, R15, the AC removals (AC-3/4/5/34),
-  and the threat-model section above all derive from that report.
+- **Opt-in shape decision (Alt 2 vs Alt 1/3/4).** The validator
+  bakeoff across the four alternatives is summarized in
+  "Considered Alternatives", and the explicit acceptance of the
+  adversarial-team-config substitution attack as out of scope is
+  recorded in "Threat Model and Security Considerations". This
+  PRD's R1, R2, R10, R15, the AC removals (AC-3/4/5/34), and the
+  threat-model section above all derive from that decision.
 - **`p-` key prefix (R7 amendment).** Adopted on the same branch
   as the Alt 2 implementation; the rationale (Infisical and
   likely other backends reject leading-digit secret keys; ~37.5%
@@ -1163,9 +1158,7 @@ resolution provider and the credential-bootstrap source. There is
 no separate `[global.machine_identities]` opt-in construct.
 Alternatives considered: explicit-opt-in block (Alt 1, the
 pre-amendment design); implicit + opt-out flag (Alt 3); per-pair
-allowlist (Alt 4). See "Considered Alternatives" section above
-and the decision report
-(`wip/decision_machine_identity_optin_report.md`).
+allowlist (Alt 4). See "Considered Alternatives" section above.
 Reasoning: the empty anonymous opt-in block under Alt 1 was
 acknowledged as a syntactic marker carrying no data beyond its
 presence. The R12 apply-time stderr line already provides a
