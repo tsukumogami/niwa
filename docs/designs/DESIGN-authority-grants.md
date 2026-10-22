@@ -256,11 +256,13 @@ niwa_holds() {
 }
 ```
 
-Beside it the guide ships `niwa_has_record <absolute-dir>`, which runs
-the same lookup and returns 0 only for a document with that schema and
-`.record == true`. A gate uses it to tell "a record exists and doesn't
-hold this" (the grant decides, so deny) from every failure and the
-no-record answer (today's behaviour). Both are functions that return,
+Beside it the guide ships `niwa_grant_decides <absolute-dir>`, which
+runs the same lookup and returns 0 only for a document with that schema,
+`.record == true` and a `grant_ceiling_source` other than `"none"`. A
+gate uses it to tell "a record from a workspace that opted in, which
+doesn't hold this" (the grant decides, so deny) from every failure, the
+no-record answer and a workspace that never declared a ceiling (today's
+behaviour). Both are functions that return,
 never ones that exit: pasted into a gate hook, an `exit 1` is a
 non-blocking hook error that would drop a deny the gate had already
 reached. The CI test runs them inside a stub gate and checks that every
@@ -352,9 +354,12 @@ field" warning so they're reported once).
 overlay and machine as three inputs, so the record can say which one
 narrowed each ceiling: the level ceiling's source is the layer that
 supplied the narrowest value (ties to `machine`, then `overlay`, then
-`workspace`), and the grant ceiling's source is `machine` if the machine
-list removed anything, else `overlay` if the overlay list did, else
-`workspace`.
+`workspace`), and the grant ceiling's source is `none` when no layer
+declares a ceiling at all, else `machine` if the machine list removed
+anything, else `overlay` if the overlay list did, else `workspace` when
+the base declares one, else the narrowing layer that declares one
+(`machine` first). `none` lets a later gate tell a workspace that never
+opted in from one that declared an empty ceiling.
 
 Values are checked by `authority.ValidateConfig`, called after parsing
 rather than inside `config.validate()`. Dispatch and `niwa authority
@@ -693,7 +698,8 @@ func ParseAuthority(raw string) (Authority, error)   // trimmed, exact case
 // `config set` gives "none" a meaning (the empty list).
 func ParseNameList(raw []string) ([]string, error)
 
-type Layer string // "flag", "machine", "overlay", "workspace", "built-in";
+type Layer string // "flag", "machine", "overlay", "workspace", "built-in",
+                   // and "none" for a grant ceiling no layer declared;
                    // a reader also uses "newer-version" (never written)
 
 type RawLayer struct {               // one layer as decoded, values untyped
@@ -880,6 +886,13 @@ record a newer niwa wrote:
 }
 ```
 
+`grant_ceiling_source` is one of `machine`, `overlay`, `workspace` or
+`none`. A record dispatched where no layer declares a ceiling carries
+`"grant_ceiling": [], "grant_ceiling_source": "none"`; one dispatched
+under `[authority] ceiling = []` carries `"grant_ceiling": [],
+"grant_ceiling_source": "workspace"`. A later gate keeps today's verdict
+for the first and lets the grant decide, so denies, for the second.
+
 v1 is additive. A later niwa may add fields, authority names and source
 kinds without changing the schema string; a reader ignores fields it
 doesn't know, never treats an unknown authority as held, and lists it
@@ -973,13 +986,23 @@ way), `--parent-from <abs dir>`.
 - **Gates honouring the grant.** A gate keeps today's text match to spot
   a merge, close or release, then runs the lookup (guarded by `command -v
   niwa`) with the same `-C` anchor. For a session whose record exists
-  (`"record": true`), the grant decides, not the instance exemption list
+  (`"record": true`) and whose `grant_ceiling_source` is anything other
+  than `none`, the grant decides, not the instance exemption list
   today's hook keeps: the action is allowed only when the held check
   finds the authority and `niwa authority decide <point>` prints
   `decider=session`, and denied otherwise, even for an instance on the
   exempt list. Otherwise a dispatched session on that list without
-  `merge-pr` could still merge. A session with no record (`"record":
-  false`), and every lookup that fails, keeps today's behaviour,
+  `merge-pr` could still merge. When `grant_ceiling_source` is `none`,
+  the workspace never opted in to grants, so the gate keeps today's
+  verdict, exemption list included: grants are opt-in, and a gate
+  upgrade must not change merging for a workspace that never adopted
+  them, whatever order the gate and the ceiling arrive in. A ceiling
+  declared empty has a declaring source, so the grant decides and
+  denies: that workspace said no session may hold these authorities. A
+  later-version record has source `newer-version`, not `none`, so the
+  grant decides and holds nothing, failing closed. A session with no
+  record (`"record": false`), and every lookup that fails, keeps today's
+  behaviour,
   exemption list included, so a missing, old or failing niwa leaves the
   gate exactly as strong as the current hook. The
   gate must bound the lookup itself, behind niwa's own watchdog, because a
@@ -989,12 +1012,11 @@ way), `--parent-from <abs dir>`.
   instance; a gate shipped some other way (as a plugin hook, or through a
   symlinked tree) resolves outside the instance and reads as not held,
   so such a gate has to be installed into the instance to honour a grant.
-  Since every dispatch writes a record, a gate adopted in a workspace
-  that hasn't set a ceiling, or reading sessions dispatched before it
-  did, would deny merges to exempt sessions that can merge today. So the
-  gate is rolled out together with the workspace's `[authority]` ceiling
-  and roles, and sessions already running are re-dispatched; the guide
-  says so.
+  The guide still advises rolling a gate out together with the
+  workspace's `[authority]` ceiling and roles and re-dispatching running
+  sessions, so their records carry the ceiling, but nothing depends on
+  that order: a session dispatched before any ceiling existed records
+  `none` and keeps today's verdict.
 - **A coordinator's posture read.** The same command with `-C` set to the
   instance root it found, and the same held check, so its prediction
   matches the gate. With no niwa it predicts not held. To read the
@@ -1128,8 +1150,9 @@ coverage, the R8a example, the JSON document and schema, the selection
 order and `-C`, the no-record answer, the held rule and the reference
 check, the settle rule, R4's combination, and what the record does and
 doesn't guarantee, including that a gate lets the grant decide only for
-a session whose lookup printed `"record": true` and otherwise keeps
-today's behaviour, exemption list included, bounds the lookup itself,
+a session whose lookup printed `"record": true` with a
+`grant_ceiling_source` other than `none`, and otherwise keeps today's
+behaviour, exemption list included, bounds the lookup itself,
 and labels the grant "recorded, not enforced". It also says that no ceiling
 means nobody can be granted anything, that a successor coordinator gets
 a fresh grant with `--role coordinator` and no config edit, that a seat
@@ -1141,8 +1164,10 @@ the guide's held, record and exact-line `decider=session` checks, as
 shell functions inside a stub gate, against real `show` and `decide`
 output, against a v1 record carrying entries this build doesn't know,
 against a later-version record, and against each failure. It checks
-that a present record decides even for an exempt instance and that
-every failure keeps the stub's today's-behaviour verdict. A CI job runs the
+that a present record decides even for an exempt instance, that a
+record with `grant_ceiling_source: none` and every failure keep the
+stub's today's-behaviour verdict, and that a declared-empty ceiling
+denies. A CI job runs the
 authority unit and functional tests with no koto binary on `PATH`. The
 one-time live check with a real Claude Code session is recorded in the
 implementing pull request.
@@ -1256,11 +1281,12 @@ dispatcher picked, which is why that work has to decide whether an
 and as "no record": a missing or older niwa, a missing `jq`, a non-zero
 exit, help text, an unknown schema, a malformed or unreadable record, or
 the watchdog. The guide states that a gate lets the grant decide only
-when the lookup positively printed a document with `"record": true`:
-then it allows a merge, close or release only on a held authority plus
-an exact `decider=session` line, and denies otherwise, the instance
-exemption list included. Every other outcome, `"record": false` among
-them, leaves today's behaviour, exemption list and all. The gate must
+when the lookup positively printed a document with `"record": true` and
+a `grant_ceiling_source` other than `none`: then it allows a merge,
+close or release only on a held authority plus an exact
+`decider=session` line, and denies otherwise, the instance exemption
+list included. Every other outcome, `"record": false` and a `none`
+source among them, leaves today's behaviour, exemption list and all. The gate must
 bound the lookup's time itself (skipping it and keeping today's
 behaviour when it can't), since a harness that kills a hung hook drops
 the hook's verdict. The guide ships the checks as shell functions that

@@ -352,10 +352,16 @@ the wrong shape for a team's rule about who decides.
   different `level_ceiling_source` for the same level, so the two fields
   can differ in a valid record. The effective grant ceiling is the base config's ceiling
   list, intersected with the overlay's list when set and the machine's
-  list when set. Its source is `machine` when the machine list removed any
-  authority from the base list, else `overlay` when the overlay list did,
-  else `workspace`. These are the only source values a record carries for
-  a level or a ceiling; the no-record read-back marks itself separately
+  list when set. Its source is `none` when no layer declares a ceiling at
+  all (no base `ceiling`, no overlay `ceiling`, no machine
+  `authority_ceiling`): the workspace never opted in. A declared ceiling,
+  even an empty one, keeps a declaring source: `machine` when the machine
+  list removed any authority from the base list, else `overlay` when the
+  overlay list did, else `workspace` when the base declares one, else
+  (no base ceiling, but a narrowing layer declares one) `machine` if the
+  machine declares one, else `overlay`. These are the only source values
+  a record carries for a level or a ceiling, apart from the reader-only
+  `newer-version` (R17a); the no-record read-back marks itself separately
   (R23).
 - **R14. Granting.** `niwa dispatch --grant <authority>` and `--role
   <name>`, each repeatable, grant the named authority, or every authority
@@ -444,7 +450,8 @@ the wrong shape for a team's rule about who decides.
   `schema: "niwa.authority.record/v1"`, `record: true`, and the top-level
   fields `dispatch_id`, `parent_session_id`, `parent_dispatch_id`,
   `parent_dispatch_source`, `level`, `level_source`, `level_ceiling`,
-  `level_ceiling_source`, `grant_ceiling`, `grant_ceiling_source`,
+  `level_ceiling_source`, `grant_ceiling`, `grant_ceiling_source` (one
+  of `machine`, `overlay`, `workspace` or `none`, R13),
   `roles` (in name order), `grant` (a list of objects with `authority`
   and `sources`, holding only authorities this niwa knows) and
   `unknown_grant` (the same shape, for entries this niwa doesn't know,
@@ -664,10 +671,12 @@ the wrong shape for a team's rule about who decides.
   `unknown_grant` (R17a), `--parent-from` and `parent_dispatch_source`
   (R14a), and what the record does and doesn't guarantee. It gives gate
   authors the model later gates follow (a present record decides, over
-  the exemption list; no record or any failure keeps today's behaviour),
-  the reference `niwa_has_record` check beside the held check, and that
-  a gate is rolled out with the workspace's ceiling and running sessions
-  re-dispatched. It says plainly
+  the exemption list, unless `grant_ceiling_source` is `none`; no
+  record, a `none` source, or any failure keeps today's behaviour),
+  the reference `niwa_grant_decides` check beside the held check, and the
+  advice to roll a gate out with the workspace's ceiling and re-dispatch
+  running sessions, which the `none` fallback makes advice rather than a
+  requirement. It says plainly
   that until a workspace adds an `[authority]` ceiling nobody can be
   granted anything, and that once it exists a successor gets a fresh
   grant with `--role coordinator` and no config edit, while merging
@@ -691,8 +700,13 @@ Declaring the policy
   from `workspace`, the two-entry ceiling from `workspace`, and the role
   with `cut-release` marked outside the ceiling.
 - [ ] With no `[authority]` table and no machine keys, `niwa authority
-  policy` prints level `autonomous` from `built-in`, an empty ceiling, no
-  roles, and a no-flag dispatch resolving to `autonomous` with no grant.
+  policy` prints level `autonomous` from `built-in`, an empty ceiling
+  with source `none`, no roles, and a no-flag dispatch resolving to
+  `autonomous` with no grant; a dispatch there records
+  `grant_ceiling_source: none`. With `[authority] ceiling = []` instead,
+  the ceiling is empty with source `workspace`, and a dispatch records
+  `grant_ceiling_source: workspace`; with no base ceiling and only a
+  machine `authority_ceiling = []`, the source is `machine`.
 - [ ] Each of `level = "Strict"`, `ceiling = ["Merge"]`, `ceiling =
   ["merge pr"]`, a role named `Coord_1`, and a role naming `Release`
   makes `niwa dispatch` and `niwa
@@ -1080,10 +1094,17 @@ Unchanged behaviour
   coordinator's posture read honour the grant is separate work; R17, R21,
   R23 and R24 are what it will consume, and it will combine grant and
   level as R4 states. For a session whose record exists (`"record":
-  true`) that gate lets the grant decide and ignores the instance
-  exemption list, so a dispatched session on that list without
-  `merge-pr` can't still merge; a session with no record, and every
-  failed lookup, keeps today's behaviour.
+  true`) and whose `grant_ceiling_source` is anything other than `none`,
+  that gate lets the grant decide and ignores the instance exemption
+  list, so a dispatched session on that list without `merge-pr` can't
+  still merge. When the source is `none` the workspace never opted in,
+  so the gate keeps today's verdict, exemption list included, whatever
+  order the gate and the ceiling were rolled out in; a declared-empty
+  ceiling is a workspace saying no session may hold these authorities,
+  so it denies. A later-version record (source `newer-version`) isn't
+  `none`, so the grant decides and holds nothing, failing closed. A
+  session with no record, and every failed lookup, keeps today's
+  behaviour.
 - **Capping a child at its parent.** A session that dispatches again gets
   the workspace and machine ceilings, not its own grant or level as a cap.
   Refusing a child wider than its parent is separate work. It reads the
