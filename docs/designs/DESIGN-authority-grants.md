@@ -261,9 +261,11 @@ gate had already reached. The CI test runs it inside a stub gate and
 checks that an already-decided deny survives every failure case.
 
 For never-wider, the record gains `parent_dispatch_id`, the dispatch id of
-the dispatched instance `niwa dispatch` was run from. Dispatch finds the
-dispatcher's record from its own working directory through `FindInstance`
-at step (2e), with no session-variable fallback, and that one read is
+the dispatched instance `niwa dispatch` was run from, or the one
+`--parent-from` names, and `parent_dispatch_source` saying which. Dispatch
+finds the dispatcher's record through `FindInstance` on that anchor, else
+its own working directory, at step (2e), with no session-variable
+fallback, and that one read is
 both where `parent_dispatch_id` comes from and where a later never-wider
 check will compare. It doesn't key on `parent_session_id`, which dispatch
 reads from a variable a worker can inherit from its own dispatcher: a
@@ -439,14 +441,20 @@ overlay through `ResolveAuthorityOverlay`, runs `ValidateConfig`, parses
 `--level`, `--grant` and `--role`, and calls `authority.Resolve`; any
 error returns before (3), so before the prompt, the sweep and
 provisioning. The same step reads the dispatcher's own record: it calls
-`FindInstance` on the dispatcher's working directory (never the session
-id variable) and, when that's a dispatched instance with a record, reads
-it through the same reader `show` uses and keeps the whole record, so the
-later never-wider check can be added at this step with no second read;
-this unit uses only its `dispatch_id`, as `parent_dispatch_id`. An
-instance with no record gives an empty `parent_dispatch_id`; a record
-that exists but can't be read or is invalid refuses the dispatch rather
-than recording an empty parent.
+`FindInstance` on `--parent-from <abs dir>` when given, else on the
+dispatcher's working directory (never the session id variable), and,
+when that's a dispatched instance with a record, reads it through the
+same reader `show` uses and keeps the whole record, so the later
+never-wider check can be added at this step with no second read; this
+unit uses only its `dispatch_id`, as `parent_dispatch_id`, and records
+how it was found as `parent_dispatch_source` (`anchor`, `cwd` or `none`).
+`--parent-from` takes the same checks as `show -C`: an empty, relative or
+nonexistent path exits 1 before anything is created. It exists because a
+coordinator that runs `niwa dispatch` from the workspace root, as
+shirabe's does today, would otherwise record no parent. An instance with
+no record gives an empty `parent_dispatch_id` and `none`; a record that
+exists but can't be read or is malformed refuses the dispatch rather than
+recording an empty parent.
 
 `Resolve` returns the record's policy fields (level, ceilings, sources,
 roles, grant). Dispatch stamps the identity fields at (8a): the
@@ -653,16 +661,18 @@ type Source string // "dispatch" or "role:<name>"
 type GrantEntry struct { Authority Authority; Sources []Source } // dispatch first, roles by name
 
 type Record struct {
-    Schema            string // "niwa.authority.record/v1"
-    Present           bool   // encoded as "record"; true for every written record
-    DispatchID        string
-    ParentSessionID   string
-    ParentDispatchID  string
+    Schema               string // "niwa.authority.record/v1"
+    Present              bool   // encoded as "record"; true for every written record
+    DispatchID           string
+    ParentSessionID      string
+    ParentDispatchID     string
+    ParentDispatchSource string // "anchor", "cwd" or "none"
     Level             Level;  LevelSource        Layer
     LevelCeiling      Level;  LevelCeilingSource Layer
     GrantCeiling      []Authority; GrantCeilingSource Layer
     Roles             []string // name order
     Grant             []GrantEntry
+    UnknownGrant      []string // read-side only: well-formed names this build doesn't know
 }
 // Resolve fills the policy fields (identity fields are stamped by
 // dispatch at (8a)) and refuses with *LevelWiderError,
@@ -673,7 +683,13 @@ func Resolve(p Policy, r Request) (Record, error)
 // prints, `record: true` included; a no-record answer is built
 // separately with `record: false`.
 func (r Record) MarshalJSON() ([]byte, error)
-func ParseRecord(b []byte) (Record, error) // rejects unknown level/authority, bad schema, bad ids
+// ParseRecord is additive within v1: an unknown field is ignored, and a
+// grant entry, ceiling entry or source kind this build doesn't know is
+// kept out of Grant (so it is never held) and listed in UnknownGrant,
+// provided it matches the name pattern. A malformed record still fails:
+// not JSON, a schema other than v1, a missing or wrongly typed known
+// field, an unknown level, a name failing the pattern, or a bad id.
+func ParseRecord(b []byte) (Record, error)
 
 type Declared struct{ Decider Decider; AuthorExclusion bool }
 type Declarations interface{ Lookup(point string) (Declared, bool) }
@@ -731,8 +747,9 @@ R21's order (`--session`, `--instance`, then `-C` or the working
 directory, and never the session id variable) and returns an instance
 path or "no record"; the `-C`, `--session`, `--instance` and `--json` flags; the
 watchdog; and the exit-code mapping. Never-wider doesn't use
-`selectDispatch`: it reads the dispatcher's record at (2e) by working
-directory alone.
+`selectDispatch`: it reads the dispatcher's record at (2e) from
+`--parent-from` or the working directory alone. `dispatch.go` also
+gains `--parent-from`, checked like `-C`.
 `config_authority.go`: `niwa config set/unset authority-level` and
 `authority-ceiling`.
 
@@ -759,6 +776,7 @@ private):
   "dispatch_id": "3c803591-4c01-486f-a927-f96ec399d6a7",
   "parent_session_id": "",
   "parent_dispatch_id": "",
+  "parent_dispatch_source": "none",
   "level": "strict", "level_source": "flag",
   "level_ceiling": "supervised", "level_ceiling_source": "workspace",
   "grant_ceiling": ["merge-pr", "close-issue"], "grant_ceiling_source": "machine",
@@ -766,9 +784,25 @@ private):
   "grant": [
     {"authority": "merge-pr", "sources": ["role:coordinator"]},
     {"authority": "close-issue", "sources": ["dispatch", "role:coordinator"]}
-  ]
+  ],
+  "unknown_grant": []
 }
 ```
+
+v1 is additive. A later niwa may add fields, authority names and source
+kinds without changing the schema string; a reader ignores fields it
+doesn't know, never treats an unknown authority as held, and lists it
+under `unknown_grant`. Only renaming a field or changing what one means
+moves the schema to v2, and a v1 reader treats v2 as malformed. The
+guide's held check reads `grant[].authority` only, so a v1 record with
+entries it doesn't know still answers for the ones it does.
+
+`niwa authority policy --json` prints `{"schema":
+"niwa.authority.policy/v1", ...}` with the effective level and grant
+ceilings, their sources, and the roles, under the same additive rule.
+When the overlay's ceiling names an authority the base ceiling lacks,
+the intersection drops it, and `policy` and `apply` print a warning
+naming the authority and the overlay.
 
 With no record: `{"schema": "niwa.authority.record/v1", "record": false,
 "grant": [], "level": "<no-flag level>", "level_source": "<layer>"}`;
@@ -788,8 +822,10 @@ With no record: `{"schema": "niwa.authority.record/v1", "record": false,
 0 with an exact `decider=session` line, and holds an authority only by the
 reference held check. Neither ever trusts exit 0 alone.
 
-**Dispatch flags.** `--level <level>`, `--grant <authority>` (repeatable),
-`--role <name>` (repeatable).
+**Dispatch flags.** `--level <level>`, `--grant <authority>` (repeatable;
+a comma list splits, so `--grant a,b` equals `--grant a --grant b`, and an
+empty entry is refused), `--role <name>` (repeatable, split the same
+way), `--parent-from <abs dir>`.
 
 ### Data Flow
 
@@ -798,7 +834,9 @@ reference held check. Neither ever trusts exit 0 alone.
 2. (2a) machine keys parsed. (2e) base config load checked fail-closed,
    overlay found by `ResolveAuthorityOverlay`, `ValidateConfig`, request
    parsed, `Resolve`; A's record read through `FindInstance(cwd)` for
-   `parent_dispatch_id`. Any error: exit 1, nothing created.
+   `parent_dispatch_id`, with `parent_dispatch_source: cwd` (from the
+   workspace root, `--parent-from <A's path>` gives the same id with
+   `anchor`). Any error: exit 1, nothing created.
 3. (3) to (4) unchanged; the dispatch id minted at (4). Stderr line
    printed. (5) to (8) unchanged. (8a) policy re-checked against what B
    was built from, identity fields stamped, and the record written into
@@ -828,16 +866,20 @@ reference held check. Neither ever trusts exit 0 alone.
   so such a gate has to be installed into the instance to honour a grant.
 - **A coordinator's posture read.** The same command with `-C` set to the
   instance root it found, and the same held check, so its prediction
-  matches the gate. With no niwa it predicts not held. It should dispatch
-  successors from inside its own instance so `parent_dispatch_id` and the
-  never-wider check find its record. That change to where the coordinator
-  runs `niwa dispatch` belongs with, or after, shirabe's rewrite of its
-  coordinator's dispatch path, not as a separate edit; until then a
-  coordinator that dispatches from the workspace root records an empty
-  parent and gets no cap, which is harmless while nothing enforces one.
+  matches the gate. With no niwa it predicts not held. To read the
+  postures of the sessions it runs, it uses `niwa list --json` (each
+  instance's `authority` object) or `show --instance`. It should pass
+  `--parent-from <its own instance>` when it dispatches successors, so
+  `parent_dispatch_id` and the never-wider check find its record. That
+  change belongs with, or after, shirabe's rewrite of its coordinator's
+  dispatch path (shirabe#978 to #986), not as a separate edit; until then
+  a coordinator that dispatches from the workspace root records
+  `parent_dispatch_source: none` and gets no cap, which is harmless while
+  nothing enforces one.
 - **Never-wider re-delegation.** A check at step (2e), using the
   dispatcher's record that step already reads through `FindInstance` on
-  the dispatcher's working directory (never the session id variable),
+  `--parent-from` or the dispatcher's working directory (never the
+  session id variable),
   refuses a child whose level or grant is wider. With no dispatcher record
   it adds no cap. Records link child to parent through
   `parent_dispatch_id`. (2e) covers the dispatcher's own record only; it
@@ -848,13 +890,18 @@ reference held check. Neither ever trusts exit 0 alone.
 
 ### Lineage and where authority lives
 
-niwa's lineage fields (`parent_dispatch_id`, `parent_session_id`) and
-koto's retention links are separate stores that don't read each other:
-koto's retention and anchors never read the authority record, and the
-record never reads koto's links. Authority belongs to the instance. A
-session or run carried onto another instance or another host reads that
-instance's record, or none; the record never travels in koto keys or in
-any cloud store.
+niwa's lineage fields (`parent_dispatch_id`, `parent_session_id`) are
+niwa's own. A workflow engine such as koto keeps its own record of which
+run started which, and the two never read each other. Authority belongs
+to the instance: a session resumed in another instance, or on another
+host, reads that instance's record, or none, and the record is never
+copied into a workflow engine's state or a cloud store.
+
+"Dispatcher" in a record means the seat that dispatched, not a
+particular session. When a coordinator is replaced, its successor holds
+the same seat, so the record says nothing about who supervises the child
+now. A successor coordinator gets its own grant from its own dispatch
+(`--role coordinator`), with no config edit.
 
 ## Implementation Approach
 
@@ -870,8 +917,14 @@ the empty-list round trip (machine and overlay `[]` stay empty through
 decode and a later `niwa config set`), unknown keys under `[authority]`
 and `authority_*` and wrong-typed values reaching `ValidateConfig` (and
 `apply` still completing with a warning), `ParseRecord`'s field
-validation, and `ResolveAuthorityOverlay` across its three branches. No
-change to dispatch.
+validation and its additive rule (a v1 record with an unknown field, an
+unknown authority such as `teardown`, or an unknown source kind such as
+`delegated:x` parses, holds only the known entries and lists the rest in
+`unknown_grant`; truncated JSON, a v2 schema, an unknown level or a name
+failing the pattern fails), the `niwa.authority.policy/v1` document, the
+warning for an overlay ceiling naming an authority the base lacks, and
+`ResolveAuthorityOverlay` across its three branches. No change to
+dispatch.
 
 Deliverables: `internal/authority/*.go`, `internal/config` changes,
 `internal/cli/config_authority.go`, `internal/cli/authority.go` (`policy`).
@@ -884,8 +937,11 @@ safe open (FIFO, symlink, oversized, unreadable and control-character
 fixtures), and `FindInstance` (planted-marker and symlinked-start
 fixtures, with `ClassifyCwd`'s existing tests unchanged). Then dispatch:
 the three flags, the (2e) step with the fail-closed config and overlay
-checks, resolution and refusal before (3), `parent_dispatch_id` from the
-dispatcher's record (present, absent and invalid), the stderr line after
+checks, resolution and refusal before (3), `--grant a,b` splitting and
+an empty entry refused, `parent_dispatch_id` and `parent_dispatch_source`
+from the dispatcher's record (present, absent and invalid, through the
+working directory and through `--parent-from`, plus an empty, relative
+or missing `--parent-from` refused), the stderr line after
 (4), the (8a) re-check (a convention overlay or refreshed base config
 that refuses the request or changes the level or grant during
 provisioning refuses and rolls back; one that only narrows or widens the
@@ -915,7 +971,8 @@ outside the workspace, and the `authority` object in `niwa list --json`
 (including a malformed record's `error`). Functional tests: a fake agent
 reading its own record as its first command (Claude and Codex, detached
 and foreground, root, repo and worktree, with an inherited session id and
-after a resume), and the decide-driven marker test at both ends. The
+after a resume, `claude --bg --resume` included), `unknown_grant` in
+`show` output, and the decide-driven marker test at both ends. The
 250-mapping benchmark (median of ten runs of the built binary), the test
 that counts session-mapping reads, and the seam test that fails on any
 network or process call.
@@ -931,10 +988,17 @@ order and `-C`, the no-record answer, the held rule and the reference
 check, the settle rule, R4's combination, and what the record does and
 doesn't guarantee, including that a gate only ever lifts a verdict on a
 held authority and never denies on "not held", bounds the lookup itself,
-and labels the grant "recorded, not enforced". A CI test runs the guide's
-held check and its exact-line `decider=session` check, as shell functions
-inside a stub gate, against real `show` and `decide` output and against
-each failure, and checks a decided deny survives. A CI job runs the
+and labels the grant "recorded, not enforced". It also says that no ceiling
+means nobody can be granted anything, that a successor coordinator gets
+a fresh grant with `--role coordinator` and no config edit, that a seat
+started by hand or an instance from `niwa create` has no record, that
+`--parent-from` records the parent for a dispatch run from the workspace
+root, that v1 is additive, and that `niwa authority show --json -C
+<instance>` saved before `niwa destroy` keeps the record. A CI test runs
+the guide's held check and its exact-line `decider=session` check, as
+shell functions inside a stub gate, against real `show` and `decide`
+output, against a v1 record carrying entries this build doesn't know,
+and against each failure, and checks a decided deny survives. A CI job runs the
 authority unit and functional tests with no koto binary on `PATH`. The
 one-time live check with a real Claude Code session is recorded in the
 implementing pull request.
@@ -1003,9 +1067,11 @@ read at most 64 KiB, and print only after a complete, successful parse,
 so a timeout or error leaves stdout empty. `ParseRecord` validates every
 string field, not only the vocabularies: `dispatch_id` and
 `parent_dispatch_id` are UUIDs or empty, `parent_session_id` passes the
-existing session-id check or is empty, each role matches the role
-pattern, each source is `dispatch` or `role:<valid name>`, and the grant
-is in R3's order. A hand-edited record therefore can't put control
+existing session-id check or is empty, each role and each authority name
+(known or not) matches the name pattern, each source is `dispatch` or
+`<kind>:<valid name>`, and the known grant is in R3's order. An unknown
+name that passes the pattern is listed in `unknown_grant`, never held. A
+hand-edited record therefore can't put control
 characters in front of an operator running `niwa list` or `show`. Error
 text and `niwa list`'s per-instance `error` name a failure class and never
 echo file contents or the record path. `--instance` names go through the
@@ -1034,6 +1100,13 @@ does, since no lookup reads the session id variable; and `-C` combined
 with `--session` or `--instance` is a usage error. The guide tells hook
 authors to anchor on the instance's own hook copy, to check that `$0` is
 absolute, and to pass the anchor after `-C` as an absolute path.
+`niwa dispatch --parent-from` goes through the same `FindInstance` and the
+same path checks, so a planted marker can't name a parent either. The
+dispatcher chooses the anchor, so `parent_dispatch_id` records what the
+dispatcher said, and `parent_dispatch_source` says it was named rather
+than found; a never-wider check reading it caps by a record the
+dispatcher picked, which is why that work has to decide whether an
+`anchor` parent is trusted the same as a `cwd` one.
 
 **Failing toward today's behaviour.** Every failure reads as "not held": a
 missing or older niwa, a missing `jq`, a non-zero exit, help text, an

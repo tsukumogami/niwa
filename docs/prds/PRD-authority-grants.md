@@ -178,9 +178,13 @@ the wrong shape for a team's rule about who decides.
   | `supervised` | `dispatcher` | `on` |
   | `strict` | `person` | `on` |
 
-  `dispatcher` is whoever ran the `niwa dispatch` that launched this
-  session: the session that ran it, or the person at that shell when it
-  ran outside any session. This feature only names the dispatcher;
+  `dispatcher` is the seat that launched this session: the coordinating
+  role that ran the `niwa dispatch`, or the person at that shell when it
+  ran outside any session. It names the seat, not one instance, so a
+  successor that takes over the seat is the dispatcher from then on. The
+  record (R17) names only the original parent and keeps no "who
+  supervises now" field, so later work can add a supervision link
+  without a format change. This feature only names the dispatcher;
   finding and reaching it is separate work (Out of Scope). Author
   exclusion `on` means whoever settles the point may
   not be the session that authored the work the point is about. Deciders
@@ -200,12 +204,14 @@ the wrong shape for a team's rule about who decides.
   The routes in the first row are what the authority means to a later
   gate; this feature tests none of them, since nothing here gates an
   action. Any other name in a config value or a flag is refused under R11
-  or R14. Adding an authority is a niwa change. niwa's own reader treats a
-  record naming an authority it doesn't know as malformed (R23), so it
-  reports nothing held; a tool reading the JSON ignores a name it doesn't
-  know and never treats it as one it does. Wherever niwa lists
-  authorities (the record, the read-back, the stderr line, telemetry) it
-  lists them in this table's order.
+  or R14. Adding an authority is a niwa change, and it doesn't change the
+  record's version (R17a): a record written by a newer niwa may name an
+  authority this niwa doesn't know. niwa's own reader reports such an
+  entry as unknown and not held, and the rest of the record stays valid;
+  a tool reading the JSON never treats an unknown name as one it knows.
+  Wherever niwa lists authorities (the record, the read-back, the stderr
+  line, telemetry) it lists the ones in this table in this table's
+  order, and any others after them in name order.
 - **R4. The level and the grant are separate and both apply.** The grant
   names the actions a session may take; the level decides who settles a
   decision point. No level adds or removes a named authority, and no grant
@@ -279,8 +285,12 @@ the wrong shape for a team's rule about who decides.
   level ceiling and grant ceiling each with its source, each declared role
   with its authorities, marking every authority outside the effective
   ceiling, and what a dispatch with no authority flags would resolve to.
-  `--json` prints the same as one JSON document. Outside a workspace it
-  exits 1 naming the missing workspace.
+  `--json` prints the same as one JSON document with `schema:
+  "niwa.authority.policy/v1"`, which grows additively under the same
+  rule as the record (R17a). It also warns when an overlay or machine
+  ceiling names an authority the base ceiling lacks: the intersection
+  drops it, and `niwa apply` prints the same warning. Outside a workspace
+  it exits 1 naming the missing workspace.
 - **R11. Values are checked exactly.** Every level value accepts only the
   three names of R1 and every authority value only the names of R3, both
   lowercase, after trimming surrounding whitespace; an empty or
@@ -329,7 +339,11 @@ the wrong shape for a team's rule about who decides.
   (R23).
 - **R14. Granting.** `niwa dispatch --grant <authority>` and `--role
   <name>`, each repeatable, grant the named authority, or every authority
-  the role names, to that one dispatch. If any requested authority,
+  the role names, to that one dispatch; the grant is the union of
+  everything requested. Each takes a comma-separated list too, split and
+  trimmed the same way `niwa config set authority-ceiling a,b` is, so
+  `--grant merge-pr,close-issue` equals two `--grant` flags and an empty
+  entry is refused. If any requested authority,
   directly or through a role, is outside the effective ceiling, the
   dispatch is refused with exit 1, and the message names each such
   authority, how it was requested (`--grant` or `role <name>`), the
@@ -338,6 +352,16 @@ the wrong shape for a team's rule about who decides.
   with exit 1 naming it and the accepted values, checked with the same
   trimming and case rules as R11. Requests are never trimmed: a dispatch
   either gets everything it asked for or launches nothing.
+- **R14a. Naming the parent explicitly.** `niwa dispatch --parent-from
+  <abs dir>` finds the dispatcher's instance from `<abs dir>` instead of
+  the working directory, with the same rules and checks as `niwa
+  authority show -C` (R21): an empty, relative or nonexistent path
+  refuses the dispatch with exit 1 before anything is created. It's how a
+  dispatcher that runs `niwa dispatch` from outside its own instance (a
+  coordinator that changes to the workspace root first, say) names its
+  instance as the parent. Without the flag, the working directory is
+  used. Like every lineage field it's advisory: it records who says they
+  dispatched, and checks nothing about the caller.
 - **R15. Empty grant.** A dispatch with no `--grant` and no `--role` holds
   no named authority. No setting grants an authority by default.
 - **R16. Refusals leave nothing behind.** A dispatch refused under R11,
@@ -374,20 +398,37 @@ the wrong shape for a team's rule about who decides.
   its sources, `dispatch` first and then roles in name order. A dispatch
   that ran outside any session records an empty parent session id. The
   record also holds `parent_dispatch_id`: the dispatch id of the
-  dispatched instance `niwa dispatch` was run from, or empty when it was
-  run from outside one or from one with no record; a record there that
-  exists but is invalid refuses the dispatch. It's the link later
-  never-wider work follows, since the parent session id is read from a
-  variable a worker can inherit from its own dispatcher (a Codex worker
-  does), so it can name the wrong session. The record is the only copy;
-  every reader in R20 to R26 reads it. Its JSON form, the one `niwa
-  authority show --json` prints, carries `schema:
-  "niwa.authority.record/v1"`, `record: true`, and the top-level fields
-  `dispatch_id`, `parent_session_id`, `parent_dispatch_id`, `level`,
-  `level_source`, `level_ceiling`, `level_ceiling_source`,
-  `grant_ceiling`, `grant_ceiling_source`, `roles` (in name order) and
-  `grant` (a list of objects with `authority` and `sources`); the design
-  may add fields but not rename these.
+  dispatched instance named by `--parent-from` (R14a) or, without it,
+  the one `niwa dispatch` was run from; and `parent_dispatch_source`:
+  `anchor` when `--parent-from` found the parent's record, `cwd` when the
+  working directory did, `none` when no record was found (an empty
+  `parent_dispatch_id`). A missing parent record means no parent, never a
+  refusal; a parent record that exists but is malformed refuses the
+  dispatch. It's the link later never-wider work follows, since the
+  parent session id is read from a variable a worker can inherit from its
+  own dispatcher (a Codex worker does), so it can name the wrong session.
+  The record is the only copy; every reader in R20 to R26 reads it. Its
+  JSON form, the one `niwa authority show --json` prints, carries
+  `schema: "niwa.authority.record/v1"`, `record: true`, and the top-level
+  fields `dispatch_id`, `parent_session_id`, `parent_dispatch_id`,
+  `parent_dispatch_source`, `level`, `level_source`, `level_ceiling`,
+  `level_ceiling_source`, `grant_ceiling`, `grant_ceiling_source`,
+  `roles` (in name order), `grant` (a list of objects with `authority`
+  and `sources`, holding only authorities this niwa knows) and
+  `unknown_grant` (the same shape, for entries this niwa doesn't know,
+  never held).
+- **R17a. The v1 format grows additively.** New fields, new authority
+  names and new source kinds stay `niwa.authority.record/v1`; only a
+  rename or a change of a field's meaning (a new level, which changes the
+  ordering, among them) moves to a new version. A reader ignores fields
+  it doesn't know. A grant entry whose authority this niwa doesn't know,
+  or whose sources are all of kinds it doesn't know, is reported under
+  `unknown_grant`, not held, and leaves the rest of the record valid, so
+  a newer niwa adding an authority (teardown, say) neither blocks a
+  dispatch from that seat nor revokes the grants an installed gate
+  reads. A record that is actually malformed (unreadable JSON, a missing
+  required field, a value of the wrong type, an unknown level, an id or
+  name with characters outside its pattern) still fails closed (R23).
 - **R18. The record is fixed for the session's life.** niwa never rewrites
   an authority record after it's written. A later `niwa apply`, a change
   to the workspace or machine config, a resume of the session, or a
@@ -416,8 +457,12 @@ the wrong shape for a team's rule about who decides.
 - **R21. Anyone reads one dispatch.** `niwa authority show` prints a
   dispatch's resolved level and source, its grant with each authority's
   sources (or `none`), its granted roles, the ceilings recorded with it,
-  its dispatch id and parent session id. It selects the dispatch, in this
-  order: the session named by `--session <id>`; the instance named by
+  its dispatch id, its parent session id, and its parent dispatch id with
+  that link's source. It selects the dispatch, in this order: the
+  session named by `--session <id>` (a session id; a coordinator that
+  holds session names reads its workers through `niwa list --json`,
+  whose rows carry each instance's session name and `authority` object,
+  or passes `--instance`); the instance named by
   `--instance <name>`; otherwise the instance containing the working
   directory. It never reads the session id variable: a working directory
   in no instance, or in an instance with no record, gives the no-record
@@ -450,9 +495,10 @@ the wrong shape for a team's rule about who decides.
   none`, an empty grant, and the level a no-flag dispatch would resolve to
   with its source followed by ` (no dispatch record)`. With `--json` the
   document carries `"record": false`, an empty `grant`, and that level
-  with its plain source in `level_source`; `record` is what marks it. A record that
-  exists but can't be read, or holds a value outside R1 or R3, makes it
-  exit 1, never fall back to the no-record answer.
+  with its plain source in `level_source`; `record` is what marks it. A
+  record that exists but can't be read or is malformed (R17a) makes it
+  exit 1, never fall back to the no-record answer; an unknown authority
+  or source kind is not malformed and lands in `unknown_grant`.
 - **R24. "Held" is never inferred from an exit code.** A caller treats an
   authority as held only when `niwa authority show --json` exits 0 and
   prints a document with the documented schema name whose grant names that
@@ -541,11 +587,19 @@ the wrong shape for a team's rule about who decides.
   selection order of R21, the no-record answer, the "held" rule of R24,
   the settle rule of R26, how level and grant combine (R4), that
   `level_source` describes resolution at dispatch and can differ from
-  `level_ceiling_source` (R13, R16a), and what the record does and
-  doesn't guarantee. It tells callers that dispatch
-  refuses an unknown flag, and that a caller unable to pass a narrowing
-  flag (`--level`) must not dispatch without it, while one unable to pass
-  `--grant` or `--role` may, since the session then holds less.
+  `level_ceiling_source` (R13, R16a), the additive versioning rule and
+  `unknown_grant` (R17a), `--parent-from` and `parent_dispatch_source`
+  (R14a), and what the record does and doesn't guarantee. It says plainly
+  that until a workspace adds an `[authority]` ceiling nobody can be
+  granted anything, and that once it exists a successor gets a fresh
+  grant with `--role coordinator` and no config edit. It tells anyone
+  archiving an instance to save `niwa authority show --json -C
+  <instance>` before `niwa destroy`, since the record goes with the
+  instance. It tells callers that dispatch refuses an unknown flag, and
+  that a caller unable to pass a narrowing flag (`--level`) must not
+  dispatch without it, while one unable to pass `--grant`, `--role` or
+  `--parent-from` may, since the session then holds less or records no
+  parent.
 
 ## Acceptance Criteria
 
@@ -667,16 +721,39 @@ Read-back
   prints `record=present` inside a dispatched instance and `record=none`
   at the workspace root.
 - [ ] A dispatch run from inside a dispatched instance records that
-  instance's `dispatch_id` as `parent_dispatch_id`, including when the
-  dispatcher is a Codex worker whose environment carries its own
-  dispatcher's session id; a dispatch run from the workspace root records
-  an empty `parent_dispatch_id`.
+  instance's `dispatch_id` as `parent_dispatch_id` with
+  `parent_dispatch_source: cwd`, including when the dispatcher is a Codex
+  worker whose environment carries its own dispatcher's session id; a
+  dispatch run from the workspace root records an empty
+  `parent_dispatch_id` with `parent_dispatch_source: none`; a dispatch run
+  from the workspace root with `--parent-from <that instance's absolute
+  path>` records the instance's `dispatch_id` with
+  `parent_dispatch_source: anchor`. `--parent-from` with an empty,
+  relative or nonexistent path exits 1 with nothing created;
+  `--parent-from` naming an instance with no record records `none`;
+  naming one whose record is malformed refuses the dispatch.
+- [ ] `--grant merge-pr,close-issue` records the same grant as `--grant
+  merge-pr --grant close-issue`; `--grant merge-pr,` exits 1 naming the
+  empty entry.
+- [ ] An overlay ceiling naming `cut-release` over a base ceiling of
+  `["merge-pr"]` leaves `cut-release` ungrantable, and `niwa authority
+  policy` and `niwa apply` each print a warning naming `cut-release` and
+  the overlay; `niwa authority policy --json` carries `schema:
+  "niwa.authority.policy/v1"`.
 - [ ] Run from the workspace root with no selector and no session id, or
   with a session id that has no record, `niwa authority show` exits 0 and
   prints `dispatch record: none` and an empty grant.
-- [ ] A record holding `level: bogus`, or a granted authority `merge`, or
-  truncated JSON, makes `niwa authority show` and `niwa authority decide
-  merge-own-pr` exit 1.
+- [ ] A record holding `level: bogus`, truncated JSON, a missing
+  `dispatch_id`, or an authority name with an uppercase letter makes `niwa
+  authority show` and `niwa authority decide merge-own-pr` exit 1.
+- [ ] A v1 record that grants `close-issue` (source `dispatch`) and
+  `teardown` (source `dispatch`), has a `merge-pr` entry whose only source
+  is `delegated:x`, and carries an extra top-level field `supervisor`
+  makes `niwa authority show --json` exit 0, with `close-issue` in
+  `grant`, `teardown` and `merge-pr` under `unknown_grant`, and the extra
+  field ignored; the guide's held check reads `close-issue` as held and
+  `teardown` and `merge-pr` as not held; a dispatch run from inside that
+  instance proceeds and records its `parent_dispatch_id`.
 - [ ] After the dispatch, editing the workspace ceiling to empty and
   running `niwa apply` leaves `niwa authority show` for the existing
   dispatch unchanged.
@@ -896,7 +973,10 @@ Unchanged behaviour
   parent's. That link can dangle, since a coordinator usually reaps its
   predecessor: nothing resolves it as a live session, and a missing
   parent or older ancestor record means no cap, never a refusal. Routing a
-  decision to the dispatcher (R2) is also separate work.
+  decision to the dispatcher (R2) is also separate work, and so is
+  shirabe's coordinator passing `--parent-from` with its own instance,
+  which lands with or after shirabe's dispatch-path rewrite (shirabe#978
+  to #986).
 - **Stronger enforcement.** Credential scoping, wrapping forbidden
   commands, a record the session can't edit, and refusing a session whose
   record is missing or malformed at a gate are a separate, later effort.
@@ -931,10 +1011,14 @@ Unchanged behaviour
 - A session's instance, and the record with it, are deleted at reap.
   After reap only the telemetry attributes remain, and they're
   best-effort observability, not an audit log.
-- The session id variable is set by the session's own environment, so a
-  session can name another's id with `--session`. That gains nothing a
+- `--session` accepts any session's id and checks nothing about the
+  caller, so a session can read another's record. That gains nothing a
   session couldn't already do, and later work that trusts the answer
-  about another session has to account for it.
+  about another session has to account for it. `--parent-from` is
+  likewise advisory: it records the parent the dispatcher names.
+- A session started by hand, or an instance made by `niwa create`, has no
+  record: no grant and no cap. A later command that attaches a record to
+  such an instance needs no format change.
 - A child dispatch isn't capped at its parent's grant or level, so a
   session granted nothing can still dispatch a child granted anything
   inside the ceiling until never-wider work lands.
@@ -1050,9 +1134,10 @@ Unchanged behaviour
   selected. Rejected because the only session that would use it is one
   that left its instance or never had one, and for both the dispatcher's
   record is the wrong answer; `--session` remains for an explicit lookup.
-- **Authority belongs to the instance.** A session or run carried onto
-  another instance or host reads that instance's record, or none. The
-  record never travels in koto keys or any cloud store.
+- **Authority belongs to the instance.** A session resumed in another
+  instance, or on another host, reads that instance's record, or none.
+  The record is never copied into a workflow engine's state or any cloud
+  store.
 - **Read-back goes through one command.** Gates, coordinators and the
   session itself use `niwa authority show` rather than parsing niwa's
   files, so the file layout can change without breaking them.
