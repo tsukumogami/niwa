@@ -1367,10 +1367,23 @@ func TestReap_NoCommandForUnmappedInstance(t *testing.T) {
 	}
 }
 
-// TestOnReap_CallSites pins where the command can run. niwa reset and a
-// dispatch's rollback remove no session niwa knows by id, so neither file may
-// reach the runner; the behavioural tests cover the call sites that do.
+// TestOnReap_CallSites pins where the command can run. The rollback,
+// --keep-session and the backstop each have a behavioural test; niwa reset
+// has this one, because a reset re-clones the instance's repositories and has
+// no harness short of the functional suite. Reset removes no session niwa
+// knows by id, so reset.go may reach neither the runner nor any path that
+// calls it (the mapped reap, destroy's session step, watch's discard).
 func TestOnReap_CallSites(t *testing.T) {
+	reset, err := os.ReadFile("reset.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"newOnReapStep(", "reapWorkspace(", "reapOpportunistically(", "removeOwningSessions(", "pruneStagedRecords(", "reapDiscardedReview("} {
+		if strings.Contains(string(reset), path) {
+			t.Errorf("reset.go calls %s, which can run the on-reap command", path)
+		}
+	}
+
 	want := map[string]bool{"on_reap.go": true, "reap.go": true, "destroy_session.go": true, "watch.go": true}
 	entries, err := os.ReadDir(".")
 	if err != nil {

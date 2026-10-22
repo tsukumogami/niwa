@@ -385,7 +385,10 @@ next reap that finds the session gone runs the command again: `niwa reap`, and
 the reaps `niwa dispatch`, `niwa create` and `niwa watch` run first. `niwa
 destroy` itself never retries one. After ten failed runs niwa drops the mapping
 with a final warning line. A mapping whose stored key fails the pattern gets no
-command run and one warning line, and counts as a failed run.
+command run and one warning line, and counts as a failed run, as does a run
+skipped for lack of budget. A `niwa watch` review session normally has no
+mapping, so when its discard's run fails there is nothing to keep: the warning
+line is printed and the command isn't run again for that review.
 
 **Kept mappings.** `niwa reap` walks the stored mappings as well as the
 instances on disk. A mapping kept because its session was still running when

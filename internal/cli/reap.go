@@ -501,8 +501,12 @@ func selectStoredMappingTargets(workspaceRoot, jobsDir string, now time.Time) ([
 			if onDisk[path] {
 				continue
 			}
-			// Gone from the instance list but still on disk is a directory
-			// this sweep doesn't understand; leave its mapping be.
+			// Gone from the instance list but still on disk: the directory
+			// is there under a spelling the enumeration doesn't produce (a
+			// symlinked path, say), or it isn't an instance any more. Either
+			// way this walk can't say the instance is gone, and running the
+			// command would close a session's state while its directory
+			// may still be in use. Leaving the mapping costs one record.
 			if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
 				continue
 			}

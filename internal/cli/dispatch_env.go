@@ -52,6 +52,13 @@ func dispatchEnvLists(cfg *config.WorkspaceConfig) (passthrough, unset []string)
 
 // loadDispatchEnvLists reads [session.dispatch_env] from the workspace
 // configuration under workspaceRoot, for a launch path that hasn't loaded it.
+//
+// A configuration that can't be loaded declares nothing here, as it does for
+// dispatch. It isn't reported because it can't get this far on its own: both
+// launch paths provision the instance first, from the same file, and a file
+// that doesn't load fails that step. The on-reap path is stricter for the
+// opposite reason: there the file is read after the session is gone, and a
+// silent "nothing declared" would skip a close nobody could repeat.
 func loadDispatchEnvLists(workspaceRoot string) (passthrough, unset []string) {
 	cfg, _ := loadWorkspaceConfig(workspaceRoot)
 	return dispatchEnvLists(cfg)
@@ -71,6 +78,13 @@ func loadDispatchEnvLists(workspaceRoot string) (passthrough, unset []string) {
 // The settings env holds the lineage value, each Passthrough name set in base
 // with its value from base, and the reap key. A name set to an empty string is
 // set; one absent from base is skipped without a word.
+//
+// The gate is the agent's settings flag, not a capability-table row of its
+// own: the "env" object is part of the settings document itself, so an agent
+// that takes the document takes the object, and the one value that does
+// depend on the agent (lineage) is already gated by its own row before it
+// reaches Lineage here. An agent with no settings flag still gets the whole
+// shaping in its process environment, which is the half every agent reads.
 func applyLaunchEnv(spec agentplan.LaunchSpec, settings map[string]any, base []string, shape launchEnvShape) []string {
 	proc, env := shapeLaunchEnv(base, shape)
 	if spec.Flags.Settings != "" && env.Len() > 0 {
