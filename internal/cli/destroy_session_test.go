@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,6 +187,129 @@ func TestRemoveOwningSessions(t *testing.T) {
 				t.Errorf("expected no output; got:\n%s", out.String())
 			}
 		})
+	}
+}
+
+// TestRemoveOwningSessions_OnReap covers the on-reap command in destroy: it
+// runs after a session's removal succeeded and for a session already gone,
+// from the workspace root whether or not the instance directory exists, and
+// the mapping goes only once it succeeds. A failed or timed-out run keeps the
+// mapping with one warning line; a failed removal, a running session and an
+// unreadable configuration run nothing that succeeds.
+func TestRemoveOwningSessions_OnReap(t *testing.T) {
+	cases := []struct {
+		name         string
+		fake         fakeClaudeSessions
+		command      string
+		breakConfig  bool
+		removeDir    bool
+		wantRuns     int
+		wantMapping  bool
+		wantWarnings int
+		wantWarning  string
+	}{
+		{name: "removed session runs the command", fake: fakeClaudeSessions{rows: []claudeSessionRow{{ID: "11111111", SessionID: ownerSID}}}, wantRuns: 1},
+		{name: "already gone runs the command", fake: fakeClaudeSessions{rows: nil}, wantRuns: 1},
+		{name: "instance directory already gone", fake: fakeClaudeSessions{rows: nil}, removeDir: true, wantRuns: 1},
+		{name: "failed run keeps the mapping", fake: fakeClaudeSessions{rows: []claudeSessionRow{{ID: "11111111", SessionID: ownerSID}}}, command: "exit 1", wantRuns: 1, wantMapping: true, wantWarnings: 1, wantWarning: "exited with status 1"},
+		{name: "timed-out run keeps the mapping", fake: fakeClaudeSessions{rows: nil}, command: "sleep 10", wantRuns: 1, wantMapping: true, wantWarnings: 1, wantWarning: "timed out after 1s"},
+		{name: "failed removal runs nothing", fake: fakeClaudeSessions{rows: []claudeSessionRow{{ID: "11111111", SessionID: ownerSID}}, rmErr: errors.New("exit status 1")}, wantRuns: 0, wantMapping: true},
+		{name: "running session runs nothing", fake: fakeClaudeSessions{rows: []claudeSessionRow{{ID: "11111111", SessionID: ownerSID, PID: 9}}}, wantRuns: 0, wantMapping: true},
+		{name: "unreadable configuration is a failed run", fake: fakeClaudeSessions{rows: nil}, breakConfig: true, wantRuns: 0, wantMapping: true, wantWarnings: 1, wantWarning: "could not read [session.on_reap]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := destroyTestSetup(t, []string{"alpha"})
+			instance := filepath.Join(root, "alpha")
+			writeTestMapping(t, root, ownerSID, instance, "")
+			logPath := filepath.Join(t.TempDir(), "runs.log")
+			cwdPath := filepath.Join(t.TempDir(), "cwd")
+			command := fmt.Sprintf(`echo "$NIWA_SESSION_ID $NIWA_REAP_KEY" >> '%s'; pwd -P > '%s'`, logPath, cwdPath)
+			if tc.command != "" {
+				command += "; " + tc.command
+			}
+			appendOnReapConfig(t, root, fmt.Sprintf("command = %q\ntimeout = \"1s\"", command))
+			if tc.breakConfig {
+				if err := os.WriteFile(workspaceConfigPath(root), []byte("[workspace\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.removeDir {
+				if err := os.RemoveAll(instance); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fake := tc.fake
+			installFakeClaudeSessions(t, &fake)
+
+			var out bytes.Buffer
+			start := time.Now()
+			removeOwningSessions(workspace.NewReporterWithTTY(&out, false), root, []string{instance})
+			if elapsed := time.Since(start); elapsed > 2*time.Second {
+				t.Errorf("destroy's session step took %s", elapsed)
+			}
+
+			runs := onReapRuns(t, logPath)
+			if len(runs) != tc.wantRuns {
+				t.Fatalf("runs = %q, want %d", runs, tc.wantRuns)
+			}
+			if tc.wantRuns > 0 {
+				if runs[0] != ownerSID+" "+ownerSID {
+					t.Errorf("run = %q, want the session id as its key", runs[0])
+				}
+				cwd, _ := os.ReadFile(cwdPath)
+				wantCwd, _ := filepath.EvalSymlinks(root)
+				if strings.TrimSpace(string(cwd)) != wantCwd {
+					t.Errorf("ran in %q, want the workspace root %q", strings.TrimSpace(string(cwd)), wantCwd)
+				}
+			}
+			if got := mappingExists(t, root, ownerSID); got != tc.wantMapping {
+				t.Errorf("mapping exists = %v, want %v", got, tc.wantMapping)
+			}
+			warnings := onReapWarnings(out.String())
+			if len(warnings) != tc.wantWarnings {
+				t.Errorf("warnings = %q, want %d", warnings, tc.wantWarnings)
+			}
+			if tc.wantWarning != "" && len(warnings) == 1 && !strings.Contains(warnings[0], tc.wantWarning) {
+				t.Errorf("warning = %q, want it to say %q", warnings[0], tc.wantWarning)
+			}
+		})
+	}
+}
+
+// TestRemoveOwningSessions_FailedRunThenReapSucceeds: a destroy whose on-reap
+// run fails keeps the mapping, and the next reap runs the command again and,
+// on success, drops it. destroy itself never retries.
+func TestRemoveOwningSessions_FailedRunThenReapSucceeds(t *testing.T) {
+	root := destroyTestSetup(t, []string{"alpha"})
+	instance := filepath.Join(root, "alpha")
+	writeTestMapping(t, root, ownerSID, instance, "")
+	flag := filepath.Join(t.TempDir(), "succeed")
+	logPath := filepath.Join(t.TempDir(), "runs.log")
+	appendOnReapConfig(t, root, fmt.Sprintf(`command = "echo run >> '%s'; [ -e '%s' ]"`, logPath, flag))
+	installFakeClaudeSessions(t, &fakeClaudeSessions{rows: []claudeSessionRow{{ID: "11111111", SessionID: ownerSID}}})
+
+	var out bytes.Buffer
+	removeOwningSessions(workspace.NewReporterWithTTY(&out, false), root, []string{instance})
+	if !mappingExists(t, root, ownerSID) {
+		t.Fatal("a failed run must keep the mapping")
+	}
+	if err := os.RemoveAll(instance); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(flag, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	captureReapStderr(t)
+	if _, err := reapWorkspace(root, t.TempDir(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if runs := onReapRuns(t, logPath); len(runs) != 2 {
+		t.Errorf("runs = %d, want 2 (destroy's failed run and the reap's)", len(runs))
+	}
+	if mappingExists(t, root, ownerSID) {
+		t.Error("the reap's successful run did not drop the mapping")
 	}
 }
 

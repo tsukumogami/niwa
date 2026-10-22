@@ -44,6 +44,10 @@ const dispatchBackstopTTL = 30 * time.Minute
 // grace period, and one that offers neither is spared rather than timed.
 const defaultReapIdleGrace = 24 * time.Hour
 
+// reapStderr is where a reap's on-reap runs write: the command's own output
+// and their warning lines. A variable so a test can read them.
+var reapStderr io.Writer = os.Stderr
+
 // reapIdleGrace resolves the grace period, honoring NIWA_REAP_IDLE_GRACE.
 //
 // The override exists because the default is a judgment about how people work
@@ -114,6 +118,18 @@ the worktree is older than the same grace period, and the session's
 transcript is gone or idle for that long. A worktree with any change, or one
 made with niwa worktree create, is never removed this way.
 
+When the workspace declares [session.on_reap], its command runs once for each
+session reap removes, from the workspace root, with PATH, HOME, NIWA_REAP_KEY,
+NIWA_SESSION_ID, NIWA_INSTANCE_PATH and the names its own env list declares.
+Each run is bounded by its timeout (10s by default) and all of one reap's runs
+by 30 seconds together. A run that fails, times out or is skipped prints one
+"niwa: warning: on-reap for session <id>: ..." line and keeps the session's
+record, so a later reap runs the command again; after ten failed runs the
+record is dropped with a final warning. reap also walks the stored session
+records, so a record kept by niwa destroy, by destroy --keep-session, or left
+behind by an instance deleted by hand gets its command once its session is
+gone. An unmapped instance the age backstop reclaims runs no command.
+
 reap runs on demand and is also invoked opportunistically at the start of
 niwa create, niwa dispatch, and niwa watch so session fan-out self-bounds.`,
 	Args:          cobra.NoArgs,
@@ -177,6 +193,10 @@ type reapTarget struct {
 	// Notice explains the reclamation when it followed nothing the developer
 	// did, and is zero otherwise. See reapNotice.
 	Notice reapNotice
+
+	// Mapping is the whole session mapping, which the on-reap command reads
+	// the reap key from and which is kept when that command fails.
+	Mapping workspace.SessionMapping
 }
 
 // maxSparedNamesListed bounds how many instance names one line carries before
@@ -334,8 +354,8 @@ func sessionState(recorded, sessionID, jobsDir, instancePath string, now time.Ti
 // of instances actually on disk (and whether each is ephemeral), while the
 // mapping supplies the session_id liveness key. An instance with no mapping is
 // never a target (no session to declare dead, and no ephemeral provenance). A
-// mapping whose instance is gone from disk is skipped here; its stale mapping
-// entry is pruned separately.
+// mapping whose instance is gone from disk is skipped here;
+// selectStoredMappingTargets walks those.
 //
 // This function performs NO destruction and touches no instance directory, so
 // the selection logic is unit-testable against fixture mappings and a fixture
@@ -442,26 +462,85 @@ func selectReapTargets(workspaceRoot, jobsDir string, now time.Time) ([]reapTarg
 			InstancePath: rec.Path,
 			Agent:        mapping.Agent,
 			Notice:       notice,
+			Mapping:      mapping,
 		})
 	}
 
 	return targets, unreadable, nil
 }
 
+// selectStoredMappingTargets walks the stored session mappings for the ones
+// whose instance is no longer on disk and whose session is gone, so the
+// on-reap command runs for them. Three kinds of mapping land here: one kept
+// because `niwa destroy` found its session still running, one kept by
+// `niwa destroy --keep-session`, and one whose instance was deleted by hand.
+// A mapping kept because an earlier on-reap run failed lands here too, which
+// is how the command is run again.
+//
+// Nothing is destroyed for these, since there is no instance left. A mapping
+// whose session is live or can't be read is left alone without a word: it
+// names no instance a developer could act on, and the next reap asks again.
+func selectStoredMappingTargets(workspaceRoot, jobsDir string, now time.Time) ([]workspace.SessionMapping, error) {
+	records, err := workspace.EnumerateInstanceRecords(workspaceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("enumerating instances: %w", err)
+	}
+	onDisk := make(map[string]bool, len(records))
+	for _, rec := range records {
+		onDisk[filepath.Clean(rec.Path)] = true
+	}
+	mappings, err := workspace.ListSessionMappings(workspaceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("listing session mappings: %w", err)
+	}
+
+	var out []workspace.SessionMapping
+	for _, m := range mappings {
+		if m.InstancePath != "" {
+			path := filepath.Clean(m.InstancePath)
+			if onDisk[path] {
+				continue
+			}
+			// Gone from the instance list but still on disk is a directory
+			// this sweep doesn't understand; leave its mapping be.
+			if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+				continue
+			}
+		}
+		if verdict, _ := sessionState(m.Agent, m.SessionID, jobsDir, m.InstancePath, now); verdict != sessionIsGone {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out, nil
+}
+
 // reapWorkspace selects and reclaims orphaned ephemeral instances under
 // workspaceRoot, returning the count actually destroyed. For each target it
 // force-destroys the instance (via destroyInstanceFunc, the non-interactive
 // destroy path, which also withdraws the Claude trust grant the instance's
-// state records) and deletes the mapping entry. A destroy
+// state records), then runs the workspace's on-reap command for the removed
+// session and deletes the mapping entry once that succeeds. A destroy
 // failure on one target is surfaced on stderr and does not abort the rest, so a
 // single stuck instance never blocks reclaiming the others.
+//
+// It also walks the stored mappings whose instance is already gone
+// (selectStoredMappingTargets) and runs the command for each whose session is
+// gone. Those are selected before any instance is destroyed here, so a
+// mapping this sweep keeps after a failed run is retried by the next reap,
+// not by this one.
 func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 	targets, unreadable, err := selectReapTargets(workspaceRoot, jobsDir, now)
 	if err != nil {
 		return 0, err
 	}
+	stored, err := selectStoredMappingTargets(workspaceRoot, jobsDir, now)
+	if err != nil {
+		return 0, err
+	}
 	reportSparedInstances(os.Stderr, unreadable)
 
+	onReap := newOnReapStep(workspaceRoot, reapStderr)
 	reaped := 0
 	for _, t := range targets {
 		// Selection happened before the spared report was printed and before
@@ -489,9 +568,10 @@ func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 			// rather than orphaning the mapping for a still-present instance.
 			continue
 		}
-		if err := workspace.DeleteSessionMapping(workspaceRoot, t.SessionID); err != nil {
-			fmt.Fprintf(os.Stderr, "niwa: warning: deleting session mapping %s: %v\n", t.SessionID, err)
-		}
+		// The session is gone and so is its instance. The mapping goes once
+		// the on-reap command has run for it; a failed run keeps it for the
+		// next reap.
+		onReap.settle(t.Mapping)
 		// Printed after the destroy rather than before it, so the line is a
 		// report of something that happened rather than of something intended:
 		// a destroy that fails above continues without saying the instance is
@@ -500,6 +580,10 @@ func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 			fmt.Fprintf(os.Stderr, "niwa: reclaimed %s: %s\n", t.Notice.Name, t.Notice.Reason)
 		}
 		reaped++
+	}
+
+	for _, m := range stored {
+		onReap.settle(m)
 	}
 
 	// Second pass: the name+TTL backstop. This is a SEPARATE scan, not a

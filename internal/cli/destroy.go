@@ -75,6 +75,14 @@ instance), with ` + "`claude rm`" + `. Claude Code keeps the session's transcrip
 ` + "`claude --resume <session-id>`" + ` still opens it. A session that is still
 running is left in place. Use --keep-session to keep the session.
 
+When the workspace declares [session.on_reap], its command runs from the
+workspace root once for each session destroy removes or finds already gone,
+and the session's record is deleted only once the command succeeds. A failed
+or timed-out run prints one "niwa: warning: on-reap for session <id>: ..." line
+and keeps the record; destroy never retries it, and the next niwa reap does.
+A session that is still running, one whose removal failed, and --keep-session
+run no command.
+
 Non-TTY behavior: the picker and typed-confirmation prompt require a
 terminal on stdin. In CI or scripted environments, pass an explicit
 instance name, or --workspace --confirm <workspace-name>.`,

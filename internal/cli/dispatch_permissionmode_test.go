@@ -532,8 +532,8 @@ func TestWatchLaunches_CarryNoPermissionMode(t *testing.T) {
 	requireRecordedPosture(t, instancePath, "bypass")
 
 	for _, sandbox := range []bool{false, true} {
-		fresh := watchReviewLaunch(instancePath, "watch-o-r-1", "review", sandbox)
-		resume := watchResumeLaunch(instancePath, "handle1", dispatchTestSessionID, "again", sandbox)
+		fresh := watchReviewLaunch(instancePath, "watch-o-r-1", "review", sandbox, launchEnvShape{})
+		resume := watchResumeLaunch(instancePath, "handle1", dispatchTestSessionID, "again", sandbox, launchEnvShape{})
 		for name, req := range map[string]launchRequest{"fresh review": fresh, "continuation": resume} {
 			if req.InstanceDir != instancePath {
 				t.Fatalf("%s: InstanceDir = %q, want %q", name, req.InstanceDir, instancePath)

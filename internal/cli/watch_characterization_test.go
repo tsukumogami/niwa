@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/claudetrust"
+	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/watch"
 	"github.com/tsukumogami/niwa/internal/workspace"
@@ -39,6 +40,13 @@ const (
 	watchCharShortID   = "5f0c2d1e"
 	watchCharCloneURL  = "https://github.com/acme/widget.git"
 	watchCharPRURL     = "https://github.com/acme/widget/pull/7"
+
+	// The settings document each launch carries: its reap key and nothing
+	// else, since the fixture workspace declares no [session.dispatch_env].
+	// A fresh stage mints its key from the pinned random source; the
+	// continuation's record predates the key and falls back to its session id.
+	watchCharStageSettings  = `{"env":{"NIWA_REAP_KEY":"abababab-abab-4bab-abab-abababababab"}}`
+	watchCharResumeSettings = `{"env":{"NIWA_REAP_KEY":"` + watchCharSessionID + `"}}`
 )
 
 var watchCharPR = github.PRRef{Owner: "acme", Repo: "widget", Number: 7, URL: watchCharPRURL}
@@ -217,14 +225,14 @@ func TestWatchCharacterization_StageReview(t *testing.T) {
 		{
 			name:            "unsandboxed",
 			plan:            reviewPlan{},
-			wantPassthrough: []string{"--name", "watch_acme_widget_7"},
+			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--settings", watchCharStageSettings},
 			wantLine:        "niwa watch: staged review for acme/widget#7 (handle watch_acme_widget_7)",
 			wantRecorded:    false,
 		},
 		{
 			name:            "sandboxed_ask",
 			plan:            reviewPlan{sandbox: true},
-			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--strict-mcp-config"},
+			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--strict-mcp-config", "--settings", watchCharStageSettings},
 			wantLine:        "niwa watch: staged review for acme/widget#7 (handle watch_acme_widget_7) -- out-of-instance writes surface an operator approval",
 			wantRecorded:    true,
 		},
@@ -232,7 +240,7 @@ func TestWatchCharacterization_StageReview(t *testing.T) {
 			name:            "sandboxed_deny",
 			plan:            reviewPlan{sandbox: true},
 			unparseable:     true,
-			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--strict-mcp-config"},
+			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--strict-mcp-config", "--settings", watchCharStageSettings},
 			wantLine:        "niwa watch: staged review for acme/widget#7 (handle watch_acme_widget_7) -- out-of-instance writes are hard-denied",
 			wantRecorded:    false,
 		},
@@ -394,14 +402,14 @@ func TestWatchCharacterization_ContinueReview(t *testing.T) {
 		{
 			name:            "unsandboxed",
 			plan:            reviewPlan{},
-			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--resume", "5f0c2d1e-7a3b-4c9d-8e2f-1a2b3c4d5e6f"},
+			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--resume", "5f0c2d1e-7a3b-4c9d-8e2f-1a2b3c4d5e6f", "--settings", watchCharResumeSettings},
 			wantLine:        "niwa watch: continued review for acme/widget#7 (handle watch_acme_widget_7)",
 			wantRecorded:    false,
 		},
 		{
 			name:            "sandboxed_ask",
 			plan:            reviewPlan{sandbox: true},
-			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--resume", "5f0c2d1e-7a3b-4c9d-8e2f-1a2b3c4d5e6f", "--strict-mcp-config"},
+			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--resume", "5f0c2d1e-7a3b-4c9d-8e2f-1a2b3c4d5e6f", "--strict-mcp-config", "--settings", watchCharResumeSettings},
 			wantLine:        "niwa watch: continued review for acme/widget#7 (handle watch_acme_widget_7) -- out-of-instance writes surface an operator approval",
 			wantRecorded:    true,
 		},
@@ -409,7 +417,7 @@ func TestWatchCharacterization_ContinueReview(t *testing.T) {
 			name:            "sandboxed_deny",
 			plan:            reviewPlan{sandbox: true},
 			unparseable:     true,
-			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--resume", "5f0c2d1e-7a3b-4c9d-8e2f-1a2b3c4d5e6f", "--strict-mcp-config"},
+			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--resume", "5f0c2d1e-7a3b-4c9d-8e2f-1a2b3c4d5e6f", "--strict-mcp-config", "--settings", watchCharResumeSettings},
 			wantLine:        "niwa watch: continued review for acme/widget#7 (handle watch_acme_widget_7) -- out-of-instance writes are hard-denied",
 			wantRecorded:    false,
 		},
@@ -515,5 +523,64 @@ func TestWatchCharacterization_ContinueReview(t *testing.T) {
 				t.Errorf("a continuation destroyed %q", *fakes.destroyed)
 			}
 		})
+	}
+}
+
+// TestWatchReviewLaunch_EnvShaping: a review launch gets the shaping a
+// dispatch gets, through the same launch-request path: the declared
+// pass-through name in its settings env and launch environment, the declared
+// unset name in neither, and an inherited NIWA_REAP_KEY replaced by the key
+// the review is minted. The key is kept in the staged record, and the
+// continuation launches with the same one.
+func TestWatchReviewLaunch_EnvShaping(t *testing.T) {
+	root, home := setupWatchCharEnv(t)
+	writeDispatchEnvConfig(t, root, `"PASS_MARK"`, `"DROP_MARK"`)
+	fakes := installWatchCharFakes(t)
+	stubWatchTrust(t, home, false)
+	client := newPullHeadServer(t)
+	cmd, _, _ := newWatchCharCmd()
+	stubDispatchRand(t, constByteReader(0xab))
+	t.Setenv("PASS_MARK", "carried-value")
+	t.Setenv("DROP_MARK", "dispatcher-value")
+	t.Setenv(config.ReapKeyEnv, "inherited-fake-key")
+	const minted = "abababab-abab-4bab-abab-abababababab"
+
+	if err := stageReview(cmd, root, root, "", client, watchCharPR, reviewPlan{}); err != nil {
+		t.Fatalf("stageReview: %v", err)
+	}
+	launch := fakes.launches[0]
+	env, ok := settingsEnvOf(t, launch.Passthrough)
+	if !ok {
+		t.Fatalf("no settings document in %q", launch.Passthrough)
+	}
+	if env["PASS_MARK"] != "carried-value" || env[config.ReapKeyEnv] != minted {
+		t.Errorf("settings env = %v", env)
+	}
+	if _, ok := env["DROP_MARK"]; ok {
+		t.Error("an unset name reached the review's settings env")
+	}
+	if v, _ := envValue(t, launch.Env, "PASS_MARK"); v != "carried-value" {
+		t.Errorf("launch PASS_MARK = %q", v)
+	}
+	if _, ok := envValue(t, launch.Env, "DROP_MARK"); ok {
+		t.Error("an unset name reached the review's launch environment")
+	}
+	if v, _ := envValue(t, launch.Env, config.ReapKeyEnv); v != minted {
+		t.Errorf("launch NIWA_REAP_KEY = %q, want %q", v, minted)
+	}
+	rec, err := watch.LoadStagedRecord(root, "watch_acme_widget_7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ReapKey != minted {
+		t.Errorf("record reap key = %q, want %q", rec.ReapKey, minted)
+	}
+
+	resume := watchResumeLaunch(rec.InstancePath, rec.Handle, watchCharSessionID, "again", false, watchLaunchEnv(root, rec.ReapKey))
+	if v, _ := envValue(t, resume.Env, config.ReapKeyEnv); v != minted {
+		t.Errorf("continuation NIWA_REAP_KEY = %q, want the review's key", v)
+	}
+	if _, ok := envValue(t, resume.Env, "DROP_MARK"); ok {
+		t.Error("an unset name reached the continuation's launch environment")
 	}
 }

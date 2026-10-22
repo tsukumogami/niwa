@@ -583,7 +583,13 @@ func continueReview(cmd *cobra.Command, root, cwd, token string, client *github.
 	// (buildDispatchPassthrough + --strict-mcp-config when sandboxed) and additionally
 	// carries --resume <SessionID>. The re-review prompt is a fixed template.
 	prompt := watch.BuildResumePrompt(watch.DefaultCloneRelDir, watch.DefaultDraftRelPath)
-	if err := dispatchLaunch(ctx, watchResumeLaunch(instancePath, rec.Handle, rec.SessionID, prompt, plan.sandbox)); err != nil {
+	// The continuation keeps the review's reap key. A record written before
+	// it carried one falls back to the session id, as its discard does.
+	reapKey := rec.ReapKey
+	if reapKey == "" {
+		reapKey = rec.SessionID
+	}
+	if err := dispatchLaunch(ctx, watchResumeLaunch(instancePath, rec.Handle, rec.SessionID, prompt, plan.sandbox, watchLaunchEnv(root, reapKey))); err != nil {
 		return fmt.Errorf("resuming review agent: %w", err)
 	}
 
@@ -695,6 +701,7 @@ func pruneStagedRecords(ctx context.Context, out io.Writer, root string, client 
 		return
 	}
 	jobsDir := defaultJobsDir()
+	onReap := newOnReapStep(root, out)
 	for _, h := range handles {
 		rec, err := watch.LoadStagedRecord(root, h)
 		if err != nil {
@@ -703,14 +710,45 @@ func pruneStagedRecords(ctx context.Context, out io.Writer, root string, client 
 
 		if !stagedInstanceLiveFunc(jobsDir, rec.InstancePath) {
 			discardStagedRecord(out, root, h, rec, "session no longer live")
+			reapDiscardedReview(onReap, root, rec)
 			continue
 		}
 
+		// A stale review whose session is still live is discarded without the
+		// on-reap command: its session hasn't gone anywhere.
 		if ok, reason := evalRecordFreshness(ctx, client, requested, rec); !ok {
 			discardStagedRecord(out, root, h, rec, reason)
 		}
 		// live + fresh: keep the record and its session untouched.
 	}
+}
+
+// reapDiscardedReview runs the workspace's on-reap command for a staged review
+// whose session is gone, once its record has been discarded.
+//
+// A review session normally has no session mapping: it is launched inside an
+// instance, which the SessionStart hook never provisions for. When one does
+// exist, the mapping is settled as a reap settles it (deleted on success,
+// kept for the next reap on failure). Otherwise the key comes from the staged
+// record, the value the review was launched with, and a failed run is warned
+// about and not repeated, since the record that would carry the retry is
+// already gone. A record whose session id was never captured names no session
+// and runs nothing.
+func reapDiscardedReview(onReap *onReapStep, root string, rec watch.StagedRecord) {
+	if rec.SessionID == "" {
+		return
+	}
+	if workspace.ValidSessionID(rec.SessionID) {
+		if m, err := workspace.ReadSessionMapping(root, rec.SessionID); err == nil {
+			onReap.settle(m)
+			return
+		}
+	}
+	key := rec.ReapKey
+	if key == "" {
+		key = rec.SessionID
+	}
+	onReap.run(removedSession{SessionID: rec.SessionID, ReapKey: key, InstancePath: rec.InstancePath})
 }
 
 // discardStagedRecord tears down one staged review: best-effort destroy the
@@ -834,8 +872,16 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 
 	prompt := watch.BuildReviewPrompt(pr, watch.DefaultCloneRelDir, watch.DefaultDraftRelPath)
 
-	// Launch detached (no terminal attach) with the real environment.
-	if err := dispatchLaunch(ctx, watchReviewLaunch(instancePath, slug, prompt, plan.sandbox)); err != nil {
+	// The review's reap key, minted here and kept in its staged record: a
+	// review session has no session mapping to recompute it from.
+	reapKey, err := newDispatchID(dispatchRandReader)
+	if err != nil {
+		return fmt.Errorf("generating the review's reap key: %w", err)
+	}
+
+	// Launch detached (no terminal attach) with the real environment, shaped
+	// as a dispatch's is.
+	if err := dispatchLaunch(ctx, watchReviewLaunch(instancePath, slug, prompt, plan.sandbox, watchLaunchEnv(root, reapKey))); err != nil {
 		return fmt.Errorf("launching review agent: %w", err)
 	}
 
@@ -861,6 +907,7 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 		DispatchedSHA: head.SHA,
 		SessionID:     sessionID,
 		ShortID:       shortID,
+		ReapKey:       reapKey,
 	}
 	if err := watch.SaveStagedRecord(root, rec); err != nil {
 		return err
@@ -888,40 +935,57 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 // the mode dispatch derives from the instance's recorded permissions posture.
 // The final "" (the permission mode) handed to buildDispatchPassthrough is
 // that rule.
-func watchReviewLaunch(instancePath, slug, prompt string, sandbox bool) launchRequest {
+func watchReviewLaunch(instancePath, slug, prompt string, sandbox bool, env launchEnvShape) launchRequest {
 	passthrough := buildDispatchPassthrough(claudeLaunchSpec().Flags, slug, "", "")
 	if sandbox {
 		// Belt-and-suspenders: reduce MCP server loading so the egress-deny hook
 		// is not the only thing standing between an MCP tool and the network.
 		passthrough = append(passthrough, "--strict-mcp-config")
 	}
-	return watchLaunchRequest(instancePath, prompt, passthrough)
+	return watchLaunchRequest(instancePath, prompt, passthrough, env)
 }
 
 // watchResumeLaunch mirrors watchReviewLaunch and additionally carries
 // --resume <sessionID>. See watchReviewLaunch for why it passes no permission
 // mode.
-func watchResumeLaunch(instancePath, handle, sessionID, prompt string, sandbox bool) launchRequest {
+func watchResumeLaunch(instancePath, handle, sessionID, prompt string, sandbox bool, env launchEnvShape) launchRequest {
 	passthrough := buildDispatchPassthrough(claudeLaunchSpec().Flags, handle, "", "")
 	passthrough = append(passthrough, "--resume", sessionID)
 	if sandbox {
 		passthrough = append(passthrough, "--strict-mcp-config")
 	}
-	return watchLaunchRequest(instancePath, prompt, passthrough)
+	return watchLaunchRequest(instancePath, prompt, passthrough, env)
+}
+
+// watchLaunchEnv is the environment shaping a review launch gets: the
+// workspace's [session.dispatch_env] lists and the review's reap key, the same
+// shaping `niwa dispatch` applies. A review carries no lineage.
+func watchLaunchEnv(root, reapKey string) launchEnvShape {
+	passthrough, unset := loadDispatchEnvLists(root)
+	return launchEnvShape{Passthrough: passthrough, Unset: unset, ReapKey: reapKey}
 }
 
 // watchLaunchRequest is the launch request both watch launches share: Claude
-// Code, backgrounded, in the review instance.
-func watchLaunchRequest(instancePath, prompt string, passthrough []string) launchRequest {
+// Code, backgrounded, in the review instance. Its environment goes through
+// applyLaunchEnv, the path `niwa dispatch` uses, and the settings document it
+// produces is the only one the launch carries.
+func watchLaunchRequest(instancePath, prompt string, passthrough []string, env launchEnvShape) launchRequest {
+	spec := claudeLaunchSpec()
+	settings := map[string]any{}
+	workerEnv := applyLaunchEnv(spec, settings, os.Environ(), env)
+	if doc, ok := renderLaunchSettings(settings); ok {
+		passthrough = append(passthrough, spec.Flags.Settings, doc)
+	}
 	return launchRequest{
-		Spec: claudeLaunchSpec(),
+		Spec: spec,
 		// This agent's runner backgrounds its own session, so the process
 		// model is the same whether or not anything asks to detach; a sweep
 		// has no terminal to run a turn in either way.
-		Mode:        claudeLaunchSpec().Runner.ModeFor(true),
+		Mode:        spec.Runner.ModeFor(true),
 		InstanceDir: instancePath,
 		Body:        prompt,
 		Passthrough: passthrough,
+		Env:         workerEnv,
 	}
 }
 

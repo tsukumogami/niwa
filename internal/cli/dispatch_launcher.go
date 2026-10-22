@@ -46,9 +46,9 @@ type launchRequest struct {
 
 	// Env is the worker's environment. A nil Env means the worker inherits the
 	// full parent environment (os.Environ()); a non-nil Env is used verbatim.
-	// A Claude dispatch that carries lineage attributes sets it to the parent
-	// environment with OTEL_RESOURCE_ATTRIBUTES replaced by the composed value
-	// (see lineageWorkerEnv); every other dispatch leaves it nil.
+	// Every launch niwa makes, dispatch and watch alike, sets it through
+	// applyLaunchEnv: the parent environment with the declared unset names
+	// removed, and the lineage value and the reap key set.
 	Env []string
 
 	// Stdout and Stderr are where a foreground worker's output goes: the

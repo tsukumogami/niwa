@@ -393,8 +393,8 @@ func TestDispatch_MCPApproval_UnreadableStateWarns(t *testing.T) {
 func TestWatchLaunches_CarryNoMCPApproval(t *testing.T) {
 	for _, sandbox := range []bool{false, true} {
 		for name, req := range map[string]launchRequest{
-			"review": watchReviewLaunch("/tmp/inst", "slug", "review this", sandbox),
-			"resume": watchResumeLaunch("/tmp/inst", "handle", "11111111-1111-4111-8111-111111111111", "continue", sandbox),
+			"review": watchReviewLaunch("/tmp/inst", "slug", "review this", sandbox, launchEnvShape{}),
+			"resume": watchResumeLaunch("/tmp/inst", "handle", "11111111-1111-4111-8111-111111111111", "continue", sandbox, launchEnvShape{}),
 		} {
 			for _, el := range req.Passthrough {
 				if strings.Contains(el, config.EnabledMcpjsonServersKey) || strings.Contains(el, "enableAllProjectMcpServers") {

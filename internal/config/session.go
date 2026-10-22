@@ -1,5 +1,12 @@
 package config
 
+import (
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+)
+
 // The agent-neutral session declaration.
 //
 // [session] describes what a prepared session is given regardless of which
@@ -26,6 +33,11 @@ package config
 type SessionConfig struct {
 	Env     SessionEnvConfig     `toml:"env,omitempty"`
 	Posture SessionPostureConfig `toml:"posture,omitempty"`
+
+	// DispatchEnv and OnReap are read when niwa launches or removes a
+	// session, never at apply. See their types.
+	DispatchEnv SessionDispatchEnvConfig `toml:"dispatch_env,omitempty"`
+	OnReap      SessionOnReapConfig      `toml:"on_reap,omitempty"`
 }
 
 // SessionPostureConfig is [session.posture]: how much a prepared session asks
@@ -86,7 +98,194 @@ type SessionEnvConfig struct {
 	Vars    EnvVarsTable `toml:"vars,omitempty"`
 }
 
-// IsEmpty reports whether the table declares nothing.
+// IsEmpty reports whether the table declares nothing. The dispatch-time
+// [session.dispatch_env] lists are a different table and never count here.
 func (s SessionEnvConfig) IsEmpty() bool {
 	return len(s.Promote) == 0 && s.Vars.IsEmpty()
+}
+
+// SessionDispatchEnvConfig is [session.dispatch_env]: variables niwa moves
+// between its own environment and a worker's when it launches one.
+//
+// It is dispatch-time, unlike [session.env], which is written at apply. That
+// table is resolved and written into generated files when the workspace is
+// applied, so every session started in an instance sees it. This one is read
+// when niwa launches a worker, from niwa's own environment at that moment,
+// and reaches only that worker. Nothing that runs at apply reads it, and it
+// counts toward neither SessionEnvConfig.IsEmpty nor any env block apply
+// writes.
+//
+// Passthrough names variables copied from niwa's environment into a launched
+// worker's environment: its settings document's env object, for an agent that
+// takes one, and its process environment. A name that isn't set when the
+// launch runs is skipped without a word. Unset names variables removed from
+// the worker's process environment, so a value the launching shell carries
+// never reaches a worker that has nothing to replace it with.
+//
+// The settings document rides the worker's command line, where other users of
+// the host can read it in a process listing, so the load refuses names that
+// look like credentials (see ValidateSessionEnvName). The heuristic can't
+// catch every secret; what keeps credentials out is that a workspace declares
+// exact names, and only the ones it needs.
+type SessionDispatchEnvConfig struct {
+	Passthrough []string `toml:"passthrough,omitempty"`
+	Unset       []string `toml:"unset,omitempty"`
+}
+
+// IsEmpty reports whether the table declares nothing.
+func (s SessionDispatchEnvConfig) IsEmpty() bool {
+	return len(s.Passthrough) == 0 && len(s.Unset) == 0
+}
+
+// DefaultOnReapTimeout bounds one on-reap run when [session.on_reap] sets no
+// timeout.
+const DefaultOnReapTimeout = 10 * time.Second
+
+// SessionOnReapConfig is [session.on_reap]: a command niwa runs once for each
+// session it removes.
+//
+// Command runs under sh -c from the workspace root with a fixed environment:
+// PATH, HOME, NIWA_REAP_KEY, NIWA_SESSION_ID, NIWA_INSTANCE_PATH, and each
+// name in Env that is set in niwa's environment. Env is the command's own
+// list. It reaches only the command's process environment, never a command
+// line, so a name may appear here and in [session.dispatch_env] too; it gets
+// the same load-time refusals all the same.
+//
+// Timeout bounds one run, "10s" when empty. The command has the trust level of
+// a hook the workspace configuration installs.
+type SessionOnReapConfig struct {
+	Command string   `toml:"command,omitempty"`
+	Timeout string   `toml:"timeout,omitempty"`
+	Env     []string `toml:"env,omitempty"`
+}
+
+// TimeoutDuration returns the per-run timeout. The load refused a value that
+// doesn't parse or isn't positive, so anything else reads as the default.
+func (s SessionOnReapConfig) TimeoutDuration() time.Duration {
+	if d, err := time.ParseDuration(strings.TrimSpace(s.Timeout)); err == nil && d > 0 {
+		return d
+	}
+	return DefaultOnReapTimeout
+}
+
+// ReapKeyEnv is the variable niwa sets to a session's reap key: the dispatch
+// id for a session niwa launched, the session id for one a SessionStart hook
+// provisioned an instance for.
+const ReapKeyEnv = "NIWA_REAP_KEY"
+
+// LaunchSettingsEnvNames are the names niwa itself writes into a launched
+// worker's settings env object. A declared name equal to one of them would
+// fight niwa for the slot. The NIWA_ prefix already covers the reap key; it is
+// listed so this stays the one place that says what niwa sets.
+var LaunchSettingsEnvNames = []string{"OTEL_RESOURCE_ATTRIBUTES", ReapKeyEnv}
+
+// credentialSuffixes and credentialPrefixes are the shapes of a variable name
+// that usually holds a credential, matched against the upper-cased name.
+var (
+	credentialSuffixes = []string{"_KEY", "_APIKEY", "_SECRET", "_TOKEN", "_PAT", "_PASSWORD", "_PASSWD", "_CREDENTIALS"}
+	credentialPrefixes = []string{"AWS_"}
+)
+
+// envNamePattern is what a declared variable name must look like at all.
+var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// ValidateSessionEnvName reports why name may not be declared in
+// [session.dispatch_env] or [session.on_reap] env, or nil when it may. Letter
+// case never rescues a name: every refusal compares the upper-cased form.
+func ValidateSessionEnvName(name string) error {
+	if !envNamePattern.MatchString(name) {
+		return fmt.Errorf("not a variable name: use letters, digits and '_', not starting with a digit")
+	}
+	upper := strings.ToUpper(name)
+	for _, p := range []string{"NIWA_", "CLAUDE_"} {
+		if strings.HasPrefix(upper, p) {
+			return fmt.Errorf("names starting %s are reserved", p)
+		}
+	}
+	for _, n := range LaunchSettingsEnvNames {
+		if upper == n {
+			return fmt.Errorf("niwa sets %s itself", n)
+		}
+	}
+	for _, s := range credentialSuffixes {
+		if strings.HasSuffix(upper, s) {
+			return fmt.Errorf("it looks like a credential (ends %s), and a declared value can reach a command line", s)
+		}
+	}
+	for _, p := range credentialPrefixes {
+		if strings.HasPrefix(upper, p) {
+			return fmt.Errorf("it looks like a credential (starts %s), and a declared value can reach a command line", p)
+		}
+	}
+	return nil
+}
+
+// validateSessionDeclaration applies the load-time refusals for the
+// dispatch-time and reap-time tables.
+func validateSessionDeclaration(s SessionConfig) error {
+	declared := sessionEnvDeclaredNames(s.Env)
+	checkList := func(field string, names []string) error {
+		seen := make(map[string]bool, len(names))
+		for _, name := range names {
+			if err := ValidateSessionEnvName(name); err != nil {
+				return fmt.Errorf("%s: %q: %w", field, name, err)
+			}
+			if seen[name] {
+				return fmt.Errorf("%s: %q is listed more than once", field, name)
+			}
+			seen[name] = true
+			if declared[name] {
+				return fmt.Errorf("%s: %q is also declared in [session.env] vars or promote; declare it in one place", field, name)
+			}
+		}
+		return nil
+	}
+
+	if err := checkList("session.dispatch_env.passthrough", s.DispatchEnv.Passthrough); err != nil {
+		return err
+	}
+	if err := checkList("session.dispatch_env.unset", s.DispatchEnv.Unset); err != nil {
+		return err
+	}
+	passed := make(map[string]bool, len(s.DispatchEnv.Passthrough))
+	for _, name := range s.DispatchEnv.Passthrough {
+		passed[name] = true
+	}
+	for _, name := range s.DispatchEnv.Unset {
+		if passed[name] {
+			return fmt.Errorf("session.dispatch_env: %q is listed in both passthrough and unset", name)
+		}
+	}
+
+	if err := checkList("session.on_reap.env", s.OnReap.Env); err != nil {
+		return err
+	}
+	if t := strings.TrimSpace(s.OnReap.Timeout); t != "" {
+		d, err := time.ParseDuration(t)
+		if err != nil {
+			return fmt.Errorf("session.on_reap.timeout: %q is not a duration (for example \"10s\")", s.OnReap.Timeout)
+		}
+		if d <= 0 {
+			return fmt.Errorf("session.on_reap.timeout: %q must be positive", s.OnReap.Timeout)
+		}
+	}
+	return nil
+}
+
+// sessionEnvDeclaredNames is every name [session.env] declares, through
+// promote or any of the vars tables.
+func sessionEnvDeclaredNames(e SessionEnvConfig) map[string]bool {
+	names := map[string]bool{}
+	for _, n := range e.Promote {
+		names[n] = true
+	}
+	for n := range e.Vars.Values {
+		names[n] = true
+	}
+	for _, m := range []map[string]string{e.Vars.Required, e.Vars.Recommended, e.Vars.Optional} {
+		for n := range m {
+			names[n] = true
+		}
+	}
+	return names
 }
