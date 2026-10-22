@@ -310,9 +310,10 @@ the wrong shape for a team's rule about who decides.
   a role that matches `^[a-z][a-z0-9-]{0,63}$` but isn't one of R3's is
   dropped from that list with a warning naming the name and the key,
   printed by `niwa apply`, `niwa dispatch` and `niwa authority policy`,
-  and grants nothing. A narrowing ceiling (overlay or machine) left
-  empty by the drop is an empty list, so it narrows to nothing rather
-  than counting as unset; a role keeps its known authorities. A name
+  and grants nothing. A ceiling in any layer (base, overlay or machine)
+  left empty by the drop is an empty list, so it still counts as
+  declared (R13's source is never `none` for it) and narrows to nothing
+  rather than counting as unset; a role keeps its known authorities. A name
   failing the pattern is still an invalid value. An unknown key inside a base or
   overlay `[authority]` table, or an unknown `authority_`-prefixed key
   under `[global]`, counts as an invalid value rather than the usual
@@ -470,7 +471,11 @@ the wrong shape for a team's rule about who decides.
   name with characters outside its pattern) still fails closed (R23).
   An unknown `parent_dispatch_source` value is read as `none` with an
   empty `parent_dispatch_id`, so a later value there costs only the
-  parent link. Every field R17 lists, `parent_dispatch_source` and
+  parent link. An unknown `grant_ceiling_source` value that matches the
+  name pattern is kept as stored and read as a declared source, never as
+  `none`, so a later gate lets the grant decide: that fails narrow and
+  blocks no dispatch. A stored v1 record carrying the reader-only
+  `newer-version` in any source field is malformed. Every field R17 lists, `parent_dispatch_source` and
   `unknown_grant` included, is required in v1, and niwa always writes
   them. A field added within v1 later is optional: a reader that knows it treats it
   as absent, with its documented default, in a record an older niwa
@@ -676,7 +681,10 @@ the wrong shape for a team's rule about who decides.
   the reference `niwa_grant_decides` check beside the held check, and the
   advice to roll a gate out with the workspace's ceiling and re-dispatch
   running sessions, which the `none` fallback makes advice rather than a
-  requirement. It says plainly
+  requirement. Where it documents the machine `authority_ceiling` and
+  the overlay `ceiling`, it says that declaring either opts every
+  workspace it applies to into grant gating, even one with no base
+  ceiling. It says plainly
   that until a workspace adds an `[authority]` ceiling nobody can be
   granted anything, and that once it exists a successor gets a fresh
   grant with `--role coordinator` and no config edit, while merging

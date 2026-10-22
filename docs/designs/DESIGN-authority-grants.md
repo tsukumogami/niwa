@@ -359,7 +359,13 @@ declares a ceiling at all, else `machine` if the machine list removed
 anything, else `overlay` if the overlay list did, else `workspace` when
 the base declares one, else the narrowing layer that declares one
 (`machine` first). `none` lets a later gate tell a workspace that never
-opted in from one that declared an empty ceiling.
+opted in from one that declared an empty ceiling, so every layer's
+ceiling is held as a pointer to a list, nil meaning not declared; a list
+emptied by Decision 6's drop stays declared. A machine or overlay
+ceiling therefore opts every workspace it applies to into grant gating,
+even one with no base ceiling, and the guide says so where it documents
+those keys. A stored source value this niwa doesn't know is read as
+declared, never as `none`, so a gate lets the grant decide.
 
 Values are checked by `authority.ValidateConfig`, called after parsing
 rather than inside `config.validate()`. Dispatch and `niwa authority
@@ -577,10 +583,11 @@ An authority name that matches the name pattern but isn't one of R3's
 is dropped from the ceiling or role that lists it, with a warning naming
 the name and the key, printed by `niwa apply`, `niwa dispatch` and `niwa
 authority policy`. Dropping it grants nothing: a ceiling entry this niwa
-can't grant can't widen anything, a narrowing ceiling (overlay or
-machine) that lists only unknown names is a present, empty list rather
-than an unset one, so it still narrows to nothing, and a role keeps its
-known authorities. Only the dispatcher's own request is refused: an
+can't grant can't widen anything, a ceiling in any layer (base, overlay
+or machine) that lists only unknown names is a present, empty list
+rather than an unset one, so it still counts as declared (a base one
+records source `workspace`, never `none`) and narrows to nothing, and a
+role keeps its known authorities. Only the dispatcher's own request is refused: an
 unknown name on `--grant`, or in `niwa config set authority-ceiling`,
 exits 1 as today, because that's a person typing on this niwa. A name
 that fails the pattern (uppercase, spaces, a misspelt key) is still an
@@ -717,8 +724,9 @@ func ValidateConfig(base, overlay, machine RawLayer) (Policy, []string, error)
 
 type Policy struct {                 // what the three config layers declare
     BaseLevel, OverlayLevel, MachineLevel *Level
-    BaseCeiling []Authority          // nil and empty both mean "nothing grantable"
-    OverlayCeiling, MachineCeiling *[]Authority // nil means "doesn't narrow"
+    BaseCeiling *[]Authority         // nil: not declared; empty: declared, nothing grantable
+    OverlayCeiling, MachineCeiling *[]Authority // nil: not declared, doesn't narrow
+    // A list emptied by Decision 6's drop stays non-nil: still declared.
     Roles map[string][]Authority
 }
 
