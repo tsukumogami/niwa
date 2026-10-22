@@ -931,8 +931,7 @@ rejected explicitly enough to record here:
   project, not per-user-allowlist, under any of Alts 1-3). The
   marginal protection over Alt 2 was narrow — only users who
   declared a personal vault for `vault://` URI resolution but
-  never opted in benefit, a population the opt-in shape decision
-  describes as shrinking.
+  never opted in benefit, and that population is shrinking.
 - **Alt 4: Per-pair allowlist scoping.** The personal overlay
   would declare an explicit list of `(kind, project)` pairs niwa
   is willing to ask the personal vault about. *Rejected* as

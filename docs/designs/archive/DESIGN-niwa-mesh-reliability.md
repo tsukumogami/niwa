@@ -1337,9 +1337,9 @@ Depends on Phase 3 (manifest source-of-truth) and Phase 4
 ### Phase 6: Skill text and guides update
 
 Deliverables:
-- `buildSkillContent` rewrite per the skill-contract audit: the
-  broken claims listed under "What was discovered" and the
-  `internal/workspace/channels.go` entry in Components.
+- `buildSkillContent` rewrite fixing the broken skill claims listed
+  under "What was discovered", as the `internal/workspace/channels.go`
+  entry in Components describes.
 - `docs/guides/sessions.md` update for the new `daemon`
   sub-object, `taskstore_lost` recovery, and the worker config
   inheritance contract.

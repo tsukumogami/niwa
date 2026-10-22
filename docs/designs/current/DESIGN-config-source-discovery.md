@@ -525,9 +525,9 @@ niwa needs to (a) ship the plugin somewhere users can get it,
 (b) install it onto the user's machine without breaking the
 "no user action required" guarantee (PRD R25), and (c) honour
 opt-out for users who don't want niwa writing under
-`~/.claude/`. Four sub-decisions, each settled in its own
-parallel decision run, compose the answer; each records its
-alternatives and reasoning below:
+`~/.claude/`. Four sub-decisions, each settled on its own,
+compose the answer; each records its alternatives and
+reasoning below:
 
 **Sub-decision 5.1 — Distribution: embed in niwa binary via Go's `embed`.**
 Plugin source tree (manifest + skill markdown) is bundled into

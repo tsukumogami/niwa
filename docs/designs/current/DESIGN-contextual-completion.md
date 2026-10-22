@@ -30,8 +30,8 @@ rationale: |
   disambiguation strategy mirrors the existing `resolveContextAware` stderr
   hint and stays under bash V2's rendering threshold. Mirroring runtime in
   `-r` scoping prevents the "completion offers X, command refuses X" bug
-  flagged in Decision Drivers. Latency measurements (Lead 3 in the
-  exploration) showed raw calls stay under 5ms at realistic scale, so no
+  flagged in Decision Drivers. Latency measurements taken during
+  exploration showed raw calls stay under 5ms at realistic scale, so no
   caching layer is needed.
 ---
 
@@ -109,7 +109,7 @@ The architectural questions that remain open:
   The decoration must be an enhancement, not load-bearing — users on macOS
   default bash should still get usable completion.
 
-- **Latency budget under 100ms per tab press**: Lead 3 measurements show
+- **Latency budget under 100ms per tab press**: Exploration measurements show
   ~2ms cold start, ~3ms for a 500-workspace TOML, <5ms for scoped filesystem
   walks even at 100k repo dirs. The design must not introduce a code path
   that enumerates all repos across all instances across all workspaces — the
@@ -141,10 +141,9 @@ The architectural questions that remain open:
 
 ## Considered Options
 
-Eight decisions shape this design. Five were settled during exploration (cited
-to the relevant research file); three were evaluated with fresh decision-skill
-analysis during design (cited to the corresponding decision report). Each is
-listed with its alternatives, chosen option, and rationale.
+Eight decisions shape this design. Five were settled during exploration; three
+were evaluated with fresh analysis during design. Each is listed with its
+alternatives, chosen option, and rationale.
 
 ### Decision 1: Disambiguation strategy for `niwa go [target]`
 
@@ -201,7 +200,7 @@ question is whether to memoize reads.
 Raw calls per tab press. Revisit only if real-world measurements contradict
 the benchmarks.
 
-**Rationale:** Measured latency (Lead 3): Go cold-start + cobra init is ~2ms;
+**Rationale:** Measured latency: Go cold-start + cobra init is ~2ms;
 a 500-workspace TOML parses in ~3ms; scoped filesystem walks stay under 5ms
 even at 100k repo dirs. The only path that crosses the 100ms perceptibility
 bar is enumerating every repo across every instance across every workspace,
@@ -624,7 +623,7 @@ cobra prints one suggestion per line + :<directive> trailer
 shell wrapper renders candidates in the completion menu
 ```
 
-Per-tab-press cost (measured, Lead 3): ~2ms cold start, ~3ms for a
+Per-tab-press cost (measured during exploration): ~2ms cold start, ~3ms for a
 500-workspace TOML, <5ms for scoped filesystem walks even at 100k repo dirs.
 
 ### Completion coverage table (v1)
@@ -903,8 +902,7 @@ problems.
   `EnumerateInstances` sort order propagates through this design
   automatically.
 - **Cold-start latency:** if user reports surface sluggishness, add the
-  on-disk cache sketched in Lead 3's research (keyed by config.toml and
-  workspace-root mtimes). Data-layer functions are already factored for
+  an on-disk cache keyed by config.toml and workspace-root mtimes. Data-layer functions are already factored for
   easy memoization.
 - **Destructive-command footgun:** a follow-up design can add
   confirmation, an env-var gate, or completion suppression. Separable and
