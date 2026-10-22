@@ -38,7 +38,7 @@ Feature: prepare every instance for both agents
   interactive start, where a live check carries information nothing else can.
   The @codex-discovery scenario spends nothing: it renders a session's own
   prompt and reads it, so its gate is the binary alone and it skips only where
-  Codex is not installed. That one is deliberately the only coverage for what
+  Codex is not installed or, outside CI, has no `debug prompt-input`. That one is deliberately the only coverage for what
   it claims, since what a session resolves is not something an offline check
   can decide.
 
@@ -1264,8 +1264,9 @@ Feature: prepare every instance for both agents
   # than what niwa wrote. `codex debug prompt-input` renders the developer
   # message a session opens with, and its skills block names every skill the
   # session resolved and the file each was read from. It consults no credential
-  # and calls no model, so the gate is the binary on PATH and nothing else: a
-  # machine without Codex skips this, a machine without a login does not.
+  # and calls no model, so the gate is the binary on PATH and not a login: a
+  # machine without Codex, or with one too old to have the subcommand, skips
+  # this (outside CI), and a machine without a login does not.
   #
   # The second run is what makes the first one mean anything. It stands one
   # directory below the instance root, so a real, populated skills tree -- the
@@ -1280,6 +1281,7 @@ Feature: prepare every instance for both agents
   Scenario: a live Codex session at the instance root resolves the skills delivered there
     Given a clean niwa environment
     And the codex binary is on PATH
+    And the codex binary on PATH can render a session's prompt input
     And a local git server is set up
     And a fake claude for plugin pre-warming
     And a staged file ".claude-plugin/marketplace.json" with body:

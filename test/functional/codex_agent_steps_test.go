@@ -169,6 +169,7 @@ func registerCodexAgentSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^codex is available$`, codexIsAvailable)
 	ctx.Step(`^the codex binary is on PATH$`, theCodexBinaryIsOnPath)
 	ctx.Step(`^the codex binary on PATH is recent enough to record turn postures$`, theCodexBinaryOnPathIsRecentEnough)
+	ctx.Step(`^the codex binary on PATH can render a session's prompt input$`, theCodexBinaryOnPathCanRenderPromptInput)
 	ctx.Step(`^I render the skills a Codex session at "([^"]*)" resolves$`, iRenderTheSkillsACodexSessionResolves)
 	ctx.Step(`^the resolved skills include "([^"]*)"$`, theResolvedSkillsInclude)
 	ctx.Step(`^the resolved skills do not include "([^"]*)"$`, theResolvedSkillsDoNotInclude)
@@ -1954,7 +1955,7 @@ func theCodexSessionReachedReadyState(ctx context.Context) error {
 // prompt-input` renders the developer message a session would open with, and
 // its skills block names every skill the session resolved together with the
 // file each was read from. No credential is consulted and no model is called,
-// so the gate below is the binary and nothing else.
+// so the gates below are the binary and its subcommand, never a login.
 
 // codexPromptInputSkill is one entry from that block: the name a session would
 // invoke, and the file it came from. The file is what separates a delivered
@@ -1984,6 +1985,29 @@ func theCodexBinaryIsOnPath(ctx context.Context) (context.Context, error) {
 		return ctx, godog.ErrPending
 	}
 	return ctx, nil
+}
+
+// theCodexBinaryOnPathCanRenderPromptInput skips the discovery scenario when
+// the Codex on PATH has no `debug prompt-input` subcommand, which older
+// releases lack. The scenario tests what niwa delivers, so a host binary that
+// can't render the prompt is a reason to skip, not to fail. Codex itself is
+// asked, through its help for the subcommand, rather than its version being
+// compared against a guess. Under CI the missing subcommand fails the scenario
+// instead, so CI keeps enforcing it.
+func theCodexBinaryOnPathCanRenderPromptInput(ctx context.Context) (context.Context, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if exec.CommandContext(probeCtx, "codex", "debug", "prompt-input", "--help").Run() == nil {
+		return ctx, nil
+	}
+	reason := "the codex on PATH has no `debug prompt-input` subcommand"
+	if runningInCI() {
+		return ctx, fmt.Errorf("%s, which this scenario needs", reason)
+	}
+	// godog prints a skipped step without its error, so the reason is
+	// printed here.
+	fmt.Fprintf(os.Stderr, "skipping the scenario: %s\n", reason)
+	return ctx, fmt.Errorf("%s: %w", reason, godog.ErrSkip)
 }
 
 // codexPostureFloor is the oldest Codex the resume-posture scenario has been
