@@ -449,7 +449,12 @@ never-wider check can be added at this step with no second read; this
 unit uses only its `dispatch_id`, as `parent_dispatch_id`, and records
 how it was found as `parent_dispatch_source` (`anchor`, `cwd` or `none`).
 `--parent-from` takes the same checks as `show -C`: an empty, relative or
-nonexistent path exits 1 before anything is created. It exists because a
+nonexistent path exits 1 before anything is created. It's stricter than
+`-C` in three ways, since the dispatcher passes it on purpose: a path in
+no instance, an instance under a workspace root other than the
+dispatch's (`class.WorkspaceRoot`), and, when the working directory is
+already in a dispatched instance, a different instance, each exit 1. So
+`anchor` and `cwd` never disagree. It exists because a
 coordinator that runs `niwa dispatch` from the workspace root, as
 shirabe's does today, would otherwise record no parent. An instance with
 no record gives an empty `parent_dispatch_id` and `none`; a record that
@@ -563,9 +568,11 @@ from (refusing and rolling back only if that refuses or changes the level
 or grant) and writes the record into `<instance>/.niwa/authority.json`
 before launch. The record
 holds the schema name, the dispatch id, the parent session id, the parent
-dispatch id, the level and its source, both ceilings and their sources,
-the granted roles, and each granted authority with its sources in a fixed
-order. It's never rewritten and goes away with the instance. Claude
+dispatch id and how the parent was found (`parent_dispatch_source`), the
+level and its source, both ceilings and their sources, the granted
+roles, and each granted authority with its sources in a fixed order; a
+reader lists entries it can't hold under `unknown_grant`. It's never
+rewritten and goes away with the instance. Claude
 workers also get two telemetry attributes; nothing else about the launch
 changes.
 
@@ -626,6 +633,10 @@ type Decider int      // Session < Dispatcher < Person
 
 func ParseLevel(raw string) (*Level, error)          // trimmed; nil when blank
 func ParseAuthority(raw string) (Authority, error)   // trimmed, exact case
+// ParseNameList splits comma lists for --grant, --role and `config set
+// authority-ceiling`, trims entries and refuses an empty one; only
+// `config set` gives "none" a meaning (the empty list).
+func ParseNameList(raw []string) ([]string, error)
 
 type Layer string // "flag", "machine", "overlay", "workspace", "built-in"
 
@@ -672,7 +683,10 @@ type Record struct {
     GrantCeiling      []Authority; GrantCeilingSource Layer
     Roles             []string // name order
     Grant             []GrantEntry
-    UnknownGrant      []string // read-side only: well-formed names this build doesn't know
+    UnknownGrant      []RawGrantEntry // read-side only: entries this build can't hold
+}
+type RawGrantEntry struct {           // as stored, names unchecked against the vocabulary
+    Authority string; Sources []string
 }
 // Resolve fills the policy fields (identity fields are stamped by
 // dispatch at (8a)) and refuses with *LevelWiderError,
@@ -683,10 +697,14 @@ func Resolve(p Policy, r Request) (Record, error)
 // prints, `record: true` included; a no-record answer is built
 // separately with `record: false`.
 func (r Record) MarshalJSON() ([]byte, error)
-// ParseRecord is additive within v1: an unknown field is ignored, and a
-// grant entry, ceiling entry or source kind this build doesn't know is
-// kept out of Grant (so it is never held) and listed in UnknownGrant,
-// provided it matches the name pattern. A malformed record still fails:
+// ParseRecord is additive within v1: an unknown field is ignored; a
+// grant entry whose authority this build doesn't know, or whose sources
+// are all of unknown kinds, is kept out of Grant (so it is never held)
+// and listed in UnknownGrant as stored; an entry with at least one known
+// source stays in Grant with its known sources; an unknown name in
+// grant_ceiling is dropped and listed nowhere; an unknown
+// parent_dispatch_source reads as "none". Every name must still match
+// its pattern. A malformed record still fails:
 // not JSON, a schema other than v1, a missing or wrongly typed known
 // field, an unknown level, a name failing the pattern, or a bad id.
 func ParseRecord(b []byte) (Record, error)
@@ -785,7 +803,9 @@ private):
     {"authority": "merge-pr", "sources": ["role:coordinator"]},
     {"authority": "close-issue", "sources": ["dispatch", "role:coordinator"]}
   ],
-  "unknown_grant": []
+  "unknown_grant": [
+    {"authority": "teardown", "sources": ["dispatch"]}
+  ]
 }
 ```
 
@@ -793,16 +813,23 @@ v1 is additive. A later niwa may add fields, authority names and source
 kinds without changing the schema string; a reader ignores fields it
 doesn't know, never treats an unknown authority as held, and lists it
 under `unknown_grant`. Only renaming a field or changing what one means
-moves the schema to v2, and a v1 reader treats v2 as malformed. The
+moves the schema to v2, and a v1 reader treats v2 as malformed. A field
+added within v1 is optional, and a reader that knows it defaults it when
+an older niwa's record lacks it. The
 guide's held check reads `grant[].authority` only, so a v1 record with
 entries it doesn't know still answers for the ones it does.
 
-`niwa authority policy --json` prints `{"schema":
-"niwa.authority.policy/v1", ...}` with the effective level and grant
-ceilings, their sources, and the roles, under the same additive rule.
-When the overlay's ceiling names an authority the base ceiling lacks,
-the intersection drops it, and `policy` and `apply` print a warning
-naming the authority and the overlay.
+`niwa authority policy --json` prints one document under the same
+additive rule, with these top-level fields in this order: `schema`
+(`"niwa.authority.policy/v1"`), `workspace`, `overlay` and `machine`
+(each `{"level": <level or null>, "ceiling": <list or null>}`, null
+meaning not set), `level_ceiling`, `level_ceiling_source`,
+`grant_ceiling`, `grant_ceiling_source`, `roles` (a list of `{"name",
+"authorities", "outside_ceiling"}` in name order), `no_flag_dispatch`
+(`{"level", "level_source", "grant": []}`) and `warnings` (strings).
+When the overlay's or the machine's ceiling names an authority the base
+ceiling lacks, the intersection drops it, and `policy` and `apply` print
+a warning naming the authority and the layer.
 
 With no record: `{"schema": "niwa.authority.record/v1", "record": false,
 "grant": [], "level": "<no-flag level>", "level_source": "<layer>"}`;
@@ -871,8 +898,9 @@ way), `--parent-from <abs dir>`.
   instance's `authority` object) or `show --instance`. It should pass
   `--parent-from <its own instance>` when it dispatches successors, so
   `parent_dispatch_id` and the never-wider check find its record. That
-  change belongs with, or after, shirabe's rewrite of its coordinator's
-  dispatch path (shirabe#978 to #986), not as a separate edit; until then
+  change belongs with, or after, shirabe's coordinator record teardown
+  (tsukumogami/shirabe#978 to tsukumogami/shirabe#986), not as a separate
+  edit; until then
   a coordinator that dispatches from the workspace root records
   `parent_dispatch_source: none` and gets no cap, which is harmless while
   nothing enforces one.
@@ -941,7 +969,9 @@ checks, resolution and refusal before (3), `--grant a,b` splitting and
 an empty entry refused, `parent_dispatch_id` and `parent_dispatch_source`
 from the dispatcher's record (present, absent and invalid, through the
 working directory and through `--parent-from`, plus an empty, relative
-or missing `--parent-from` refused), the stderr line after
+or missing `--parent-from`, one in no instance, one in another
+workspace, and one disagreeing with the working directory's instance
+refused), the stderr line after
 (4), the (8a) re-check (a convention overlay or refreshed base config
 that refuses the request or changes the level or grant during
 provisioning refuses and rolls back; one that only narrows or widens the
