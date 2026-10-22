@@ -475,7 +475,8 @@ the wrong shape for a team's rule about who decides.
   name pattern is kept as stored and read as a declared source, never as
   `none`, so a later gate lets the grant decide: that fails narrow and
   blocks no dispatch. A stored v1 record carrying the reader-only
-  `newer-version` in any source field is malformed. Every field R17 lists, `parent_dispatch_source` and
+  `newer-version` as its `level_source`, `level_ceiling_source` or
+  `grant_ceiling_source` is malformed. Every field R17 lists, `parent_dispatch_source` and
   `unknown_grant` included, is required in v1, and niwa always writes
   them. A field added within v1 later is optional: a reader that knows it treats it
   as absent, with its documented default, in a record an older niwa
