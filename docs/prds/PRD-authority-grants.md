@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: In Progress
 problem: |
   A session `niwa dispatch` launches runs as the operator and settles every
   decision point the same way in every workspace, because nothing tells it
@@ -25,7 +25,7 @@ absorbed:
 
 ## Status
 
-Accepted
+In Progress
 
 Absorbed [BRIEF-authority-grants](docs/briefs/BRIEF-authority-grants.md); carried in Absorbed Brief.
 
