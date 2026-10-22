@@ -557,7 +557,7 @@ workspace, to ask a person before every decision.
 
 ### Decision 6: An authority name this niwa doesn't know, in config
 
-Resolved inline, from the merger's review.
+Resolved inline.
 
 The record already reads an unknown authority as present but not held
 (R17a). The workspace config is shared the same way records are: once a
