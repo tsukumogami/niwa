@@ -150,9 +150,10 @@ type GlobalSettings struct {
 	// AuthorityLevel caps the authority level of every dispatch on this
 	// machine; it can never make a resolved level wider. AuthorityCeiling is
 	// a list that narrows the workspace grant ceiling to the authorities in
-	// both. Both are stored untyped, so a wrong type reaches validation
-	// through the AuthorityLevel and AuthorityCeiling accessors instead of
-	// failing the whole config decode. AuthorityCeiling has no omitempty on
+	// both. Both are stored untyped, so a wrong type reaches
+	// authority.ValidateConfig (through AuthorityRawLayer, or the
+	// AuthorityLevel and AuthorityCeiling accessors) instead of failing the
+	// whole config decode. AuthorityCeiling has no omitempty on
 	// purpose: `authority_ceiling = []` limits the ceiling to nothing, and it
 	// must survive an unrelated `niwa config set` rewriting the file. A nil
 	// value (the key absent) is not written.

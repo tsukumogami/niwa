@@ -35,6 +35,10 @@ type Effective struct {
 // the narrowing layer that declares one, machine first.
 func EffectivePolicy(p Policy) Effective {
 	e := Effective{LevelCeiling: Autonomous, LevelCeilingSource: LayerBuiltIn}
+	// The tie rule lives in this order plus the strict > below: the first
+	// layer to reach the narrowest level keeps the source, so machine beats
+	// overlay beats workspace. Reordering the list or loosening the
+	// comparison changes which layer a record names.
 	found := false
 	for _, c := range []struct {
 		level *Level
@@ -71,6 +75,9 @@ func EffectivePolicy(p Policy) Effective {
 	sortAuthorities(ceiling)
 	e.GrantCeiling = ceiling
 
+	// Each narrowing layer is compared against the base list, not against
+	// what the layers before it left (PRD R13's wording): when the overlay
+	// and the machine both remove an authority, the machine is credited.
 	switch {
 	case p.MachineCeiling != nil && len(intersect(base, *p.MachineCeiling)) < len(base):
 		e.GrantCeilingSource = LayerMachine

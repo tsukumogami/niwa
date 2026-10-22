@@ -33,14 +33,6 @@ func LevelNames() []string {
 	return append([]string(nil), levelNames...)
 }
 
-// narrower returns the narrower of two levels.
-func narrower(a, b Level) Level {
-	if b > a {
-		return b
-	}
-	return a
-}
-
 // levelByName matches a stored level exactly, with no trimming: a record or a
 // config value is compared as written.
 func levelByName(s string) (Level, bool) {

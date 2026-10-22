@@ -30,6 +30,9 @@ var ErrNewerVersionRecord = errors.New("refusing to write an authority record re
 // 0600, through a temporary file opened O_EXCL|O_NOFOLLOW, synced, then
 // renamed over the final path, so a reader sees either no record or the
 // whole one. It refuses a record with NewerVersion set and writes nothing.
+// It exists before dispatch writes records so that refusal is pinned
+// alongside the reader that produces such records. Instances are only built
+// on Linux and macOS, where O_NOFOLLOW is available.
 func WriteAuthorityRecord(instancePath string, rec authority.Record) error {
 	if rec.NewerVersion != "" {
 		return ErrNewerVersionRecord

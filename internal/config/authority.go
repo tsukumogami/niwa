@@ -123,6 +123,11 @@ func AuthorityPolicy(cfg *WorkspaceConfig, overlay *WorkspaceOverlay, global *Gl
 // warning lines, for loaders that warn and carry on (niwa apply): each
 // invalid value, then the warnings AuthorityPolicy returns. The overlay roles
 // tombstone is reported here only, never by TombstoneWarnings.
+//
+// The apply pipeline calls it, so every loader that provisions through that
+// pipeline (apply, create, and the provisioning a dispatch runs) prints these
+// lines. Dispatch's own resolution step, which refuses on the invalid values
+// and prints the warnings before provisioning, is not wired yet.
 func AuthorityWarnings(cfg *WorkspaceConfig, overlay *WorkspaceOverlay, global *GlobalConfig) []string {
 	_, warnings, err := AuthorityPolicy(cfg, overlay, global)
 	var out []string
