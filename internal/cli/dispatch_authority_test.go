@@ -398,6 +398,21 @@ func TestDispatchAuthority_ParentLink(t *testing.T) {
 	}
 }
 
+// TestDispatchAuthority_KeepsTheWholeParentRecord: (2e) keeps the
+// dispatcher's whole record, not just its id, so a never-wider check at the
+// same step needs no second read.
+func TestDispatchAuthority_KeepsTheWholeParentRecord(t *testing.T) {
+	root, _ := authorityWorkspace(t, "", "")
+	parent := installedInstance(t, root, "test-ws-parent", parentRecord(t))
+	rec, source, err := dispatchParent(parent, root)
+	if err != nil || rec == nil {
+		t.Fatalf("dispatchParent = %v, %v", rec, err)
+	}
+	if rec.DispatchID != parentDispatchID || source != authority.ParentSourceCwd || rec.GrantCeilingSource != authority.LayerNone {
+		t.Errorf("kept %+v from %s", rec, source)
+	}
+}
+
 // TestDispatchAuthority_CodexParentFromWorkingDirectory: a Codex worker
 // inherits its dispatcher's session id variable, so the parent dispatch must
 // come from the working directory's instance, not from that variable.

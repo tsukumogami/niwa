@@ -78,6 +78,10 @@ type dispatchAuthority struct {
 	resolved  authority.Record
 	parentID  string
 	parentSrc string
+	// parent is the dispatcher's whole record, nil when there is none. Only
+	// its dispatch id is used today; it is kept so a never-wider check can
+	// compare the child against it at this step without reading it again.
+	parent *authority.Record
 }
 
 // authorityRefusal is a refusal whose message may span lines (one per
@@ -178,57 +182,61 @@ func resolveDispatchAuthority(warn io.Writer, cwd, workspaceRoot, wsConfigPath s
 	if err != nil {
 		return nil, authorityRefusal{err}
 	}
-	parentID, parentSrc, err := dispatchParent(cwd, workspaceRoot)
+	parent, parentSrc, err := dispatchParent(cwd, workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
-	return &dispatchAuthority{
+	auth := &dispatchAuthority{
 		request:   req,
 		policy:    policy,
 		overlay:   overlay,
 		resolved:  resolved,
-		parentID:  parentID,
 		parentSrc: parentSrc,
-	}, nil
+		parent:    parent,
+	}
+	if parent != nil {
+		auth.parentID = parent.DispatchID
+	}
+	return auth, nil
 }
 
 // dispatchParent finds the dispatcher's own record: through --parent-from
 // when given, else from the working directory, never from the session id
-// variable (a Codex worker inherits its dispatcher's). It returns the
-// record's dispatch id and how it was found, or "" and none when the
-// directory is in no instance or the instance has no record. A record that
-// exists but can't be read refuses: recording no parent for an instance that
-// has one would hide the link later checks follow.
-func dispatchParent(cwd, workspaceRoot string) (string, string, error) {
+// variable (a Codex worker inherits its dispatcher's). It returns the whole
+// record and how it was found, or nil and none when the directory is in no
+// instance or the instance has no record. A record that exists but can't be
+// read refuses: recording no parent for an instance that has one would hide
+// the link later checks follow.
+func dispatchParent(cwd, workspaceRoot string) (*authority.Record, string, error) {
 	cwdInstance, cwdInInstance, err := workspace.FindInstance(cwd)
 	if err != nil {
-		return "", "", refuse("resolving the working directory for the parent link: %v", err)
+		return nil, "", refuse("resolving the working directory for the parent link: %v", err)
 	}
 	instance, source := "", authority.ParentSourceNone
 	switch {
 	case dispatchParentFromSet:
 		anchor, err := checkParentFrom(dispatchParentFrom, workspaceRoot)
 		if err != nil {
-			return "", "", err
+			return nil, "", err
 		}
 		if cwdInInstance && cwdInstance.Instance != anchor.Instance {
-			return "", "", refuse("--parent-from %s is in instance %s, but this dispatch runs inside instance %s; the anchor must name the instance it runs in",
+			return nil, "", refuse("--parent-from %s is in instance %s, but this dispatch runs inside instance %s; the anchor must name the instance it runs in",
 				strconv.Quote(dispatchParentFrom), anchor.Instance, cwdInstance.Instance)
 		}
 		instance, source = anchor.Instance, authority.ParentSourceAnchor
 	case cwdInInstance:
 		instance, source = cwdInstance.Instance, authority.ParentSourceCwd
 	default:
-		return "", authority.ParentSourceNone, nil
+		return nil, authority.ParentSourceNone, nil
 	}
 	rec, found, err := workspace.ReadAuthorityRecord(instance)
 	if err != nil {
-		return "", "", refuse("the dispatching instance %s has an authority record that can't be used: %v; refusing to dispatch rather than record no parent", instance, err)
+		return nil, "", refuse("the dispatching instance %s has an authority record that can't be used: %v; refusing to dispatch rather than record no parent", instance, err)
 	}
 	if !found {
-		return "", authority.ParentSourceNone, nil
+		return nil, authority.ParentSourceNone, nil
 	}
-	return rec.DispatchID, source, nil
+	return &rec, source, nil
 }
 
 // checkParentFrom applies --parent-from's checks: the same as `niwa authority
