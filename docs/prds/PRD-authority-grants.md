@@ -131,7 +131,7 @@ the wrong shape for a team's rule about who decides.
   policy without each brief saying so.
 - As a workspace owner, I want to check what niwa made of my authority
   settings before anyone dispatches against them, so that a typo in a role
-  shows up as an error now rather than as a refusal later.
+  shows up as an error or a warning now rather than as a refusal later.
 - As a coordinating session handing off to a successor, I want to dispatch
   it with the `coordinator` role and have it read back merge, close and
   release, each attributed to the role, so that the grant needs no edit
@@ -157,7 +157,8 @@ the wrong shape for a team's rule about who decides.
   command that works whether I'm a Claude or a Codex session, so that I
   act on what I hold instead of guessing from my brief.
 - As the author of later gate or re-delegation work, I want a documented
-  record and lookup whose every failure reads as "not held", so that I can
+  record and lookup whose every failure reads as "not held" and as "no
+  record", so that I can
   build on it without parsing niwa's session files or making anything
   weaker than today.
 
@@ -372,7 +373,10 @@ the wrong shape for a team's rule about who decides.
   the dispatch
   with exit 1 naming it and the accepted values, checked with the same
   trimming and case rules as R11. Requests are never trimmed: a dispatch
-  either gets everything it asked for or launches nothing.
+  either gets everything it asked for or launches nothing. The one
+  exception is R11's: a `--role` whose role lists an authority name this
+  niwa doesn't know launches with the role's known authorities, and
+  dispatch's warning names both the role and the dropped name.
 - **R14a. Naming the parent explicitly.** `niwa dispatch --parent-from
   <abs dir>` finds the dispatcher's instance from `<abs dir>` instead of
   the working directory, with the same rules and checks as `niwa
@@ -488,8 +492,11 @@ the wrong shape for a team's rule about who decides.
   and `unknown_grant`. `newer-version` is a source only this case gives.
   `niwa authority decide` answers from that `strict`, with
   `source=newer-version` and `record=present`. After a version bump, then, an older and a newer niwa
-  on one host don't strand each other's seats, and reading the record as
-  granting nothing gives up no authority. A dispatch from such an
+  on one host don't stop each other's instances from dispatching, and
+  reading the record as granting nothing gives up no authority. A gate
+  that honours the grant will deny such an instance's gated actions until it
+  runs on a niwa that reads the newer version, which is the narrow side
+  to fail on. A dispatch from such an
   instance proceeds and records that `dispatch_id` as its
   `parent_dispatch_id` with its usual source (R17); the child inherits
   no grant from it.
@@ -655,7 +662,12 @@ the wrong shape for a team's rule about who decides.
   `level_source` describes resolution at dispatch and can differ from
   `level_ceiling_source` (R13, R16a), the additive versioning rule and
   `unknown_grant` (R17a), `--parent-from` and `parent_dispatch_source`
-  (R14a), and what the record does and doesn't guarantee. It says plainly
+  (R14a), and what the record does and doesn't guarantee. It gives gate
+  authors the model later gates follow (a present record decides, over
+  the exemption list; no record or any failure keeps today's behaviour),
+  the reference `niwa_has_record` check beside the held check, and that
+  a gate is rolled out with the workspace's ceiling and running sessions
+  re-dispatched. It says plainly
   that until a workspace adds an `[authority]` ceiling nobody can be
   granted anything, and that once it exists a successor gets a fresh
   grant with `--role coordinator` and no config edit, while merging
@@ -681,8 +693,9 @@ Declaring the policy
 - [ ] With no `[authority]` table and no machine keys, `niwa authority
   policy` prints level `autonomous` from `built-in`, an empty ceiling, no
   roles, and a no-flag dispatch resolving to `autonomous` with no grant.
-- [ ] Each of `level = "Strict"`, `ceiling = ["merge"]`, a role named
-  `Coord_1`, and a role naming `release` makes `niwa dispatch` and `niwa
+- [ ] Each of `level = "Strict"`, `ceiling = ["Merge"]`, `ceiling =
+  ["merge pr"]`, a role named `Coord_1`, and a role naming `Release`
+  makes `niwa dispatch` and `niwa
   authority policy` exit 1 with a message naming the key, the bad value
   and the accepted values, and makes `niwa apply` print that message as a
   warning and exit as it would without the bad value. `level = " strict "`
@@ -848,10 +861,15 @@ Read-back
   it, and the dispatch records a grant of `merge-pr` only, with `teardown`
   in neither `grant_ceiling` nor `grant`. `niwa dispatch --grant teardown`
   and `niwa config set authority-ceiling teardown` each exit 1 naming
-  `teardown` and the accepted values. A machine `authority_ceiling =
-  ["teardown"]` narrows the ceiling to nothing (a later `--grant
-  merge-pr` is refused naming the machine ceiling), and a ceiling entry
-  `Merge-PR` is still an invalid value.
+  `teardown` and the accepted values. The same holds for a base `ceiling
+  = ["merge"]` and a role naming `release`: each is dropped with a
+  warning and grants nothing. A machine `authority_ceiling =
+  ["teardown"]`, and separately `["merge"]`, narrows the ceiling to
+  nothing (a later `--grant merge-pr` is refused naming the machine
+  ceiling), and a ceiling entry `Merge-PR` is still an invalid value. An
+  unknown name in an overlay or machine ceiling prints only Decision 6's
+  "unknown name dropped" warning, not also R10's "names an authority the
+  base ceiling lacks".
 - [ ] After the dispatch, editing the workspace ceiling to empty and
   running `niwa apply` leaves `niwa authority show` for the existing
   dispatch unchanged.
@@ -932,7 +950,7 @@ Decision points at the two ends
 Edge cases and errors
 
 - [ ] A hand-edited personal config with `authority_level = "loose"`, and
-  separately `authority_ceiling = ["merge"]`, makes `niwa dispatch` and
+  separately `authority_ceiling = ["Merge"]`, makes `niwa dispatch` and
   `niwa authority policy` exit 1 naming the key and the value, with
   nothing created.
 - [ ] A `workspace.toml` with a TOML syntax error, and separately one that

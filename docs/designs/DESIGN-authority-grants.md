@@ -29,8 +29,8 @@ rationale: |
   side effect and (8a) the first point the instance exists, with rollback
   already covering it. A command-only read contract keeps every reader on
   niwa's own instance resolution and lets the storage change, and every
-  way it can fail reads as "not held", which leaves a later gate exactly
-  as strong as today's hook.
+  way it can fail reads as "not held" and as "no record", which leaves a
+  later gate exactly as strong as today's hook.
 upstream: docs/prds/PRD-authority-grants.md
 user_visible_surface: true
 decision_provenance: inline-resolved
@@ -114,7 +114,7 @@ pre-launch instance record.
    ceilings, role expansion and record validation.
 3. **The record exists before the worker's first command,** for Claude and
    Codex, detached and foreground, and survives resume (R17, R22).
-4. **Every failure reads as "not held"** to a reader outside niwa,
+4. **Every failure reads as "not held" and as "no record"** to a reader outside niwa,
    including a niwa that doesn't know the command (R23, R24).
 5. **No change to what a session can do.** argv, the permission mode,
    hooks and settings documents are untouched apart from two telemetry
@@ -471,7 +471,7 @@ recording an empty parent. A record with a later schema version is not
 "no record": dispatch takes its version-independent `dispatch_id` as
 `parent_dispatch_id` with the usual `cwd` or `anchor` source and
 proceeds, and refuses if even that doesn't parse, so an older niwa never
-records an empty parent for a newer niwa's seat.
+records an empty parent for an instance a newer niwa dispatched.
 
 `Resolve` returns the record's policy fields (level, ceilings, sources,
 roles, grant). Dispatch stamps the identity fields at (8a): the
@@ -900,9 +900,10 @@ the same document. `WriteAuthorityRecord` refuses a record with
 `NewerVersion` set, so none is ever stored. `schema`, in the
 `niwa.authority.record/v<N>` form, and `dispatch_id`, a UUID, are fixed
 across every version. That way
-an older and a newer niwa on one host don't strand each other's seats
-after a bump, and reading the record as granting nothing gives up no
-authority. A record that is actually malformed (not a JSON object, a
+an older and a newer niwa on one host don't stop each other's
+instances from dispatching after a bump, and reading the record as granting
+nothing gives up no authority; a gate honouring the grant denies that
+instance's gated actions until it reads the newer version, failing narrow. A record that is actually malformed (not a JSON object, a
 schema matching no version, a v1 record missing a required field) still
 fails closed. A field added within v1 is optional, and a reader that knows it defaults it when
 an older niwa's record lacks it. The
@@ -919,7 +920,8 @@ meaning not set), `level_ceiling`, `level_ceiling_source`,
 (`{"level", "level_source", "grant": []}`) and `warnings` (strings).
 When the overlay's or the machine's ceiling names an authority the base
 ceiling lacks, the intersection drops it, and `policy` and `apply` print
-a warning naming the authority and the layer.
+a warning naming the authority and the layer. A name this niwa doesn't
+know gets only Decision 6's dropped-name warning, not this one too.
 
 With no record: `{"schema": "niwa.authority.record/v1", "record": false,
 "grant": [], "level": "<no-flag level>", "level_source": "<layer>"}`;
@@ -987,6 +989,12 @@ way), `--parent-from <abs dir>`.
   instance; a gate shipped some other way (as a plugin hook, or through a
   symlinked tree) resolves outside the instance and reads as not held,
   so such a gate has to be installed into the instance to honour a grant.
+  Since every dispatch writes a record, a gate adopted in a workspace
+  that hasn't set a ceiling, or reading sessions dispatched before it
+  did, would deny merges to exempt sessions that can merge today. So the
+  gate is rolled out together with the workspace's `[authority]` ceiling
+  and roles, and sessions already running are re-dispatched; the guide
+  says so.
 - **A coordinator's posture read.** The same command with `-C` set to the
   instance root it found, and the same held check, so its prediction
   matches the gate. With no niwa it predicts not held. To read the
@@ -1201,8 +1209,8 @@ seconds before their first filesystem call, open the record without
 following a final symlink and without blocking, require a regular file,
 read at most 64 KiB, and print only after a complete, successful parse,
 so a timeout or error leaves stdout empty. `ParseRecord` validates every
-string field, not only the vocabularies: `dispatch_id` and
-`parent_dispatch_id` are UUIDs or empty, `parent_session_id` passes the
+string field, not only the vocabularies: `dispatch_id` is a UUID,
+`parent_dispatch_id` is a UUID or empty, `parent_session_id` passes the
 existing session-id check or is empty, each role and each authority name
 (known or not) matches the name pattern, each source is `dispatch` or
 `<kind>:<valid name>`, and the known grant is in R3's order. An unknown
