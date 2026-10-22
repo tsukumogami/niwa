@@ -427,11 +427,13 @@ the wrong shape for a team's rule about who decides.
   detect them.
 - **R25. Telemetry carries it as observability.** A dispatch whose agent
   receives niwa's lineage resource attributes (Claude Code today) adds
-  `niwa.authority.level=<level>` and `niwa.authority.grant=<a,b,...>` (the
-  granted authorities in R3's order, or `none`) to the attributes it sends
-  the worker, alongside the lineage attributes it already sends. An agent that receives no lineage attributes (Codex today) gets
-  none, and its record carries the same values. Telemetry is best-effort
-  and isn't the record.
+  `niwa.authority.level=<level>` and `niwa.authority.grant=<a/b/...>` (the
+  granted authorities in R3's order joined with `/`, or `none`) to the
+  attributes it sends the worker, alongside the lineage attributes it
+  already sends. The separator is `/` because `OTEL_RESOURCE_ATTRIBUTES`
+  separates entries with commas. An agent that receives no lineage
+  attributes (Codex today) gets none, and its record carries the same
+  values. Telemetry is best-effort and isn't the record.
 
 **Answering a decision point**
 
@@ -807,7 +809,7 @@ Unchanged behaviour
 - [ ] A Claude dispatch whose environment already carries
   `OTEL_RESOURCE_ATTRIBUTES=team=x` sends the worker a value holding
   `team=x`, the existing lineage attributes, `niwa.authority.level` and
-  `niwa.authority.grant=merge-pr,close-issue` for a dispatch granted
+  `niwa.authority.grant=merge-pr/close-issue` for a dispatch granted
   those two.
 
 ## Out of Scope

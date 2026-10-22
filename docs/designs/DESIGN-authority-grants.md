@@ -383,7 +383,11 @@ rename. The rollback armed at (7) already removes the instance directory,
 record included, on any later failure. Add `niwa.authority.level` and
 `niwa.authority.grant` to `lineageInputs`, so `composeDispatchLineage`
 emits them beside the existing attributes under its existing validation,
-in both the launch environment and the settings document. Nothing from
+in both the launch environment and the settings document. The grant value
+joins authorities with `/` (`merge-pr/close-issue`), which the composer's
+value pattern `^[A-Za-z0-9._:/@-]{1,128}$` already admits; a comma would
+both fail that pattern and break the comma-separated variable, dropping
+the lineage attributes beside it. Nothing from
 (9) on reads the resolved authority, so argv, the permission mode and the
 settings document are untouched (R28 to R30).
 
@@ -686,8 +690,10 @@ alone.
 `ParseRecord`, and `Decide` with a fake `Declarations`. The three config
 layers, `ValidateConfig` wired to refuse in the authority commands and
 warn in `apply`, the overlay tombstone warning, `niwa config set/unset
-authority-level|authority-ceiling`, and `niwa authority policy`. No change
-to dispatch.
+authority-level|authority-ceiling`, and `niwa authority policy`. Includes
+the empty-list round trip (machine and overlay `[]` stay empty through
+decode and a later `niwa config set`) and `ParseRecord`'s field
+validation. No change to dispatch.
 
 Deliverables: `internal/authority/*.go`, `internal/config` changes,
 `internal/cli/config_authority.go`, `internal/cli/authority.go` (`policy`).
@@ -698,8 +704,9 @@ The three flags, the fail-closed workspace load and overlay load at (2b),
 resolution and refusal before (3c), `parent_dispatch_id`, the stderr line,
 the record at (8a), and the lineage attributes. Unit tests with the
 existing dispatch fakes; functional scenarios for every refusal (nothing
-created, no prompt), the record's contents, and an unchanged argv and
-settings document.
+created, no prompt), the record's contents, a failed record write rolling
+back with no launch, the `/`-joined grant attribute surviving beside the
+existing lineage attributes, and an unchanged argv and settings document.
 
 Deliverables: `internal/cli/dispatch.go`, `internal/cli/dispatch_lineage.go`,
 `internal/workspace/authority_record.go` (write).
@@ -708,8 +715,11 @@ Deliverables: `internal/cli/dispatch.go`, `internal/cli/dispatch_lineage.go`,
 
 `FindInstance`, `ReadAuthorityRecord`, `niwa authority show` and `decide`
 with every selector, `-C`, the no-record document, the watchdog and the
-safe open (FIFO, symlink, oversized and unreadable fixtures), and the
-`authority` object in `niwa list --json`. Functional tests: a fake agent
+safe open (FIFO, symlink, oversized and unreadable fixtures), records
+with control characters in string fields, a planted `.niwa` marker in a
+repository, empty, relative and missing `-C` values, a mapping whose
+`instance_path` points outside the workspace, and the `authority` object
+in `niwa list --json`. Functional tests: a fake agent
 reading its own record as its first command (Claude and Codex, detached and
 foreground, root, repo and worktree, with an inherited session id), the
 decide-driven marker test at both ends, and the bounded-read and
@@ -724,8 +734,10 @@ Deliverables: `internal/workspace/authority_record.go` (read, find),
 coverage, the R8a example, the JSON document and schema, the selection
 order and `-C`, the no-record answer, the held rule and the reference
 check, the settle rule, R4's combination, and what the record does and
-doesn't guarantee. A CI test runs the guide's held check against real
-`show` output and against each failure. The one-time live check with a
+doesn't guarantee, including that a gate only ever lifts a verdict on a
+held authority and never denies on "not held". A CI test runs the guide's
+held check and its exact-line `decider=session` check against real `show`
+and `decide` output and against each failure. The one-time live check with a
 real Claude Code session is recorded in the implementing pull request.
 
 Deliverables: `docs/guides/authority-grants.md`, the contract test, and
@@ -736,7 +748,112 @@ Phases 2 and 3 depend on Phase 1; Phase 3's functional tests need Phase
 
 ## Security Considerations
 
-PLACEHOLDER
+This feature declares and records authority; it doesn't enforce it. A
+dispatched session runs as the operator and can read and edit every file
+the operator can, including its own instance's authority record. Nothing
+in this design stops it from doing so, and nothing here claims to. Making
+the record tamper-proof, scoping credentials and wrapping commands are
+separate, later work. What this design does promise is that it makes
+nothing weaker than today, that a later gate reading the record can't be
+led into failing open by this unit's behaviour, and that no input reaches
+a path, a shell or a terminal unsafely.
+
+**Inputs and validation.** Every authority value is checked against a
+closed set after trimming, with exact lowercase matching: three levels,
+three authorities, and role and decision point names matching
+`^[a-z][a-z0-9-]{0,63}$`. No flag or config value builds a path or reaches
+a shell. Messages that quote a bad value print it quoted and escaped, so a
+hand-edited value with control bytes can't paint the terminal. A workspace
+config that exists but can't be read, an overlay the workspace state
+records but that's missing or unparseable, and an invalid machine value
+all refuse the dispatch rather than fall back, because a silent fallback
+would widen policy on the machine that has the problem.
+
+**Empty lists are real limits.** `authority_ceiling = []` and an overlay
+`ceiling = []` mean nothing is grantable, not "unset". The machine field
+is stored so that an empty list survives decoding and every later rewrite
+of the personal config (no `omitempty` on it), and the overlay field
+decodes `[]` to a present, empty list. A round-trip test sets `none`, runs
+an unrelated `niwa config set`, and checks the ceiling is still empty.
+
+**Writing the record.** The record is written at (8a) through a temp file
+created with `O_EXCL|O_NOFOLLOW` in the new instance's `.niwa/`, synced and
+renamed, with mode 0600; it is not written with the dispatch marker's
+plain writer. A failed write, or a record that would exceed the reader's
+64 KiB cap, fails the dispatch and triggers the rollback, so no worker is
+ever launched without its record. The record holds no secret, but the
+design doesn't claim it's private from other local users: the instance
+directory keeps the mode provisioning gives it.
+
+**Reading the record.** `show` and `decide` arm a watchdog of about two
+seconds before their first filesystem call, open the record without
+following a final symlink and without blocking, require a regular file,
+read at most 64 KiB, and print only after a complete, successful parse,
+so a timeout or error leaves stdout empty. `ParseRecord` validates every
+string field, not only the vocabularies: `dispatch_id` and
+`parent_dispatch_id` are UUIDs or empty, `parent_session_id` passes the
+existing session-id check or is empty, each role matches the role
+pattern, each source is `dispatch` or `role:<valid name>`, and the grant
+is in R3's order. A hand-edited record therefore can't put control
+characters in front of an operator running `niwa list` or `show`. Error
+text and `niwa list`'s per-instance `error` name a failure class and never
+echo file contents or the record path. `--instance` names go through the
+existing name validation and instance enumeration before they're joined
+to a path, and the `instance_path` a session mapping holds is accepted for
+`--session` only if it's an instance directly under the workspace root.
+Neither command writes anything, makes a network call or starts a
+process.
+
+**Anchoring a hook.** Cloned repositories are untrusted content, and a
+directory that carries its own `.niwa` marker could be mistaken for an
+instance. `FindInstance` therefore accepts only an instance that sits
+directly under a workspace root (or a niwa worktree of one), and
+discovers the workspace root from that instance, not from the nearest
+`workspace.toml`. An empty, relative or nonexistent `-C` argument is an
+error, never a fallback to the working directory. The guide tells hook
+authors to anchor on the instance's own hook copy, to check that `$0` is
+absolute, and to pass the anchor after `-C` as an absolute path.
+
+**Failing toward today's behaviour.** Every failure reads as "not held": a
+missing or older niwa, a missing `jq`, a non-zero exit, help text, an
+unknown schema, a malformed or unreadable record, or the watchdog. The
+guide states that a gate may use the lookup only to lift a verdict it has
+already reached on its own text match, and only on a held authority plus
+an exact `decider=session` line; it must never treat "not held" as a
+reason to deny. The guide ships exact-match checks for both, and niwa's CI
+runs them against real and failing output. With no record, `decide`
+answers from the level a no-flag dispatch would get and marks the source,
+because the usual caller then is the operator's own session.
+
+**Supply chain and dependencies.** No new Go module is added; the reader
+uses the standard library. `jq` is a test-time tool for niwa and a
+runtime tool only for hook authors, and a missing `jq` reads as not held.
+The overlay is a git clone of the organization's overlay repository. It
+can narrow the level and ceiling and can't declare roles, so a compromised
+overlay can at worst refuse dispatches or reduce grants. Its `roles`
+tombstone and unknown keys are only warned about, never evaluated.
+
+**Data exposure.** The record holds the dispatch id, the parent session
+and dispatch ids, the level, the ceilings, the roles and the grants with
+their sources: no credentials, prompt text or paths. Dispatch's stderr
+line uses the same closed vocabulary. The two telemetry attributes go to
+the worker's configured collector for agents that receive lineage
+attributes and reveal which authorities a session holds; they're
+best-effort and aren't the record.
+
+**Residual risks accepted.** A session can edit its own record, the
+workspace state that names the overlay, and its parent linkage (it can
+dispatch from outside its instance and so record no parent), so later
+never-wider work must not treat `parent_dispatch_id` as a security
+boundary. A session can pass another session's id to `--session`. A
+session that corrupts its own record blocks its own child dispatches. A
+record states what was resolved at dispatch and doesn't follow later
+policy changes; provisioning can refresh config after resolution; a stale
+overlay clone can carry an older narrowing than its remote; and an older
+niwa that rewrites the personal config drops the machine keys, which
+`niwa authority policy` then shows as `not set`. All of these sit inside
+the boundary the feature states: until a separate effort hardens
+enforcement, anything running as the operator holds the operator's rights.
 
 ## Consequences
 
