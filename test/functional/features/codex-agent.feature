@@ -1199,6 +1199,7 @@ Feature: prepare every instance for both agents
     Given a clean niwa environment
     And codex is available
     And the Codex sandbox can run here
+    And the Codex default model is available to this login
     And a local git server is set up
     And a source repo "app" exists
     And a config repo "ws" exists with body:

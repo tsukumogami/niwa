@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -175,6 +176,7 @@ func registerCodexAgentSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the resolved skills do not include "([^"]*)"$`, theResolvedSkillsDoNotInclude)
 	ctx.Step(`^the resolved skill "([^"]*)" was read from a file under "([^"]*)"$`, theResolvedSkillWasReadFromAFileUnder)
 	ctx.Step(`^the Codex sandbox can run here$`, theCodexSandboxCanRunHere)
+	ctx.Step(`^the Codex default model is available to this login$`, theCodexDefaultModelIsAvailable)
 	ctx.Step(`^I run codex exec from "([^"]*)" with prompt:$`, iRunCodexExecFrom)
 	ctx.Step(`^I start an interactive codex session at "([^"]*)" under a pty$`, iStartInteractiveCodexAt)
 	ctx.Step(`^the codex session output shows no trust or approval prompt$`, theCodexSessionShowsNoTrustPrompt)
@@ -1851,6 +1853,95 @@ func theCodexSandboxCanRunHere(ctx context.Context) (context.Context, error) {
 		return ctx, godog.ErrPending
 	}
 	return ctx, nil
+}
+
+// codexModelProbeTimeout bounds the one call theCodexDefaultModelIsAvailable
+// makes. Codex has no command-line switch that caps the built-in provider's
+// retries, so the bound and the kill are what keep the probe short.
+const codexModelProbeTimeout = 20 * time.Second
+
+// codexModelNotFound matches the model-not-available answer, the 404 the
+// provider gives a login that can't use the model Codex asked for, and
+// captures the model's name.
+var codexModelNotFound = regexp.MustCompile("The model `([^`]+)` does not exist or you do not have access to it")
+
+// theCodexDefaultModelIsAvailable skips the file-write scenario outside CI when
+// the login can't use the model Codex defaults to, which an older local Codex
+// can still name after the provider has retired it. The scenario tests what
+// niwa prepared, and a session that never gets a model turn says nothing about
+// that. One short `codex exec` is made, killed at its first answer or at
+// codexModelProbeTimeout, and only the model-not-available 404 skips: any
+// other error, a timeout or a plain exit lets the scenario run and fail as it
+// would have. Under CI there is no probe, so CI runs the scenario unchanged.
+// The probe's output is matched here and never printed.
+func theCodexDefaultModelIsAvailable(ctx context.Context) (context.Context, error) {
+	if runningInCI() {
+		return ctx, nil
+	}
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	dir, err := os.MkdirTemp(s.homeDir, "codex-model-probe-")
+	if err != nil {
+		return ctx, fmt.Errorf("creating the model probe directory: %w", err)
+	}
+	defer os.RemoveAll(dir)
+
+	probeCtx, cancel := context.WithTimeout(ctx, codexModelProbeTimeout)
+	defer cancel()
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return ctx, fmt.Errorf("creating the model probe pipe: %w", err)
+	}
+	defer pr.Close()
+	cmd := exec.CommandContext(probeCtx, "codex", "exec", "--skip-git-repo-check", "--color", "never",
+		"-s", "read-only", "Reply with the single word ok.")
+	cmd.Dir = dir
+	cmd.Env = codexLiveEnv(s)
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+	if err := cmd.Start(); err != nil {
+		pw.Close()
+		return ctx, nil
+	}
+	pw.Close()
+
+	model := make(chan string, 1)
+	go func() {
+		defer close(model)
+		scanner := bufio.NewScanner(pr)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		saw404 := false
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.Contains(line, "unexpected status 404") {
+				saw404 = true
+			}
+			if m := codexModelNotFound.FindStringSubmatch(line); m != nil && saw404 {
+				model <- m[1]
+				return
+			}
+		}
+	}()
+	var missing string
+	select {
+	case missing = <-model:
+	case <-probeCtx.Done():
+	}
+	// The answer is in, or the bound has passed: either way the probe is done,
+	// and killing it here is what stops Codex retrying.
+	cancel()
+	pr.Close()
+	_ = cmd.Wait()
+	if missing == "" {
+		return ctx, nil
+	}
+	// godog prints a skipped step without its error, so the reason is
+	// printed here.
+	reason := fmt.Sprintf("the Codex default model %q is not available to this login", missing)
+	fmt.Fprintf(os.Stderr, "skipping the scenario: %s\n", reason)
+	return ctx, fmt.Errorf("%s: %w", reason, godog.ErrSkip)
 }
 
 func iRunCodexExecFrom(ctx context.Context, loc string, prompt *godog.DocString) (context.Context, error) {
