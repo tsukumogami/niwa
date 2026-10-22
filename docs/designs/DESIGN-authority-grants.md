@@ -363,13 +363,16 @@ clone exists locally and treated as absent when it doesn't. At (2e) the
 state is the workspace root's. Treating an uncloned convention overlay
 as absent would be the silent widening rejected below if nothing caught
 it, so dispatch re-checks at (8a) (PRD R16a): it calls the resolver with
-the new instance's own state (falling back to the overlay (2e) used when
-that state records none, which happens when provisioning couldn't read
-the overlay's commit), re-reads the config provisioning may have
-refreshed, and resolves the same request again. If that refuses, or the
-level or grant differs from (2e)'s, the dispatch refuses and the armed
+the new instance's own state, whose convention branch now finds a clone
+provisioning just made; only when that state records no overlay URL and
+the convention branch finds none either (provisioning couldn't read the
+overlay's commit) does it fall back to the overlay (2e) used. It
+re-reads the config provisioning may have refreshed and resolves the
+same request again. If that refuses, or the level (narrower or wider) or
+the grant differs from (2e)'s, the dispatch refuses and the armed
 rollback removes the instance; otherwise the record takes the second
-resolution's ceilings and sources. So the record never claims a wider
+resolution's two ceilings and their sources, and keeps (2e)'s level,
+level source and grant, which R19's line printed. So the record never claims a wider
 ceiling than the instance was built from. `policy` and the no-record
 level have no such re-check and can show a wider policy than a dispatch
 ends up with when a convention overlay isn't cloned yet.
@@ -458,8 +461,9 @@ re-checks the policy against what the new instance was built from, as
 Decision 3 describes: it resolves the same request against the
 instance's applied overlay and the config provisioning may have
 refreshed, refuses (and the armed rollback removes the instance) if that
-refuses or changes the level or grant, and otherwise keeps that
-resolution's ceilings and sources. Then it stamps the identity fields and
+refuses or changes the level or grant, and otherwise takes that
+resolution's ceilings and their sources while keeping (2e)'s level, level
+source and grant. Then it stamps the identity fields and
 writes the record to
 `<instance>/.niwa/authority.json` with mode 0600 through a temp file and
 rename. The rollback armed at (7) already removes the instance directory,
@@ -704,7 +708,7 @@ returns the outermost valid instance containing `dir`, using the same
 marker checks `ClassifyCwd` uses but resolving symlinks first and
 requiring the candidate to be an instance the workspace root enumerates;
 `ClassifyCwd` itself is unchanged, so `destroy`, `apply` and dispatch see
-the paths they see today. `ResolveAuthorityOverlay(root, configSourceURL)`
+the paths they see today. `ResolveAuthorityOverlay(stateDir, configSourceURL)`
 mirrors provisioning's overlay branches (Decision 3). The session-id and
 dispatch-id patterns that `internal/cli` holds today
 (`parentSessionPattern`, `dispatchIDPattern`) move into
@@ -862,7 +866,9 @@ the three flags, the (2e) step with the fail-closed config and overlay
 checks, resolution and refusal before (3), `parent_dispatch_id` from the
 dispatcher's record (present, absent and invalid), the stderr line after
 (4), the (8a) re-check (a convention overlay or refreshed base config
-that narrows the policy during provisioning refuses and rolls back), the
+that refuses the request or changes the level or grant during
+provisioning refuses and rolls back; one that only narrows or widens the
+ceiling is recorded), the
 record at (8a), and the lineage attributes. Unit tests with the existing dispatch
 fakes; functional scenarios for every refusal (nothing created, no
 prompt), the record's contents, a failed record write rolling back with

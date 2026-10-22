@@ -348,14 +348,15 @@ the wrong shape for a team's rule about who decides.
   after authority is resolved. Before writing the record, dispatch
   resolves the same request again against the config and overlay the new
   instance was built from. If that resolution refuses the request, or
-  gives a different level or grant than the first one, the dispatch exits
+  gives a different level (narrower or wider) or grant than the first
+  one, the dispatch exits
   1 naming the setting that changed, the new instance is removed, nothing
   is written and nothing launches. By then the prompt may have been taken,
   the reclamation sweep may have run, and R19's line has printed; this is
   the one refusal that comes that late. Otherwise the record carries this
-  second resolution's ceilings and sources, so it never claims a wider
-  ceiling than the instance was built from, while the level and grant
-  stay the ones R19's line printed.
+  second resolution's two ceilings and their sources, so it never claims
+  a wider ceiling than the instance was built from, while the level, its
+  source and the grant stay the ones R19's line printed.
 
 **Recording and reading back**
 
@@ -939,9 +940,10 @@ Unchanged behaviour
 - Dispatch resolves against the workspace config on disk when it starts.
   Provisioning can refresh that config, or bring in an overlay, after
   that; R16a re-checks before writing the record, which makes this the
-  one refusal that can come after the prompt and the reclamation sweep. A
-  policy that widened during the dispatch only takes effect on the next
-  one. `niwa authority policy` and the no-record answer have no such
+  one refusal that can come after the prompt and the reclamation sweep.
+  A change that would alter the dispatch's level, in either direction,
+  or its grant refuses that dispatch; a ceiling that only widened is
+  recorded, and the wider ceiling is available to the next dispatch. `niwa authority policy` and the no-record answer have no such
   re-check, so a convention overlay that isn't cloned yet can make them
   show a wider policy than a dispatch would end up with.
 - A niwa binary older than this feature ignores `[authority]` with an
