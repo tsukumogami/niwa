@@ -33,10 +33,9 @@ them: the pure package every caller shares, the record's storage and the
 dispatch path that writes it, the read commands that consume the record, and
 the guide and contract tests that pin the read format. Dispatch's refusal plus
 its record is already the first end-to-end slice, so a separate stub skeleton
-would only add a throwaway layer. Everything lands in one pull request under
-the repository's default consolidated delivery preference; no split branch
-fires, since there's one repository, no merge gate, and none of the pieces is
-useful to an operator without the others.
+would only add a throwaway layer. Everything lands in one pull request; no
+split applies, since there's one repository, no merge gate, and none of the
+pieces is useful to an operator without the others.
 
 ## Issue Outlines
 
@@ -48,12 +47,12 @@ useful to an operator without the others.
 
 _Package `internal/authority` (pure, no I/O, no niwa imports)_
 
-- [ ] `ParseLevel` and `ParseAuthority` trim whitespace, match exact lowercase, return nil for a blank level, and reject anything outside `autonomous|supervised|strict` and `merge-pr|close-issue|cut-release`; table tests pass, including a mixed-case and an padded input.
+- [ ] `ParseLevel` and `ParseAuthority` trim whitespace, match exact lowercase, return nil for a blank level, and reject anything outside `autonomous|supervised|strict` and `merge-pr|close-issue|cut-release`; table tests pass, including a mixed-case and a padded input.
 - [ ] `Resolve` returns narrowest-wins level and grant ceiling across workspace, overlay, machine and request, with a source for each; level-ceiling ties resolve to `machine`, then `overlay`, then `workspace`; grant-ceiling source is `machine` if the machine list removed anything, else `overlay` if the overlay list did, else `workspace`; with no level anywhere the level is `autonomous` (R13).
 - [ ] `Resolve` returns `*LevelWiderError`, `*OutsideCeilingError` (listing every offending authority with its route, direct or `role:<name>`) and `*UnknownValueError` for a wider level, an authority outside the ceiling, and an unknown authority or role; tests assert each error type and its message content.
-- [ ] `Resolve` de-duplicates roles and sources, orders grants in R3 order with `dispatch` before roles by name, and refuses a request whose encoded record exceeds 64 KiB.
-- [ ] `EffectivePolicy` returns the level ceiling and grant ceiling with their sources; an absent base ceiling yields an empty grant ceiling (nothing grantable).
-- [ ] Record JSON encoding matches the design's `niwa.authority.record/v1` document field for field; `ParseRecord` round-trips a valid record.
+- [ ] `Resolve` de-duplicates roles and sources, lists roles in name order, orders grants in R3 order with `dispatch` before roles by name, and refuses a request whose encoded record, with the identity fields at their maximum lengths, exceeds `authority.MaxRecordBytes` (64 KiB), the same constant the reader uses.
+- [ ] `EffectivePolicy` returns the level ceiling and grant ceiling with their sources; an absent base ceiling yields an empty grant ceiling (nothing grantable); base ceiling of all three, overlay `["merge-pr","close-issue"]` and machine `["merge-pr","cut-release"]` give `merge-pr` from `machine`.
+- [ ] `Record.MarshalJSON` writes the one document the file stores and `show --json` prints, with keys in this order: `schema`, `record` (always `true`), `dispatch_id`, `parent_session_id`, `parent_dispatch_id`, `level`, `level_source`, `level_ceiling`, `level_ceiling_source`, `grant_ceiling`, `grant_ceiling_source`, `roles`, `grant`; a test compares the bytes against a golden document, and `ParseRecord` round-trips it.
 - [ ] `ParseRecord` rejects with a test each: an unknown level, an unknown authority, a bad schema, a `dispatch_id` or `parent_dispatch_id` that is neither a UUID nor empty, a `parent_session_id` failing the session-id pattern, a role not matching `^[a-z][a-z0-9-]{0,63}$`, a source that is not `dispatch` or `role:<valid name>`, a grant out of R3 order, and a field containing control characters.
 - [ ] `Decide` with no declaration returns decider/author_exclusion `session`/`off` at `autonomous`, `dispatcher`/`on` at `supervised` and `person`/`on` at `strict`, with `Source` equal to the level's source, and appends ` (no dispatch record)` to `Source` when `noRecord` is true; `ValidPoint` accepts `a`, `merge-2` and a 64-character name and rejects `Merge_Now`, `2merge`, `-merge`, an empty name and a 65-character name.
 - [ ] Declaration-seam table rows, each asserting decider, author_exclusion and source: a declaration of `dispatcher`/`off` for `merge-own-pr` at `autonomous` (source `workspace`) returns `dispatcher`/`off`/`declaration`; the same declaration at `strict` (source `flag`) returns `person`/`on`/`flag`; at `supervised` (source `workspace`) returns `dispatcher`/`on`/`workspace`; a declaration of `person`/`on` at `autonomous` returns `person`/`on`/`declaration`; a declaration for `merge-own-pr` leaves `accept-prd` at `session`/`off` under `autonomous`.
@@ -63,8 +62,10 @@ _Config layers and validation_
 
 - [ ] `[authority]` in the base `workspace.toml` decodes `level`, `ceiling` and `roles.<name>.authorities`; the overlay `[authority]` decodes `level` and `ceiling` and a tombstone `roles`; `MergeWorkspaceOverlay` leaves authority untouched, and a test shows base, overlay and machine reach `Resolve` as three separate inputs.
 - [ ] An overlay can only narrow: an overlay `level` wider than base, or an overlay `ceiling` entry outside the base ceiling, does not widen policy, and `niwa authority policy` reports the narrowest value with source `overlay` where the overlay narrowed it.
-- [ ] An overlay `[authority.roles]` is reported by `config.AuthorityWarnings` as having no effect and does not change any resolved value.
-- [ ] An unknown key inside a base or overlay `[authority]` table (for example `ceilng`) and an unknown `authority_*` key under `[global]` are reported as invalid values by `ValidateConfig`, not as the ordinary unknown-key warning.
+- [ ] An overlay `[authority.roles]` is reported once, by `config.AuthorityWarnings` (not also by `TombstoneWarnings`), as having no effect, and does not change any resolved value.
+- [ ] An unknown key inside a base or overlay `[authority]` table (for example `ceilng`) and an unknown `authority_*` key under `[global]` reach `ValidateConfig` through each layer's `UnknownKeys` (the overlay and global parsers decode with `toml.Decode` to see them) and are reported as invalid values, and the base parser's generic "unknown config field" warning no longer lists them, so each is reported exactly once.
+- [ ] A wrong-typed value (`ceiling = "merge-pr"`, `level = 3`, `authority_ceiling = "x"`) reaches `ValidateConfig` as an invalid value rather than failing the config decode: `niwa apply` completes with a warning, and `niwa authority policy` exits 1 naming the key.
+- [ ] `workspace.ResolveAuthorityOverlay` follows provisioning's branches with a test each: `NoOverlay` in the root's `.niwa/instance.json` gives no overlay; a recorded `overlay_url` with a present clone gives that overlay, and with a missing or unparseable clone returns an error naming `niwa apply`; no recorded URL and a convention clone present locally gives the convention overlay; no recorded URL and no convention clone gives no overlay.
 - [ ] `ValidateConfig` errors name the key, the (quoted, escaped) value and the accepted values; a value containing control bytes does not reach the output unescaped.
 - [ ] Empty-list round trip: `authority_ceiling = []` in `[global]` and an overlay `ceiling = []` decode to a present, empty list (nothing grantable, not unset); `niwa config set authority-ceiling none`, then an unrelated `niwa config set`, leaves the file with `authority_ceiling` still empty and `policy` still showing an empty machine ceiling.
 - [ ] `GlobalSettings` accessors for `authority_level` and `authority_ceiling` return an error on an invalid value, mirroring `DispatchPermissionMode()`.
@@ -75,7 +76,8 @@ _Commands_
 
 - [ ] `niwa config set authority-level <level>` and `authority-ceiling <a,b,...>` validate through the same parser as the authority commands, trim and de-duplicate list entries, accept `none` as the empty list, and write `[global]` keys; `niwa config unset` removes them.
 - [ ] `niwa config set authority-level bogus` and `authority-ceiling merge-pr,nope` exit non-zero with an accepted-values message and leave the config file byte-identical.
-- [ ] `niwa authority policy` prints, for the base, overlay and machine layers, each declared value (`not set` where absent), the resolved level ceiling and grant ceiling with their sources, and the roles; `--json` prints a valid JSON document with the same content. Exit 0 on success, 1 on config error or outside a workspace, 2 on usage.
+- [ ] `niwa authority policy` prints, for the base, overlay and machine layers, each declared value (`not set` where absent), the resolved level ceiling and grant ceiling with their sources, the roles, and what a dispatch with no authority flags would resolve to; `--json` prints a valid JSON document with the same content. Exit 0 on success, 1 on config error or outside a workspace, 2 on usage.
+- [ ] With base ceiling of all three, machine `authority_ceiling = ["merge-pr"]` and a role naming all three, `policy` marks `close-issue` and `cut-release` on that role as outside the effective ceiling.
 - [ ] Policy output shows `overlay` as the source when only the overlay narrowed, `machine` when the machine narrowed, `workspace` otherwise, and `built-in` when no layer sets a level.
 - [ ] With base `ceiling = ["merge-pr", "close-issue"]` and a role `coordinator` naming all three authorities, `niwa authority policy` marks `cut-release` on that role as outside the effective ceiling (text and `--json`).
 - [ ] `niwa authority --help` lists the `policy` subcommand (later issues add `show` and `decide` to the same group).
@@ -89,7 +91,7 @@ _Deliverables downstream work depends on_
 - [ ] Must deliver: the moved session-id and dispatch-id patterns in `internal/authority` (required by <<ISSUE:2>>)
 - [ ] Must deliver: `authority.ValidateConfig` and `config.AuthorityWarnings` (required by <<ISSUE:2>>)
 - [ ] Must deliver: the `GlobalSettings`, base and overlay config accessors and a helper that builds `authority.Policy` from the three layers (required by <<ISSUE:2>>)
-- [ ] Must deliver: the overlay loader inputs dispatch needs to read the recorded overlay into a `WorkspaceOverlay` (required by <<ISSUE:2>>)
+- [ ] Must deliver: `workspace.ResolveAuthorityOverlay` (required by <<ISSUE:2>>)
 - [ ] Must deliver: `authority.Decide`, `Declarations`, `NoDeclarations`, `ValidPoint` and `EffectivePolicy` (required by <<ISSUE:3>>)
 
 **Dependencies**: None
@@ -98,20 +100,20 @@ _Deliverables downstream work depends on_
 
 ### Issue 2: feat(dispatch): resolve, refuse and record a dispatch's authority before launch
 
-**Goal**: Make `niwa dispatch` resolve, refuse and record a dispatch's authority before the worker launches. Add `WriteAuthorityRecord` and `ReadAuthorityRecord` (safe open) in `internal/workspace`, extract the stat-only instance walk `FindInstance` from `ClassifyCwd`, and give dispatch the `--level`, `--grant` and `--role` flags. Dispatch refuses at the new step (2e) before any side effect, prints the resolution line after step (4), records `parent_dispatch_id` from the dispatcher's own record, writes the record at step (8a), and adds the `niwa.authority.level` and `niwa.authority.grant` telemetry attributes (grant joined with `/`). Covers R12 to R19, R22, R28 to R30 and Decision 4.
+**Goal**: Make `niwa dispatch` resolve, refuse and record a dispatch's authority before the worker launches. Add `WriteAuthorityRecord` and `ReadAuthorityRecord` (safe open) and the stat-only instance walk `FindInstance` in `internal/workspace`, and give dispatch the `--level`, `--grant` and `--role` flags. Dispatch refuses at the new step (2e) before any side effect, prints the resolution line after step (4), records `parent_dispatch_id` from the dispatcher's own record, re-checks the policy against what the instance was built from and writes the record at step (8a), and adds the `niwa.authority.level` and `niwa.authority.grant` telemetry attributes (grant joined with `/`). Covers R12 to R19, R22, R28 to R30 and Decision 4.
 
 **Acceptance Criteria**:
 
 _Record I/O (`internal/workspace/authority_record.go`)_
 
 - [ ] `WriteAuthorityRecord(instancePath, record)` creates `<instance>/.niwa/authority.json` with mode 0600 via a temp file opened `O_EXCL|O_NOFOLLOW`, synced, then renamed; a test asserts the mode is `0600` and that no temp file remains after success or failure.
-- [ ] `ReadAuthorityRecord` round-trips a written record to an equal `authority.Record`; the stored JSON has keys in this order: `schema`, `dispatch_id`, `parent_session_id`, `parent_dispatch_id`, `level`, `level_source`, `level_ceiling`, `level_ceiling_source`, `grant_ceiling`, `grant_ceiling_source`, `roles`, `grant`; a test compares the key order byte for byte.
+- [ ] `ReadAuthorityRecord` round-trips a written record to an equal `authority.Record`, and the stored bytes equal `Record.MarshalJSON`'s golden document from Issue 1 (`record: true` included).
 - [ ] Reader fixtures each return an error naming a failure class and never echo file contents or the record path: a FIFO at the record path returns promptly without blocking (test fails by timeout if the open blocks); a symlink at the final path component is refused; a file over 64 KiB is refused; a regular file with control characters in `parent_session_id`, a role or a source is refused; an unknown level, unknown authority, wrong schema, bad UUID, or grant out of R3 order is refused.
 - [ ] A missing record returns a distinct "no record" result, not an error, so callers can tell absent from invalid.
 
 _Instance walk (`internal/workspace/cwd_classify.go`)_
 
-- [ ] `FindInstance(dir)` returns the outermost valid instance containing `dir` using stat calls only (a test seam fails on any config load, network or process call), and `ClassifyCwd` calls it, so existing `ClassifyCwd` tests pass unchanged.
+- [ ] `FindInstance(dir)` returns the outermost valid instance containing `dir` using stat calls only (a test seam fails on any config load, network or process call); `ClassifyCwd`'s behaviour is unchanged and its existing tests pass unmodified.
 - [ ] Planted-marker fixture: a `.niwa` marker directory placed inside a cloned repo within an instance does not become the result; `FindInstance` returns the real instance, and returns "none" when the marker sits outside any workspace root's enumerated instances.
 - [ ] Symlinked-start fixture: starting from a symlink that resolves into an instance returns that instance; a symlink resolving outside any instance returns "none".
 - [ ] `FindInstance` returns the instance for the instance root, a repo directory inside it and a niwa worktree of it.
@@ -119,12 +121,13 @@ _Instance walk (`internal/workspace/cwd_classify.go`)_
 _Refusal at (2e), all before the prompt, sweep and provisioning_
 
 - [ ] `--level` wider than the level ceiling exits 1 with the R13 message naming the level asked for, how it was asked (`--level`), and the ceiling with its source; the test pins the exact stderr text.
-- [ ] `--grant` or `--role` that expands to an authority outside the grant ceiling exits 1 with the R14 message naming each offending authority, its route (`--grant` or `role:<name>`), and the ceiling with its source; exact stderr text pinned, one line per offender.
+- [ ] `--grant` or `--role` that expands to an authority outside the grant ceiling exits 1 with the R14 message naming each offending authority, its route (`--grant` or `role <name>`), and the ceiling with its source; exact stderr text pinned, one line per offender.
 - [ ] An unknown authority, an unknown role and an invalid machine value (`authority_level`, `authority_ceiling`) each exit 1 with a message naming the key or flag, the quoted and escaped value, and the accepted values; a value containing control bytes prints escaped.
-- [ ] A workspace config that fails to load (including a missing `workspace.toml`) exits 1 at (2e) naming the file; an overlay the instance state records but that is missing or unparseable exits 1 naming `niwa apply`; neither is treated as "no narrowing".
+- [ ] A workspace config that fails to load (including a missing `workspace.toml`) exits 1 at (2e) naming the file; an overlay the workspace root's `.niwa/instance.json` records but whose clone is missing or unparseable exits 1 naming `niwa apply`; neither is treated as "no narrowing".
 - [ ] An unreadable or invalid dispatcher record (dispatcher cwd inside a dispatched instance) exits 1 and does not record an empty parent.
 - [ ] A request whose encoded record would exceed the 64 KiB reader cap is refused at (2e), not at (8a).
-- [ ] For every refusal case above, a functional test asserts: exit code 1; no new instance directory under the workspace root; no authority record and no session mapping or pending marker written; every pre-existing instance is still present (the sweep did not run); stdin was never read and no prompt was shown (a prompt-capture fake records zero calls); the fake agent was not launched.
+- [ ] For every refusal case above, a functional test asserts: exit code 1; no `niwa dispatch: authority level` line on stderr; no new instance directory under the workspace root; no authority record and no session mapping or pending marker written; every pre-existing instance is still present (the sweep did not run); stdin was never read and no prompt was shown (a prompt-capture fake records zero calls); the fake agent was not launched.
+- [ ] The (8a) re-check: when provisioning applies a convention overlay (not recorded in the root state before the dispatch) whose `[authority] ceiling` leaves out a requested authority, or refreshes a base config whose level is narrower than the one (2e) resolved, the dispatch exits 1 naming the narrower setting, the rollback removes the new instance, and the fake agent records zero launches; when the policy the instance was built from matches (2e)'s, the dispatch proceeds and the record is written.
 
 _Resolution line, parent link and record_
 
@@ -135,7 +138,7 @@ _Resolution line, parent link and record_
 - [ ] The record written at (8a) contains the minted `dispatch_id`, `level` and `level_source`, both ceilings with sources, `roles` and `grant` with sources in the order `dispatch` first then roles by name; the test compares the whole file against an expected document for a request mixing `--grant`, `--role` and an overlay-narrowed ceiling.
 - [ ] `parent_dispatch_id` cases: dispatcher cwd inside a dispatched instance with a valid record gives that record's `dispatch_id`; dispatcher cwd outside any dispatched instance gives an empty string; dispatcher instance with no record (older niwa) gives an empty string and the dispatch proceeds; dispatcher record present but invalid refuses the dispatch. A Codex dispatcher whose environment carries an inherited `parent_session_id` of its own dispatcher still records the `parent_dispatch_id` of the instance it runs in, found from its working directory, not from the session id variable.
 - [ ] A failed record write at (8a) (for example the `.niwa` directory made read-only by the test) exits non-zero, runs the rollback so the instance directory is gone, and the fake agent records zero launches.
-- [ ] The record survives `niwa apply` of the instance byte for byte, and `niwa reset` removes it along with the instance.
+- [ ] The record survives `niwa apply` of the instance, a later dispatch of another session, a change to the machine config, and a resume through `claude attach` or `codex resume`, each byte for byte; `niwa reset`, `niwa destroy` and `niwa reap` of the instance remove it along with the instance.
 
 _Unchanged behavior and telemetry_
 
@@ -143,6 +146,7 @@ _Unchanged behavior and telemetry_
 - [ ] With no authority settings, a Claude dispatch's argv and settings document are byte-identical to the previous release's golden output apart from the two `niwa.authority.*` lineage attributes; a Codex dispatch's argv and launch environment are byte-identical with no exception.
 - [ ] A Claude dispatch's `OTEL_RESOURCE_ATTRIBUTES`, in both the launch environment and the settings document's `env`, carries `niwa.authority.level=<level>` and `niwa.authority.grant=merge-pr/close-issue` (slash-joined, R3 order) for a dispatch granted those two, beside the existing lineage attributes, which all remain present with their values; a grant of three authorities and an empty grant (`none`) both pass the composer's value pattern without dropping any existing attribute, and a pre-existing `team=x` entry in the dispatcher's own variable survives.
 - [ ] A Codex dispatch granted `merge-pr` has neither `niwa.authority.level` nor `niwa.authority.grant` anywhere in its launch environment, and its record carries the same level and grant a Claude dispatch with the same flags records.
+- [ ] The instance's hook files and every settings document a dispatch writes are byte-identical between a dispatch with `--role coordinator` and one with no grant, and between a dispatch with `--level strict` and one with no flags, apart from the two lineage attributes (R28).
 
 **Dependencies**: Blocked by <<ISSUE:1>>
 
@@ -164,10 +168,11 @@ _Self-read as the first command (functional tests with a fake agent that runs `n
 
 _Selector precedence and combinations (table test over `selectDispatch` plus command-level tests)_
 
-- [ ] Precedence is `--session`, then `--instance`, then `-C` or the working directory, then the session-id variable; a test per adjacent pair shows the higher one wins when both could apply.
+- [ ] Precedence pairs that can both apply: `--session <a>` run with the working directory in instance `b` reports `a`; `--instance <a>` run with the working directory in instance `b` reports `a`; with no selector, the working directory in instance `b` and the session-id variable naming session `a` reports `b`; from the workspace root with the variable naming `a` (which has a record), it reports `a`; from the workspace root with the variable naming a session with no mapping, it prints `dispatch record: none`. The selector pairs that can't both apply are covered by the usage-error criterion below.
+- [ ] `-C <dir>` where `<dir>` is in no instance, with the session-id variable naming a session that has a record, prints `dispatch record: none` (no fall-through to the variable).
 - [ ] Any two of `--session`, `--instance`, `-C` together exit 2 with a usage error and empty stdout, for `show` and `decide`.
 - [ ] `-C ""`, a relative `-C`, and a nonexistent `-C` each exit 1 with empty stdout and never fall back to the working directory (run from inside a dispatched instance to prove it).
-- [ ] `show -C <dir>` output is byte-identical to `show` run from `<dir>`, for `--json` and plain output.
+- [ ] `show -C <dir>` output is byte-identical to `show` run from `<dir>` when `<dir>` is inside an instance, for `--json` and plain output.
 - [ ] `--instance <name>` naming a missing instance exits 1; an invalid name is rejected before any path is joined.
 - [ ] `--session <id>` with no mapping prints the no-record answer and exits 0.
 - [ ] A session mapping whose `instance_path` is not an instance directly under the workspace root (outside the workspace, or nested) is refused with exit 1 and empty stdout.
@@ -175,7 +180,7 @@ _Selector precedence and combinations (table test over `selectDispatch` plus com
 
 _No-record document_
 
-- [ ] In a workspace with no record for the selected dispatch, `show --json` exits 0 and prints exactly `schema: niwa.authority.record/v1`, `"record": false`, `"grant": []`, a `level`, and a `level_source` ending in ` (no dispatch record)`.
+- [ ] In a workspace with no record for the selected dispatch, `show --json` exits 0 and prints a document with `schema` `niwa.authority.record/v1`, `"record": false`, `"grant": []`, a `level`, and a `level_source` that is a plain layer name (no suffix).
 - [ ] Plain `show` with no record prints the line `dispatch record: none`.
 - [ ] The no-record `level` equals the level a no-flag dispatch would resolve to in that workspace (tested with `autonomous` default and a workspace `supervised`).
 
@@ -184,16 +189,21 @@ _Failure behaviour_
 - [ ] A malformed record, an unknown-schema record, an unknown level or authority, an oversized record (over 64 KiB), a FIFO, a symlink and an unreadable file each make `show` and `decide` exit 1 with empty stdout (stderr names a failure class only, no path and no file contents).
 - [ ] With `--json`, stdout carries only the document on success, and nothing on every failure.
 - [ ] A watchdog test (stalled read) exits 1 within about two seconds of start with empty stdout.
-- [ ] `show` against an existing record discovers no workspace config and writes nothing (filesystem unchanged before and after).
+- [ ] `show` against an existing record found from the working directory or `-C` discovers no workspace config and writes nothing (filesystem unchanged before and after).
+- [ ] Inside a dispatched instance with a valid record, after the base config gains `[authority] level = "Strict"` and the machine config gains `authority_level = "loose"`, `show --json` and `decide merge-own-pr` still exit 0 and report the recorded dispatch; from the workspace root (no record) with the same configs, both exit 1 naming the bad key (R11).
+
 _`decide`_
+
 - [ ] Output is exactly the lines `point=`, `level=`, `decider=`, `author_exclusion=`, `source=`, `record=present|none`, and the test asserts each exact line.
 - [ ] `source=` is exactly one of `flag`, `machine`, `overlay`, `workspace`, `built-in`, or `declaration` with a record, and that value plus ` (no dispatch record)` without one; `record=present` pairs with the former and `record=none` with the latter.
 - [ ] For records resolved from each layer, `decide merge-own-pr` prints exactly `source=flag`, `source=machine`, `source=workspace` and `source=built-in` respectively; with no record in a `strict` workspace it prints `level=strict`, `source=workspace (no dispatch record)` and `record=none`.
 - [ ] A bad point name (not matching `^[a-z][a-z0-9-]{0,63}$`) exits 2 and is checked before any selector or filesystem work, so a bad point with a bad `-C` still exits 2.
 - [ ] At `autonomous` it prints `decider=session` and `author_exclusion=off`, at `supervised` `decider=dispatcher` and `author_exclusion=on`, at `strict` `decider=person` and `author_exclusion=on`, each exiting 0.
 - [ ] A `strict` record that also holds `merge-pr` still prints `decider=person` for the merge-pr point (R4: holding does not override the level).
-- [ ] Decide-driven fake-agent marker test, both ends: an `autonomous` dispatch's fake runs `decide`, sees `decider=session`, and writes the marker; a `strict` dispatch's fake runs the same command, sees `decider=person`, and does not write it.
+- [ ] Decide-driven fake-agent marker test, both ends, in an `autonomous` workspace: the fake runs `decide merge-own-pr` and writes `settled` to its marker when it exits 0 with `decider=session`, and `waiting-for-person` otherwise. Dispatched with no flag the marker reads `settled`; dispatched with `--level strict` it reads `waiting-for-person`.
+
 _`niwa list --json`_
+
 - [ ] Each instance with a valid record carries an `authority` object equal to the `show --json` document for that instance (same fields and values).
 - [ ] An instance with no record has no `authority` key at all; an instance with a malformed or unreadable record carries an `authority` object holding only an `error` naming a failure class, with no path or contents, while the other instances still list and the command exits 0.
 - [ ] Editing only an instance's record file (changing its level) changes what both `niwa authority show` and `niwa list --json` report for that instance, showing both read the one copy.
@@ -203,7 +213,7 @@ _`niwa list --json`_
 _Cost and isolation_
 
 - [ ] Benchmark: with 250 session mappings in the workspace, the median of ten runs of the built binary for `show` (and for `decide`) is under 200 ms.
-- [ ] A test that counts session-mapping reads shows at most one mapping read per invocation (zero without `--session`).
+- [ ] A test that counts session-mapping reads shows zero reads when `--instance`, `-C` or a working directory inside an instance selects the dispatch, and at most one otherwise (`--session`, or the session-id variable from outside any instance).
 - [ ] A seam test replaces the network and process-start seams with fakes that fail the test if called; `show`, `decide` and `list` pass it.
 
 **Dependencies**: Blocked by <<ISSUE:2>>
@@ -236,10 +246,14 @@ _Contract test_
 - [ ] The timeout case finishes within the bound the stub gate sets and the deny survives; the test fails if the stub gate hangs.
 - [ ] At `strict`, `decide` output makes the settle check return non-zero and the deny survives even when `merge-pr` is held.
 - [ ] A `decide` run with no record (`record=none`) does not settle the point.
+
 _CI_
+
 - [ ] A CI job runs the authority unit and functional tests with no koto binary on `PATH` and passes. The job fails if `koto` resolves on `PATH`.
 - [ ] The contract test runs in CI on every pull request, and a CI run with the guide's held check altered to `exit` fails.
+
 _CLAUDE.md_
+
 - [ ] The repo's CLAUDE.md "Contributor Guides" section has an entry linking `docs/guides/authority-grants.md` with a one-line description.
 
 _Live check (recorded in the implementing pull request, run once before merge)_

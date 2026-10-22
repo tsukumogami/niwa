@@ -193,7 +193,9 @@ Key assumptions:
 
 - Claude Code runs each hook by the absolute path niwa writes into
   settings, so a hook's `$0` names its own copy. Anchoring wrong still
-  fails closed, since no record exists outside a dispatched instance.
+  fails closed: with `-C`, a directory in no instance gives the no-record
+  answer and never falls through to the session id variable, and no
+  record exists outside a dispatched instance.
 - A later gate consults the grant only to lift a deny it has already
   decided on, so a missing, old or hung niwa leaves today's verdict.
 - niwa's startup stays free of network calls and config loading.
@@ -210,8 +212,11 @@ and the held rule. It doesn't document where the record lives on disk or
 its stored bytes, so niwa can move or restructure the file while printing
 the same document.
 
-Both commands take `-C <dir>`, meaning "resolve exactly as if run from
-`<dir>`", tested to give byte-identical output. A hook anchors on its own
+Both commands take `-C <dir>`, meaning "find the instance from `<dir>`
+instead of the working directory", tested to give byte-identical output to
+running from `<dir>` inside an instance. Unlike a bare run, `-C` never
+falls through to the session id variable: a `<dir>` in no instance gives
+the no-record answer. A hook anchors on its own
 script path, `niwa authority show --json -C "$(dirname "$0")"`, and never
 on the payload's `cwd` (the model's), `CLAUDE_PROJECT_DIR` (Claude-only and
 the workspace root for ephemeral sessions), `--instance <name>` (needs the
@@ -221,8 +226,10 @@ starts the hook in.
 The reads can't hang, write or leak. `show` and `decide` find the instance
 with stat-only checks and read the record before they touch workspace
 config; they discover the workspace root only for `--session`,
-`--instance` or the no-record level, so a held check against an existing
-record writes nothing. The record is opened without following symlinks
+`--instance` or the no-record level, and load and validate the authority
+config only for the no-record level (PRD R11). A held check against an
+existing record therefore performs only reads, and a config typo added
+after a dispatch doesn't hide that dispatch's record. The record is opened without following symlinks
 and without blocking, confirmed a regular file, and read up to a size
 cap. A watchdog of about two seconds exits 1 with nothing on stdout. With
 `--json`, stdout carries only the document.
@@ -249,14 +256,17 @@ gate had already reached. The CI test runs it inside a stub gate and
 checks that an already-decided deny survives every failure case.
 
 For never-wider, the record gains `parent_dispatch_id`, the dispatch id of
-the dispatched instance `niwa dispatch` was run from. A later check
-selects the dispatcher's record with R21's order applied to the
-dispatcher's own working directory, which dispatch already resolves. It
-doesn't key on `parent_session_id`, which is empty for every Codex worker
-and names the grandparent for a dispatch made inside one.
+the dispatched instance `niwa dispatch` was run from. Dispatch finds the
+dispatcher's record from its own working directory through `FindInstance`
+at step (2e), with no session-variable fallback, and that one read is
+both where `parent_dispatch_id` comes from and where a later never-wider
+check will compare. It doesn't key on `parent_session_id`, which dispatch
+reads from a variable a worker can inherit from its own dispatcher: a
+Codex worker carries its dispatcher's value, so a dispatch made inside one
+would name the grandparent.
 
-All four validators in the decision run converged on this option,
-including the advocates of the file and dual contracts.
+The file and dual-contract alternatives below were each argued for and
+rejected on the evidence stated with them.
 
 #### Alternatives Considered
 
@@ -299,8 +309,11 @@ the overlay into one config.
 
 Key assumptions:
 
-- The workspace root's `.niwa/instance.json` records the overlay URL
-  dispatch should read, as the worktree path already reads it.
+- Provisioning picks an overlay through three branches
+  (`internal/workspace/apply.go`): none when the state says `NoOverlay`,
+  the URL the state records, or a convention overlay derived from the
+  config source's URL, which provisioning may clone during the dispatch.
+  Only the instance's own state records which one it applied.
 - A machine whose state records an overlay but has no local clone of it
   is rare enough that refusing, with a message naming `niwa apply`, is
   acceptable.
@@ -312,7 +325,15 @@ Key assumptions:
 `[authority]` table with `level` and `ceiling`; its `roles` key is
 decoded only so every command that loads the overlay warns it has no
 effect. `GlobalSettings` gains `authority_level` and `authority_ceiling`
-with fail-closed accessors that mirror `DispatchPermissionMode()`.
+with fail-closed accessors that mirror `DispatchPermissionMode()`. All of
+these values are decoded loosely (as untyped TOML values), so a wrong
+type such as `ceiling = "merge-pr"` reaches validation as a bad value
+instead of failing the whole config decode, which would stop `apply`.
+The overlay and global parsers move from `toml.Unmarshal` to
+`toml.Decode` so their undecoded keys are visible; unknown keys under
+`authority.` and `global.authority_` go into the policy's per-layer
+unknown-key lists (and are dropped from the generic "unknown config
+field" warning so they're reported once).
 
 `MergeWorkspaceOverlay` doesn't touch authority. The resolver takes base,
 overlay and machine as three inputs, so the record can say which one
@@ -323,13 +344,25 @@ list removed anything, else `overlay` if the overlay list did, else
 `workspace`.
 
 Values are checked by `authority.ValidateConfig`, called after parsing
-rather than inside `config.validate()`. Dispatch and the `niwa authority`
-commands refuse on its error with exit 1; `apply` and every other loader
-print it as a warning and carry on. Dispatch reads the overlay the
-workspace state records (`overlay_url` to `config.OverlayDir` to
-`workspace-overlay.toml`). An overlay the state records but that can't be
-read or parsed refuses the dispatch instead of silently dropping its
-narrowing.
+rather than inside `config.validate()`. Dispatch and `niwa authority
+policy` refuse on its error with exit 1, as do `show` and `decide` when
+they need the config for a no-record answer; `apply` and every other
+loader print it as a warning and carry on.
+
+One overlay resolver, `workspace.ResolveAuthorityOverlay`, mirrors
+provisioning's three branches and is shared by dispatch, `policy` and the
+no-record level: `NoOverlay` in the workspace root's
+`.niwa/instance.json` means no overlay; else the `overlay_url` it records,
+whose clone must exist and parse or the caller refuses; else the
+convention URL derived from the registered config source, used when its
+clone exists locally and treated as absent when it doesn't. Because
+provisioning can still clone a convention overlay, or refresh the base
+config, after (2e) has resolved, dispatch re-checks at (8a): it reads the
+new instance's own state and the config it was built from, resolves
+again, and if the result is narrower than (2e)'s or refuses the request,
+it refuses and the armed rollback removes the instance. So the record
+never claims more than the policy the instance was actually built
+from.
 
 `niwa config set authority-level|authority-ceiling` and `niwa config
 unset` follow `config_permission_mode.go`: validate through the same
@@ -372,8 +405,9 @@ first command (R17, R22).
 
 Key assumptions:
 
-- Provisioning's config refresh at (6) may change the snapshot after
-  resolution; the PRD accepts that as a known limitation.
+- Provisioning at (6) may refresh the base config or clone a convention
+  overlay after (2e) resolves; the (8a) re-check below catches a
+  narrowing that arrives that way.
 
 #### Chosen: resolve at a new step (2e), record at (8a), telemetry through the lineage composer
 
@@ -383,26 +417,39 @@ workspace-config load, so its own behaviour doesn't change. A new step
 (2e), after (2d) and before the preflight at (3), refuses when the
 workspace config load at (2b) failed for any reason, a missing
 `workspace.toml` included (dispatch already requires a workspace root,
-so this case means the file vanished or can't be read), then loads the
-overlay, runs `ValidateConfig`, parses `--level`, `--grant` and `--role`,
-and calls `authority.Resolve`; any error returns before (3), so before
-the prompt, the sweep and provisioning. The same step reads the
-dispatcher's own record: when the dispatcher's working directory is
-inside a dispatched instance (`class.InstanceDir`), it reads that
-instance's record through the same reader `show` uses and keeps the whole
-record, so the later never-wider check can be added at this step with no
-second read; this unit uses only its `dispatch_id`, as
-`parent_dispatch_id`. An unreadable record there refuses the dispatch
-rather than recording an empty parent.
+so this case means the file vanished or can't be read), then resolves the
+overlay through `ResolveAuthorityOverlay`, runs `ValidateConfig`, parses
+`--level`, `--grant` and `--role`, and calls `authority.Resolve`; any
+error returns before (3), so before the prompt, the sweep and
+provisioning. The same step reads the dispatcher's own record: it calls
+`FindInstance` on the dispatcher's working directory (never the session
+id variable) and, when that's a dispatched instance with a record, reads
+it through the same reader `show` uses and keeps the whole record, so the
+later never-wider check can be added at this step with no second read;
+this unit uses only its `dispatch_id`, as `parent_dispatch_id`. An
+instance with no record gives an empty `parent_dispatch_id`; a record
+that exists but can't be read or is invalid refuses the dispatch rather
+than recording an empty parent.
 
-`Resolve` returns the record with every field but `dispatch_id`, which
-dispatch mints at (4), after the prompt. R19's stderr line prints after
-(4) and before the sweep at (5), so a dispatch that fails its binary
-preflight or prompt capture never prints a line for a launch that won't
-happen.
+`Resolve` returns the record's policy fields (level, ceilings, sources,
+roles, grant). Dispatch stamps the identity fields at (8a): the
+`dispatch_id` it mints at (4), after the prompt, and the
+`parent_session_id` and `parent_dispatch_id` it already holds. `Resolve`
+checks the record's encoded size with those fields at their maximum
+lengths against the reader's 64 KiB cap, a constant in
+`internal/authority` that the reader uses too. R19's stderr line prints
+after (4) and before the sweep at (5), so a dispatch that fails its
+binary preflight or prompt capture never prints a line; one that prints
+it and then fails to provision or launch has rolled back, and the line
+describes a dispatch that didn't launch.
 
-At a new step (8a), right after `writeDispatchMarker`, stamp the
-`dispatch_id` into the resolved record and write it to
+At a new step (8a), right after `writeDispatchMarker`, dispatch first
+re-checks the policy against what the new instance was built from: it
+reads the instance's own state for the overlay provisioning actually
+applied, re-reads the base config provisioning may have refreshed,
+resolves again, and refuses (and the armed rollback removes the instance)
+if that result is narrower than (2e)'s or refuses the request. Then it
+stamps the identity fields and writes the record to
 `<instance>/.niwa/authority.json` with mode 0600 through a temp file and
 rename. The rollback armed at (7) already removes the instance directory,
 record included, on any later failure. Add `niwa.authority.level` and
@@ -420,7 +467,7 @@ The two resolution orders sit side by side and neither reads the other.
 The permission mode keeps its order unchanged: `--permission-mode`, then
 `[global] dispatch_permission_mode`, then a `bypass` workspace posture,
 with the machine outranking the workspace in both directions, resolved
-at (9a) as today. Authority resolves at (2e) narrowest-wins across
+at the (9a-derive) step as today. Authority resolves at (2e) narrowest-wins across
 workspace, overlay, machine and flag, where the machine can only narrow.
 A `--level strict` dispatch with `--permission-mode bypassPermissions`
 launches in bypass mode and records `strict`; a `bypass` posture implies
@@ -428,7 +475,7 @@ no level and no grant (R29).
 
 #### Alternatives Considered
 
-**Resolve after provisioning, beside the permission mode at (9a)**: all
+**Resolve after provisioning, beside the permission mode at (9a-derive)**: all
 dispatch defaults in one place. Rejected because a refusal would need the
 rollback and would come after the operator typed a prompt.
 
@@ -552,13 +599,25 @@ func ParseAuthority(raw string) (Authority, error)   // trimmed, exact case
 
 type Layer string // "flag", "machine", "overlay", "workspace", "built-in"
 
+type RawLayer struct {               // one layer as decoded, values untyped
+    Level       any                  // nil when absent
+    Ceiling     any                  // nil when absent; a list when set
+    Roles       map[string]any       // base layer only
+    UnknownKeys []string             // undecoded keys under [authority] / authority_*
+}
+// ValidateConfig checks the three raw layers (types, vocabularies, role
+// names, unknown keys) and returns the typed Policy or an error naming
+// the key, the quoted value and the accepted values.
+func ValidateConfig(base, overlay, machine RawLayer) (Policy, error)
+
 type Policy struct {                 // what the three config layers declare
     BaseLevel, OverlayLevel, MachineLevel *Level
     BaseCeiling []Authority          // nil and empty both mean "nothing grantable"
     OverlayCeiling, MachineCeiling *[]Authority // nil means "doesn't narrow"
     Roles map[string][]Authority
 }
-func ValidateConfig(p Policy) error  // names key, value, accepted values
+
+const MaxRecordBytes = 64 << 10      // shared by Resolve's size check and the reader
 
 type Request struct { Level *Level; Grants []Authority; Roles []string }
 
@@ -573,20 +632,26 @@ type GrantEntry struct { Authority Authority; Sources []Source } // dispatch fir
 
 type Record struct {
     Schema            string // "niwa.authority.record/v1"
+    Present           bool   // encoded as "record"; true for every written record
     DispatchID        string
     ParentSessionID   string
     ParentDispatchID  string
     Level             Level;  LevelSource        Layer
     LevelCeiling      Level;  LevelCeilingSource Layer
     GrantCeiling      []Authority; GrantCeilingSource Layer
-    Roles             []string
+    Roles             []string // name order
     Grant             []GrantEntry
 }
-// Resolve refuses with *LevelWiderError, *OutsideCeilingError (every
-// offending authority with its route), *UnknownValueError.
+// Resolve fills the policy fields (identity fields are stamped by
+// dispatch at (8a)) and refuses with *LevelWiderError,
+// *OutsideCeilingError (every offending authority with its route),
+// *UnknownValueError, or *RecordTooLargeError.
 func Resolve(p Policy, r Request) (Record, error)
+// MarshalJSON writes the one document the file stores and `show --json`
+// prints, `record: true` included; a no-record answer is built
+// separately with `record: false`.
 func (r Record) MarshalJSON() ([]byte, error)
-func ParseRecord(b []byte) (Record, error) // rejects unknown level/authority, bad schema
+func ParseRecord(b []byte) (Record, error) // rejects unknown level/authority, bad schema, bad ids
 
 type Declared struct{ Decider Decider; AuthorExclusion bool }
 type Declarations interface{ Lookup(point string) (Declared, bool) }
@@ -601,40 +666,52 @@ func Decide(point string, level Level, levelSource Layer, noRecord bool, d Decla
 
 **`internal/config` (changed).** `WorkspaceConfig.Authority` (`level`,
 `ceiling`, `roles`); `WorkspaceOverlay.Authority` (`level`, `ceiling`,
-and a tombstone `roles` that `TombstoneWarnings` reports);
-`GlobalSettings.AuthorityLevel` and `AuthorityCeiling` with accessors
-returning parsed values or an error; `authority_ceiling` is stored
-without `omitempty` so an empty list survives a rewrite, and the config
-writer keeps using the TOML encoder. A helper builds `authority.Policy`
-from the three. `config.AuthorityWarnings(cfg, overlay)` returns the
-authority validation errors and the overlay `roles` tombstone as
-strings, and the apply pipeline's deferred reporter prints them beside
-the existing `TombstoneWarnings`, so every loader that isn't dispatch or
-an authority command warns from one place.
+and a tombstone `roles`); `GlobalSettings.AuthorityLevel` and
+`AuthorityCeiling`, all decoded as untyped values and turned into
+`authority.RawLayer`s with their undecoded keys (the overlay and global
+parsers move to `toml.Decode` for that, and the base parser's generic
+"unknown config field" warning skips `authority.*` keys).
+`authority_ceiling` is stored without `omitempty` so an empty list
+survives a rewrite, and the config writer keeps using the TOML encoder.
+`config.AuthorityWarnings(cfg, overlay)` returns the authority
+validation errors and the overlay `roles` tombstone as strings (the
+tombstone is reported here only, not by `TombstoneWarnings`); the apply
+pipeline calls it whether or not an overlay is present and prints its
+lines with its other deferred warnings, so every loader that isn't
+dispatch or an authority command warns from one place.
 
 **`internal/workspace` (changed).** `authority_record.go`:
 `WriteAuthorityRecord(instancePath, authority.Record)` (0600, temp file
 and rename) and `ReadAuthorityRecord(instancePath)` (open with
 `O_NOFOLLOW|O_NONBLOCK`, `fstat` must be a regular file, read at most
-64 KiB, `authority.ParseRecord`). `FindInstance(dir)`, the stat-only
-instance walk extracted from `ClassifyCwd` so both share it, returns the
-outermost valid instance containing `dir` without config discovery. The
-session-id and dispatch-id patterns that `internal/cli` holds today
+`authority.MaxRecordBytes`, `authority.ParseRecord`), returning a
+distinct "no record" result for a missing file. `FindInstance(dir)`
+returns the outermost valid instance containing `dir`, using the same
+marker checks `ClassifyCwd` uses but resolving symlinks first and
+requiring the candidate to be an instance the workspace root enumerates;
+`ClassifyCwd` itself is unchanged, so `destroy`, `apply` and dispatch see
+the paths they see today. `ResolveAuthorityOverlay(root, configSourceURL)`
+mirrors provisioning's overlay branches (Decision 3). The session-id and
+dispatch-id patterns that `internal/cli` holds today
 (`parentSessionPattern`, `dispatchIDPattern`) move into
-`internal/authority`, and the lineage code, `niwa list` and
-`ParseRecord` all use that one copy. `niwa list` reads each instance's
-record into `InstanceRecord.Authority`, or an `error` field naming the
-failure class when it can't.
+`internal/authority`, whose package doc says it also owns these id
+formats, and the lineage code, `niwa list` and `ParseRecord` all use that
+one copy. `niwa list` reads each instance's record into
+`InstanceRecord.Authority`, or an `error` field naming the failure class
+when it can't.
 
 **`internal/cli` (changed and new).** `dispatch.go`: the `--level`,
 `--grant`, `--role` flags, resolution at (2e), the stderr line after
 (4), the record at (8a), the lineage inputs. `authority.go`: the `niwa
 authority` group with `policy`, `show` and `decide`; one
-`selectDispatch` function that applies R21's order (`--session`,
-`--instance`, `-C` or the working directory, then the session id
-variable) and returns an instance path or "no record", used by `show`,
-`decide` and later by never-wider; the `-C`, `--session`, `--instance`
-and `--json` flags; the watchdog; and the exit-code mapping.
+`selectDispatch` function, used by `show` and `decide`, that applies
+R21's order (`--session`, `--instance`, `-C` or the working directory,
+then, for a bare run in no instance, the session id variable named by the
+launch specs' `Lineage.ParentSessionEnv`) and returns an instance path or
+"no record"; the `-C`, `--session`, `--instance` and `--json` flags; the
+watchdog; and the exit-code mapping. Never-wider doesn't use
+`selectDispatch`: it reads the dispatcher's record at (2e) by working
+directory alone.
 `config_authority.go`: `niwa config set/unset authority-level` and
 `authority-ceiling`.
 
@@ -673,8 +750,9 @@ private):
 ```
 
 With no record: `{"schema": "niwa.authority.record/v1", "record": false,
-"grant": [], "level": "<no-flag level>", "level_source": "<layer> (no
-dispatch record)"}`.
+"grant": [], "level": "<no-flag level>", "level_source": "<layer>"}`;
+`record` is what marks it, and only the text output and `decide`'s
+`source=` line add ` (no dispatch record)`.
 
 **Commands and exit codes.**
 
@@ -696,13 +774,14 @@ reference held check. Neither ever trusts exit 0 alone.
 
 1. `niwa dispatch --role coordinator "<task>"` from inside coordinator
    instance A.
-2. (2a) machine keys parsed. (2e) base config load checked fail-closed, overlay
-   loaded from the recorded URL, `ValidateConfig`, request parsed,
-   `Resolve`; A's record read through `FindInstance(cwd)` for
+2. (2a) machine keys parsed. (2e) base config load checked fail-closed,
+   overlay found by `ResolveAuthorityOverlay`, `ValidateConfig`, request
+   parsed, `Resolve`; A's record read through `FindInstance(cwd)` for
    `parent_dispatch_id`. Any error: exit 1, nothing created.
 3. (3) to (4) unchanged; the dispatch id minted at (4). Stderr line
-   printed. (5) to (8) unchanged. (8a) dispatch id stamped and the record
-   written into the new instance B.
+   printed. (5) to (8) unchanged. (8a) policy re-checked against what B
+   was built from, identity fields stamped, and the record written into
+   the new instance B.
 4. (9) launch with unchanged argv and settings, plus two lineage
    attributes. (10), (11) unchanged.
 5. B's first command, `niwa authority show`, runs `FindInstance(cwd)`,
@@ -722,17 +801,21 @@ reference held check. Neither ever trusts exit 0 alone.
   gate must bound the lookup itself, behind niwa's own watchdog, because a
   harness that kills a slow hook drops its deny; where it can't bound it
   (no `timeout` and no background-job fallback), it skips the lookup and
-  keeps its deny.
+  keeps its deny. `$0` anchoring works for hooks niwa copies into the
+  instance; a gate shipped some other way (as a plugin hook, or through a
+  symlinked tree) resolves outside the instance and reads as not held,
+  so such a gate has to be installed into the instance to honour a grant.
 - **A coordinator's posture read.** The same command with `-C` set to the
   instance root it found, and the same held check, so its prediction
   matches the gate. With no niwa it predicts not held. It should dispatch
   successors from inside its own instance so `parent_dispatch_id` and the
   never-wider check find its record.
-- **Never-wider re-delegation.** A check inside `niwa dispatch`, before any
-  side effect, selects the dispatcher's record by R21's order applied to
-  the dispatcher's working directory, and refuses a child whose level or
-  grant is wider. With no dispatcher record it adds no cap. Records link
-  child to parent through `parent_dispatch_id`.
+- **Never-wider re-delegation.** A check at step (2e), using the
+  dispatcher's record that step already reads through `FindInstance` on
+  the dispatcher's working directory (never the session id variable),
+  refuses a child whose level or grant is wider. With no dispatcher record
+  it adds no cap. Records link child to parent through
+  `parent_dispatch_id`.
 
 ## Implementation Approach
 
@@ -745,8 +828,11 @@ layers, `ValidateConfig` wired to refuse in the authority commands and
 warn in `apply`, the overlay tombstone warning, `niwa config set/unset
 authority-level|authority-ceiling`, and `niwa authority policy`. Includes
 the empty-list round trip (machine and overlay `[]` stay empty through
-decode and a later `niwa config set`) and `ParseRecord`'s field
-validation. No change to dispatch.
+decode and a later `niwa config set`), unknown keys under `[authority]`
+and `authority_*` and wrong-typed values reaching `ValidateConfig` (and
+`apply` still completing with a warning), `ParseRecord`'s field
+validation, and `ResolveAuthorityOverlay` across its three branches. No
+change to dispatch.
 
 Deliverables: `internal/authority/*.go`, `internal/config` changes,
 `internal/cli/config_authority.go`, `internal/cli/authority.go` (`policy`).
@@ -756,22 +842,27 @@ Deliverables: `internal/authority/*.go`, `internal/config` changes,
 The record's storage first, since dispatch both writes a record and reads
 the dispatcher's: `WriteAuthorityRecord`, `ReadAuthorityRecord` with the
 safe open (FIFO, symlink, oversized, unreadable and control-character
-fixtures), and `FindInstance` extracted from `ClassifyCwd` (planted-marker
-and symlinked-start fixtures). Then dispatch: the three flags, the (2e)
-step with the fail-closed config and overlay checks, resolution and
-refusal before (3), `parent_dispatch_id` from the dispatcher's record
-(present, absent and invalid), the stderr line after (4), the record at
-(8a), and the lineage attributes. Unit tests with the existing dispatch
+fixtures), and `FindInstance` (planted-marker and symlinked-start
+fixtures, with `ClassifyCwd`'s existing tests unchanged). Then dispatch:
+the three flags, the (2e) step with the fail-closed config and overlay
+checks, resolution and refusal before (3), `parent_dispatch_id` from the
+dispatcher's record (present, absent and invalid), the stderr line after
+(4), the (8a) re-check (a convention overlay or refreshed base config
+that narrows the policy during provisioning refuses and rolls back), the
+record at (8a), and the lineage attributes. Unit tests with the existing dispatch
 fakes; functional scenarios for every refusal (nothing created, no
 prompt), the record's contents, a failed record write rolling back with
 no launch, the `/`-joined grant attribute surviving beside the existing
 lineage attributes, `--level strict` with `--permission-mode
 bypassPermissions` and a `bypass` posture with no `[authority]`, the
-record surviving `niwa apply` and removed by `niwa reset`, and an
-unchanged argv and settings document.
+record surviving `niwa apply` and removed by `niwa reset`, and hook
+files and settings documents byte-identical between a `--role
+coordinator` or `--level strict` dispatch and a no-flag one apart from
+the lineage attributes.
 
 Deliverables: `internal/workspace/authority_record.go`,
-`internal/workspace/cwd_classify.go` (extraction), `internal/cli/dispatch.go`,
+`internal/workspace/cwd_classify.go` (`FindInstance`),
+`internal/workspace/authority_overlay.go`, `internal/cli/dispatch.go`,
 `internal/cli/dispatch_lineage.go`.
 
 ### Phase 3: Read-back
@@ -880,8 +971,10 @@ echo file contents or the record path. `--instance` names go through the
 existing name validation and instance enumeration before they're joined
 to a path, and the `instance_path` a session mapping holds is accepted for
 `--session` only if it's an instance directly under the workspace root.
-Neither command writes anything, makes a network call or starts a
-process.
+Neither command makes a network call or starts a process. Reading an
+existing record found from the working directory or `-C` performs only
+reads; the `--session`, `--instance` and no-record paths discover the
+workspace root the way every niwa command does.
 
 **Anchoring a hook.** Cloned repositories are untrusted content, and a
 directory that carries its own `.niwa` marker could be mistaken for an
@@ -889,11 +982,13 @@ instance. `FindInstance` resolves symlinks in the starting directory
 first, then walks up and takes the outermost candidate that sits directly
 under a workspace root and that niwa's own instance enumeration for that
 root returns (or a niwa worktree of one), so a marker planted inside a
-repository can't stand in for its instance. It's the stat-only half of
-`ClassifyCwd`, extracted so both use one walk rather than two that could
-drift. An empty, relative or nonexistent `-C` argument is an error, never
-a fallback to the working directory, and `-C` combined with `--session`
-or `--instance` is a usage error. The guide tells hook
+repository can't stand in for its instance. It uses the same marker
+checks as `ClassifyCwd` but leaves `ClassifyCwd`'s own behaviour
+unchanged. An empty, relative or nonexistent `-C` argument is an error,
+never a fallback to the working directory; a `-C` directory in no
+instance gives the no-record answer and never falls through to the
+session id variable; and `-C` combined with `--session` or `--instance`
+is a usage error. The guide tells hook
 authors to anchor on the instance's own hook copy, to check that `$0` is
 absolute, and to pass the anchor after `-C` as an absolute path.
 
@@ -920,7 +1015,10 @@ runtime tool only for hook authors, and a missing `jq` reads as not held.
 The overlay is a git clone of the organization's overlay repository. It
 can narrow the level and ceiling and can't declare roles, so a compromised
 overlay can at worst refuse dispatches or reduce grants. Its `roles`
-tombstone and unknown keys are only warned about, never evaluated.
+tombstone and its unknown keys outside `[authority]` are only warned
+about, never evaluated; an unknown key inside its `[authority]` table is
+an invalid value and refuses dispatch, like any other misspelt narrowing
+key.
 
 **Data exposure.** The record holds the dispatch id, the parent session
 and dispatch ids, the level, the ceilings, the roles and the grants with
