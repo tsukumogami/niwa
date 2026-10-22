@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   An operator who launches sessions with `niwa dispatch` can't say how much
   those sessions may do on their behalf. Every dispatched session settles
@@ -30,7 +30,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 This brief frames the feature. The PRD owns the requirements and the design
 owns the record's shape and where niwa resolves it.
