@@ -323,6 +323,10 @@ and no cap on what it dispatches.
 | `level`, `level_source` | the resolved level and where it came from (`flag`, `machine`, `overlay`, `workspace`, `built-in`) |
 | `level_ceiling`, `level_ceiling_source` | the level ceiling and its source |
 | `grant_ceiling`, `grant_ceiling_source` | the grant ceiling and its source: `machine`, `overlay`, `workspace` or `none` |
+
+A reader also reports `newer-version` as all three sources for a record
+written in a later schema version (see [Versions](#versions)); dispatch never
+records it.
 | `roles` | the roles granted, in name order |
 | `grant` | each held authority with every source it came from: `dispatch` for `--grant`, `role:<name>` for a role, `dispatch` first |
 | `unknown_grant` | entries this niwa can't hold, same shape, never held |
@@ -414,7 +418,8 @@ record=present
 own declaration. With no record, `decide` answers from the level a no-flag
 dispatch would get, adds ` (no dispatch record)` to `source=` and prints
 `record=none`. It exits 2 for a point name outside `^[a-z][a-z0-9-]{0,63}$`,
-checked before anything else.
+checked before anything else. `--json` prints the same six fields as one
+object.
 
 ### `niwa list --json`
 
@@ -435,7 +440,10 @@ answer. Never infer "held" from an exit code alone.
 
 A caller settles a decision point itself only when `niwa authority decide`
 exits 0 and prints the exact line `decider=session`. A caller that needs a
-dispatched session's answer, as a gate does, also requires `record=present`.
+dispatched session's answer, as a gate does, also requires `record=present`:
+with no record, `decide` answers from the level a no-flag dispatch would get,
+which in an `autonomous` workspace is `decider=session` too, so that line alone
+would settle a point for a session niwa never dispatched.
 
 These are the reference checks. niwa's CI extracts this block from this
 guide and runs it inside a stub gate against real `show` and `decide`
@@ -512,8 +520,8 @@ read the grant.
    lookup printed `"record": true` with a `grant_ceiling_source` other than
    `none`, the grant decides: the action is allowed only when `niwa_holds`
    finds the authority and `niwa_settles` finds an exact `decider=session`
-   line, and it's denied otherwise, even for an instance on the gate's
-   exemption list.
+   line beside `record=present`, and it's denied otherwise, even for an
+   instance on the gate's exemption list.
 3. A `none` source (the workspace never declared a ceiling), `"record":
    false` and every failed lookup leave today's behaviour, exemption list
    included. A missing, old, hung or failing niwa leaves the gate exactly as
@@ -549,9 +557,15 @@ example, and this feature maps no point to an authority.
 A gate must bound the lookup time itself, behind niwa's own watchdog,
 because a harness that kills a slow hook drops the hook's verdict, deny
 included. `niwa_lookup` does it with `timeout` when that's installed and
-with a background job otherwise. A gate that can do neither (no `timeout`
+with a background job otherwise, so a bash gate that sources it always has
+a bound. A gate written some other way that can do neither (no `timeout`
 and no background-job fallback) skips the lookup and keeps today's
 behaviour.
+
+The bound applies to each lookup, and the sketch above makes up to three
+in a row (`niwa_grant_decides`, `niwa_holds`, `niwa_settles`), each a niwa
+process start of about 10 ms when nothing stalls. Keep the bound times three
+under the harness's hook timeout, or lower `NIWA_LOOKUP_SECONDS`.
 
 ### Anchor on the hook's own path
 
@@ -592,7 +606,9 @@ and its exemption list.
 A successor coordinator gets its own grant by being dispatched with
 `--role coordinator`, with no config edit between sessions. The record names
 only the original parent, by dispatch id, and says nothing about who
-supervises the child now. A coordinator reads its sessions' postures through
+supervises the child now. A coordinator that dispatches from the workspace
+root passes `--parent-from` with a directory in its own instance, so its
+children record it as their parent. It reads its sessions' postures through
 `niwa list --json`, or `niwa authority show --instance <name>`, and predicts a
 gate's answer by running the same reference checks with `-C` set to the
 instance root.
@@ -610,6 +626,8 @@ re-delegation work must not treat it as one. A session that corrupts its own
 record blocks its own child dispatches, since a malformed dispatcher record
 refuses the dispatch.
 
-What it does promise is that nothing gets weaker than today: every way a
+What it does promise is that a failure never widens anything: every way a
 lookup can fail reads as not held and as no record, so a gate written to
-this contract is never more permissive than the gate it replaces.
+this contract falls back to exactly the verdict the gate it replaces would
+have given. Only a positively read record, from a workspace that declared a
+ceiling, changes the verdict, and then by the grant.

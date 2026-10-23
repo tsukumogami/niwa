@@ -90,10 +90,18 @@ func TestAuthorityGuideExitCheckCatchesAnExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	altered := strings.Replace(block, "|| return 1", "|| exit 1", 1)
-	if altered == block {
-		t.Fatal("the reference block has no `|| return 1` to alter")
+	// Alter the held check itself: its lookup line is the first one of this
+	// form, since niwa_holds comes before niwa_grant_decides in the block.
+	at := strings.Index(block, "niwa_holds() {")
+	if at < 0 {
+		t.Fatal("the reference block does not define niwa_holds")
 	}
+	held := block[at:]
+	line := `out=$(niwa_lookup show --json -C "$1") || return 1`
+	if !strings.Contains(held, line) {
+		t.Fatalf("niwa_holds has no %q line to alter", line)
+	}
+	altered := strings.Replace(block, held, strings.Replace(held, line, strings.Replace(line, "return", "exit", 1), 1), 1)
 	if err := checkAuthorityGuideChecks(altered); err == nil {
 		t.Fatal("a reference block that exits passed the check")
 	}

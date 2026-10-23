@@ -115,6 +115,8 @@ Feature: the authority guide's reference checks inside a stub gate
       | unknown-schema | 0        |
       | malformed      | 0        |
 
+  # The "by timeout" row needs a timeout binary on the host and skips without
+  # one (macOS ships none); Linux CI runs both rows.
   Scenario Outline: a lookup that hangs is cut off at the gate's bound <how>
     Given the gate's niwa is "hang"
     And the gate has <timeout>

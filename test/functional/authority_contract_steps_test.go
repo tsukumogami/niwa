@@ -37,7 +37,6 @@ const gateRunDeadline = 20 * time.Second
 // authorityGateScenario is what these steps remember between steps.
 type authorityGateScenario struct {
 	dir       string        // where the checks, the stub gate and the gate's PATH live
-	checks    string        // the guide's reference block, as extracted
 	niwa      string        // which niwa the gate's PATH carries
 	noTimeout bool          // leave timeout off the gate's PATH, forcing the background-job bound
 	target    string        // the directory the checks anchor on; empty means the dispatch instance
@@ -47,7 +46,10 @@ type authorityGateScenario struct {
 // stubGateScript is the stub gate. `call` runs one check and prints its
 // return code; `gate` prints the gate's verdict. Either prints its last line
 // only if the sourced checks returned, so a check that exits leaves the run
-// with no answer, which fails the scenario.
+// with no answer, which fails the scenario. The gate branch is the guide's
+// gate model and its sketch under "Writing a gate that honours the grant",
+// taking the directory as an argument where the sketch derives it from $0;
+// change them together.
 const stubGateScript = `. "$GATE_CHECKS"
 NIWA_LOOKUP_SECONDS=%d
 mode=$1
@@ -118,7 +120,7 @@ func registerAuthorityGateSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the gate has a timeout command$`, theGateHasATimeoutCommand)
 	ctx.Step(`^the gate looks up the workspace root$`, theGateLooksUpTheWorkspaceRoot)
 	ctx.Step(`^the gate looks up the dispatch instance$`, theGateLooksUpTheDispatchInstance)
-	ctx.Step(`^"(niwa_\w+)((?: [a-z-]+)*)" returns (0|non-zero)$`, theCheckReturns)
+	ctx.Step(`^"(niwa_\w+)((?: [a-z0-9-]+)*)" returns (0|non-zero)$`, theCheckReturns)
 	ctx.Step(`^the stub gate (allows|denies) "([^"]*)" at point "([^"]*)" for (an exempt|a non-exempt) instance$`, theStubGateVerdict)
 	ctx.Step(`^the last gate run finished within the gate's bound$`, theLastGateRunFinishedWithinTheBound)
 	ctx.Step(`^the gate's "niwa authority decide ([a-z-]+)" prints "([^"]*)" and "([^"]*)"$`, theGatesDecidePrints)
@@ -143,7 +145,7 @@ func theStubGateSourcesTheGuideChecks(ctx context.Context) (context.Context, err
 	if err := os.WriteFile(filepath.Join(dir, "gate.sh"), []byte(fmt.Sprintf(stubGateScript, gateLookupBound)), 0o644); err != nil {
 		return ctx, err
 	}
-	s.gate = authorityGateScenario{dir: dir, checks: block, niwa: "built"}
+	s.gate = authorityGateScenario{dir: dir, niwa: "built"}
 	return ctx, nil
 }
 
@@ -219,6 +221,13 @@ func gateTarget(s *testState) string {
 
 // gatePath builds the gate's PATH directory for one run: the tools the
 // checks and the stub gate call, and the niwa the scenario chose.
+//
+// The tool list is a contract with the guide's reference block: every
+// external command the block runs must be listed here. A command missing
+// from it makes a check fail as "not found", which reads as not held, and
+// most failure scenarios expect exactly that, so they would pass for the
+// wrong reason. The held-merge scenarios, which need every check to succeed,
+// are what catch a missing tool.
 func gatePath(s *testState) (string, error) {
 	bin := filepath.Join(s.gate.dir, "bin")
 	if err := os.RemoveAll(bin); err != nil {
@@ -355,8 +364,11 @@ func theLastGateRunFinishedWithinTheBound(ctx context.Context) error {
 	return nil
 }
 
-// theGatesDecidePrints runs decide through the gate's own niwa and lookup
-// helper, so a scenario can show what the settle check turned down.
+// theGatesDecidePrints runs the built niwa's `authority decide` directly, with
+// the harness environment and -C set to the gate's target. It doesn't go
+// through the stub gate, its PATH, the scenario's chosen niwa or
+// niwa_lookup: it shows the raw answer the settle check is then given, so a
+// scenario can say what the check turned down and why.
 func theGatesDecidePrints(ctx context.Context, point, lineA, lineB string) error {
 	s := getState(ctx)
 	if s == nil {

@@ -53,7 +53,10 @@ test-functional-claude-integration: build-test
 # docs/guides/authority-grants.md), then the authority features, the
 # gate-contract scenarios that run the guide's reference checks among them.
 # The Authority workflow runs this on every pull request with no koto on PATH,
-# since nothing here may depend on koto.
+# since nothing here may depend on koto. The unit tests are picked by name, so
+# a new authority test whose name matches none of these patterns is left out
+# of this target (go test -race ./... still runs it); name it to match or
+# extend the pattern.
 AUTHORITY_UNIT_TESTS := Authority|FindInstance|SelectDispatch|^TestShow|^TestDecide
 AUTHORITY_FEATURES := features/authority-policy.feature:features/dispatch-authority.feature:features/authority-read.feature:features/authority-gate-contract.feature
 
