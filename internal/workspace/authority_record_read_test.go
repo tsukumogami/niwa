@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -195,6 +196,90 @@ func TestReadAuthorityRecord_OversizeRefused(t *testing.T) {
 	assertRecordClass(t, inst, err, RecordClassTooLarge, "")
 	if want := "is larger than " + strconv.Itoa(authority.MaxRecordBytes) + " bytes"; RecordClassTooLarge != want {
 		t.Errorf("class %q disagrees with the cap: want %q", RecordClassTooLarge, want)
+	}
+}
+
+// TestAuthorityRecord_CapIsTheStoredSize builds a request whose stored
+// record, identity fields at their longest, is exactly the cap: Resolve
+// accepts it, the written file is exactly the cap, and the reader reads it
+// back. One byte more is refused at Resolve.
+func TestAuthorityRecord_CapIsTheStoredSize(t *testing.T) {
+	// Every role grants nothing, so lengthening a name by one character
+	// lengthens the record by one byte.
+	resolve := func(names []string) (authority.Record, error) {
+		roles := map[string][]authority.Authority{}
+		for _, n := range names {
+			roles[n] = []authority.Authority{}
+		}
+		return authority.Resolve(authority.Policy{Roles: roles}, authority.Request{Roles: names})
+	}
+	stamp := func(rec authority.Record) authority.Record {
+		rec.DispatchID = "3c803591-4c01-486f-a927-f96ec399d6a7"
+		rec.ParentDispatchID = "7f1d2c3b-9a8e-4d6c-b5a4-0e1f2a3b4c5d"
+		rec.ParentSessionID = strings.Repeat("s", authority.MaxSessionIDLen)
+		rec.ParentDispatchSource = authority.ParentSourceAnchor
+		return rec
+	}
+	storedSize := func(names []string) int {
+		t.Helper()
+		rec, err := resolve(names)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := stamp(rec).MarshalJSON()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(b) + 1
+	}
+	filler := func(i int) string { return fmt.Sprintf("f%031d", i) }
+
+	one := storedSize([]string{"z"})
+	perFiller := storedSize([]string{filler(0), "z"}) - one
+	var names []string
+	for i := 0; i < (authority.MaxRecordBytes-one-1)/perFiller; i++ {
+		names = append(names, filler(i))
+	}
+	last := 1 + authority.MaxRecordBytes - storedSize(append(names, "z"))
+	if last < 1 || last >= 64 {
+		t.Fatalf("tuning name length %d is outside the name pattern", last)
+	}
+	exact := append(append([]string{}, names...), strings.Repeat("z", last))
+	if got := storedSize(exact); got != authority.MaxRecordBytes {
+		t.Fatalf("tuned record stores %d bytes, want %d", got, authority.MaxRecordBytes)
+	}
+
+	rec, err := resolve(exact)
+	if err != nil {
+		t.Fatalf("a record of exactly the cap was refused: %v", err)
+	}
+	inst := authorityInstance(t)
+	if err := WriteAuthorityRecord(inst, stamp(rec)); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(AuthorityRecordPath(inst))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != authority.MaxRecordBytes {
+		t.Fatalf("stored %d bytes, want %d", info.Size(), authority.MaxRecordBytes)
+	}
+	got, found, err := ReadAuthorityRecord(inst)
+	if err != nil || !found {
+		t.Fatalf("a stored record of exactly the cap: found %v, err %v", found, err)
+	}
+	if !reflect.DeepEqual(got.Roles, rec.Roles) {
+		t.Errorf("read back %d roles, want %d", len(got.Roles), len(rec.Roles))
+	}
+
+	over := append(append([]string{}, names...), strings.Repeat("z", last+1))
+	_, err = resolve(over)
+	var te *authority.RecordTooLargeError
+	if !errors.As(err, &te) {
+		t.Fatalf("one byte over the cap: err = %v, want *RecordTooLargeError", err)
+	}
+	if te.Size != authority.MaxRecordBytes+1 {
+		t.Errorf("refused size %d, want %d", te.Size, authority.MaxRecordBytes+1)
 	}
 }
 

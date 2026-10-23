@@ -6,9 +6,10 @@ import (
 	"strings"
 )
 
-// MaxRecordBytes caps an encoded authority record. Resolve refuses a request
-// whose record would exceed it, and the reader refuses a stored file larger
-// than it, so a record dispatch writes is always one the reader accepts.
+// MaxRecordBytes caps a stored authority record: its encoding plus the
+// trailing newline the writer adds. Resolve refuses a request whose stored
+// record would exceed it, and the reader refuses a stored file larger than
+// it, so a record dispatch writes is always one the reader accepts.
 const MaxRecordBytes = 64 << 10
 
 // Effective is what the policy resolves to before any request.
@@ -289,8 +290,9 @@ func Resolve(p Policy, r Request) (Record, error) {
 		UnknownGrant:         []RawGrantEntry{},
 	}
 
-	// Size the record with every identity field at its longest, so the
-	// record dispatch stamps later can't cross the reader's cap.
+	// Size the record as it is stored, with every identity field at its
+	// longest, so the record dispatch stamps later can't cross the reader's
+	// cap. The stored file is the encoding plus the newline the writer adds.
 	probe := rec
 	probe.DispatchID = strings.Repeat("0", dispatchIDLen)
 	probe.ParentDispatchID = strings.Repeat("0", dispatchIDLen)
@@ -300,8 +302,8 @@ func Resolve(p Policy, r Request) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
-	if len(b) > MaxRecordBytes {
-		return Record{}, &RecordTooLargeError{Size: len(b)}
+	if stored := len(b) + 1; stored > MaxRecordBytes {
+		return Record{}, &RecordTooLargeError{Size: stored}
 	}
 	return rec, nil
 }

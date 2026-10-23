@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 
 	"github.com/tsukumogami/niwa/internal/authority"
@@ -93,10 +94,13 @@ func (e *AuthorityRecordError) Unwrap() error { return e.Err }
 const (
 	RecordClassSymlink    = "is a symbolic link"
 	RecordClassNotRegular = "is not a regular file"
-	RecordClassTooLarge   = "is larger than 65536 bytes"
 	RecordClassUnreadable = "cannot be read"
 	RecordClassMalformed  = "is malformed"
 )
+
+// RecordClassTooLarge is the class for a record over the cap; it is a
+// variable only because Go can't format a constant into a constant string.
+var RecordClassTooLarge = "is larger than " + strconv.Itoa(authority.MaxRecordBytes) + " bytes"
 
 // ReadAuthorityRecord reads an instance's authority record. found is false,
 // with no error, when there is no record file, so a caller can tell an
