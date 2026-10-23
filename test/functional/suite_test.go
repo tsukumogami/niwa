@@ -557,6 +557,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	registerDispatchLineageSteps(ctx)
 	registerDispatchAuthoritySteps(ctx)
 	registerAuthorityReadSteps(ctx)
+	registerAuthorityResumeSteps(ctx)
 	registerKeepAliveSteps(ctx)
 
 	// --- vault failure handling: seeding and counting the shared infisical

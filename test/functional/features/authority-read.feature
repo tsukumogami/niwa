@@ -60,6 +60,29 @@ Feature: niwa authority show, decide and niwa list read back a dispatch's grant
       | --detach |
       |          |
 
+  # Each resume path starts a fresh agent process in the same instance under a
+  # new session id, and niwa writes nothing for it. The resumed session's first
+  # read must match the launch's, and the stored record must be byte for byte
+  # what dispatch wrote.
+  Scenario Outline: a worker resumed through <resume path> reads the same record, which stays unchanged
+    Given a config repo "ws" exists with authority fixture "r8a"
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    Given a fake <agent> for dispatch that reads its authority first, with session "<session>"
+    When I run "niwa dispatch hello-task --detach --grant merge-pr <harness>" from the workspace root
+    Then the exit code is 0
+    And the worker's "launch" read printed the dispatch instance's record
+    Given I remember the dispatch instance's authority record
+    When the worker is resumed with "<resume path> <session>" under session "<new session>"
+    Then the worker's "<label>" read matches its first read and ran under session "<new session>"
+    And the remembered authority record is byte-for-byte unchanged
+
+    Examples:
+      | resume path          | agent  | session                              | harness         | new session                          | label     |
+      | claude attach        | claude | aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa |                 | cccccccc-cccc-4ccc-8ccc-cccccccccccc | attach    |
+      | claude --bg --resume | claude | aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa |                 | dddddddd-dddd-4ddd-8ddd-dddddddddddd | bg-resume |
+      | codex resume         | codex  | 01d00000-0000-7000-8000-00000000a11c | --harness codex | 01d00000-0000-7000-8000-00000000c33c | resume    |
+
   Scenario: a Codex worker carrying its dispatcher's session id reads its own record, and none outside its instance
     Given a config repo "ws" exists with authority fixture "r8a"
     When I run niwa init from config repo "ws"

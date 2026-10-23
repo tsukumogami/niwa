@@ -45,6 +45,7 @@ const authorityReadPrologue = `if [ -n "$FAKE_AUTHORITY_NIWA" ]; then
   if [ -n "$label" ]; then
     out="$HOME/authority-read-$label"
     ls "$(dirname "$PWD")/.niwa/sessions" > "$out.mappings" 2>/dev/null
+    printf '%s' "$CLAUDE_CODE_SESSION_ID" > "$out.session"
     ( cd "${FAKE_AUTHORITY_CD:-.}" && "$FAKE_AUTHORITY_NIWA" authority show ${FAKE_AUTHORITY_SHOW_ARGS---json} ) > "$out.out" 2> "$out.err"
     echo $? > "$out.exit"
     if [ -n "$FAKE_AUTHORITY_DECIDE" ]; then
