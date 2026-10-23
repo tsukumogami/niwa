@@ -112,14 +112,17 @@ func refuse(format string, args ...any) error {
 	return authorityRefusal{fmt.Errorf(format, args...)}
 }
 
-// checkMachineAuthority validates the machine's authority_level and
-// authority_ceiling at (2a), beside the permission mode, so a broken machine
-// setting stops the dispatch before anything else reads it.
+// checkMachineAuthority validates the machine's authority_level,
+// authority_ceiling and principal at (2a), beside the permission mode, so a
+// broken machine setting stops the dispatch before anything else reads it.
 func checkMachineAuthority(gc *config.GlobalConfig, cfgPath string) error {
 	if _, err := gc.AuthorityLevel(); err != nil {
 		return refuse("%v (in %s)", err, cfgPath)
 	}
 	if _, err := gc.AuthorityCeiling(); err != nil {
+		return refuse("%v (in %s)", err, cfgPath)
+	}
+	if _, err := gc.Principal(); err != nil {
 		return refuse("%v (in %s)", err, cfgPath)
 	}
 	return nil
@@ -215,28 +218,37 @@ func resolveDispatchAuthority(warn io.Writer, cwd, workspaceRoot, wsConfigPath, 
 	if parent != nil {
 		auth.parentID = parent.DispatchID
 	}
-	in := gatherLineageInputs(workspaceRoot, sessionVar, cwdInstance, cwdInInstance, auth.parentID, parentSrc)
+	// checkMachineAuthority refused an invalid principal at (2a).
+	declared, _ := gc.Principal()
+	in := gatherLineageInputs(workspaceRoot, sessionVar, cwdInstance, cwdInInstance, auth.parentID, parentSrc, declared)
 	auth.parentSession, auth.parentDispatch, auth.principal = lineage.Resolve(in)
 	return auth, nil
 }
 
-// gatherLineageInputs gathers what the link rules read beyond what dispatchParent
-// already found. Both session mapping reads are best effort: a store or a
-// mapping that can't be read counts as no mapping, which makes the session
-// link handed and the root fallback none, never observed or mapped.
+// gatherLineageInputs gathers what the link and principal rules read beyond
+// what dispatchParent already found. Both session mapping reads are best
+// effort: a store or a mapping that can't be read counts as no mapping, which
+// makes the session link handed and the root fallback none, never observed
+// or mapped.
 //
 // The instance's newest mapping is read only when --parent-from was not
 // given, since the rules don't consult it then. The mapping keyed by the
 // variable's value is read only at the workspace root (the working directory
 // in no instance, no --parent-from) and only when the value is a lowercase
 // UUID, the only key shape the store accepts.
-func gatherLineageInputs(workspaceRoot, sessionVar string, cwdInstance workspace.FoundInstance, cwdInInstance bool, parentID, parentSrc string) lineage.Inputs {
+//
+// The parent's lineage entry is read by whichever parent dispatch id
+// resolved: the dispatcher's record or the root mapping. An entry that is
+// missing, unreadable or of a later version is left nil, which the principal
+// rules read as a parent whose principal couldn't be inherited.
+func gatherLineageInputs(workspaceRoot, sessionVar string, cwdInstance workspace.FoundInstance, cwdInInstance bool, parentID, parentSrc, declaredPrincipal string) lineage.Inputs {
 	in := lineage.Inputs{
 		SessionVar:         sessionVar,
 		ParentFromSet:      dispatchParentFromSet,
 		CwdInInstance:      cwdInInstance,
 		ParentDispatchID:   parentID,
 		ParentDispatchFrom: parentSrc,
+		DeclaredPrincipal:  declaredPrincipal,
 	}
 	switch {
 	case dispatchParentFromSet:
@@ -249,7 +261,31 @@ func gatherLineageInputs(workspaceRoot, sessionVar string, cwdInstance workspace
 			in.RootMappedDispatch = m.DispatchID
 		}
 	}
+	// A record's parent id is set only for the cwd and --parent-from rows,
+	// and the root mapping is read only when neither applies, so at most one
+	// of the two names the parent dispatch. lineage.Resolve checks the entry
+	// it gets is the parent link's.
+	parentDispatch := parentID
+	if parentDispatch == "" {
+		parentDispatch = in.RootMappedDispatch
+	}
+	in.ParentEntry = readParentEntry(workspaceRoot, parentDispatch)
 	return in
+}
+
+// readParentEntry reads the parent dispatch's lineage entry, nil when there
+// is no parent id, the id isn't a dispatch id, or the entry is missing,
+// unreadable or of a later version.
+func readParentEntry(workspaceRoot, dispatchID string) *lineage.Entry {
+	if dispatchID == "" {
+		return nil
+	}
+	stored, found, err := workspace.ReadLineageEntry(workspaceRoot, dispatchID)
+	if err != nil || !found || stored.Parsed.LaterVersion {
+		return nil
+	}
+	e := stored.Parsed.Entry
+	return &e
 }
 
 // newestMappedSession is the session id of the newest mapping naming the

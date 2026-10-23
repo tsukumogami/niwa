@@ -28,12 +28,41 @@ type Inputs struct {
 // package free of the store; change the two together.
 var lowercaseUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
-// Resolve applies the parent-session and parent-dispatch source rules, each
-// in row order, first match wins. No outcome is a refusal: a handed, mapped,
-// unverified or absent link is recorded as such. The principal is left
-// absent until it is resolved here too.
+// Resolve applies the parent-session, parent-dispatch and principal source
+// rules, each in row order, first match wins. No outcome is a refusal: a
+// handed, mapped, unverified or absent link is recorded as such, and so is a
+// principal niwa couldn't vouch for.
 func Resolve(in Inputs) (parentSession, parentDispatch Link, p Principal) {
-	return resolveParentSession(in), resolveParentDispatch(in), Principal{Source: SourceNone, Trust: TrustObserved}
+	parentSession, parentDispatch = resolveParentSession(in), resolveParentDispatch(in)
+	return parentSession, parentDispatch, resolvePrincipal(in, parentSession, parentDispatch)
+}
+
+// resolvePrincipal applies the principal rows. A parent dispatch whose entry
+// is readable passes its principal down, an empty one included; its trust
+// stays observed only when niwa observed every hop that carried it: the
+// parent dispatch link, the parent session link not contradicted by the
+// instance's mapping, and the parent's own principal. Otherwise the declared
+// principal, or none. When a parent link has an id but its entry couldn't
+// be used, the person should have come from that parent, so the trust is
+// handed.
+func resolvePrincipal(in Inputs, parentSession, parentDispatch Link) Principal {
+	hasParent := parentDispatch.ID != ""
+	if hasParent && in.ParentEntry != nil && in.ParentEntry.DispatchID == parentDispatch.ID {
+		trust := TrustHanded
+		if parentDispatch.Source == SourceObserved && parentSession.Source != SourceUnverified &&
+			in.ParentEntry.Principal.Trust == TrustObserved {
+			trust = TrustObserved
+		}
+		return Principal{Name: in.ParentEntry.Principal.Name, Source: PrincipalInherited, Trust: trust}
+	}
+	trust := TrustObserved
+	if hasParent {
+		trust = TrustHanded
+	}
+	if in.DeclaredPrincipal != "" {
+		return Principal{Name: in.DeclaredPrincipal, Source: PrincipalDeclared, Trust: trust}
+	}
+	return Principal{Source: SourceNone, Trust: trust}
 }
 
 func resolveParentSession(in Inputs) Link {
