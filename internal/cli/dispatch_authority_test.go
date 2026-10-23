@@ -912,6 +912,41 @@ func TestDispatchAuthority_RecheckAfterProvisioning(t *testing.T) {
 	}
 }
 
+// TestDispatchAuthority_RecheckRefusesAChangedGrant: provisioning brings in a
+// config whose role names fewer authorities. The request still resolves at
+// the same level and inside the ceiling, but to a smaller grant than the
+// line printed, so (8a) refuses on the grant and the instance is rolled back.
+func TestDispatchAuthority_RecheckRefusesAChangedGrant(t *testing.T) {
+	_, f := authorityWorkspace(t, r8aExample, "")
+	registerSource(t, "test-ws", "")
+	dispatchRoles = []string{"coordinator"}
+	provisionThen(t, func(root, _ string) {
+		writeWorkspaceConfig(t, root, strings.Replace(r8aExample,
+			`authorities = ["merge-pr", "close-issue", "cut-release"]`, `authorities = ["merge-pr"]`, 1))
+	})
+	_, stderr, err := runDispatchCmd(t, "do a thing")
+	if err == nil {
+		t.Fatal("dispatch succeeded with a grant different from the one printed")
+	}
+	for _, want := range []string{"the workspace config's [authority.roles] changed", "the grant would now be", "printed above"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v; want it to contain %q", err, want)
+		}
+	}
+	if !strings.Contains(stderr, authorityLinePrefix) {
+		t.Errorf("the line should have printed before the late refusal: %s", stderr)
+	}
+	if f.destroyCalled != 1 || f.destroyedPath != f.instancePath {
+		t.Errorf("rollback destroyed %d times (%s)", f.destroyCalled, f.destroyedPath)
+	}
+	if f.launchCalled != 0 || len(sessionMappingFiles(t, filepath.Dir(f.instancePath))) != 0 {
+		t.Errorf("launched %d times or wrote a mapping", f.launchCalled)
+	}
+	if _, statErr := os.Stat(workspace.AuthorityRecordPath(f.instancePath)); statErr == nil {
+		t.Error("a record was written for a refused dispatch")
+	}
+}
+
 // TestDispatchAuthority_RecheckFallsBackToTheFirstOverlay: with no overlay
 // URL in the instance state and no convention clone left, (8a) still uses
 // the overlay (2e) resolved against, rather than reading "no overlay".
