@@ -113,7 +113,7 @@ place when `niwa dispatch` returns.
   | `schema` | `niwa.lineage.entry/v1` |
   | `dispatch_id` | the dispatch's version-4 UUID |
   | `instance` | the instance's directory name |
-  | `agent` | the dispatched agent's name, as the session mapping records it (`claude`, `codex`) |
+  | `agent` | the dispatched agent's name, as the session mapping records it (`claude`, `codex`): 1 to 32 lowercase letters, digits or `-` |
   | `origin` | `dispatch`, or `watch` (R12) |
   | `written_at` | when the entry was written, RFC 3339 in UTC |
   | `session_id` | the worker's session id, absent until captured (R2) |
@@ -170,18 +170,21 @@ place when `niwa dispatch` returns.
   |---|---|---|---|
   | The parent dispatch link has an id and that dispatch's entry is readable | `inherited` | the parent entry's principal name | `observed` if the parent dispatch link is `observed` and the parent entry's principal trust is `observed`; otherwise `handed` |
   | Otherwise, the personal niwa config declares a principal (R8) | `declared` | the declared value | `observed` |
-  | Otherwise, the operating-system account's name is a valid principal | `os-account` | the account name | `observed` |
+  | Otherwise, the operating-system account's name is valid by R8's rule | `os-account` | the account name | `observed` |
   | Otherwise | `none` | empty | `observed` |
 
   The second to fourth rows also apply when a parent dispatch link has an id
   but its entry is missing, unreadable or of a later version; the entry's
   `parent_dispatch` still names the parent, so a reader sees a parent whose
-  principal wasn't inherited.
+  principal wasn't inherited. A readable parent entry whose principal is
+  `none` is still inherited: the child's principal is `inherited` with an
+  empty name, never filled in from this machine. The principal's `source` is
+  a provenance label; its `trust` is what says whether niwa observed it.
 - **R8. Declaring the person.** The personal niwa config's `[global]` table
   accepts `principal = "<value>"`. A value is valid when it is 1 to 128
   characters of letters, digits, `.`, `_`, `-`, `@` or `+`. An invalid value
-  refuses every dispatch on that machine with an error naming the key and
-  the config file. No dispatch flag sets or overrides the principal.
+  refuses every dispatch and every `niwa watch` review launch on that
+  machine with an error naming the key and the config file. No dispatch flag sets or overrides the principal.
 - **R9. A person, never a credential.** niwa never derives the principal
   from a token, a keyring login, a GitHub account or any network call, and
   recording it changes nothing about which credentials a session holds.
@@ -193,9 +196,9 @@ place when `niwa dispatch` returns.
   stored mapping whose instance is gone, and the unmapped backstop); `niwa
   destroy` of the instance, with or without `--keep-session`; `niwa reset`;
   an on-reap command that fails, and one that has failed often enough for
-  its mapping to be dropped; the deletion of the session mapping; and every
-  operation that rewrites the workspace configuration directory, `niwa
-  apply` among them.
+  its mapping to be dropped; and the deletion of the session mapping. The
+  store sits outside every directory `niwa apply` and its configuration
+  refresh rewrite, so neither touches it.
 - **R11. How long entries last.** Entries last as long as the workspace root.
   Destroying the workspace removes them; nothing in this feature removes one
   earlier.
@@ -212,38 +215,48 @@ place when `niwa dispatch` returns.
 
 - **R13. Selecting an entry.** `niwa lineage show` takes one selector:
   - a dispatch id as its argument, matching that entry;
-  - `--session <id>`, matching entries whose `session_id` is that id, the
-    latest `written_at` winning;
-  - `--instance <name>`, matching entries for that instance name, the latest
-    `written_at` winning;
+  - `--session <id>`, matching entries whose `session_id` is that id;
+  - `--instance <name>`, matching entries for that instance name;
   - none, or `-C <dir>`: the instance containing the working directory (or
-    `<dir>`); its authority record's dispatch id when it has one, otherwise
-    the latest entry for that instance name.
+    `<dir>`); the entry for its authority record's dispatch id when it has
+    one, otherwise the entries for that instance name.
 
-  Two selectors together, or `-C` with any other selector, is a usage error
-  (exit 2). An empty, relative or nonexistent `-C` exits 1. A selector that
-  matches nothing, including in a workspace with no store, prints `no
-  lineage entry` and exits 1. Run outside a workspace it exits 1 naming the
+  Where several entries match, the latest `written_at` wins, ties going to
+  the lower dispatch id. Two selectors together, or `-C` with any other
+  selector, is a usage error (exit 2). An empty, relative or nonexistent
+  `-C` exits 1. A selector that matches nothing prints `no lineage entry`
+  and exits 1: that includes a workspace with no store, a working directory
+  in the workspace but in no instance, and an authority record whose
+  dispatch id has no entry. Run outside a workspace it exits 1 naming the
   missing workspace.
 - **R14. Showing the chain.** `show` prints the selected entry and then each
   ancestor reached through `parent_dispatch` ids, nearest first. For every
   level it prints the dispatch id, the worker session id, the parent session
   with its source, the parent dispatch with its source, and the principal
   with its source and trust, and every level whose parent session id is set
-  prints that session as the one directing it. The walk stops at an entry
-  whose parent dispatch id is empty; at a parent dispatch id with no entry,
-  printed as `not on record`; at an entry that can't be read, of a later
-  version, or that fails validation, printed as that level's error; at a
-  dispatch id already printed (a cycle); and after 64 levels. Each stop
-  except the first prints why. `show` exits 0 whenever the selected entry
-  itself is readable, and exits 1 when it isn't.
+  prints `directed by <session id>`. The layout is the design's; tests may
+  rely on the values, `(not observed)`, `directed by`, and the stop text
+  below. The walk ends as the table says, the selected entry counting as
+  level 1:
+
+  | When | Last level printed | Stop text | JSON `stop` |
+  |---|---|---|---|
+  | An entry's parent dispatch id is empty | that entry | none | `root` |
+  | A parent dispatch id has no entry | `<id> not on record` | none | `not-on-record` |
+  | An entry can't be read or fails validation | `<id> unreadable: <reason>` | none | `unreadable` |
+  | An entry is of a later version | `<id> later version <schema>` | none | `later-version` |
+  | A parent dispatch id was already printed | the level before it | `stopped: cycle at <id>` | `cycle` |
+  | Level 64 has a parent dispatch id | level 64 | `stopped: 64 levels` | `depth` |
+
+  `show` exits 0 when the selected entry is readable, including one of a
+  later version, and exits 1 when it can't be read or fails validation.
 - **R15. Versioned documents for tools.** `show --json` prints
   `{"schema": "niwa.lineage.chain/v1", "chain": [...], "stop": "<reason>"}`,
-  where `chain` holds one object per level printed, each the entry's R1
-  fields, and `stop` is one of `root`, `not-on-record`, `unreadable`,
-  `cycle`, `depth`. An entry of a later version appears as `{"dispatch_id",
-  "schema", "known": false}` and nothing else of it is read; an entry that
-  can't be read appears as `{"dispatch_id", "error"}`. `niwa lineage list
+  where `chain` holds one object per level printed, and `stop` is a value
+  from R14's table. A readable level is the entry's R1 fields; a later
+  version is `{"dispatch_id", "schema", "known": false}` and nothing else of
+  it is read; an unreadable entry is `{"dispatch_id", "error"}`; a parent
+  with no entry is `{"dispatch_id", "error": "not on record"}`. `niwa lineage list
   --json` prints `{"schema": "niwa.lineage.list/v1", "entries": [...]}` in
   the same entry shapes. Every source and trust value is printed as stored.
   The formats grow additively within a version.
@@ -253,15 +266,20 @@ place when `niwa dispatch` returns.
   and principal. An unreadable entry prints as its dispatch id and error, and
   the rest still list; `list` exits 0 unless the store itself can't be read.
   A workspace with no store lists nothing and exits 0.
-- **R17. Only `observed` is observed.** A source or trust value other than
-  `observed`, including one this niwa doesn't know, is not observed. The
-  human output prints such a value followed by `(not observed)`; the JSON
-  prints it as stored, and the guide (R21) tells tool authors to apply the
-  same rule.
+- **R17. Only `observed` is observed.** The rule covers three fields:
+  `parent_session.source`, `parent_dispatch.source` and `principal.trust`.
+  In them, a value other than `observed`, including one this niwa doesn't
+  know, is not observed. The human output prints such a value followed by
+  `(not observed)`, except `none` on a link, which means there is no parent
+  and prints alone. The JSON prints every value as stored, and the guide
+  (R21) tells tool authors to apply the same rule. `principal.source` is a
+  provenance label and is printed without annotation.
 - **R18. The live read agrees.** The authority record gains the parent
   session source and the principal (name, source, trust), with the same
-  values as the lineage entry, so `niwa authority show` and `niwa lineage
-  show` agree while the instance exists. An authority record written before
+  values as the lineage entry. Its existing `parent_dispatch_source` keeps
+  its values, and `cwd`, `anchor` and `none` there correspond to the
+  entry's `observed`, `handed` and `none`. So `niwa authority show` and
+  `niwa lineage show` agree while the instance exists. An authority record written before
   this feature lacks them, and `niwa authority show` prints them as
   `unrecorded`; an older niwa reading a newer record ignores them, as the
   record format already allows.
@@ -284,9 +302,9 @@ place when `niwa dispatch` returns.
   workspace is destroyed.
 - **R22. Store safety.** The store's directory is mode 0700 and each entry
   0600. An entry is written to a temporary file and renamed into place, so a
-  reader never sees a partial entry. Every field is re-validated against the
-  shape R1, R4, R7 and R8 give it when read, and an entry failing any check
-  is unreadable.
+  reader never sees a partial entry. Every field, `agent` and `written_at`
+  included, is re-validated against the shape R1, R4, R7 and R8 give it when
+  read, and an entry failing any check is unreadable.
 - **R23. Bounded entries.** Every field is length-bounded (ids by their
   formats, the instance name by niwa's instance naming, the principal by
   R8), so an entry is at most 4 KiB.
@@ -307,7 +325,9 @@ The tree:
       prints B's parent session as A's session id `observed`, B's parent
       dispatch as A's dispatch id `observed`, then A's level with parent
       session S0 `handed` and parent dispatch `none`, stop `root`; both
-      levels name the same principal (R1, R4, R5, R7, R10, R14).
+      levels name the same principal. B's level prints `directed by <A's
+      session id>` and A's prints `directed by S0` (R1, R4, R5, R7, R10,
+      R14).
 - [ ] Extend that tree with C dispatched from inside B's instance: `show` on
       C prints three levels, nearest first (R14).
 - [ ] In the same tree, A's principal source is `declared` with `principal`
@@ -334,11 +354,19 @@ Parent links:
 - [ ] A dispatch from inside an instance whose lineage entry was deleted
       records that parent dispatch id and a `declared` or `os-account`
       principal (R7).
+- [ ] A grandchild dispatched from inside a child whose principal trust is
+      `handed` records principal trust `handed`, even through an `observed`
+      parent dispatch link (R7).
+- [ ] With no `principal` declared and an OS account name that fails R8's
+      rule (set through a test seam), a root dispatch records principal
+      source `none` with an empty name; a child of it records `inherited`
+      with an empty name (R7).
 
 The principal:
 - [ ] `principal = "dana@example.com"` is accepted; `principal = ""`,
       `principal = "Dana G"` and a 129-character value each refuse dispatch
-      with an error naming `principal` and the config file (R8).
+      with an error naming `principal` and the config file, and the invalid
+      value refuses a `niwa watch` review launch the same way (R8).
 - [ ] `niwa dispatch --help` lists no flag that sets the principal (R8).
 - [ ] With `principal` declared, `GH_TOKEN` set, and a stub `gh` reporting a
       different login, the entry's principal is the declared value (R9).
@@ -354,8 +382,9 @@ Writing:
 - [ ] With the store directory unwritable, dispatch refuses and leaves no
       instance; with an entry already present for the minted dispatch id,
       dispatch refuses the same way (R3).
-- [ ] When adding `session_id` fails, dispatch prints one warning naming the
-      entry, exits 0, and the entry has no `session_id` (R3).
+- [ ] With the step that adds `session_id` made to fail through a test seam,
+      dispatch prints one warning naming the entry, exits 0, and the entry
+      has no `session_id` (R3).
 - [ ] An entry's bytes are identical before and after a reap, a second
       dispatch and a `niwa apply` (R2).
 
@@ -376,30 +405,44 @@ Reading:
 - [ ] `show` selects correctly by dispatch id, `--session`, `--instance`, the
       working directory and `-C`; with two entries sharing a session id or
       instance name it selects the later `written_at` (R13).
-- [ ] Two selectors exit 2; `-C` with a relative path exits 1; an unknown
-      dispatch id exits 1 printing `no lineage entry`, also in a workspace
-      with no store (R13).
-- [ ] With the parent's entry deleted, `show` prints it as `not on record`,
-      stop `not-on-record`, exit 0 (R14).
+- [ ] Two selectors exit 2; `-C` that is empty, relative or nonexistent
+      exits 1; outside any workspace `show` exits 1 naming the missing
+      workspace (R13).
+- [ ] `show` prints `no lineage entry` and exits 1 for an unknown dispatch
+      id, in a workspace with no store, from the workspace root with no
+      selector, and from an instance whose authority record's dispatch id
+      has no entry (R13).
+- [ ] With the parent's entry deleted, `show` prints `<id> not on record`,
+      stop `not-on-record`, exit 0, and the JSON's last chain object is
+      `{"dispatch_id", "error": "not on record"}` (R14, R15).
 - [ ] With two entries edited to name each other as parent dispatch, `show`
-      stops with `cycle`; a hand-built chain of 70 entries stops with
-      `depth` after 64 levels (R14).
-- [ ] An entry with its schema changed to `niwa.lineage.entry/v2` shows as
-      `known: false` with nothing else read; one edited to hold a malformed
-      dispatch id, an unknown `agent` shape or an over-long principal is
-      unreadable; `show` on an unreadable selected entry exits 1 (R14, R15,
-      R22).
+      prints `stopped: cycle at <id>` and JSON stop `cycle`; a hand-built
+      chain of 70 entries prints 64 levels, `stopped: 64 levels` and JSON
+      stop `depth` (R14).
+- [ ] An ancestor with its schema changed to `niwa.lineage.entry/v2` ends
+      the walk with `<id> later version niwa.lineage.entry/v2`, JSON stop
+      `later-version`, and a chain object with `known: false` and nothing
+      else of the entry; selecting that entry directly exits 0 (R14, R15).
+- [ ] Entries edited to hold a malformed dispatch id, an `agent` of `Claude
+      Code`, a `written_at` that isn't RFC 3339, or a 129-character
+      principal are each unreadable; `show` on an unreadable selected entry
+      exits 1 (R14, R22).
 - [ ] `niwa lineage list` orders three entries by `written_at`, newest
-      first, lists an unreadable one by dispatch id and error among the
-      others, exits 0, and lists nothing with exit 0 in a workspace that
-      never dispatched (R16).
+      first, and two with equal `written_at` by dispatch id; each line holds
+      the dispatch id, session id, parent session id with its source, and
+      principal; an unreadable entry lists as its dispatch id and error
+      among the others, exit 0; a workspace that never dispatched lists
+      nothing, exit 0 (R16).
 - [ ] An entry whose parent session source is edited to `vouched` prints
-      `vouched (not observed)` in `show` and `"vouched"` in `show --json`
-      (R17).
+      `vouched (not observed)` in `show` and `"vouched"` in `show --json`;
+      one whose principal trust is edited to `vouched` prints the same way;
+      a `none` link prints `none` alone; a `declared` principal source
+      prints with no annotation (R17).
 - [ ] While an instance exists, `niwa authority show --json` and `niwa
       lineage show --json` report the same parent session source and
-      principal; an authority record without the new fields prints them as
-      `unrecorded` (R18).
+      principal, and the authority record's `parent_dispatch_source` `cwd`
+      or `anchor` matches the entry's `observed` or `handed`; an authority
+      record without the new fields prints them as `unrecorded` (R18).
 
 Constraints:
 - [ ] The lineage functional tests pass with no workflow engine on PATH
@@ -409,9 +452,9 @@ Constraints:
       `OTEL_RESOURCE_ATTRIBUTES` holds no principal attribute (R20).
 - [ ] `docs/guides/dispatch-lineage.md` has a section stating each point R21
       lists (R21).
-- [ ] The store directory is mode 0700 and entries 0600; killing a writer
-      between the temporary write and the rename leaves no entry at the
-      final path (R22).
+- [ ] The store directory is mode 0700 and entries 0600; with the rename
+      made to fail through a test seam, no file exists at the entry's final
+      path and the dispatch refuses (R3, R22).
 - [ ] An entry with every field at its maximum length is at most 4 KiB
       (R23).
 - [ ] The existing dispatch, authority and telemetry tests pass unchanged,
