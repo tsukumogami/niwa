@@ -240,7 +240,7 @@ _Cost and isolation_
 
 ### Issue 4: docs(authority): document the grant contract and test its consumers
 
-**Goal**: Document the authority-grant contract in `docs/guides/authority-grants.md` and test the way outside readers consume it. The guide carries the reference held, record and settle checks as shell functions that return rather than exit. A CI contract test runs those functions inside a stub gate against real `show` and `decide` output and against each failure, and checks that a present record decides even for an exempt instance while every failure keeps today's behaviour. A CI job runs the authority tests with no koto on `PATH`. The CLAUDE.md contributor-guides entry points at the guide. The one-time live check with a real Claude Code session is recorded in the implementing pull request.
+**Goal**: Document the authority-grant contract in `docs/guides/authority-grants.md` and test the way outside readers consume it. The guide carries the reference held, record and settle checks as shell functions that return rather than exit. A CI contract test runs those functions inside a stub gate against real `show` and `decide` output and against each failure, and checks that a present record decides even for an exempt instance while every failure keeps today's behaviour. The existing Test job runs the authority tests, and a CI-only test asserts no koto on `PATH`. The CLAUDE.md contributor-guides entry points at the guide. The one-time live check with a real Claude Code session is recorded in the implementing pull request.
 
 **Acceptance Criteria**:
 
@@ -272,8 +272,8 @@ _Contract test_
 
 _CI_
 
-- [ ] A CI job runs the authority unit and functional tests with no koto binary on `PATH` and passes. The job fails if `koto` resolves on `PATH`.
-- [ ] The contract test runs in CI on every pull request, and a CI run with the guide's held check altered to `exit` fails.
+- [ ] The existing Test job runs the authority unit and functional tests and passes, and a CI-only test asserts no koto on `PATH`: `TestCI_AuthorityRunsWithoutKoto`, run by that job's `go test -race ./...`, fails if `koto` resolves on `PATH` when `CI` is set.
+- [ ] The contract test runs in the existing Test job on every pull request that job runs for, and a run with the guide's held check altered to `exit` fails.
 
 _CLAUDE.md_
 

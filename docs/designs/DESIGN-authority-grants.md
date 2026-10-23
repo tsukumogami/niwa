@@ -1178,8 +1178,8 @@ against a later-version record, and against each failure. It checks
 that a present record decides even for an exempt instance, that a
 record with `grant_ceiling_source: none` and every failure keep the
 stub's today's-behaviour verdict, and that a declared-empty ceiling
-denies. A CI job runs the
-authority unit and functional tests with no koto binary on `PATH`. The
+denies. The existing Test job runs the authority unit and functional
+tests, and a CI-only test asserts no koto binary is on `PATH`. The
 one-time live check with a real Claude Code session is recorded in the
 implementing pull request.
 

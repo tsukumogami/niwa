@@ -15,7 +15,10 @@ half of this guide is the contract such a gate follows.
 
 None of this needs koto. A host with niwa alone declares, records and reads
 authority, and no part of the record or the lookup reads anything koto
-writes.
+writes. The existing Test job in CI runs the authority unit tests and the
+functional suite, the gate-contract scenarios for this guide among them, and
+a CI-only test, `TestCI_AuthorityRunsWithoutKoto`, asserts that no koto is on
+PATH while it does.
 
 ## Levels and authorities
 
