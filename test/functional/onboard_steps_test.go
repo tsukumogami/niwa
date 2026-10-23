@@ -247,11 +247,11 @@ func iRunFromWorkspaceUnderPTYWithInput(ctx context.Context, command, workspace,
 		quoted[i] = shellQuote(a)
 	}
 	cwd := filepath.Join(s.workspaceRoot, workspace, ".niwa")
-	// util-linux `script` does not propagate the wrapped command's exit
-	// status as its own (confirmed empirically: `script -q -c "exit 42"
-	// /dev/null` exits 0). BSD `script` on macOS does propagate it, but
-	// the sentinel works under both, so one path serves both -- every existing PTY scenario in this suite
-	// only ever asserts exit 0 for exactly this reason. AC-32 needs a
+	// util-linux `script` without -e does not propagate the wrapped
+	// command's exit status as its own (`script -q -c "exit 42" /dev/null`
+	// exits 0); scriptCommand now passes -e, and BSD `script` on macOS
+	// propagates it anyway. This step predates that and keeps its own
+	// sentinel, which works under both. AC-32 needs a
 	// real non-zero exit code out of a TTY-driven run, so the inner
 	// command prints its own $? as a sentinel line instead of relying on
 	// `exec` + script's exit status. This drops the `exec` optimization
