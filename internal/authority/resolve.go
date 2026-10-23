@@ -220,7 +220,8 @@ func Resolve(p Policy, r Request) (Record, error) {
 	roles := dedupSorted(r.Roles)
 	for _, role := range roles {
 		if _, ok := p.Roles[role]; !ok {
-			return Record{}, &UnknownValueError{Key: "--role", Value: role, Accepted: declaredRoles(p)}
+			return Record{}, &UnknownValueError{Key: "--role", Value: role, Accepted: declaredRoles(p),
+				IfNone: "no roles are declared in the workspace config's [authority.roles]"}
 		}
 	}
 

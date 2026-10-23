@@ -225,6 +225,13 @@ func TestResolve_Refusals(t *testing.T) {
 			t.Errorf("err = %v", err)
 		}
 	})
+	t.Run("no roles declared names the table", func(t *testing.T) {
+		_, err := Resolve(Policy{}, Request{Roles: []string{"coordinator"}})
+		want := `invalid --role "coordinator"; no roles are declared in the workspace config's [authority.roles]`
+		if err == nil || err.Error() != want {
+			t.Errorf("err = %v, want %q", err, want)
+		}
+	})
 }
 
 func TestResolve_Ordering(t *testing.T) {

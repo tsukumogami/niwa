@@ -135,9 +135,16 @@ type UnknownValueError struct {
 	// WellFormed is true when Value matches the name pattern, so it could be
 	// an authority a newer niwa knows.
 	WellFormed bool
+	// IfNone, when set, replaces the accepted-values clause when Accepted is
+	// empty, so a vocabulary nobody declared isn't printed as one whose only
+	// value is "none".
+	IfNone string
 }
 
 func (e *UnknownValueError) Error() string {
+	if len(e.Accepted) == 0 && e.IfNone != "" {
+		return fmt.Sprintf("invalid %s %s; %s", e.Key, quote(e.Value), e.IfNone)
+	}
 	accepted := "none"
 	if len(e.Accepted) > 0 {
 		accepted = strings.Join(e.Accepted, ", ")
