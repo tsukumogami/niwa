@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -182,17 +183,23 @@ func TestDispatchLineage_RollbackAfterTheWriteRemovesTheEntry(t *testing.T) {
 // given, from the working directory.
 func runLineageShowCmd(t *testing.T, asJSON bool, args ...string) (stdout string, err error) {
 	t.Helper()
-	prev := lineageShowJSON
-	lineageShowJSON = asJSON
-	t.Cleanup(func() { lineageShowJSON = prev })
-	var out bytes.Buffer
-	cmd := &cobra.Command{}
-	cmd.SetOut(&out)
-	cmd.SetErr(&out)
-	if err := lineageShowCmd.Args(cmd, args); err != nil {
-		return "", err
+	if asJSON {
+		args = append([]string{"--json"}, args...)
 	}
-	err = runLineageShow(cmd, args)
+	return runLineageCmd(t, newLineageShowCmd(), args...)
+}
+
+// runLineageCmd runs a freshly built lineage subcommand with args from the
+// working directory, so no flag state carries over between runs.
+func runLineageCmd(t *testing.T, cmd *cobra.Command, args ...string) (stdout string, err error) {
+	t.Helper()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs(args)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	err = cmd.Execute()
 	return out.String(), err
 }
 
@@ -224,9 +231,9 @@ func TestLineageShow_Text(t *testing.T) {
 		"  origin:          dispatch\n" +
 		"  written at:      2026-10-23T12:00:00Z\n" +
 		"  session:         none\n" +
-		"  parent session:  none (source none)\n" +
-		"  parent dispatch: none (source none)\n" +
-		"  principal:       none (source none, trust observed)\n"
+		"  parent session:  none\n" +
+		"  parent dispatch: none\n" +
+		"  principal:       none, source none, trust observed\n"
 	if out != want {
 		t.Errorf("show =\n%s\nwant\n%s", out, want)
 	}
@@ -352,7 +359,7 @@ func TestLineageShow_Failures(t *testing.T) {
 	})
 	t.Run("usage", func(t *testing.T) {
 		lineageShowWorkspace(t)
-		for _, args := range [][]string{nil, {constABDispatchID, constABDispatchID}} {
+		for _, args := range [][]string{{constABDispatchID, constABDispatchID}, {"--bogus"}} {
 			if _, err := runLineageShowCmd(t, false, args...); exitCode(t, err) != 2 {
 				t.Errorf("args %v: err = %v, want exit 2", args, err)
 			}
