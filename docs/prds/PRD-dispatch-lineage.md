@@ -14,12 +14,47 @@ goals: |
   person the tree acts for, and how niwa came by every parent link. Tools
   read the same answers in a versioned form that never presents a handed
   parent as an observed one, and none of it needs another tool installed.
-upstream: docs/briefs/BRIEF-dispatch-lineage.md
+absorbed:
+  - docs/briefs/BRIEF-dispatch-lineage.md
 ---
 
 ## Status
 
 Accepted
+
+Absorbed [BRIEF-dispatch-lineage](docs/briefs/BRIEF-dispatch-lineage.md); carried in Absorbed Brief.
+
+The brief was folded into this PRD and has no separate file; the link above is the absorption record the document format requires, and the brief's content is the Absorbed Brief section below.
+
+## Absorbed Brief
+
+The brief framed the gap from the operator's side. Sessions dispatch
+sessions, and once a tree of them finishes and `niwa reap` removes its
+instances, niwa keeps no local record of which session asked for which
+dispatch, nothing at all about the person the tree worked for, and no mark
+on the parent ids it did record saying whether niwa saw that parent or took
+the caller's word. Later authority work (capping a child at its parent,
+routing a session's questions to whoever directs it, attributing decisions
+to a person) needs the tree readable after the sessions end.
+
+The outcome it set: an operator who comes back after every instance in a
+tree is reaped reads, from a niwa record in the workspace, the whole chain
+for any dispatch, the person the tree acts for at every level, and beside
+every parent link whether niwa observed it or the caller handed it. A
+dispatch whose claimed parent contradicts niwa's own records never passes
+as observed. Tools read the same answers in a stable form, and none of it
+needs another tool installed.
+
+Its four journeys (an operator reconstructing a reaped tree, a coordinator
+reading one link and how far to trust it, a dispatch claiming a parent it
+didn't come from, and a session started with no parent session) are the
+user stories below. Its boundary is carried by the requirements and Out of
+Scope: capping authority, hardening the trust boundary, reading any
+workflow engine's records, decision attribution and escalation routing,
+cross-machine lineage, changing credentials, and guessing parents from the
+process tree all stay out. It left three questions to this document: what
+happens to a false parent claim, how long the record outlives the instance,
+and what identifies the person. Decisions and Trade-offs answers each.
 
 ## Problem Statement
 
