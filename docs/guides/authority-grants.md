@@ -323,13 +323,13 @@ and no cap on what it dispatches.
 | `level`, `level_source` | the resolved level and where it came from (`flag`, `machine`, `overlay`, `workspace`, `built-in`) |
 | `level_ceiling`, `level_ceiling_source` | the level ceiling and its source |
 | `grant_ceiling`, `grant_ceiling_source` | the grant ceiling and its source: `machine`, `overlay`, `workspace` or `none` |
+| `roles` | the roles granted, in name order |
+| `grant` | each held authority with every source it came from: `dispatch` for `--grant`, `role:<name>` for a role, `dispatch` first |
+| `unknown_grant` | entries this niwa can't hold, same shape, never held |
 
 A reader also reports `newer-version` as all three sources for a record
 written in a later schema version (see [Versions](#versions)); dispatch never
 records it.
-| `roles` | the roles granted, in name order |
-| `grant` | each held authority with every source it came from: `dispatch` for `--grant`, `role:<name>` for a role, `dispatch` first |
-| `unknown_grant` | entries this niwa can't hold, same shape, never held |
 
 `level_source` describes the resolution at dispatch, and can differ from
 `level_ceiling_source` in a valid record: when provisioning brings in an
