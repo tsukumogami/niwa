@@ -231,8 +231,8 @@ letters, digits or `-`.
   should have come from that parent. A readable parent entry whose principal is
   `none` is still inherited: the child's principal is `inherited` with an
   empty name, never filled in from this machine. The principal's `source` is
-  a provenance label; its `trust` is what says whether niwa observed it. No
-  gate and no permission decision may read the principal.
+  a provenance label; its `trust` is what says whether niwa observed a match
+  for it. No gate and no permission decision may read the principal.
 - **R8. Declaring the person.** The principal is opt-in. The personal niwa
   config's `[global]` table accepts `principal = "<value>"`; nothing else
   supplies a name, and the workspace config and overlays have no such key.
@@ -388,8 +388,11 @@ letters, digits or `-`.
   process that reads the mapping names can arrange; lineage records the
   dispatcher at dispatch time, not re-parenting by message or a
   coordinator's successor; clearing `[global] principal` doesn't change
-  entries already written; and entries last until the workspace is
-  destroyed.
+  entries already written; the declared principal is machine-wide, readable
+  by any process running as the user, and the environment can point niwa at
+  another personal config; whether a version-controlled workspace root picks
+  up `.niwa-lineage/`, with the ignore line that keeps it out; and entries
+  last until the workspace is destroyed.
 - **R23. Store safety.** The store's directory is mode 0700, set on the
   first write in each process even when an existing directory is wider; if
   it can't be set (another user owns it, say), the write refuses. Each entry
@@ -399,7 +402,9 @@ letters, digits or `-`.
   niwa knows is re-validated against the shape R1, R4, R5, R7 and R8 give it
   when read, and an entry failing any check is unreadable. A dispatch id
   taken from any record (a parent link, a mapping, an authority record) is
-  checked to be a UUID before it names a file.
+  checked to be a UUID before it names a file. An entry file whose mode
+  grants any access beyond its owner is unreadable. `show` and `list` only
+  read: they neither tighten the directory nor warn about its mode.
 - **R24. Bounded entries.** Every field is length-bounded (ids by their
   formats, the instance name by niwa's instance naming, the principal by
   R8, name values by their rule), so an entry this niwa writes is at most
@@ -474,6 +479,16 @@ Parent links:
       `inherited` with an empty name, even with `principal` declared (R7).
 - [ ] A dispatch from a session imported from another host, which has no
       mapping in this workspace, records parent session `handed` (R12).
+- [ ] A dispatch from the workspace root whose variable names a mapping that
+      carries no dispatch id records parent dispatch `none` and parent
+      session `handed` (R4, R5).
+- [ ] An imported session whose id collides with a mapping this workspace
+      already holds, dispatching from the workspace root, records parent
+      dispatch `mapped` and never `observed` (R5, R12).
+- [ ] A dispatch from inside an instance whose authority record exists but
+      which has no session mapping records parent session `handed`, parent
+      dispatch `observed`, and an inherited principal with trust `observed`
+      (R4, R5, R7).
 
 The principal:
 - [ ] `principal = "dana@example.com"` is accepted; `principal = ""`,
@@ -561,7 +576,8 @@ Reading:
       `dispatch_id` differing from the file name, an `instance` with a
       space, an `agent` of `Claude Code`, a `written_at` that isn't RFC 3339,
       a malformed `session_id` or parent id, a source or trust of `Not
-      Valid`, a 129-character principal, or a duplicate member are each
+      Valid`, a 129-character principal, a duplicate member, a missing
+      `schema`, or a `schema` that isn't a `niwa.lineage.entry` version are each
       unreadable; one with `origin` `cron` and an extra field reads
       normally; `show` on an unreadable selected entry exits 1 (R14, R16,
       R23).
@@ -608,6 +624,9 @@ Constraints:
       made to fail through a test seam, the dispatch refuses; with the rename
       made to fail through a test seam, no file exists at the entry's final
       path and the dispatch refuses (R3, R23).
+- [ ] An entry file chmodded to 0644 reads as unreadable; running `show` and
+      `list` over a 0755 store leaves its mode at 0755 and prints no warning
+      (R23).
 - [ ] An entry with every field at its maximum length is at most 4 KiB
       (R24).
 - [ ] The existing dispatch, authority and telemetry tests pass unchanged,
@@ -657,6 +676,12 @@ Constraints:
   can choose which coordinator it appears under as `mapped`. Session ids
   aren't scoped to a host, so an imported session whose id this workspace
   has mapped before can get a false `observed` or `mapped` link too.
+- **The declared principal is machine-wide.** It comes from the personal
+  config, so it appears in the entries of every workspace dispatched from
+  that machine, any process running as the user can read it, and the
+  environment can point niwa at a different personal config file.
+- **Tie-breaks use a writable field.** Choosing among several matches by
+  `written_at` relies on a field any same-user process can edit.
 - **Clearing the principal doesn't scrub.** Entries written while a
   principal was declared keep it, and their descendants inherit it, until
   the workspace is destroyed.

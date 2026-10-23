@@ -517,7 +517,8 @@ value.
     order; `Parse` returning an `Entry` plus the raw members it didn't know,
     a later-version result for any `niwa.lineage.entry/vN` with N > 1, or an
     invalid-entry error; `SetSessionID(raw []byte, id string) ([]byte,
-    error)`, the member-preserving rewrite completion uses.
+    error)`, the member-preserving rewrite completion uses, which rejects a
+    document with a duplicate member as `Parse` does.
   - `validate.go`: the field patterns: dispatch id through
     `authority.ValidDispatchID`; session ids through
     `authority.ValidSessionID`; instance `^[A-Za-z0-9._-]{1,128}$`; agent,
@@ -554,9 +555,11 @@ value.
   dot-prefixed temporaries are skipped) and reports any selected file that
   isn't a regular file within the cap, without parsing to decide. A
   `.niwa-lineage` path that is a symlink or not a directory refuses writes;
-  the first write in each process opens the directory `O_NOFOLLOW` and
-  `fchmod`s it to 0700, and a failure there (another user owns it, say)
-  refuses the write. Completion refuses to write an entry that would exceed
+  the first write in each process opens the directory
+  `O_RDONLY|O_DIRECTORY|O_NOFOLLOW` and `fchmod`s it to 0700, and a failure
+  there (another user owns it, say) refuses the write. `show` and `list`
+  only read: they neither tighten the directory nor warn about its mode. An
+  entry file whose mode grants access beyond its owner is unreadable. Completion refuses to write an entry that would exceed
   the read cap. Store file names are UUIDs in lowercase, so a
   case-insensitive filesystem can't make two ids collide.
 - **`internal/config/registry.go`**: `Principal string` in `GlobalSettings`
@@ -766,7 +769,7 @@ Writes use the authority record's pattern: the final name is checked to be absen
 
 The two fields the authority record gains are parsed leniently: a wrong type or a value outside its pattern reads as unrecorded instead of making the record malformed. A strict reading would let an advisory field, written by a later niwa or edited by hand, void the record and with it every grant a gate reads from it.
 
-The only personal data stored is the principal name, which is only what the user declared, plus session and dispatch ids and the instance name. All of it stays on the machine in 0600 files under the workspace root, and none of it goes to telemetry, to the network or to any other tool. A dispatched worker can read its own authority record and run `niwa lineage show`, so a declared principal can reach the worker's context and through it the agent's model provider; that is why the principal is opt-in, and the guide says so. Lineage never travels with a session export or import: a session imported from another host dispatches with a `handed` parent session, and because session ids aren't scoped to a host, `show --session` can match an older entry for the same id, and an imported session whose id this workspace mapped before can get a false `observed` or `mapped` link. Clearing `[global] principal` stops new entries naming the person but doesn't change entries already written or what their descendants inherit. The store persists until the workspace is destroyed; a user who shares the workspace root should keep `.niwa-lineage/` out of what they publish. The design adds no dependency beyond the Go standard library and existing niwa packages, calls nothing over the network, and does not require koto or any other tool to be installed.
+The only personal data stored is the principal name, which is only what the user declared, plus session and dispatch ids and the instance name. All of it stays on the machine in 0600 files under the workspace root, and none of it goes to telemetry, to the network or to any other tool. A dispatched worker can read its own authority record and run `niwa lineage show`, so a declared principal can reach the worker's context and through it the agent's model provider; that is why the principal is opt-in, and the guide says so. Lineage never travels with a session export or import: a session imported from another host dispatches with a `handed` parent session, and because session ids aren't scoped to a host, `show --session` can match an older entry for the same id, and an imported session whose id this workspace mapped before can get a false `observed` or `mapped` link. Clearing `[global] principal` stops new entries naming the person but doesn't change entries already written or what their descendants inherit. The declared principal is machine-wide: it lands in the entries of every workspace dispatched from that machine, any process running as the user can read the personal config, and the environment can point niwa at a different personal config file, so the principal is what the dispatching process's environment says. Choosing among several matches by `written_at` relies on a field any same-user process can edit. A workspace root kept under version control would pick up `.niwa-lineage/` where the old `.niwa/` location may already have been ignored; the guide gives the ignore line. The store persists until the workspace is destroyed; a user who shares the workspace root should keep `.niwa-lineage/` out of what they publish. The design adds no dependency beyond the Go standard library and existing niwa packages, calls nothing over the network, and does not require koto or any other tool to be installed.
 
 Residual risks accepted: a same-user process, any dispatched worker included, can forge or alter any entry, the authority record or a session mapping, and later children inherit from forged entries; an `observed` link or principal is conditional on the caller's claim and the parent's records being honest, which niwa cannot know; a principal stays in entries after it is cleared, with no prune command to remove it; a very large number of valid entries slows `show --session`, `show --instance` and `list` linearly.
 
@@ -776,7 +779,7 @@ Residual risks accepted: a same-user process, any dispatched worker included, ca
 
 - An operator can reconstruct any dispatch tree after reap from local files,
   including coordinator and worker trees dispatched from the workspace root,
-  with the person it acted for and how far each link can be trusted.
+  with the person it acted for and how each link was established.
 - Later authority work (a never-wider cap, escalation routing, decision
   attribution) has a durable, versioned, additive record to read, with the
   trust boundary stated in the data rather than in prose.
