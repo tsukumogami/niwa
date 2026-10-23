@@ -15,7 +15,7 @@ resource attributes you already set.
 | `niwa.parent.session.id` | The id of the session that ran `niwa dispatch`, from `CLAUDE_CODE_SESSION_ID` | Dispatched from a plain shell, or the value isn't id-shaped |
 | `niwa.requested.skill` | The `--skill` value, `<plugin>:<name>` | No `--skill` |
 | `niwa.brief.id` | `sha256:` and the hex digest of the `--brief` file's content, or of the prompt when there's no `--brief` | Never |
-| `niwa.workspace` | The `name` in the workspace's `.niwa/workspace.toml` | The configuration couldn't be read |
+| `niwa.workspace` | The `name` in the workspace's `.niwa/workspace.toml` | The name doesn't match the value pattern below. A configuration that can't be read refuses the dispatch before launch, so it never reaches this point |
 | `niwa.authority.level` | The dispatch's resolved authority level: `autonomous`, `supervised` or `strict` | Never, for a Claude worker |
 | `niwa.authority.grant` | The granted authorities in `merge-pr`, `close-issue`, `cut-release` order, joined with `/` (`merge-pr/close-issue`), or `none` | Never, for a Claude worker |
 

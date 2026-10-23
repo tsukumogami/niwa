@@ -13,7 +13,7 @@ worker launches with depends on it. The workspace's gates decide exactly as
 they did before until a gate is written to read the record, and the second
 half of this guide is the contract such a gate follows.
 
-None of this needs koto. A host with niwa alone declares, records and reads
+None of this needs koto, the workflow engine for coding agents. A host with niwa alone declares, records and reads
 authority, and no part of the record or the lookup reads anything koto
 writes. The existing Test job in CI runs the authority unit tests and the
 functional suite, the gate-contract scenarios for this guide among them, and
@@ -161,7 +161,9 @@ name failing the name pattern, an unknown key inside `[authority]`, an
 unknown `authority_*` key under `[global]`, a value of the wrong type)
 refuses `niwa dispatch` and
 `niwa authority policy` with exit 1 and a message naming the key, the value
-and the accepted values. `niwa apply` prints the same message as a warning
+and the accepted values. `niwa authority show` and `decide` refuse the same
+way, with exit 1, when there's no record and they read the config to give
+the no-record answer; with a record they don't read the config. `niwa apply` prints the same message as a warning
 and carries on, so a fix can still be pulled from the config's source.
 
 One exception keeps a shared config usable across niwa versions. An
@@ -272,8 +274,10 @@ inside an instance, any instance other than that one. Any instance counts for
 the last rule, including one made with `niwa create` that has no record, and
 a niwa worktree of an instance counts as that instance. That way the anchor
 and the working directory can never name two different parents, and an
-instance someone made by hand is still the dispatcher's own. An instance
-that has no record gives no parent. A record that exists but can't be read or
+instance someone made by hand is still the dispatcher's own. With nested
+workspaces, the lookup takes the outermost instance that holds the
+directory, so a dispatch run inside an inner instance records the outer
+instance as its parent. An instance that has no record gives no parent. A record that exists but can't be read or
 is malformed refuses the dispatch rather than recording an empty parent.
 
 ## The record
@@ -424,12 +428,15 @@ source=workspace
 record=present
 ```
 
-`source=` is the level's source, or `declaration` once a point carries its
-own declaration. With no record, `decide` answers from the level a no-flag
+`source=` is the level's source, or `declaration` when the point's own
+declaration decides the answer and the level didn't narrow it. A declaration
+the level overrides (a `strict` level over a point declared `session`, say)
+keeps the level's source. With no record, `decide` answers from the level a no-flag
 dispatch would get, adds ` (no dispatch record)` to `source=` and prints
 `record=none`. It exits 2 for a point name outside `^[a-z][a-z0-9-]{0,63}$`,
 checked before anything else. `--json` prints the same six fields as one
-object.
+object. That object carries no schema string and isn't part of the versioned
+record contract; the held and settle rules below read the text lines.
 
 ### `niwa list --json`
 
@@ -457,7 +464,10 @@ would settle a point for a session niwa never dispatched.
 
 These are the reference checks. niwa's CI extracts this block from this
 guide and runs it inside a stub gate against real `show` and `decide`
-output and against every failure, so copy it as it is:
+output and against every failure, whenever the existing Test job runs. That
+job's path filter doesn't start it for a change that touches only docs, so an
+edit to this guide alone isn't checked until a change to code or tests runs
+the job. Copy the block as it is:
 
 ```bash
 # Reference checks for a dispatch's grant. Each function returns and none
