@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -1048,6 +1049,114 @@ func TestDispatchAuthority_LineageAttributes(t *testing.T) {
 	}
 }
 
+// settingsEnvKeys returns the keys of the launch settings document's env
+// object in the order the document writes them.
+func settingsEnvKeys(t *testing.T, passthrough []string) []string {
+	t.Helper()
+	for i := 0; i+1 < len(passthrough); i++ {
+		if passthrough[i] != "--settings" {
+			continue
+		}
+		var doc struct {
+			Env json.RawMessage `json:"env"`
+		}
+		if err := json.Unmarshal([]byte(passthrough[i+1]), &doc); err != nil {
+			t.Fatalf("settings document is not JSON: %v", err)
+		}
+		dec := json.NewDecoder(bytes.NewReader(doc.Env))
+		if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+			t.Fatalf("settings env is not a JSON object")
+		}
+		var keys []string
+		for dec.More() {
+			tok, err := dec.Token()
+			if err != nil {
+				t.Fatalf("settings env: %v", err)
+			}
+			keys = append(keys, tok.(string))
+			var skip string
+			if err := dec.Decode(&skip); err != nil {
+				t.Fatalf("settings env %s: %v", tok, err)
+			}
+		}
+		return keys
+	}
+	t.Fatalf("no settings document in the launch")
+	return nil
+}
+
+// TestDispatchAuthority_SettingsEnvCarriesAuthorityPassthroughAndReapKey: a
+// dispatch with --grant merge-pr in a workspace whose ceiling allows it, and
+// a [session.dispatch_env] pass-through name that is set, gives the worker one
+// settings env holding all of it together: OTEL_RESOURCE_ATTRIBUTES with the
+// lineage attributes, the dispatcher's own attribute and the two authority
+// attributes, then the pass-through value, then NIWA_REAP_KEY set to the
+// dispatch id. The launch environment carries the same. Neither the reap
+// key's value nor the whole environment is ever printed.
+func TestDispatchAuthority_SettingsEnvCarriesAuthorityPassthroughAndReapKey(t *testing.T) {
+	_, f := authorityWorkspace(t, r8aExample+"\n[session.dispatch_env]\npassthrough = [\"PASS_MARK\"]\n", "")
+	var reqs []launchRequest
+	captureLaunchRequest(f, &reqs)
+	dispatchGrants = []string{"merge-pr"}
+	dispatchName = "env-check"
+	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "team=x")
+	t.Setenv("PASS_MARK", "carried-value")
+	t.Setenv(config.ReapKeyEnv, "inherited-fake-key")
+
+	if _, stderr, err := runDispatchCmd(t, "do a thing"); err != nil {
+		t.Fatalf("dispatch: %v\n%s", err, stderr)
+	}
+	if len(reqs) != 1 {
+		t.Fatalf("launches = %d, want 1", len(reqs))
+	}
+	req := reqs[0]
+	dispatchID := readRecord(t, f).DispatchID
+	if !validReapKey(dispatchID) {
+		t.Fatal("the authority record holds no usable dispatch id")
+	}
+
+	env, ok := settingsEnvOf(t, req.Passthrough)
+	if !ok {
+		t.Fatal("no settings document in the launch")
+	}
+	wantKeys := []string{"OTEL_RESOURCE_ATTRIBUTES", "PASS_MARK", config.ReapKeyEnv}
+	if keys := settingsEnvKeys(t, req.Passthrough); !reflect.DeepEqual(keys, wantKeys) {
+		t.Errorf("settings env keys = %v, want %v", keys, wantKeys)
+	}
+
+	launchOTEL, _ := envValue(t, req.Env, "OTEL_RESOURCE_ATTRIBUTES")
+	for where, value := range map[string]string{"settings env": env["OTEL_RESOURCE_ATTRIBUTES"], "launch environment": launchOTEL} {
+		attrs, _ := attributeMap(t, value)
+		if attrs[attrDispatchID] != dispatchID {
+			t.Errorf("%s: %s is not the dispatch id", where, attrDispatchID)
+		}
+		for _, name := range []string{attrDispatchSlug, attrBriefID, attrWorkspace} {
+			if attrs[name] == "" {
+				t.Errorf("%s: lineage attribute %s is missing", where, name)
+			}
+		}
+		if attrs["team"] != "x" {
+			t.Errorf("%s: the dispatcher's own attribute team=x is missing", where)
+		}
+		if attrs[attrAuthorityLevel] != "supervised" || attrs[attrAuthorityGrant] != "merge-pr" {
+			t.Errorf("%s: level %q grant %q, want supervised and merge-pr", where, attrs[attrAuthorityLevel], attrs[attrAuthorityGrant])
+		}
+	}
+
+	if env["PASS_MARK"] != "carried-value" {
+		t.Errorf("settings PASS_MARK = %q, want carried-value", env["PASS_MARK"])
+	}
+	if v, ok := envValue(t, req.Env, "PASS_MARK"); !ok || v != "carried-value" {
+		t.Errorf("launch PASS_MARK = %q (set %v), want carried-value", v, ok)
+	}
+	if env[config.ReapKeyEnv] != dispatchID {
+		t.Errorf("settings %s is not the dispatch id", config.ReapKeyEnv)
+	}
+	if v, ok := envValue(t, req.Env, config.ReapKeyEnv); !ok || v != dispatchID {
+		t.Errorf("launch %s is not the dispatch id (set %v)", config.ReapKeyEnv, ok)
+	}
+}
+
 func TestDispatchAuthority_CodexGetsNoAuthorityAttributes(t *testing.T) {
 	records := map[string]authority.Record{}
 	for _, harness := range []string{"claude", "codex"} {
@@ -1081,13 +1190,16 @@ func TestDispatchAuthority_CodexGetsNoAuthorityAttributes(t *testing.T) {
 
 // stripAuthorityAttributes removes the two authority lineage entries from
 // every OTEL_RESOURCE_ATTRIBUTES value in a pass-through, and blanks the
-// dispatch id, which differs per dispatch.
+// dispatch id, which differs per dispatch, both in the lineage value and as
+// the NIWA_REAP_KEY settings env value.
 func stripAuthorityAttributes(pass []string) []string {
 	re := regexp.MustCompile(`,?niwa\.authority\.(level|grant)=[^,"]*`)
 	id := regexp.MustCompile(`niwa\.dispatch\.id=[0-9a-f-]{36}`)
+	reapKey := regexp.MustCompile(`"` + config.ReapKeyEnv + `":"[^"]*"`)
 	out := make([]string, len(pass))
 	for i, p := range pass {
-		out[i] = id.ReplaceAllString(re.ReplaceAllString(p, ""), "niwa.dispatch.id=<id>")
+		p = id.ReplaceAllString(re.ReplaceAllString(p, ""), "niwa.dispatch.id=<id>")
+		out[i] = reapKey.ReplaceAllString(p, `"`+config.ReapKeyEnv+`":"<id>"`)
 	}
 	return out
 }
