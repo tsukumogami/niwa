@@ -48,7 +48,7 @@ func init() {
 	// The authority flags (dispatch_authority.go). --grant and --role are
 	// string arrays rather than slices so the comma split, and its refusal of
 	// an empty entry, is authority.ParseNameList's alone.
-	dispatchCmd.Flags().StringVar(&dispatchLevel, "level", "", dispatchLevelFlagUsage)
+	dispatchCmd.Flags().Var(optionalStringValue{&dispatchLevel, &dispatchLevelSet}, "level", dispatchLevelFlagUsage)
 	dispatchCmd.Flags().StringArrayVar(&dispatchGrants, "grant", nil, dispatchGrantFlagUsage)
 	dispatchCmd.Flags().StringArrayVar(&dispatchRoles, "role", nil, dispatchRoleFlagUsage)
 	dispatchCmd.Flags().Var(optionalStringValue{&dispatchParentFrom, &dispatchParentFromSet}, "parent-from", dispatchParentFromHelp)

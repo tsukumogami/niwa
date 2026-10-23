@@ -25,10 +25,11 @@ import (
 // attributes, so argv, the permission mode and every settings document are
 // the same whatever was granted.
 
-// The authority flags. dispatchParentFromSet tells `--parent-from ""` (a
-// refusal) from no flag at all.
+// The authority flags. dispatchLevelSet and dispatchParentFromSet tell an
+// explicit blank value (a refusal) from no flag at all.
 var (
 	dispatchLevel         string
+	dispatchLevelSet      bool
 	dispatchGrants        []string
 	dispatchRoles         []string
 	dispatchParentFrom    string
@@ -119,9 +120,15 @@ func checkMachineAuthority(gc *config.GlobalConfig, cfgPath string) error {
 // parseDispatchRequest turns the three request flags into an
 // authority.Request. Vocabulary is checked by authority.Resolve, which names
 // the flag; this only splits the comma lists, refusing an empty entry, and
-// parses the level.
-func parseDispatchRequest(level string, grants, roles []string) (authority.Request, error) {
+// parses the level. levelSet says --level was given: ParseLevel reads a blank
+// value as not set, which is right for config and wrong for a value someone
+// typed, so a given --level that is blank is refused rather than resolving to
+// the level ceiling.
+func parseDispatchRequest(level string, levelSet bool, grants, roles []string) (authority.Request, error) {
 	var req authority.Request
+	if levelSet && strings.TrimSpace(level) == "" {
+		return req, refuse("--level is empty; accepted values are %s. Leave out --level to take the level ceiling", strings.Join(authority.LevelNames(), ", "))
+	}
 	l, err := authority.ParseLevel(level)
 	if err != nil {
 		var uv *authority.UnknownValueError
@@ -174,7 +181,7 @@ func resolveDispatchAuthority(warn io.Writer, cwd, workspaceRoot, wsConfigPath s
 	if err != nil {
 		return nil, authorityRefusal{err}
 	}
-	req, err := parseDispatchRequest(dispatchLevel, dispatchGrants, dispatchRoles)
+	req, err := parseDispatchRequest(dispatchLevel, dispatchLevelSet, dispatchGrants, dispatchRoles)
 	if err != nil {
 		return nil, err
 	}

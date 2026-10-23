@@ -163,12 +163,14 @@ func resetDispatchFlags(t *testing.T) {
 	prevBrief := dispatchBrief
 	prevSkill := dispatchSkill
 	prevLevel := dispatchLevel
+	prevLevelSet := dispatchLevelSet
 	prevGrants := dispatchGrants
 	prevRoles := dispatchRoles
 	prevParentFrom := dispatchParentFrom
 	prevParentFromSet := dispatchParentFromSet
 
 	dispatchLevel = ""
+	dispatchLevelSet = false
 	dispatchGrants = nil
 	dispatchRoles = nil
 	dispatchParentFrom = ""
@@ -201,6 +203,7 @@ func resetDispatchFlags(t *testing.T) {
 		dispatchBrief = prevBrief
 		dispatchSkill = prevSkill
 		dispatchLevel = prevLevel
+		dispatchLevelSet = prevLevelSet
 		dispatchGrants = prevGrants
 		dispatchRoles = prevRoles
 		dispatchParentFrom = prevParentFrom

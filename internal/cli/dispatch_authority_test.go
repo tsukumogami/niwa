@@ -146,6 +146,18 @@ func refusalCases() []refusalCase {
 			exact: `niwa: error: invalid --level "strict\x1b[2J"; accepted values are autonomous, supervised, strict`,
 		},
 		{
+			name:  "explicit empty --level",
+			body:  "[authority]\nlevel = \"autonomous\"\n",
+			flags: func() { dispatchLevel, dispatchLevelSet = "", true },
+			exact: "niwa: error: --level is empty; accepted values are autonomous, supervised, strict. Leave out --level to take the level ceiling",
+		},
+		{
+			name:  "whitespace-only --level",
+			body:  "[authority]\nlevel = \"autonomous\"\n",
+			flags: func() { dispatchLevel, dispatchLevelSet = "  ", true },
+			exact: "niwa: error: --level is empty; accepted values are autonomous, supervised, strict. Leave out --level to take the level ceiling",
+		},
+		{
 			name:     "invalid machine authority_level",
 			host:     "[global]\nauthority_level = \"godmode\"\n",
 			contains: []string{`niwa: error: invalid [global] authority_level "godmode"; accepted values are autonomous, supervised, strict`, "config.toml"},

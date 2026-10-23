@@ -304,8 +304,12 @@ the wrong shape for a team's rule about who decides.
   it exits 1 naming the missing workspace.
 - **R11. Values are checked exactly.** Every level value accepts only the
   three names of R1 and every authority value only the names of R3, both
-  lowercase, after trimming surrounding whitespace; an empty or
-  whitespace-only level means not set. One exception keeps a shared
+  lowercase, after trimming surrounding whitespace. In a config file an
+  empty or whitespace-only level means not set; a blank value typed on
+  `--level` or given to `niwa config set authority-level` is refused
+  with exit 1 and a message naming the flag or command and the accepted
+  values, since someone who typed it asked for a level and didn't name
+  one. One exception keeps a shared
   config usable across niwa versions: an authority name in a ceiling or
   a role that matches `^[a-z][a-z0-9-]{0,63}$` but isn't one of R3's is
   dropped from that list with a warning naming the name and the key,

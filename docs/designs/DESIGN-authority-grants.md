@@ -965,7 +965,8 @@ With no record: `{"schema": "niwa.authority.record/v1", "record": false,
 0 with an exact `decider=session` line, and holds an authority only by the
 reference held check. Neither ever trusts exit 0 alone.
 
-**Dispatch flags.** `--level <level>`, `--grant <authority>` (repeatable;
+**Dispatch flags.** `--level <level>` (an explicit blank value is
+refused, never read as no flag), `--grant <authority>` (repeatable;
 a comma list splits, so `--grant a,b` equals `--grant a --grant b`, and an
 empty entry is refused), `--role <name>` (repeatable, split the same
 way), `--parent-from <abs dir>`.

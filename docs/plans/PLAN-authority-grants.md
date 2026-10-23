@@ -135,6 +135,7 @@ _Refusal at (2e), all before the prompt, sweep and provisioning_
 - [ ] An unreadable or malformed dispatcher record (dispatcher cwd, or `--parent-from`, inside a dispatched instance) exits 1 and does not record an empty parent.
 - [ ] `--parent-from ""`, a relative `--parent-from`, a nonexistent `--parent-from`, one naming a directory under the workspace root that is in no instance, one naming an instance under a different workspace root, and (run from inside any instance X, including one with no record) one naming instance Y each exit 1 naming the flag and never fall back to the working directory. A valid anchor in a workspace reached through a symlinked path (the workspace root under a symlinked parent directory) is accepted.
 - [ ] `--grant merge-pr,` and `--role ,coordinator` exit 1 naming the empty entry.
+- [ ] An explicit blank `--level` (`--level ""` or `--level "  "`) exits 1 naming `--level` and the accepted values, and never resolves to the level ceiling as a missing flag would.
 - [ ] A request whose encoded record would exceed the 64 KiB reader cap is refused at (2e), not at (8a).
 - [ ] For every refusal case above, a functional test asserts: exit code 1; no `niwa dispatch: authority level` line on stderr; no new instance directory under the workspace root; no authority record and no session mapping or pending marker written; every pre-existing instance is still present (the sweep did not run); stdin was never read and no prompt was shown (a prompt-capture fake records zero calls); the fake agent was not launched.
 

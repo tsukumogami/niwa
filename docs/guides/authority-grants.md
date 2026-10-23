@@ -154,7 +154,9 @@ dispatched on this machine after it's set.
 
 Levels accept only `autonomous`, `supervised` and `strict`, and authorities
 only the three names above, lowercase, after trimming whitespace. An empty
-level means not set. An invalid value (an unknown level, a role or authority
+level in a config file means not set; a blank level typed on `--level` or
+given to `niwa config set authority-level` is refused with exit 1. An invalid
+value (an unknown level, a role or authority
 name failing the name pattern, an unknown key inside `[authority]`, an
 unknown `authority_*` key under `[global]`, a value of the wrong type)
 refuses `niwa dispatch` and
@@ -192,7 +194,9 @@ would resolve to. `--json` prints the same as one document with schema
 
 `--grant` and `--role` take comma lists too: `--grant merge-pr,close-issue`
 equals two `--grant` flags, and an empty entry (`--grant merge-pr,`) is
-refused. The grant is the union of everything requested.
+refused. The grant is the union of everything requested. A blank `--level`
+(`--level ""`) is refused too, rather than read as no flag; leave the flag out
+to take the level ceiling.
 
 Resolution is narrowest-wins. The level ceiling is the narrowest of the
 workspace, overlay and machine levels, with its source (`machine`, `overlay`,
