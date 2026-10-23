@@ -618,9 +618,18 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// defer does not run on SIGKILL; the name+TTL reaper backstop closes that
 	// remaining gap (the dispatch instance NAME, created atomically by provision,
 	// is the backstop's eligibility signal, so no marker is required).
+	//
+	// The rollback also removes the dispatch's lineage entry, but only once
+	// this dispatch has created it at (8a): an entry already present for the
+	// same dispatch id is someone else's, and a refused create leaves it as
+	// it was.
 	success := false
+	entryCreated := false
 	defer func() {
 		if !success {
+			if entryCreated {
+				_ = workspace.RemoveLineageEntry(workspaceRoot, dispatchID)
+			}
 			_ = destroyInstanceFunc(instancePath)
 		}
 	}()
@@ -646,6 +655,15 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if err := writeAuthorityRecordFunc(instancePath, authRecord); err != nil {
 		return fmt.Errorf("niwa: error: writing the dispatch's authority record: %w", err)
 	}
+	// Right after the record, the dispatch's lineage entry goes into the
+	// workspace root's store, outside the instance, so it outlives it. A
+	// failure refuses the dispatch the same way: the rollback removes the
+	// instance, and there is no entry of this dispatch's to remove.
+	entry := dispatchLineageEntry(dispatchID, filepath.Base(instancePath), string(dispatchedAgent), time.Now())
+	if err := createLineageEntryFunc(workspaceRoot, entry); err != nil {
+		return fmt.Errorf("niwa: error: writing the dispatch's lineage entry: %w", err)
+	}
+	entryCreated = true
 
 	// (9) The host global config was loaded once at (2a), before the agent
 	// resolution that also reads it. gc below is that same result, and it is

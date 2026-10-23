@@ -560,6 +560,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	registerDispatchSpillSteps(ctx)
 	registerDispatchLineageSteps(ctx)
 	registerDispatchAuthoritySteps(ctx)
+	registerLineageStoreSteps(ctx)
 	registerAuthorityReadSteps(ctx)
 	registerAuthorityResumeSteps(ctx)
 	registerAuthorityGateSteps(ctx)
