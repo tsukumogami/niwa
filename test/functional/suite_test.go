@@ -167,6 +167,10 @@ type testState struct {
 	// steps; see dispatch_authority_steps_test.go.
 	authority authorityScenario
 
+	// authorityRead is what the authority read-back scenarios remember; see
+	// authority_read_steps_test.go.
+	authorityRead authorityReadScenario
+
 	// cleanups run in the After hook, last registered first, so a scenario
 	// that started a process or a listener stops it however the scenario
 	// ended.
@@ -552,6 +556,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	registerDispatchSpillSteps(ctx)
 	registerDispatchLineageSteps(ctx)
 	registerDispatchAuthoritySteps(ctx)
+	registerAuthorityReadSteps(ctx)
 	registerKeepAliveSteps(ctx)
 
 	// --- vault failure handling: seeding and counting the shared infisical
