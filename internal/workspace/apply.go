@@ -107,6 +107,12 @@ type Applier struct {
 	// reaches neither consult site.
 	StrictSecrets bool
 
+	// MachineConfig is the developer's machine config, the authority
+	// policy's machine layer for the warnings apply prints. nil means the
+	// pipeline loads it itself when it reaches that step; a config that
+	// can't be loaded is skipped there, since its own loader reports it.
+	MachineConfig *config.GlobalConfig
+
 	// Reporter receives all progress and diagnostic output for this applier.
 	// NewApplier initializes it with NewReporter(os.Stderr). Callers may
 	// replace it (e.g., with NewReporterWithTTY) before calling Apply or Create.
@@ -1298,6 +1304,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// the overlay is merged into the base config. This mirrors how the personal
 	// overlay (global config) resolves its own secrets against its own provider
 	// bundle before MergeGlobalOverride runs.
+	var authorityOverlay *config.WorkspaceOverlay
 	if overlayDir != "" {
 		overlayTOML := filepath.Join(overlayDir, "workspace-overlay.toml")
 		overlay, parseErr := config.ParseOverlay(overlayTOML)
@@ -1307,6 +1314,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			}
 			return nil, fmt.Errorf("parsing workspace overlay: %w", parseErr)
 		}
+		authorityOverlay = overlay
 
 		// Inert [workspace] settings the overlay declares are announced here
 		// rather than rejected: a stale overlay must keep applying, and the
@@ -1387,6 +1395,16 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			return nil, fmt.Errorf("merging workspace overlay: %w", mergeErr)
 		}
 		cfg = mergedWS
+	}
+
+	// Authority problems in any of the three layers (an invalid value, an
+	// unknown [authority] key, a name this niwa doesn't know, an overlay
+	// roles table) are warnings here and never fail the apply: apply is how
+	// a workspace pulls the fix. Dispatch and the authority commands refuse
+	// on the same problems. MergeWorkspaceOverlay leaves the base
+	// [authority] table as it was, so cfg still carries it.
+	for _, w := range config.AuthorityWarnings(cfg, authorityOverlay, a.authorityMachineConfig()) {
+		a.Reporter.DeferWarn("%s", w)
 	}
 
 	// Step 1: Discover repos from all sources (base + overlay after merge).

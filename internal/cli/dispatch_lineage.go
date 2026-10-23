@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/agentplan"
+	"github.com/tsukumogami/niwa/internal/authority"
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
@@ -29,9 +30,13 @@ import (
 // This file resolves the inputs, validates every value, and composes the list.
 // It does not decide where the value goes; the dispatch path does.
 
-// The six lineage attribute names, in the order niwa writes them. They are
-// fixed: other tools read them by name, so a rename here breaks every reader
+// The lineage attribute names, in the order niwa writes them. They are fixed:
+// other tools read them by name, so a rename here breaks every reader
 // silently. lineageAttributeNames pins the order and a test pins the list.
+//
+// The two authority attributes carry the dispatch's resolved level and grant
+// as observability only; the authority record in the instance is what any
+// reader that decides something reads.
 const (
 	attrDispatchID      = "niwa.dispatch.id"
 	attrDispatchSlug    = "niwa.dispatch.slug"
@@ -39,6 +44,8 @@ const (
 	attrRequestedSkill  = "niwa.requested.skill"
 	attrBriefID         = "niwa.brief.id"
 	attrWorkspace       = "niwa.workspace"
+	attrAuthorityLevel  = "niwa.authority.level"
+	attrAuthorityGrant  = "niwa.authority.grant"
 )
 
 var lineageAttributeNames = []string{
@@ -48,6 +55,8 @@ var lineageAttributeNames = []string{
 	attrRequestedSkill,
 	attrBriefID,
 	attrWorkspace,
+	attrAuthorityLevel,
+	attrAuthorityGrant,
 }
 
 // lineageNamespace is the prefix niwa owns. An inherited entry under it is
@@ -61,13 +70,10 @@ const lineageNamespace = "niwa."
 // beside it. A value outside it is dropped, not truncated or encoded.
 var lineageValuePattern = regexp.MustCompile(`^[A-Za-z0-9._:/@-]{1,128}$`)
 
-// parentSessionPattern is the shape niwa accepts for a calling session's id,
-// the same one it already accepts for an agent's session ids elsewhere.
-var parentSessionPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,128}$`)
-
-// dispatchIDPattern is the shape newDispatchID produces: a lowercase
-// version-4 UUID.
-var dispatchIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+// The calling session's id and the dispatch id are checked through
+// authority.ValidSessionID and authority.ValidDispatchID: the authority
+// record carries both ids, and its reader and this code share one copy of
+// each format.
 
 // requestedSkillPattern is `<plugin>:<name>`.
 var requestedSkillPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*:[a-z0-9][a-z0-9-]*$`)
@@ -77,8 +83,8 @@ var requestedSkillPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*:[a-z0-9][a-z
 // what it claims to be, and reading it whole would be the wrong response.
 const maxLineageFileBytes = 1 << 20
 
-// lineageInputs are the six values before validation. An empty field means
-// the value doesn't exist for this dispatch, and its attribute is left out.
+// lineageInputs are the values before validation. An empty field means the
+// value doesn't exist for this dispatch, and its attribute is left out.
 type lineageInputs struct {
 	DispatchID      string
 	Slug            string
@@ -86,6 +92,11 @@ type lineageInputs struct {
 	RequestedSkill  string
 	BriefID         string
 	Workspace       string
+	// AuthorityLevel is the resolved level's name. AuthorityGrant is the
+	// granted authorities joined with "/" (a comma would split the list), or
+	// "none" (see grantAttribute).
+	AuthorityLevel string
+	AuthorityGrant string
 }
 
 // lineageEntries renders the inputs as `key=value` entries in the fixed order.
@@ -100,6 +111,8 @@ func lineageEntries(in lineageInputs, warn io.Writer) []string {
 		attrRequestedSkill:  in.RequestedSkill,
 		attrBriefID:         in.BriefID,
 		attrWorkspace:       in.Workspace,
+		attrAuthorityLevel:  in.AuthorityLevel,
+		attrAuthorityGrant:  in.AuthorityGrant,
 	}
 	entries := make([]string, 0, len(lineageAttributeNames))
 	for _, name := range lineageAttributeNames {
@@ -162,7 +175,7 @@ func lineageParentSessionID(spec agentplan.LaunchSpec, getenv func(string) strin
 		return ""
 	}
 	id := getenv(spec.Lineage.ParentSessionEnv)
-	if !parentSessionPattern.MatchString(id) {
+	if !authority.ValidSessionID(id) {
 		return ""
 	}
 	return id

@@ -30,6 +30,8 @@ var lineageAttributeNames = []string{
 	"niwa.requested.skill",
 	"niwa.brief.id",
 	"niwa.workspace",
+	"niwa.authority.level",
+	"niwa.authority.grant",
 }
 
 func registerDispatchLineageSteps(ctx *godog.ScenarioContext) {

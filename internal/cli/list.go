@@ -9,13 +9,14 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
+	"github.com/tsukumogami/niwa/internal/authority"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
 func init() {
 	rootCmd.AddCommand(listCmd)
 	listCmd.Flags().BoolVar(&listJSON, "json", false,
-		"emit a JSON array of {name, path, ephemeral, accepts_session_messages[, keep_alive][, session_name]} records, one per instance")
+		"emit a JSON array of {name, path, ephemeral, accepts_session_messages[, keep_alive][, session_name][, authority]} records, one per instance")
 }
 
 var listJSON bool
@@ -60,7 +61,13 @@ An instance whose session was dispatched with keep-alive armed and is still
 live additionally carries keep_alive:true (and a "(keep-alive)" marker in
 the human output, placed before the "(accepts session messages)" marker when
 both apply). An instance whose dispatch recorded a session name additionally
-carries session_name, the same value the session name: line shows.`,
+carries session_name, the same value the session name: line shows.
+
+An instance niwa dispatched with an authority record carries authority, the
+same document "niwa authority show --json" prints for it (level, ceilings,
+roles, grant and parent links). An instance with no record has no authority
+key; one whose record can't be used carries an authority object holding only
+an error naming why, and the rest of the listing is unaffected.`,
 	Args: cobra.NoArgs,
 	RunE: runList,
 }
@@ -90,6 +97,11 @@ func runList(cmd *cobra.Command, args []string) error {
 		// unconditionally, even when no instances exist.
 		if records == nil {
 			records = []workspace.InstanceRecord{}
+		}
+		// Each record is read from the one copy in its instance, the same
+		// file `niwa authority show` reads, so the two can't disagree.
+		for i := range records {
+			records[i].Authority = listAuthority(records[i].Path)
 		}
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		if err := enc.Encode(records); err != nil {
@@ -205,10 +217,10 @@ func annotateFromSessionMappings(records []workspace.InstanceRecord, workspaceRo
 		// each checked against the shape niwa writes, for the same reason the
 		// name is: a mapping file is writable by any same-user process.
 		if m, ok := newest[records[i].Path]; ok {
-			if dispatchIDPattern.MatchString(m.DispatchID) {
+			if authority.ValidDispatchID(m.DispatchID) {
 				records[i].DispatchID = m.DispatchID
 			}
-			if parentSessionPattern.MatchString(m.ParentSessionID) {
+			if authority.ValidSessionID(m.ParentSessionID) {
 				records[i].ParentSessionID = m.ParentSessionID
 			}
 		}

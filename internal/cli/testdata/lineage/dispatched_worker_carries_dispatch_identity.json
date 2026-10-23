@@ -7,6 +7,8 @@
         "parent_session_id": "caller-session"
       },
       "resource_attributes": {
+        "niwa.authority.grant": "none",
+        "niwa.authority.level": "autonomous",
         "niwa.brief.id": "sha256:176712590dbfcda6b7082ab2be8bff292f7e3015082ba05a229172f9971b93c2",
         "niwa.dispatch.id": "<dispatch-id>",
         "niwa.dispatch.slug": "fixture",

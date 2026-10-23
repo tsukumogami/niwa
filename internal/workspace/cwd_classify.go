@@ -241,6 +241,83 @@ func ClassifyCwd(cwd string) (CwdClassification, error) {
 	return CwdClassification{Class: CwdOutside}, nil
 }
 
+// FoundInstance is an instance FindInstance found: the instance directory and
+// the workspace root that holds it, both with symlinks resolved.
+type FoundInstance struct {
+	Instance      string
+	WorkspaceRoot string
+}
+
+// findInstanceStat is the only filesystem call FindInstance makes besides
+// resolving symlinks. It is a variable so a test can count and police the
+// calls; production uses os.Stat.
+var findInstanceStat = os.Stat
+
+// FindInstance returns the instance containing dir: the outermost directory
+// at or above dir, symlinks resolved first, that a workspace root enumerates
+// as one of its instances (a valid-named child of a directory holding
+// .niwa/workspace.toml that carries its own .niwa/instance.json and is not
+// itself a workspace root). ok is false when dir is in no such instance; err
+// is set only when dir can't be resolved.
+//
+// It answers "whose authority record applies here", so it differs from
+// ClassifyCwd, which is left as it is, in three ways:
+//
+//   - Symlinks are resolved before the walk, so a path that reaches an
+//     instance through a link finds that instance, and one that leaves every
+//     instance through a link finds none.
+//   - A candidate must sit directly under a workspace root. A .niwa marker
+//     planted in a cloned repository therefore never becomes the answer.
+//   - The outermost candidate wins, so even a repository that plants a whole
+//     fake workspace root inside the instance can't shadow the real one.
+//
+// It only stats paths. It loads no config and reads no file, so a hook can
+// call it with nothing to parse and nothing that can block. A niwa worktree
+// of an instance lives under that instance's .niwa/worktrees, so the walk
+// finds the instance from inside one.
+func FindInstance(dir string) (FoundInstance, bool, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return FoundInstance{}, false, fmt.Errorf("resolving %s: %w", dir, err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return FoundInstance{}, false, fmt.Errorf("resolving %s: %w", dir, err)
+	}
+	var found FoundInstance
+	ok := false
+	for d := resolved; ; {
+		parent := filepath.Dir(d)
+		if parent == d {
+			break
+		}
+		if isEnumeratedInstance(parent, d) {
+			found, ok = FoundInstance{Instance: d, WorkspaceRoot: parent}, true
+		}
+		d = parent
+	}
+	return found, ok, nil
+}
+
+// isEnumeratedInstance reports, with stat calls only, whether dir is one of
+// the instances EnumerateInstances would list for root.
+func isEnumeratedInstance(root, dir string) bool {
+	if !ValidName(filepath.Base(dir)) {
+		return false
+	}
+	if info, err := findInstanceStat(filepath.Join(root, StateDir, WorkspaceConfigFile)); err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	if info, err := findInstanceStat(dir); err != nil || !info.IsDir() {
+		return false
+	}
+	if _, err := findInstanceStat(statePath(dir)); err != nil {
+		return false
+	}
+	_, err := findInstanceStat(filepath.Join(dir, StateDir, WorkspaceConfigFile))
+	return err != nil
+}
+
 // worktreesDirName is the directory under an instance's .niwa that holds
 // session worktrees: <instanceRoot>/.niwa/worktrees/<repo>-<sid>/. It mirrors
 // the layout CreateSession writes (internal/worktree/worktree.go).

@@ -162,7 +162,19 @@ func resetDispatchFlags(t *testing.T) {
 	prevAcceptSessionMessages := dispatchAcceptSessionMessages
 	prevBrief := dispatchBrief
 	prevSkill := dispatchSkill
+	prevLevel := dispatchLevel
+	prevLevelSet := dispatchLevelSet
+	prevGrants := dispatchGrants
+	prevRoles := dispatchRoles
+	prevParentFrom := dispatchParentFrom
+	prevParentFromSet := dispatchParentFromSet
 
+	dispatchLevel = ""
+	dispatchLevelSet = false
+	dispatchGrants = nil
+	dispatchRoles = nil
+	dispatchParentFrom = ""
+	dispatchParentFromSet = false
 	dispatchLabel = ""
 	dispatchName = ""
 	dispatchModel = ""
@@ -190,6 +202,12 @@ func resetDispatchFlags(t *testing.T) {
 		dispatchAcceptSessionMessages = prevAcceptSessionMessages
 		dispatchBrief = prevBrief
 		dispatchSkill = prevSkill
+		dispatchLevel = prevLevel
+		dispatchLevelSet = prevLevelSet
+		dispatchGrants = prevGrants
+		dispatchRoles = prevRoles
+		dispatchParentFrom = prevParentFrom
+		dispatchParentFromSet = prevParentFromSet
 	})
 }
 

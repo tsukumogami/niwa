@@ -39,6 +39,11 @@ type WorkspaceOverlay struct {
 	// so an author who writes the stanza is told it does nothing, instead of
 	// watching a security-relevant setting be silently ignored.
 	Workspace OverlayWorkspaceTombstone `toml:"workspace"`
+	// Authority is the overlay's narrowing-only [authority] table. Like
+	// Workspace, MergeWorkspaceOverlay never reads it: the authority policy
+	// resolves it as its own layer, so the record can say which layer
+	// narrowed a ceiling.
+	Authority OverlayAuthorityConfig `toml:"authority"`
 }
 
 // OverlayInstanceConfig is the [instance] section of workspace-overlay.toml.
@@ -153,10 +158,15 @@ func ParseOverlay(path string) (*WorkspaceOverlay, error) {
 		return nil, fmt.Errorf("reading overlay config: %w", err)
 	}
 
+	// Decoded with toml.Decode rather than Unmarshal so the keys under
+	// [authority] it didn't recognize are visible: they're invalid values
+	// for the authority policy, not silently ignored.
 	var o WorkspaceOverlay
-	if err := toml.Unmarshal(data, &o); err != nil {
+	md, err := toml.Decode(string(data), &o)
+	if err != nil {
 		return nil, fmt.Errorf("parsing overlay config: %w", err)
 	}
+	o.Authority.UnknownKeys, _ = splitAuthorityKeys(md.Undecoded(), "authority")
 
 	if err := validateOverlay(&o); err != nil {
 		return nil, err

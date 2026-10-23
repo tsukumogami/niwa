@@ -317,11 +317,15 @@ type WorkspaceConfig struct {
 	// [mcp] it is workspace-scoped, and for the same reason: what a session
 	// runs with belongs to the prepared workspace rather than to one
 	// repository in it.
-	Session  SessionConfig     `toml:"session,omitempty"`
-	Env      EnvConfig         `toml:"env"`
-	Files    map[string]string `toml:"files,omitempty"`
-	Instance InstanceConfig    `toml:"instance,omitempty"`
-	Root     RootConfig        `toml:"root,omitempty"`
+	Session SessionConfig `toml:"session,omitempty"`
+	// Authority is the [authority] table: the workspace's authority level,
+	// grant ceiling and roles. MergeWorkspaceOverlay never touches it; the
+	// overlay's own [authority] is resolved beside it (AuthorityPolicy).
+	Authority AuthorityConfig   `toml:"authority,omitempty"`
+	Env       EnvConfig         `toml:"env"`
+	Files     map[string]string `toml:"files,omitempty"`
+	Instance  InstanceConfig    `toml:"instance,omitempty"`
+	Root      RootConfig        `toml:"root,omitempty"`
 	// OverlayInstanceFiles is not parsed from TOML (toml:"-"). It is set
 	// exclusively by MergeWorkspaceOverlay from the overlay's
 	// [instance.files] table. It is kept separate from Instance.Files
@@ -735,7 +739,11 @@ func Parse(data []byte) (*ParseResult, error) {
 		return nil, err
 	}
 
-	for _, key := range md.Undecoded() {
+	// Unknown keys under [authority] are reported once, as invalid values by
+	// authority.ValidateConfig, so they're taken out of the generic warning.
+	unknownAuthority, undecoded := splitAuthorityKeys(md.Undecoded(), "authority")
+	cfg.Authority.UnknownKeys = unknownAuthority
+	for _, key := range undecoded {
 		warnings = append(warnings, fmt.Sprintf("unknown config field: %s", key))
 	}
 

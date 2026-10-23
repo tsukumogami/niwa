@@ -55,9 +55,15 @@ const ptyInputTail = 100 * time.Millisecond
 // string for the shell, under a fresh pty and discards the transcript.
 // util-linux `script` (Linux) takes the command with -c; BSD `script` (macOS)
 // has no -c and takes the command as trailing arguments instead.
+//
+// The two also differ in what `script` itself exits with. BSD `script` exits
+// with the child's status. util-linux `script` exits 0 whatever the child did
+// unless it is given -e (--return), so without -e every pty scenario on Linux
+// would read a refused command as a success. With -e both report the child's
+// own status, which is what runUnderPTY hands to the exit-code assertions.
 func scriptCommand(ctx context.Context, inner string) *exec.Cmd {
 	if runtime.GOOS == "linux" {
-		return exec.CommandContext(ctx, "script", "-q", "-c", inner, "/dev/null")
+		return exec.CommandContext(ctx, "script", "-q", "-e", "-c", inner, "/dev/null")
 	}
 	return exec.CommandContext(ctx, "script", "-q", "/dev/null", "/bin/sh", "-c", inner)
 }

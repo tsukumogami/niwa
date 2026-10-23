@@ -16,7 +16,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
-// TestLineageAttributeNamesArePinned pins the six names and their order. Other
+// TestLineageAttributeNamesArePinned pins the eight names and their order. Other
 // tools read these attributes by name, so a rename here breaks every reader
 // without a compile error anywhere; this is the one place that notices.
 func TestLineageAttributeNamesArePinned(t *testing.T) {
@@ -27,6 +27,8 @@ func TestLineageAttributeNamesArePinned(t *testing.T) {
 		"niwa.requested.skill",
 		"niwa.brief.id",
 		"niwa.workspace",
+		"niwa.authority.level",
+		"niwa.authority.grant",
 	}
 	if !slices.Equal(lineageAttributeNames, want) {
 		t.Fatalf("lineage attribute names = %v, want exactly %v", lineageAttributeNames, want)

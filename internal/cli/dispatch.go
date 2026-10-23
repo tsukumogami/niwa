@@ -45,6 +45,13 @@ func init() {
 	// directions, and the bare form means explicit true.
 	dispatchCmd.Flags().Var(triBoolValue{&dispatchAcceptSessionMessages}, acceptSessionMessagesFlagName, acceptSessionMessagesFlagUsage)
 	dispatchCmd.Flags().Lookup(acceptSessionMessagesFlagName).NoOptDefVal = "true"
+	// The authority flags (dispatch_authority.go). --grant and --role are
+	// string arrays rather than slices so the comma split, and its refusal of
+	// an empty entry, is authority.ParseNameList's alone.
+	dispatchCmd.Flags().Var(optionalStringValue{&dispatchLevel, &dispatchLevelSet}, "level", dispatchLevelFlagUsage)
+	dispatchCmd.Flags().StringArrayVar(&dispatchGrants, "grant", nil, dispatchGrantFlagUsage)
+	dispatchCmd.Flags().StringArrayVar(&dispatchRoles, "role", nil, dispatchRoleFlagUsage)
+	dispatchCmd.Flags().Var(optionalStringValue{&dispatchParentFrom, &dispatchParentFromSet}, "parent-from", dispatchParentFromHelp)
 	rootCmd.AddCommand(dispatchCmd)
 }
 
@@ -347,14 +354,20 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("niwa: error: %w (in %s)", err, cfgPath)
 	}
+	// The machine's authority_level and authority_ceiling fail closed the
+	// same way: an invalid value would otherwise leave the level or the grant
+	// ceiling wider than the machine owner set it.
+	if err := checkMachineAuthority(gc, cfgPath); err != nil {
+		return err
+	}
 
 	// (2b) Resolve which agent this dispatch launches, from --harness,
 	// NIWA_DISPATCH_HARNESS, the workspace default_agent, and the host
 	// default_dispatch_harness, in that order. dispatch's own --agent flag is
 	// the launched agent's subagent-type passthrough, a different thing, so it
 	// is deliberately not consulted here. A config that cannot be loaded resolves against the
-	// sources that did load and leaves the failure to the provisioning path to
-	// report -- but it says so first, because a rung that was skipped rather
+	// sources that did load, and the authority step at (2e) then refuses the
+	// dispatch on it -- but it says so first, because a rung that was skipped rather
 	// than consulted is the one case where the resolution's answer is right
 	// about the inputs it had and wrong about the ones the developer wrote.
 	wsConfigPath := filepath.Join(workspaceRoot, workspace.StateDir, workspace.WorkspaceConfigFile)
@@ -407,6 +420,18 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if launchDecl.State != agentplan.StateImplemented || !hasSpec {
 		return fmt.Errorf("niwa: error: niwa dispatch cannot launch a background worker for the %q agent. %s %s, or open a session yourself and run the task there",
 			dispatchedAgent, launchDecl.Reason, launchableAgentsHint())
+	}
+
+	// (2e) Resolve the dispatch's authority level and named grant, and read
+	// the dispatcher's own record for the parent link. Unlike (2b), a
+	// workspace config that didn't load refuses here: the level and the
+	// ceiling must never fall back to a default because the file was
+	// unreadable. Every refusal comes before the preflight, the prompt, the
+	// sweep and provisioning, so a refused dispatch leaves nothing behind
+	// and never asks for a prompt.
+	auth, err := resolveDispatchAuthority(cmd.ErrOrStderr(), cwd, workspaceRoot, wsConfigPath, wsConfig, cfgErr, gc)
+	if err != nil {
+		return err
 	}
 
 	// (3) Preflight the worker binary on PATH BEFORE creating any instance, so
@@ -526,6 +551,11 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("niwa: error: generating the dispatch id: %w", err)
 	}
+	// R19's line: once the dispatch id exists and before the sweep, so a
+	// dispatch that failed its preflight or prompt capture never prints it.
+	// A dispatch that prints it and then fails to provision or launch has
+	// rolled back by the time it exits.
+	fmt.Fprintln(cmd.ErrOrStderr(), authorityLine(auth.resolved))
 	parentSessionID := lineageParentSessionID(spec, os.Getenv)
 	namePrefix := dispatchInstancePrefix(slug, token)
 	// The session name shares the instance's token, so it is unique for the
@@ -602,6 +632,19 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// never lands. A write failure rolls back via the deferred destroy above.
 	if err := writeDispatchMarker(instancePath); err != nil {
 		return fmt.Errorf("niwa: error: writing dispatch pending-marker: %w", err)
+	}
+
+	// (8a) Re-check the authority against what the instance was built from,
+	// then write the record before anything can launch in the instance. A
+	// failure either way returns with the rollback armed, so the instance
+	// goes and nothing launches.
+	authRecord, err := recheckDispatchAuthority(auth, workspaceRoot, wsConfigPath, instancePath, gc)
+	if err != nil {
+		return err
+	}
+	authRecord = stampDispatchRecord(authRecord, auth, dispatchID, parentSessionID)
+	if err := writeAuthorityRecordFunc(instancePath, authRecord); err != nil {
+		return fmt.Errorf("niwa: error: writing the dispatch's authority record: %w", err)
 	}
 
 	// (9) The host global config was loaded once at (2a), before the agent
@@ -800,6 +843,8 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			RequestedSkill:  dispatchSkill,
 			BriefID:         briefID,
 			Workspace:       lineageWorkspace(wsConfig, cmd.ErrOrStderr()),
+			AuthorityLevel:  authRecord.Level.String(),
+			AuthorityGrant:  grantAttribute(authRecord),
 		})
 	}
 	// The reap key is the dispatch id, set whether or not a lineage value
