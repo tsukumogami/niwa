@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Proposed
+status: Accepted
 problem: |
   niwa's only parent links for a dispatched session live in the instance's
   authority record and the workspace's session mapping, and `niwa reap`
@@ -38,7 +38,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
