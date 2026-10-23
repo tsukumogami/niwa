@@ -52,8 +52,10 @@ test-functional-claude-integration: build-test
 # authority tests of the packages that call it (and the static checks on
 # docs/guides/authority-grants.md), then the authority features, the
 # gate-contract scenarios that run the guide's reference checks among them.
-# The Authority workflow runs this on every pull request with no koto on PATH,
-# since nothing here may depend on koto. The unit tests are picked by name, so
+# A local shortcut: CI runs all of these through the Test job's go test and
+# make test-functional, where TestCI_AuthorityRunsWithoutKoto fails if koto
+# resolves on PATH. Run it with koto off PATH to check the same thing here.
+# The unit tests are picked by name, so
 # a new authority test whose name matches none of these patterns is left out
 # of this target (go test -race ./... still runs it); name it to match or
 # extend the pattern.
