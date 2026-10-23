@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 problem: |
   niwa's only parent links for a dispatched session live in the instance's
   authority record and the workspace's session mapping, and `niwa reap`
@@ -34,11 +34,11 @@ upstream: docs/prds/PRD-dispatch-lineage.md
 decision_provenance: inline-resolved
 ---
 
-# DESIGN: dispatch-lineage
+# DESIGN: Dispatch lineage
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
