@@ -27,6 +27,12 @@ motivating_context: |
 
 Draft
 
+Framing for a durable lineage record of dispatched sessions. It stops at the
+problem, the outcome, the journeys and the scope boundary. The downstream PRD
+owns the choices this brief leaves open: whether a dispatch claiming a false
+parent is refused or recorded and marked, how long the record outlives the
+instance, and what identifies the person a session acts for.
+
 ## Problem Statement
 
 A person starts a session, that session runs `niwa dispatch` to hand work to
@@ -65,15 +71,15 @@ every instance in it has been reaped, reads from a niwa record in the
 workspace the whole chain for any dispatch: this session was dispatched by
 that one, which was dispatched from the session a person started. The same
 record names the person the tree acts for, at every level, so a session two
-levels down answers "on whose behalf?" the same way its parent does. Every
-session below the first level has a parent on the record, which is where its
-escalations go.
+levels down answers "on whose behalf?" the same way its parent does. For any
+session below the first level, the operator can read the session above it
+that directs it.
 
 Beside every parent link the operator reads how niwa came by it: niwa
-observed it, matching the caller against what niwa itself launched; the
-caller handed it, with nothing niwa holds to check it against; or the caller
-claimed a parent niwa's own records contradict, recorded and marked
-unverified. A tool that reads authority relations gets these answers in a
+observed it, matching the caller against what niwa itself launched; or the
+caller handed it, with nothing niwa holds to check it against. A dispatch
+whose claimed parent contradicts niwa's own records never passes as
+observed: it is refused, or recorded with the claim marked unverified. A tool that reads authority relations gets these answers in a
 stable form, and when it reads a handed parent it shows it as handed rather
 than as something niwa saw.
 
@@ -93,9 +99,9 @@ instances, the session mappings, or a telemetry backend still existing.
 
 ### A tool reads one link and how far to trust it
 
-A coordinator, or a gate script, needs to know who directs session B before
-it routes a question or allows an action. It asks niwa for B's lineage in
-machine-readable form and gets B's parent, the parent's parent, the person
+A coordinator session needs to know who directs session B before it routes
+B's question. It asks niwa for B's lineage in machine-readable form, the way
+a gate script would before allowing an action, and gets B's parent, the parent's parent, the person
 the tree acts for, and for each parent link whether niwa observed it or the
 caller handed it. When the link is handed, the tool shows it as handed and
 decides accordingly; it never has to guess from the shape of the record.
