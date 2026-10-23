@@ -477,6 +477,10 @@ func TestDispatchAuthority_ParentRefusals(t *testing.T) {
 			chdir(t, installedInstance(t, root, "test-ws-x", parentRecord(t)))
 			dispatchParentFrom, dispatchParentFromSet = installedInstance(t, root, "test-ws-y", parentRecord(t)), true
 		}, "but this dispatch runs inside instance"},
+		{"--parent-from another instance than the working directory's, which has no record", func(t *testing.T, root string) {
+			chdir(t, installedInstance(t, root, "test-ws-x", ""))
+			dispatchParentFrom, dispatchParentFromSet = installedInstance(t, root, "test-ws-y", parentRecord(t)), true
+		}, "but this dispatch runs inside instance"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

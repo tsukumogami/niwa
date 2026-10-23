@@ -54,6 +54,25 @@ func grantText(authority string, sources []string) string {
 	return fmt.Sprintf("%s (%s)", authority, strings.Join(parts, ", "))
 }
 
+// GrantListText writes a grant the way both `niwa authority show` and
+// dispatch's resolution line do: each authority with its sources in
+// parentheses, joined with ", ", or "none" for an empty grant. Both call it,
+// so the two renderings can't drift.
+func GrantListText(grant []GrantEntry) string {
+	if len(grant) == 0 {
+		return "none"
+	}
+	parts := make([]string, len(grant))
+	for i, g := range grant {
+		sources := make([]string, len(g.Sources))
+		for j, s := range g.Sources {
+			sources[j] = string(s)
+		}
+		parts[i] = grantText(string(g.Authority), sources)
+	}
+	return strings.Join(parts, ", ")
+}
+
 // Text is what plain `niwa authority show` prints for a record that exists.
 // Every value in it came through ParseRecord, which refuses control characters
 // and names outside their patterns, so nothing here can paint the terminal.
@@ -81,19 +100,7 @@ func (r Record) Text() string {
 		roles = strings.Join(r.Roles, ", ")
 	}
 	fmt.Fprintf(&b, "roles: %s\n", roles)
-	grant := "none"
-	if len(r.Grant) > 0 {
-		parts := make([]string, len(r.Grant))
-		for i, g := range r.Grant {
-			sources := make([]string, len(g.Sources))
-			for j, s := range g.Sources {
-				sources[j] = string(s)
-			}
-			parts[i] = grantText(string(g.Authority), sources)
-		}
-		grant = strings.Join(parts, ", ")
-	}
-	fmt.Fprintf(&b, "grant: %s\n", grant)
+	fmt.Fprintf(&b, "grant: %s\n", GrantListText(r.Grant))
 	if len(r.UnknownGrant) > 0 {
 		parts := make([]string, len(r.UnknownGrant))
 		for i, g := range r.UnknownGrant {

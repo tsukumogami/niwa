@@ -285,21 +285,10 @@ func checkParentFrom(path, workspaceRoot string) (workspace.FoundInstance, error
 }
 
 // authorityLine is R19's line: the level and its source, then each granted
-// authority with its sources, written "dispatch" and "role <name>".
+// authority with its sources, written "dispatch" and "role <name>" by the
+// rendering `niwa authority show` uses, so the two can't drift.
 func authorityLine(rec authority.Record) string {
-	grant := "none"
-	if len(rec.Grant) > 0 {
-		parts := make([]string, len(rec.Grant))
-		for i, g := range rec.Grant {
-			sources := make([]string, len(g.Sources))
-			for j, s := range g.Sources {
-				sources[j] = strings.Replace(string(s), "role:", "role ", 1)
-			}
-			parts[i] = fmt.Sprintf("%s (%s)", g.Authority, strings.Join(sources, ", "))
-		}
-		grant = strings.Join(parts, ", ")
-	}
-	return fmt.Sprintf("niwa dispatch: authority level %s from %s; grant %s", rec.Level, rec.LevelSource, grant)
+	return fmt.Sprintf("niwa dispatch: authority level %s from %s; grant %s", rec.Level, rec.LevelSource, authority.GrantListText(rec.Grant))
 }
 
 // grantAttribute is the niwa.authority.grant value: the granted authorities

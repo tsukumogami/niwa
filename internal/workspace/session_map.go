@@ -21,7 +21,10 @@ var sessionUUIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 
 // ValidSessionID reports whether id is a syntactically valid Claude session
 // id (a lowercase UUID). Callers validate before using the id as a path
-// component or command argument.
+// component or command argument. It is stricter than
+// authority.ValidSessionID, which checks the looser shape (8 to 128 letters,
+// digits, '_' or '-') niwa accepts for any agent's calling-session id in
+// lineage and the authority record; the two aren't interchangeable.
 func ValidSessionID(id string) bool {
 	return sessionUUIDRe.MatchString(id)
 }
