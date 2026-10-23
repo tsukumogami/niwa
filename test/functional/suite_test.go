@@ -549,6 +549,10 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// workspace root against the worktrees of a dispatched session's instance ---
 	registerWorktreeTeardownSteps(ctx)
 
+	// --- host-local env layer: the machine config's per-key [env] and
+	// [claude.env] tables applied after the personal overlay ---
+	registerHostEnvSteps(ctx)
+
 	// --- ephemeral-session integration: instance from-hook provision/teardown
 	// and the orphan reaper, driven against the offline localGitServer ---
 	registerEphemeralSessionSteps(ctx)

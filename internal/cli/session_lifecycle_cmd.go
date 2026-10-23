@@ -417,6 +417,17 @@ func applyContentToWorktree(instanceRoot, worktreePath, repo, purpose, branch st
 		opts.GlobalEnvOutput = globalOverride.Global.EnvOutput
 	}
 
+	// The host-local env layer is plain machine config too. The worktree's env
+	// files inherit it from the clone, which applied it; the Claude session env
+	// is re-materialized here, so it needs the layer itself.
+	if gc, gErr := config.LoadGlobalConfig(); gErr == nil {
+		hostEnv := gc.HostEnv()
+		if err := hostEnv.Validate(); err != nil {
+			return nil, fmt.Errorf("machine config host-local env: %w", err)
+		}
+		cfg.HostEnv = hostEnv
+	}
+
 	return workspace.ApplyToWorktree(cfg, configDir, instanceRoot, worktreePath, group, repo, purpose, branch, opts)
 }
 

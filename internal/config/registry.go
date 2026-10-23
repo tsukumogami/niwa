@@ -18,6 +18,13 @@ type GlobalConfig struct {
 	GlobalConfig GlobalConfigSource       `toml:"global_config"`
 	Registry     map[string]RegistryEntry `toml:"registry"`
 
+	// Env and Claude are the host-local env layer: per-key values and unsets
+	// this machine applies after every other layer, the personal overlay
+	// included. See HostEnvLayer. They are declared here, rather than read
+	// off the raw file, so a `niwa config set` rewrite keeps them.
+	Env    HostEnvTable    `toml:"env,omitempty"`
+	Claude HostClaudeTable `toml:"claude,omitempty"`
+
 	// authorityUnknownKeys are the authority_-prefixed keys under [global]
 	// this build doesn't know. They're invalid values for the authority
 	// policy, since a misspelt narrowing key would leave policy wider.

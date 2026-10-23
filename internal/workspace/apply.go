@@ -1631,12 +1631,31 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// context so the pre-pass can consult the global category rung. It stays
 	// nil when no global override is loaded (skipGlobal or no niwa.toml), which
 	// the resolver treats as "no global rung".
+	//
+	// The host-local env layer rides on the effective config so every
+	// materializer applies it last. Each of its keys is reported with the
+	// layer it won over, the same value-free way as the shadows above.
+	hostEnv, err := a.hostEnv()
+	if err != nil {
+		return nil, err
+	}
+	if hostEnv != nil {
+		var personal *config.GlobalOverride
+		if globalOverride != nil {
+			flat := ResolveGlobalOverride(globalOverride, cfg.Workspace.Name)
+			personal = &flat
+		}
+		for _, o := range HostEnvOverrides(cfg, personal, hostEnv) {
+			a.Reporter.Defer("%s", o.Line())
+		}
+	}
 	effectiveCfg, globalEnvExamplePolicy, globalEnvOutput, err := ResolveAndMergeEffectiveConfig(
 		ctx, cfg, globalOverride, teamBundle, personalBundle,
 		EffectiveConfigOptions{
 			GlobalConfigDir: a.GlobalConfigDir,
 			Stderr:          a.Reporter.Writer(),
 			Keys:            a.Keys,
+			HostEnv:         hostEnv,
 		},
 	)
 	if err != nil {
