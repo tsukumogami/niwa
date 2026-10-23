@@ -547,14 +547,23 @@ func TestShowDecide_UnusableRecordsFail(t *testing.T) {
 func TestShow_WatchdogOnAStalledRead(t *testing.T) {
 	w := newShowWorkspace(t, "")
 	inst := w.instance(t, "a")
+	// The stalled read is left behind in the watchdog's goroutine, so the
+	// cleanup has to be ordered against it: the goroutine read the seam
+	// before it signalled entered, and once released it returns an error and
+	// touches nothing shared, so restoring the seam after both is race-free.
+	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
 	prev := authorityReadRecord
 	authorityReadRecord = func(string) (authority.Record, bool, error) {
+		entered <- struct{}{}
 		<-release
-		return authority.Record{}, false, nil
+		return authority.Record{}, false, errors.New("released")
 	}
-	t.Cleanup(func() { authorityReadRecord = prev })
+	t.Cleanup(func() {
+		<-entered
+		close(release)
+		authorityReadRecord = prev
+	})
 	start := time.Now()
 	r := runAuthorityCmd(t, inst, "show", "--json").mustFail(t, 1)
 	elapsed := time.Since(start)

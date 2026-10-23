@@ -181,6 +181,8 @@ func selectBySession(id, cwd string) (dispatchSelection, error) {
 // workspace root enumerates, matching by name, so the flag's value is checked
 // before it is ever part of a path and can't step outside the root.
 func selectByInstance(name, cwd string) (dispatchSelection, error) {
+	// workspace.ValidName only refuses control and format characters; it
+	// allows "/" and "..", so those are refused here first.
 	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) || !workspace.ValidName(name) {
 		return dispatchSelection{}, readError("invalid --instance %s: pass the name of an instance in this workspace", strconv.Quote(name))
 	}
