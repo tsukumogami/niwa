@@ -31,3 +31,22 @@ Feature: niwa dispatch writes a lineage entry and niwa lineage show reads it
     And the output contains "parent dispatch: none (source none)"
     And the output contains "principal:       none (source none, trust observed)"
     And nothing under the workspace root's .niwa names the dispatch
+
+  @critical
+  Scenario: each dispatch records its parent links with how niwa came by them
+    Given a config repo "ws" exists with authority fixture "none"
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    Given a fake claude for dispatch that mints a new session per launch
+    And the dispatching session is "c0c0c0c0-1111-4111-8111-c0c0c0c0c0c0"
+    When I run "niwa dispatch coordinator --detach" from the workspace root
+    Then the exit code is 0
+    And the dispatch's lineage entry records parent session "handed" and parent dispatch "none"
+    Given I keep the dispatch instance as the first dispatch
+    And the dispatching session is the first dispatch's session
+    When I dispatch with "" from inside the first dispatch instance
+    Then the exit code is 0
+    And the dispatch's lineage entry records parent session "observed" and parent dispatch "observed"
+    When I dispatch with "" from the workspace root
+    Then the exit code is 0
+    And the dispatch's lineage entry records parent session "handed" and parent dispatch "mapped"

@@ -23,6 +23,60 @@ func registerLineageStoreSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the lineage show output is the dispatch's entry with every link none$`, theLineageShowOutputIsTheDispatchsEntry)
 	ctx.Step(`^the dispatch's lineage entry is private to its owner$`, theDispatchsLineageEntryIsPrivate)
 	ctx.Step(`^nothing under the workspace root's \.niwa names the dispatch$`, nothingUnderTheRootsNiwaNamesTheDispatch)
+	ctx.Step(`^the dispatch's lineage entry records parent session "([^"]*)" and parent dispatch "([^"]*)"$`, theDispatchsLineageEntryRecordsSources)
+}
+
+// theDispatchsLineageEntryRecordsSources reads the last dispatch's entry from
+// the store and checks both links' sources. The parent session link carries
+// the session the dispatching shell exported, and a parent dispatch link
+// other than none names the first dispatch.
+func theDispatchsLineageEntryRecordsSources(ctx context.Context, sessionSource, dispatchSource string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	id, err := lastDispatchID(s)
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(filepath.Join(s.workspaceRoot, ".niwa-lineage", id+".json"))
+	if err != nil {
+		return err
+	}
+	type link struct {
+		ID     string `json:"id"`
+		Source string `json:"source"`
+	}
+	var e struct {
+		ParentSession  link `json:"parent_session"`
+		ParentDispatch link `json:"parent_dispatch"`
+	}
+	if err := json.Unmarshal(data, &e); err != nil {
+		return fmt.Errorf("entry is not JSON (%v):\n%s", err, data)
+	}
+	if e.ParentSession.Source != sessionSource || e.ParentSession.ID != s.envOverrides["CLAUDE_CODE_SESSION_ID"] {
+		return fmt.Errorf("parent session = %+v, want source %s for %q\n%s", e.ParentSession, sessionSource, s.envOverrides["CLAUDE_CODE_SESSION_ID"], data)
+	}
+	if e.ParentDispatch.Source != dispatchSource {
+		return fmt.Errorf("parent dispatch = %+v, want source %s\n%s", e.ParentDispatch, dispatchSource, data)
+	}
+	if dispatchSource == "none" {
+		if e.ParentDispatch.ID != "" {
+			return fmt.Errorf("parent dispatch none carries id %q", e.ParentDispatch.ID)
+		}
+		return nil
+	}
+	first, err := os.ReadFile(filepath.Join(s.authority.firstInstance, ".niwa", "authority.json"))
+	if err != nil {
+		return fmt.Errorf("reading the first dispatch's record: %w", err)
+	}
+	var rec struct {
+		DispatchID string `json:"dispatch_id"`
+	}
+	if err := json.Unmarshal(first, &rec); err != nil || rec.DispatchID == "" || rec.DispatchID != e.ParentDispatch.ID {
+		return fmt.Errorf("parent dispatch id %q, want the first dispatch's %q (%v)", e.ParentDispatch.ID, rec.DispatchID, err)
+	}
+	return nil
 }
 
 // lastDispatchID reads the dispatch id from the last dispatch instance's

@@ -199,7 +199,12 @@ func lineageShowWorkspace(t *testing.T) string {
 	t.Helper()
 	root := setupDispatchWorkspace(t)
 	chdir(t, root)
-	e := dispatchLineageEntry(constABDispatchID, "test-ws+task-abababab", "claude", time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC))
+	none := &dispatchAuthority{
+		parentSession:  lineage.Link{Source: lineage.SourceNone},
+		parentDispatch: lineage.Link{Source: lineage.SourceNone},
+		principal:      lineage.Principal{Source: lineage.SourceNone, Trust: lineage.TrustObserved},
+	}
+	e := dispatchLineageEntry(constABDispatchID, "test-ws+task-abababab", "claude", time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC), none)
 	if err := workspace.CreateLineageEntry(root, e); err != nil {
 		t.Fatal(err)
 	}

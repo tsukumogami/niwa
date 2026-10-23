@@ -63,10 +63,9 @@ entry, an unreadable entry or outside a workspace, 2 usage.`,
 // can make the write fail and watch the rollback.
 var createLineageEntryFunc = workspace.CreateLineageEntry
 
-// dispatchLineageEntry is the entry a dispatch writes. Every parent link and
-// the principal are none: no link is resolved yet, and with no parent
-// dispatch link the principal's trust is observed.
-func dispatchLineageEntry(dispatchID, instance, agentName string, now time.Time) lineage.Entry {
+// dispatchLineageEntry is the entry a dispatch writes: its identity, and the
+// parent links and principal (2e) resolved.
+func dispatchLineageEntry(dispatchID, instance, agentName string, now time.Time, auth *dispatchAuthority) lineage.Entry {
 	return lineage.Entry{
 		Schema:         lineage.SchemaEntryV1,
 		DispatchID:     dispatchID,
@@ -74,9 +73,9 @@ func dispatchLineageEntry(dispatchID, instance, agentName string, now time.Time)
 		Agent:          agentName,
 		Origin:         lineage.OriginDispatch,
 		WrittenAt:      now.UTC().Format(time.RFC3339),
-		ParentSession:  lineage.Link{Source: lineage.SourceNone},
-		ParentDispatch: lineage.Link{Source: lineage.SourceNone},
-		Principal:      lineage.Principal{Source: lineage.SourceNone, Trust: lineage.TrustObserved},
+		ParentSession:  auth.parentSession,
+		ParentDispatch: auth.parentDispatch,
+		Principal:      auth.principal,
 	}
 }
 

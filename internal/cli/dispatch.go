@@ -428,8 +428,10 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// ceiling must never fall back to a default because the file was
 	// unreadable. Every refusal comes before the preflight, the prompt, the
 	// sweep and provisioning, so a refused dispatch leaves nothing behind
-	// and never asks for a prompt.
-	auth, err := resolveDispatchAuthority(cmd.ErrOrStderr(), cwd, workspaceRoot, wsConfigPath, wsConfig, cfgErr, gc)
+	// and never asks for a prompt. The calling session's variable is read
+	// here, once; its parent session link's id is the calling session's id
+	// for the rest of the dispatch.
+	auth, err := resolveDispatchAuthority(cmd.ErrOrStderr(), cwd, workspaceRoot, wsConfigPath, parentSessionVar(spec, os.Getenv), wsConfig, cfgErr, gc)
 	if err != nil {
 		return err
 	}
@@ -556,7 +558,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// A dispatch that prints it and then fails to provision or launch has
 	// rolled back by the time it exits.
 	fmt.Fprintln(cmd.ErrOrStderr(), authorityLine(auth.resolved))
-	parentSessionID := lineageParentSessionID(spec, os.Getenv)
+	parentSessionID := auth.parentSession.ID
 	namePrefix := dispatchInstancePrefix(slug, token)
 	// The session name shares the instance's token, so it is unique for the
 	// same reason the directory is. It is forwarded only to an agent that
@@ -659,7 +661,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// workspace root's store, outside the instance, so it outlives it. A
 	// failure refuses the dispatch the same way: the rollback removes the
 	// instance, and there is no entry of this dispatch's to remove.
-	entry := dispatchLineageEntry(dispatchID, filepath.Base(instancePath), string(dispatchedAgent), time.Now())
+	entry := dispatchLineageEntry(dispatchID, filepath.Base(instancePath), string(dispatchedAgent), time.Now(), auth)
 	if err := createLineageEntryFunc(workspaceRoot, entry); err != nil {
 		return fmt.Errorf("niwa: error: writing the dispatch's lineage entry: %w", err)
 	}
