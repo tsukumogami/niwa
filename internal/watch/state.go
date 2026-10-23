@@ -325,6 +325,15 @@ type StagedRecord struct {
 	// detached-idle process by this id before resuming. Empty when capture
 	// missed. It MUST pass isSafeHandle before it becomes a CLI argument.
 	ShortID string `json:"short_id,omitempty"`
+	// ReapKey is the NIWA_REAP_KEY value the review session was launched with,
+	// minted at stage time and reused by its continuation. A review session
+	// has no session mapping (it is launched inside an instance, which the
+	// SessionStart hook never provisions for), so this record is where the
+	// discard of a review whose session is gone finds the key to hand the
+	// workspace's on-reap command. Empty in a record written before the field
+	// existed; the session id stands in then. It is checked against the reap
+	// key pattern before any use.
+	ReapKey string `json:"reap_key,omitempty"`
 }
 
 // SaveStagedRecord writes a staged-review record keyed by handle.

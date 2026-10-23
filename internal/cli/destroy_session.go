@@ -99,11 +99,18 @@ func realRemoveClaudeSession(ctx context.Context, id string) (string, error) {
 // is already gone, so it has nothing for this step to do.
 //
 // For each owner:
-//   - gone from `claude agents` already: its mapping is deleted;
-//   - still running (a live process): it is kept, and the line says how to
-//     remove it once it stops. destroy never stops a session;
-//   - otherwise: `claude rm <id>` removes it and its mapping is deleted.
-//     Claude Code keeps the transcript, so the line names the resume command.
+//   - gone from `claude agents` already: the workspace's on-reap command runs
+//     for it, and its mapping is deleted once that succeeds;
+//   - still running (a live process): it is kept, with its mapping, and the
+//     line says how to remove it once it stops. destroy never stops a
+//     session, and runs no command for one it kept;
+//   - otherwise: `claude rm <id>` removes it, then the on-reap command runs
+//     and the mapping is deleted once that succeeds. Claude Code keeps the
+//     transcript, so the line names the resume command. A failed removal runs
+//     no command and keeps the mapping.
+//
+// A failed or timed-out on-reap run keeps the mapping, and the next reap that
+// finds the session gone runs the command again (see on_reap.go).
 //
 // Every failure is reported and swallowed, the same contract as destroy's
 // plugin-record and trust cleanup: by the time this runs the user has asked
@@ -129,11 +136,16 @@ func removeOwningSessions(reporter *workspace.Reporter, workspaceRoot string, in
 		}
 	}
 
+	// The on-reap command runs from the workspace root, which outlives the
+	// instance directory, after each removal that succeeded and for each
+	// session already gone. The mapping is deleted only once it succeeds; a
+	// failed run keeps it for the next reap. destroy itself never retries one.
+	onReap := newOnReapStep(workspaceRoot, reporter.Writer())
 	for _, m := range owners {
 		row, listed := byID[m.SessionID]
 		if !listed {
 			// Already deleted from the agents view; only the mapping is left.
-			deleteMappingReporting(reporter, workspaceRoot, m.SessionID)
+			onReap.settle(m)
 			continue
 		}
 		// The id comes from another program's output and becomes an argv
@@ -152,7 +164,7 @@ func removeOwningSessions(reporter *workspace.Reporter, workspaceRoot string, in
 			continue
 		}
 		reporter.Log("removed Claude session %s; its transcript is kept: claude --resume %s", row.ID, m.SessionID)
-		deleteMappingReporting(reporter, workspaceRoot, m.SessionID)
+		onReap.settle(m)
 	}
 }
 
@@ -180,12 +192,6 @@ func owningClaudeMappings(reporter *workspace.Reporter, workspaceRoot string, in
 		owners = append(owners, m)
 	}
 	return owners
-}
-
-func deleteMappingReporting(reporter *workspace.Reporter, workspaceRoot, sessionID string) {
-	if err := workspace.DeleteSessionMapping(workspaceRoot, sessionID); err != nil {
-		reporter.Warn("could not delete the session record for %s: %v", sessionID, err)
-	}
 }
 
 // firstLine returns the first non-empty line of a command's output, falling

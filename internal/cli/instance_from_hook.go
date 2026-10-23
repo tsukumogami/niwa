@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
@@ -239,6 +240,13 @@ func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsD
 	if err := workspace.WriteSessionMapping(workspaceRoot, mapping); err != nil {
 		renderNotices(cmd.ErrOrStderr(), res.Notices)
 		return fmt.Errorf("niwa: error: writing session mapping for %s: %w", payload.SessionID, err)
+	}
+
+	// The session's reap key is its session id, the value a reap recomputes
+	// from this mapping. It reaches the session through the hook's env file;
+	// a session whose hook has none simply runs without it.
+	if err := writeReapKeyEnvFile(os.Getenv("CLAUDE_ENV_FILE"), reapKeyFor(mapping)); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa: warning: could not give session %s its reap key: %v\n", payload.SessionID, err)
 	}
 
 	// The session's MCP set comes from its project, the workspace root, so
@@ -627,4 +635,25 @@ func destroyInstanceWarningTo(instancePath string, w io.Writer) error {
 	}
 	return workspace.DestroyInstance(instancePath,
 		workspace.WithDestroyReporter(workspace.NewWarningReporter(w)))
+}
+
+// writeReapKeyEnvFile appends `export NIWA_REAP_KEY='<key>'` to the hook's
+// env file, which Claude Code sources into the session's environment. An
+// empty path writes nothing, and so does a key that doesn't match
+// reapKeyPattern: a value with nothing but letters, digits, '_' and '-' needs
+// no escaping inside single quotes, and nothing else is written at all. A
+// symlink at the path is refused rather than followed.
+func writeReapKeyEnvFile(path, key string) error {
+	if path == "" || !validReapKey(key) {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(f, "export %s='%s'\n", config.ReapKeyEnv, key); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }

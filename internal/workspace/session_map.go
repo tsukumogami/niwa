@@ -109,12 +109,22 @@ type SessionMapping struct {
 	SessionName string `json:"session_name,omitempty"`
 	// DispatchID is the dispatch's own identity, the value its worker carries
 	// as a lineage resource attribute. ParentSessionID is the id of the
-	// session that ran the dispatch, when it was run from one. Both are
-	// informational: they power `niwa list --json` and are never read by the
-	// reaper. omitempty keeps mappings written before these fields existed,
+	// session that ran the dispatch, when it was run from one. Both power
+	// `niwa list --json`. DispatchID is also the session's reap key: when niwa
+	// removes the session it recomputes the key from the mapping, the dispatch
+	// id when there is one and the session id otherwise, and hands it to the
+	// workspace's on-reap command. Neither decides whether a session is
+	// reclaimed. omitempty keeps mappings written before these fields existed,
 	// and dispatches with no caller session, byte-identical.
 	DispatchID      string `json:"dispatch_id,omitempty"`
 	ParentSessionID string `json:"parent_session_id,omitempty"`
+	// OnReapFailures counts the on-reap runs that failed, timed out or were
+	// skipped for this session after it was removed. The mapping is kept while
+	// the count is below the limit, so a later reap runs the command again;
+	// at the limit niwa drops the mapping. A mapping written before this field
+	// existed loads with a count of zero, and omitempty keeps it absent until
+	// a run fails.
+	OnReapFailures int `json:"on_reap_failures,omitempty"`
 }
 
 // sessionsDirName is the directory under the config dir that holds the session

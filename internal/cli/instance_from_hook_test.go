@@ -30,6 +30,10 @@ const testSessionID = "aabbccdd-eeff-1122-3344-556677889900"
 func setupHookWorkspace(t *testing.T, ephemeral bool) string {
 	t.Helper()
 	root := t.TempDir()
+	// The SessionStart path appends the reap key to the hook's env file. A
+	// test run inside a hook-started session would otherwise write to that
+	// session's real file; tests that want the line set their own.
+	t.Setenv("CLAUDE_ENV_FILE", "")
 
 	configDir := filepath.Join(root, config.ConfigDir)
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
@@ -297,6 +301,86 @@ func TestSessionStart_PassingWorker_Provisions(t *testing.T) {
 	}
 	if !strings.Contains(ctx, "# instance guidance") {
 		t.Errorf("additionalContext missing instance CLAUDE.md content")
+	}
+}
+
+// TestSessionStart_WritesReapKeyToEnvFile: a provisioned session gets one
+// plain, single-quoted `export NIWA_REAP_KEY='<session id>'` line appended to
+// the hook's env file, after whatever was already there.
+func TestSessionStart_WritesReapKeyToEnvFile(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	writeJobState(t, jobsDir, testSessionID[:8], testSessionID, "bg")
+	stubProvision(t, "")
+	envFile := filepath.Join(t.TempDir(), "session.env")
+	if err := os.WriteFile(envFile, []byte("export EARLIER_MARK='x'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_ENV_FILE", envFile)
+
+	if _, _, err := runStart(t, instanceHookPayload{HookEventName: hookEventSessionStart, SessionID: testSessionID, Cwd: root}, jobsDir); err != nil {
+		t.Fatalf("runInstanceHookStart: %v", err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "export EARLIER_MARK='x'\nexport NIWA_REAP_KEY='" + testSessionID + "'\n"
+	if string(data) != want {
+		t.Errorf("env file = %q, want %q", data, want)
+	}
+}
+
+// TestSessionStart_NoEnvFileLineWhenNotProvisioned: a session the guard turns
+// away gets no reap key.
+func TestSessionStart_NoEnvFileLineWhenNotProvisioned(t *testing.T) {
+	root := setupHookWorkspace(t, false)
+	envFile := filepath.Join(t.TempDir(), "session.env")
+	t.Setenv("CLAUDE_ENV_FILE", envFile)
+	if _, _, err := runStart(t, instanceHookPayload{HookEventName: hookEventSessionStart, SessionID: testSessionID, Cwd: root}, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(envFile); !os.IsNotExist(err) {
+		t.Errorf("an unprovisioned session's env file was written: %v", err)
+	}
+}
+
+// TestWriteReapKeyEnvFile covers the writer: a key matching the pattern is
+// written, one that doesn't is refused without a write, and a symlink at the
+// path is not followed.
+func TestWriteReapKeyEnvFile(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.env")
+	if err := writeReapKeyEnvFile(good, "abc_DEF-123"); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(good); string(data) != "export NIWA_REAP_KEY='abc_DEF-123'\n" {
+		t.Errorf("good = %q", data)
+	}
+
+	for _, bad := range []string{"", "has space", "quote'd", "semi;colon", "$(x)", strings.Repeat("a", 129)} {
+		path := filepath.Join(dir, "bad.env")
+		if err := writeReapKeyEnvFile(path, bad); err != nil {
+			t.Errorf("key %q: %v", bad, err)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("key %q was written", bad)
+		}
+	}
+
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.env")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeReapKeyEnvFile(link, "abc"); err == nil {
+		t.Error("a symlinked env file was followed")
+	}
+	if data, _ := os.ReadFile(target); len(data) != 0 {
+		t.Errorf("the symlink target was written: %q", data)
 	}
 }
 

@@ -151,6 +151,15 @@ func deepCopySession(in config.SessionConfig) config.SessionConfig {
 			Promote: slices.Clone(in.Env.Promote),
 			Vars:    cloneEnvVarsTable(in.Env.Vars),
 		},
+		DispatchEnv: config.SessionDispatchEnvConfig{
+			Passthrough: slices.Clone(in.DispatchEnv.Passthrough),
+			Unset:       slices.Clone(in.DispatchEnv.Unset),
+		},
+		OnReap: config.SessionOnReapConfig{
+			Command: in.OnReap.Command,
+			Timeout: in.OnReap.Timeout,
+			Env:     slices.Clone(in.OnReap.Env),
+		},
 	}
 }
 

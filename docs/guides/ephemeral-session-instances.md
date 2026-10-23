@@ -53,7 +53,8 @@ agent cd's into the instance and works there in isolation
       | -> its ~/.claude/jobs/<id>/ entry disappears
       v
 niwa reap  (on demand, or at the next niwa create)
-           sees the job entry gone, niwa destroy --force, delete mapping
+           sees the job entry gone, niwa destroy --force, run the on-reap
+           command (if declared), delete mapping once it succeeds
 ```
 
 The reaper is the single automatic teardown path; `niwa destroy` is the manual one
@@ -149,6 +150,8 @@ only the Bash tool's directory.)
 | `created` | RFC3339 creation timestamp (UTC). |
 | `ephemeral` | Always `true` for a provisioned instance. The load-bearing marker that gates teardown and reaping. |
 | `label` | Optional human-friendly alias derived later from the session topic. Metadata only — never used to rename the on-disk instance. |
+| `dispatch_id` | Set by `niwa dispatch`: the dispatch's own id. It is also the session's reap key (see [The reap key and the on-reap command](#the-reap-key-and-the-on-reap-command)). |
+| `on_reap_failures` | How many on-reap runs failed for this session after it was removed. Absent until one fails; a mapping written before the field existed reads as zero. |
 
 `session_id` flows from untrusted hook stdin straight into a path component and
 command arguments, so it is validated against the UUID format before any path is
@@ -224,7 +227,10 @@ hand inside an instance has no mapping, and destroy leaves it alone.
   session listed.
 
 When destroy removes a session, or finds it already gone from the Agent View, it
-also deletes the session's mapping. A kept session keeps its mapping.
+runs the workspace's on-reap command for it (if one is declared) and deletes the
+session's mapping once that command succeeds. A failed run keeps the mapping, and
+destroy never retries it; the next `niwa reap` does. A kept session keeps its
+mapping, and so does a session whose removal failed: neither runs the command.
 
 ## `niwa reap`
 
@@ -238,6 +244,11 @@ session mapping, and force-destroys an instance only when BOTH hold:
 
 - the instance is marked **ephemeral**, and
 - its session is **deleted** by the liveness rule.
+
+It also walks the stored session mappings for those whose instance is already
+gone, and when the workspace declares an on-reap command, it runs it for each
+removed session and keeps the mapping until it succeeds (see
+[The reap key and the on-reap command](#the-reap-key-and-the-on-reap-command)).
 
 ### The liveness rule
 
@@ -299,6 +310,119 @@ are noted on stderr.
 > accepts. If this ever bites you, re-run the session's work in a fresh dispatch; a
 > longer-lived safety-net TTL for genuinely abandoned instances is a possible future
 > addition.
+
+## The reap key and the on-reap command
+
+A workspace can ask niwa to run a command each time it removes a session, so
+that state some other tool keeps per session can be closed when the session
+goes. Two pieces make that work: a key every session niwa starts carries, and
+the command itself.
+
+### `NIWA_REAP_KEY`
+
+Every session niwa starts gets `NIWA_REAP_KEY` in its environment:
+
+- A session `niwa dispatch` launches gets the dispatch id, in both its
+  `--settings` document's `env` object and its launch environment, before its
+  first command. It's set whether or not the dispatch composed any lineage
+  attributes. A `NIWA_REAP_KEY` inherited from the shell that ran the dispatch
+  is replaced, and removed when niwa has no valid key to set.
+- A session the SessionStart hook provisions an instance for gets its session
+  id. `niwa instance from-hook` appends one plain, single-quoted line to the
+  hook's `CLAUDE_ENV_FILE`:
+
+  ```
+  export NIWA_REAP_KEY='<session-id>'
+  ```
+
+- A review session `niwa watch` stages gets a key niwa mints for it, kept in the
+  staged review's own record (a review session has no session mapping), and its
+  continuation reuses it.
+
+niwa sets or writes the key only when it matches `^[A-Za-z0-9_-]{1,128}$`; a
+value that doesn't is left unset and the step still succeeds. The key is an
+identifier, not a secret. When niwa removes the session it recomputes the key
+from the mapping (the dispatch id when present, the session id otherwise) and
+checks the pattern again, so a hand-edited mapping can't hand the command
+anything else.
+
+### `[session.on_reap]`
+
+```toml
+[session.on_reap]
+command = "my-close-tool --key \"$NIWA_REAP_KEY\" --session \"$NIWA_SESSION_ID\""
+timeout = "10s"          # per run; the default
+env = ["MY_TOOL_HOME"]   # names copied from niwa's environment, when set
+```
+
+niwa runs `command` under `sh -c` from the workspace root (the removed
+instance may already be gone), in its own process group, with stdin at
+`/dev/null` and this environment and nothing else:
+
+- `PATH` and `HOME` from niwa's environment;
+- `NIWA_REAP_KEY`, the recomputed key;
+- `NIWA_SESSION_ID`, the removed session's id;
+- `NIWA_INSTANCE_PATH`, the instance it ran in;
+- each name in `env` that is set in niwa's environment.
+
+The `env` list reaches only the command, never a command line, so a name may
+also appear in [`[session.dispatch_env]`](session-env-passthrough.md). It gets
+the same load-time refusals as those lists. A `timeout` that doesn't parse or
+isn't positive is refused at load.
+
+The command's standard output, and the warning lines below, go where the
+step's own diagnostics go: niwa's standard error for `niwa reap`, the reaps
+other commands run first, and `niwa destroy`; standard output for `niwa
+watch`'s discard, beside its "discarding staged review" lines. It has the trust
+level of a hook the workspace configuration installs.
+
+**Bounds.** Each run gets its timeout, and on timeout the whole process group is
+killed; a run never waits on a pipe a leftover grandchild still holds, so it ends
+within its timeout plus a second. All the runs of one niwa step share a
+30-second budget, and a run the budget can't start is skipped.
+
+**Failure is never fatal.** A run that fails, times out or is skipped prints one
+line, with the reason truncated and stripped of control characters, and the
+step's own outcome doesn't change:
+
+```
+niwa: warning: on-reap for session <id>: <reason>
+```
+
+**Repeat.** niwa keeps a session's mapping until its on-reap run succeeds. The
+next reap that finds the session gone runs the command again: `niwa reap`, and
+the reaps `niwa dispatch`, `niwa create` and `niwa watch` run first. `niwa
+destroy` itself never retries one, and `niwa destroy --workspace` removes the
+mapping store with the workspace, so a run that fails there isn't repeated.
+After ten failed runs niwa drops the mapping
+with a final warning line. A mapping whose stored key fails the pattern gets no
+command run and one warning line, and counts as a failed run, as does a run
+skipped for lack of budget. A `niwa watch` review session normally has no
+mapping, so when its discard's run fails there is nothing to keep: the warning
+line is printed and the command isn't run again for that review.
+
+**Kept mappings.** `niwa reap` walks the stored mappings as well as the
+instances on disk. A mapping kept because its session was still running when
+destroy ran, one left by `niwa destroy --keep-session`, and one whose instance
+was deleted by hand are each reaped the same way once the session is gone: the
+command runs for it once, and the mapping goes when it succeeds. A mapping
+whose session reap can't judge is left alone, as an instance would be: that
+includes an agent whose liveness niwa reads from session records it can no
+longer match to the directory once the instance is gone.
+
+**Where it runs.** The mapped reap (`niwa reap`, the idle-grace reclaim, and the
+reaps `dispatch`, `create` and `watch` run first); `niwa destroy` when it removes
+a session or finds it already gone; and `niwa watch`'s discard of a staged
+review whose session is gone. **Where it doesn't:** `niwa reset`, `niwa destroy
+--keep-session`, the backstop's reap of an instance with no session mapping, and
+a failed dispatch's rollback. None of those removes a session niwa knows by id.
+
+**Configuration.** niwa reads `[session.on_reap]` from
+`.niwa/workspace.toml` when it removes a session. A workspace with no
+configuration file at all declares no command: nothing runs and the mapping is
+dropped as before. A file that exists but can't be read or parsed counts as a
+failed run for every session that step removes, with the warning line, so the
+mappings are kept until the file is fixed (or ten reaps go by).
 
 ## Context-aware `niwa apply`
 

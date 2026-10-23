@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/watch"
+	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
 // writeCorruptStagedRecord drops a syntactically-invalid record file into the
@@ -121,6 +124,82 @@ func TestPruneStagedRecords(t *testing.T) {
 	wantDestroyed := []string{"/inst/dead", "/inst/div", "/inst/notreq"}
 	if !equalStrings(destroyed, wantDestroyed) {
 		t.Errorf("destroyed instances = %v, want %v", destroyed, wantDestroyed)
+	}
+}
+
+// TestPruneStagedRecords_OnReap: discarding a staged review whose session is
+// gone runs the on-reap command once, with the reap key the review was
+// launched with; a stale review whose session is still live runs nothing; a
+// failing command prints one warning line and the pass goes on.
+func TestPruneStagedRecords_OnReap(t *testing.T) {
+	for _, failing := range []bool{false, true} {
+		t.Run(map[bool]string{false: "succeeds", true: "fails"}[failing], func(t *testing.T) {
+			root := setupDispatchWorkspace(t)
+			command, logPath := onReapLogCommand(t)
+			if failing {
+				command += "; exit 1"
+			}
+			appendOnReapConfig(t, root, fmt.Sprintf("command = %q", command))
+			recs := []watch.StagedRecord{
+				{Handle: "gone0001", Owner: "acme", Repo: "api", Number: 1, InstancePath: "/inst/gone", DispatchedSHA: "aaaa111", SessionID: reapDeadSessionID, ReapKey: onReapDispatchID},
+				{Handle: "stale002", Owner: "acme", Repo: "api", Number: 2, InstancePath: "/inst/stale", DispatchedSHA: "bbbb222", SessionID: onReapSID2, ReapKey: "review-key-2"},
+				{Handle: "noid0003", Owner: "acme", Repo: "api", Number: 3, InstancePath: "/inst/noid", DispatchedSHA: "cccc333"},
+			}
+			for _, r := range recs {
+				if err := watch.SaveStagedRecord(root, r); err != nil {
+					t.Fatal(err)
+				}
+			}
+			origLive := stagedInstanceLiveFunc
+			stagedInstanceLiveFunc = func(_, instancePath string) bool { return instancePath == "/inst/stale" }
+			t.Cleanup(func() { stagedInstanceLiveFunc = origLive })
+			stubDestroyAll(t)
+
+			var out bytes.Buffer
+			// PR #2 is no longer requested, so its live review is discarded as stale.
+			pruneStagedRecords(context.Background(), &out, root, &fakeFreshnessClient{}, map[string]bool{})
+
+			runs := onReapRuns(t, logPath)
+			if len(runs) != 1 || runs[0] != reapDeadSessionID+" "+onReapDispatchID+" /inst/gone" {
+				t.Errorf("runs = %q, want one for the gone session with its review key", runs)
+			}
+			warnings := onReapWarnings(out.String())
+			if failing && len(warnings) != 1 {
+				t.Errorf("warnings = %q, want one", warnings)
+			}
+			if !failing && len(warnings) != 0 {
+				t.Errorf("warnings = %q, want none", warnings)
+			}
+			if handles, _ := watch.ListStagedHandles(root); len(handles) != 0 {
+				t.Errorf("records left = %v, want every one discarded", handles)
+			}
+		})
+	}
+}
+
+// TestPruneStagedRecords_OnReapUsesMapping: a gone review that does have a
+// session mapping is settled like a reap: the key comes from the mapping and
+// a failed run keeps it.
+func TestPruneStagedRecords_OnReapUsesMapping(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	appendOnReapConfig(t, root, `command = "exit 1"`)
+	writeMapping(t, root, workspace.SessionMapping{SessionID: reapDeadSessionID, InstancePath: "/inst/gone", DispatchID: onReapDispatchID, Ephemeral: true})
+	if err := watch.SaveStagedRecord(root, watch.StagedRecord{Handle: "gone0001", Owner: "acme", Repo: "api", Number: 1, InstancePath: "/inst/gone", SessionID: reapDeadSessionID}); err != nil {
+		t.Fatal(err)
+	}
+	origLive := stagedInstanceLiveFunc
+	stagedInstanceLiveFunc = func(_, _ string) bool { return false }
+	t.Cleanup(func() { stagedInstanceLiveFunc = origLive })
+	stubDestroyAll(t)
+
+	var out bytes.Buffer
+	pruneStagedRecords(context.Background(), &out, root, &fakeFreshnessClient{}, map[string]bool{})
+	m, err := workspace.ReadSessionMapping(root, reapDeadSessionID)
+	if err != nil || m.OnReapFailures != 1 {
+		t.Errorf("mapping = %+v, %v; want it kept with one failed run", m, err)
+	}
+	if w := onReapWarnings(out.String()); len(w) != 1 {
+		t.Errorf("warnings = %q, want one", w)
 	}
 }
 

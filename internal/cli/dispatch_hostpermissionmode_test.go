@@ -409,8 +409,8 @@ func TestWatch_IgnoresHostPermissionMode(t *testing.T) {
 			t.Fatalf("launches = %d, want 1", len(fakes.launches))
 		}
 		inst := fakes.provisioned.path
-		fresh := watchReviewLaunch(inst, "watch_acme_widget_7", "review", true)
-		resume := watchResumeLaunch(inst, "watch_acme_widget_7", watchCharSessionID, "again", true)
+		fresh := watchReviewLaunch(inst, "watch_acme_widget_7", "review", true, launchEnvShape{})
+		resume := watchResumeLaunch(inst, "watch_acme_widget_7", watchCharSessionID, "again", true, launchEnvShape{})
 		return fakes.launches[0].Passthrough, fresh.Passthrough, resume.Passthrough
 	}
 

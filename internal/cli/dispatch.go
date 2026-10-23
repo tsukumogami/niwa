@@ -252,6 +252,16 @@ backgrounds its own session simply skips the attach. Either way dispatch
 returns after printing the launched agent's own management hints, which is the
 mode for fan-out and scripting.
 
+The worker starts with this shell's environment, shaped by the workspace's
+[session.dispatch_env]: each name in its passthrough list that is set here is
+copied into the worker's settings document (for an agent that takes one) and
+launch environment, and each name in its unset list is removed. The worker also
+gets NIWA_REAP_KEY, set to this dispatch's id and replacing any value this shell
+carries. When niwa later removes the worker's session -- niwa reap, the reap
+that niwa dispatch, niwa create and niwa watch run first, or niwa destroy --
+the workspace's [session.on_reap] command runs for it. A dispatch's own
+rollback runs no such command.
+
 Any failure before the mapping is durable destroys the just-created instance,
 so dispatch never leaves an unreclaimable instance DIRECTORY. One caveat, for a
 worker that is still running when that happens: if the launch succeeds but
@@ -725,17 +735,20 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// own block after the last contributor and before the render call, deciding and
 	// recording for itself whether its key went in.
 	launchSettings := map[string]any{}
+	passthroughNames, unsetNames := dispatchEnvLists(wsConfig)
 	rcInjected := false
 	rcDecl, rcErr := agentplan.Lookup(agentplan.RemoteControl, dispatchedAgent)
 	rcDeliverable := rcErr == nil && rcDecl.State == agentplan.StateImplemented && spec.Flags.Settings != ""
 	if rcDeliverable {
 		// The eligibility check must inspect the environment the worker
 		// inherits, so the warning describes the worker's actual auth context.
-		// That is os.Environ(), except that the lineage contributor below may
-		// set OTEL_RESOURCE_ATTRIBUTES in it, which has no bearing on
-		// eligibility. Any other divergence between the two must be mirrored
-		// here.
-		inject, warning := resolveDispatchRemoteControl(gc.Global, inst, os.Environ())
+		// That is os.Environ() less the [session.dispatch_env] unset names,
+		// which the launch environment below removes. The same launch also
+		// sets OTEL_RESOURCE_ATTRIBUTES and NIWA_REAP_KEY, which have no
+		// bearing on eligibility. Any other divergence between the two must
+		// be mirrored here.
+		eligibilityEnv, _ := shapeLaunchEnv(os.Environ(), launchEnvShape{Unset: unsetNames})
+		inject, warning := resolveDispatchRemoteControl(gc.Global, inst, eligibilityEnv)
 		if warning != "" {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s\n", warning)
 		}
@@ -768,13 +781,15 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		launchSettings[config.CrossSessionInboundKey] = crossSessionInboundAccept
 		inboundApplied = true
 	}
-	// Lineage resource attributes are the third contributor, and their value
-	// is the one non-constant value this document carries (see
-	// renderLaunchSettings). They go in only where the declaration says the
-	// agent receives them and it has a settings flag. The same string is handed
-	// to the launched process's environment below, so whichever of a settings
-	// env block and the launch environment the agent lets win, the worker ends
-	// up with it.
+	// The launch environment is the third contributor, and its value is the
+	// first non-constant value this document carries (see
+	// renderLaunchSettings). It holds the lineage resource attributes, the
+	// names [session.dispatch_env] passes through, and the reap key, and
+	// applyLaunchEnv puts the same values into the launched process's
+	// environment, so whichever of a settings env block and the launch
+	// environment the agent lets win, the worker ends up with them. Lineage
+	// is composed only where the declaration says the agent receives it and
+	// it has a settings flag.
 	lineageValue := ""
 	lineageDecl, lineageErr := agentplan.Lookup(agentplan.DispatchResourceAttributes, dispatchedAgent)
 	if lineageErr == nil && lineageDecl.State == agentplan.StateImplemented && spec.Flags.Settings != "" {
@@ -786,10 +801,17 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			BriefID:         briefID,
 			Workspace:       lineageWorkspace(wsConfig, cmd.ErrOrStderr()),
 		})
-		if lineageValue != "" {
-			launchSettings["env"] = resourceAttributesEnv{value: lineageValue}
-		}
 	}
+	// The reap key is the dispatch id, set whether or not a lineage value
+	// was composed, so the on-reap command can name this session once niwa
+	// removes it. An agent with no settings flag gets the process
+	// environment only.
+	workerEnv := applyLaunchEnv(spec, launchSettings, os.Environ(), launchEnvShape{
+		Lineage:     lineageValue,
+		Passthrough: passthroughNames,
+		Unset:       unsetNames,
+		ReapKey:     dispatchID,
+	})
 	// The MCP approval is the fourth contributor, and the second non-constant
 	// value (see renderLaunchSettings). A dispatched worker ignores the
 	// enabledMcpjsonServers list in the instance's own settings files and
@@ -920,7 +942,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		Prefix:      promptPrefix,
 		Body:        prompt,
 		Passthrough: passthrough,
-		Env:         lineageWorkerEnv(os.Environ(), lineageValue),
+		Env:         workerEnv,
 		Stdout:      cmd.OutOrStdout(),
 		Stderr:      cmd.ErrOrStderr(),
 	}); err != nil {

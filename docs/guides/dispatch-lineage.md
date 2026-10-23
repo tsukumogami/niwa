@@ -56,6 +56,10 @@ win, the worker ends up with the same list. The daemon keeps the settings
 document with the worker's launch flags, so the attributes come back when the
 daemon resumes the worker.
 
+The same `env` object also carries `NIWA_REAP_KEY` and any names the workspace
+passes through with `[session.dispatch_env]`; see
+[Passing variables through to dispatched workers](session-env-passthrough.md).
+
 The tests hold this without depending on which order Claude Code picks. The
 `internal/otelprecedence` package works out the worker's value from a recorded
 launch and the user settings file three ways: settings first, launch
