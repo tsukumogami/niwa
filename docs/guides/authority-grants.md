@@ -604,8 +604,8 @@ reads, know how each session will be judged:
    sessions that need to merge are dispatched with a role that holds
    `merge-pr`, such as `--role coordinator` in the example above.
 
-Until gates honour the grant, merging still goes through the workspace hook
-and its exemption list.
+Until gates honour the grant, merging still goes through a workspace's
+existing merge hook, if it has one.
 
 ## Coordinators and successors
 
