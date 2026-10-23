@@ -102,8 +102,9 @@ readable, with trust `observed` only when the parent dispatch link is
 `observed`, the parent session link is not `unverified`, and the parent's own
 principal trust is `observed`. Otherwise it is the machine's declared
 `[global] principal` (1 to 128 letters, digits, `.`, `_`, `-`, `@`, `+`),
-else empty with source `none`. A readable parent whose principal is empty is
-inherited as empty. An invalid declared value refuses every dispatch. The
+else empty with source `none`; either fallback has trust `handed` when a
+parent dispatch link has an id, since the person should have come from that
+parent. A readable parent whose principal is empty is inherited as empty. An invalid declared value refuses every dispatch. The
 principal never comes from a token, a keyring, a login, the OS account or the
 network, and no gate may read it (R7, R8, R9).
 
@@ -261,9 +262,11 @@ in an instance; that instance's newest mapping session id (read only when
 `--parent-from` was not given: `ListSessionMappings`, then
 `NewestMappingPerInstance`, looked up by `filepath.Clean` of the instance's
 root, the key that function already uses); when the working directory is in
-no instance, the dispatch id of the mapping keyed by the variable's value
-(`ReadSessionMapping`, only when the value is a lowercase UUID as that store
-requires); the parent dispatch id and how it was found; the parent's lineage
+no instance and `--parent-from` was not given, the dispatch id of the
+mapping keyed by the variable's value (`ReadSessionMapping`, only when the
+value is a lowercase UUID as that store requires; any other well-formed
+value skips the lookup, leaving the dispatch link `none`); the parent
+dispatch id and how it was found; the parent's lineage
 entry (read through the store by whichever parent dispatch id resolved); and
 the declared principal. `lineage.Resolve(Inputs)` applies the PRD's tables in
 row order and returns the values the entry and the authority record both
@@ -330,7 +333,10 @@ rollback closure armed at (7) gains one line: when `success` is false and
 `entryCreated` is true it removes the entry for this dispatch id as well as
 the instance. A refusal after (8a), a launch failure and a detached capture
 failure therefore leave no entry, and a create that failed because the id
-was already taken never deletes the entry it collided with.
+was already taken never deletes the entry it collided with. Today `success`
+is always set before any path could remove a completed entry; the rollback
+closure carries a comment saying so, so a later change that reorders the
+steps doesn't start deleting completed entries.
 
 Completion runs right after (10) captures the session id and before (11)
 writes the mapping: `workspace.CompleteLineageEntry(root, dispatchID,
@@ -520,7 +526,12 @@ value.
     `^[A-Za-z0-9._@+-]{1,128}$` or empty.
   - `resolve.go`: `Inputs`, `Resolve`. Link sources `observed`, `handed`,
     `mapped`, `unverified`, `none`; principal sources `inherited`,
-    `declared`, `none`.
+    `declared`, `none`. `Resolve` applies the parent-dispatch rows in order
+    (cwd record, `--parent-from`, `mapped`, `none`), so `--parent-from`
+    always wins over `mapped`, and caps the principal's trust at `handed`
+    whenever the parent dispatch link is not `observed`, the parent session
+    link is `unverified`, the parent's principal trust is not `observed`, or
+    a parent link has an id but its entry couldn't be used.
   - `walk.go`: `Walk(start Entry, get func(id string) Lookup) Chain`, with
     the visited set, the 64-level limit and the stop reasons `root`,
     `not-on-record`, `unreadable`, `later-version`, `cycle`, `depth`.
@@ -534,14 +545,20 @@ value.
   (`<root>/.niwa-lineage`), `CreateLineageEntry`, `CompleteLineageEntry`,
   `RemoveLineageEntry`, `ReadLineageEntry(root, id)`,
   `ListLineageEntries(root)` (each result an entry, a later-version marker or
-  a per-file error). Every read opens with `O_NOFOLLOW|O_NONBLOCK`, requires
-  a regular file and reads at most 8 KiB, as `ReadAuthorityRecord` does, and
-  an entry whose `dispatch_id` differs from its file name is unreadable.
-  Listing selects files by name (`<dispatch id>.json`, so the dot-prefixed
-  temporaries are skipped) and reports any selected file that isn't a
-  regular file within the cap, without parsing to decide. A `.niwa-lineage`
-  path that is a symlink or not a directory refuses writes; the first write
-  in each process sets the directory to 0700.
+  a per-file error). Every function that takes a dispatch id checks it is a
+  UUID before joining it into a path, whatever record it came from. Every
+  read opens with `O_NOFOLLOW|O_NONBLOCK`, requires a regular file and reads
+  at most 8 KiB, as `ReadAuthorityRecord` does; an entry whose
+  `dispatch_id` differs from its file name, or with a duplicate member, is
+  unreadable. Listing selects files by name (`<dispatch id>.json`, so the
+  dot-prefixed temporaries are skipped) and reports any selected file that
+  isn't a regular file within the cap, without parsing to decide. A
+  `.niwa-lineage` path that is a symlink or not a directory refuses writes;
+  the first write in each process opens the directory `O_NOFOLLOW` and
+  `fchmod`s it to 0700, and a failure there (another user owns it, say)
+  refuses the write. Completion refuses to write an entry that would exceed
+  the read cap. Store file names are UUIDs in lowercase, so a
+  case-insensitive filesystem can't make two ids collide.
 - **`internal/config/registry.go`**: `Principal string` in `GlobalSettings`
   (`principal` key) and `GlobalConfig.Principal() (string, error)`
   validating with the lineage pattern. No workspace or overlay type gains a
@@ -609,7 +626,7 @@ type Inputs struct {
     NewestMappedSession string // "" when the instance has no mapping, or the instance came from --parent-from
     ParentDispatchID    string
     ParentDispatchFrom  string // authority.ParentSourceCwd | Anchor | None
-    RootMappedDispatch  string // cwd in no instance: the dispatch id of the mapping keyed by SessionVar, or ""
+    RootMappedDispatch  string // cwd in no instance and no --parent-from: the dispatch id of the mapping keyed by SessionVar (a lowercase UUID), or ""
     ParentEntry         *Entry // nil when absent, unreadable or a later version
     DeclaredPrincipal   string // already validated; "" when not declared
 }
@@ -625,7 +642,8 @@ The documents `show --json` and `list --json` print:
                               | {"dispatch_id": "...", "error": "..."} ],
  "stop": "root",
  "matched": 1,
- "matches": ["<dispatch id>"]}
+ "matches": ["<dispatch id>"],
+ "instance_name_fallback": false}
 
 {"schema": "niwa.lineage.list/v1", "entries": [ ...same shapes... ]}
 ```
@@ -687,10 +705,13 @@ member-preserving completion, removal, single read and listing. Tests:
 modes, an existing 0755 directory tightened on first write, a duplicate id
 refusing without touching the existing entry, a failed rename leaving
 nothing at the final path (through a test seam), the 8 KiB cap, a file
-whose `dispatch_id` differs from its name reading as unreadable, a planted
+whose `dispatch_id` differs from its name or with a duplicate member
+reading as unreadable, a non-UUID id never reaching a path, a planted
 symlink, FIFO and directory reading as per-entry errors without hanging,
-selection by name only, and an unknown member surviving completion. Depends
-on Phase 1.
+selection by name only, a failed `fchmod` refusing the write, an unknown
+member surviving completion, a failed or oversized completion leaving the
+original entry byte for byte, and `--parent-from` winning over `mapped`.
+Depends on Phase 1.
 
 ### Phase 3: The principal setting and the authority record fields
 
@@ -737,17 +758,17 @@ sections. Depends on Phases 4 and 5.
 
 The lineage store is advisory local state, and the design does not try to make it tamper-proof. Any process running as the same user can write `<root>/.niwa-lineage/`, the session mappings and the authority record, so every field in an entry is a claim recorded at dispatch time, not a proof. The `source` and `trust` fields state how much niwa itself checked when it wrote the entry: `observed` means niwa saw the evidence (the instance's newest session mapping, the parent's authority record found from the working directory, the parent's lineage entry) at that moment; `mapped` means niwa found a coordinator's mapping through the session id the caller named but did not see that the caller is that session; `handed` and `unverified` mean it did not check. `observed` does not mean the file is unmodified since. No gate reads the lineage store or the new authority-record fields, and a later check such as a never-wider cap must not use the principal, either parent link or any source or trust value as an input to a permission decision; those fields identify and attribute, they do not authorize. Enforcement is unchanged from today.
 
-Inputs are validated on write and again on every read. Dispatch and session ids go through the existing id validators, the instance, agent, origin, principal, source and trust fields have fixed patterns, and `written_at` must parse as RFC 3339. Unknown source, trust and origin values are kept when they are name values, so a newer niwa's values survive, but only the exact string `observed` is ever printed as observed. Unknown fields are kept, and completion rewrites only the `session_id` member, so an older niwa never strips a newer one's data. The declared `[global] principal` is validated when the personal config loads and an invalid value refuses the dispatch with the key and file named. The principal is a label for a person that someone chose to declare: it is never taken from a token, keyring, login, the OS account or the network, and never from the workspace config or an overlay, so the configuration snapshot, the one input that arrives over the network, can't name the person. A session variable that is unset or malformed records the source `none`, `--parent-from` always records `handed`, and the root mapping lookup records `mapped`; a dispatch cannot make its claimed parent look observed except by presenting what niwa itself checks, and a same-user process that can write the mapping can already do that. A principal inherited through any link that isn't observed, or past an `unverified` session link, is capped at `handed`.
+Inputs are validated on write and again on every read. Dispatch and session ids go through the existing id validators, the instance, agent, origin, principal, source and trust fields have fixed patterns, and `written_at` must parse as RFC 3339. Unknown source, trust and origin values are kept when they are name values, so a newer niwa's values survive, but only the exact string `observed` is ever printed as observed. Unknown fields are kept, and completion rewrites only the `session_id` member, so an older niwa never strips a newer one's data. The declared `[global] principal` is validated when the personal config loads and an invalid value refuses the dispatch with the key and file named. The principal is a label for a person that someone chose to declare: it is never taken from a token, keyring, login, the OS account or the network, and never from the workspace config or an overlay, so the configuration snapshot, the one input that arrives over the network, can't name the person. A session variable that is unset or malformed records the source `none`, `--parent-from` always records `handed`, and the root mapping lookup records `mapped`. `observed` means the caller's claimed session id and working directory matched niwa's own records, not that niwa proved who the caller is: the mapping store's file names are session ids, so a same-user caller that sets its variable to one of them and runs from that session's instance gets `observed` links and an `observed` inherited principal, and one at the workspace root can pick which coordinator it appears under as `mapped`, and so whose principal it inherits. That is within the ruled boundary, which records rather than hardens, and the guide says so. A principal inherited through any link that isn't observed, past an `unverified` session link, or falling back to the declared one because a parent's entry couldn't be used, is capped at `handed`.
 
-Reading the store is bounded so one bad entry costs only that entry. Every read opens the file with `O_NOFOLLOW` and `O_NONBLOCK`, requires a regular file, and reads at most 8 KiB, the same discipline the authority record reader applies, so a planted symlink, FIFO, directory or oversized file produces a per-entry error instead of a hang, an unrelated read or memory growth. Which files are entries is decided by name, type and size alone. Every read requires an entry's `dispatch_id` to equal its file name, so a copied or renamed file can't pose as another dispatch in a walk. The ancestor walk keeps a visited set and stops at 64 levels, on a cycle, on a missing, unreadable or later-version entry, so a forged parent id cannot loop or run long. Error text names the failure class only and never echoes file content, which may contain terminal escape sequences. An unreadable parent entry never refuses a dispatch: the principal falls back to the declared one and the parent link is kept.
+Reading the store is bounded so one bad entry costs only that entry. Every read opens the file with `O_NOFOLLOW` and `O_NONBLOCK`, requires a regular file, and reads at most 8 KiB, the same discipline the authority record reader applies, so a planted symlink, FIFO, directory or oversized file produces a per-entry error instead of a hang, an unrelated read or memory growth. Which files are entries is decided by name, type and size alone. Every read requires an entry's `dispatch_id` to equal its file name, so a copied or renamed file can't pose as another dispatch in a walk, and rejects a document with a duplicate member, so two readers can't see different values for one field. A dispatch id taken from a parent link, a mapping or an authority record, all same-user writable, is checked to be a UUID before it is joined into a path, so a forged `../` id reads as unreadable instead of opening another file. Unknown members are kept and printed as data, never interpreted, and a completion that would push an entry past the read cap is refused. The ancestor walk keeps a visited set and stops at 64 levels, on a cycle, on a missing, unreadable or later-version entry, so a forged parent id cannot loop or run long. Error text names the failure class only and never echoes file content, which may contain terminal escape sequences. An unreadable parent entry never refuses a dispatch: the principal falls back to the declared one and the parent link is kept.
 
-Writes use the authority record's pattern: the final name is checked to be absent, then a temporary file is created `O_CREATE|O_EXCL|O_NOFOLLOW` at 0600 under a dot-prefixed random name, synced, and renamed to `<dispatch id>.json`, with the temporary removed on failure. The directory is created 0700, an existing one is set to 0700 on the first write in each process, and a `.niwa-lineage` that is a symlink or not a directory is refused. Completion with the session id re-validates the entry it read, refuses a later-version entry rather than rewriting it with less, and replaces the file by rename. A race between two same-user writers on completion is accepted: the entry is advisory and locking would add a failure mode for no gain. The store sits outside the configuration directory, so no refresh copies, swaps or replaces it, and nothing a config source ships can land in it.
+Writes use the authority record's pattern: the final name is checked to be absent, then a temporary file is created `O_CREATE|O_EXCL|O_NOFOLLOW` at 0600 under a dot-prefixed random name, synced, and renamed to `<dispatch id>.json`, with the temporary removed on failure. The directory is created 0700, an existing one is opened `O_NOFOLLOW` and `fchmod`ed to 0700 on the first write in each process, a failure to tighten it (another user owns it, say) refuses the write, and a `.niwa-lineage` that is a symlink or not a directory is refused. Completion with the session id re-validates the entry it read, refuses a later-version entry rather than rewriting it with less, and replaces the file by rename. A race between two same-user writers on completion is accepted: the entry is advisory and locking would add a failure mode for no gain. The store sits outside the configuration directory, so no refresh copies, swaps or replaces it, and nothing a config source ships can land in it.
 
 The two fields the authority record gains are parsed leniently: a wrong type or a value outside its pattern reads as unrecorded instead of making the record malformed. A strict reading would let an advisory field, written by a later niwa or edited by hand, void the record and with it every grant a gate reads from it.
 
-The only personal data stored is the principal name, which is only what the user declared, plus session and dispatch ids and the instance name. All of it stays on the machine in 0600 files under the workspace root, and none of it goes to telemetry, to the network or to any other tool. A dispatched worker can read its own authority record and run `niwa lineage show`, so a declared principal can reach the worker's context and through it the agent's model provider; that is why the principal is opt-in, and the guide says so. Lineage never travels with a session export or import: a session imported from another host dispatches with a `handed` parent session, and because session ids aren't scoped to a host, `show --session` can match an older entry for the same id. The store persists until the workspace is destroyed; a user who shares the workspace root should keep `.niwa-lineage/` out of what they publish. The design adds no dependency beyond the Go standard library and existing niwa packages, calls nothing over the network, and does not require koto or any other tool to be installed.
+The only personal data stored is the principal name, which is only what the user declared, plus session and dispatch ids and the instance name. All of it stays on the machine in 0600 files under the workspace root, and none of it goes to telemetry, to the network or to any other tool. A dispatched worker can read its own authority record and run `niwa lineage show`, so a declared principal can reach the worker's context and through it the agent's model provider; that is why the principal is opt-in, and the guide says so. Lineage never travels with a session export or import: a session imported from another host dispatches with a `handed` parent session, and because session ids aren't scoped to a host, `show --session` can match an older entry for the same id, and an imported session whose id this workspace mapped before can get a false `observed` or `mapped` link. Clearing `[global] principal` stops new entries naming the person but doesn't change entries already written or what their descendants inherit. The store persists until the workspace is destroyed; a user who shares the workspace root should keep `.niwa-lineage/` out of what they publish. The design adds no dependency beyond the Go standard library and existing niwa packages, calls nothing over the network, and does not require koto or any other tool to be installed.
 
-Residual risks accepted: a same-user process can forge or alter any entry, the authority record or a session mapping, and an inherited principal's `observed` trust is conditional on the parent's record and entry being unmodified, which niwa cannot know; a very large number of valid entries slows `show --session`, `show --instance` and `list` linearly, and a prune command is deferred.
+Residual risks accepted: a same-user process, any dispatched worker included, can forge or alter any entry, the authority record or a session mapping, and later children inherit from forged entries; an `observed` link or principal is conditional on the caller's claim and the parent's records being honest, which niwa cannot know; a principal stays in entries after it is cleared, with no prune command to remove it; a very large number of valid entries slows `show --session`, `show --instance` and `list` linearly.
 
 ## Consequences
 

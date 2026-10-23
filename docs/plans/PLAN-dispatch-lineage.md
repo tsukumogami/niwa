@@ -31,7 +31,7 @@ Every `niwa dispatch` writes a durable, dispatch-keyed lineage entry in `<root>/
 
 **Acceptance Criteria**:
 - [ ] `internal/lineage` defines `Entry`, `Link` and `Principal` with the PRD's R1 fields, writes the known members in a fixed order with `schema: niwa.lineage.entry/v1`, and parses them back keeping members it doesn't know: a `niwa.lineage.entry/vN` document with N > 1 parses to a distinct later-version result carrying only its dispatch id and schema, and any other schema is refused.
-- [ ] `internal/workspace/lineage_store.go` adds `CreateLineageEntry` (refuses when the final name exists, writes a dot-prefixed temporary at 0600 in a 0700 `<root>/.niwa-lineage` directory, renames it into place), `ReadLineageEntry` and `RemoveLineageEntry`.
+- [ ] `internal/workspace/lineage_store.go` adds `CreateLineageEntry` (refuses when the final name exists, writes a dot-prefixed temporary at 0600 in a 0700 `<root>/.niwa-lineage` directory, renames it into place), `ReadLineageEntry` and `RemoveLineageEntry`; a fresh store's directory is 0700 and its entry 0600.
 - [ ] `niwa dispatch` creates the entry right after the authority record at step (8a); a failed create refuses the dispatch and leaves no instance.
 - [ ] The rollback armed at step (7) removes the entry only when this dispatch created it: with an entry already present for the minted dispatch id (through the id seam), the dispatch refuses and the existing entry's bytes are unchanged.
 - [ ] A dispatch refused at authority resolution, and one rolled back during provisioning, leave no entry (unit tests through the existing dispatch seams).
@@ -49,7 +49,7 @@ Every `niwa dispatch` writes a durable, dispatch-keyed lineage entry in `<root>/
 **Acceptance Criteria**:
 - [ ] `dispatchParent` also returns the working directory's `FoundInstance`, and `resolveDispatchAuthority` builds `lineage.Inputs` from it, the session variable, `--parent-from`, the parent record, the instance's newest session mapping (looked up by the cleaned instance root, only when `--parent-from` was not given), and, when the working directory is in no instance, the dispatch id of the mapping keyed by the variable's value.
 - [ ] A table test covers every parent-session row: variable unset and malformed (`none`), `--parent-from` (`handed`), no instance (`handed`), an instance with no mapping (`handed`), a matching newest mapping (`observed`), and a different one (`unverified`, with `mapped_session_id`).
-- [ ] A table test covers every parent-dispatch row: the working directory's instance record (`observed`), `--parent-from` (`handed`), a root dispatch whose variable names a mapping with a dispatch id (`mapped`), and otherwise (`none`); an unreadable parent record still refuses the dispatch.
+- [ ] A table test covers every parent-dispatch row: the working directory's instance record (`observed`), `--parent-from` (`handed`, also when the variable names a mapped session), a root dispatch whose variable is a lowercase UUID naming a mapping with a dispatch id (`mapped`), a well-formed but non-UUID variable at the root (`none`), and otherwise (`none`); an unreadable parent record still refuses the dispatch.
 - [ ] For each source row above, the dispatch exits 0 and writes an entry carrying that source: none of `handed`, `mapped`, `unverified` or `none` refuses.
 - [ ] The session variable is read once, at step (2e), and the `niwa.parent.session.id` telemetry attribute is unchanged.
 - [ ] The skeleton's functional test now shows a dispatch from the workspace root recording `parent_session.source` `handed` and `parent_dispatch.source` `none`, a dispatch from inside that instance recording both `observed`, and a dispatch from the workspace root whose variable names the first dispatch's session recording `parent_dispatch.source` `mapped`.
@@ -66,7 +66,7 @@ Every `niwa dispatch` writes a durable, dispatch-keyed lineage entry in `<root>/
 - [ ] The personal niwa config's `[global]` table accepts `principal`, valid at 1 to 128 letters, digits, `.`, `_`, `-`, `@` or `+`; an invalid value refuses dispatch at step (2a) naming the key and the file; a `principal` key in the workspace config or an overlay has no effect.
 - [ ] `lineage.Resolve` implements the principal rows: `inherited` from a readable parent entry, `declared`, and `none` with an empty name; with nothing declared the principal is empty whatever the OS account.
 - [ ] Inherited trust is `observed` only when the parent dispatch link is `observed`, the parent session link is not `unverified`, and the parent's principal trust is `observed`; a principal inherited through `--parent-from`, through a `mapped` link, or past an `unverified` session link reads `handed`, and a grandchild of a `handed` principal reads `handed`.
-- [ ] A parent link whose entry is missing, unreadable or of a later version falls through to the declared principal; a readable parent with an empty principal is inherited as empty, even with `principal` declared.
+- [ ] A parent link whose entry is missing, unreadable or of a later version falls through to the declared principal (or `none`) with trust `handed`; a readable parent with an empty principal is inherited as empty, even with `principal` declared; a dispatch from inside an `observed` parent with the variable unset inherits with trust `observed`.
 - [ ] With `principal` declared, `GH_TOKEN` set and a stub `gh` reporting a different login first on `PATH`, the entry names the declared value.
 - [ ] The worker's `OTEL_RESOURCE_ATTRIBUTES` carries no principal.
 
@@ -80,7 +80,7 @@ Every `niwa dispatch` writes a durable, dispatch-keyed lineage entry in `<root>/
 
 **Acceptance Criteria**:
 - [ ] `CompleteLineageEntry` reads the stored members, refuses an entry that already has a session id or is of a later version, inserts `session_id`, and writes every other member back unchanged through a temporary file and a rename; it never re-marshals the `Entry` struct.
-- [ ] An entry holding a member this niwa doesn't know keeps it, byte for byte, after completion.
+- [ ] An entry holding a member this niwa doesn't know keeps it, byte for byte, after completion; a failed completion, and one that would push the entry past 8 KiB, leave the original entry byte for byte and dispatch warns.
 - [ ] Dispatch calls completion after capture and before the session mapping write; a foreground dispatch whose session mapping write fails keeps its entry with the session id recorded.
 - [ ] A detached dispatch whose capture fails leaves no entry; a foreground one whose turn ends with no session record keeps an entry without `session_id`.
 - [ ] With completion made to fail through a test seam, dispatch prints one warning naming the entry, exits 0, and the entry has no `session_id`.
@@ -96,9 +96,10 @@ Every `niwa dispatch` writes a durable, dispatch-keyed lineage entry in `<root>/
 
 **Acceptance Criteria**:
 - [ ] Every read opens with `O_NOFOLLOW|O_NONBLOCK`, requires a regular file and reads at most 8 KiB; a planted symlink, FIFO, directory or oversized file reads as a per-entry error without hanging.
-- [ ] An entry whose `dispatch_id` differs from its file name is unreadable, and every known field (agent, origin, `written_at`, principal, sources) is re-validated on read, with unknown name values for origin, source and trust accepted.
+- [ ] An entry whose `dispatch_id` differs from its file name, or with a duplicate member, is unreadable, and every known field (instance, agent, origin, `written_at`, session and parent ids, principal, sources) is re-validated on read, with unknown name values for origin, source and trust accepted.
+- [ ] Every store function that takes a dispatch id checks it is a UUID before joining it into a path; a parent id edited to `../../etc/passwd` reads as unreadable.
 - [ ] `ListLineageEntries` selects files by name (`<dispatch id>.json`, dot-prefixed temporaries skipped) and reports a selected file that isn't a regular file within the cap, without parsing to decide; it returns one result per selected file (an entry, a later-version marker or a per-file error).
-- [ ] A `.niwa-lineage` path that is a symlink or not a directory refuses writes; an existing directory at 0755 is 0700 after the first write in a process.
+- [ ] A `.niwa-lineage` path that is a symlink or not a directory refuses writes; an existing directory at 0755 is `fchmod`ed through an `O_NOFOLLOW` fd to 0700 on the first write in a process, and a failure to tighten it (made to fail through a test seam) refuses the write.
 - [ ] An entry with every field at its maximum length is at most 4 KiB.
 
 **Dependencies**: Blocked by <<ISSUE:1>>
@@ -116,7 +117,7 @@ Every `niwa dispatch` writes a durable, dispatch-keyed lineage entry in `<root>/
 - [ ] While an instance exists, `niwa authority show --json` and `niwa lineage show --json <dispatch id>` agree on the parent session source and principal; `parent_dispatch_source` `cwd` or `anchor` matches the entry's `observed` or `handed`, and a `mapped` entry has `none` there.
 - [ ] The held answer and `niwa authority decide` are unchanged with the new fields present.
 
-**Dependencies**: Blocked by <<ISSUE:3>>
+**Dependencies**: Blocked by <<ISSUE:2>>, <<ISSUE:3>>
 
 **Type**: code
 
@@ -125,9 +126,9 @@ Every `niwa dispatch` writes a durable, dispatch-keyed lineage entry in `<root>/
 **Goal**: People and tools read any entry's chain up to its root, and every entry in the workspace, with the PRD's selection, stop and trust rules.
 
 **Acceptance Criteria**:
-- [ ] `show` selects by positional dispatch id, `--session`, `--instance`, the working directory and `-C`; several matches start the chain from the latest `written_at`, ties to the lower dispatch id, print `<n> entries matched; showing the latest` with the other ids, and the JSON carries `"matched": <n>` and `"matches"` with every matching id; an instance-name fallback prints `selected by instance name`.
+- [ ] `show` selects by positional dispatch id, `--session`, `--instance`, the working directory and `-C`; several matches start the chain from the latest `written_at`, ties to the lower dispatch id, print `<n> entries matched; showing the latest` with the other ids, and the JSON carries `"matched": <n>` and `"matches"` with every matching id; an instance-name fallback prints `selected by instance name` and sets `"instance_name_fallback": true`.
 - [ ] Two selectors exit 2; an empty, relative or nonexistent `-C` exits 1; outside a workspace exits 1 naming it; no match prints `no lineage entry` and exits 1, including with no store, from the workspace root with no selector, and when the authority record's dispatch id has no entry.
-- [ ] The walk follows `parent_dispatch` ids of any source and stops with the PRD's texts and JSON values for `root`, `not-on-record`, `unreadable`, `later-version`, `cycle` and `depth` (64 levels counting the selected entry); a selected later-version entry exits 0 and an unreadable selected entry exits 1.
+- [ ] The walk follows `parent_dispatch` ids of any source and stops at: an empty parent id (JSON `root`); a missing parent, printed `<id> not on record` (`not-on-record`); an unreadable ancestor, printed `<id> unreadable: <reason>` (`unreadable`); a later version, printed `<id> later version <schema>` (`later-version`); a repeated id, printed `stopped: cycle at <id>` (`cycle`); and level 64 with a parent, printed `stopped: 64 levels` (`depth`), a chain of exactly 64 ending `root`. A selected later-version entry exits 0 and an unreadable selected entry exits 1.
 - [ ] Each level prints `directed by <session id>` when its parent session id is set.
 - [ ] In `parent_session.source`, `parent_dispatch.source` and `principal.trust`, values other than `observed` (`mapped` and unknown values included) print with `(not observed)` except `none` on a link; JSON prints values as stored; `principal.source` prints unannotated.
 - [ ] `list` orders by `written_at` newest first, ties by dispatch id, one line per entry, lists an unreadable entry as its id and error, exits 0, and lists nothing with exit 0 when no store exists; `list --json` prints `niwa.lineage.list/v1`.
@@ -141,9 +142,9 @@ Every `niwa dispatch` writes a durable, dispatch-keyed lineage entry in `<root>/
 **Goal**: Functional tests show the PRD's tree, durability and constraint criteria hold with real dispatches, reaps and refreshes.
 
 **Acceptance Criteria**:
-- [ ] With `principal` declared, dispatching A from the workspace root and B from inside A's instance, then reaping both, `niwa lineage show --session <B>` prints the two levels, sources and principal the PRD's first criterion lists; a third level C prints three levels nearest first.
-- [ ] A coordinator K dispatches worker W from the workspace root; after both are reaped, `show` on W prints W's `mapped` link to K, K's level, stop `root`, and a principal trust of `handed`.
-- [ ] An entry survives each of: mapped reap, stored-mapping reap, backstop reap, `niwa destroy`, `niwa destroy --keep-session`, `niwa reset`, a failing on-reap command, one failing until its mapping is dropped, and `niwa apply` refreshing the configuration directory; two dispatches run while a third provisions through a refresh all keep their entries; `niwa destroy --workspace` removes the store.
+- [ ] With `principal` declared, dispatching A from the workspace root (variable S0) and B from inside A's instance (variable A's mapped session), then reaping both, `niwa lineage show --session <B>` prints B with parent session A's id `observed`, parent dispatch A's id `observed` and principal `inherited`/`observed`, then A with parent session S0 `handed`, parent dispatch `none` and principal `declared`/`observed`, stop `root`; a third level C prints three levels nearest first.
+- [ ] A coordinator K dispatches worker W from the workspace root; after both are reaped, `show` on W prints parent dispatch K's id `mapped (not observed)`, parent session `handed (not observed)`, principal `inherited` with trust `handed (not observed)`, then K's level and stop `root`.
+- [ ] An entry survives each of: mapped reap, stored-mapping reap, backstop reap, `niwa destroy`, `niwa destroy --keep-session`, `niwa reset`, a failing on-reap command, one failing until its mapping is dropped, and `niwa apply` refreshing the configuration directory; entries live under `<root>/.niwa-lineage/` with nothing for them under `<root>/.niwa/`; with a test seam holding one dispatch's refresh between copy and swap, a second dispatch's entry survives; `niwa destroy --workspace` removes the store.
 - [ ] A dispatch from a session with no mapping in this workspace (an imported one) records parent session `handed`.
 - [ ] With `HTTPS_PROXY` and `HTTP_PROXY` pointed at a closed local port, dispatch writes its entry and `show` and `list` succeed.
 - [ ] The lineage functional tests pass with no workflow engine on `PATH`.
@@ -158,7 +159,7 @@ Every `niwa dispatch` writes a durable, dispatch-keyed lineage entry in `<root>/
 **Goal**: Operators and tool authors learn from the guides what the lineage record holds, how far each link can be trusted, how to declare the person, and how long entries last.
 
 **Acceptance Criteria**:
-- [ ] `docs/guides/dispatch-lineage.md` gains a section on the lineage record stating: a first-level parent session is `handed`; `--parent-from` makes both links `handed`; a worker dispatched from the workspace root links to its coordinator as `mapped`, not observed; `unverified` is expected after a resume and for a Codex worker's dispatches, and the parent dispatch link is the one to follow; a resumed Claude session with a new id keeps its record under the original id; only `observed` counts as observed, unknown values included; same-user processes can edit the store, so entries are advisory; entries last until the workspace is destroyed.
+- [ ] `docs/guides/dispatch-lineage.md` gains a section on the lineage record stating: a first-level parent session is `handed`; `--parent-from` makes both links `handed`; a worker dispatched from the workspace root links to its coordinator as `mapped`, not observed; `unverified` is expected after a resume and for a Codex worker's dispatches, and the parent dispatch link is the one to follow; a resumed Claude session with a new id keeps its record under the original id; only `observed` counts as observed, unknown values included, and `observed` means the caller's claimed id and working directory matched, which a same-user process reading the mapping names can arrange; lineage records the dispatcher at dispatch time, not re-parenting by message or a coordinator's successor; same-user processes can edit the store, so entries are advisory; clearing the principal doesn't change entries already written; entries last until the workspace is destroyed.
 - [ ] The same section shows how to set `[global] principal`, says the principal is empty until it is set, that a worker can read and pass on its own principal, that lineage never travels with a session export or import, that `show --session` and `--instance` may match more than one entry (an older entry for a reused id among them), and that `.niwa-lineage/` should stay out of anything published from the workspace root.
 - [ ] The section documents `niwa lineage show` (with its positional dispatch id, unlike `niwa authority show`) and `niwa lineage list`, their selectors, exit codes and JSON schemas, and that a reader treats an unknown `stop` value as not `root`.
 - [ ] `docs/guides/authority-grants.md` notes the two new authority record fields and their unrecorded reading.
