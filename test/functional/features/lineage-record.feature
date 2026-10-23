@@ -50,3 +50,26 @@ Feature: niwa dispatch writes a lineage entry and niwa lineage show reads it
     When I dispatch with "" from the workspace root
     Then the exit code is 0
     And the dispatch's lineage entry records parent session "handed" and parent dispatch "mapped"
+
+  @critical
+  Scenario: a completed entry is unchanged by a reap, another dispatch and an apply
+    Given a config repo "ws" exists with authority fixture "none"
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    When I run "niwa dispatch reap-me --detach" from the workspace root
+    Then the exit code is 0
+    And the dispatch's lineage entry records session "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    Given I remember the dispatch's lineage entry
+    When the dispatch session "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" is deleted from the Agent View
+    And I run niwa reap from the workspace root
+    Then the exit code is 0
+    And no dispatch instance remains
+    And the remembered lineage entry is unchanged
+    Given a fake claude for dispatch with session "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    When I run "niwa dispatch second --detach" from the workspace root
+    Then the exit code is 0
+    And the remembered lineage entry is unchanged
+    When I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the remembered lineage entry is unchanged

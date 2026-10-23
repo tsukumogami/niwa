@@ -147,6 +147,46 @@ func CreateLineageEntry(root string, e lineage.Entry) error {
 	return placeLineageFile(dir, e.DispatchID, final, data)
 }
 
+// ErrLineageEntryTooLarge refuses a completion that would leave the entry
+// larger than a read takes.
+var ErrLineageEntryTooLarge = errors.New("the completed lineage entry would be larger than " + strconv.Itoa(MaxLineageEntryBytes) + " bytes")
+
+// CompleteLineageEntry records the worker's session id in a dispatch's
+// entry. It reads the entry as ReadLineageEntry does, refuses one that is
+// missing, unreadable, of a later version or already has a session id, and
+// rewrites the stored document with lineage.SetSessionID, which keeps every
+// other member, unknown ones included, as stored. The result goes through a
+// temporary file and a rename; a refusal or failure leaves the entry as it
+// was.
+func CompleteLineageEntry(root, dispatchID, sessionID string) error {
+	final, err := lineageEntryPath(root, dispatchID)
+	if err != nil {
+		return fmt.Errorf("completing the lineage entry: %w", err)
+	}
+	stored, found, err := ReadLineageEntry(root, dispatchID)
+	if err != nil {
+		return fmt.Errorf("completing the lineage entry: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("completing the lineage entry: %w", os.ErrNotExist)
+	}
+	if stored.Parsed.LaterVersion {
+		return fmt.Errorf("completing the lineage entry: %w", lineage.ErrLaterVersion)
+	}
+	data, err := lineage.SetSessionID(stored.Raw, sessionID)
+	if err != nil {
+		return fmt.Errorf("completing the lineage entry: %w", err)
+	}
+	if len(data) > MaxLineageEntryBytes {
+		return fmt.Errorf("completing the lineage entry: %w", ErrLineageEntryTooLarge)
+	}
+	dir, err := prepareLineageDir(root)
+	if err != nil {
+		return err
+	}
+	return placeLineageFile(dir, dispatchID, final, data)
+}
+
 // RemoveLineageEntry removes a dispatch's entry. An entry that isn't there
 // is not an error.
 func RemoveLineageEntry(root, dispatchID string) error {

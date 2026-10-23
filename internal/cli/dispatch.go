@@ -624,7 +624,11 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// The rollback also removes the dispatch's lineage entry, but only once
 	// this dispatch has created it at (8a): an entry already present for the
 	// same dispatch id is someone else's, and a refused create leaves it as
-	// it was.
+	// it was. The entry may already hold the session id (10a) when a
+	// detached mapping write fails; it goes with the instance then, since an
+	// entry exists exactly when the dispatch keeps its instance. A foreground
+	// dispatch sets success before capture, so its entry is never removed
+	// here; a change that moves that line must keep this true.
 	success := false
 	entryCreated := false
 	defer func() {
@@ -1086,6 +1090,17 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: the %s worker's own output, which the rollback is about to delete:\n%s\n", spec.Binary, tail)
 		}
 		return fmt.Errorf("niwa: error: capturing dispatch session id: %w", err)
+	}
+
+	// (10a) Record the session id in the lineage entry, before the mapping
+	// write, so a foreground dispatch whose mapping write then fails, which
+	// keeps its instance, still has it recorded. The entry is otherwise
+	// complete, so a failure here costs only the id: it warns and the
+	// dispatch goes on.
+	if err := completeLineageEntryFunc(workspaceRoot, dispatchID, sessionID); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"niwa: warning: could not record the session id in the lineage entry %s: %v\n",
+			filepath.Join(workspace.LineageDir(workspaceRoot), dispatchID+".json"), err)
 	}
 
 	// (11) Write the durable ephemeral, dispatch-origin mapping keyed on the

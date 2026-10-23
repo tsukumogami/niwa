@@ -60,6 +60,7 @@ func TestDispatchLineage_WritesEntryBesideTheRecord(t *testing.T) {
 		Agent:          "claude",
 		Origin:         "dispatch",
 		WrittenAt:      e.WrittenAt,
+		SessionID:      dispatchTestSessionID,
 		ParentSession:  lineage.Link{Source: "none"},
 		ParentDispatch: lineage.Link{Source: "none"},
 		Principal:      lineage.Principal{Source: "none", Trust: "observed"},

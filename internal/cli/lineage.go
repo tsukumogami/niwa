@@ -63,6 +63,10 @@ entry, an unreadable entry or outside a workspace, 2 usage.`,
 // can make the write fail and watch the rollback.
 var createLineageEntryFunc = workspace.CreateLineageEntry
 
+// completeLineageEntryFunc records the worker's session id in the entry
+// after (10). It is a variable so a test can make the completion fail.
+var completeLineageEntryFunc = workspace.CompleteLineageEntry
+
 // dispatchLineageEntry is the entry a dispatch writes: its identity, and the
 // parent links and principal (2e) resolved.
 func dispatchLineageEntry(dispatchID, instance, agentName string, now time.Time, auth *dispatchAuthority) lineage.Entry {

@@ -24,6 +24,7 @@ func registerLineageStoreSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the dispatch's lineage entry is private to its owner$`, theDispatchsLineageEntryIsPrivate)
 	ctx.Step(`^nothing under the workspace root's \.niwa names the dispatch$`, nothingUnderTheRootsNiwaNamesTheDispatch)
 	ctx.Step(`^the dispatch's lineage entry records parent session "([^"]*)" and parent dispatch "([^"]*)"$`, theDispatchsLineageEntryRecordsSources)
+	registerLineageCompletionSteps(ctx)
 }
 
 // theDispatchsLineageEntryRecordsSources reads the last dispatch's entry from
