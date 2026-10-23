@@ -282,12 +282,14 @@ _CLAUDE.md_
 
 _Live check (recorded in the implementing pull request, run once before merge)_
 
-- [ ] The pull request description records a live check with a real Claude Code session in a workspace holding R8a's example, with a session dispatched with `--grant merge-pr`, briefed to run `niwa authority show` and `niwa authority decide merge-own-pr`.
-- [ ] The recorded transcript excerpts show, at `autonomous`, `decider=session` followed by the session proceeding with the merge step it was briefed on.
-- [ ] They show, at `strict`, `decider=person` followed by the session stopping without that step.
-- [ ] They show the session's own `niwa authority show` output naming `merge-pr` from `dispatch`.
-- [ ] They show the refusal text for a dispatch made from inside that session asking for `--grant cut-release` past a narrowed ceiling (overlay or machine ceiling set to `merge-pr`), naming `cut-release` and the ceiling, with nothing launched.
-- [ ] The live-check excerpts appear only in the pull request, not in a committed file, and the guide and the CLAUDE.md entry reference only durable paths.
+Covered by stub-harness tests in place of a real session. A real launch was blocked by Claude Code's trust gate in an untrusted temp workspace (inferred: `claude --bg` exited 1 and its error text was lost, tsukumogami/niwa#410).
+
+- [x] The pull request description records a live check with a real Claude Code session in a workspace holding R8a's example, with a session dispatched with `--grant merge-pr`, briefed to run `niwa authority show` and `niwa authority decide merge-own-pr`. Covered by the stub-worker scenarios "a dispatched Claude worker reads its own record as its first command" and "a foreground Claude dispatch reads its own record as its first command" (test/functional/features/authority-read.feature).
+- [x] The recorded transcript excerpts show, at `autonomous`, `decider=session` followed by the session proceeding with the merge step it was briefed on. Covered by "a worker settles a point only when decide names the session" (authority-read.feature) and "a record holding merge-pr at autonomous decides, over the exemption list" (authority-gate-contract.feature).
+- [x] They show, at `strict`, `decider=person` followed by the session stopping without that step. Covered by "a worker settles a point only when decide names the session" and "at strict the settle check turns the merge down, held or exempt" (authority-gate-contract.feature).
+- [x] They show the session's own `niwa authority show` output naming `merge-pr` from `dispatch`. Covered by "a dispatched Claude worker reads its own record as its first command" and "a granted dispatch records its authority before the worker starts" (dispatch-authority.feature).
+- [x] They show the refusal text for a dispatch made from inside that session asking for `--grant cut-release` past a narrowed ceiling (overlay or machine ceiling set to `merge-pr`), naming `cut-release` and the ceiling, with nothing launched. Covered by the outline "a dispatch refused at authority resolution leaves nothing behind" (dispatch-authority.feature) and `TestDispatchAuthorityRefusalExitsNonZeroDirect`.
+- [x] The live-check excerpts appear only in the pull request, not in a committed file, and the guide and the CLAUDE.md entry reference only durable paths.
 
 **Dependencies**: Blocked by <<ISSUE:3>>
 

@@ -938,7 +938,7 @@ Decision points at the two ends
   command exits 0 and prints `decider=session`, and `waiting-for-person`
   otherwise. In an `autonomous` workspace the marker reads `settled`;
   dispatched with `--level strict` it reads `waiting-for-person`.
-- [ ] Live check with a real Claude Code session, in a workspace holding
+- [x] Live check with a real Claude Code session, in a workspace holding
   R8a's example: a session dispatched with `--grant merge-pr`, briefed to
   read back its own grant with `niwa authority show` and to reach a merge
   decision by running `niwa authority decide merge-own-pr`, reports
@@ -954,7 +954,16 @@ Decision points at the two ends
   the session's own `niwa authority show` output naming `merge-pr` from
   `dispatch`; and the refusal text. The transcript excerpts are recorded
   in the implementing pull request. This check is run once before merge;
-  the fake-agent test above is what CI runs.
+  the fake-agent test above is what CI runs. Covered by the stub-harness
+  scenarios in test/functional/features/authority-read.feature ("a
+  dispatched Claude worker reads its own record as its first command", "a
+  worker settles a point only when decide names the session"),
+  authority-gate-contract.feature ("at strict the settle check turns the
+  merge down, held or exempt") and dispatch-authority.feature ("a dispatch
+  refused at authority resolution leaves nothing behind"), plus
+  `TestDispatchAuthorityRefusalExitsNonZeroDirect`; a real launch was
+  blocked by Claude Code's trust gate in an untrusted temp workspace
+  (inferred: the error text was lost, tsukumogami/niwa#410).
 - [ ] Point names: `a`, `merge-2` and a 64-character name are accepted;
   `Merge_Now`, `2merge`, `-merge`, an empty name, a 65-character name and
   a missing argument each exit 2.
