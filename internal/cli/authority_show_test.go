@@ -629,7 +629,7 @@ func TestShowDecide_BadConfigAfterTheDispatch(t *testing.T) {
 	runAuthorityCmd(t, a, "decide", "merge-own-pr").mustSucceed(t)
 	for _, args := range [][]string{{"show", "--json"}, {"decide", "merge-own-pr"}} {
 		r := runAuthorityCmd(t, w.root, args...).mustFail(t, 1)
-		if !strings.Contains(r.stderr, "level") {
+		if !strings.Contains(r.stderr, `[authority] level "Strict"`) || !strings.Contains(r.stderr, `authority_level "loose"`) {
 			t.Errorf("%v does not name the bad key: %s", args, r.stderr)
 		}
 	}
@@ -740,7 +740,7 @@ func jsonEqual(t *testing.T, a json.RawMessage, b string) bool {
 
 func TestList_AuthorityObject(t *testing.T) {
 	w, a, b := twoInstances(t)
-	plain := w.instance(t, "plain")
+	w.instance(t, "plain")
 	bad := w.instance(t, "bad")
 	writeRawRecord(t, bad, `{"schema": "niwa.authority.record/v1", "dispatch_id": "SECRET"}`)
 	listed := listJSONFor(t, w.root)
@@ -753,13 +753,29 @@ func TestList_AuthorityObject(t *testing.T) {
 	if v, ok := listed["plain"]; !ok || v != nil {
 		t.Errorf("an instance with no record carries authority %s (present %v)", v, ok)
 	}
-	_ = plain
 	var errObj map[string]string
 	if err := json.Unmarshal(listed["bad"], &errObj); err != nil {
 		t.Fatalf("bad record's authority: %v", err)
 	}
 	if len(errObj) != 1 || errObj["error"] != "authority record is malformed" {
 		t.Errorf("bad record's authority = %v", errObj)
+	}
+	if os.Geteuid() != 0 {
+		unreadable := w.instance(t, "unreadable")
+		writeShowFile(t, workspace.AuthorityRecordPath(unreadable), unknownGrantRecord, 0o000)
+		listed := listJSONFor(t, w.root)
+		errObj = nil
+		if err := json.Unmarshal(listed["unreadable"], &errObj); err != nil {
+			t.Fatalf("unreadable record's authority: %v", err)
+		}
+		if len(errObj) != 1 || errObj["error"] != "authority record cannot be read" {
+			t.Errorf("unreadable record's authority = %v", errObj)
+		}
+		if listed["a"] == nil || listed["b"] == nil {
+			t.Errorf("an unreadable record hid the other instances: %v", listed)
+		}
+		os.Chmod(workspace.AuthorityRecordPath(unreadable), 0o600)
+		os.Remove(workspace.AuthorityRecordPath(unreadable))
 	}
 
 	// Editing only the record changes what both commands report.
