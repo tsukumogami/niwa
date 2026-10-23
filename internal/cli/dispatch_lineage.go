@@ -385,16 +385,6 @@ func composeResourceAttributes(settingsValue, envValue string, own []string) (st
 	return strings.Join(out, ","), nil
 }
 
-// resourceAttributesEnv is the launch settings document's "env" entry for
-// lineage. Its one field is unexported and it marshals to exactly one key, so
-// this contributor can't be used to set any other environment variable.
-type resourceAttributesEnv struct{ value string }
-
-// MarshalJSON renders {"OTEL_RESOURCE_ATTRIBUTES": "<value>"}.
-func (e resourceAttributesEnv) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]string{"OTEL_RESOURCE_ATTRIBUTES": e.value})
-}
-
 // composeDispatchLineage builds the value a dispatched worker gets: the user
 // settings attributes and the dispatching environment's, carried forward,
 // then niwa's own. When an inherited value can't be carried it says so on
@@ -412,21 +402,4 @@ func composeDispatchLineage(warn io.Writer, spec agentplan.LaunchSpec, in lineag
 	}
 	fmt.Fprintf(warn, "niwa dispatch: %v\n", err)
 	return ""
-}
-
-// lineageWorkerEnv is the launched process's environment: base, with
-// OTEL_RESOURCE_ATTRIBUTES set to value. With no value it is nil, which the
-// launcher reads as "inherit this process's environment unchanged".
-func lineageWorkerEnv(base []string, value string) []string {
-	if value == "" {
-		return nil
-	}
-	out := make([]string, 0, len(base)+1)
-	for _, kv := range base {
-		if strings.HasPrefix(kv, "OTEL_RESOURCE_ATTRIBUTES=") {
-			continue
-		}
-		out = append(out, kv)
-	}
-	return append(out, "OTEL_RESOURCE_ATTRIBUTES="+value)
 }

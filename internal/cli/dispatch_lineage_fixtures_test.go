@@ -169,9 +169,13 @@ func TestLineageFixture_WorkspaceNameOnlyOnDispatchedSessions(t *testing.T) {
 func TestLineage_OnlyDispatchNamesTheVariable(t *testing.T) {
 	allowed := map[string]bool{
 		"internal/cli/dispatch.go":          true,
+		"internal/cli/dispatch_env.go":      true,
 		"internal/cli/dispatch_launcher.go": true,
 		"internal/cli/dispatch_lineage.go":  true,
 		"internal/cli/dispatch_settings.go": true,
+		// The config load refuses the name in [session.dispatch_env], so a
+		// declared pass-through can't stand in for lineage.
+		"internal/config/session.go": true,
 		// The test-only package that works out a worker's value.
 		"internal/otelprecedence/otelprecedence.go": true,
 	}

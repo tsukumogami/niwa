@@ -40,10 +40,19 @@ func captureLineageLaunch(f *dispatchFakes, got *lineageLaunch) {
 				got.settings = doc.Env["OTEL_RESOURCE_ATTRIBUTES"]
 			}
 		}
+		// The launch always carries an environment now (the reap key goes in
+		// every one), so "niwa left it alone" means the value is the one
+		// this process inherited, untouched.
+		inherited, wasSet := os.LookupEnv("OTEL_RESOURCE_ATTRIBUTES")
+		var value string
+		var present bool
 		for _, kv := range req.Env {
 			if v, ok := strings.CutPrefix(kv, "OTEL_RESOURCE_ATTRIBUTES="); ok {
-				got.env, got.envSet = v, true
+				value, present = v, true
 			}
+		}
+		if present && (!wasSet || value != inherited) {
+			got.env, got.envSet = value, true
 		}
 		return nil
 	}

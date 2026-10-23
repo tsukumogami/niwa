@@ -28,13 +28,25 @@ import (
 // caller rewrite the worker's configuration.
 //
 // Two values are exceptions, and they are named here so they stay the only
-// ones. The first is the lineage contributor's "env" key, a resourceAttributesEnv that can
-// marshal to nothing but {"OTEL_RESOURCE_ATTRIBUTES": "<value>"}. Its value is
-// composed in dispatch_lineage.go from niwa's own entries, each checked
-// against an alphabet that has no ',' or '=', and from attributes the
-// developer's own settings and environment already set, each checked against
-// the attribute parser's own rule. It is one string under one fixed key, so
-// nothing in it can add a settings key.
+// ones. The first is the launch environment contributor's "env" key, a
+// launchEnv (dispatch_env.go) that can marshal to nothing but a JSON object of
+// string values. Its keys come from three places and no others:
+//
+//   - OTEL_RESOURCE_ATTRIBUTES, the lineage value composed in
+//     dispatch_lineage.go from niwa's own entries, each checked against an
+//     alphabet that has no ',' or '=', and from attributes the developer's own
+//     settings and environment already set, each checked against the
+//     attribute parser's own rule;
+//   - the names [session.dispatch_env] passthrough declares, which the config
+//     load accepted only as plain variable names that are not reserved to
+//     niwa or Claude Code, not one niwa sets here, and not shaped like a
+//     credential. Their values are copied verbatim from niwa's own
+//     environment, the developer's shell, and are never read from a file a
+//     repository controls;
+//   - NIWA_REAP_KEY, whose value must match reapKeyPattern.
+//
+// Every key and value is a JSON string inside the one "env" object, so nothing
+// in them can add a settings key outside it.
 //
 // The second exception is the MCP approval contributor's
 // enabledMcpjsonServers key, an mcpApprovalList that can marshal to nothing

@@ -1,10 +1,14 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -692,5 +696,778 @@ func TestInstanceHasLiveJob(t *testing.T) {
 	}
 	if instanceHasLiveJob(jobsDir, "/ws/test-ws+-0000bb22") {
 		t.Fatal("an unrelated instance must not match")
+	}
+}
+
+// ---- The on-reap command ----
+//
+// These tests run real commands under /bin/sh. Every command is a neutral
+// shell one-liner; the environment they record holds only fake values the
+// test sets.
+
+const (
+	onReapDispatchID = "d1d1d1d1-0000-4000-8000-000000000001"
+	onReapSID2       = "44444444-4444-4444-8444-444444444444"
+	onReapSID3       = "55555555-5555-4555-8555-555555555555"
+	onReapSID4       = "66666666-6666-4666-8666-666666666666"
+	onReapSID5       = "77777777-7777-4777-8777-777777777777"
+)
+
+// appendOnReapConfig adds a [session.on_reap] table to the workspace config
+// under root. body is the table's lines.
+func appendOnReapConfig(t *testing.T, root, body string) {
+	t.Helper()
+	path := workspaceConfigPath(root)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintf(f, "\n[session.on_reap]\n%s\n", body); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// onReapLogCommand returns a command that appends one line per run --
+// "<session id> <reap key> <instance path>" -- to a log file, and the file.
+func onReapLogCommand(t *testing.T) (command, logPath string) {
+	t.Helper()
+	logPath = filepath.Join(t.TempDir(), "runs.log")
+	return fmt.Sprintf(`printf '%%s %%s %%s\n' "$NIWA_SESSION_ID" "$NIWA_REAP_KEY" "$NIWA_INSTANCE_PATH" >> '%s'`, logPath), logPath
+}
+
+// onReapRuns reads the run log, one entry per line.
+func onReapRuns(t *testing.T, logPath string) []string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+}
+
+// captureReapStderr points the reap's on-reap output at a buffer.
+func captureReapStderr(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := reapStderr
+	reapStderr = &buf
+	t.Cleanup(func() { reapStderr = prev })
+	return &buf
+}
+
+// onReapWarnings returns the on-reap warning lines in out.
+func onReapWarnings(out string) []string {
+	var lines []string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "niwa: warning: on-reap for session ") {
+			lines = append(lines, l)
+		}
+	}
+	return lines
+}
+
+// stubDestroyRemoving installs a destroyInstanceFunc that really removes the
+// directory, so the next reap finds the instance gone.
+func stubDestroyRemoving(t *testing.T) {
+	t.Helper()
+	prev := destroyInstanceFunc
+	destroyInstanceFunc = func(path string) error { return os.RemoveAll(path) }
+	t.Cleanup(func() { destroyInstanceFunc = prev })
+}
+
+// TestOnReap_FixedEnvironment: the command sees PATH, HOME, the three values
+// naming the session and the names its own env list declares that are set,
+// and nothing else from niwa -- a name declared only for pass-through is
+// absent. It runs from the workspace root.
+func TestOnReap_FixedEnvironment(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	out := filepath.Join(t.TempDir(), "env.txt")
+	cwdOut := filepath.Join(t.TempDir(), "cwd.txt")
+	appendOnReapConfig(t, root, fmt.Sprintf(`command = "env > '%s'; pwd -P > '%s'"
+env = ["LISTED_MARK", "UNSET_LISTED_MARK"]`, out, cwdOut))
+	if f, err := os.OpenFile(workspaceConfigPath(root), os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+		fmt.Fprintf(f, "\n[session.dispatch_env]\npassthrough = [\"PASS_ONLY_MARK\"]\n")
+		f.Close()
+	}
+	t.Setenv("LISTED_MARK", "listed-fake")
+	t.Setenv("UNSET_LISTED_MARK", "")
+	os.Unsetenv("UNSET_LISTED_MARK")
+	t.Setenv("PASS_ONLY_MARK", "pass-fake")
+	t.Setenv("UNRELATED_MARK", "unrelated-fake")
+
+	var buf bytes.Buffer
+	step := newOnReapStep(root, &buf)
+	inst := filepath.Join(root, "gone-instance")
+	if !step.run(removedSession{SessionID: reapDeadSessionID, ReapKey: onReapDispatchID, InstancePath: inst}) {
+		t.Fatalf("run failed: %s", buf.String())
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		k, v, _ := strings.Cut(line, "=")
+		switch k {
+		case "PWD", "SHLVL", "_":
+			// set by sh itself
+			continue
+		}
+		got[k] = v
+	}
+	want := map[string]string{
+		"PATH":               os.Getenv("PATH"),
+		"HOME":               os.Getenv("HOME"),
+		"NIWA_REAP_KEY":      onReapDispatchID,
+		"NIWA_SESSION_ID":    reapDeadSessionID,
+		"NIWA_INSTANCE_PATH": inst,
+		"LISTED_MARK":        "listed-fake",
+	}
+	if len(got) != len(want) {
+		t.Errorf("environment names = %v, want exactly %v", keysOf(got), keysOf(want))
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, want %q", k, got[k], v)
+		}
+	}
+	cwd, _ := os.ReadFile(cwdOut)
+	wantCwd, _ := filepath.EvalSymlinks(root)
+	if strings.TrimSpace(string(cwd)) != wantCwd {
+		t.Errorf("command ran in %q, want the workspace root %q", strings.TrimSpace(string(cwd)), wantCwd)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("a successful run printed %q", buf.String())
+	}
+}
+
+func keysOf(m map[string]string) []string {
+	var ks []string
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
+}
+
+// TestOnReap_FailuresPrintOneLine: a command that exits 1, one that sleeps
+// past its timeout, and one missing from the PATH each fail with exactly one
+// warning line, within the timeout plus one second. A command that exits 0
+// on finding its tool absent prints nothing.
+func TestOnReap_FailuresPrintOneLine(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		ok      bool
+		reason  string
+	}{
+		{"exits 1", "echo failing-detail >&2; exit 1", false, "exited with status 1: failing-detail"},
+		{"sleeps past its timeout", "sleep 10", false, "timed out after 1s"},
+		{"missing from the PATH", "no-such-close-tool-x --close", false, "exited with status 127"},
+		{"exits 0 when its tool is absent", "command -v no-such-close-tool-x >/dev/null 2>&1 || exit 0; exec no-such-close-tool-x", true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := setupHookWorkspace(t, true)
+			appendOnReapConfig(t, root, fmt.Sprintf("command = %q\ntimeout = \"1s\"", tc.command))
+			var buf bytes.Buffer
+			step := newOnReapStep(root, &buf)
+			start := time.Now()
+			ok := step.run(removedSession{SessionID: reapDeadSessionID, ReapKey: reapDeadSessionID})
+			if elapsed := time.Since(start); elapsed > 2*time.Second {
+				t.Errorf("run took %s, want within the timeout plus one second", elapsed)
+			}
+			if ok != tc.ok {
+				t.Fatalf("run = %v, want %v (%s)", ok, tc.ok, buf.String())
+			}
+			warnings := onReapWarnings(buf.String())
+			if tc.ok {
+				if buf.Len() != 0 {
+					t.Errorf("printed %q, want nothing", buf.String())
+				}
+				return
+			}
+			if len(warnings) != 1 || strings.Count(buf.String(), "\n") != 1 {
+				t.Fatalf("output = %q, want exactly one warning line", buf.String())
+			}
+			want := "niwa: warning: on-reap for session " + reapDeadSessionID + ": " + tc.reason
+			if !strings.HasPrefix(warnings[0], want) {
+				t.Errorf("warning = %q, want prefix %q", warnings[0], want)
+			}
+		})
+	}
+}
+
+// TestOnReap_TimeoutHonoredAndGrandchildren: a configured 2s timeout is
+// honoured; a grandchild that keeps stdout open, or one that left the process
+// group with setsid, does not hold the run past its timeout plus one second;
+// and a shell that exits while its grandchild still holds stdout succeeds
+// without waiting for it.
+func TestOnReap_TimeoutHonoredAndGrandchildren(t *testing.T) {
+	setsidCmd := `perl -MPOSIX -e 'POSIX::setsid(); sleep 6' &`
+	if _, err := exec.LookPath("perl"); err != nil {
+		setsidCmd = ""
+	}
+	cases := []struct {
+		name    string
+		command string
+		timeout string
+		limit   time.Duration
+		ok      bool
+	}{
+		{"2s timeout honored", "sleep 10", "2s", 3 * time.Second, false},
+		{"grandchild keeps stdout open past exit", "sleep 6 & exit 0", "2s", 1 * time.Second, true},
+		{"grandchild keeps stdout open past timeout", "sleep 6 & sleep 10", "1s", 2 * time.Second, false},
+		{"setsid grandchild past timeout", setsidCmd + " sleep 10", "1s", 2 * time.Second, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if strings.HasPrefix(tc.name, "setsid") && setsidCmd == "" {
+				t.Skip("perl is not available to call setsid")
+			}
+			root := setupHookWorkspace(t, true)
+			appendOnReapConfig(t, root, fmt.Sprintf("command = %q\ntimeout = %q", tc.command, tc.timeout))
+			// A buffer, not a file, so the command's stdout is a pipe the
+			// grandchild can hold.
+			var buf bytes.Buffer
+			step := newOnReapStep(root, &buf)
+			start := time.Now()
+			ok := step.run(removedSession{SessionID: reapDeadSessionID, ReapKey: reapDeadSessionID})
+			elapsed := time.Since(start)
+			if elapsed > tc.limit {
+				t.Errorf("run took %s, want at most %s", elapsed, tc.limit)
+			}
+			if ok != tc.ok {
+				t.Errorf("run = %v, want %v (%s)", ok, tc.ok, buf.String())
+			}
+			if !tc.ok && !strings.Contains(buf.String(), "timed out after "+tc.timeout) {
+				t.Errorf("warning = %q, want a timeout", buf.String())
+			}
+		})
+	}
+}
+
+// TestOnReap_ProcessGroupKilledOnTimeout: on timeout the whole process group
+// goes, so a grandchild in the group doesn't live on.
+func TestOnReap_ProcessGroupKilledOnTimeout(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	marker := filepath.Join(t.TempDir(), "survived")
+	appendOnReapConfig(t, root, fmt.Sprintf("command = \"(sleep 2; touch '%s') & sleep 10\"\ntimeout = \"1s\"", marker))
+	step := newOnReapStep(root, io.Discard)
+	if step.run(removedSession{SessionID: reapDeadSessionID, ReapKey: reapDeadSessionID}) {
+		t.Fatal("a timed-out run reported success")
+	}
+	time.Sleep(2500 * time.Millisecond)
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("a grandchild in the command's process group outlived the timeout")
+	}
+}
+
+// TestOnReap_WarningReasonIsSanitized: the reason is stripped of control
+// characters and truncated.
+func TestOnReap_WarningReasonIsSanitized(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	appendOnReapConfig(t, root, `command = "printf 'bad\\033[31mred\\tx%0500d\\n' 0 >&2; exit 1"`)
+	var buf bytes.Buffer
+	newOnReapStep(root, &buf).run(removedSession{SessionID: reapDeadSessionID, ReapKey: reapDeadSessionID})
+	out := buf.String()
+	if strings.Count(out, "\n") != 1 {
+		t.Fatalf("output = %q, want one line", out)
+	}
+	if strings.ContainsAny(out[:len(out)-1], "\x1b\t\r") {
+		t.Errorf("control characters reached the warning: %q", out)
+	}
+	if !strings.HasSuffix(out, "...\n") {
+		t.Errorf("a long reason was not truncated: %q", out)
+	}
+	prefix := "niwa: warning: on-reap for session " + reapDeadSessionID + ": "
+	if len(out)-len(prefix)-1 > maxOnReapReasonBytes {
+		t.Errorf("reason is %d bytes, want at most %d", len(out)-len(prefix)-1, maxOnReapReasonBytes)
+	}
+}
+
+// TestOnReap_InvalidStoredKeyRunsNothing: a mapping whose stored dispatch id
+// holds shell metacharacters gets no command run, one warning line, and the
+// reap still succeeds.
+func TestOnReap_InvalidStoredKeyRunsNothing(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	stubDestroyAll(t)
+	stderr := captureReapStderr(t)
+	command, logPath := onReapLogCommand(t)
+	appendOnReapConfig(t, root, fmt.Sprintf("command = %q", command))
+	inst := makeReapInstance(t, root, "test-ws-dead")
+	writeMapping(t, root, workspace.SessionMapping{
+		SessionID: reapDeadSessionID, InstancePath: inst, Ephemeral: true,
+		DispatchID: "x'; touch /tmp/should-not-exist; '",
+	})
+
+	n, err := reapWorkspace(root, t.TempDir(), time.Now())
+	if err != nil || n != 1 {
+		t.Fatalf("reap = %d, %v; want 1, nil", n, err)
+	}
+	if runs := onReapRuns(t, logPath); len(runs) != 0 {
+		t.Errorf("the command ran for an invalid key: %v", runs)
+	}
+	if w := onReapWarnings(stderr.String()); len(w) != 1 || !strings.Contains(w[0], "reap key is not a plain identifier") {
+		t.Errorf("warnings = %q", w)
+	}
+}
+
+// TestReap_OnReapRunsOncePerRemovedSession: a reap that removes a session runs
+// the command once with the recomputed key -- the dispatch id when the
+// mapping has one, the session id otherwise -- and drops the mapping on
+// success.
+func TestReap_OnReapRunsOncePerRemovedSession(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	stubDestroyAll(t)
+	captureReapStderr(t)
+	command, logPath := onReapLogCommand(t)
+	appendOnReapConfig(t, root, fmt.Sprintf("command = %q", command))
+	dispatched := makeReapInstance(t, root, "test-ws-dispatched")
+	hooked := makeReapInstance(t, root, "test-ws-hooked")
+	writeMapping(t, root, workspace.SessionMapping{SessionID: reapDeadSessionID, InstancePath: dispatched, Ephemeral: true, DispatchID: onReapDispatchID})
+	writeMapping(t, root, workspace.SessionMapping{SessionID: onReapSID2, InstancePath: hooked, Ephemeral: true})
+
+	if _, err := reapWorkspace(root, t.TempDir(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	runs := onReapRuns(t, logPath)
+	sort.Strings(runs)
+	want := []string{
+		reapDeadSessionID + " " + onReapDispatchID + " " + dispatched,
+		onReapSID2 + " " + onReapSID2 + " " + hooked,
+	}
+	sort.Strings(want)
+	if strings.Join(runs, "|") != strings.Join(want, "|") {
+		t.Errorf("runs = %q, want %q", runs, want)
+	}
+	for _, sid := range []string{reapDeadSessionID, onReapSID2} {
+		if mappingExists(t, root, sid) {
+			t.Errorf("mapping %s kept after a successful run", sid)
+		}
+	}
+}
+
+// TestReap_FailedRunKeepsMappingAndRetries: a failed run keeps the mapping
+// with its count raised and the reap's outcome unchanged; the next reap that
+// finds the session gone runs the command again, and a run that then
+// succeeds drops the mapping.
+func TestReap_FailedRunKeepsMappingAndRetries(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	stubDestroyRemoving(t)
+	stderr := captureReapStderr(t)
+	flag := filepath.Join(t.TempDir(), "succeed")
+	logPath := filepath.Join(t.TempDir(), "runs.log")
+	appendOnReapConfig(t, root, fmt.Sprintf(`command = "echo run >> '%s'; [ -e '%s' ]"`, logPath, flag))
+	inst := makeReapInstance(t, root, "test-ws-dead")
+	mapEphemeral(t, root, reapDeadSessionID, inst, true)
+	jobsDir := t.TempDir()
+
+	n, err := reapWorkspace(root, jobsDir, time.Now())
+	if err != nil || n != 1 {
+		t.Fatalf("first reap = %d, %v; want 1, nil", n, err)
+	}
+	if w := onReapWarnings(stderr.String()); len(w) != 1 {
+		t.Fatalf("warnings = %q, want one", w)
+	}
+	m, err := workspace.ReadSessionMapping(root, reapDeadSessionID)
+	if err != nil {
+		t.Fatalf("the mapping was not kept after a failed run: %v", err)
+	}
+	if m.OnReapFailures != 1 {
+		t.Errorf("failure count = %d, want 1", m.OnReapFailures)
+	}
+
+	if err := os.WriteFile(flag, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reapWorkspace(root, jobsDir, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if runs := onReapRuns(t, logPath); len(runs) != 2 {
+		t.Errorf("runs = %d, want 2 (the failed one and the retry)", len(runs))
+	}
+	if mappingExists(t, root, reapDeadSessionID) {
+		t.Error("the mapping was kept after the retry succeeded")
+	}
+}
+
+// TestReap_TenFailedRunsDropTheMapping: at the tenth failed run niwa drops the
+// mapping with a final warning line.
+func TestReap_TenFailedRunsDropTheMapping(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	stderr := captureReapStderr(t)
+	appendOnReapConfig(t, root, `command = "exit 1"`)
+	writeMapping(t, root, workspace.SessionMapping{SessionID: reapDeadSessionID, InstancePath: filepath.Join(root, "gone"), Ephemeral: true, OnReapFailures: onReapFailureLimit - 2})
+	jobsDir := t.TempDir()
+
+	if _, err := reapWorkspace(root, jobsDir, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	m, err := workspace.ReadSessionMapping(root, reapDeadSessionID)
+	if err != nil || m.OnReapFailures != onReapFailureLimit-1 {
+		t.Fatalf("after nine failures: %+v, %v", m, err)
+	}
+	stderr.Reset()
+	if _, err := reapWorkspace(root, jobsDir, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if mappingExists(t, root, reapDeadSessionID) {
+		t.Error("the mapping survived its tenth failed run")
+	}
+	w := onReapWarnings(stderr.String())
+	if len(w) != 2 || !strings.Contains(w[1], "gave up after 10 failed runs") {
+		t.Errorf("warnings = %q, want the failure and a final line", w)
+	}
+}
+
+// TestReap_MappingWrittenBeforeTheCountLoadsAtZero: a mapping file with no
+// failure count decodes with a count of zero.
+func TestReap_MappingWrittenBeforeTheCountLoadsAtZero(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	dir := filepath.Join(root, workspace.StateDir, "sessions")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `{"session_id":"` + reapDeadSessionID + `","instance_name":"x","instance_path":"/x","transcript_path":"","created":"2026-01-01T00:00:00Z","ephemeral":true}`
+	if err := os.WriteFile(filepath.Join(dir, reapDeadSessionID+".json"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, err := workspace.ReadSessionMapping(root, reapDeadSessionID)
+	if err != nil || m.OnReapFailures != 0 {
+		t.Errorf("legacy mapping = %+v, %v; want a count of zero", m, err)
+	}
+}
+
+// TestReap_KeptMappingsAreReapedOnceTheirSessionIsGone covers the mappings
+// reap finds by walking the store rather than the instances: one kept by
+// destroy because its session was still running, one left by
+// destroy --keep-session, one whose instance was deleted by hand, and one with
+// no instance at all. Each gets the command once its session is gone, and a
+// live session's mapping gets nothing.
+func TestReap_KeptMappingsAreReapedOnceTheirSessionIsGone(t *testing.T) {
+	root := destroyTestSetup(t, []string{"alpha", "beta", "gamma"})
+	captureReapStderr(t)
+	command, logPath := onReapLogCommand(t)
+	appendOnReapConfig(t, root, fmt.Sprintf("command = %q", command))
+	jobsDir := t.TempDir()
+
+	// Kept because its session was still running when destroy ran.
+	alpha := filepath.Join(root, "alpha")
+	writeTestMapping(t, root, ownerSID, alpha, "")
+	installFakeClaudeSessions(t, &fakeClaudeSessions{rows: []claudeSessionRow{{ID: "11111111", SessionID: ownerSID, PID: 42}}})
+	var destroyOut bytes.Buffer
+	removeOwningSessions(workspace.NewReporterWithTTY(&destroyOut, false), root, []string{alpha})
+	if !mappingExists(t, root, ownerSID) {
+		t.Fatal("precondition: destroy must keep a running session's mapping")
+	}
+	if err := os.RemoveAll(alpha); err != nil {
+		t.Fatal(err)
+	}
+
+	// Left by --keep-session: the instance is gone and the mapping stays.
+	beta := filepath.Join(root, "beta")
+	writeTestMapping(t, root, otherSID, beta, "")
+	chdirTo(t, root)
+	quietDestroyCmd()
+	setDestroyFlags(t, true, false, "")
+	prevKeep := destroyKeepSession
+	destroyKeepSession = true
+	t.Cleanup(func() { destroyKeepSession = prevKeep })
+	if err := runDestroy(destroyCmd, []string{"beta"}); err != nil {
+		t.Fatalf("destroy --keep-session: %v", err)
+	}
+	if runs := onReapRuns(t, logPath); len(runs) != 0 {
+		t.Fatalf("destroy --keep-session ran the command: %v", runs)
+	}
+
+	// Deleted by hand.
+	gamma := filepath.Join(root, "gamma")
+	writeTestMapping(t, root, onReapSID3, gamma, "")
+	if err := os.RemoveAll(gamma); err != nil {
+		t.Fatal(err)
+	}
+
+	// No instance path at all, and a still-live session with no instance.
+	writeMapping(t, root, workspace.SessionMapping{SessionID: onReapSID4, Ephemeral: true})
+	writeMapping(t, root, workspace.SessionMapping{SessionID: onReapSID5, InstancePath: filepath.Join(root, "delta"), Ephemeral: true})
+	writeJobEntry(t, jobsDir, onReapSID5)
+
+	if _, err := reapWorkspace(root, jobsDir, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	runs := onReapRuns(t, logPath)
+	got := map[string]int{}
+	for _, r := range runs {
+		got[strings.Fields(r)[0]]++
+	}
+	for _, sid := range []string{ownerSID, otherSID, onReapSID3, onReapSID4} {
+		if got[sid] != 1 {
+			t.Errorf("session %s: %d runs, want 1 (runs %q)", sid, got[sid], runs)
+		}
+		if mappingExists(t, root, sid) {
+			t.Errorf("session %s: mapping kept after a successful run", sid)
+		}
+	}
+	if got[onReapSID5] != 0 || !mappingExists(t, root, onReapSID5) {
+		t.Errorf("a live session's mapping was reaped: runs %d", got[onReapSID5])
+	}
+
+	// A second reap finds nothing more to do.
+	if _, err := reapWorkspace(root, jobsDir, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if again := onReapRuns(t, logPath); len(again) != len(runs) {
+		t.Errorf("a second reap ran the command again: %q", again)
+	}
+}
+
+// TestReap_StepBudget: five sessions removed in one reap with a command that
+// sleeps 10 seconds end within 31 seconds of wall time, and each session whose
+// run timed out or was skipped for lack of budget gets one warning line.
+//
+// The per-run timeout is 9s, not the 10s default. With a 10s timeout a
+// `sleep 10` races its own deadline: whichever of the sleep's exit and the
+// timer fires first decides whether the run succeeded, and on a Linux runner
+// the sleep often wins, so two runs passed and printed nothing. With 9s every
+// run that starts times out, so every session is warned about exactly once:
+// usually three runs time out at 9s, a fourth at the budget's end and the
+// fifth is skipped, though a slow runner can shift that split, which is why
+// the test checks only that every line is a timeout or a skip.
+func TestReap_StepBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("takes 30 seconds")
+	}
+	root := setupHookWorkspace(t, true)
+	stderr := captureReapStderr(t)
+	appendOnReapConfig(t, root, "command = \"sleep 10\"\ntimeout = \"9s\"")
+	sids := []string{reapDeadSessionID, onReapSID2, onReapSID3, onReapSID4, onReapSID5}
+	for _, sid := range sids {
+		writeMapping(t, root, workspace.SessionMapping{SessionID: sid, InstancePath: filepath.Join(root, "gone-"+sid[:4]), Ephemeral: true})
+	}
+
+	start := time.Now()
+	if _, err := reapWorkspace(root, t.TempDir(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 31*time.Second {
+		t.Errorf("the reap's on-reap runs took %s, want at most 31s", elapsed)
+	}
+	w := onReapWarnings(stderr.String())
+	if len(w) != len(sids) {
+		t.Fatalf("warnings = %d, want one per session:\n%s", len(w), stderr.String())
+	}
+	timedOut, skipped := 0, 0
+	for _, line := range w {
+		switch {
+		case strings.Contains(line, "skipped"):
+			skipped++
+		case strings.Contains(line, "timed out"):
+			timedOut++
+		default:
+			t.Errorf("unexpected warning %q", line)
+		}
+	}
+	// The split between the two depends on how long each kill takes on the
+	// runner, so only what the criterion needs is checked: every line is one
+	// or the other, and at least one run was skipped for lack of budget.
+	if timedOut+skipped != len(sids) {
+		t.Errorf("timed out %d + skipped %d, want %d:\n%s", timedOut, skipped, len(sids), stderr.String())
+	}
+	if skipped == 0 {
+		t.Errorf("no run was skipped for lack of budget:\n%s", stderr.String())
+	}
+	for _, sid := range sids {
+		if n := strings.Count(stderr.String(), "on-reap for session "+sid+":"); n != 1 {
+			t.Errorf("session %s: %d warning lines, want exactly one", sid, n)
+		}
+		m, err := workspace.ReadSessionMapping(root, sid)
+		if err != nil {
+			t.Errorf("session %s lost its mapping after a failed run: %v", sid, err)
+			continue
+		}
+		if m.OnReapFailures != 1 {
+			t.Errorf("session %s: failure count %d, want 1", sid, m.OnReapFailures)
+		}
+	}
+}
+
+// TestReap_TwoSecondTimeoutFiveSessions is the criterion as written: five
+// sessions removed in one reap, a command that sleeps 10 seconds and a 2s
+// timeout. Every run times out (2s is far from the sleep's end, so no run can
+// race its deadline), each session gets exactly one timeout line, the reap
+// ends well within 31 seconds, and every mapping is kept with one failure.
+func TestReap_TwoSecondTimeoutFiveSessions(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	stderr := captureReapStderr(t)
+	appendOnReapConfig(t, root, "command = \"sleep 10\"\ntimeout = \"2s\"")
+	sids := []string{reapDeadSessionID, onReapSID2, onReapSID3, onReapSID4, onReapSID5}
+	for _, sid := range sids {
+		writeMapping(t, root, workspace.SessionMapping{SessionID: sid, InstancePath: filepath.Join(root, "gone-"+sid[:4]), Ephemeral: true})
+	}
+
+	start := time.Now()
+	if _, err := reapWorkspace(root, t.TempDir(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 31*time.Second {
+		t.Errorf("the reap's on-reap runs took %s, want at most 31s", elapsed)
+	}
+	w := onReapWarnings(stderr.String())
+	if len(w) != len(sids) {
+		t.Fatalf("warnings = %d, want one per session:\n%s", len(w), stderr.String())
+	}
+	for _, sid := range sids {
+		line := "niwa: warning: on-reap for session " + sid + ": timed out after 2s"
+		if n := strings.Count(stderr.String(), line+"\n"); n != 1 {
+			t.Errorf("session %s: %d %q lines, want exactly one", sid, n, line)
+		}
+		m, err := workspace.ReadSessionMapping(root, sid)
+		if err != nil {
+			t.Errorf("session %s lost its mapping after a timed-out run: %v", sid, err)
+			continue
+		}
+		if m.OnReapFailures != 1 {
+			t.Errorf("session %s: failure count %d, want 1", sid, m.OnReapFailures)
+		}
+	}
+}
+
+// TestReap_StepBudgetScaled is the budget rule at a scale fast enough for
+// every run: with a 3s budget and a 1s timeout, three runs time out and the
+// rest are skipped.
+func TestReap_StepBudgetScaled(t *testing.T) {
+	prev := onReapStepBudget
+	onReapStepBudget = 3 * time.Second
+	t.Cleanup(func() { onReapStepBudget = prev })
+	root := setupHookWorkspace(t, true)
+	stderr := captureReapStderr(t)
+	appendOnReapConfig(t, root, "command = \"sleep 10\"\ntimeout = \"1s\"")
+	sids := []string{reapDeadSessionID, onReapSID2, onReapSID3, onReapSID4, onReapSID5}
+	for _, sid := range sids {
+		writeMapping(t, root, workspace.SessionMapping{SessionID: sid, InstancePath: filepath.Join(root, "gone-"+sid[:4]), Ephemeral: true})
+	}
+	start := time.Now()
+	if _, err := reapWorkspace(root, t.TempDir(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
+		t.Errorf("took %s, want within the 3s budget plus one second", elapsed)
+	}
+	w := onReapWarnings(stderr.String())
+	timedOut, skipped := 0, 0
+	for _, line := range w {
+		switch {
+		case strings.Contains(line, "timed out"):
+			timedOut++
+		case strings.Contains(line, "skipped"):
+			skipped++
+		}
+	}
+	if len(w) != 5 || timedOut != 3 || skipped != 2 {
+		t.Errorf("warnings: %d (timed out %d, skipped %d), want 5 (3, 2):\n%s", len(w), timedOut, skipped, stderr.String())
+	}
+}
+
+// TestReap_ConfigurationReadability: a workspace with no configuration file
+// declares no command, so the mapping goes as it always did; a file that
+// exists but can't be parsed counts as a failed run, warns and keeps it.
+func TestReap_ConfigurationReadability(t *testing.T) {
+	t.Run("no configuration file", func(t *testing.T) {
+		root := setupHookWorkspace(t, true)
+		stderr := captureReapStderr(t)
+		if err := os.Remove(workspaceConfigPath(root)); err != nil {
+			t.Fatal(err)
+		}
+		writeMapping(t, root, workspace.SessionMapping{SessionID: reapDeadSessionID, InstancePath: filepath.Join(root, "gone"), Ephemeral: true})
+		if _, err := reapWorkspace(root, t.TempDir(), time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if mappingExists(t, root, reapDeadSessionID) {
+			t.Error("with no configuration the mapping must be dropped as before")
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("printed %q", stderr.String())
+		}
+	})
+	t.Run("unparsable configuration file", func(t *testing.T) {
+		root := setupHookWorkspace(t, true)
+		stderr := captureReapStderr(t)
+		if err := os.WriteFile(workspaceConfigPath(root), []byte("[workspace\nname = "), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeMapping(t, root, workspace.SessionMapping{SessionID: reapDeadSessionID, InstancePath: filepath.Join(root, "gone"), Ephemeral: true})
+		if _, err := reapWorkspace(root, t.TempDir(), time.Now()); err != nil {
+			t.Fatalf("an unreadable on-reap configuration failed the reap: %v", err)
+		}
+		m, err := workspace.ReadSessionMapping(root, reapDeadSessionID)
+		if err != nil || m.OnReapFailures != 1 {
+			t.Errorf("mapping = %+v, %v; want it kept with one failed run", m, err)
+		}
+		if w := onReapWarnings(stderr.String()); len(w) != 1 || !strings.Contains(w[0], "could not read [session.on_reap]") {
+			t.Errorf("warnings = %q", w)
+		}
+	})
+}
+
+// TestReap_NoCommandForUnmappedOrRolledBack: the backstop's reap of an
+// unmapped dispatch instance runs no command.
+func TestReap_NoCommandForUnmappedInstance(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	stubDestroyAll(t)
+	captureReapStderr(t)
+	command, logPath := onReapLogCommand(t)
+	appendOnReapConfig(t, root, fmt.Sprintf("command = %q", command))
+	orphan := makeReapInstance(t, root, dispInstOrphan)
+	writeDispatchMarkerAt(t, orphan, time.Now().Add(-2*dispatchBackstopTTL))
+
+	n, err := reapWorkspace(root, t.TempDir(), time.Now())
+	if err != nil || n != 1 {
+		t.Fatalf("reap = %d, %v; want the backstop to reclaim one", n, err)
+	}
+	if runs := onReapRuns(t, logPath); len(runs) != 0 {
+		t.Errorf("the backstop ran the command: %v", runs)
+	}
+}
+
+// TestOnReap_CallSites pins where the command can run. The rollback,
+// --keep-session and the backstop each have a behavioural test; niwa reset
+// has this one, because a reset re-clones the instance's repositories and has
+// no harness short of the functional suite. Reset removes no session niwa
+// knows by id, so reset.go may reach neither the runner nor any path that
+// calls it (the mapped reap, destroy's session step, watch's discard).
+func TestOnReap_CallSites(t *testing.T) {
+	reset, err := os.ReadFile("reset.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"newOnReapStep(", "reapWorkspace(", "reapOpportunistically(", "removeOwningSessions(", "pruneStagedRecords(", "reapDiscardedReview("} {
+		if strings.Contains(string(reset), path) {
+			t.Errorf("reset.go calls %s, which can run the on-reap command", path)
+		}
+	}
+
+	want := map[string]bool{"on_reap.go": true, "reap.go": true, "destroy_session.go": true, "watch.go": true}
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		uses := strings.Contains(string(data), "newOnReapStep(")
+		if uses != want[name] {
+			t.Errorf("%s: reaches the on-reap runner = %v, want %v", name, uses, want[name])
+		}
 	}
 }

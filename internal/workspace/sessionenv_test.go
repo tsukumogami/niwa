@@ -133,6 +133,36 @@ func TestNoDeclarationResolvesToNothing(t *testing.T) {
 	}
 }
 
+// TestDispatchTimeListsProduceNoApplyEnv holds [session.dispatch_env] and
+// [session.on_reap] env to dispatch and reap time: a workspace that declares
+// only those lists gets no session environment at apply, so no generated env
+// block, and the Claude env resolution sees nothing from them either.
+func TestDispatchTimeListsProduceNoApplyEnv(t *testing.T) {
+	t.Setenv("PASSED_NAME", "from-shell")
+	t.Setenv("DROPPED_NAME", "from-shell")
+	cfg := &config.WorkspaceConfig{Session: config.SessionConfig{
+		DispatchEnv: config.SessionDispatchEnvConfig{
+			Passthrough: []string{"PASSED_NAME"},
+			Unset:       []string{"DROPPED_NAME"},
+		},
+		OnReap: config.SessionOnReapConfig{Command: "true", Env: []string{"PASSED_NAME"}},
+	}}
+	vars, sources, err := SessionEnvVars(cfg, EffectiveConfig{}, t.TempDir())
+	if err != nil {
+		t.Fatalf("SessionEnvVars: %v", err)
+	}
+	if len(vars) != 0 || len(sources) != 0 {
+		t.Errorf("dispatch-time lists produced an apply-time environment: %v / %v", vars, sources)
+	}
+	claudeVars, _, err := resolveClaudeEnvVars(&MaterializeContext{Config: cfg, SessionEnv: vars})
+	if err != nil {
+		t.Fatalf("resolveClaudeEnvVars: %v", err)
+	}
+	if len(claudeVars) != 0 {
+		t.Errorf("dispatch-time lists reached the Claude env block: %v", claudeVars)
+	}
+}
+
 // TestNoClaudeKeyGatesTheNeutralDeclaration is the requirement stated as a
 // test, in both directions.
 //

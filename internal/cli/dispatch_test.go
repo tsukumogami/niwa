@@ -910,3 +910,262 @@ func TestDispatch_NameSanitizesEmpty_FallsBack(t *testing.T) {
 		}
 	}
 }
+
+// writeDispatchEnvConfig declares [session.dispatch_env] in the workspace
+// config setupDispatchWorkspace wrote.
+func writeDispatchEnvConfig(t *testing.T, root, passthrough, unset string) {
+	t.Helper()
+	content := fmt.Sprintf("[workspace]\nname = \"test-ws\"\n\n[session.dispatch_env]\npassthrough = [%s]\nunset = [%s]\n", passthrough, unset)
+	if err := os.WriteFile(filepath.Join(root, config.ConfigDir, config.ConfigFile), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// captureLaunchRequest records every launch request a dispatch makes.
+func captureLaunchRequest(f *dispatchFakes, got *[]launchRequest) {
+	dispatchLaunch = func(_ context.Context, req launchRequest) error {
+		f.launchCalled++
+		*got = append(*got, req)
+		return nil
+	}
+}
+
+// settingsEnvOf returns the single settings document's env object.
+func settingsEnvOf(t *testing.T, passthrough []string) (map[string]string, bool) {
+	t.Helper()
+	for i := 0; i+1 < len(passthrough); i++ {
+		if passthrough[i] != "--settings" {
+			continue
+		}
+		var doc struct {
+			Env map[string]string `json:"env"`
+		}
+		if err := json.Unmarshal([]byte(passthrough[i+1]), &doc); err != nil {
+			t.Fatalf("settings document is not JSON: %v", err)
+		}
+		return doc.Env, true
+	}
+	return nil, false
+}
+
+// TestDispatch_EnvPassthroughUnsetAndReapKey is the first dispatch, detached
+// and not, with neutral names: a declared pass-through name that is set
+// reaches the worker's settings env beside the lineage value and its launch
+// environment; a declared unset name set in niwa's environment reaches
+// neither; an inherited NIWA_REAP_KEY is replaced by the dispatch id in both.
+func TestDispatch_EnvPassthroughUnsetAndReapKey(t *testing.T) {
+	for _, detach := range []bool{true, false} {
+		t.Run(fmt.Sprintf("detach=%v", detach), func(t *testing.T) {
+			root := setupDispatchWorkspace(t)
+			chdir(t, root)
+			writeDispatchEnvConfig(t, root, `"PASS_MARK"`, `"DROP_MARK"`)
+			f := installDispatchFakes(t, root)
+			var reqs []launchRequest
+			captureLaunchRequest(f, &reqs)
+			dispatchDetach = detach
+			t.Setenv("PASS_MARK", "carried-value")
+			t.Setenv("DROP_MARK", "dispatcher-value")
+			t.Setenv(config.ReapKeyEnv, "inherited-fake-key")
+
+			_, stderr, err := runDispatchCmd(t, "do a thing")
+			if err != nil {
+				t.Fatalf("dispatch: %v", err)
+			}
+			if len(reqs) != 1 {
+				t.Fatalf("launches = %d, want 1", len(reqs))
+			}
+			req := reqs[0]
+			mapping := readSingleMappingJSON(t, root)
+			dispatchID, _ := mapping["dispatch_id"].(string)
+			if !validReapKey(dispatchID) {
+				t.Fatalf("mapping dispatch_id = %q", dispatchID)
+			}
+
+			env, ok := settingsEnvOf(t, req.Passthrough)
+			if !ok {
+				t.Fatalf("no settings document in %v", req.Passthrough)
+			}
+			if env["PASS_MARK"] != "carried-value" {
+				t.Errorf("settings PASS_MARK = %q", env["PASS_MARK"])
+			}
+			if env["OTEL_RESOURCE_ATTRIBUTES"] == "" {
+				t.Errorf("the lineage value is missing beside the pass-through: %v", env)
+			}
+			if env[config.ReapKeyEnv] != dispatchID {
+				t.Errorf("settings NIWA_REAP_KEY = %q, want the dispatch id %q", env[config.ReapKeyEnv], dispatchID)
+			}
+			if _, ok := env["DROP_MARK"]; ok {
+				t.Error("an unset name reached the settings env")
+			}
+
+			if v, ok := envValue(t, req.Env, "PASS_MARK"); !ok || v != "carried-value" {
+				t.Errorf("launch PASS_MARK = %q (%v)", v, ok)
+			}
+			if _, ok := envValue(t, req.Env, "DROP_MARK"); ok {
+				t.Error("an unset name reached the launch environment")
+			}
+			if v, _ := envValue(t, req.Env, config.ReapKeyEnv); v != dispatchID {
+				t.Errorf("launch NIWA_REAP_KEY = %q, want the dispatch id", v)
+			}
+			if strings.Contains(stderr, "PASS_MARK") || strings.Contains(stderr, "DROP_MARK") {
+				t.Errorf("the declared names were reported: %q", stderr)
+			}
+		})
+	}
+}
+
+// TestDispatch_EnvDeclaredButAbsent: a declared pass-through name that isn't
+// set, and a declared unset name that isn't set, change nothing and say
+// nothing; the reap key is still set with no lineage value composed.
+func TestDispatch_EnvDeclaredButAbsent(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	writeDispatchEnvConfig(t, root, `"ABSENT_PASS"`, `"ABSENT_DROP"`)
+	f := installDispatchFakes(t, root)
+	var reqs []launchRequest
+	captureLaunchRequest(f, &reqs)
+	dispatchDetach = true
+	// t.Setenv first so the cleanup restores whatever was there.
+	for _, n := range []string{"ABSENT_PASS", "ABSENT_DROP"} {
+		t.Setenv(n, "")
+		os.Unsetenv(n)
+	}
+
+	_, stderr, err := runDispatchCmd(t, "do a thing")
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if strings.Contains(stderr, "ABSENT_") || strings.Contains(stderr, "warning") {
+		t.Errorf("an absent declared name was reported: %q", stderr)
+	}
+	env, _ := settingsEnvOf(t, reqs[0].Passthrough)
+	if _, ok := env["ABSENT_PASS"]; ok {
+		t.Error("an absent pass-through name reached the settings env")
+	}
+	if _, ok := envValue(t, reqs[0].Env, "ABSENT_PASS"); ok {
+		t.Error("an absent pass-through name reached the launch environment")
+	}
+	if !validReapKey(env[config.ReapKeyEnv]) {
+		t.Errorf("settings NIWA_REAP_KEY = %q", env[config.ReapKeyEnv])
+	}
+}
+
+// TestDispatch_OnReapInItsReap: the reap a dispatch runs first runs the
+// on-reap command for a session it removes; a command that exits 1 or sleeps
+// past its timeout leaves the dispatch's outcome unchanged and prints one
+// warning line, within the timeout plus one second.
+func TestDispatch_OnReapInItsReap(t *testing.T) {
+	for _, command := range []string{"exit 1", "sleep 10"} {
+		t.Run(command, func(t *testing.T) {
+			root := setupDispatchWorkspace(t)
+			chdir(t, root)
+			t.Setenv("HOME", t.TempDir()) // an empty jobs dir: the mapped session is gone
+			appendOnReapConfig(t, root, fmt.Sprintf("command = %q\ntimeout = \"1s\"", command))
+			inst := makeReapInstance(t, root, "test-ws-dead")
+			mapEphemeral(t, root, reapDeadSessionID, inst, true)
+			installDispatchFakes(t, root)
+			stderr := captureReapStderr(t)
+			dispatchDetach = true
+
+			start := time.Now()
+			if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
+				t.Fatalf("a failing on-reap command failed the dispatch: %v", err)
+			}
+			if elapsed := time.Since(start); elapsed > 2*time.Second {
+				t.Errorf("dispatch took %s", elapsed)
+			}
+			if w := onReapWarnings(stderr.String()); len(w) != 1 || !strings.Contains(w[0], reapDeadSessionID) {
+				t.Errorf("warnings = %q, want one for the reaped session", w)
+			}
+			if !mappingExists(t, root, reapDeadSessionID) {
+				t.Error("a failed run must keep the reaped session's mapping")
+			}
+		})
+	}
+}
+
+// TestDispatch_RollbackRunsNoOnReap: a dispatch that fails after provisioning
+// rolls its instance back, and that removes no session, so no command runs.
+func TestDispatch_RollbackRunsNoOnReap(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	t.Setenv("HOME", t.TempDir())
+	command, logPath := onReapLogCommand(t)
+	appendOnReapConfig(t, root, fmt.Sprintf("command = %q", command))
+	f := installDispatchFakes(t, root)
+	captureReapStderr(t)
+	dispatchCapture = func(_ agentplan.SessionRecords, _, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
+		return "", "", errors.New("no session record appeared")
+	}
+	dispatchDetach = true
+
+	if _, _, err := runDispatchCmd(t, "do a thing"); err == nil {
+		t.Fatal("a capture failure should fail the dispatch")
+	}
+	if f.destroyCalled != 1 {
+		t.Fatalf("rollback destroys = %d, want 1", f.destroyCalled)
+	}
+	if runs := onReapRuns(t, logPath); len(runs) != 0 {
+		t.Errorf("a rollback ran the on-reap command: %v", runs)
+	}
+}
+
+// TestReapOpportunistically_OnReapFailureWarnsOnce is the reap `niwa create`
+// and `niwa watch` run first (the same function dispatch calls): a failing
+// command prints one warning line and the step goes on.
+func TestReapOpportunistically_OnReapFailureWarnsOnce(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	t.Setenv("HOME", t.TempDir())
+	appendOnReapConfig(t, root, `command = "exit 1"`)
+	inst := makeReapInstance(t, root, "test-ws-dead")
+	mapEphemeral(t, root, reapDeadSessionID, inst, true)
+	stubDestroyAll(t)
+	stderr := captureReapStderr(t)
+
+	reapOpportunistically(root)
+	if w := onReapWarnings(stderr.String()); len(w) != 1 {
+		t.Errorf("warnings = %q, want one", w)
+	}
+	if !mappingExists(t, root, reapDeadSessionID) {
+		t.Error("a failed run must keep the mapping")
+	}
+}
+
+// TestDispatch_EnvCodexProcessOnly: a Codex worker gets the declared names
+// and the reap key in its process environment only, and the unset names are
+// removed from it too; no settings document is produced.
+func TestDispatch_EnvCodexProcessOnly(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	writeDispatchEnvConfig(t, root, `"PASS_MARK"`, `"DROP_MARK"`)
+	f := installDispatchFakes(t, root)
+	var reqs []launchRequest
+	captureLaunchRequest(f, &reqs)
+	dispatchDetach = true
+	t.Setenv("NIWA_DISPATCH_HARNESS", "codex")
+	t.Setenv("PASS_MARK", "carried-value")
+	t.Setenv("DROP_MARK", "dispatcher-value")
+	t.Setenv(config.ReapKeyEnv, "inherited-fake-key")
+
+	if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	req := reqs[0]
+	if _, ok := settingsEnvOf(t, req.Passthrough); ok {
+		t.Fatalf("a Codex launch carried a settings document: %v", req.Passthrough)
+	}
+	for _, a := range req.Passthrough {
+		if a == "--settings" {
+			t.Fatalf("a Codex launch carried a settings flag: %v", req.Passthrough)
+		}
+	}
+	if v, _ := envValue(t, req.Env, "PASS_MARK"); v != "carried-value" {
+		t.Errorf("launch PASS_MARK = %q", v)
+	}
+	if _, ok := envValue(t, req.Env, "DROP_MARK"); ok {
+		t.Error("an unset name reached a Codex launch environment")
+	}
+	if v, _ := envValue(t, req.Env, config.ReapKeyEnv); !validReapKey(v) || v == "inherited-fake-key" {
+		t.Errorf("launch NIWA_REAP_KEY = %q, want the dispatch id", v)
+	}
+}
