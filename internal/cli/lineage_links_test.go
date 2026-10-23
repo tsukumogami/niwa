@@ -3,9 +3,11 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/tsukumogami/niwa/internal/authority"
 	"github.com/tsukumogami/niwa/internal/lineage"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -156,6 +158,21 @@ func TestDispatchLineage_LinkSources(t *testing.T) {
 			}
 			if rec.ParentSessionID != tc.wantSession.ID {
 				t.Errorf("record parent session = %q, want the link's id %q", rec.ParentSessionID, tc.wantSession.ID)
+			}
+			// The live record agrees with the entry: the same parent session
+			// source and principal, and parent_dispatch_source naming only a
+			// record found through an instance.
+			if rec.ParentSessionSource != e.ParentSession.Source {
+				t.Errorf("record parent_session_source = %q, entry %q", rec.ParentSessionSource, e.ParentSession.Source)
+			}
+			wantPrincipal := &authority.PrincipalDoc{Name: e.Principal.Name, Source: e.Principal.Source, Trust: e.Principal.Trust}
+			if !reflect.DeepEqual(rec.Principal, wantPrincipal) {
+				t.Errorf("record principal = %+v, entry %+v", rec.Principal, e.Principal)
+			}
+			wantSrc := map[string]string{"observed": authority.ParentSourceCwd, "handed": authority.ParentSourceAnchor,
+				"mapped": authority.ParentSourceNone, "none": authority.ParentSourceNone}[e.ParentDispatch.Source]
+			if rec.ParentDispatchSource != wantSrc {
+				t.Errorf("record parent_dispatch_source = %q for an entry source %q, want %q", rec.ParentDispatchSource, e.ParentDispatch.Source, wantSrc)
 			}
 		})
 	}

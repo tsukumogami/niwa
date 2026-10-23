@@ -532,5 +532,13 @@ func stampDispatchRecord(rec authority.Record, auth *dispatchAuthority, dispatch
 	rec.ParentSessionID = parentSessionID
 	rec.ParentDispatchID = auth.parentID
 	rec.ParentDispatchSource = auth.parentSrc
+	// The same resolution the lineage entry is written from, so the two agree
+	// while the instance lives.
+	rec.ParentSessionSource = auth.parentSession.Source
+	rec.Principal = &authority.PrincipalDoc{
+		Name:   auth.principal.Name,
+		Source: auth.principal.Source,
+		Trust:  auth.principal.Trust,
+	}
 	return rec
 }

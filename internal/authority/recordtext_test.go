@@ -15,6 +15,8 @@ roles: coordinator
 grant: merge-pr (role coordinator), close-issue (dispatch, role coordinator)
 parent session id: session_abc-123
 parent dispatch id: 7f1d2c3b-9a8e-4d6c-b5a4-0e1f2a3b4c5d (from cwd)
+parent session source: unrecorded
+principal: unrecorded
 `
 	if got := goldenRecord().Text(); got != want {
 		t.Errorf("text =\n%s\nwant\n%s", got, want)

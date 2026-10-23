@@ -35,20 +35,35 @@ type Record struct {
 	ParentSessionID      string
 	ParentDispatchID     string
 	ParentDispatchSource string // ParentSourceAnchor, ParentSourceCwd or ParentSourceNone
-	Level                Level
-	LevelSource          Layer
-	LevelCeiling         Level
-	LevelCeilingSource   Layer
-	GrantCeiling         []Authority
-	GrantCeilingSource   Layer
-	Roles                []string // name order
-	Grant                []GrantEntry
+	// ParentSessionSource and Principal are advisory: the lineage entry's
+	// parent_session.source and principal, written from the same resolution.
+	// No gate reads them, so a value this build can't read is unrecorded ("",
+	// nil), never a malformed record.
+	ParentSessionSource string
+	Principal           *PrincipalDoc
+	Level               Level
+	LevelSource         Layer
+	LevelCeiling        Level
+	LevelCeilingSource  Layer
+	GrantCeiling        []Authority
+	GrantCeilingSource  Layer
+	Roles               []string // name order
+	Grant               []GrantEntry
 	// UnknownGrant is read-side: stored entries this build can't hold, in
 	// authority name order. A record this build writes always has none.
 	UnknownGrant []RawGrantEntry
 	// NewerVersion is read-side: the stored schema when it is a later version
 	// than v1. Such a record is read as holding nothing and is never written.
 	NewerVersion string
+}
+
+// PrincipalDoc is the person a dispatch acts for, as the lineage entry's
+// principal records it. It is declared here, not taken from internal/lineage,
+// because that package imports this one.
+type PrincipalDoc struct {
+	Name   string `json:"name"`
+	Source string `json:"source"`
+	Trust  string `json:"trust"`
 }
 
 type grantDoc struct {
@@ -59,22 +74,24 @@ type grantDoc struct {
 // recordDoc fixes the document's key order: encoding/json writes struct
 // fields in declaration order.
 type recordDoc struct {
-	Schema               string     `json:"schema"`
-	Record               bool       `json:"record"`
-	RecordVersion        string     `json:"record_version,omitempty"`
-	DispatchID           string     `json:"dispatch_id"`
-	ParentSessionID      string     `json:"parent_session_id"`
-	ParentDispatchID     string     `json:"parent_dispatch_id"`
-	ParentDispatchSource string     `json:"parent_dispatch_source"`
-	Level                string     `json:"level"`
-	LevelSource          string     `json:"level_source"`
-	LevelCeiling         string     `json:"level_ceiling"`
-	LevelCeilingSource   string     `json:"level_ceiling_source"`
-	GrantCeiling         []string   `json:"grant_ceiling"`
-	GrantCeilingSource   string     `json:"grant_ceiling_source"`
-	Roles                []string   `json:"roles"`
-	Grant                []grantDoc `json:"grant"`
-	UnknownGrant         []grantDoc `json:"unknown_grant"`
+	Schema               string        `json:"schema"`
+	Record               bool          `json:"record"`
+	RecordVersion        string        `json:"record_version,omitempty"`
+	DispatchID           string        `json:"dispatch_id"`
+	ParentSessionID      string        `json:"parent_session_id"`
+	ParentDispatchID     string        `json:"parent_dispatch_id"`
+	ParentDispatchSource string        `json:"parent_dispatch_source"`
+	ParentSessionSource  string        `json:"parent_session_source,omitempty"`
+	Principal            *PrincipalDoc `json:"principal,omitempty"`
+	Level                string        `json:"level"`
+	LevelSource          string        `json:"level_source"`
+	LevelCeiling         string        `json:"level_ceiling"`
+	LevelCeilingSource   string        `json:"level_ceiling_source"`
+	GrantCeiling         []string      `json:"grant_ceiling"`
+	GrantCeilingSource   string        `json:"grant_ceiling_source"`
+	Roles                []string      `json:"roles"`
+	Grant                []grantDoc    `json:"grant"`
+	UnknownGrant         []grantDoc    `json:"unknown_grant"`
 }
 
 // MarshalJSON writes the one document the record file stores and `niwa
@@ -92,6 +109,8 @@ func (r Record) MarshalJSON() ([]byte, error) {
 		ParentSessionID:      r.ParentSessionID,
 		ParentDispatchID:     r.ParentDispatchID,
 		ParentDispatchSource: r.ParentDispatchSource,
+		ParentSessionSource:  r.ParentSessionSource,
+		Principal:            r.Principal,
 		Level:                r.Level.String(),
 		LevelSource:          string(r.LevelSource),
 		LevelCeiling:         r.LevelCeiling.String(),
@@ -143,10 +162,53 @@ var v1Fields = []string{
 
 // v1Optional holds the fields added within v1 after its first release, each
 // with the JSON default a reader uses when a record an older niwa wrote
-// lacks it. Every field so far shipped with the first v1, so it is empty; a
-// field added later goes here, not in the required list, so records written
-// before it keep reading.
-var v1Optional = map[string]string{}
+// lacks it. A field added later goes here, not in the required list, so
+// records written before it keep reading.
+var v1Optional = map[string]string{
+	"parent_session_source": `""`,
+	"principal":             `null`,
+}
+
+// The shapes of the advisory fields, the lineage entry's patterns repeated
+// here because internal/lineage imports this package; change them together.
+var (
+	nameValuePattern = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+	principalPattern = regexp.MustCompile(`^[A-Za-z0-9._@+-]{1,128}$`)
+)
+
+// lenientNameValue reads an advisory name value: anything but a string of
+// the name-value shape reads as "" (unrecorded).
+func lenientNameValue(raw json.RawMessage) string {
+	s, err := asString(raw)
+	if err != nil || !nameValuePattern.MatchString(s) {
+		return ""
+	}
+	return s
+}
+
+// lenientPrincipal reads the advisory principal: anything but an object with
+// a name (empty or of the principal shape) and a source and trust of the
+// name-value shape reads as nil (unrecorded). Members it doesn't know are
+// ignored.
+func lenientPrincipal(raw json.RawMessage) *PrincipalDoc {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '{' {
+		return nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil
+	}
+	name, err := asString(m["name"])
+	if err != nil || (name != "" && !principalPattern.MatchString(name)) {
+		return nil
+	}
+	source, trust := lenientNameValue(m["source"]), lenientNameValue(m["trust"])
+	if source == "" || trust == "" {
+		return nil
+	}
+	return &PrincipalDoc{Name: name, Source: source, Trust: trust}
+}
 
 // ParseRecord reads a stored record.
 //
@@ -157,7 +219,9 @@ var v1Optional = map[string]string{}
 // only; an unknown name in grant_ceiling is dropped and listed nowhere; an
 // unknown parent_dispatch_source reads as "none" with an empty
 // ParentDispatchID; an unknown grant_ceiling_source is kept as stored, never
-// read as none.
+// read as none. The advisory parent_session_source and principal are read
+// leniently: missing, of the wrong type or outside their shapes, each reads
+// as unrecorded and the rest of the record reads as usual.
 //
 // A later schema version (niwa.authority.record/v2 and up) is not malformed:
 // only schema and the version-independent dispatch_id, which must be a UUID,
@@ -264,6 +328,8 @@ func parseV1(m map[string]json.RawMessage, dispatchID string) (Record, error) {
 		// A later value costs only the parent link.
 		r.ParentDispatchSource, r.ParentDispatchID = ParentSourceNone, ""
 	}
+	r.ParentSessionSource = lenientNameValue(m["parent_session_source"])
+	r.Principal = lenientPrincipal(m["principal"])
 
 	if r.Level, err = levelField(m, "level"); err != nil {
 		return Record{}, err

@@ -194,8 +194,9 @@ Key assumptions:
 #### Chosen: one JSON file per dispatch in `<root>/.niwa-lineage/`
 
 Each entry is `<root>/.niwa-lineage/<dispatch id>.json`, one JSON object,
-mode 0600, in a directory created 0700 on first write; the first write in
-each process also sets an existing directory to 0700. The dispatch id is a
+mode 0600, in a directory created 0700 on first write; every write also
+sets an existing directory to 0700, which is stricter than doing it once per
+process and keeps no per-process state. The dispatch id is a
 UUID, so the file name needs no escaping, and every read requires the
 `dispatch_id` inside a file to equal its name, so a copied or renamed file is
 unreadable rather than read as a different dispatch. Writes follow
@@ -521,7 +522,9 @@ value.
     document with a duplicate member as `Parse` does.
   - `validate.go`: the field patterns: dispatch id through
     `authority.ValidDispatchID`; session ids through
-    `authority.ValidSessionID`; instance `^[A-Za-z0-9._-]{1,128}$`; agent,
+    `authority.ValidSessionID`; instance `^[A-Za-z0-9._+-]{1,255}$`
+    (real instance names join the workspace name and suffix with `+`, and an
+    entry with every field at its maximum still fits in 4 KiB); agent,
     origin, source and trust values as name values `^[a-z0-9-]{1,32}$`
     (unknown values kept); `written_at` RFC 3339 UTC; principal name
     `^[A-Za-z0-9._@+-]{1,128}$` or empty.
@@ -555,8 +558,9 @@ value.
   dot-prefixed temporaries are skipped) and reports any selected file that
   isn't a regular file within the cap, without parsing to decide. A
   `.niwa-lineage` path that is a symlink or not a directory refuses writes;
-  the first write in each process opens the directory
-  `O_RDONLY|O_DIRECTORY|O_NOFOLLOW` and `fchmod`s it to 0700, and a failure
+  every write opens the directory
+  `O_RDONLY|O_DIRECTORY|O_NOFOLLOW` and `fchmod`s it to 0700 (stricter than
+  once per process, and no per-process state to keep), and a failure
   there (another user owns it, say) refuses the write. `show` and `list`
   only read: they neither tighten the directory nor warn about its mode. An
   entry file whose mode grants access beyond its owner is unreadable. Completion refuses to write an entry that would exceed
@@ -705,7 +709,7 @@ and tests.
 
 `internal/workspace/lineage_store.go` with existence-checked create,
 member-preserving completion, removal, single read and listing. Tests:
-modes, an existing 0755 directory tightened on first write, a duplicate id
+modes, an existing 0755 directory tightened on every write, a duplicate id
 refusing without touching the existing entry, a failed rename leaving
 nothing at the final path (through a test seam), the 8 KiB cap, a file
 whose `dispatch_id` differs from its name or with a duplicate member
@@ -765,7 +769,7 @@ Inputs are validated on write and again on every read. Dispatch and session ids 
 
 Reading the store is bounded so one bad entry costs only that entry. Every read opens the file with `O_NOFOLLOW` and `O_NONBLOCK`, requires a regular file, and reads at most 8 KiB, the same discipline the authority record reader applies, so a planted symlink, FIFO, directory or oversized file produces a per-entry error instead of a hang, an unrelated read or memory growth. Which files are entries is decided by name, type and size alone. Every read requires an entry's `dispatch_id` to equal its file name, so a copied or renamed file can't pose as another dispatch in a walk, and rejects a document with a duplicate member, so two readers can't see different values for one field. A dispatch id taken from a parent link, a mapping or an authority record, all same-user writable, is checked to be a UUID before it is joined into a path, so a forged `../` id reads as unreadable instead of opening another file. Unknown members are kept and printed as data, never interpreted, and a completion that would push an entry past the read cap is refused. The ancestor walk keeps a visited set and stops at 64 levels, on a cycle, on a missing, unreadable or later-version entry, so a forged parent id cannot loop or run long. Error text names the failure class only and never echoes file content, which may contain terminal escape sequences. An unreadable parent entry never refuses a dispatch: the principal falls back to the declared one and the parent link is kept.
 
-Writes use the authority record's pattern: the final name is checked to be absent, then a temporary file is created `O_CREATE|O_EXCL|O_NOFOLLOW` at 0600 under a dot-prefixed random name, synced, and renamed to `<dispatch id>.json`, with the temporary removed on failure. The directory is created 0700, an existing one is opened `O_NOFOLLOW` and `fchmod`ed to 0700 on the first write in each process, a failure to tighten it (another user owns it, say) refuses the write, and a `.niwa-lineage` that is a symlink or not a directory is refused. Completion with the session id re-validates the entry it read, refuses a later-version entry rather than rewriting it with less, and replaces the file by rename. A race between two same-user writers on completion is accepted: the entry is advisory and locking would add a failure mode for no gain. The store sits outside the configuration directory, so no refresh copies, swaps or replaces it, and nothing a config source ships can land in it.
+Writes use the authority record's pattern: the final name is checked to be absent, then a temporary file is created `O_CREATE|O_EXCL|O_NOFOLLOW` at 0600 under a dot-prefixed random name, synced, and renamed to `<dispatch id>.json`, with the temporary removed on failure. The directory is created 0700, an existing one is opened `O_NOFOLLOW` and `fchmod`ed to 0700 on every write, a failure to tighten it (another user owns it, say) refuses the write, and a `.niwa-lineage` that is a symlink or not a directory is refused. Completion with the session id re-validates the entry it read, refuses a later-version entry rather than rewriting it with less, and replaces the file by rename. A race between two same-user writers on completion is accepted: the entry is advisory and locking would add a failure mode for no gain. The store sits outside the configuration directory, so no refresh copies, swaps or replaces it, and nothing a config source ships can land in it.
 
 The two fields the authority record gains are parsed leniently: a wrong type or a value outside its pattern reads as unrecorded instead of making the record malformed. A strict reading would let an advisory field, written by a later niwa or edited by hand, void the record and with it every grant a gate reads from it.
 

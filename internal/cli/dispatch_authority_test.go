@@ -722,6 +722,12 @@ func TestDispatchAuthority_WholeRecord(t *testing.T) {
   "parent_session_id": "",
   "parent_dispatch_id": "",
   "parent_dispatch_source": "none",
+  "parent_session_source": "none",
+  "principal": {
+    "name": "",
+    "source": "none",
+    "trust": "observed"
+  },
   "level": "supervised",
   "level_source": "workspace",
   "level_ceiling": "supervised",
