@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Draft
+status: Accepted
 problem: |
   When sessions dispatch sessions, the only niwa records of who asked for
   each dispatch live in files `niwa reap` deletes, no record names the person
@@ -19,7 +19,7 @@ upstream: docs/briefs/BRIEF-dispatch-lineage.md
 
 ## Status
 
-Draft
+Accepted
 
 ## Problem Statement
 
