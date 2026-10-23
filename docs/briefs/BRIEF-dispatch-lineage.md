@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   Once a tree of dispatched sessions finishes and its instances are reaped,
   niwa keeps no local record of which session dispatched which, nothing at
@@ -25,7 +25,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 Framing for a durable lineage record of dispatched sessions. It stops at the
 problem, the outcome, the journeys and the scope boundary. The downstream PRD
