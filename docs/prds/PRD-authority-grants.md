@@ -392,10 +392,13 @@ the wrong shape for a team's rule about who decides.
   the dispatcher passes it on purpose, it's stricter than `-C` in three
   ways, each also an exit 1 before anything is created: a path in no
   instance (a typo, most likely), an instance under a different
-  workspace root than the dispatch's, and, when the working directory is
-  already inside a dispatched instance, a different instance from that
-  one. An instance that exists but has no record still gives no parent.
-  So `anchor` and `cwd` never disagree. It's how a
+  workspace root than the dispatch's, and, whenever the working directory
+  is inside any instance, a different instance from that one. Any
+  instance counts there, including one with no record (made with `niwa
+  create`, or by hand), and a niwa worktree of an instance counts as that
+  instance. An instance that exists but has no record still gives no
+  parent. So `anchor` and `cwd` can never disagree, and an instance
+  someone made by hand is still the dispatcher's own. It's how a
   dispatcher that runs `niwa dispatch` from outside its own instance (a
   coordinator that changes to the workspace root first, say) names its
   instance as the parent. Without the flag, the working directory is
@@ -835,8 +838,9 @@ Read-back
   `parent_dispatch_source: anchor`; the same flag run from inside that
   instance also records `anchor`. `--parent-from` with an empty,
   relative or nonexistent path, a directory in no instance, an instance
-  under another workspace root, or (from inside dispatched instance X)
-  an instance other than X exits 1 with nothing created; `--parent-from` naming an
+  under another workspace root, or (from inside any instance X, one
+  with no record included) an instance other than X exits 1 with nothing
+  created; `--parent-from` naming an
   instance with no record records `none`; naming one whose record is
   malformed refuses the dispatch.
 - [ ] `--grant merge-pr,close-issue` records the same grant as `--grant

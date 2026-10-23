@@ -471,9 +471,12 @@ nonexistent path exits 1 before anything is created. It's stricter than
 no instance, an instance under a workspace root other than the
 dispatch's (`class.WorkspaceRoot`, compared after resolving symlinks on
 both sides, since `ClassifyCwd` leaves them and `FindInstance` resolves
-them), and, when the working directory is
-already in a dispatched instance, a different instance, each exit 1. So
-`anchor` and `cwd` never disagree. It exists because a
+them), and, whenever the working directory is
+inside any instance, a different instance, each exit 1. Any instance
+counts there, one with no record (from `niwa create`, or made by hand)
+included, and a niwa worktree of an instance counts as that instance. So
+`anchor` and `cwd` can never disagree, and an instance someone made by
+hand is still the dispatcher's own. It exists because a
 coordinator that runs `niwa dispatch` from the workspace root, as
 shirabe's does today, would otherwise record no parent. An instance with
 no record gives an empty `parent_dispatch_id` and `none`; a record that
