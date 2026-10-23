@@ -59,6 +59,17 @@ authorities = ["merge-pr", "close-issue", "cut-release"]
 [authority.roles.reviewer]
 authorities = ["merge-pr"]
 `,
+	// R8a's example exactly as the PRD and the guide give it.
+	"r8a-example": `[authority]
+level = "autonomous"
+ceiling = ["merge-pr", "close-issue", "cut-release"]
+
+[authority.roles.coordinator]
+authorities = ["merge-pr", "close-issue", "cut-release"]
+`,
+	"empty-ceiling": `[authority]
+ceiling = []
+`,
 	"invalid-level": `[authority]
 level = "bogus"
 `,

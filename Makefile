@@ -1,4 +1,4 @@
-.PHONY: build test build-test test-functional test-functional-critical test-functional-claude-integration test-install test-live clean
+.PHONY: build test build-test test-functional test-functional-critical test-functional-claude-integration test-authority test-install test-live clean
 
 # Build the niwa binary.
 build:
@@ -47,6 +47,21 @@ test-functional-critical: build-test
 # it uses the CLI's existing login; under CI it also requires ANTHROPIC_API_KEY.
 test-functional-claude-integration: build-test
 	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_TAGS=@claude-integration go test -v -timeout $(FUNCTIONAL_TIMEOUT) ./test/functional/... $(LOCK_HELD)
+
+# Run the authority tests: the internal/authority package in full, the
+# authority tests of the packages that call it (and the static checks on
+# docs/guides/authority-grants.md), then the authority features, the
+# gate-contract scenarios that run the guide's reference checks among them.
+# The Authority workflow runs this on every pull request with no koto on PATH,
+# since nothing here may depend on koto.
+AUTHORITY_UNIT_TESTS := Authority|FindInstance|SelectDispatch|^TestShow|^TestDecide
+AUTHORITY_FEATURES := features/authority-policy.feature:features/dispatch-authority.feature:features/authority-read.feature:features/authority-gate-contract.feature
+
+test-authority: build-test
+	go test -race -count=1 ./internal/authority/...
+	go test -race -count=1 -run '$(AUTHORITY_UNIT_TESTS)' ./internal/cli/ ./internal/config/ ./internal/workspace/ ./test/functional/
+	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_PATHS=$(AUTHORITY_FEATURES) \
+	go test -v -count=1 -timeout $(FUNCTIONAL_TIMEOUT) -run TestFeatures ./test/functional/... $(LOCK_HELD)
 
 # Run only install-path integration scenarios. Proves that `niwa shell-init`
 # output contains the wrapper + cobra completion function (the bake target

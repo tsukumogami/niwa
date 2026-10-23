@@ -171,6 +171,10 @@ type testState struct {
 	// authority_read_steps_test.go.
 	authorityRead authorityReadScenario
 
+	// gate is what the gate-contract scenarios remember; see
+	// authority_contract_steps_test.go.
+	gate authorityGateScenario
+
 	// cleanups run in the After hook, last registered first, so a scenario
 	// that started a process or a listener stops it however the scenario
 	// ended.
@@ -558,6 +562,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	registerDispatchAuthoritySteps(ctx)
 	registerAuthorityReadSteps(ctx)
 	registerAuthorityResumeSteps(ctx)
+	registerAuthorityGateSteps(ctx)
 	registerKeepAliveSteps(ctx)
 
 	// --- vault failure handling: seeding and counting the shared infisical
