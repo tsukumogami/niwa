@@ -82,8 +82,78 @@ reads the same in a workspace that never set up a workflow engine.
 
 ## User Journeys
 
-<Phase 3 will name the concrete journeys that exercise the feature.>
+### An operator reconstructs a finished tree
+
+A reviewer, working in a workspace where dispatch is on, starts session A
+from their own session, and A dispatches B. Both finish, and `niwa reap`
+removes both instances. The next day the reviewer asks niwa about B and
+reads that B's parent is A, that A's parent is the reviewer's own session,
+and that both acted for the reviewer. Nothing about the answer depends on the
+instances, the session mappings, or a telemetry backend still existing.
+
+### A tool reads one link and how far to trust it
+
+A coordinator, or a gate script, needs to know who directs session B before
+it routes a question or allows an action. It asks niwa for B's lineage in
+machine-readable form and gets B's parent, the parent's parent, the person
+the tree acts for, and for each parent link whether niwa observed it or the
+caller handed it. When the link is handed, the tool shows it as handed and
+decides accordingly; it never has to guess from the shape of the record.
+
+### A dispatch claims a parent it didn't come from
+
+A session runs `niwa dispatch` with the calling-session variable set to some
+other session's id, by mistake or on purpose. Later, the reviewer reads that
+dispatch's record and sees either that niwa refused it at the time, or that
+the claimed parent is there marked unverified, beside what niwa's own records
+said the parent was. A tool reading the record doesn't treat the claim as an
+observed parent.
+
+### A session started with no parent session
+
+A dispatch starts from something other than a person's session: a watcher
+reacting to a pull request, or a person running `niwa dispatch` in a plain
+terminal. The record says plainly that there is no parent session, so the
+session sits at the first level, and still names the person it acts for, so
+"on whose behalf" has an answer even at the root.
 
 ## Scope Boundary
 
-<Phase 3 will record what this feature holds in and pushes out.>
+### In scope
+
+- A record, kept by niwa in the workspace, of each dispatch's place in the
+  tree: the dispatch, the session it started, the session that asked for it,
+  and the dispatch that session belonged to, if any.
+- The person a dispatched session acts on behalf of, on the same record, at
+  every level of the tree, including sessions with no parent session.
+- A mark beside every recorded parent saying how niwa came by it: observed,
+  handed, or claimed against niwa's own records. The written statement of
+  where that trust boundary sits and why.
+- What happens when a dispatch claims a parent other than the one it came
+  from.
+- How long the record outlives the instance, and what removes it.
+- A way for a person to read a dispatch's lineage, and a stable
+  machine-readable form for tools that read authority relations.
+- Lineage of any depth, and dispatches whose parents and grandparents are
+  long gone.
+
+### Out of scope
+
+- Capping a child's authority at its parent's. That check reads this record
+  but is separate work; this feature records, it doesn't refuse wider grants.
+- Hardening the trust boundary. A parent niwa can't check is recorded as
+  handed, not made checkable by signatures or a broker process; enforcement
+  stays where it is today.
+- Reading, or depending on, any workflow engine's own session records. A
+  workflow engine may keep its own record of which run started which; niwa
+  neither reads it nor requires it, and a niwa user needs no other tool
+  installed.
+- Carrying the person onto recorded decisions, classifying where a session
+  escalated, and telling a session at start who directs it. Each reads this
+  record and each is separate work.
+- Lineage that crosses machines or workspaces, or a copy kept in a cloud
+  store. The record is local to the workspace that dispatched.
+- Changing which credentials a session holds. The person a session acts for
+  is recorded as a person, not as the login whose token the session uses.
+- Guessing a parent from the process tree, or reviving a registry of live
+  sessions. A wrong parent is worse than none.
