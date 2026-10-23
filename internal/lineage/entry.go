@@ -130,8 +130,9 @@ var entrySchemaPattern = regexp.MustCompile(`^niwa\.lineage\.entry/v([1-9][0-9]{
 // Parse reads an entry document. A v1 document parses to its known members
 // plus the members it didn't know; a niwa.lineage.entry/vN document with
 // N > 1 parses to a later-version result carrying only its dispatch id and
-// schema; any other schema, and a v1 document whose known members have the
-// wrong types or whose dispatch id isn't one, is an *InvalidEntryError.
+// schema; any other schema, a document that names a member twice at any
+// depth, and a v1 document whose known members have the wrong types or fail
+// their shapes (validate.go) are an *InvalidEntryError.
 func Parse(b []byte) (Parsed, error) {
 	var members map[string]json.RawMessage
 	if err := json.Unmarshal(b, &members); err != nil {
@@ -139,6 +140,9 @@ func Parse(b []byte) (Parsed, error) {
 	}
 	if members == nil {
 		return Parsed{}, invalid("not a JSON object")
+	}
+	if err := checkDuplicateMembers(b); err != nil {
+		return Parsed{}, err
 	}
 	rawSchema, ok := members["schema"]
 	if !ok {
@@ -173,8 +177,8 @@ func Parse(b []byte) (Parsed, error) {
 		}
 		return Parsed{}, invalid("a member has the wrong type")
 	}
-	if !authority.ValidDispatchID(e.DispatchID) {
-		return Parsed{}, invalid("dispatch_id is not a dispatch id")
+	if err := validateEntry(e); err != nil {
+		return Parsed{}, err
 	}
 	var unknown map[string]json.RawMessage
 	for k, v := range members {
