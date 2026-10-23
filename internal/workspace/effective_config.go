@@ -25,10 +25,15 @@ import (
 // returns, so a nil collector means "this caller does not report" rather than
 // "nothing went wrong": the worktree path passes nil because it re-materializes
 // from an already-written file rather than resolving.
+//
+// HostEnv is the host-local env layer from the machine config, set on the
+// returned config so every materializer applies it last. nil means the machine
+// config declares none, and the returned config is what it was without it.
 type EffectiveConfigOptions struct {
 	GlobalConfigDir string
 	Stderr          io.Writer
 	Keys            *keyreport.Collector
+	HostEnv         *config.HostEnvLayer
 }
 
 // ResolveAndMergeEffectiveConfig runs the vault resolve + personal-overlay
@@ -83,6 +88,7 @@ func ResolveAndMergeEffectiveConfig(
 	// No overlay registered: return the team-only resolved cfg unchanged.
 	if globalOverride == nil {
 		collectUnresolvedKeys(resolvedCfg, opts.Keys)
+		resolvedCfg.HostEnv = opts.HostEnv
 		return resolvedCfg, nil, nil, nil
 	}
 
@@ -107,5 +113,6 @@ func ResolveAndMergeEffectiveConfig(
 	// may be supplied by the personal overlay, and only the merged config knows
 	// which layer won.
 	collectUnresolvedKeys(merged, opts.Keys)
+	merged.HostEnv = opts.HostEnv
 	return merged, flattened.EnvExamplePolicy, flattened.EnvOutput, nil
 }

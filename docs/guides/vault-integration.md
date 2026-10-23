@@ -299,6 +299,68 @@ Each shadow is visible in three places: a stderr diagnostic during
 `--audit-secrets` SHADOWED column. Diagnostics name the key and the
 overlay layer; they never print the shadowing or shadowed value.
 
+### Host-local overrides
+
+The personal overlay applies on every machine you use. When one machine
+needs a single key different, set or clear just that key in that
+machine's niwa config, `~/.config/niwa/config.toml`, instead of editing
+the overlay repo:
+
+```toml
+# ~/.config/niwa/config.toml on the one host that differs
+
+[claude.env]
+unset = ["KOTO_SESSION_BACKEND"]   # this host's sessions don't get the key
+
+[claude.env.vars]
+OTHER_SWITCH = "off"               # this host's sessions get this value
+
+[env]
+unset = ["SOME_KEY"]               # dropped from repo env files
+
+[env.vars]
+SOME_TOKEN = "host-value"          # repo env files get this value
+```
+
+`[env]` acts on the resolved env pipeline: what each repo's `.local.env`
+(or `env_output` targets) receives, and what any `promote` list reads.
+`[claude.env]` acts on the session env niwa writes into each
+`settings.local.json`, after promotion and the inline tables. Clearing a
+key with `unset` drops it; setting it to `""` writes an empty value,
+which isn't the same thing. To keep a promoted key out of sessions but
+leave it in repo env files, clear it under `[claude.env]`; clear it
+under `[env]` to drop it from both.
+
+Everything the overlay sets that the host doesn't name still applies:
+its other variables, secrets and files. Host values are literal; a
+`vault://` reference there isn't resolved, so apply refuses one, and it
+also refuses a key that is both set and listed in `unset` in the same
+table.
+
+The full precedence for an env key, lowest to highest:
+
+1. Team config (`workspace.toml`)
+2. Workspace overlay
+3. Personal overlay (`[global]`, then `[workspaces.<name>]`)
+4. Host-local tables in `~/.config/niwa/config.toml`
+
+The personal overlay merges at the workspace level, so a team per-repo
+table (`[repos.<name>.env]`, `[repos.<name>.claude.env]`) still wins over
+it for that one repo. The host-local layer wins over both.
+
+The host-local layer is applied at materialization, so it is the last
+word for every source of a key, including env files and a repo's
+discovered `.env`, not just the config tables above it. It applies to
+every instance on that machine at its next `niwa apply` or `niwa
+create`; an instance that's already running keeps its current env until
+then. Worktrees created afterwards inherit the instance's env files and
+apply the `[claude.env]` table themselves.
+
+Apply prints one line per host key naming the layer it won over, for
+example `host-local claude.env unset "KOTO_SESSION_BACKEND" wins over
+the personal overlay`. Like the shadow diagnostics, these lines never
+print a value.
+
 ### Why there's no "replace the whole team provider" path
 
 File-local provider scoping (design D-9) rules out a single-line

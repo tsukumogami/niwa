@@ -343,6 +343,12 @@ type WorkspaceConfig struct {
 	// the overlay set it to true. An overlay false, or any base value, leaves
 	// it false. The apply uses it to say the overlay is what turned trust on.
 	TrustInstancesFromOverlay bool `toml:"-"`
+	// HostEnv is not parsed from TOML (toml:"-"). It is the host-local env
+	// layer from the machine config, carried on the effective config so every
+	// materializer applies it last; nil when the machine config declares none.
+	// Set by ResolveAndMergeEffectiveConfig on the apply path and by the
+	// worktree apply on its own.
+	HostEnv *HostEnvLayer `toml:"-"`
 	// Vault carries the optional [vault] block (anonymous [vault.provider]
 	// or named [vault.providers.<name>] shape, plus [vault].team_only).
 	// nil when the config declares no vault providers.

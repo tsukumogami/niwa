@@ -1204,11 +1204,27 @@ func emitReports(w io.Writer, reports []string) {
 // when any keys are promoted, plus inline vars.
 func resolveClaudeEnvVars(ctx *MaterializeContext) (map[string]string, []SourceEntry, error) {
 	claudeEnv := ctx.Effective.Claude.Env
-	vars, sources, err := resolveDeclaredEnvVars(ctx, "claude.env", claudeEnv.Promote, claudeEnv.Vars)
+	host := hostEnvLayer(ctx)
+	promote := claudeEnv.Promote
+	if host != nil {
+		// A key the host clears is not looked up at all, so a promote of it
+		// neither warns nor, under strict mode, refuses.
+		promote = slices.DeleteFunc(slices.Clone(promote), host.Claude.Clears)
+	}
+	vars, sources, err := resolveDeclaredEnvVars(ctx, "claude.env", promote, claudeEnv.Vars)
 	if err != nil {
 		return nil, nil, err
 	}
 	merged := mergeSessionEnv(ctx.SessionEnv, vars)
+	if host != nil && !host.Claude.IsEmpty() {
+		// Copy first: mergeSessionEnv may hand back ctx.SessionEnv itself,
+		// which every repo of the apply shares.
+		merged = maps.Clone(merged)
+		if merged == nil {
+			merged = map[string]string{}
+		}
+		sources = append(sources, applyHostEnvTable(merged, nil, "claude.env", host.Claude)...)
+	}
 	if len(merged) == 0 {
 		return nil, nil, nil
 	}
@@ -1263,10 +1279,16 @@ func resolveDeclaredEnvVars(ctx *MaterializeContext, label string, promote []str
 		// that distinction: a key in it is omitted and reported, and a key
 		// outside it is skipped with a warning that points at a possible typo.
 		unresolved := promoteUnresolvedSet(ctx)
+		host := hostEnvLayer(ctx)
 		for _, key := range promote {
 			val, found := resolvedEnv[key]
 			if found {
 				envResult[key] = val
+				continue
+			}
+			// The host cleared this key from the env pipeline on purpose, so
+			// its absence is neither a shortfall nor a typo.
+			if host != nil && host.Env.Clears(key) {
 				continue
 			}
 			if omitted, ok := unresolved[key]; ok {
@@ -1628,8 +1650,9 @@ func ResolveEnvVars(ctx *MaterializeContext) (map[string]string, []SourceEntry, 
 
 	hasVars := len(envCfg.Vars.Values) > 0 || len(envCfg.Secrets.Values) > 0
 	hasRepoFile := discovered != nil && discovered.RepoFiles != nil && discovered.RepoFiles[ctx.RepoName] != ""
+	host := hostEnvLayer(ctx)
 
-	if len(files) == 0 && !hasVars && !hasRepoFile && len(ctx.EnvExampleVars) == 0 {
+	if len(files) == 0 && !hasVars && !hasRepoFile && len(ctx.EnvExampleVars) == 0 && (host == nil || len(host.Env.Vars) == 0) {
 		return nil, nil, nil
 	}
 
@@ -1728,8 +1751,14 @@ func ResolveEnvVars(ctx *MaterializeContext) (map[string]string, []SourceEntry, 
 		})
 	}
 
-	// A discovered repo env file is the highest-priority layer, so a key it
-	// supplies is resolved after all: drop the record rather than write one
+	// The host-local layer comes after everything above, the discovered repo
+	// env file included: it is the one machine's last word on a key.
+	if host != nil {
+		sources = append(sources, applyHostEnvTable(vars, unresolved, "env", host.Env)...)
+	}
+
+	// A discovered repo env file is the highest-priority config layer, so a key
+	// it supplies is resolved after all: drop the record rather than write one
 	// beside a real assignment for the same key.
 	for k := range unresolved {
 		if _, ok := vars[k]; ok {
