@@ -451,10 +451,17 @@ value.
 - **`internal/workspace/lineage_store.go`** (new): `LineageDir(root)`,
   `CreateLineageEntry`, `CompleteLineageEntry`, `RemoveLineageEntry`,
   `ReadLineageEntry(root, id)`, `ListLineageEntries(root)` (each result an
-  entry, a later-version marker or a per-file error), with an 8 KiB read
-  cap that makes anything larger unreadable.
-- **`internal/workspace/snapshotwriter.go`**: `preserveLineage`, a copy of
-  `preserveSessionMappings` for `lineage/`, called right after it.
+  entry, a later-version marker or a per-file error). Every read opens with
+  `O_NOFOLLOW|O_NONBLOCK`, requires a regular file and reads at most 8 KiB,
+  as `ReadAuthorityRecord` does; listing ignores names that aren't a valid
+  dispatch id with `.json`; a `lineage` path that is a symlink or not a
+  directory refuses writes.
+- **`internal/workspace/snapshotwriter.go`**: `preserveLineage`, called right
+  after `preserveSessionMappings`. Unlike that step it first removes any
+  `lineage/` the fetched config source put in staging, then copies only
+  regular files named `<dispatch id>.json` within the read cap, skipping and
+  reporting anything else instead of failing the refresh, and sets the
+  directory mode to 0700.
 - **`internal/config/registry.go`**: `Principal string` in `GlobalSettings`
   (`principal` key) and `GlobalConfig.Principal() (string, error)`
   validating with the lineage pattern.
@@ -585,8 +592,11 @@ and tests.
 completion by rename, removal, single read and listing, plus
 `preserveLineage` in the snapshot refresh. Tests: modes, a duplicate id
 refusing, a failed link or rename leaving nothing at the final path (through
-a test seam), the 8 KiB cap, and an apply-style refresh keeping the
-directory. Depends on Phase 1.
+a test seam), the 8 KiB cap, a planted symlink and FIFO reading as per-entry
+errors without hanging, an apply-style refresh keeping the directory, and a
+refresh whose config source ships a `lineage/`, an oddly named file or an
+oversized file: the shipped entries are dropped, the odd files skipped and
+reported, and the refresh succeeds. Depends on Phase 1.
 
 ### Phase 3: The principal setting and the authority record fields
 
@@ -622,7 +632,19 @@ offline run with proxies pointed at a closed port, no workflow engine on
 
 ## Security Considerations
 
-<Phase 5 fills this section.>
+The lineage store is advisory local state, and the design does not try to make it tamper-proof. Any process running as the same user can write `<root>/.niwa/lineage/`, the session mappings and the authority record, so every field in an entry is a claim recorded at dispatch time, not a proof. The `source` and `trust` fields state how much niwa itself checked when it wrote the entry: `observed` means niwa saw the evidence (the instance's newest session mapping, the parent's authority record, the parent's lineage entry) at that moment, and `handed` or `unverified` mean it did not. `observed` does not mean the file is unmodified since. No gate reads the lineage store or the new authority-record fields, and a later check such as a never-wider cap must not use the principal, either parent link or any source or trust value as an input to a permission decision; those fields identify and attribute, they do not authorize. Enforcement is unchanged from today.
+
+Inputs are validated on write and again on every read. Dispatch and session ids go through the existing id validators, the instance, agent, origin, principal, source and trust fields have fixed patterns, and `written_at` must parse as RFC 3339. Unknown source and trust strings are kept so a newer niwa's values survive, but only the exact string `observed` is ever printed as observed. The declared `[global] principal` is validated when the personal config loads and an invalid value refuses the dispatch or watch launch with the key and file named; the OS account name is used only if it passes the same pattern. The principal is a label for a person: it is never taken from a token, keyring, login or the network. A session variable that is unset or malformed records the source `none`, and `--parent-from` always records `handed`; a dispatch cannot make its claimed parent look observed except by presenting what niwa itself checks, and a same-user process that can write the mapping can already do that.
+
+Reading the store is bounded so one bad entry costs only that entry. Every read opens the file with `O_NOFOLLOW` and `O_NONBLOCK`, requires a regular file, and reads at most 8 KiB, the same discipline the authority record reader applies, so a planted symlink, FIFO, directory or oversized file produces a per-entry error instead of a hang, an unrelated read or memory growth. Listing ignores names that are not a valid dispatch id with a `.json` suffix. The ancestor walk keeps a visited set and stops at 64 levels, on a cycle, on a missing, unreadable or later-version entry, so a forged parent id cannot loop or run long. Error text names the failure class only and never echoes file content, which may contain terminal escape sequences. An unreadable parent entry never refuses a dispatch: the principal falls back to the machine's and the parent link is kept.
+
+Writes use the authority record's pattern: a temporary file created `O_CREATE|O_EXCL|O_NOFOLLOW` at 0600 under a random name, synced, then hard-linked to `<dispatch id>.json` so creation is exclusive and atomic, with the temporary removed either way. The directory is created 0700; an existing `lineage` that is a symlink or not a directory is refused. Completion with the session id re-validates the entry it read, refuses a later-version entry rather than rewriting it with less, and replaces the file by rename. If the file system cannot hard-link, the write refuses; it never falls back to a non-exclusive write. A race between two same-user writers on completion is accepted: the entry is advisory and locking would add a failure mode for no gain.
+
+The configuration snapshot refresh is the one place network-delivered content and the store share a directory. `preserveLineage` therefore discards any `lineage/` the config source ships before copying the local store in, so a shared config repository cannot plant entries that read as observed. It copies only regular files named `<dispatch id>.json` and no larger than the read cap, skips and reports anything else rather than failing the apply, and sets the directory mode explicitly after the copy so a refresh does not widen 0700. Tests cover a source-shipped `lineage/`, an oddly named file, an oversized file and a symlink in the store.
+
+The only personal data stored is the principal name, which is either what the user declared or, failing that, their OS account name, plus session and dispatch ids and the instance name. All of it stays on the machine under the workspace's local configuration directory in 0600 files, and none of it goes to telemetry, to the network or to any other tool. The OS account name is recorded without the user choosing to, so the guide says that setting `[global] principal` replaces it, and that entries can be deleted from the store by hand. The store persists until the workspace is destroyed; a user who commits or shares the workspace's configuration directory should keep `lineage/` out of what they publish. The design adds no dependency beyond the Go standard library and existing niwa packages, calls nothing over the network, and does not require koto or any other tool to be installed.
+
+Residual risks accepted: a same-user process can forge or alter any entry, the authority record or a session mapping, and an inherited principal's `observed` trust is conditional on the parent's record and entry being unmodified, which niwa cannot know; a very large number of valid entries slows `list` and snapshot refreshes linearly, and a prune command is deferred.
 
 ## Consequences
 
