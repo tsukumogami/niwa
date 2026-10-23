@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Planned
+status: Current
 problem: |
   niwa has no way to declare how much a dispatched session may decide or
   which named actions it may take, no place to resolve that at dispatch,
@@ -40,7 +40,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Planned
+Current
 
 ## Context and Problem Statement
 
