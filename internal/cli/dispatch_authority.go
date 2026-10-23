@@ -242,6 +242,8 @@ func gatherLineageInputs(workspaceRoot, sessionVar string, cwdInstance workspace
 	case dispatchParentFromSet:
 	case cwdInInstance:
 		in.NewestMappedSession = newestMappedSession(workspaceRoot, cwdInstance.Instance)
+	// workspace.ValidSessionID is the store's lowercase-UUID key shape, not
+	// the looser calling-session shape lineage.Resolve accepts for the link.
 	case workspace.ValidSessionID(sessionVar):
 		if m, err := workspace.ReadSessionMapping(workspaceRoot, sessionVar); err == nil {
 			in.RootMappedDispatch = m.DispatchID
@@ -251,30 +253,31 @@ func gatherLineageInputs(workspaceRoot, sessionVar string, cwdInstance workspace
 }
 
 // newestMappedSession is the session id of the newest mapping naming the
-// instance, or "" when none does or the store can't be listed. Mappings are
-// grouped by their cleaned instance path. FindInstance resolves symlinks and
-// the path a mapping records may not be resolved, so when no group matches
-// the instance as given, a group whose path resolves to it stands in.
+// instance, or "" when none does or the store can't be listed. FindInstance
+// resolves symlinks and the path a mapping records may not be resolved, so a
+// mapping names the instance when its cleaned path is the instance's or
+// resolves to it. Every such mapping is then grouped under the instance's
+// path, whatever its spelling, so NewestMappingPerInstance picks the newest
+// of them all.
 func newestMappedSession(workspaceRoot, instance string) string {
 	mappings, err := workspace.ListSessionMappings(workspaceRoot)
 	if err != nil {
 		return ""
 	}
-	newest := workspace.NewestMappingPerInstance(mappings)
 	key := filepath.Clean(instance)
-	if m, ok := newest[key]; ok {
-		return m.SessionID
-	}
-	var same []workspace.SessionMapping
-	for path, m := range newest {
-		if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved == key {
-			same = append(same, m)
+	var named []workspace.SessionMapping
+	for _, m := range mappings {
+		path := filepath.Clean(m.InstancePath)
+		if path != key {
+			resolved, err := filepath.EvalSymlinks(path)
+			if err != nil || resolved != key {
+				continue
+			}
 		}
+		m.InstancePath = key
+		named = append(named, m)
 	}
-	for _, m := range workspace.NewestMappingPerInstance(same) {
-		return m.SessionID
-	}
-	return ""
+	return workspace.NewestMappingPerInstance(named)[key].SessionID
 }
 
 // dispatchParent finds the dispatcher's own record: through --parent-from

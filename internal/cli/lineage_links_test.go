@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -8,6 +9,49 @@ import (
 	"github.com/tsukumogami/niwa/internal/lineage"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
+
+// TestNewestMappedSession_AcrossSymlinkedSpellings: a mapping that records
+// the instance through a symlink names the same instance as one that records
+// its resolved path, and the newest of them wins whichever spelling it uses.
+func TestNewestMappedSession_AcrossSymlinkedSpellings(t *testing.T) {
+	real, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := filepath.Join(real, "test-ws-1")
+	if err := os.MkdirAll(instance, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "root-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	const older, newer = "a1a1a1a1-1111-4111-8111-a1a1a1a1a1a1", "b2b2b2b2-2222-4222-8222-b2b2b2b2b2b2"
+	now := time.Now().UTC()
+	for _, tc := range []struct{ name, olderPath, newerPath string }{
+		{"newest under the symlinked spelling", instance, filepath.Join(link, "test-ws-1")},
+		{"newest under the resolved spelling", filepath.Join(link, "test-ws-1"), instance},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, m := range []workspace.SessionMapping{
+				{SessionID: older, InstancePath: tc.olderPath, Created: now.Add(-time.Hour)},
+				{SessionID: newer, InstancePath: tc.newerPath, Created: now},
+				{SessionID: "c3c3c3c3-3333-4333-8333-c3c3c3c3c3c3", InstancePath: filepath.Join(real, "test-ws-2"), Created: now.Add(time.Hour)},
+			} {
+				if err := workspace.WriteSessionMapping(root, m); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := newestMappedSession(root, instance); got != newer {
+				t.Errorf("newest = %q, want %q", got, newer)
+			}
+		})
+	}
+	if got := newestMappedSession(t.TempDir(), instance); got != "" {
+		t.Errorf("an empty store names %q", got)
+	}
+}
 
 // TestDispatchLineage_LinkSources dispatches once per row of the parent
 // session and parent dispatch rules and checks the entry records the source

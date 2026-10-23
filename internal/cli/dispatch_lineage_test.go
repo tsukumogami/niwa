@@ -141,6 +141,8 @@ func TestParentSessionID(t *testing.T) {
 			if k == "PARENT_ID" {
 				return v
 			}
+			// Every other variable holds a valid id, so a read of the
+			// wrong one shows up as a non-empty result.
 			return "6f1a2b3c-aaaa-bbbb-cccc-1234567890ab"
 		}
 	}

@@ -21,9 +21,11 @@ type Inputs struct {
 	DeclaredPrincipal   string // already validated; "" when not declared
 }
 
-// lowercaseUUID is the key shape the session mapping store accepts. A
+// lowercaseUUID is the key shape the session mapping store accepts, the one
+// workspace.ValidSessionID checks before the caller looks a mapping up. A
 // session variable of any other shape never names a mapping, so the root
-// fallback skips it.
+// fallback skips it. It is repeated here, rather than imported, to keep this
+// package free of the store; change the two together.
 var lowercaseUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // Resolve applies the parent-session and parent-dispatch source rules, each
