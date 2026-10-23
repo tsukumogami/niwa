@@ -343,7 +343,10 @@ instance was built from.
 `grant_ceiling_source` is `none` only when no layer declares a ceiling.
 `"grant_ceiling": [], "grant_ceiling_source": "none"` means the workspace
 never opted in; `"grant_ceiling": [], "grant_ceiling_source": "workspace"`
-means it declared `ceiling = []`, so no session may hold anything.
+means it declared `ceiling = []`, so no session may hold anything. Plain
+`show` prints those two as `grant ceiling: (empty) from none` and
+`grant ceiling: (empty) from workspace`, the same way `niwa authority policy`
+prints them.
 
 ### Versions
 

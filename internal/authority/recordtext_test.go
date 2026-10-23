@@ -53,7 +53,7 @@ func TestRecordText_NoCeilingDeclaredAndNoParent(t *testing.T) {
 	rec.ParentSessionID, rec.ParentDispatchID, rec.ParentDispatchSource = "", "", ParentSourceNone
 	text := rec.Text()
 	for _, want := range []string{
-		"grant ceiling: none (no layer declares one)\n",
+		"grant ceiling: (empty) from none\n",
 		"roles: none\n",
 		"grant: none\n",
 		"parent session id: none\n",
@@ -62,6 +62,15 @@ func TestRecordText_NoCeilingDeclaredAndNoParent(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("text lacks %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestRecordText_DeclaredEmptyCeiling(t *testing.T) {
+	rec := goldenRecord()
+	rec.GrantCeiling, rec.GrantCeilingSource = []Authority{}, LayerWorkspace
+	rec.Roles, rec.Grant = nil, nil
+	if text := rec.Text(); !strings.Contains(text, "grant ceiling: (empty) from workspace\n") {
+		t.Errorf("text lacks the declared-empty ceiling line:\n%s", text)
 	}
 }
 

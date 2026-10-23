@@ -73,15 +73,9 @@ func (r Record) Text() string {
 	fmt.Fprintf(&b, "dispatch id: %s\n", r.DispatchID)
 	fmt.Fprintf(&b, "level: %s from %s\n", r.Level, r.LevelSource)
 	fmt.Fprintf(&b, "level ceiling: %s from %s\n", r.LevelCeiling, r.LevelCeilingSource)
-	ceiling := "none"
-	if len(r.GrantCeiling) > 0 {
-		ceiling = strings.Join(names(r.GrantCeiling), ", ")
-	}
-	if r.GrantCeilingSource == LayerNone {
-		fmt.Fprintf(&b, "grant ceiling: %s (no layer declares one)\n", ceiling)
-	} else {
-		fmt.Fprintf(&b, "grant ceiling: %s from %s\n", ceiling, r.GrantCeilingSource)
-	}
+	// Rendered as `niwa authority policy` renders it, so "none" only ever
+	// names the source of a ceiling no layer declares.
+	fmt.Fprintf(&b, "grant ceiling: %s from %s\n", listText(r.GrantCeiling), r.GrantCeilingSource)
 	roles := "none"
 	if len(r.Roles) > 0 {
 		roles = strings.Join(r.Roles, ", ")
