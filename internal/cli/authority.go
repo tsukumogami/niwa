@@ -54,7 +54,9 @@ var authorityCmd = &cobra.Command{
 
 A workspace declares its authority level, grant ceiling and roles in the
 [authority] table of .niwa/workspace.toml; an overlay and the machine config
-can only narrow them.`,
+can only narrow them. policy shows what the workspace declares; show reads
+back what a dispatch was granted; decide says who settles a decision point
+for it.`,
 }
 
 var authorityPolicyCmd = &cobra.Command{

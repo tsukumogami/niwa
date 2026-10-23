@@ -502,6 +502,12 @@ type InstanceRecord struct {
 	// for the same instance recorded a valid name. omitempty keeps the --json
 	// shape unchanged for those instances.
 	SessionName string `json:"session_name,omitempty"`
+	// Authority is the instance's dispatch authority as `niwa authority show
+	// --json` prints it, or an object holding only an "error" naming why its
+	// record can't be used. EnumerateInstanceRecords leaves it empty and the
+	// list command fills it in; omitempty keeps the key off an instance with
+	// no record.
+	Authority json.RawMessage `json:"authority,omitempty"`
 }
 
 // EnumerateInstanceRecords enumerates the instances under workspaceRoot as
