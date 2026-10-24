@@ -18,7 +18,8 @@ goals: |
   dispatcher; a session can read back its own grant and get the gate's answer;
   and no session gets a more permissive verdict than today's hook would give it,
   except one whose grant allows the action.
-upstream: docs/briefs/BRIEF-gates-honour-grant.md
+absorbed:
+  - docs/briefs/BRIEF-gates-honour-grant.md
 ---
 
 # PRD: gates-honour-grant
@@ -26,6 +27,45 @@ upstream: docs/briefs/BRIEF-gates-honour-grant.md
 ## Status
 
 Accepted
+
+Absorbed [BRIEF-gates-honour-grant](docs/briefs/BRIEF-gates-honour-grant.md); carried in Absorbed Brief.
+
+Phase 4 jury: completeness and testability passed on re-review after the
+revision that added the verdict table, the numeric lookup bounds and a
+criterion for every requirement; clarity failed both rounds, and its
+second-round findings (the pre-capture binding, the unusable-record posture,
+the baseline commit, the timeout variable) were fixed in place without a
+third round.
+
+## Absorbed Brief
+
+niwa records, before a dispatched session starts, which named authorities
+it holds and where each came from, and that record is the one place a
+dispatcher says what a session may land. Nothing that decides a landing
+reads it. The workspace's gate decides merges from a list of instance names
+and asks a person before every close and release, so a coordinator hand-off
+is a configuration change, a session's grant has no effect at the moment it
+matters, a refusal says nothing about what was missing, delegation can widen
+authority, and `/coordinate` hands every merge to a person.
+
+What should be true instead is that whoever dispatches a session decides, at
+dispatch, what it may land, and that decision holds without anyone touching
+the workspace afterwards. A successor coordinator granted merge, close and
+release does all three as its first actions; a refused session reads what it
+holds and what it lacks and hands the step back to its dispatcher; a child
+can't be granted more than its dispatcher; a dispatched session can read its
+own grant and get the gate's answer; and an operator or owner working
+somewhere with no grant sees nothing change.
+
+The feature holds in the session's read-back, the gate honouring the grant
+for merging, closing and releasing, moving dispatched sessions off the
+instance list, telling a dispatched session from a hand-started one in the
+same instance, refusing a wider child at dispatch, `/coordinate` acting on
+its grant, and making `cut-release` grantable in this workspace. It pushes
+out stronger enforcement, the rest of never-wider, author exclusion, new
+gated actions, refusal routing, moving the gate into niwa, the koto decision
+record, and redesigning `/coordinate`'s dispatch, each set out in Out of
+Scope below.
 
 ## Problem Statement
 
