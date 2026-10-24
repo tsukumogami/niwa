@@ -381,8 +381,9 @@ func dispatchParent(cwd, workspaceRoot string) (*authority.Record, string, works
 // dispatch wrote: that dispatch's record caps the child, and a record that is
 // missing, unusable or names another dispatch caps at nothing. A Codex worker
 // inherits its dispatcher's variable, so it may name an ancestor rather than
-// the caller; an ancestor's grant is at least as wide, so this never refuses
-// wrongly. No such mapping, no dispatcher.
+// the caller; an ancestor dispatched under this rule holds at least what its
+// descendants do, so this never refuses wrongly. No such mapping, no
+// dispatcher.
 //
 // A dispatch from outside every instance that names an instance with
 // --parent-from takes both: the named instance's cap and the calling

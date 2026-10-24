@@ -6,10 +6,11 @@ import (
 	"strings"
 )
 
-// rootContextNiwaPath is the absolute niwa path the session-context hook
-// falls back to when PATH has no niwa, or "" when it can't be resolved, in
-// which case no context hook is written: a PATH-only hook would run nothing
-// in exactly the environments the fallback exists for.
+// rootContextNiwaPath is the absolute path of the running niwa, or "" when it
+// can't be resolved. The session-context hook falls back to it when PATH has
+// no niwa, and the settings documents carry it as NIWA_BIN. With "" neither is
+// written: a PATH-only hook would run nothing in exactly the environments the
+// fallback exists for, and a hook then finds niwa on PATH or not at all.
 func rootContextNiwaPath() string {
 	p, err := os.Executable()
 	if err != nil {

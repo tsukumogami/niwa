@@ -257,6 +257,9 @@ niwa: error: authority close-issue (requested by --grant) is wider than the disp
 niwa: error: authority merge-pr (requested by --grant) is wider than the dispatcher's grant: the dispatcher's record is missing or can't be used, so it holds none (dispatch 3c803591-4c01-486f-a927-f96ec399d6a7)
 ```
 
+Every line of this refusal contains `is wider than the dispatcher's grant:`,
+which no other refusal does, so a caller that reports it can match on that.
+
 `--parent-from` only chooses which instance is the dispatcher; it never adds
 to what may be passed on. Run from outside every instance by a session whose
 own mapping names a dispatch, it's capped by both the named instance and that
