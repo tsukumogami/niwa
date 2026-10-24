@@ -1,7 +1,6 @@
 ---
 schema: design/v1
-status: Proposed
-upstream: docs/prds/PRD-gates-honour-grant.md
+status: Accepted
 problem: |
   niwa's authority record is per instance and written before launch, but the
   session mapping that ties a session id to a dispatch is written only after the
@@ -13,8 +12,9 @@ problem: |
 decision: |
   niwa adds `niwa authority check`, one read-only lookup taking a session id, an
   anchor directory and decision points, which binds the session to the instance's
-  dispatch through the dispatch-written mapping, or before capture through the
-  agent's own session records matched the way capture matches them, and answers
+  dispatch through the dispatch-written mapping, the lineage entry's session id,
+  or, only while a capture is pending, the agent's own session records matched
+  the way capture matches them, and answers
   `bound`, `record-unusable` or `not-dispatched` with the grant and each point's
   decider. Dispatch refuses a grant wider than the dispatcher's record, the
   SessionStart hook stops overwriting dispatch mappings, and niwa puts its own
@@ -32,6 +32,7 @@ rationale: |
   and adding one call only on gated commands keeps every other command's cost
   and verdict unchanged. Each repo can ship on its own: an old gate ignores the
   new command, and an old niwa reads as a failed lookup.
+upstream: docs/prds/PRD-gates-honour-grant.md
 decision_provenance: inline-resolved
 ---
 
@@ -39,7 +40,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
@@ -130,6 +131,8 @@ is accepted (Out of Scope in the PRD).
 
 ### Decision 1: The lookup's surface
 
+Resolved inline.
+
 The gate, `/coordinate` and the session need one call that answers binding,
 grant and deciders together (R1). The question is whether that's a new
 command or new flags on `show` and `decide`.
@@ -156,24 +159,45 @@ files the PRD rules out.
 
 ### Decision 2: Binding a session before capture
 
+Resolved inline.
+
 R4 requires the worker to be bound from its first command, while the mapping
 is written after launch.
 
-#### Chosen: the lookup applies capture's own match when capture hasn't finished
+#### Chosen: three sources in order, the last only inside a capture-pending window
 
-With no mapping for the session id, the lookup checks that the instance's
-record is usable, that the dispatch's lineage entry exists, names an agent,
-and has no session id yet (capture hasn't reached step 10a), and that no
-dispatch-written mapping names the instance. It then reads that agent's
-session records with the same function capture uses (`matchRecordByCwd`
-against the instance directory). If exactly one record claims the instance
-and its id is the payload's session id, the session is `bound`, with
-`"binding": "records"`. Anything else (no record yet, two records, another
-id) is `not-dispatched`. Once capture finishes the mapping takes over
-(`"binding": "mapping"`). Nothing is written by the lookup.
+The lookup binds from whichever of these niwa has reached, in order:
 
-This needs no launch change, works for every agent whose spec declares
-session records, and can't bind a session capture wouldn't have bound.
+1. **The mapping** (`"binding": "mapping"`), once step (11) wrote it.
+2. **The lineage entry's session id** (`"binding": "lineage"`), once step
+   (10a) wrote it and before the mapping lands: the entry names the
+   instance, its `session_id` equals the payload's, and its `dispatch_id`
+   equals the record's.
+3. **The agent's own session records** (`"binding": "records"`), before
+   step (10a), and only while a capture is pending. Just before launch,
+   dispatch writes `<instance>/.niwa/capture-pending.json` holding the
+   dispatch id, its own process id and the launch time, and removes it once
+   capture has an outcome: after the mapping write on success, and on every
+   failure path. The lookup uses this source only when that file exists,
+   names the record's dispatch, and its process is still alive. It then reads
+   the agent's session records with capture's own function
+   (`matchRecordByCwd` against the instance directory); exactly one record
+   claiming the instance, whose id is the payload's, binds. No record, two
+   records, or another id is `not-dispatched`.
+
+When none applies the answer is `not-dispatched`. A capture that times out,
+refuses an ambiguous match, or dies with its dispatch closes the window,
+so a session started by hand later can never be bound through records. The
+lookup writes nothing.
+
+Inside the window this source binds exactly what capture is about to bind:
+the same function, the same directory, the same moment. A hand-started
+session that appears in the window beside the worker makes the match
+ambiguous, so neither is bound and capture itself refuses it. The one
+residual case is a hand-started background session whose record appears
+before the worker's own does, in the milliseconds after launch; capture
+would bind that same session today, so this adds no new failure, and the
+Security Considerations record it.
 
 #### Alternatives Considered
 
@@ -192,7 +216,13 @@ the window could claim it.
 5-second hook budget, and a foreground Codex worker's mapping can take a
 whole turn.
 
+**Bound the records source by a fixed time after launch.** Rejected: a
+foreground worker's capture runs after its whole turn, so no fixed bound
+fits both launch modes; the dispatch process's own liveness does.
+
 ### Decision 3: Letting a hook find niwa
+
+Resolved inline.
 
 R8 requires a hook to run niwa when the harness's `PATH` lacks it. niwa's
 own hook commands already solve this with a PATH-first command that falls
@@ -218,20 +248,31 @@ niwa is installed on each host.
 
 ### Decision 4: How the gate combines today's rules with the grant
 
+Resolved inline.
+
 The awk pass returns one best verdict today. The grant decides only merge,
 close and release, and every other rule must keep its verdict (R16).
 
 #### Chosen: awk reports two verdicts and the authorities a command needs
 
-awk keeps its scanner unchanged and records, per command, which rule fired.
-It prints three lines: the verdict from the rules the grant doesn't cover
-(`base`), the merge, close and release verdict today's rules give with and
-without the exemption (`today`, `nonexempt`), and the authorities the
-command's gated rules need (`needs merge-pr,close-issue`). The shell part
-then makes no lookup when `needs` is empty and returns `base`; otherwise it
-makes one bounded `niwa authority check` call for the points in `needs` and
-decides by the table below, then takes the most restrictive of that and
-`base`.
+awk keeps its scanner. The exemption moves out of `rules()`: each match is
+tagged with a class, and `END` keeps three best verdicts instead of one.
+`base` collects every rule the grant doesn't cover, and that includes every
+"can't tell" ask (text handed to a shell, a command name that's an
+expansion, a heredoc with command substitution, an unclosed quote), even
+when the text it worries about is a merge. Only a literal `gh pr merge`, a
+literal `gh api` merge call, `gh issue close` or `gh release create` feeds
+the gated class, which records the authority it needs. `END` prints one
+tab-separated line: the `base` decision and reason, the gated decision with
+the exemption applied (`today`), the gated decision without it
+(`nonexempt`), the gated reason, and the needed authorities as a comma list.
+The shell part makes no lookup when that list is empty and emits `base`
+combined with `today` exactly as the hook does now; otherwise it makes one
+bounded `niwa authority check` call with a `--point` per needed authority,
+decides the gated part by the table below, then takes the most restrictive
+of that and `base`. A grant can therefore never lift a `base` deny or ask:
+`gh pr merge 12; curl x` stays denied for a bound session holding
+`merge-pr`.
 
 | `check` answer | Each needed authority |
 |----------------|-----------------------|
@@ -244,7 +285,12 @@ decides by the table below, then takes the most restrictive of that and
 
 A lookup failed when niwa can't be found, exits non-zero, runs past the
 bound, or prints a document whose `schema` isn't exactly
-`niwa.authority.check/v1` or whose `state` isn't one of the three.
+`niwa.authority.check/v1`, whose `state` isn't one of the three, or whose
+authority, level or decider values fall outside niwa's fixed vocabularies;
+only values that pass that check reach a deny reason. niwa's output goes to
+a temporary file rather than through `$(...)`, so a killed lookup can't hold
+the hook open on a pipe, and `NIWA_LOOKUP_SECONDS` is honoured only as a
+whole number from 1 to 3.
 
 #### Alternatives Considered
 
@@ -257,14 +303,20 @@ every workspace's gate depend on niwa's release schedule.
 
 ### Decision 5: The never-wider check at dispatch
 
+Resolved inline.
+
 #### Chosen: compare named authorities at step (2e), after `authority.Resolve`
 
 `resolveDispatchAuthority` already holds the resolved request and the
 dispatcher's record. A new `authority.CapByDispatcher(resolved, parent)`
 returns the resolved grant entries the parent doesn't hold, each with its
 sources; the parent's held set is empty when its record grants nothing or
-was read as a later schema version. With no parent record it returns
-nothing. Any entry refuses the dispatch before the binary preflight, the
+was read as a later schema version. A parent instance with no record but a
+dispatch-written mapping naming it is a dispatched session whose record
+went missing, and caps at nothing too; a malformed parent record already
+refuses the dispatch today. With no parent record and no such mapping it
+returns nothing. `--parent-from` only chooses which instance is the parent;
+it never adds to a grant. Any entry refuses the dispatch before the binary preflight, the
 prompt and provisioning, with one line per authority:
 
 ```text
@@ -286,19 +338,30 @@ dispatcher's variable, so it would name the wrong parent.
 
 ### Decision 6: Where `/coordinate` reads the grant
 
+Resolved inline.
+
 #### Chosen: `posture-read.sh` asks `niwa authority check` before reading hooks
 
 `posture-read.sh` already finds the instance root. When niwa is found (the
 same PATH-then-`NIWA_BIN` order as the gate) and `CLAUDE_CODE_SESSION_ID` is
 set, it runs `niwa authority check --json --session "$CLAUDE_CODE_SESSION_ID"
 -C <instance root> --point merge-pr --point close-issue --point cut-release`,
-bounded at 3 seconds. For `bound`, merge, close and release take `permit` or
-`deny` from the answer by the gate's table, and teardown is read as today.
-For `record-unusable`, merge is `deny` and the rest is read as today. For
-anything else, the whole token is today's. A new `release` step joins
-`merge`, `close` and `teardown`, matched by `gh release create` in the
-hook-text reading, so the token gains `release:<v>`; its readers parse steps
-by name, so the extra field doesn't break them.
+bounded at 3 seconds. The permission-rule and `defaultMode` reading stays
+as it is for every step, because a gate's allow still passes through Claude
+Code's own permissions. For `bound`, the grant replaces only the hook-text
+step for merge, close and release: each takes the more restrictive of its
+permission-rule reading and the grant's answer by the gate's table, and
+teardown is read as today. For `record-unusable`, merge is `deny` and the
+rest is read as today. For anything else, the whole token is today's. A new
+`release` step is appended after `teardown`, matched by `gh release create`
+in the hook-text reading, so the token gains a trailing `release:<v>`; the
+design checks each reader of the token (`bl_posture_merge`,
+`coord-verdict.sh`, `record-confirm.sh`, `land-check.sh`) parses steps by
+name before the field is added.
+
+The coordinator's own grant, which it passes to a successor (PRD R21), is
+the `grant` list of the same answer; the dispatcher it names in a need
+(R22) is the answer's `parent` field.
 
 `bl_merge_posture`, `land-check.sh` and `land-merge.sh` keep calling
 `posture-read.sh`, so the land re-read gets the grant answer with no change
@@ -358,16 +421,25 @@ niwa dispatch (2e) -> Resolve -> CapByDispatcher(parent record) -> refuse | cont
   as `show -C` does (absolute, existing, in an instance of this workspace,
   outermost instance, a niwa worktree counts as its instance) and the
   session id as `workspace.ValidSessionID`, refusing with exit 1 and empty
-  stdout otherwise. It reads the record, the mapping, and, only for the
-  pre-capture case, the lineage entry and the agent's session records. It
-  runs under the same two-second watchdog `show` uses.
+  stdout otherwise. It reads the record and the mapping, and when there's no
+  mapping the lineage entry, the capture-pending file and, inside that
+  window, the agent's session records. It runs under the same two-second
+  watchdog `show` uses.
+- `internal/cli/dispatch.go`: writes `<instance>/.niwa/capture-pending.json`
+  (dispatch id, process id, launch time) immediately before launch and
+  removes it after the mapping write, on a capture failure, and in the
+  rollback, so no path leaves it behind with a live process.
 - `internal/cli/dispatch_capture.go`: `matchRecordByCwd` is reused by the
   lookup as it is; no behaviour change.
 - `internal/cli/dispatch_authority.go`: calls `CapByDispatcher` after
   `authority.Resolve` and again in `recheckDispatchAuthority`.
-- `internal/cli/instance_from_hook.go`: before writing a mapping, reads any
-  existing mapping for the session id and leaves an `origin: dispatch` one in
-  place (R25).
+- `internal/cli/instance_from_hook.go`: right after the session id passes
+  `ValidSessionID`, and before it provisions anything, reads any existing
+  mapping for the id and returns without action when that mapping is
+  `origin: dispatch` (R25). The read-then-write can race a dispatch writing
+  the same id at the same instant, which needs a session id the dispatch has
+  only just captured; the guard closes the ordinary case, a resume whose
+  SessionStart fires at the workspace root.
 - `internal/workspace/materialize.go`: adds `NIWA_BIN` to every Claude
   settings document's `env`.
 - `docs/guides/authority-grants.md`: the `check` command, its document, the
@@ -376,12 +448,13 @@ niwa dispatch (2e) -> Resolve -> CapByDispatcher(parent record) -> refuse | cont
 
 **dot-niwa**
 
-- `.niwa/hooks/pre_tool_use/gate-online.sh`: the awk `rules()` function tags
-  each match with its class (`base`, or the authority it needs); `END`
-  prints `base`, `today`, `nonexempt` and `needs`; the shell adds the niwa
-  locator, a bounded lookup function in the guide's style (`timeout` when
-  present, a background job and `kill` otherwise), the jq checks, and the
-  table. The header comment describes the grant rule and that
+- `.niwa/hooks/pre_tool_use/gate-online.sh`: `rules()` tags each match with
+  its class and no longer applies the exemption; `END` keeps the `base` and
+  gated verdicts apart and prints the one tab-separated line Decision 4
+  describes; the shell adds the niwa locator (`command -v niwa`, then
+  `$NIWA_BIN`), a bounded lookup in the guide's style (`timeout` when
+  present, a background job and `kill` otherwise) writing to a temporary
+  file, the jq vocabulary checks, and the table. The header comment describes the grant rule and that
   `GATE_MERGE_EXEMPT_INSTANCE` now applies only to sessions niwa didn't
   dispatch.
 - `tests/gate-online.test.sh`: a stub `niwa` on `PATH` that prints a fixture
@@ -396,10 +469,12 @@ niwa dispatch (2e) -> Resolve -> CapByDispatcher(parent record) -> refuse | cont
 
 **shirabe**
 
-- `skills/coordinate/scripts/posture-read.sh`: the grant read before the
-  settings and hooks read, the `release` step, and a `source=grant` detail in
-  the `coord/posture.json` context key so a reader can tell where a step's
-  posture came from.
+- `skills/coordinate/scripts/posture-read.sh`: the grant read, which for a
+  bound session replaces only the hook-text step for merge, close and
+  release; the trailing `release` step; and a `source=grant` detail in the
+  `coord/posture.json` context key so a reader can tell where a step's
+  posture came from. Its readers (`board-lib.sh`, `coord-verdict.sh`,
+  `record-confirm.sh`, `land-check.sh`) are checked to parse steps by name.
 - `skills/coordinate/scripts/dispatch-worker.sh`: adds `--grant` (from the
   brief's new `grant` field) and `--parent-from <own instance root>` when
   `niwa dispatch --help` lists them, using the probe it already runs for
@@ -428,6 +503,7 @@ niwa dispatch (2e) -> Resolve -> CapByDispatcher(parent record) -> refuse | cont
   "state": "bound",
   "binding": "mapping",
   "dispatch_id": "3c803591-4c01-486f-a927-f96ec399d6a7",
+  "parent": {"dispatch_id": "9f0c2a11-77b2-4d0e-8a51-0c1d2e3f4a5b", "instance": "ws+coordinator-1a2b3c4d"},
   "grant": [
     {"authority": "merge-pr", "sources": ["role:coordinator"]},
     {"authority": "close-issue", "sources": ["role:coordinator"]}
@@ -445,8 +521,9 @@ niwa dispatch (2e) -> Resolve -> CapByDispatcher(parent record) -> refuse | cont
 |-------|---------|---------|
 | `schema` | always | `niwa.authority.check/v1`; additive fields don't change it |
 | `state` | always | `bound`, `record-unusable` or `not-dispatched` |
-| `binding` | `bound` | `mapping` (captured) or `records` (before capture) |
+| `binding` | `bound` | `mapping`, `lineage` (session id recorded, mapping not yet written) or `records` (capture pending) |
 | `dispatch_id` | `bound`, `record-unusable` | the dispatch the mapping or lineage entry names |
+| `parent` | `bound`, when the record names one | the dispatcher's dispatch id and, when its lineage entry still exists, its instance name; `/coordinate` names this in a need |
 | `grant` | always | held entries with sources, `[]` unless `bound` |
 | `level`, `level_source` | `bound` | the record's level |
 | `points` | `bound` | one entry per `--point`, decided as `decide` decides it |
@@ -466,7 +543,10 @@ or `session: not dispatched (no-mapping); grant: none` and
 Exit 0 for every state; exit 1 with empty stdout for a bad `-C`, a session
 id that isn't a lowercase UUID, a directory in no instance, or the watchdog;
 exit 2 for a usage error. A record from niwa 0.36.0 or 0.37.0 is read by the
-same code `show` uses, so its grant reads as recorded (R27).
+same code `show` uses, so its grant reads as recorded (R27). A record in a
+later schema version binds as usual and reads as `bound` with an empty grant
+and level `strict`, the way `show` already reads it, so every gated action
+is denied naming `holds none`.
 
 ### Data Flow
 
@@ -479,10 +559,13 @@ same code `show` uses, so its grant reads as recorded (R27).
    (`mapping`); otherwise `record-unusable` with the matching reason.
 4. Mapping present any other way: `not-dispatched` (`hook-mapping` or
    `other-instance`).
-5. No mapping: if the record is usable, its lineage entry has an agent and
-   no session id, and no dispatch-written mapping names `I`, match the
-   agent's session records against `I`; exactly one match whose id is `S`
-   is `bound` (`records`). Otherwise `not-dispatched` (`no-mapping`).
+5. No mapping, record usable, and its dispatch's lineage entry names `I`
+   with `session_id` equal to `S`: `bound` (`lineage`).
+6. No mapping, record usable, lineage `session_id` empty, and
+   `I/.niwa/capture-pending.json` names the record's dispatch with a live
+   process: match the lineage entry's agent's session records against `I`;
+   exactly one match whose id is `S` is `bound` (`records`).
+7. Otherwise `not-dispatched` (`no-mapping`).
 
 A session resumed through niwa's resume (`claude attach`) keeps its id, so
 step 3 still binds it. A subagent's payload carries its parent's id. A
@@ -496,22 +579,29 @@ decision and makes no niwa call. Otherwise the shell runs one `check` with
 and applies the table.
 
 **Dispatch.** (2e) resolves, reads the parent, caps; (8a) resolves again,
-caps again, writes the record; launch; capture; lineage session id; mapping.
+caps again, writes the record; capture-pending file; launch; capture;
+lineage session id; mapping; capture-pending file removed.
 
 ## Implementation Approach
 
 The work lands in three repositories, niwa first, because the gate and
 `/coordinate` call a command only a new niwa has. Each later step is safe
-against an older niwa (a failed lookup), so the order is for usefulness, not
-for safety.
+against an older niwa (a failed lookup), so the order is mostly for
+usefulness. Two orderings matter for behaviour: the ceiling change lands
+before or with the gate, because the gate turns a bound session's
+`gh release create` from ask into deny unless the session can hold
+`cut-release`; and the shirabe phase depends on the niwa release that ships
+`check`.
 
 ### Phase 1: niwa lookup and binding (niwa)
 
-`internal/authority/check.go`, `internal/cli/authority_check.go`, unit tests
-for every binding branch with fake records, mappings, lineage entries and
-agent session records, and functional scenarios with the fake agent: bound
-by mapping, bound by records with capture held back by the existing test
-seam, hand-started session, SessionStart-hook mapping, other instance, other
+`internal/authority/check.go`, `internal/cli/authority_check.go`, the
+capture-pending file in `dispatch.go`, unit tests for every binding branch
+with fake records, mappings, lineage entries, pending files and agent
+session records, and functional scenarios with the fake agent: bound by
+mapping, by lineage, and by records with capture held back by the existing
+test seam; a capture that times out and a dispatch process that's killed,
+each followed by a hand session that must read `not-dispatched`; hand-started session, SessionStart-hook mapping, other instance, other
 dispatch, deleted and malformed record, after destroy, a niwa worktree, and
 the 0.36.0 and 0.37.0 record fixtures. A regression test pins `show`, `show
 --json` and `decide` output. The `TestCI_AuthorityRunsWithoutKoto` guard
@@ -526,20 +616,21 @@ narrower launches; dispatcher with no grant; later-version dispatcher; no
 dispatcher record; a hand session in a granted instance (the PRD's pinned
 limitation). Guide update. A niwa release follows this phase.
 
-### Phase 3: the gate (dot-niwa)
+### Phase 3: the workspace ceiling (dot-niwa)
+
+`cut-release` in the ceiling and the coordinator role, separate from the
+gate change so the owner can sign it off on its own, and merged before or
+with Phase 4.
+
+### Phase 4: the gate (dot-niwa)
 
 The awk split, the lookup, the table and the stub-driven case table, with
 the comparison against the hook at `2a98f60`. Runs in the existing
 `test-hooks.yml` matrix with no niwa installed.
 
-### Phase 4: the workspace ceiling (dot-niwa)
-
-`cut-release` in the ceiling and the coordinator role, separate from the
-gate change so the owner can sign it off on its own.
-
 ### Phase 5: `/coordinate` (shirabe)
 
-The posture read and `release` step; the dispatch flags and the brief's
+After the niwa release from Phase 2. The posture read and `release` step; the dispatch flags and the brief's
 grant line; the need wording; the template and skill text; the merge-policy
 amendment. Tests drive `posture-read.sh` with a stub niwa and the existing
 fixture instances.
@@ -551,20 +642,31 @@ files: the record, the mapping and the lineage entry, plus the agent's own
 session records. A process running as the operator can forge any of them,
 which today's threat model already accepts: anything running as the operator
 can act with the operator's rights, and the gate is a text-matching hook a
-session can go around. This design doesn't make that worse. It adds no path
-that binds a session niwa didn't launch: a hand-started session has no
-mapping and, before capture, either no matching session record or a second
-one that makes the match ambiguous, which reads as `not-dispatched`.
+session can go around. This design doesn't make that worse. A session
+started by hand in an instance never gets a mapping (niwa's SessionStart
+provisioning runs only at the workspace root), never matches the lineage
+entry's session id, and can be bound through records only inside a capture
+window, beside the worker it would collide with.
 
-**The pre-capture window.** In the window between launch and capture, a
-second background session started by hand in the same instance produces two
-records claiming its directory. The lookup then binds neither, which is the
-safe answer: the dispatched worker falls to today's verdict until capture
-writes its mapping, and capture itself refuses an ambiguous match as it does
-today.
+**The pre-capture window.** The records source is open only while
+`capture-pending.json` exists and the dispatch process that wrote it is
+alive, so a capture that times out, refuses an ambiguous match, or is killed
+closes it, and a session started later reads `not-dispatched`. Inside the
+window a second background session started by hand in the instance makes the
+match ambiguous, and neither binds; capture refuses the same ambiguity. The
+residual case is a hand-started background session whose record lands before
+the worker's own, in the milliseconds after launch: the lookup would bind it
+for that instant, and capture would then bind it permanently, exactly as
+capture does today. The process-id check can be fooled by process-id reuse
+on the same host, which needs the dispatch to die and an unrelated process
+to take its id while the file remains; the file is removed on every exit
+path niwa controls.
 
 **Failure direction.** Every lookup failure (no niwa, old niwa, hang, bad
-output, unknown schema, unknown state) reads as today's verdict. A
+output, unknown schema, unknown state, a value outside niwa's vocabularies)
+reads as today's verdict. A grant can't lift a verdict the gate reached
+without it: uncertain commands stay in `base`, and the final verdict is the
+most restrictive of `base` and the grant's. A
 `record-unusable` answer reads as the non-exempt verdict, so a dispatched
 session can't regain the exemption by deleting its record.
 
@@ -579,13 +681,22 @@ included. The gate bounds its one call at 3 seconds behind niwa's own
 two-second watchdog, and its whole run at 5 seconds, well under the
 60-second default.
 
-**`NIWA_BIN` in the environment.** The variable names a binary path the
-session could already find; it carries no credential. A session that points
-it elsewhere only changes what its own gate runs, which it could already do
-by editing its hooks.
+**Which niwa the gate runs.** The gate tries `PATH` first and `NIWA_BIN`
+second, the order niwa's own hooks use so that an upgrade under a versioned
+install keeps working. A session that puts a fake `niwa` on its own `PATH`,
+or points `NIWA_BIN` elsewhere, can make its gate allow, but it could already
+edit the hook script itself; both are inside the accepted same-user threat
+model, and preferring `NIWA_BIN` wouldn't remove the edit path. The
+variable carries no credential.
+
+**What a grant covers.** A grant covers a command class, not a repository or
+a pull request: a session holding `merge-pr` may merge any pull request its
+credentials reach. The gate doesn't read `author_exclusion`; author
+exclusion is separate work.
 
 **Never-wider and identity.** The cap reads the record of the instance the
-dispatch runs from. A session started by hand inside a granted instance can
+dispatch runs from, and `--parent-from` only chooses that instance; it never
+adds to a grant. A session started by hand inside a granted instance can
 dispatch a child up to that instance's grant; the PRD records this as a
 known limitation for the later enforcement work.
 
