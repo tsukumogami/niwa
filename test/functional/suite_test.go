@@ -91,6 +91,7 @@ type testState struct {
 	lastRunDuration time.Duration        // last command's wall time (runNiwa, runNiwaWithStdin)
 	inheritedPath   string               // when set, buildEnv puts this after the prepended dirs instead of the suite's own PATH
 	lineageTree     *lineageTreeState    // the named dispatches a lineage tree scenario keeps
+	remembered      *rememberedMapping   // a session mapping and the instances, kept to compare after a step
 	sandboxFiles    sandboxSnapshot      // files under the sandbox as last recorded (vault fallback leak checks)
 	shellPwd        string               // pwd reported by the last wrapped-shell run
 	generatedPrompt string               // the oversized prompt a spill scenario dispatched
@@ -571,6 +572,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	registerAuthorityResumeSteps(ctx)
 	registerAuthorityGateSteps(ctx)
 	registerAuthorityCheckSteps(ctx)
+	registerAuthorityCaptureSteps(ctx)
 	registerKeepAliveSteps(ctx)
 
 	// --- vault failure handling: seeding and counting the shared infisical

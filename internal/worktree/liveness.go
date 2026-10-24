@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"syscall"
+	"time"
 )
 
 // IsPIDAlive returns true if the given PID exists and its recorded start time
@@ -130,6 +131,13 @@ func NewUUID() string { return newUUID() }
 // recycle-safe PID fingerprint without doing the platform lookup themselves.
 // Compare values only against other values from the same machine and OS.
 func PIDStartTime(pid int) (int64, error) { return pidStartTime(pid) }
+
+// PIDStartedAt returns the wall-clock time a process started, for a caller
+// that compares it with a time recorded elsewhere rather than with an earlier
+// reading of the same process. On Linux it can read up to a second early; it
+// is never later than the real start. An error means the start can't be read,
+// on this platform or for this PID.
+func PIDStartedAt(pid int) (time.Time, error) { return pidStartedAt(pid) }
 
 // newUUID generates a random UUID v4 without external dependencies.
 func newUUID() string {

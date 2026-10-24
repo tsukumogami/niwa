@@ -186,6 +186,18 @@ func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsD
 		return nil
 	}
 
+	// A session niwa dispatched already has its instance and its mapping, and
+	// the mapping is what binds it to the dispatch's grant. Its SessionStart can
+	// still fire at the workspace root (a resume does), and provisioning for it
+	// would replace that mapping with one for a fresh instance. So an existing
+	// dispatch-written mapping ends the hook here. Dispatch writes the mapping
+	// only once it has captured the session id, so a hook racing that write
+	// for the same id can still slip past; the ordinary case is a resume, long
+	// after.
+	if m, err := workspace.ReadSessionMapping(workspaceRoot, payload.SessionID); err == nil && m.Origin == workspace.MappingOriginDispatch {
+		return nil
+	}
+
 	if !sessionStartGuardPasses(workspaceRoot, payload.Cwd, payload.SessionID, jobsDir) {
 		return nil
 	}
