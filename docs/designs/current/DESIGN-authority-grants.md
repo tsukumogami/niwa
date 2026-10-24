@@ -1028,7 +1028,12 @@ way), `--parent-from <abs dir>`.
   workspace's `[authority]` ceiling and roles and re-dispatching running
   sessions, so their records carry the ceiling, but nothing depends on
   that order: a session dispatched before any ceiling existed records
-  `none` and keeps today's verdict.
+  `none` and keeps today's verdict. [DESIGN-gates-honour-grant](../DESIGN-gates-honour-grant.md)
+  supersedes that last rule for a gate that reads a session's binding
+  through `niwa authority check`: such a gate judges a bound session by its
+  grant whatever its `grant_ceiling_source`, so a session dispatched before
+  the workspace declared a ceiling holds nothing there and gets the
+  non-exempt verdict until it's re-dispatched.
 - **A coordinator's posture read.** The same command with `-C` set to the
   instance root it found, and the same held check, so its prediction
   matches the gate. With no niwa it predicts not held. To read the
