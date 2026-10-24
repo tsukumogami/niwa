@@ -13,10 +13,6 @@ import (
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
-// authorityReadLineageEntry is the lineage read the check makes for the
-// parent's instance name; a test replaces it to count or fail the read.
-var authorityReadLineageEntry = workspace.ReadLineageEntry
-
 func init() {
 	authorityCmd.AddCommand(newAuthorityCheckCmd())
 }
@@ -119,8 +115,14 @@ func checkSession(sessionID, dir string, points []string) (authority.CheckDoc, e
 		if errors.Is(err, fs.ErrNotExist) {
 			return authority.CheckNotDispatched(authority.ReasonNoMapping), nil
 		}
+		// A mapping that exists but can't be read might be a dispatch's, so
+		// no state is claimed for it: the exit 1 a gate reads as a failed
+		// lookup, the same answer show gives for it.
 		return authority.CheckDoc{}, readError("the session mapping for --session %s can't be read", sessionID)
 	}
+	// Origin first: a mapping dispatch didn't write is no binding wherever it
+	// points, so its reason is hook-mapping even when it names another
+	// instance too.
 	if m.Origin != "dispatch" {
 		return authority.CheckNotDispatched(authority.ReasonHookMapping), nil
 	}
@@ -148,6 +150,10 @@ func bindToRecord(binding authority.Binding, dispatchID string, found workspace.
 	rec, present, err := authorityReadRecord(found.Instance)
 	switch {
 	case err != nil:
+		// Every class ReadAuthorityRecord reports (a symlink, an unreadable
+		// or oversized file, bad contents) is one reason here: the document
+		// keeps a two-code vocabulary for a record that exists but can't be
+		// used, and each class fails the same way, holding nothing.
 		return authority.CheckRecordUnusable(dispatchID, authority.ReasonRecordMalformed)
 	case !present:
 		return authority.CheckRecordUnusable(dispatchID, authority.ReasonRecordMissing)
@@ -165,7 +171,9 @@ func checkParent(root string, rec authority.Record) *authority.CheckParent {
 		return nil
 	}
 	parent := &authority.CheckParent{DispatchID: rec.ParentDispatchID}
-	entry, found, err := authorityReadLineageEntry(root, rec.ParentDispatchID)
+	// A later-version entry is read for its dispatch id alone, so it has no
+	// instance to give.
+	entry, found, err := workspace.ReadLineageEntry(root, rec.ParentDispatchID)
 	if err == nil && found && !entry.Parsed.LaterVersion {
 		parent.Instance = entry.Parsed.Entry.Instance
 	}

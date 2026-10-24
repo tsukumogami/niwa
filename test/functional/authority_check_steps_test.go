@@ -32,18 +32,33 @@ func registerAuthorityCheckSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the dispatch instance's authority record is deleted$`, theDispatchInstancesRecordIsDeleted)
 }
 
+// checkPlaceholders expands the placeholders in command. One whose value an
+// earlier step never set is an error, not an empty string: an empty -C would
+// still exit 1 and pass a scenario that expects a refusal for another reason.
 func checkPlaceholders(s *testState, command string) (string, error) {
-	outside := filepath.Join(s.sandbox, "outside-every-workspace")
-	if err := os.MkdirAll(outside, 0o755); err != nil {
-		return "", err
+	values := map[string]string{
+		"{instance}":       s.lastDispatchInstancePath,
+		"{first-instance}": s.authority.firstInstance,
+		"{worktree}":       s.lastSessionWorktreePath,
+		"{workspace-root}": s.workspaceRoot,
 	}
-	return strings.NewReplacer(
-		"{instance}", s.lastDispatchInstancePath,
-		"{first-instance}", s.authority.firstInstance,
-		"{worktree}", s.lastSessionWorktreePath,
-		"{workspace-root}", s.workspaceRoot,
-		"{outside}", outside,
-	).Replace(command), nil
+	if strings.Contains(command, "{outside}") {
+		outside := filepath.Join(s.sandbox, "outside-every-workspace")
+		if err := os.MkdirAll(outside, 0o755); err != nil {
+			return "", err
+		}
+		values["{outside}"] = outside
+	}
+	for name, value := range values {
+		if !strings.Contains(command, name) {
+			continue
+		}
+		if value == "" {
+			return "", fmt.Errorf("%s is used before any step set it", name)
+		}
+		command = strings.ReplaceAll(command, name, value)
+	}
+	return command, nil
 }
 
 // iRunTheCheck runs the command from the workspace root's parent, a
@@ -52,9 +67,6 @@ func iRunTheCheck(ctx context.Context, command string) (context.Context, error) 
 	s := getState(ctx)
 	if s == nil {
 		return ctx, fmt.Errorf("no test state")
-	}
-	if s.lastDispatchInstancePath == "" && strings.Contains(command, "{instance}") {
-		return ctx, fmt.Errorf("no dispatch instance recorded")
 	}
 	command, err := checkPlaceholders(s, command)
 	if err != nil {

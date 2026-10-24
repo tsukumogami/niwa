@@ -74,7 +74,9 @@ type CheckDoc struct {
 	GrantCeilingSource string       `json:"grant_ceiling_source,omitempty"`
 	Points             []CheckPoint `json:"points,omitempty"`
 
-	// grant is the bound grant, kept for the plain text.
+	// grant is the bound grant as typed entries, which Text renders through
+	// GrantListText so the plain line reads like show's. Only CheckBound sets
+	// it; a CheckDoc built any other way prints "grant: none".
 	grant []GrantEntry
 }
 
@@ -129,11 +131,15 @@ func CheckBound(binding Binding, rec Record, parent *CheckParent, points []strin
 // writes the record. A bound answer always carries its points list, empty
 // when no point was asked about.
 func (d CheckDoc) MarshalJSON() ([]byte, error) {
+	// doc has CheckDoc's fields and none of its methods, so encoding it
+	// doesn't call back into this one.
 	type doc CheckDoc
 	if d.State != StateBound {
 		return json.MarshalIndent(doc(d), "", "  ")
 	}
-	// omitempty would drop an empty points list; a bound answer keeps it.
+	// omitempty would drop an empty points list; a bound answer keeps it. The
+	// outer Points shadows the embedded one and is written in its place,
+	// last, which holds while Points is CheckDoc's last field.
 	type boundDoc struct {
 		doc
 		Points []CheckPoint `json:"points"`
