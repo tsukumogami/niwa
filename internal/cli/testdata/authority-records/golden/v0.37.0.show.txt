@@ -1,0 +1,11 @@
+dispatch record: present
+dispatch id: 37373737-0370-4037-8037-373737373737
+level: supervised from workspace
+level ceiling: supervised from workspace
+grant ceiling: merge-pr, close-issue from overlay
+roles: coordinator
+grant: merge-pr (role coordinator), close-issue (dispatch, role coordinator)
+parent session id: cccccccc-cccc-4ccc-8ccc-cccccccccccc
+parent dispatch id: 36363636-0360-4036-8036-363636363636 (from cwd)
+parent session source: unrecorded
+principal: unrecorded

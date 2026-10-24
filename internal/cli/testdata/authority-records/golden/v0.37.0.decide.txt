@@ -1,0 +1,6 @@
+point=merge-pr
+level=supervised
+decider=dispatcher
+author_exclusion=on
+source=workspace
+record=present

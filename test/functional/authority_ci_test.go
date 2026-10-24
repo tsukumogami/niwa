@@ -12,7 +12,9 @@ import (
 // when CI is set (GitHub Actions sets it), because developers commonly have
 // koto installed. The Test job reaches it through `go test -race ./...`, in the
 // same run as the authority unit tests, and `make test-functional` runs the
-// authority features; a runner image that later gains koto turns this red.
+// authority features, `niwa authority check`'s among them (its scenarios also
+// strip koto from the PATH niwa runs with); a runner image that later gains
+// koto turns this red.
 func TestCI_AuthorityRunsWithoutKoto(t *testing.T) {
 	if _, set := os.LookupEnv("CI"); !set {
 		t.Skip("CI is not set; the no-koto check runs only in CI")

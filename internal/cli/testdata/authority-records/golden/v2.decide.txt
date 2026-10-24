@@ -1,0 +1,6 @@
+point=merge-pr
+level=strict
+decider=person
+author_exclusion=on
+source=newer-version
+record=present

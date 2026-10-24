@@ -1,0 +1,6 @@
+point=merge-pr
+level=autonomous
+decider=session
+author_exclusion=off
+source=workspace
+record=present

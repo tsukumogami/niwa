@@ -124,6 +124,8 @@ func runAuthorityCmd(t *testing.T, cwd string, args ...string) authorityRun {
 		cmd = newAuthorityShowCmd()
 	case "decide":
 		cmd = newAuthorityDecideCmd()
+	case "check":
+		cmd = newAuthorityCheckCmd()
 	default:
 		t.Fatalf("no authority command %q", args[0])
 	}
