@@ -47,7 +47,9 @@ order ("binding" in the answer says which):
             capture is under way, the agent's own session records, with this
             session the only one claiming the instance
 
-The answer's state is one of:
+A worker's binding moves from records to lineage to mapping as dispatch
+goes on, so a gate decides on the state and the grant, never on which
+binding it reads. The answer's state is one of:
 
   bound            the dispatch's own session; the grant and points apply
   record-unusable  the dispatch's own session, but its record is missing,
@@ -138,7 +140,7 @@ func checkSession(sessionID, dir string, points []string) (authority.CheckDoc, e
 	// Origin first: a mapping dispatch didn't write is no binding wherever it
 	// points, so its reason is hook-mapping even when it names another
 	// instance too.
-	if m.Origin != "dispatch" {
+	if m.Origin != workspace.MappingOriginDispatch {
 		return authority.CheckNotDispatched(authority.ReasonHookMapping), nil
 	}
 	if !mappingNamesInstance(m, found.Instance) {
@@ -150,14 +152,16 @@ func checkSession(sessionID, dir string, points []string) (authority.CheckDoc, e
 // bindBeforeMapping answers for a session with no mapping. Dispatch writes
 // the mapping only after it has captured the worker's session id, and a
 // worker's first command can come before that, so two earlier pieces of
-// evidence bind it, in the order dispatch writes them:
+// evidence bind it. They are checked newest first, the reverse of the order
+// dispatch produces them, so the firmest evidence that exists decides:
 //
 //   - the lineage entry, once dispatch has recorded the session id in it: an
-//     entry naming this instance and this session id;
-//   - before that, the agent's own session records, but only while the
-//     capture-pending file says a capture is under way: exactly one record
-//     claiming the instance, and it is this session's. That is the match
-//     capture itself is about to make.
+//     entry naming this instance and this session id. Its lookup can scan the
+//     whole lineage store, whether or not a capture is pending;
+//   - otherwise the agent's own session records, which exist from the
+//     worker's start, but only while the capture-pending file says a capture
+//     is under way: exactly one record claiming the instance, and it is this
+//     session's. That is the match capture itself is about to make.
 //
 // Either one ties the session to a dispatch, so the record decides the rest
 // as it does for a mapping: a missing or malformed record, or one naming
@@ -230,7 +234,9 @@ func boundByRecords(sessionID string, found workspace.FoundInstance, pending wor
 
 // captureProcessRunning reports whether the process the pending file names is
 // alive and started no later than the file's launch time. A start that can't
-// be read counts as not running.
+// be read counts as not running. On Linux the start can read up to a second
+// early, so a process id reused within a second of the launch would pass; a
+// reuse that soon after a killed dispatch is the residual this accepts.
 func captureProcessRunning(p workspace.CapturePending) bool {
 	if !worktree.IsProcessAlive(p.PID) {
 		return false

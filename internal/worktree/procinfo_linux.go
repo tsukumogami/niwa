@@ -61,9 +61,9 @@ func readPPID(pid int) int {
 	return ppid
 }
 
-// userHZ is the unit /proc reports process times in. The kernel fixes it at
-// 100 for userspace on every architecture niwa builds for, whatever the
-// kernel's own tick rate.
+// userHZ is the unit /proc reports process times in: USER_HZ, which Linux
+// keeps at 100 for userspace on the amd64 and arm64 kernels niwa runs on,
+// whatever the kernel's own tick rate.
 const userHZ = 100
 
 // pidStartedAt returns the wall-clock time the process started: the boot time

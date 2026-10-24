@@ -130,6 +130,12 @@ type SessionMapping struct {
 	OnReapFailures int `json:"on_reap_failures,omitempty"`
 }
 
+// MappingOriginDispatch is the Origin `niwa dispatch` writes. A mapping with
+// it is how `niwa authority check` binds a session to its dispatch's grant,
+// and what keeps `niwa instance from-hook` from replacing the mapping, so the
+// writer and every reader use this one spelling.
+const MappingOriginDispatch = "dispatch"
+
 // sessionsDirName is the directory under the config dir that holds the session
 // mapping store. It is a named constant because two places must agree on it:
 // this store, which writes it, and the snapshot writer, which has to carry it

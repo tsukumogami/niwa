@@ -1135,7 +1135,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		Agent:        string(dispatchedAgent),
 		Handle:       handle,
 		Ephemeral:    true,
-		Origin:       "dispatch",
+		Origin:       workspace.MappingOriginDispatch,
 		Label:        dispatchLabel,
 		KeepAlive:    keepAliveArmed,
 		SessionName:  forwardedName,
