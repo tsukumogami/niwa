@@ -560,6 +560,14 @@ read the grant.
    denies. A record in a later schema version has source `newer-version` and
    holds nothing, so it denies too.
 
+Rule 3's `none` case is for gates that read by instance with the checks
+above. The planned session-bound lookup
+([DESIGN-gates-honour-grant](../designs/DESIGN-gates-honour-grant.md))
+changes it for gates built on that lookup: they judge a session bound to its
+dispatch by its grant whatever its `grant_ceiling_source`, so a session
+dispatched before the workspace declared a ceiling holds nothing at such a
+gate until it's re-dispatched.
+
 A sketch, with the gate's existing verdict in `today`:
 
 ```bash
