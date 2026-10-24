@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 problem: |
   niwa's authority record is per instance and written before launch, but the
   session mapping that ties a session id to a dispatch is written only after the
@@ -40,7 +40,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
