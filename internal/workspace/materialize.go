@@ -440,6 +440,10 @@ type WorktreeDelegation struct {
 	NiwaPath string
 }
 
+// niwaBinEnv names the settings variable that carries niwa's own path to
+// hooks (BuildSettingsConfig.NiwaBin).
+const niwaBinEnv = "NIWA_BIN"
+
 // worktreeFromHookCommand returns the hook command string Claude invokes for
 // the per-repo WorktreeCreate/WorktreeRemove hooks.
 func worktreeFromHookCommand(niwaPath string) string {
@@ -557,6 +561,14 @@ type BuildSettingsConfig struct {
 	// and after compaction. Only the instance root's document sets it; the
 	// value is the absolute niwa path the PATH-first command falls back to.
 	RootContextNiwaPath string
+
+	// NiwaBin, when non-empty, is written into the env block as NIWA_BIN: the
+	// absolute path of the niwa that wrote the document, so a hook can run
+	// niwa when the harness's PATH lacks it. A hook tries PATH first and this
+	// second, the order niwa's own hook commands use. It is niwa's own name
+	// and replaces any value the env tables declare for it. Alone it never
+	// makes a document be written.
+	NiwaBin string
 
 	// SessionHooks, when non-nil, installs the workspace-root
 	// SessionStart/SessionEnd hook entries (the ephemeral-session integration).
@@ -1110,9 +1122,9 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 		doc["hooks"] = hooksDoc
 	}
 
-	// Build env block from resolved env vars.
-	if len(cfg.ResolvedEnvVars) > 0 {
-		envDoc := make(map[string]any, len(cfg.ResolvedEnvVars))
+	// Build env block from resolved env vars, plus NIWA_BIN.
+	if len(cfg.ResolvedEnvVars) > 0 || cfg.NiwaBin != "" {
+		envDoc := make(map[string]any, len(cfg.ResolvedEnvVars)+1)
 		envKeys := make([]string, 0, len(cfg.ResolvedEnvVars))
 		for k := range cfg.ResolvedEnvVars {
 			envKeys = append(envKeys, k)
@@ -1120,6 +1132,9 @@ func buildSettingsDoc(cfg BuildSettingsConfig) (map[string]any, error) {
 		sort.Strings(envKeys)
 		for _, k := range envKeys {
 			envDoc[k] = cfg.ResolvedEnvVars[k]
+		}
+		if cfg.NiwaBin != "" {
+			envDoc[niwaBinEnv] = cfg.NiwaBin
 		}
 		doc["env"] = envDoc
 	}
@@ -1539,6 +1554,7 @@ func (s *SettingsMaterializer) Materialize(ctx *MaterializeContext) ([]string, e
 		Settings:           settings,
 		InstalledHooks:     hooks,
 		ResolvedEnvVars:    resolvedEnv,
+		NiwaBin:            rootContextNiwaPath(),
 		Plugins:            plugins,
 		Marketplaces:       marketplaces,
 		RepoIndex:          ctx.RepoIndex,

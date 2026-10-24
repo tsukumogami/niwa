@@ -179,3 +179,93 @@ func (d CheckDoc) Text() string {
 	}
 	return b.String()
 }
+
+// DispatcherCap is the most a dispatch may grant its child: the named
+// authorities the dispatcher's own record holds. Held is empty when that
+// record grants nothing, is in a later schema version, or is missing for a
+// dispatcher that was itself dispatched.
+type DispatcherCap struct {
+	// DispatchID is the dispatcher's dispatch, as its record or its session
+	// mapping names it.
+	DispatchID string
+	Held       []Authority
+	// Missing says the dispatcher's record is gone or can't be used, which
+	// the refusal says rather than naming an empty grant.
+	Missing bool
+}
+
+// WiderThanDispatcherError refuses a request for an authority the dispatcher
+// doesn't hold. It lists every such authority with every route that asked
+// for it, one line each, as OutsideCeilingError does for the ceiling.
+type WiderThanDispatcherError struct {
+	Offenders []Offender
+	Cap       DispatcherCap
+}
+
+func (e *WiderThanDispatcherError) Error() string {
+	held := "none"
+	if len(e.Cap.Held) > 0 {
+		names := make([]string, len(e.Cap.Held))
+		for i, a := range e.Cap.Held {
+			names[i] = string(a)
+		}
+		held = strings.Join(names, ", ")
+	}
+	where := fmt.Sprintf("the dispatcher holds %s (dispatch %s)", held, e.Cap.DispatchID)
+	if e.Cap.Missing {
+		where = fmt.Sprintf("the dispatcher's record is missing or can't be used, so it holds none (dispatch %s)", e.Cap.DispatchID)
+	}
+	lines := make([]string, len(e.Offenders))
+	for i, o := range e.Offenders {
+		lines[i] = fmt.Sprintf("authority %s (requested by %s) is wider than the dispatcher's grant: %s",
+			o.Authority, strings.Join(o.Routes, ", "), where)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// CapByDispatcher refuses a resolved grant wider than the dispatcher's own:
+// every entry whose authority cap doesn't hold is an offender, named with the
+// routes that asked for it. A nil cap is a dispatch with no dispatcher record
+// to compare against, which only the grant ceiling limits.
+func CapByDispatcher(resolved Record, cap *DispatcherCap) error {
+	if cap == nil {
+		return nil
+	}
+	held := map[Authority]bool{}
+	for _, a := range cap.Held {
+		held[a] = true
+	}
+	var offenders []Offender
+	for _, g := range resolved.Grant {
+		if held[g.Authority] {
+			continue
+		}
+		routes := make([]string, len(g.Sources))
+		for i, s := range g.Sources {
+			routes[i] = sourceRoute(s)
+		}
+		offenders = append(offenders, Offender{Authority: g.Authority, Routes: routes})
+	}
+	if len(offenders) == 0 {
+		return nil
+	}
+	return &WiderThanDispatcherError{Offenders: offenders, Cap: *cap}
+}
+
+// sourceRoute names how a grant source was asked for, the way Resolve's
+// refusals name it: "--grant" for the flag and "role <name>" for a role.
+func sourceRoute(s Source) string {
+	if s == SourceDispatch {
+		return "--grant"
+	}
+	return sourceText(string(s))
+}
+
+// HeldAuthorities lists the authorities a grant holds, in grant order.
+func HeldAuthorities(grant []GrantEntry) []Authority {
+	out := make([]Authority, len(grant))
+	for i, g := range grant {
+		out[i] = g.Authority
+	}
+	return out
+}

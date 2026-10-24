@@ -225,6 +225,47 @@ instance was built from, and if that refuses it or gives a different level or
 grant, the dispatch exits 1 naming the setting that changed and the new
 instance is removed.
 
+### Never wider than the dispatcher
+
+A dispatch also can't grant its child a named authority its dispatcher
+doesn't hold. The dispatcher is found the way the parent link is:
+
+- Inside an instance (the working directory's, or the one `--parent-from`
+  names), it's that instance's dispatch, and its record's grant is the most
+  the child may get. A record that grants nothing, or one in a later schema
+  version, passes on nothing. An instance with no record that a
+  dispatch-written session mapping still names was dispatched and lost its
+  record, so it passes on nothing too.
+- At the workspace root there's no instance to read, so the dispatcher is the
+  calling session, when the session id variable names a mapping dispatch
+  wrote: that dispatch's record caps the child, and if the record is missing,
+  can't be read or names another dispatch, the child gets nothing. A Codex
+  worker inherits its dispatcher's variable, so this may name an ancestor,
+  whose grant is at least as wide as the caller's.
+- With neither (a directory in no instance and no such mapping, or an
+  instance made by `niwa create` that has no record), only the grant ceiling
+  limits the child.
+
+A session started by hand inside a dispatched instance runs from that
+instance, so its own dispatches are capped by the instance's record. The
+check runs with the ceiling, before the prompt, the sweep and provisioning,
+and again with the late re-check, and the refusal names each authority, how
+it was asked for and what the dispatcher holds:
+
+```text
+niwa: error: authority close-issue (requested by --grant) is wider than the dispatcher's grant: the dispatcher holds merge-pr (dispatch 3c803591-4c01-486f-a927-f96ec399d6a7)
+niwa: error: authority merge-pr (requested by --grant) is wider than the dispatcher's grant: the dispatcher's record is missing or can't be used, so it holds none (dispatch 3c803591-4c01-486f-a927-f96ec399d6a7)
+```
+
+Every line of this refusal contains `is wider than the dispatcher's grant:`,
+which no other refusal does, so a caller that reports it can match on that.
+
+`--parent-from` only chooses which instance is the dispatcher; it never adds
+to what may be passed on. Run from outside every instance by a session whose
+own mapping names a dispatch, it's capped by both the named instance and that
+dispatch, so naming a wider instance, or one nothing dispatched, can't lift
+the caller's cap.
+
 A dispatch that launches prints one line to stderr saying what it resolved:
 
 ```text
@@ -296,8 +337,10 @@ niwa destroy <instance>
 
 Where the record is stored, and its stored bytes, aren't part of the
 contract; the document `niwa authority show --json` prints is. A session
-started by hand, or an instance from `niwa create`, has no record: no grant,
-and no cap on what it dispatches.
+started by hand has no record of its own and holds no grant; what it
+dispatches is capped by the record of the instance it runs in, when that has
+one. An instance from `niwa create` has no record, and no cap on what's
+dispatched from it beyond the grant ceiling.
 
 ### The document
 
@@ -448,6 +491,96 @@ checked before anything else. `--json` prints the same six fields as one
 object. That object carries no schema string and isn't part of the versioned
 record contract; the held and settle rules below read the text lines.
 
+### `niwa authority check`
+
+`show` and `decide` answer for an instance. `check` answers for a session:
+whether it's the session its instance's dispatch launched, and what it holds.
+A gate knows two things about the session it guards, the `session_id` in its
+payload and its own path, which names the instance, so that's what `check`
+takes:
+
+```sh
+niwa authority check --json --session <session id> -C <absolute dir> --point merge-pr --point close-issue
+```
+
+`-C` is a directory in the instance: its root, a repo inside it, or a niwa
+worktree of it. Each `--point` asks who settles that decision point, decided
+as `decide` decides it. The answer is one `niwa.authority.check/v1` document:
+
+```json
+{
+  "schema": "niwa.authority.check/v1",
+  "state": "bound",
+  "binding": "mapping",
+  "dispatch_id": "3c803591-4c01-486f-a927-f96ec399d6a7",
+  "grant": [
+    {
+      "authority": "merge-pr",
+      "sources": [
+        "role:coordinator"
+      ]
+    }
+  ],
+  "level": "autonomous",
+  "level_source": "workspace",
+  "grant_ceiling_source": "workspace",
+  "points": [
+    {
+      "point": "merge-pr",
+      "decider": "session",
+      "author_exclusion": "off"
+    }
+  ]
+}
+```
+
+`state` is one of three values:
+
+| State | Meaning | Carries |
+|-------|---------|---------|
+| `bound` | the dispatch's own session, with a usable record | `binding`, `dispatch_id`, `parent` when the record names one, `grant`, `level`, `level_source`, `grant_ceiling_source`, `points` |
+| `record-unusable` | the dispatch's own session, but its record is missing (`record-missing`), can't be read or used (`record-malformed`) or names another dispatch (`record-other-dispatch`) | `reason`, `dispatch_id`, an empty `grant` |
+| `not-dispatched` | any other session: no mapping (`no-mapping`), a mapping dispatch didn't write (`hook-mapping`), or one for another instance (`other-instance`) | `reason`, an empty `grant` |
+
+A session is bound when the instance's record names the dispatch that one of
+these ties the session to, checked in this order, and `binding` says which:
+
+1. `mapping`: the session mapping dispatch wrote once it captured the
+   worker's session id, naming this instance.
+2. `lineage`: before the mapping exists, the dispatch's lineage entry naming
+   this instance and this session id.
+3. `records`: before dispatch has recorded the session id, and only while
+   its capture is under way, the agent's own session records, with this
+   session the only one claiming the instance. Dispatch marks the capture
+   with `.niwa/capture-pending.json` from just before launch until capture
+   has an outcome, and the records count only while the dispatch process that
+   wrote it is still running.
+
+So a worker is bound from its first command, and its `binding` moves from
+`records` to `lineage` to `mapping` as dispatch goes on; decide on the state
+and the grant, never on the binding. A session someone starts by hand in the
+instance is never bound: it has no dispatch mapping, no lineage entry names
+it, and it can match the records only while capture runs, beside the worker,
+where the match is ambiguous and binds neither. A dispatched session whose
+record goes missing reads `record-unusable`, never `not-dispatched`, so losing
+the record can't buy it a wider answer. A record in a later schema version
+binds as usual and holds nothing at level `strict`.
+
+Without `--json` it prints a few lines for a session reading about itself:
+
+```text
+session: bound to dispatch 3c803591-4c01-486f-a927-f96ec399d6a7 (mapping)
+grant: merge-pr (role coordinator)
+level: autonomous from workspace
+point merge-pr: decider session, author exclusion off
+```
+
+It exits 0 for every state. It exits 1 with nothing on stdout for a `-C`
+that is empty, relative, missing or in no instance, a session id that isn't
+a lowercase UUID, a session mapping that can't be read, and the two-second
+watchdog; and 2 for a usage error, such as a point name outside
+`^[a-z][a-z0-9-]{0,63}$`. It loads no config and writes nothing.
+
 ### `niwa list --json`
 
 Each dispatched instance's row carries an `authority` object equal to its
@@ -544,6 +677,56 @@ deny the gate had already reached.
 niwa ships no gate. This is the model a gate follows when it's written to
 read the grant.
 
+### A gate on the binding
+
+A gate built on `niwa authority check` judges the session it guards, not the
+instance. It keeps its own text match to spot a merge, a close or a release,
+and for those only it makes one bounded call, with the payload's
+`session_id`, its own directory and a `--point` per authority the command
+needs, then decides by the answer:
+
+| `check` answer | Each needed authority |
+|----------------|-----------------------|
+| `bound`, held, decider `session`, author exclusion `off` | allow |
+| `bound`, not held, `merge-pr` or `close-issue` | deny, naming what the session holds and the authority it needs |
+| `bound`, not held, `cut-release` | ask, naming the same |
+| `bound`, held, decider `dispatcher` | deny, naming the level |
+| `bound`, held, decider `person`, or author exclusion `on` | the verdict an instance off the exemption list gets |
+| `record-unusable` | the verdict an instance off the exemption list gets |
+| `not-dispatched`, or the lookup failed | the gate's verdict today |
+
+A lookup failed when niwa can't be found, exits non-zero, runs past the
+bound, or prints a document whose `schema` isn't exactly
+`niwa.authority.check/v1` or whose `state`, authority, level, decider or
+`author_exclusion` falls outside niwa's vocabularies. The grant never lifts a
+verdict the gate reached without it: a command the gate can't read, or one
+that also does something the grant doesn't cover, keeps its verdict.
+
+Such a gate judges a bound session by its grant whatever the record's
+`grant_ceiling_source`. That supersedes the rule below for `none`, which
+holds for gates that read by instance: a session dispatched before the
+workspace declared a ceiling recorded `none` and holds nothing, so at a gate
+on the binding it's denied a merge or a close until it's re-dispatched.
+
+### Finding niwa from a hook
+
+Every Claude settings document niwa writes (each repo's, the instance
+root's and the workspace root's) carries `NIWA_BIN` in its `env`: the
+absolute path of the niwa that wrote it. A hook tries `command -v niwa`
+first and falls back to `$NIWA_BIN` when that names an executable, the order
+niwa's own hook commands use, so a niwa upgraded on `PATH` is the one that
+runs. `NIWA_BIN` is niwa's own name: a value the workspace's env tables
+declare for it is replaced. It's added to the documents niwa writes for other
+reasons and never makes niwa write one, so a repo with no settings document
+of its own has none. The instance root's document is always written, so a
+session launched at the instance root, as a dispatched worker is, runs its
+hooks with `NIWA_BIN` set.
+
+### A gate that reads by instance
+
+A gate written with the reference checks above reads the instance's record,
+whoever runs the command:
+
 1. The gate keeps its own text match to spot a merge, a close or a release.
    The lookup runs only for commands that match.
 2. It looks the grant up with `niwa_grant_decides`. For a session whose
@@ -560,13 +743,11 @@ read the grant.
    denies. A record in a later schema version has source `newer-version` and
    holds nothing, so it denies too.
 
-Rule 3's `none` case is for gates that read by instance with the checks
-above. The planned session-bound lookup
-([DESIGN-gates-honour-grant](../designs/DESIGN-gates-honour-grant.md))
-changes it for gates built on that lookup: they judge a session bound to its
-dispatch by its grant whatever its `grant_ceiling_source`, so a session
-dispatched before the workspace declared a ceiling holds nothing at such a
-gate until it's re-dispatched.
+Rule 3's `none` case holds only for gates that read by instance. A gate on
+the binding judges a bound session by its grant whatever its
+`grant_ceiling_source`, as described above. A gate that reads by instance
+also can't tell the dispatched session from one started by hand in the same
+instance, so both get the instance's grant there.
 
 A sketch, with the gate's existing verdict in `today`:
 
@@ -620,9 +801,11 @@ a grant.
 
 As advice rather than a requirement: roll a gate out together with the
 workspace's `[authority]` ceiling and roles, and re-dispatch running
-sessions so their records carry the ceiling. Nothing depends on that order,
-since a session dispatched before any ceiling existed records `none` and
-keeps today's verdict.
+sessions so their records carry the ceiling. At a gate that reads by
+instance nothing depends on that order, since a session dispatched before any
+ceiling existed records `none` and keeps today's verdict. At a gate on the
+binding it does: such a session holds nothing, so re-dispatch any session that
+needs to merge or close before the gate changes.
 
 ## Migrating a workspace to a declared ceiling
 
@@ -630,8 +813,10 @@ Before adding an `[authority]` ceiling to a workspace that a gate already
 reads, know how each session will be judged:
 
 1. Sessions with no record keep today's verdict.
-2. So do sessions whose record shows `grant_ceiling_source: none`, because
-   they were dispatched before the declaration.
+2. At a gate that reads by instance, so do sessions whose record shows
+   `grant_ceiling_source: none`, because they were dispatched before the
+   declaration. At a gate on the binding they're judged by their grant,
+   which is empty.
 3. A session dispatched after the declaration is judged by its grant, so
    sessions that need to merge are dispatched with a role that holds
    `merge-pr`, such as `--role coordinator` in the example above.
@@ -646,10 +831,12 @@ A successor coordinator gets its own grant by being dispatched with
 only the original parent, by dispatch id, and says nothing about who
 supervises the child now. A coordinator that dispatches from the workspace
 root passes `--parent-from` with a directory in its own instance, so its
-children record it as their parent. It reads its sessions' postures through
-`niwa list --json`, or `niwa authority show --instance <name>`, and predicts a
-gate's answer by running the same reference checks with `-C` set to the
-instance root.
+children record it as their parent. It can pass on only what it holds
+itself, and a successor dispatched with `--role coordinator` from a
+coordinator holding less is refused. It reads its sessions' postures through
+`niwa list --json`, or `niwa authority show --instance <name>`, and reads its
+own with `niwa authority check --session "$CLAUDE_CODE_SESSION_ID" -C
+<its instance root>`, the same call a gate on the binding makes.
 
 ## What the record does and doesn't guarantee
 
@@ -664,8 +851,17 @@ re-delegation work must not treat it as one. A session that corrupts its own
 record blocks its own child dispatches, since a malformed dispatcher record
 refuses the dispatch.
 
+The binding `check` reads is the same kind of evidence: session mappings,
+lineage entries, the capture-pending file and the agent's session records
+are all files the operator's processes can write. A session started by hand
+in a granted instance can dispatch a child up to that instance's grant, and
+one that leaves every instance with no mapped session variable dispatches
+limited only by the ceiling.
+
 What it does promise is that a failure never widens anything: every way a
 lookup can fail reads as not held and as no record, so a gate written to
 this contract falls back to exactly the verdict the gate it replaces would
-have given. Only a positively read record, from a workspace that declared a
-ceiling, changes the verdict, and then by the grant.
+have given. Only a positively read record changes the verdict, and then by
+the grant: at a gate that reads by instance, only one from a workspace that
+declared a ceiling; at a gate on the binding, only for the session bound to
+it.
