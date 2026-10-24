@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: In Progress
 problem: |
   niwa writes a dispatched session's named authorities (merge-pr, close-issue,
   cut-release) into a record before the session starts, but nothing that decides
@@ -26,7 +26,7 @@ absorbed:
 
 ## Status
 
-Accepted
+In Progress
 
 Absorbed [BRIEF-gates-honour-grant](docs/briefs/BRIEF-gates-honour-grant.md); carried in Absorbed Brief.
 
