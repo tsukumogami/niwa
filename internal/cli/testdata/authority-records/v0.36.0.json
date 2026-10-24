@@ -1,0 +1,28 @@
+{
+  "schema": "niwa.authority.record/v1",
+  "record": true,
+  "dispatch_id": "36363636-0360-4036-8036-363636363636",
+  "parent_session_id": "",
+  "parent_dispatch_id": "",
+  "parent_dispatch_source": "none",
+  "level": "autonomous",
+  "level_source": "workspace",
+  "level_ceiling": "autonomous",
+  "level_ceiling_source": "built-in",
+  "grant_ceiling": [
+    "merge-pr",
+    "close-issue",
+    "cut-release"
+  ],
+  "grant_ceiling_source": "workspace",
+  "roles": [],
+  "grant": [
+    {
+      "authority": "merge-pr",
+      "sources": [
+        "dispatch"
+      ]
+    }
+  ],
+  "unknown_grant": []
+}

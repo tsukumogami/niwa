@@ -1,0 +1,11 @@
+dispatch record: present
+dispatch id: 36363636-0360-4036-8036-363636363636
+level: autonomous from workspace
+level ceiling: autonomous from built-in
+grant ceiling: merge-pr, close-issue, cut-release from workspace
+roles: none
+grant: merge-pr (dispatch)
+parent session id: none
+parent dispatch id: none
+parent session source: unrecorded
+principal: unrecorded
