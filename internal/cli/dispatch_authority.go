@@ -383,7 +383,25 @@ func dispatchParent(cwd, workspaceRoot string) (*authority.Record, string, works
 // inherits its dispatcher's variable, so it may name an ancestor rather than
 // the caller; an ancestor's grant is at least as wide, so this never refuses
 // wrongly. No such mapping, no dispatcher.
+//
+// A dispatch from outside every instance that names an instance with
+// --parent-from takes both: the named instance's cap and the calling
+// session's, so the anchor can narrow what the child gets but never widen it.
 func dispatcherCap(workspaceRoot, sessionVar string, parent *authority.Record, cwdInstance workspace.FoundInstance, cwdInInstance bool) *authority.DispatcherCap {
+	anchored := instanceCap(workspaceRoot, parent, cwdInstance, cwdInInstance)
+	if cwdInInstance {
+		return anchored
+	}
+	// Outside every instance --parent-from may have chosen the instance, and
+	// it never adds to a grant: the calling session's own dispatcher, when it
+	// has one, still caps the child, whatever instance the anchor names.
+	return narrowerCap(anchored, sessionCap(workspaceRoot, sessionVar))
+}
+
+// instanceCap is the cap of the instance the dispatch runs from or names:
+// its record's grant, nothing for a dispatched instance whose record is gone,
+// and nil for an instance nothing dispatched or no instance at all.
+func instanceCap(workspaceRoot string, parent *authority.Record, cwdInstance workspace.FoundInstance, cwdInInstance bool) *authority.DispatcherCap {
 	if parent != nil {
 		return &authority.DispatcherCap{DispatchID: parent.DispatchID, Held: authority.HeldAuthorities(parent.Grant)}
 	}
@@ -397,12 +415,20 @@ func dispatcherCap(workspaceRoot, sessionVar string, parent *authority.Record, c
 	case cwdInInstance:
 		instance = cwdInstance.Instance
 	}
-	if instance != "" {
-		if m, ok := dispatchMappingNaming(workspaceRoot, instance); ok {
-			return &authority.DispatcherCap{DispatchID: m.DispatchID, Missing: true}
-		}
+	if instance == "" {
 		return nil
 	}
+	if m, ok := dispatchMappingNaming(workspaceRoot, instance); ok {
+		return &authority.DispatcherCap{DispatchID: m.DispatchID, Missing: true}
+	}
+	return nil
+}
+
+// sessionCap is the cap of the dispatch the session id variable's
+// dispatch-written mapping names: that dispatch's record's grant, nothing
+// when the record is missing, unusable or names another dispatch, and nil
+// when the variable names no such mapping.
+func sessionCap(workspaceRoot, sessionVar string) *authority.DispatcherCap {
 	if !workspace.ValidSessionID(sessionVar) {
 		return nil
 	}
@@ -419,6 +445,31 @@ func dispatcherCap(workspaceRoot, sessionVar string, parent *authority.Record, c
 		}
 	}
 	return &authority.DispatcherCap{DispatchID: m.DispatchID, Missing: true}
+}
+
+// narrowerCap combines two caps: nil is no cap, and with both the child may
+// hold only what both allow, named after the calling session's dispatcher,
+// since that is the one the dispatch can't escape.
+func narrowerCap(anchored, session *authority.DispatcherCap) *authority.DispatcherCap {
+	switch {
+	case anchored == nil:
+		return session
+	case session == nil:
+		return anchored
+	case session.Missing || anchored.Missing:
+		return &authority.DispatcherCap{DispatchID: session.DispatchID, Missing: true}
+	}
+	inAnchored := map[authority.Authority]bool{}
+	for _, a := range anchored.Held {
+		inAnchored[a] = true
+	}
+	held := []authority.Authority{}
+	for _, a := range session.Held {
+		if inAnchored[a] {
+			held = append(held, a)
+		}
+	}
+	return &authority.DispatcherCap{DispatchID: session.DispatchID, Held: held}
 }
 
 // dispatchMappingNaming finds a dispatch-written session mapping whose

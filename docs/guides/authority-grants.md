@@ -258,7 +258,10 @@ niwa: error: authority merge-pr (requested by --grant) is wider than the dispatc
 ```
 
 `--parent-from` only chooses which instance is the dispatcher; it never adds
-to what may be passed on.
+to what may be passed on. Run from outside every instance by a session whose
+own mapping names a dispatch, it's capped by both the named instance and that
+dispatch, so naming a wider instance, or one nothing dispatched, can't lift
+the caller's cap.
 
 A dispatch that launches prints one line to stderr saying what it resolved:
 
@@ -709,7 +712,12 @@ root's and the workspace root's) carries `NIWA_BIN` in its `env`: the
 absolute path of the niwa that wrote it. A hook tries `command -v niwa`
 first and falls back to `$NIWA_BIN` when that names an executable, the order
 niwa's own hook commands use, so a niwa upgraded on `PATH` is the one that
-runs.
+runs. `NIWA_BIN` is niwa's own name: a value the workspace's env tables
+declare for it is replaced. It's added to the documents niwa writes for other
+reasons and never makes niwa write one, so a repo with no settings document
+of its own has none. The instance root's document is always written, so a
+session launched at the instance root, as a dispatched worker is, runs its
+hooks with `NIWA_BIN` set.
 
 ### A gate that reads by instance
 
