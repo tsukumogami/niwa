@@ -428,8 +428,10 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// ceiling must never fall back to a default because the file was
 	// unreadable. Every refusal comes before the preflight, the prompt, the
 	// sweep and provisioning, so a refused dispatch leaves nothing behind
-	// and never asks for a prompt.
-	auth, err := resolveDispatchAuthority(cmd.ErrOrStderr(), cwd, workspaceRoot, wsConfigPath, wsConfig, cfgErr, gc)
+	// and never asks for a prompt. The calling session's variable is read
+	// here, once; its parent session link's id is the calling session's id
+	// for the rest of the dispatch.
+	auth, err := resolveDispatchAuthority(cmd.ErrOrStderr(), cwd, workspaceRoot, wsConfigPath, parentSessionVar(spec, os.Getenv), wsConfig, cfgErr, gc)
 	if err != nil {
 		return err
 	}
@@ -556,7 +558,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// A dispatch that prints it and then fails to provision or launch has
 	// rolled back by the time it exits.
 	fmt.Fprintln(cmd.ErrOrStderr(), authorityLine(auth.resolved))
-	parentSessionID := lineageParentSessionID(spec, os.Getenv)
+	parentSessionID := auth.parentSession.ID
 	namePrefix := dispatchInstancePrefix(slug, token)
 	// The session name shares the instance's token, so it is unique for the
 	// same reason the directory is. It is forwarded only to an agent that
@@ -618,9 +620,22 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// defer does not run on SIGKILL; the name+TTL reaper backstop closes that
 	// remaining gap (the dispatch instance NAME, created atomically by provision,
 	// is the backstop's eligibility signal, so no marker is required).
+	//
+	// The rollback also removes the dispatch's lineage entry, but only once
+	// this dispatch has created it at (8a): an entry already present for the
+	// same dispatch id is someone else's, and a refused create leaves it as
+	// it was. The entry may already hold the session id (10a) when a
+	// detached mapping write fails; it goes with the instance then, since an
+	// entry exists exactly when the dispatch keeps its instance. A foreground
+	// dispatch sets success before capture, so its entry is never removed
+	// here; a change that moves that line must keep this true.
 	success := false
+	entryCreated := false
 	defer func() {
 		if !success {
+			if entryCreated {
+				_ = workspace.RemoveLineageEntry(workspaceRoot, dispatchID)
+			}
 			_ = destroyInstanceFunc(instancePath)
 		}
 	}()
@@ -646,6 +661,15 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if err := writeAuthorityRecordFunc(instancePath, authRecord); err != nil {
 		return fmt.Errorf("niwa: error: writing the dispatch's authority record: %w", err)
 	}
+	// Right after the record, the dispatch's lineage entry goes into the
+	// workspace root's store, outside the instance, so it outlives it. A
+	// failure refuses the dispatch the same way: the rollback removes the
+	// instance, and there is no entry of this dispatch's to remove.
+	entry := dispatchLineageEntry(dispatchID, filepath.Base(instancePath), string(dispatchedAgent), time.Now(), auth)
+	if err := createLineageEntryFunc(workspaceRoot, entry); err != nil {
+		return fmt.Errorf("niwa: error: writing the dispatch's lineage entry: %w", err)
+	}
+	entryCreated = true
 
 	// (9) The host global config was loaded once at (2a), before the agent
 	// resolution that also reads it. gc below is that same result, and it is
@@ -1066,6 +1090,17 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: the %s worker's own output, which the rollback is about to delete:\n%s\n", spec.Binary, tail)
 		}
 		return fmt.Errorf("niwa: error: capturing dispatch session id: %w", err)
+	}
+
+	// (10a) Record the session id in the lineage entry, before the mapping
+	// write, so a foreground dispatch whose mapping write then fails, which
+	// keeps its instance, still has it recorded. The entry is otherwise
+	// complete, so a failure here costs only the id: it warns and the
+	// dispatch goes on.
+	if err := completeLineageEntryFunc(workspaceRoot, dispatchID, sessionID); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"niwa: warning: could not record the session id in the lineage entry %s: %v\n",
+			filepath.Join(workspace.LineageDir(workspaceRoot), dispatchID+".json"), err)
 	}
 
 	// (11) Write the durable ephemeral, dispatch-origin mapping keyed on the

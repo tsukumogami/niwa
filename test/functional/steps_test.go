@@ -141,7 +141,11 @@ func (s *testState) buildEnv() []string {
 		"TMPDIR="+s.tmpDir,
 	)
 	if overridePath {
-		parts := append(append([]string{}, pathDirs...), os.Getenv("PATH"))
+		inherited := os.Getenv("PATH")
+		if s.inheritedPath != "" {
+			inherited = s.inheritedPath
+		}
+		parts := append(append([]string{}, pathDirs...), inherited)
 		env = append(env, "PATH="+strings.Join(parts, string(os.PathListSeparator)))
 	}
 	for k, v := range s.envOverrides {

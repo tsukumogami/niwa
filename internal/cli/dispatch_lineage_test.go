@@ -14,6 +14,7 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/lineage"
 )
 
 // TestLineageAttributeNamesArePinned pins the eight names and their order. Other
@@ -130,25 +131,34 @@ func TestLineageSlugMapsUnderscores(t *testing.T) {
 	}
 }
 
-func TestLineageParentSessionID(t *testing.T) {
+// TestParentSessionID: the calling session's id is the session variable's
+// value when it is well formed and "" otherwise, read from the variable the
+// launch spec names and from no other.
+func TestParentSessionID(t *testing.T) {
 	spec := agentplan.LaunchSpec{Lineage: agentplan.Lineage{ParentSessionEnv: "PARENT_ID"}}
 	env := func(v string) func(string) string {
 		return func(k string) string {
 			if k == "PARENT_ID" {
 				return v
 			}
-			return ""
+			// Every other variable holds a valid id, so a read of the
+			// wrong one shows up as a non-empty result.
+			return "6f1a2b3c-aaaa-bbbb-cccc-1234567890ab"
 		}
 	}
-	if got := lineageParentSessionID(spec, env("6f1a2b3c-aaaa-bbbb-cccc-1234567890ab")); got != "6f1a2b3c-aaaa-bbbb-cccc-1234567890ab" {
+	id := func(spec agentplan.LaunchSpec, getenv func(string) string) string {
+		s, _, _ := lineage.Resolve(lineage.Inputs{SessionVar: parentSessionVar(spec, getenv)})
+		return s.ID
+	}
+	if got := id(spec, env("6f1a2b3c-aaaa-bbbb-cccc-1234567890ab")); got != "6f1a2b3c-aaaa-bbbb-cccc-1234567890ab" {
 		t.Fatalf("valid id not returned, got %q", got)
 	}
 	for _, bad := range []string{"", "short", "has space in it", strings.Repeat("a", 129)} {
-		if got := lineageParentSessionID(spec, env(bad)); got != "" {
+		if got := id(spec, env(bad)); got != "" {
 			t.Fatalf("id %q should be ignored, got %q", bad, got)
 		}
 	}
-	if got := lineageParentSessionID(agentplan.LaunchSpec{}, env("6f1a2b3c-aaaa-bbbb-cccc-1234567890ab")); got != "" {
+	if got := id(agentplan.LaunchSpec{}, env("6f1a2b3c-aaaa-bbbb-cccc-1234567890ab")); got != "" {
 		t.Fatalf("an agent that declares no variable has no parent, got %q", got)
 	}
 }

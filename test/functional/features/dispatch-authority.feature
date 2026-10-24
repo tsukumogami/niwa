@@ -39,6 +39,12 @@ Feature: niwa dispatch: resolve, refuse and record a dispatch's authority
         "parent_session_id": "caller-session",
         "parent_dispatch_id": "",
         "parent_dispatch_source": "none",
+        "parent_session_source": "handed",
+        "principal": {
+          "name": "",
+          "source": "none",
+          "trust": "observed"
+        },
         "level": "supervised",
         "level_source": "workspace",
         "level_ceiling": "supervised",

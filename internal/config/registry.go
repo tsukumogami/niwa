@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/BurntSushi/toml"
+	"github.com/tsukumogami/niwa/internal/lineage"
 )
 
 // GlobalConfig is the top-level structure parsed from ~/.config/niwa/config.toml.
@@ -166,6 +167,26 @@ type GlobalSettings struct {
 	// value (the key absent) is not written.
 	AuthorityLevel   any `toml:"authority_level,omitempty"`
 	AuthorityCeiling any `toml:"authority_ceiling"`
+	// Principal names the person dispatches on this machine act for, as the
+	// lineage entry records it when no parent passes one down. It is opt-in
+	// and read from here only: no workspace or overlay key, OS account or
+	// credential supplies it. It is stored raw and validated by the
+	// Principal accessor, so dispatch can refuse a bad value with the key
+	// and the file named.
+	Principal string `toml:"principal,omitempty"`
+}
+
+// Principal returns the declared principal, "" when none is declared. A
+// value that isn't 1 to 128 letters, digits, '.', '_', '-', '@' or '+' is an
+// error naming the key.
+func (g *GlobalConfig) Principal() (string, error) {
+	if g == nil || g.Global.Principal == "" {
+		return "", nil
+	}
+	if !lineage.ValidPrincipal(g.Global.Principal) {
+		return "", fmt.Errorf("invalid [global] principal %q; a principal is 1 to 128 letters, digits, '.', '_', '-', '@' or '+'", g.Global.Principal)
+	}
+	return g.Global.Principal, nil
 }
 
 // DispatchPermissionModes is the closed set of values

@@ -118,5 +118,22 @@ func (r Record) Text() string {
 	} else {
 		fmt.Fprintf(&b, "parent dispatch id: %s (from %s)\n", r.ParentDispatchID, r.ParentDispatchSource)
 	}
+	// The advisory fields, as the lineage entry records them; a record
+	// written before them, or holding a value this build can't read, says
+	// unrecorded.
+	sessionSource := r.ParentSessionSource
+	if sessionSource == "" {
+		sessionSource = "unrecorded"
+	}
+	fmt.Fprintf(&b, "parent session source: %s\n", sessionSource)
+	if p := r.Principal; p == nil {
+		b.WriteString("principal: unrecorded\n")
+	} else {
+		name := p.Name
+		if name == "" {
+			name = "none"
+		}
+		fmt.Fprintf(&b, "principal: %s, source %s, trust %s\n", name, p.Source, p.Trust)
+	}
 	return b.String()
 }

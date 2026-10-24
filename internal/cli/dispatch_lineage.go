@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/agentplan"
-	"github.com/tsukumogami/niwa/internal/authority"
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
@@ -166,19 +165,18 @@ func lineageWorkspace(cfg *config.WorkspaceConfig, warn io.Writer) string {
 	return cfg.Workspace.Name
 }
 
-// lineageParentSessionID is the calling session's id, read from the variable
-// the agent's launch spec names, or "" when it's unset or not id-shaped. niwa
+// parentSessionVar is the raw value of the variable the agent's launch spec
+// names for the calling session, or "" when the spec names none. Dispatch
+// reads it once, at (2e); lineage.Resolve decides whether it is a well-formed
+// session id, and the calling session's id everywhere else is the parent
+// session link's id, so an unset or malformed value is "" throughout. niwa
 // doesn't guess a parent from the process tree: a wrong parent is worse than
 // none in a lineage tree.
-func lineageParentSessionID(spec agentplan.LaunchSpec, getenv func(string) string) string {
+func parentSessionVar(spec agentplan.LaunchSpec, getenv func(string) string) string {
 	if spec.Lineage.ParentSessionEnv == "" {
 		return ""
 	}
-	id := getenv(spec.Lineage.ParentSessionEnv)
-	if !authority.ValidSessionID(id) {
-		return ""
-	}
-	return id
+	return getenv(spec.Lineage.ParentSessionEnv)
 }
 
 // validateRequestedSkill checks a --skill value.

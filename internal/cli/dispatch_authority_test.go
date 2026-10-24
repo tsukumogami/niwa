@@ -321,7 +321,7 @@ func TestDispatchAuthority_MissingWorkspaceConfigRefuses(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	resetDispatchFlags(t)
 	path := filepath.Join(root, config.ConfigDir, config.ConfigFile)
-	_, err := resolveDispatchAuthority(&bytes.Buffer{}, root, root, path, nil, os.ErrNotExist, nil)
+	_, err := resolveDispatchAuthority(&bytes.Buffer{}, root, root, path, "", nil, os.ErrNotExist, nil)
 	if err == nil || !strings.Contains(err.Error(), "loading "+path) {
 		t.Fatalf("err = %v; want a refusal naming %s", err, path)
 	}
@@ -417,7 +417,7 @@ func TestDispatchAuthority_ParentLink(t *testing.T) {
 func TestDispatchAuthority_KeepsTheWholeParentRecord(t *testing.T) {
 	root, _ := authorityWorkspace(t, "", "")
 	parent := installedInstance(t, root, "test-ws-parent", parentRecord(t))
-	rec, source, err := dispatchParent(parent, root)
+	rec, source, _, _, err := dispatchParent(parent, root)
 	if err != nil || rec == nil {
 		t.Fatalf("dispatchParent = %v, %v", rec, err)
 	}
@@ -722,6 +722,12 @@ func TestDispatchAuthority_WholeRecord(t *testing.T) {
   "parent_session_id": "",
   "parent_dispatch_id": "",
   "parent_dispatch_source": "none",
+  "parent_session_source": "none",
+  "principal": {
+    "name": "",
+    "source": "none",
+    "trust": "observed"
+  },
   "level": "supervised",
   "level_source": "workspace",
   "level_ceiling": "supervised",

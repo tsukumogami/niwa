@@ -12,6 +12,7 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/authority"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/lineage"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -83,6 +84,13 @@ type dispatchAuthority struct {
 	// its dispatch id is used today; it is kept so a never-wider check can
 	// compare the child against it at this step without reading it again.
 	parent *authority.Record
+	// The lineage entry's links, with how niwa came by each. The parent
+	// session link's id is the calling session's id dispatch uses everywhere
+	// else (the telemetry attribute, the record, the mapping): the session
+	// variable's value when it is well formed, else "".
+	parentSession  lineage.Link
+	parentDispatch lineage.Link
+	principal      lineage.Principal
 }
 
 // authorityRefusal is a refusal whose message may span lines (one per
@@ -104,14 +112,17 @@ func refuse(format string, args ...any) error {
 	return authorityRefusal{fmt.Errorf(format, args...)}
 }
 
-// checkMachineAuthority validates the machine's authority_level and
-// authority_ceiling at (2a), beside the permission mode, so a broken machine
-// setting stops the dispatch before anything else reads it.
+// checkMachineAuthority validates the machine's authority_level,
+// authority_ceiling and principal at (2a), beside the permission mode, so a
+// broken machine setting stops the dispatch before anything else reads it.
 func checkMachineAuthority(gc *config.GlobalConfig, cfgPath string) error {
 	if _, err := gc.AuthorityLevel(); err != nil {
 		return refuse("%v (in %s)", err, cfgPath)
 	}
 	if _, err := gc.AuthorityCeiling(); err != nil {
+		return refuse("%v (in %s)", err, cfgPath)
+	}
+	if _, err := gc.Principal(); err != nil {
 		return refuse("%v (in %s)", err, cfgPath)
 	}
 	return nil
@@ -158,8 +169,11 @@ func parseDispatchRequest(level string, levelSet bool, grants, roles []string) (
 // may fall back to a default because the file was unreadable), finds the
 // overlay the way provisioning will, validates the three layers, parses and
 // resolves the request, and reads the dispatcher's own record for the parent
-// link. Every refusal returns before the preflight, so nothing exists yet.
-func resolveDispatchAuthority(warn io.Writer, cwd, workspaceRoot, wsConfigPath string, wsConfig *config.WorkspaceConfig, cfgErr error, gc *config.GlobalConfig) (*dispatchAuthority, error) {
+// link. sessionVar is the raw value of the variable the launch spec names for
+// the calling session, read once by the caller at this step; the lineage
+// links are resolved from it and from what this step finds. Every refusal
+// returns before the preflight, so nothing exists yet.
+func resolveDispatchAuthority(warn io.Writer, cwd, workspaceRoot, wsConfigPath, sessionVar string, wsConfig *config.WorkspaceConfig, cfgErr error, gc *config.GlobalConfig) (*dispatchAuthority, error) {
 	if cfgErr != nil || wsConfig == nil {
 		if cfgErr == nil {
 			cfgErr = errors.New("no configuration was loaded")
@@ -189,7 +203,7 @@ func resolveDispatchAuthority(warn io.Writer, cwd, workspaceRoot, wsConfigPath s
 	if err != nil {
 		return nil, authorityRefusal{err}
 	}
-	parent, parentSrc, err := dispatchParent(cwd, workspaceRoot)
+	parent, parentSrc, cwdInstance, cwdInInstance, err := dispatchParent(cwd, workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +218,102 @@ func resolveDispatchAuthority(warn io.Writer, cwd, workspaceRoot, wsConfigPath s
 	if parent != nil {
 		auth.parentID = parent.DispatchID
 	}
+	// checkMachineAuthority refused an invalid principal at (2a).
+	declared, _ := gc.Principal()
+	in := gatherLineageInputs(workspaceRoot, sessionVar, cwdInstance, cwdInInstance, auth.parentID, parentSrc, declared)
+	auth.parentSession, auth.parentDispatch, auth.principal = lineage.Resolve(in)
 	return auth, nil
+}
+
+// gatherLineageInputs gathers what the link and principal rules read beyond
+// what dispatchParent already found. Both session mapping reads are best
+// effort: a store or a mapping that can't be read counts as no mapping, which
+// makes the session link handed and the root fallback none, never observed
+// or mapped.
+//
+// The instance's newest mapping is read only when --parent-from was not
+// given, since the rules don't consult it then. The mapping keyed by the
+// variable's value is read only at the workspace root (the working directory
+// in no instance, no --parent-from) and only when the value is a lowercase
+// UUID, the only key shape the store accepts.
+//
+// The parent's lineage entry is read by whichever parent dispatch id
+// resolved: the dispatcher's record or the root mapping. An entry that is
+// missing, unreadable or of a later version is left nil, which the principal
+// rules read as a parent whose principal couldn't be inherited.
+func gatherLineageInputs(workspaceRoot, sessionVar string, cwdInstance workspace.FoundInstance, cwdInInstance bool, parentID, parentSrc, declaredPrincipal string) lineage.Inputs {
+	in := lineage.Inputs{
+		SessionVar:         sessionVar,
+		ParentFromSet:      dispatchParentFromSet,
+		CwdInInstance:      cwdInInstance,
+		ParentDispatchID:   parentID,
+		ParentDispatchFrom: parentSrc,
+		DeclaredPrincipal:  declaredPrincipal,
+	}
+	switch {
+	case dispatchParentFromSet:
+	case cwdInInstance:
+		in.NewestMappedSession = newestMappedSession(workspaceRoot, cwdInstance.Instance)
+	// workspace.ValidSessionID is the store's lowercase-UUID key shape, not
+	// the looser calling-session shape lineage.Resolve accepts for the link.
+	case workspace.ValidSessionID(sessionVar):
+		if m, err := workspace.ReadSessionMapping(workspaceRoot, sessionVar); err == nil {
+			in.RootMappedDispatch = m.DispatchID
+		}
+	}
+	// A record's parent id is set only for the cwd and --parent-from rows,
+	// and the root mapping is read only when neither applies, so at most one
+	// of the two names the parent dispatch. lineage.Resolve checks the entry
+	// it gets is the parent link's.
+	parentDispatch := parentID
+	if parentDispatch == "" {
+		parentDispatch = in.RootMappedDispatch
+	}
+	in.ParentEntry = readParentEntry(workspaceRoot, parentDispatch)
+	return in
+}
+
+// readParentEntry reads the parent dispatch's lineage entry, nil when there
+// is no parent id, the id isn't a dispatch id, or the entry is missing,
+// unreadable or of a later version.
+func readParentEntry(workspaceRoot, dispatchID string) *lineage.Entry {
+	if dispatchID == "" {
+		return nil
+	}
+	stored, found, err := workspace.ReadLineageEntry(workspaceRoot, dispatchID)
+	if err != nil || !found || stored.Parsed.LaterVersion {
+		return nil
+	}
+	e := stored.Parsed.Entry
+	return &e
+}
+
+// newestMappedSession is the session id of the newest mapping naming the
+// instance, or "" when none does or the store can't be listed. FindInstance
+// resolves symlinks and the path a mapping records may not be resolved, so a
+// mapping names the instance when its cleaned path is the instance's or
+// resolves to it. Every such mapping is then grouped under the instance's
+// path, whatever its spelling, so NewestMappingPerInstance picks the newest
+// of them all.
+func newestMappedSession(workspaceRoot, instance string) string {
+	mappings, err := workspace.ListSessionMappings(workspaceRoot)
+	if err != nil {
+		return ""
+	}
+	key := filepath.Clean(instance)
+	var named []workspace.SessionMapping
+	for _, m := range mappings {
+		path := filepath.Clean(m.InstancePath)
+		if path != key {
+			resolved, err := filepath.EvalSymlinks(path)
+			if err != nil || resolved != key {
+				continue
+			}
+		}
+		m.InstancePath = key
+		named = append(named, m)
+	}
+	return workspace.NewestMappingPerInstance(named)[key].SessionID
 }
 
 // dispatchParent finds the dispatcher's own record: through --parent-from
@@ -213,37 +322,39 @@ func resolveDispatchAuthority(warn io.Writer, cwd, workspaceRoot, wsConfigPath s
 // record and how it was found, or nil and none when the directory is in no
 // instance or the instance has no record. A record that exists but can't be
 // read refuses: recording no parent for an instance that has one would hide
-// the link later checks follow.
-func dispatchParent(cwd, workspaceRoot string) (*authority.Record, string, error) {
+// the link later checks follow. It also returns the working directory's
+// instance and whether there is one (the zero value and false when not),
+// which the lineage links read.
+func dispatchParent(cwd, workspaceRoot string) (*authority.Record, string, workspace.FoundInstance, bool, error) {
 	cwdInstance, cwdInInstance, err := workspace.FindInstance(cwd)
 	if err != nil {
-		return nil, "", refuse("resolving the working directory for the parent link: %v", err)
+		return nil, "", workspace.FoundInstance{}, false, refuse("resolving the working directory for the parent link: %v", err)
 	}
 	instance, source := "", authority.ParentSourceNone
 	switch {
 	case dispatchParentFromSet:
 		anchor, err := checkParentFrom(dispatchParentFrom, workspaceRoot)
 		if err != nil {
-			return nil, "", err
+			return nil, "", cwdInstance, cwdInInstance, err
 		}
 		if cwdInInstance && cwdInstance.Instance != anchor.Instance {
-			return nil, "", refuse("--parent-from %s is in instance %s, but this dispatch runs inside instance %s; the anchor must name the instance it runs in",
+			return nil, "", cwdInstance, cwdInInstance, refuse("--parent-from %s is in instance %s, but this dispatch runs inside instance %s; the anchor must name the instance it runs in",
 				strconv.Quote(dispatchParentFrom), anchor.Instance, cwdInstance.Instance)
 		}
 		instance, source = anchor.Instance, authority.ParentSourceAnchor
 	case cwdInInstance:
 		instance, source = cwdInstance.Instance, authority.ParentSourceCwd
 	default:
-		return nil, authority.ParentSourceNone, nil
+		return nil, authority.ParentSourceNone, cwdInstance, cwdInInstance, nil
 	}
 	rec, found, err := workspace.ReadAuthorityRecord(instance)
 	if err != nil {
-		return nil, "", refuse("the dispatching instance %s has an authority record that can't be used: %v; refusing to dispatch rather than record no parent", instance, err)
+		return nil, "", cwdInstance, cwdInInstance, refuse("the dispatching instance %s has an authority record that can't be used: %v; refusing to dispatch rather than record no parent", instance, err)
 	}
 	if !found {
-		return nil, authority.ParentSourceNone, nil
+		return nil, authority.ParentSourceNone, cwdInstance, cwdInInstance, nil
 	}
-	return &rec, source, nil
+	return &rec, source, cwdInstance, cwdInInstance, nil
 }
 
 // checkParentFrom applies --parent-from's checks: the same as `niwa authority
@@ -421,5 +532,13 @@ func stampDispatchRecord(rec authority.Record, auth *dispatchAuthority, dispatch
 	rec.ParentSessionID = parentSessionID
 	rec.ParentDispatchID = auth.parentID
 	rec.ParentDispatchSource = auth.parentSrc
+	// The same resolution the lineage entry is written from, so the two agree
+	// while the instance lives.
+	rec.ParentSessionSource = auth.parentSession.Source
+	rec.Principal = &authority.PrincipalDoc{
+		Name:   auth.principal.Name,
+		Source: auth.principal.Source,
+		Trust:  auth.principal.Trust,
+	}
 	return rec
 }
