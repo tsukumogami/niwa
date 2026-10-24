@@ -1,6 +1,6 @@
 .niwa/worktrees/app-ship/.claude/hooks/pre_tool_use/lint.local.sh	f98aac584a3561e0d1d3e0a60a49dc7624ce71db038d7df770ef10646c973740
 .niwa/worktrees/app-ship/.claude/rules/worktree-imports.md	b1cba0062520397cbf2385d89f32b6c11fa51a7e4245a98e9440eb4ffbd2621a
-.niwa/worktrees/app-ship/.claude/settings.local.json	4704d20c45d93e5a5eaf7e981c0aac2608c6a7a0b31dcdf16ad3a5808fec942e
+.niwa/worktrees/app-ship/.claude/settings.local.json	4e80d0e5c77308a7cb1ad527f0b3ae2a37026dfe4268c7e5bb8c66bb3e06fdc6
 .niwa/worktrees/app-ship/.editorconfig.local	5a1a948fb3fd8d68bee00abb4d6d05b6437033cf330d0b1b90f62c79622b41e6
 .niwa/worktrees/app-ship/.local.env	2cb091e1d80be093c845c3b4b1753ba19108e64532f6058547fdf9d4eb2d3326
 .niwa/worktrees/app-ship/AGENTS.override.md	fdc50f53da95e9271b25d5da6d234442d39beaf2bf305d37394412387a9175a4

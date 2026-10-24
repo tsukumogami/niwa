@@ -272,6 +272,7 @@ func writeRootSettings(cfg *config.WorkspaceConfig, workspaceRoot, niwaPath stri
 		Plugins:                rootPlugins,
 		Marketplaces:           rootMarketplaces,
 		BaseDir:                workspaceRoot,
+		NiwaBin:                niwaPath,
 		IncludeGitInstructions: &includeGit,
 		UseAbsolutePaths:       true,
 		Reports:                &reports,

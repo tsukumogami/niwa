@@ -438,6 +438,7 @@ func (m *RootSettingsMaterializer) Materialize(ctx *MaterializeContext) ([]strin
 		Settings:               effective.Claude.Settings,
 		InstalledHooks:         installedHooks,
 		ResolvedEnvVars:        envResult,
+		NiwaBin:                rootContextNiwaPath(),
 		Plugins:                effective.Plugins,
 		Marketplaces:           effective.Claude.Marketplaces,
 		RepoIndex:              repoIndex,

@@ -80,10 +80,12 @@ type dispatchAuthority struct {
 	resolved  authority.Record
 	parentID  string
 	parentSrc string
-	// parent is the dispatcher's whole record, nil when there is none. Only
-	// its dispatch id is used today; it is kept so a never-wider check can
-	// compare the child against it at this step without reading it again.
+	// parent is the dispatcher's whole record, nil when there is none.
 	parent *authority.Record
+	// cap is the most this dispatch may grant: what its dispatcher holds, nil
+	// when there is no dispatcher to compare against. (2e) and (8a) both
+	// check the grant against it.
+	cap *authority.DispatcherCap
 	// The lineage entry's links, with how niwa came by each. The parent
 	// session link's id is the calling session's id dispatch uses everywhere
 	// else (the telemetry attribute, the record, the mapping): the session
@@ -217,6 +219,12 @@ func resolveDispatchAuthority(warn io.Writer, cwd, workspaceRoot, wsConfigPath, 
 	}
 	if parent != nil {
 		auth.parentID = parent.DispatchID
+	}
+	// The child may hold no named authority its dispatcher doesn't, refused
+	// here with the rest of (2e), before anything exists.
+	auth.cap = dispatcherCap(workspaceRoot, sessionVar, parent, cwdInstance, cwdInInstance)
+	if err := authority.CapByDispatcher(resolved, auth.cap); err != nil {
+		return nil, authorityRefusal{err}
 	}
 	// checkMachineAuthority refused an invalid principal at (2a).
 	declared, _ := gc.Principal()
@@ -357,6 +365,78 @@ func dispatchParent(cwd, workspaceRoot string) (*authority.Record, string, works
 	return &rec, source, cwdInstance, cwdInInstance, nil
 }
 
+// dispatcherCap finds what this dispatch's dispatcher holds, the most the
+// child may be granted, or nil when there is no dispatcher to compare
+// against and only the grant ceiling limits the child.
+//
+// Inside an instance (the working directory's, or the one --parent-from
+// names) the dispatcher is that instance's dispatch: its record's grant caps
+// the child, and a later-version record holds nothing. An instance with no
+// record that a dispatch-written mapping names was dispatched and lost its
+// record, so it caps at nothing; one with neither (made by `niwa create`)
+// has no dispatcher.
+//
+// At the workspace root there is no instance to read, so the dispatcher is
+// the calling session, when the session id variable names a mapping
+// dispatch wrote: that dispatch's record caps the child, and a record that is
+// missing, unusable or names another dispatch caps at nothing. A Codex worker
+// inherits its dispatcher's variable, so it may name an ancestor rather than
+// the caller; an ancestor's grant is at least as wide, so this never refuses
+// wrongly. No such mapping, no dispatcher.
+func dispatcherCap(workspaceRoot, sessionVar string, parent *authority.Record, cwdInstance workspace.FoundInstance, cwdInInstance bool) *authority.DispatcherCap {
+	if parent != nil {
+		return &authority.DispatcherCap{DispatchID: parent.DispatchID, Held: authority.HeldAuthorities(parent.Grant)}
+	}
+	instance := ""
+	switch {
+	case dispatchParentFromSet:
+		// dispatchParent has already checked the anchor.
+		if found, ok, err := workspace.FindInstance(dispatchParentFrom); err == nil && ok {
+			instance = found.Instance
+		}
+	case cwdInInstance:
+		instance = cwdInstance.Instance
+	}
+	if instance != "" {
+		if m, ok := dispatchMappingNaming(workspaceRoot, instance); ok {
+			return &authority.DispatcherCap{DispatchID: m.DispatchID, Missing: true}
+		}
+		return nil
+	}
+	if !workspace.ValidSessionID(sessionVar) {
+		return nil
+	}
+	m, err := workspace.ReadSessionMapping(workspaceRoot, sessionVar)
+	if err != nil || m.Origin != workspace.MappingOriginDispatch {
+		return nil
+	}
+	if m.InstancePath != "" && filepath.IsAbs(m.InstancePath) {
+		if found, ok, err := workspace.FindInstance(m.InstancePath); err == nil && ok {
+			rec, present, err := workspace.ReadAuthorityRecord(found.Instance)
+			if err == nil && present && rec.DispatchID == m.DispatchID {
+				return &authority.DispatcherCap{DispatchID: rec.DispatchID, Held: authority.HeldAuthorities(rec.Grant)}
+			}
+		}
+	}
+	return &authority.DispatcherCap{DispatchID: m.DispatchID, Missing: true}
+}
+
+// dispatchMappingNaming finds a dispatch-written session mapping whose
+// instance is instance, symlinks resolved. A store that can't be listed
+// names nothing.
+func dispatchMappingNaming(workspaceRoot, instance string) (workspace.SessionMapping, bool) {
+	mappings, err := workspace.ListSessionMappings(workspaceRoot)
+	if err != nil {
+		return workspace.SessionMapping{}, false
+	}
+	for _, m := range mappings {
+		if m.Origin == workspace.MappingOriginDispatch && mappingNamesInstance(m, instance) {
+			return m, true
+		}
+	}
+	return workspace.SessionMapping{}, false
+}
+
 // checkParentFrom applies --parent-from's checks: the same as `niwa authority
 // show -C` (not empty, absolute, existing), and stricter in that the path
 // must be in an instance of this dispatch's workspace. Both roots are
@@ -451,6 +531,10 @@ func recheckDispatchAuthority(auth *dispatchAuthority, workspaceRoot, wsConfigPa
 	if !reflect.DeepEqual(again.Grant, first.Grant) {
 		return authority.Record{}, policyChangedRefusal(changed,
 			fmt.Sprintf("the grant would now be %s, not the %s printed above", grantAttribute(again), grantAttribute(first)))
+	}
+	// The same dispatcher as (2e), so provisioning can't widen the child.
+	if err := authority.CapByDispatcher(again, auth.cap); err != nil {
+		return authority.Record{}, refuse("%v; the instance was removed", err)
 	}
 	final := first
 	final.LevelCeiling, final.LevelCeilingSource = again.LevelCeiling, again.LevelCeilingSource
