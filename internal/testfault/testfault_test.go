@@ -1,9 +1,45 @@
 package testfault
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestMaybe_HoldWaitsForTheRelease(t *testing.T) {
+	release := filepath.Join(t.TempDir(), "release")
+	t.Setenv(envVar, "hold:"+release+"@held")
+	done := make(chan error, 1)
+	go func() { done <- Maybe("held") }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(release + ".held"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the hold never wrote its marker")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case <-done:
+		t.Fatal("Maybe returned before the release")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Maybe after the release = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Maybe didn't return after the release")
+	}
+}
 
 func TestMaybe_DefaultNoOp(t *testing.T) {
 	t.Setenv(envVar, "")

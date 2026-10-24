@@ -14,6 +14,10 @@
 //	error:<message>           always returns an error with that message
 //	truncate-after:<bytes>    used by stream consumers; production code
 //	                          interprets this when copying bytes
+//	hold:<path>               writes <path>.held, then waits until <path>
+//	                          exists (at most holdLimit) and returns nil, so
+//	                          a test can run something else while this
+//	                          process sits at the label
 //
 // In production builds the only effect is a single os.Getenv lookup
 // per Maybe call (negligible overhead). The seam exists to satisfy
@@ -26,6 +30,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // envVar names the environment variable controlling fault injection.
@@ -106,9 +111,32 @@ func parseFault(body, label string) error {
 		// truncate-after is consulted via TruncateAfter; Maybe reports nil
 		// so the production code can handle the truncation explicitly.
 		return nil
+	case strings.HasPrefix(body, "hold:"):
+		hold(strings.TrimPrefix(body, "hold:"))
+		return nil
 	default:
 		// Unknown fault spec — ignored. Tests should fail loudly via
 		// other assertions if a typo silently disabled the fault.
 		return nil
+	}
+}
+
+// holdLimit bounds a hold, so a test that never releases it still ends.
+const holdLimit = 2 * time.Minute
+
+// hold marks that this process reached the held label by writing
+// <path>.held, then waits for <path> to appear or holdLimit to pass. An
+// empty path holds nothing.
+func hold(path string) {
+	if path == "" {
+		return
+	}
+	_ = os.WriteFile(path+".held", nil, 0o600)
+	deadline := time.Now().Add(holdLimit)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

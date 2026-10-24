@@ -6,11 +6,12 @@ Feature: niwa dispatch writes a lineage entry and niwa lineage show reads it
   reads an entry back by its dispatch id.
 
   The fake claude stands in for the worker, so nothing here launches a real
-  agent.
+  agent, and no workflow engine is on PATH.
 
   Background:
     Given a clean niwa environment
     And a local git server is set up
+    And no workflow engine is on PATH
 
   @critical
   Scenario: a dispatch's lineage entry reads back after an apply
