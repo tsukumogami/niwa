@@ -109,6 +109,7 @@ release. Step 4 makes the gate honour the grant; steps 5 and 6 make
 - [ ] From the same instance, `--role coordinator` (holding `merge-pr` and `close-issue`) is refused, naming the role `coordinator` and `close-issue`.
 - [ ] From an instance whose record grants nothing, from one whose record is in a later schema version, and from one with no record that a dispatch-written mapping names, `--grant merge-pr` is refused; from each, a dispatch asking for nothing launches.
 - [ ] From the workspace root, a dispatch whose session variable names a dispatch-written mapping for a dispatch granting `merge-pr` is refused `--grant close-issue` and launches with `--grant merge-pr`.
+- [ ] From the workspace root, a dispatch whose session variable names a dispatch-written mapping whose dispatch's record is missing is refused `--grant merge-pr` and launches asking for nothing, matching the instance case.
 - [ ] From a directory in no instance with no session variable naming a dispatch-written mapping, and from an instance made by `niwa create` with no record, a dispatch is limited only by the grant ceiling.
 - [ ] A session started by hand inside an instance whose record grants `merge-pr` can dispatch a child with `--grant merge-pr` and is refused `--grant close-issue`.
 - [ ] After `niwa apply`, every Claude settings document niwa wrote has `NIWA_BIN` in its `env`, naming an executable niwa; a hook run with `PATH` stripped of niwa's directory runs `"$NIWA_BIN" authority check` successfully.
@@ -199,3 +200,19 @@ then 6 in shirabe. Step 4 is done only after running coordinators are
 re-dispatched with `--role coordinator`. In shirabe, step 5 builds on main
 after the rename of the `record-*` scripts to `state-*`, and step 6 appends
 its amendment after the merge-policy design's pending one.
+
+Notes to carry into execution:
+
+- A `supervised` session holding `cut-release` is denied a release (its
+  decider is the dispatcher), while a session lacking `cut-release` is asked
+  for one. That is less permissive for the holder, which is the safe
+  direction; leave it as it is.
+- The checks that need a real dispatch (the disposable-workspace half of
+  step 4's second criterion, and the PRD's first criterion) can't run on a
+  stub. Run them by hand against the step 3 niwa release when step 4 closes,
+  and record the result in step 4's report.
+- With the record gone before capture, the lookup still has to find the
+  dispatch's lineage entry, and lineage entries are keyed by dispatch id.
+  Step 2's record-deleted criterion forces this: step 2 decides how the
+  lookup gets the dispatch id without the record (from the capture-pending
+  file, which names it, or by finding the entry that names the instance).
