@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: In Progress
+status: Done
 problem: |
   When sessions dispatch sessions, the only niwa records of who asked for
   each dispatch live in files `niwa reap` deletes, no record names the person
@@ -20,7 +20,7 @@ absorbed:
 
 ## Status
 
-In Progress
+Done
 
 Absorbed [BRIEF-dispatch-lineage](docs/briefs/BRIEF-dispatch-lineage.md); carried in Absorbed Brief.
 

@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Planned
+status: Current
 problem: |
   niwa's only parent links for a dispatched session live in the instance's
   authority record and the workspace's session mapping, and `niwa reap`
@@ -40,7 +40,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Planned
+Current
 
 Revised after review: the store moved out of the configuration directory,
 root dispatches gained the `mapped` parent link, the entry format became
