@@ -67,6 +67,15 @@ ceiling = ["merge-pr", "close-issue", "cut-release"]
 [authority.roles.coordinator]
 authorities = ["merge-pr", "close-issue", "cut-release"]
 `,
+	// A coordinator role narrower than the ceiling: it lands merges and
+	// closes, and a release takes a grant of its own.
+	"coordinator-lands": `[authority]
+level = "autonomous"
+ceiling = ["merge-pr", "close-issue", "cut-release"]
+
+[authority.roles.coordinator]
+authorities = ["merge-pr", "close-issue"]
+`,
 	"empty-ceiling": `[authority]
 ceiling = []
 `,

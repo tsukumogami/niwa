@@ -573,6 +573,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	registerAuthorityGateSteps(ctx)
 	registerAuthorityCheckSteps(ctx)
 	registerAuthorityCaptureSteps(ctx)
+	registerAuthorityNeverWiderSteps(ctx)
 	registerKeepAliveSteps(ctx)
 
 	// --- vault failure handling: seeding and counting the shared infisical

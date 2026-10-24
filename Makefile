@@ -59,8 +59,8 @@ test-functional-claude-integration: build-test
 # a new authority test whose name matches none of these patterns is left out
 # of this target (go test -race ./... still runs it); name it to match or
 # extend the pattern.
-AUTHORITY_UNIT_TESTS := Authority|FindInstance|SelectDispatch|^TestShow|^TestDecide|^TestCheck|CapturePending|CaptureWindow
-AUTHORITY_FEATURES := features/authority-policy.feature:features/dispatch-authority.feature:features/authority-read.feature:features/authority-gate-contract.feature:features/authority-check.feature:features/authority-check-capture.feature
+AUTHORITY_UNIT_TESTS := Authority|FindInstance|SelectDispatch|^TestShow|^TestDecide|^TestCheck|CapturePending|CaptureWindow|DispatcherCap|CapByDispatcher
+AUTHORITY_FEATURES := features/authority-policy.feature:features/dispatch-authority.feature:features/authority-read.feature:features/authority-gate-contract.feature:features/authority-check.feature:features/authority-check-capture.feature:features/authority-never-wider.feature
 
 test-authority: build-test
 	go test -race -count=1 ./internal/authority/...
