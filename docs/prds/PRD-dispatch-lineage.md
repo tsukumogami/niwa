@@ -393,9 +393,10 @@ letters, digits or `-`.
   another personal config; whether a version-controlled workspace root picks
   up `.niwa-lineage/`, with the ignore line that keeps it out; and entries
   last until the workspace is destroyed.
-- **R23. Store safety.** The store's directory is mode 0700, set on the
-  first write in each process even when an existing directory is wider; if
-  it can't be set (another user owns it, say), the write refuses. Each entry
+- **R23. Store safety.** The store's directory is mode 0700, set on every
+  write (an fchmod through a handle opened `O_RDONLY|O_DIRECTORY|O_NOFOLLOW`)
+  even when an existing directory is wider; if it can't be set (another user
+  owns it, say), the write refuses. Each entry
   is 0600. An entry is written to a temporary file and renamed into place,
   so a reader never sees a partial entry. Reads cap a file at 8 KiB, and a
   completed entry that would exceed it is not written. Every field this
@@ -406,7 +407,8 @@ letters, digits or `-`.
   grants any access beyond its owner is unreadable. `show` and `list` only
   read: they neither tighten the directory nor warn about its mode.
 - **R24. Bounded entries.** Every field is length-bounded (ids by their
-  formats, the instance name by niwa's instance naming, the principal by
+  formats, the instance name by `^[A-Za-z0-9._+-]{1,255}$`, since real
+  instance names contain `+` and a maximal entry still fits, the principal by
   R8, name values by their rule), so an entry this niwa writes is at most
   4 KiB.
 - **R25. Nothing else changes.** Dispatch argv, the permission mode,
@@ -620,7 +622,7 @@ Constraints:
 - [ ] `docs/guides/dispatch-lineage.md` has a section stating each point R22
       lists (R22).
 - [ ] The store directory is mode 0700 and entries 0600, including when the
-      directory existed at 0755 before the first write; with the mode change
+      directory was set to 0755 before a write; with the mode change
       made to fail through a test seam, the dispatch refuses; with the rename
       made to fail through a test seam, no file exists at the entry's final
       path and the dispatch refuses (R3, R23).

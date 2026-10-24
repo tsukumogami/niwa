@@ -309,6 +309,8 @@ and no cap on what it dispatches.
   "parent_session_id": "",
   "parent_dispatch_id": "",
   "parent_dispatch_source": "none",
+  "parent_session_source": "none",
+  "principal": {"name": "", "source": "none", "trust": "observed"},
   "level": "strict",
   "level_source": "flag",
   "level_ceiling": "supervised",
@@ -331,6 +333,8 @@ and no cap on what it dispatches.
 | `dispatch_id` | the dispatch's id, a UUID |
 | `parent_session_id` | the dispatching session's id, empty outside any session |
 | `parent_dispatch_id`, `parent_dispatch_source` | the parent link above |
+| `parent_session_source` | how niwa came by `parent_session_id`: `observed`, `handed`, `mapped`, `unverified` or `none`, as in the lineage record ([Dispatch lineage](dispatch-lineage.md#the-lineage-record)) |
+| `principal` | the person the dispatch acts for, `{"name", "source", "trust"}`, the same value its lineage entry holds |
 | `level`, `level_source` | the resolved level and where it came from (`flag`, `machine`, `overlay`, `workspace`, `built-in`) |
 | `level_ceiling`, `level_ceiling_source` | the level ceiling and its source |
 | `grant_ceiling`, `grant_ceiling_source` | the grant ceiling and its source: `machine`, `overlay`, `workspace` or `none` |
@@ -341,6 +345,12 @@ and no cap on what it dispatches.
 A reader also reports `newer-version` as all three sources for a record
 written in a later schema version (see [Versions](#versions)); dispatch never
 records it.
+
+`parent_session_source` and `principal` are advisory: no gate reads them. A
+record written before niwa added them, or one whose value has the wrong type
+or shape, reads with them unrecorded rather than malformed, so neither can
+void a grant. Plain `show` prints `unrecorded` for them, and `--json` leaves
+them out.
 
 `level_source` describes the resolution at dispatch, and can differ from
 `level_ceiling_source` in a valid record: when provisioning brings in an

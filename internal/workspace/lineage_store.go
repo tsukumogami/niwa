@@ -56,8 +56,9 @@ var lineageDirChmod = func(f *os.File, mode os.FileMode) error { return f.Chmod(
 // directory, and sets the directory to 0700 through a handle opened with
 // O_NOFOLLOW, so a directory left wider by hand is tightened before an entry
 // goes into it. A failure to tighten (another user owns it, say) refuses the
-// write. It runs on every write, so the first write in each process tightens
-// the directory; only writes call it, so show and list leave the mode alone.
+// write. It runs on every write, so every write tightens the directory, not
+// just a process's first; only writes call it, so show and list leave the
+// mode alone.
 func prepareLineageDir(root string) (string, error) {
 	dir := LineageDir(root)
 	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
