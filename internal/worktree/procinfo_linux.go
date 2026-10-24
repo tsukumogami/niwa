@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // pidStartTime reads the process start time (jiffies since boot) from
@@ -58,4 +59,37 @@ func readPPID(pid int) int {
 		return 0
 	}
 	return ppid
+}
+
+// userHZ is the unit /proc reports process times in. The kernel fixes it at
+// 100 for userspace on every architecture niwa builds for, whatever the
+// kernel's own tick rate.
+const userHZ = 100
+
+// pidStartedAt returns the wall-clock time the process started: the boot time
+// /proc/stat records, plus the start time /proc/<pid>/stat records since boot.
+// The boot time is whole seconds, so the result can be up to a second earlier
+// than the real start, never later.
+func pidStartedAt(pid int) (time.Time, error) {
+	ticks, err := pidStartTime(pid)
+	if err != nil {
+		return time.Time{}, err
+	}
+	data, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return time.Time{}, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		rest, ok := strings.CutPrefix(line, "btime ")
+		if !ok {
+			continue
+		}
+		boot, err := strconv.ParseInt(strings.TrimSpace(rest), 10, 64)
+		if err != nil {
+			return time.Time{}, err
+		}
+		since := time.Duration(ticks) * time.Second / userHZ
+		return time.Unix(boot, 0).Add(since), nil
+	}
+	return time.Time{}, fmt.Errorf("no btime line in /proc/stat")
 }

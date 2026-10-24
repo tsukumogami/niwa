@@ -28,9 +28,18 @@ const (
 // Binding is the evidence a bound session was bound through.
 type Binding string
 
-// BindingMapping is the session mapping dispatch writes once it has captured
-// the worker's session id.
-const BindingMapping Binding = "mapping"
+// The bindings, in the order dispatch writes the evidence behind them.
+const (
+	// BindingRecords is the agent's own session records, matched while a
+	// capture is pending, before dispatch has recorded the session id.
+	BindingRecords Binding = "records"
+	// BindingLineage is the dispatch's lineage entry, once dispatch has
+	// recorded the session id in it and before it writes the mapping.
+	BindingLineage Binding = "lineage"
+	// BindingMapping is the session mapping dispatch writes once it has
+	// captured the worker's session id.
+	BindingMapping Binding = "mapping"
+)
 
 // The reason codes for a state other than bound. They are machine-stable: a
 // reader may match on them.

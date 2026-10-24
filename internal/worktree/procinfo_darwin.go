@@ -2,6 +2,7 @@ package worktree
 
 import (
 	"fmt"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -44,4 +45,15 @@ func readPPID(pid int) int {
 		return 0
 	}
 	return int(kp.Eproc.Ppid)
+}
+
+// pidStartedAt returns the wall-clock time the process started, from the same
+// kern.proc.pid sysctl field pidStartTime reads.
+func pidStartedAt(pid int) (time.Time, error) {
+	kp, err := kinfoProc(pid)
+	if err != nil {
+		return time.Time{}, err
+	}
+	st := kp.Proc.P_starttime
+	return time.Unix(int64(st.Sec), int64(st.Usec)*1000), nil
 }

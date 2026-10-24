@@ -19,6 +19,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/promptcapture"
+	"github.com/tsukumogami/niwa/internal/testfault"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -1004,6 +1005,18 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return interruptedDispatchError(prepCtx, "before its worker was launched; the instance was removed")
 	}
 
+	// (9c) Open the capture window: from here until the mapping is written, the
+	// worker may be running with nothing that ties its session id to this
+	// dispatch, so `niwa authority check` binds it through the agent's own
+	// session records while the capture-pending file exists and this process
+	// is alive. The window closes on every way out of this function: after the
+	// mapping write below, and on every return before it through the defer.
+	closeCaptureWindow, err := openCaptureWindow(instancePath, dispatchID, dispatchedAgent)
+	if err != nil {
+		return fmt.Errorf("niwa: error: recording the pending session capture: %w", err)
+	}
+	defer closeCaptureWindow()
+
 	if err := dispatchLaunch(cmd.Context(), launchRequest{
 		Spec:        spec,
 		Mode:        launchMode,
@@ -1063,6 +1076,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if launchMode == agentplan.LaunchForeground {
 		captureTimeout = dispatchForegroundCaptureTimeout
 	}
+	// A test seam: a functional test holds dispatch here, worker launched and
+	// capture not yet started, to read what the worker reads in that gap.
+	_ = testfault.Maybe("dispatch-before-capture")
 	sessionID, handle, err := dispatchCapture(spec.Records, recordsRoot, instancePath, captureTimeout, nil, 0)
 	if err != nil {
 		if launchMode == agentplan.LaunchForeground {
@@ -1102,6 +1118,10 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			"niwa: warning: could not record the session id in the lineage entry %s: %v\n",
 			filepath.Join(workspace.LineageDir(workspaceRoot), dispatchID+".json"), err)
 	}
+
+	// The second seam: the lineage entry names the session, the mapping doesn't
+	// exist yet.
+	_ = testfault.Maybe("dispatch-before-mapping")
 
 	// (11) Write the durable ephemeral, dispatch-origin mapping keyed on the
 	// session id. The mapping records which agent launched the session, because
@@ -1150,8 +1170,10 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("niwa: error: writing dispatch session mapping: %w", err)
 	}
 
-	// (12) The mapping is durable. Remove the pending-marker and disarm
-	// rollback.
+	// (12) The mapping is durable. Close the capture window (the mapping binds
+	// the session from now on, and an attach below can hold this process open
+	// for the whole session), remove the pending-marker and disarm rollback.
+	closeCaptureWindow()
 	removeDispatchMarker(instancePath)
 	success = true
 

@@ -1616,6 +1616,8 @@ case "$1" in
     # watches, so a scenario can tell a worker that ran in front of them from
     # one whose output went to a file inside the instance.
     echo "fake codex: running the turn"
+    # A turn that leaves no session record, so dispatch's capture finds none.
+    [ -n "$FAKE_CODEX_NO_RECORD" ] && exit 0
     sid="${FAKE_CODEX_SESSION_ID:-01a00000-0000-7000-8000-000000000000}"
     home="${CODEX_HOME:-$HOME/.codex}"
     root="$home/sessions/2026/08/19"

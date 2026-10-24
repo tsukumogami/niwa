@@ -5,12 +5,16 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strconv"
 
 	"github.com/spf13/cobra"
+	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/authority"
+	"github.com/tsukumogami/niwa/internal/lineage"
 	"github.com/tsukumogami/niwa/internal/workspace"
+	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
 func init() {
@@ -32,9 +36,18 @@ settles that decision point. This is the one lookup a gate, a coordinator
 and the session itself all make, so they read the same answer.
 
 -C names a directory in the instance: its root, a repo inside it, or a niwa
-worktree of it. The session is bound when the session mapping dispatch wrote
-for it names this instance and the instance's authority record names the
-same dispatch. The answer's state is one of:
+worktree of it. The session is bound when the instance's authority record
+names the dispatch that one of these ties the session to, checked in this
+order ("binding" in the answer says which):
+
+  mapping   the session mapping dispatch wrote for it, naming this instance
+  lineage   before the mapping exists, the dispatch's lineage entry naming
+            this instance and session
+  records   before dispatch has recorded the session id, and only while its
+            capture is under way, the agent's own session records, with this
+            session the only one claiming the instance
+
+The answer's state is one of:
 
   bound            the dispatch's own session; the grant and points apply
   record-unusable  the dispatch's own session, but its record is missing,
@@ -91,10 +104,12 @@ stdout, 2 usage or a point name not matching ` + authority.NamePatternText + `.`
 	return cmd
 }
 
-// checkSession binds sessionID to the instance holding dir. It reads only
-// the session's own mapping, the instance's record and, for a bound session
-// with a parent, the parent's lineage entry; it loads no config and writes
-// nothing. The session id is checked before any path is built from it.
+// checkSession binds sessionID to the instance holding dir. It reads the
+// session's own mapping and the instance's record; with no mapping, the
+// lineage entries, the capture-pending file and the agent's session records
+// bindBeforeMapping names; and, for a bound session with a parent, the
+// parent's lineage entry. It loads no config and writes nothing. The session
+// id is checked before any path is built from it.
 func checkSession(sessionID, dir string, points []string) (authority.CheckDoc, error) {
 	if !workspace.ValidSessionID(sessionID) {
 		return authority.CheckDoc{}, readError("invalid --session %s: a session id is a lowercase UUID", strconv.Quote(sessionID))
@@ -113,7 +128,7 @@ func checkSession(sessionID, dir string, points []string) (authority.CheckDoc, e
 	m, err := authorityReadSessionMapping(found.WorkspaceRoot, sessionID)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return authority.CheckNotDispatched(authority.ReasonNoMapping), nil
+			return bindBeforeMapping(sessionID, found, points), nil
 		}
 		// A mapping that exists but can't be read might be a dispatch's, so
 		// no state is claimed for it: the exit 1 a gate reads as a failed
@@ -130,6 +145,126 @@ func checkSession(sessionID, dir string, points []string) (authority.CheckDoc, e
 		return authority.CheckNotDispatched(authority.ReasonOtherInstance), nil
 	}
 	return bindToRecord(authority.BindingMapping, m.DispatchID, found, points), nil
+}
+
+// bindBeforeMapping answers for a session with no mapping. Dispatch writes
+// the mapping only after it has captured the worker's session id, and a
+// worker's first command can come before that, so two earlier pieces of
+// evidence bind it, in the order dispatch writes them:
+//
+//   - the lineage entry, once dispatch has recorded the session id in it: an
+//     entry naming this instance and this session id;
+//   - before that, the agent's own session records, but only while the
+//     capture-pending file says a capture is under way: exactly one record
+//     claiming the instance, and it is this session's. That is the match
+//     capture itself is about to make.
+//
+// Either one ties the session to a dispatch, so the record decides the rest
+// as it does for a mapping: a missing or malformed record, or one naming
+// another dispatch, is record-unusable. Anything else is not-dispatched.
+func bindBeforeMapping(sessionID string, found workspace.FoundInstance, points []string) authority.CheckDoc {
+	rec, present, recErr := authorityReadRecord(found.Instance)
+	recordUsable := recErr == nil && present
+	pending, pendingFound, pendingErr := workspace.ReadCapturePending(found.Instance)
+	capturePending := pendingFound && pendingErr == nil
+
+	// The lineage store is keyed by dispatch id, so the entries read first
+	// are the ones the record and the pending file name, which is where a
+	// worker's entry is. Only when neither names this session is the store
+	// scanned: that finds an entry for another dispatch than the record's,
+	// which reads record-other-dispatch, and keeps a dispatched session whose
+	// record and mapping are both gone at record-unusable rather than
+	// not-dispatched.
+	var candidates []string
+	if recordUsable {
+		candidates = append(candidates, rec.DispatchID)
+	}
+	if capturePending && (!recordUsable || pending.DispatchID != rec.DispatchID) {
+		candidates = append(candidates, pending.DispatchID)
+	}
+	instanceName := filepath.Base(found.Instance)
+	names := func(e lineage.Entry) bool {
+		return e.Instance == instanceName && e.SessionID == sessionID
+	}
+	for _, id := range candidates {
+		if e, ok := readLineage(found.WorkspaceRoot, id); ok && names(e) {
+			return bindToRecord(authority.BindingLineage, id, found, points)
+		}
+	}
+	if id, ok := scanLineageFor(found.WorkspaceRoot, names); ok {
+		return bindToRecord(authority.BindingLineage, id, found, points)
+	}
+
+	if capturePending && boundByRecords(sessionID, found, pending) {
+		return bindToRecord(authority.BindingRecords, pending.DispatchID, found, points)
+	}
+	return authority.CheckNotDispatched(authority.ReasonNoMapping)
+}
+
+// boundByRecords reports whether the agent's session records bind sessionID
+// to the pending capture. The window is open only while the dispatch that
+// wrote the file is still running: its process is alive and started no later
+// than the launch the file records, so a dispatch that timed out, refused an
+// ambiguous match or was killed, or a process id reused afterwards, opens
+// nothing. Once the lineage entry carries a session id the capture has its
+// answer and the records are not consulted.
+func boundByRecords(sessionID string, found workspace.FoundInstance, pending workspace.CapturePending) bool {
+	if e, ok := readLineage(found.WorkspaceRoot, pending.DispatchID); ok && e.SessionID != "" {
+		return false
+	}
+	if !captureProcessRunning(pending) {
+		return false
+	}
+	ag, err := agent.ParseAgent(pending.Agent)
+	if err != nil {
+		return false
+	}
+	spec, ok := dispatchLaunchSpec(ag)
+	if !ok {
+		return false
+	}
+	root := recordStoreRoot(spec.Records, userHomeDir(), os.Getenv)
+	match, ambiguous, err := matchRecordByCwd(root, spec.Records, normalizePath(found.Instance))
+	return err == nil && !ambiguous && match.ID == sessionID
+}
+
+// captureProcessRunning reports whether the process the pending file names is
+// alive and started no later than the file's launch time. A start that can't
+// be read counts as not running.
+func captureProcessRunning(p workspace.CapturePending) bool {
+	if !worktree.IsProcessAlive(p.PID) {
+		return false
+	}
+	started, err := worktree.PIDStartedAt(p.PID)
+	return err == nil && !started.After(p.LaunchedAt)
+}
+
+// readLineage reads one dispatch's lineage entry. An entry that is missing,
+// unreadable or in a later version is no evidence.
+func readLineage(root, dispatchID string) (lineage.Entry, bool) {
+	stored, found, err := workspace.ReadLineageEntry(root, dispatchID)
+	if err != nil || !found || stored.Parsed.LaterVersion {
+		return lineage.Entry{}, false
+	}
+	return stored.Parsed.Entry, true
+}
+
+// scanLineageFor returns the dispatch id of the first entry in the store that
+// match accepts, in the store's file-name order.
+func scanLineageFor(root string, match func(lineage.Entry) bool) (string, bool) {
+	results, err := workspace.ListLineageEntries(root)
+	if err != nil {
+		return "", false
+	}
+	for _, r := range results {
+		if r.Err != nil || r.Entry.Parsed.LaterVersion {
+			continue
+		}
+		if match(r.Entry.Parsed.Entry) {
+			return r.DispatchID, true
+		}
+	}
+	return "", false
 }
 
 // mappingNamesInstance reports whether the mapping's instance_path is the
