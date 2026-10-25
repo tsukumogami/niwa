@@ -130,6 +130,16 @@ records, so a record kept by niwa destroy, by destroy --keep-session, or left
 behind by an instance deleted by hand gets its command once its session is
 gone. An unmapped instance the age backstop reclaims runs no command.
 
+When the workspace declares [session.before_remove], its command runs from
+the workspace root immediately before reap removes a mapped instance, with
+PATH, HOME, NIWA_REMOVE_PATH, NIWA_REMOVE_STEP, NIWA_SESSION_IDS and the names
+its own env list declares. Exit 0 lets the removal go ahead. Any other exit, a
+run past its timeout (10s by default), a command that can't start, or 30
+seconds of one reap's runs used up keeps the instance and its record, and reap
+prints one "niwa: kept <instance>: ..." line saying why. The next reap asks
+again. The command's own output is never printed; only its last line is
+quoted, as the reason.
+
 reap runs on demand and is also invoked opportunistically at the start of
 niwa create, niwa dispatch, and niwa watch so session fan-out self-bounds.`,
 	Args:          cobra.NoArgs,
@@ -545,6 +555,14 @@ func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 	reportSparedInstances(os.Stderr, unreadable)
 
 	onReap := newOnReapStep(workspaceRoot, reapStderr)
+	// The workspace's pre-removal command gets the last word on each target,
+	// after niwa's own checks. Its spare lines go where the on-reap command's
+	// warnings go.
+	gate := newRemovalGate(workspaceRoot, removeStepReap, reapStderr)
+	var sessionIDs map[string][]string
+	if gate.active() {
+		sessionIDs = sessionIDsByInstance(workspaceRoot)
+	}
 	reaped := 0
 	for _, t := range targets {
 		// Selection happened before the spared report was printed and before
@@ -565,6 +583,11 @@ func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 			if verdict, _ := sessionState(t.Agent, t.SessionID, jobsDir, t.InstancePath, time.Now()); verdict != sessionIsGone {
 				continue
 			}
+		}
+		// A kept target is left exactly as it was, mapping and on-reap
+		// failure count included, so the next reap asks again.
+		if !gate.ask(t.InstancePath, sessionIDs[t.InstancePath]) {
+			continue
 		}
 		if err := destroyInstanceFunc(t.InstancePath); err != nil {
 			fmt.Fprintf(os.Stderr, "niwa: warning: reaping instance %s: %v\n", t.InstancePath, err)
