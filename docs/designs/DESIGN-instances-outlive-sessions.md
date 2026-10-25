@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 problem: |
   niwa removes ephemeral instances and hook-made worktrees on signals that
   can't see a paused worker or a workflow run waiting for its successor: the
@@ -38,7 +38,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
