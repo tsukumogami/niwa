@@ -16,7 +16,7 @@ goals: |
   workspace; a worker whose directory went anyway comes back through niwa,
   trusted and in its dispatched posture; and the workspace configuration
   declares the two koto seams niwa already ships.
-upstream: docs/briefs/BRIEF-instances-outlive-sessions.md
+absorbed: docs/briefs/BRIEF-instances-outlive-sessions.md
 source_issue: 369
 ---
 
@@ -25,6 +25,32 @@ source_issue: 369
 ## Status
 
 Accepted
+
+Absorbed [BRIEF-instances-outlive-sessions](docs/briefs/BRIEF-instances-outlive-sessions.md); carried in Absorbed Brief.
+
+## Absorbed Brief
+
+**Why this work exists.** Coordinators now hold dispatched workers at a
+checkpoint for hours or days, and workflow runs outlive the Claude Code
+session that started them while they wait for a successor. niwa removes
+instances and hook-made worktrees on signals that can't tell either case
+from abandoned work: the job entry, a day of transcript idleness, a plain
+destroy, and reaps that run at the top of every dispatch, create and watch.
+When a directory goes early, the person rebuilds it by hand and resumes
+without niwa's posture and trust. Separately, this organization's workspace
+leaves koto unable to close the agent-session records of sessions niwa
+removed, or to link a dispatched worker to its coordinator.
+
+**What changes for the people involved.** A held worker or a waiting run
+keeps its directory as long as something needs it and loses it on the next
+reap once nothing does; an operator is stopped before destroying a needed
+instance and can still force it; a worker whose directory went anyway comes
+back through niwa, trusted and in its dispatched posture; niwa reports the
+outside reason it spared something for and needs no workflow engine to run;
+and a coordinator can see in koto which runs its workers hold. The five user
+stories below are the concrete paths, and Out of Scope carries the boundary:
+niwa never reads koto, the continues relation and koto's removal guards are
+other work, and when reaps run doesn't change.
 
 ## Problem Statement
 
