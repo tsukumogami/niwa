@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: In Progress
 problem: |
   A release seat niwa dispatches can hold merging and closing from its grant
   but not releasing. The tsukumogami workspace grants no `cut-release`, the
@@ -29,7 +29,7 @@ absorbed:
 
 ## Status
 
-Accepted
+In Progress
 
 Absorbed [BRIEF-release-honours-grant](docs/briefs/BRIEF-release-honours-grant.md); carried in Absorbed Brief.
 
@@ -178,12 +178,17 @@ asking for every cut.
     whatever other flags it carries and in whichever order;
   - `gh api` whose path addresses `actions/workflows/<selector>/dispatches`
     under `repos/<owner>/<repo>/` (literal or `{owner}`/`{repo}` placeholders,
-    with or without a leading slash), with the selector naming a release
-    workflow, unless the method is given as GET in any spelling the hook
-    already reads (`-X GET`, `-XGET`, `--method GET`, `--method=GET`, any
-    case).
-  The hook reads a `gh` command's first two words after `gh` as its
-  subcommand, as it does for its other rules.
+    with or without a leading slash, followed by the end of the word, `/`,
+    `?` or `#`), with the selector naming a release workflow, unless the
+    method is GET. The method is the last `-X`/`--method` given, in any
+    spelling the hook reads (`-X GET`, `-XGET`, `--method GET`,
+    `--method=GET`, any case); only that explicit GET exempts the path, and
+    a call with no method flag is read as a write. The same reading applies
+    to the merge endpoint rule.
+  The hook finds a `gh` command's subcommand words by skipping flags between
+  them, and the value of `-R`/`--repo`, so `gh workflow -R o/r run`, `gh
+  release -R o/r create` and `gh pr -R o/r merge` are read as the commands
+  they are, for this rule and for the hook's existing ones.
 - **R4. Release workflow names.** A selector names a release workflow when,
   compared case-insensitively, it equals `prepare-release.yml`,
   `prepare-release.yaml`, `release-prepare.yml`, `release-prepare.yaml` or
@@ -192,9 +197,12 @@ asking for every cut.
   repository that adds a release workflow under another name adds the name
   to this list in dot-niwa.
 - **R5. An unreadable selector asks.** A `gh workflow run` with no selector,
-  a selector made only of digits, or a selector that is an expansion, and an
-  R3 `gh api` path whose selector is digits only or an expansion, get ask for
-  every session, and no grant or exemption lifts it.
+  with more than one positional word, or with a selector that is digits only,
+  an expansion, or holds any of `* ? [ ] { } ~ \ % /`, an R3 `gh api` path
+  whose selector is digits only, an expansion or holds one of those
+  characters, and a `gh api` call whose endpoint is wholly an expansion with
+  a non-GET method flag or a body flag, get ask for every session, and no
+  grant or exemption lifts it.
 - **R6. Other workflows are unchanged.** A dispatch whose selector is a
   readable name outside R4 gets the `179f588` hook's verdict. Text that only
   mentions `gh workflow run` (a comment, a quoted string, a commit message, a
@@ -239,19 +247,28 @@ asking for every cut.
   repository holding `.niwa/instance.json`. The answer counts only when it
   is exactly one `niwa.authority.check/v1` document with every state,
   authority, level, decider and author-exclusion value in niwa's
-  vocabularies. The check prints one line: `go=grant dispatch=<dispatch id>`
-  for a holder, or `go=person reason=<why>` otherwise.
+  vocabularies and a `dispatch_id` that is a lowercase UUID. The niwa it runs
+  must not lie under the repository's working tree. The check prints one
+  line: `go=grant dispatch=<dispatch id>` for a holder, or `go=person
+  reason=<why>` otherwise. The check is advisory: the session id and the
+  working directory are the session's own to change, so the gate, reading
+  the payload's session and its own path, stays the control on every step.
 - **R12. The grant answers the go.** A holder skips the go: it takes the
   version given in the invocation, or else the version its commit analysis
-  recommends when that is a minor or patch bump, and the notes it drafted. It
+  recommends when that is a minor or patch bump, and the notes it drafted,
+  once the version matches `^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$`. It
   still prints the notes, the unattributed commits and the version, followed
   by the line `release go: from the grant of dispatch <dispatch id>`.
 - **R13. The grant answers nothing else.** These still ask a person,
   whatever the grant: the version of a first release (no earlier `v*` tag);
   a recommended major bump with no version given in the invocation; how a
   security-labelled pull request is described in the notes; running a check,
-  asset or install command from the untracked `release.local.md`; and a
-  declared check that exits 5 asking for a confirmation.
+  asset or install command from the untracked `release.local.md`; a
+  declared check that exits 5 asking for a confirmation; a range whose
+  security check printed an `UNRESOLVED` line; and a range holding an
+  unattributed commit other than the release workflow's own version commits
+  (a direct push nobody reviewed as a pull request). A version that fails
+  R12's pattern stops the run for everyone.
 - **R14. Blockers stop a holder.** Every precondition check (clean tree, CI
   green, no existing tag or draft, no open `blocks-release` or
   `priority:critical` issue, a declared check failing) stops a holder's run
@@ -278,10 +295,12 @@ asking for every cut.
   with `RELEASE_VERSION` set to the released version without a leading `v`.
   koto, shirabe, niwa and tsuku each declare, in a tracked
   `.claude/shirabe-extensions/release.md`, the host installs their release
-  calls for: reinstalling the released tool with tsuku at `RELEASE_VERSION`;
-  for koto, shirabe and niwa, re-applying every instance of the workspace
-  from its root with `niwa apply`; and, last, a command that exits non-zero
-  unless the installed tool reports `RELEASE_VERSION`.
+  calls for, in this order: reinstalling the released tool with tsuku at
+  `RELEASE_VERSION`; a command that exits non-zero unless the installed tool
+  reports `RELEASE_VERSION`; and, for koto, shirabe and niwa, re-applying
+  every instance of the workspace from its root with `niwa apply`. On a
+  holder's run the commands are read from the extension as committed at the
+  commit the release was cut from, not from the working tree.
 - **R18. Installs run only after their own cut is published.** In the run
   that dispatched the release workflow, after its monitoring sees the
   dispatched run conclude `success`, the
@@ -299,7 +318,9 @@ asking for every cut.
   and reports each command it didn't run. A command from `release.local.md`
   is asked about one at a time for every session and skipped on a no. A
   command that exits non-zero is reported with its command and the last 20
-  lines of its output; the rest still run, and the release stays published.
+  lines of its output, and the commands after it don't run, so `niwa apply`
+  never runs after a failed reinstall or version check; the release stays
+  published.
   The run's final report lists each install command with how it ended (ran
   and passed, failed, not run, declined).
 - **R20. Installs outside a release keep today's rules.** The gate gets no
@@ -312,7 +333,11 @@ asking for every cut.
   states that `cut-release` covers dispatching a repository's release
   workflow as well as creating a release, and the host installs a release run
   makes after its own cut; and its "A gate on the binding" section says a
-  gate treats a release workflow dispatch as a release. No niwa code changes.
+  gate treats a release workflow dispatch as a release. It says that a
+  text-reading gate covers only the commands it reads, naming the release
+  routes it doesn't (a tag push, `gh release edit`, the REST releases
+  endpoint, a script), so the table doesn't read as complete coverage. No
+  niwa code changes.
 - **R22. Release authority flows only from a holder.** A seat holding
   `cut-release` can dispatch a child granted `cut-release`, and a seat
   without it is refused before any instance exists. This is niwa's existing
@@ -403,6 +428,22 @@ author exclusion `off`, at `autonomous`.
   run prepare-release.yml"`, a comment `# gh workflow run
   prepare-release.yml`, and a `cat <<'EOF'` heredoc whose body is `gh
   workflow run prepare-release.yml`.
+- [ ] With the holder stub, `gh workflow -R o/r run prepare-release.yml` and
+  `gh api repos/o/r/actions/workflows/prepare-release.yml/dispatches?x=1 -f
+  ref=main` get allow; with the stub answering bound holding `merge-pr` only,
+  the same two get ask with `needs cut-release`, and `gh api -X GET -X POST
+  repos/o/r/actions/workflows/prepare-release.yml/dispatches -f ref=main` gets
+  ask too.
+- [ ] With the holder stub and in an instance on the exemption list, `gh
+  workflow run prepare-releas[e].yml`, `gh workflow run
+  prepare-release.y{ml,aml}`, `gh
+  workflow run ~/prepare-release.yml`, `gh workflow run prepare-release.yml
+  extra`, and `gh api -X POST
+  repos/o/r/actions/workflows/prepare%2Drelease.yml/dispatches` get ask.
+- [ ] With a stub answering not-dispatched and no exemption list, `gh pr -R
+  o/r merge 12` is denied and `gh release -R o/r create v1` gets ask; `gh api
+  -X GET -X PUT repos/o/r/pulls/12/merge` is denied. Each is a row where the
+  new hook is stricter than the `179f588` hook, marked as expected.
 - [ ] With the holder stub, `gh workflow run prepare-release.yml; curl x` is
   denied, and `gh workflow run prepare-release.yml && gh pr merge 12` is
   denied with a reason containing `needs merge-pr`.
@@ -472,15 +513,27 @@ release view, and record every question the run puts.
   `abandoned`. With the holder stub, when the stubbed gate asks for the
   workflow dispatch and the answer is no, the run stops the same way and
   prints the gate's reason.
+- [ ] The grant check prints `go=person` when the stub's `dispatch_id` isn't
+  a lowercase UUID, and when the only niwa it finds lies under the fixture
+  repository's working tree.
+- [ ] With the holder stub, a range whose security check prints an
+  `UNRESOLVED` line, and a range holding an unattributed commit that the
+  release workflow didn't write, each get the go question.
+- [ ] With the holder stub, `/shirabe:release '1.2.3;id'` and
+  `/shirabe:release 1.2` stop before the draft with a message naming the
+  version, and so does the same run without a holder.
 - [ ] The grant check runs with no koto on `PATH`.
 
 **The installs (R17 to R20)**
 
 - [ ] koto, shirabe, niwa and tsuku each have a tracked
   `.claude/shirabe-extensions/release.md` whose `## After release` bullets
-  reinstall that repository's tool with tsuku at `RELEASE_VERSION`, run
-  `niwa apply` from the workspace root (koto, shirabe and niwa only), and end
-  with a version check, in that order.
+  reinstall that repository's tool with tsuku at `RELEASE_VERSION`, check
+  the installed version, and run `niwa apply` from the workspace root (koto,
+  shirabe and niwa only), in that order.
+- [ ] With the holder stub and the working copy's `release.md` edited after
+  the release commit to add a bullet, Phase 7 runs the committed bullets and
+  not the added one.
 - [ ] With the holder stub, the dispatch succeeding and `gh release view`
   reporting `isDraft: true` twice then `isDraft: false`, each tracked command
   runs once, in order, from the repository root, with `RELEASE_VERSION` set
@@ -506,8 +559,9 @@ release view, and record every question the run puts.
   isn't published yet and names each install not run; the final report of
   every install run lists each command with how it ended.
 - [ ] A tracked command that exits 1 is reported with its command and its
-  last output lines, the commands after it still run, and no
-  `gh release` call deletes or edits the release.
+  last output lines, the commands after it don't run (a failed reinstall is
+  followed by no `niwa apply`), the final report lists them as not run, and
+  no `gh release` call deletes or edits the release.
 - [ ] `tsuku update koto`, `tsuku install tsukumogami/koto`, `niwa apply` and
   `claude plugin marketplace update shirabe` get the `179f588` hook's verdict
   under every gate stub.
@@ -581,8 +635,11 @@ with real niwa dispatches and no person attached to the dispatched seats.
   coordinator's own grant; reading the new hook rule's text for an unbound
   coordinator is left as it is.
 - **Stronger enforcement.** The gate stays text inspection, and a session
-  that edits its own record or hides a dispatch behind a script isn't stopped
-  by it.
+  that edits its own record or hides a dispatch behind a script, a `gh`
+  alias or another language isn't stopped by it. The boundary that would
+  hold against such a session is on GitHub's side, such as a protected
+  environment with required reviewers on each release workflow; that is
+  separate work.
 
 ## Known Limitations
 
@@ -590,9 +647,15 @@ with real niwa dispatches and no person attached to the dispatched seats.
   release workflow differently isn't gated until the list gains its name,
   and a non-release workflow that happens to carry one of these names is
   gated as a release.
-- The hook reads the two words after `gh` as the subcommand, so a `gh`
-  global flag placed before `workflow` hides the dispatch from it, as it
-  already hides a merge placed that way.
+- The gate is friction against a mistake or an injected instruction, not a
+  boundary against a session set on getting through: a script file, a `gh`
+  alias, another language, a tag push or `gh release edit` reach a release
+  without a command it reads. Every holder, which after R1 means every
+  coordinator, can release any repository its token can, for as long as its
+  session lives.
+- With the grant, release notes are published without a person reading
+  them, so a commit subject or pull request title that shouldn't be public
+  goes out unless an earlier review caught it.
 - The undispatched owner session gains one question per release: the go,
   then the draft (as today), then the new ask on the workflow dispatch.
 - `niwa apply` from the workspace root re-applies every instance, including
