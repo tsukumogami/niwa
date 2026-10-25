@@ -235,9 +235,10 @@ func TestSessionEnvListRefusals(t *testing.T) {
 		{"leading digit", "1NAME"},
 	}
 	lists := map[string]string{
-		"passthrough": "[session.dispatch_env]\npassthrough",
-		"unset":       "[session.dispatch_env]\nunset",
-		"on_reap env": "[session.on_reap]\nenv",
+		"passthrough":       "[session.dispatch_env]\npassthrough",
+		"unset":             "[session.dispatch_env]\nunset",
+		"on_reap env":       "[session.on_reap]\nenv",
+		"before_remove env": "[session.before_remove]\nenv",
 	}
 	for listName, list := range lists {
 		for _, tc := range refused {
@@ -319,6 +320,50 @@ passthrough = ["SHARED_NAME"]
 env = ["SHARED_NAME"]
 `))); err != nil {
 		t.Errorf("a name in both the pass-through and the on-reap list was refused: %v", err)
+	}
+}
+
+// TestBeforeRemoveParse pins the authored shape of [session.before_remove]:
+// every documented key decodes, none surfaces as an unknown field, and an
+// empty timeout reads as the default.
+func TestBeforeRemoveParse(t *testing.T) {
+	result, err := Parse([]byte(sessionConfigWith(`
+[session.before_remove]
+command = "exit 0"
+timeout = "3s"
+env = ["STORE_DIR"]
+`)))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Warnings) != 0 {
+		t.Errorf("parsing reported %v; every documented key must decode", result.Warnings)
+	}
+	b := result.Config.Session.BeforeRemove
+	if b.Command != "exit 0" || b.TimeoutDuration() != 3*time.Second {
+		t.Errorf("before_remove = %+v (timeout %s)", b, b.TimeoutDuration())
+	}
+	if len(b.Env) != 1 || b.Env[0] != "STORE_DIR" {
+		t.Errorf("before_remove env = %v", b.Env)
+	}
+	if got := (SessionBeforeRemoveConfig{}).TimeoutDuration(); got != DefaultBeforeRemoveTimeout {
+		t.Errorf("default timeout = %s, want %s", got, DefaultBeforeRemoveTimeout)
+	}
+}
+
+// TestBeforeRemoveTimeoutRefusals: an unparsable or non-positive timeout is
+// refused at load, naming the key.
+func TestBeforeRemoveTimeoutRefusals(t *testing.T) {
+	for _, v := range []string{"soon", "10", "0s", "-1s"} {
+		t.Run(v, func(t *testing.T) {
+			_, err := Parse([]byte(sessionConfigWith(fmt.Sprintf("[session.before_remove]\ncommand = \"true\"\ntimeout = %q\n", v))))
+			if err == nil {
+				t.Fatalf("timeout %q loaded without complaint", v)
+			}
+			if !strings.Contains(err.Error(), "session.before_remove.timeout") {
+				t.Errorf("the error does not name the key: %v", err)
+			}
+		})
 	}
 }
 
