@@ -16,12 +16,13 @@ goals: |
   release however it is started, and the gate names the authority it lacks.
   The change is proved in a throwaway repository before any real release
   relies on it.
-upstream: docs/briefs/BRIEF-release-honours-grant.md
 motivating_context: |
   The owner directed that release permission be granted through niwa the same
   way merge and close already are, reversing the earlier ruling that kept
   `cut-release` out of the tsukumogami workspace, and ruled that an approved
   cut carries the installs that follow it on the host.
+absorbed:
+  - docs/briefs/BRIEF-release-honours-grant.md
 ---
 
 # PRD: release-honours-grant
@@ -29,6 +30,37 @@ motivating_context: |
 ## Status
 
 Accepted
+
+Absorbed [BRIEF-release-honours-grant](docs/briefs/BRIEF-release-honours-grant.md); carried in Absorbed Brief.
+
+## Absorbed Brief
+
+A session niwa dispatches to cut releases can be granted merging and
+closing but not releasing. The workspace never grants `cut-release`, the
+gate watches `gh release create` (the draft) and not the "Prepare Release"
+workflow dispatch that actually cuts, and `/shirabe:release` asks a person
+for the version-and-notes go whatever the session holds. The installs that
+bring the host up to a new release wait on a go of their own.
+
+What should be true instead is that the owner grants release authority
+once, through niwa, as merge and close are granted. A release seat holding
+`cut-release` runs `/shirabe:release` from version choice to a published
+release and an updated host with nobody asked, and the owner reads the
+result afterwards. A session without the grant, and the owner's own session
+niwa never dispatched, are asked before a release however it is started,
+told which authority they lack; a seat that never held `cut-release` can't
+pass it on; and before any real release relies on it, the whole path is
+proved against a throwaway repository and only then does the workspace
+grant `cut-release`.
+
+The feature holds in the workspace's ceiling and `coordinator` role, the
+gate's treatment of a release workflow dispatch, the skill reading the
+grant for its go, the installs that follow a cut and are tied to it, niwa's
+guide, and the rollout with its live check. It pushes out other release
+routes (hand-pushed tags, `gh release edit`, the REST releases endpoint),
+the confirmations that aren't the go, a separate release role, gating
+installs in general, changes to niwa's grant model, and stronger
+enforcement, each set out in Out of Scope below.
 
 ## Problem Statement
 
