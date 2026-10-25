@@ -199,32 +199,51 @@ hand inside an instance has no mapping, and destroy leaves it alone.
   removed Claude session 7a920b0c; its transcript is kept: claude --resume <session-id>
   ```
 
-- **A running session is never removed.** destroy reads `claude agents --json
-  --all`, and a session whose process is still alive (the row carries a `pid` or
-  `status`) is left in place, finished or not. A worker that has finished its task
-  often keeps an idle process alive for a while, so this is common right after a
-  dispatch completes. destroy never stops a session for you. That's also what
-  happens when a session destroys its own instance:
+- **A running session stops the destroy.** Before any prompt, destroy reads
+  `claude agents --json --all` once, and a mapped session whose process is still
+  alive (the row carries a `pid` or `status`) keeps the instance, finished or
+  not. The workspace's pre-removal command is asked too (see
+  [The pre-removal command](#the-pre-removal-command)), and destroy lists every
+  reason it found, exits non-zero and removes nothing:
+
+  ```
+  niwa: my-ws+fix-0123abcd is still needed:
+    - Claude session 7a920b0c (fix-thing) is still running
+    - reason from before_remove: "run 42 is still bound here"
+  ```
+
+  A worker that has finished its task often keeps an idle process alive for a
+  while, so this is common right after a dispatch completes, and it is what
+  happens when a session destroys its own instance. destroy never stops a
+  session for you. `--force` prints the same reasons as overridden and destroys
+  the instance anyway; the running session is still left in place:
 
   ```
   kept Claude session 7a920b0c: it is still running; once it stops (claude stop 7a920b0c), remove it with claude rm 7a920b0c
   ```
+
+  `niwa destroy --workspace` refuses as a whole when any instance is still
+  needed, naming each one, and takes no `--force`. Destroy the others by name,
+  or run it again once nothing needs them.
 
 - **Unpushed work.** destroy's own unpushed-work check runs first and is
   unchanged. It covers linked worktrees inside the instance, which is where a
   session's worktree lives. destroy never passes `--discard-unpushed` or
   `--force-remove-worktree` to `claude rm`. If Claude Code still refuses, destroy
   reports the refusal and the session stays listed.
-- **Failures don't block the teardown.** If `claude` isn't on `PATH`, its listing
-  can't be read, or `claude rm` fails, destroy warns, leaves the session, and still
-  removes the instance:
+- **A listing that fails refuses.** If `claude` isn't on `PATH` or its listing
+  can't be read, destroy can't tell whether a mapped session is running, so it
+  refuses an instance that has one and says the listing failed. `--force`
+  proceeds. An instance with no mapped session never needs the listing.
+- **Other failures don't block the teardown.** If `claude rm` fails, destroy
+  warns, leaves the session, and still removes the instance:
 
   ```
   warning: could not remove Claude session 7a920b0c: <claude's message>; remove it with claude rm 7a920b0c
   ```
 
-- **Keeping it.** `niwa destroy --keep-session` skips all of this and leaves the
-  session listed.
+- **Keeping it.** `niwa destroy --keep-session` removes no session and leaves it
+  listed. A running session still stops the destroy.
 
 When destroy removes a session, or finds it already gone from the Agent View, it
 runs the workspace's on-reap command for it (if one is declared) and deletes the
@@ -444,7 +463,8 @@ group, with stdin at `/dev/null` and this environment and nothing else:
 
 - `PATH` and `HOME` from niwa's environment;
 - `NIWA_REMOVE_PATH`, the absolute path about to be removed;
-- `NIWA_REMOVE_STEP`, the step asking: `reap` for the mapped reap;
+- `NIWA_REMOVE_STEP`, the step asking: `reap` for the mapped reap, `destroy`
+  for `niwa destroy` and `destroy-workspace` for `niwa destroy --workspace`;
 - `NIWA_SESSION_IDS`, the session ids niwa maps to that instance,
   space-separated, empty when there are none;
 - each name in `env` that is set in niwa's environment.
@@ -484,7 +504,9 @@ starts no process for it.
 **Where it runs.** The mapped reap: `niwa reap`, the idle-grace reclaim, and the
 reaps `niwa dispatch`, `niwa create` and `niwa watch` run first. It runs after
 niwa's own checks (the ephemeral marker, the liveness rule and the re-ask before
-a destroy), immediately before the instance is removed.
+a destroy), immediately before the instance is removed. `niwa destroy` asks it
+once per instance before any prompt, and lists its reason with every other one
+it found instead of printing the `niwa: kept` line; `--force` overrides it.
 
 ## Context-aware `niwa apply`
 

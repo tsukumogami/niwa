@@ -462,8 +462,10 @@ func TestRunDestroy_UnpushedRefusalKeepsSession(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "unpushed work") {
 		t.Fatalf("destroy should refuse over unpushed work; got: %v", err)
 	}
-	if fake.listCalls != 0 || len(fake.removed) != 0 {
-		t.Errorf("an unpushed refusal reached claude: list=%d rm=%v", fake.listCalls, fake.removed)
+	// The preflight lists the sessions before any prompt, to see whether one
+	// is running; the refusal must still remove none.
+	if len(fake.removed) != 0 {
+		t.Errorf("an unpushed refusal removed a session: rm=%v", fake.removed)
 	}
 	if !mappingExists(t, root, ownerSID) {
 		t.Errorf("an unpushed refusal should keep the session's mapping")
@@ -473,7 +475,7 @@ func TestRunDestroy_UnpushedRefusalKeepsSession(t *testing.T) {
 
 // TestRunDestroy_RemovesOwningSession drives `niwa destroy <name>` from the
 // workspace root: the owning session is removed before the instance goes,
-// and --keep-session skips the step without asking claude anything.
+// and --keep-session skips the step without removing anything.
 func TestRunDestroy_RemovesOwningSession(t *testing.T) {
 	for _, keep := range []bool{false, true} {
 		t.Run(map[bool]string{false: "default", true: "keep-session"}[keep], func(t *testing.T) {
@@ -496,8 +498,10 @@ func TestRunDestroy_RemovesOwningSession(t *testing.T) {
 				t.Errorf("instance should be gone: %v", err)
 			}
 			if keep {
-				if fake.listCalls != 0 || len(fake.removed) != 0 {
-					t.Errorf("--keep-session called claude: list=%d rm=%v", fake.listCalls, fake.removed)
+				// The preflight still lists the sessions, since a running
+				// one keeps the instance; --keep-session removes none.
+				if len(fake.removed) != 0 {
+					t.Errorf("--keep-session removed a session: rm=%v", fake.removed)
 				}
 				if !mappingExists(t, root, ownerSID) {
 					t.Errorf("--keep-session should keep the mapping")
