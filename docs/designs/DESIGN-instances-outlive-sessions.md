@@ -101,9 +101,11 @@ anchor carries no link to its coordinator's.
 - **One override.** `--force` on destroy already means "remove it"; it
   overrides the running-session refusal and the gate too, after saying what
   it overrides (R14 to R17).
-- **Resume replays, it doesn't re-derive.** A resumed worker gets the flags
-  dispatch used, read from a record, even when configuration changed since
-  (R19 to R22, niwa#369).
+- **Resume replays, it doesn't re-derive, except where policy tightened.** A
+  resumed worker gets the flags dispatch used, read from a record, even when
+  configuration changed since (R19 to R22, niwa#369), except that it never
+  runs in a mode more permissive than current policy would give, and never
+  carries an environment name the workspace has stopped passing (R22).
 - **koto reads stay read-only.** The verb must leave every session's log,
   keys and bucket copy byte-identical (R30), which rules out `koto context
   get`, which can write (koto#436).
@@ -221,7 +223,10 @@ Resolved inline.
 PRD R19 to R25: dispatch records the launch, the record survives destroy and
 on-reap and lives as long as the transcript; `niwa resume <name> [prompt]`
 finds the worker by instance name, session id or session name, refuses
-ambiguity, replays the recorded launch, restores a missing instance under its
+ambiguity, replays the recorded launch (taking the stricter of the recorded
+and current permission modes, with a notice when that downgrades, and refusing
+a recorded environment name the workspace no longer passes), restores a
+missing instance under its
 original name and path with its trust grant, refuses an occupied path, a gone
 transcript or a running session, and maps the resumed worker under its
 original dispatch id.
@@ -264,7 +269,15 @@ concern with its own retention.
 
 **Re-derive the flags at resume time.** niwa#369 asks for the flags dispatch
 used; re-deriving silently changes a worker's posture when configuration
-changed in between.
+changed in between. The chosen option borrows one thing from it: the current
+policy's permission mode, as a ceiling on the recorded one.
+
+**Replay the recorded permission mode regardless of current policy.** It is
+what niwa#369 literally asks for, but it lets a stale record outrank a policy
+someone tightened after the launch, and when the instance had to be restored
+it pairs that permissive mode with a fresh clone and a trust grant. The
+stricter-of-two rule keeps niwa#369's concern visible instead, through the
+notice it prints when it downgrades.
 
 **Resume through `claude attach`.** It works only while the job entry exists,
 which is exactly what's gone after `claude rm` or a deleted session.
@@ -444,9 +457,17 @@ with the recorded name and prints that unpushed work isn't restored. Then it
 builds the argv with a new `reentryResumeArgs(spec, record)` in
 `dispatch_reentry.go`, launches it from the instance directory with the
 recorded environment, captures the job through dispatch's capture path, and
-writes a session mapping carrying the original dispatch id. When the current
-configuration's permission mode differs from the record's, it prints so and
-uses the record's. Before launching it runs the same machine authority
+writes a session mapping carrying the original dispatch id. The permission
+mode it launches with is the stricter of the record's and the one
+`derivePermissionMode` gives now for that instance with no flag, ordered by a
+strictest-first list the agent declares beside its mode set in `agentplan`
+(Claude Code: `plan`, `default`, `acceptEdits`, `bypassPermissions`); a mode
+outside that list refuses the record. When the current mode is the stricter
+one, resume prints a notice naming both modes before launching. The
+environment allowlist below is read against the workspace's current
+`[session.dispatch_env]`, so a recorded name the workspace has since dropped
+refuses the record, naming the variable, before anything is restored or
+launched. Before launching it runs the same machine authority
 checks dispatch runs (`checkMachineAuthority`) and refuses when they fail, and
 it prints the permission mode it is about to launch with.
 
@@ -703,17 +724,19 @@ reading them, opens record files without following symlinks and checks
 their owner and mode, refuses a symlinked store, and runs the same machine
 authority checks dispatch runs before it launches.
 
-**Replaying a permission mode the current policy would no longer give.**
-Resume uses the recorded mode even when the workspace's configuration has
-since become stricter, and when the instance had to be restored that comes
-with a fresh clone and a trust grant. Using the stricter of the two modes, or
-requiring an explicit flag, was considered and set aside: niwa#369 asks
-precisely that a resumed worker keep the posture it was dispatched with,
-because the failure it reports is a worker that silently came back prompting
-and stalled its coordinator. The mode was granted by whoever dispatched the
-worker, the machine authority checks still bound it, and resume prints the
-mode and, when it differs from what configuration gives now, says so before
-launching. This is an accepted risk, not a mitigated one.
+**A permission mode never outlives a tightened policy.** Resume launches with
+the stricter of the recorded mode and the mode current configuration would
+give a new dispatch into the instance, so a record can never bring back a mode
+more permissive than today's policy allows, including when the instance is
+restored with a fresh clone and a trust grant. A mode niwa can't place in the
+agent's strictest-first order refuses the record rather than being guessed
+at. The cost is that a worker dispatched under a looser policy may come back
+prompting, which is the failure niwa#369 reports; resume prints a notice
+naming both modes when it downgrades, so that change is never silent, and an
+operator who wants the old posture can loosen the policy deliberately. The
+environment follows the same rule: a recorded name the workspace's current
+`[session.dispatch_env]` no longer passes refuses the record instead of being
+replayed.
 
 **Restoring trust.** `niwa resume` re-grants the Claude trust niwa withdrew,
 only for the path derived above and only through the applier's own trust

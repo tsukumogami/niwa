@@ -242,9 +242,18 @@ the coordinators that drive this organization's work.
   session id or session name. An argument matching no launch record, or more
   than one, is refused and every match is listed.
 - **R22.** `niwa resume` resumes the session with the recorded launch, never
-  with values re-derived from current configuration. When the current
-  configuration would give a different permission mode, it says so on stderr
-  and uses the recorded one.
+  with values re-derived from current configuration, with two exceptions:
+  - **Permission mode.** It uses the stricter of the recorded mode and the
+    mode current configuration would give a new dispatch into that instance
+    with no `--permission-mode` flag, ordered strictest first as the agent
+    declares its modes (for Claude Code: `plan`, `default`, `acceptEdits`,
+    `bypassPermissions`). When that is stricter than the recorded mode, it
+    prints a notice on stderr naming both modes before launching. It never
+    launches with a mode more permissive than the recorded one.
+  - **Environment.** It refuses, naming the variable and starting nothing,
+    when the launch record names an environment variable that the
+    workspace's current `[session.dispatch_env]` passthrough no longer lists
+    and that isn't one niwa sets itself.
 - **R23.** When the instance directory is gone, `niwa resume` first restores
   the instance under its original name and at its original path, from the
   workspace configuration and the repositories' pushed state, with the Claude
@@ -402,8 +411,15 @@ the coordinators that drive this organization's work.
   same worker as `niwa resume <instance name>`.
 - [ ] `niwa resume` of a worker whose instance directory is still there
   restores nothing, writes no trust entry and resumes in place.
-- [ ] With the workspace's default permission mode changed after dispatch,
-  `niwa resume` passes the recorded mode and prints that it differs.
+- [ ] A worker dispatched with `bypassPermissions`, after the workspace's
+  policy is tightened so a new dispatch would get `default`, is resumed with
+  `--permission-mode default` and a stderr notice naming `bypassPermissions`
+  and `default`; with the policy loosened instead, a worker dispatched with
+  `default` is resumed with `default` and no notice.
+- [ ] A launch record naming a variable the workspace's
+  `[session.dispatch_env]` passthrough has since dropped makes `niwa resume`
+  exit non-zero naming that variable, with nothing started and no directory
+  restored.
 - [ ] The resumed instance has a session mapping whose dispatch id equals the
   original, and a later reap after its job is removed runs the on-reap
   command with that id as `NIWA_REAP_KEY`.
@@ -504,9 +520,17 @@ the coordinators that drive this organization's work.
 - **The sweep asks the same command about the worktree.** A held worker's
   workflow run is often anchored inside its worktree, so the worktree path is
   as much a "still needed" question as the instance path.
-- **Resume replays, it doesn't re-derive.** niwa#369 asks for the flags
-  dispatch used; re-deriving from current configuration would silently change
-  a worker's posture when the workspace changed in between.
+- **Resume replays, it doesn't re-derive, except where policy tightened.**
+  niwa#369 asks for the flags dispatch used; re-deriving from current
+  configuration would silently change a worker's posture when the workspace
+  changed in between. The permission mode is the one exception: a policy
+  someone tightened since the launch wins, so resume takes the stricter of
+  the recorded and current modes and says so when it downgrades, which keeps
+  niwa#369's failure (a worker silently back in a different mode) visible
+  instead of silent. Replaying the recorded mode regardless was rejected
+  because it would let a stale record outrank a deliberate tightening. An
+  environment name the workspace has since stopped passing is refused rather
+  than replayed, for the same reason.
 - **The launch record lives as long as the transcript.** Without a transcript
   `claude --resume` has nothing to resume, so there's no point keeping the
   record longer, and keeping it shorter breaks user story 4.
