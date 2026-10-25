@@ -102,8 +102,9 @@ dot-niwa's declarations (steps 9 and 10).
 - [ ] With `[session.before_remove]` declared to print a reason and exit 1, `reapBackstop` leaves an unmapped, dispatch-named, past-TTL instance on disk and prints `niwa: kept <instance>: ...`; the command saw `NIWA_REMOVE_STEP=reap-backstop` and an empty `NIWA_SESSION_IDS`; with the command exiting 0 the backstop removes it.
 - [ ] With the same command, `niwa watch`'s discard of a staged review instance whose session is gone leaves the instance on disk with the same line, the command saw `NIWA_REMOVE_STEP=watch-discard`; with exit 0 it is discarded as before.
 - [ ] With nothing declared, the backstop and the discard behave as before and start no process for the gate.
+- [ ] With a command that sleeps 2 seconds and exits 0, under a 10-second timeout, the backstop removes the instance; with a shell that can't start, it keeps the instance and its line says the command could not start.
 - [ ] With no timeout declared and four reapable instances whose commands each sleep 12 seconds, the first three runs are each cut at 10 seconds and keep their instances as timed out, and the fourth doesn't start and its line says the step's time ran out.
-- [ ] A test lists every non-test caller of `destroyInstanceFunc` and `worktree.DestroySession` and fails when a new one appears; the rollbacks after a failed dispatch or watch launch, `niwa reset`, and the explicit `niwa session destroy` and `niwa worktree destroy` paths are named in it as deliberately ungated.
+- [ ] A test lists every non-test caller of `destroyInstanceFunc` and `worktree.DestroySession` and fails when a new one appears. The gated callers are named in it (the mapped reap, the backstop, the watch discard, the worktree sweep, and `niwa destroy` through its preflight in step 2), and so are the deliberately ungated ones: the rollbacks after a failed dispatch or watch launch, `niwa reset`, and the explicit `niwa session destroy` and `niwa worktree destroy` paths, which a person runs on a named target.
 
 **Check**: `go test -count=1 -run 'TestRemovalGate|TestReapBackstop|TestWatch' ./internal/cli/` against scratch workspaces with stub commands; the new tests pass and the existing backstop and watch tests pass unchanged.
 
@@ -122,6 +123,8 @@ dot-niwa's declarations (steps 9 and 10).
 - [ ] A worktree recorded with no job entry, and one whose record predates the change (no session id), are removed once record and transcript are older than the grace period, and kept while the transcript is younger.
 - [ ] A job-keyed worktree whose record is younger than the grace period, or that is changed since creation, is kept with its job entry gone.
 - [ ] With the jobs directory missing or unreadable, no job-keyed worktree is removed.
+- [ ] A hook payload whose session id isn't a well-formed session id records no id, and that worktree follows the transcript rule.
+- [ ] With a pre-removal shell that can't start, a worktree the sweep would otherwise remove is kept and its line says the command could not start.
 - [ ] A worktree the sweep would otherwise remove is kept when the pre-removal command exits 1 for its path, which it sees with `NIWA_REMOVE_STEP=worktree-sweep` and the recorded session id in `NIWA_SESSION_IDS`, with a `niwa: kept` line.
 
 **Check**: `go test -count=1 -run 'TestSweep|TestHookWorktree|TestSessionFromHook|TestRemovalGate' ./internal/cli/ ./internal/worktree/` against scratch instances and a scratch jobs directory; the new tests pass and the existing sweep tests pass unchanged.
@@ -140,6 +143,7 @@ dot-niwa's declarations (steps 9 and 10).
 - [ ] No value of a name `ValidateSessionEnvName` refuses as a credential is written, and a dispatch whose record write fails warns and still completes.
 - [ ] After `niwa destroy` of that instance and the on-reap processing of its session, the record is still there.
 - [ ] A reap removes a record whose transcript Claude Code no longer holds, and keeps a record whose transcript exists or whose transcript directory can't be read.
+- [ ] A record file that doesn't parse, or whose name isn't a valid dispatch id, is left in place with one warning line naming it, and the reap goes on with the others.
 - [ ] A record file is written atomically and its dispatch id is validated before any path is built from it.
 
 **Check**: `go test -count=1 -run 'TestLaunchRecord|TestDispatch|TestReap' ./internal/workspace/ ./internal/cli/` with a stub agent binary in a scratch workspace; the new tests pass and the existing dispatch and reap tests pass unchanged.
@@ -150,14 +154,14 @@ dot-niwa's declarations (steps 9 and 10).
 
 ### Step 6: `niwa resume` brings a dispatched worker back in its recorded posture, restoring a destroyed instance and its trust
 
-**Goal**: `niwa resume <instance name | session id | session name> [prompt]` finds the worker's launch record, validates it, restores a missing instance under its original name and path with its Claude trust grant, and resumes the session with the recorded launch, never more permissive than current policy. Assumes step 1's gate API is untouched; uses step 5's launch store.
+**Goal**: `niwa resume <instance name | session id | session name> [prompt]` finds the worker's launch record, validates it, runs the machine authority checks dispatch runs, restores a missing instance under its original name and path with its Claude trust grant, and resumes the session with the recorded launch, never more permissive than current policy. Uses step 5's launch store and nothing from step 1's gate.
 
 **Acceptance Criteria**:
 
 - [ ] With a stub `claude` recording its arguments, `niwa resume <instance name>` for a dispatched worker whose instance was destroyed restores the directory at the original path, writes the Claude trust entry for it, runs `claude --bg --resume <session id>` with `--permission-mode`, `--name=`, `--model=` and `--settings` from the record and `--` before the prompt, prints the session id, the permission mode and the restored commits, and says unpushed work isn't restored.
 - [ ] `niwa resume <session id>` and `niwa resume <session name>` resume the same worker; with the directory still present, nothing is restored and no trust entry is written.
-- [ ] A worker dispatched with `bypassPermissions`, after the workspace's policy is tightened so a new dispatch would get `default`, is resumed with `default` and a stderr notice naming both modes; a worker dispatched with `default` under a loosened policy is resumed with `default` and no notice.
-- [ ] `niwa resume` exits non-zero naming the argument and starts nothing for: no launch record; two matching records (both listed); a gone transcript; a running session; an original path occupied by a file, directory or symlink; a record naming an environment variable the current `[session.dispatch_env]` no longer passes; a record whose settings carry a key outside the set dispatch emits; a record whose model or session name starts with `-`; a record file not owned by the user or not mode 0600.
+- [ ] The launched mode is the stricter of the recorded mode and the mode the current policy gives, in Claude Code's order `plan`, `default`, `acceptEdits`, `bypassPermissions`. For each pair the tests cover, recorded then current: `bypassPermissions` then `default` launches `default` with a stderr notice naming both; `acceptEdits` then `plan` launches `plan` with the notice; `acceptEdits` then `bypassPermissions` launches `acceptEdits` with no notice; `default` then `default` launches `default` with no notice. A recorded mode outside that list refuses the record.
+- [ ] `niwa resume` exits non-zero naming the argument for: no launch record; two matching records (both listed); a gone transcript; a running session; something other than the instance (a file, a directory without the instance's state, or a symlink) at the original path; a record naming an environment variable the current `[session.dispatch_env]` no longer passes; a record whose settings carry a key outside the set dispatch emits; a record whose model or session name doesn't start with a letter or digit; a record file not owned by the user or not mode 0600. In each case the stub `claude` records no call, no directory is created or restored, and no trust entry is written.
 - [ ] The resumed instance has a session mapping with the original dispatch id, written before the launch.
 
 **Check**: `go test -count=1 -run 'TestResume|TestLaunchRecord' ./internal/cli/ ./internal/workspace/` with a stub `claude` and a scratch workspace whose repositories are local bare repositories; the new tests pass.
@@ -175,10 +179,10 @@ dot-niwa's declarations (steps 9 and 10).
 - [ ] Given a path holding the execution anchor of a running session that nothing continues, the verb exits 1 and prints one line of at most 200 bytes naming that session; after a session anchored elsewhere continues it, or it reaches a terminal state, or it is cancelled, the verb exits 0.
 - [ ] With v1 and v2 (continuing v1) under the path and v3 (continuing v2) outside it, the verb exits 0; with v3 also under the path and running, it exits 1; a successor with no recorded anchor leaves the path needed; a terminal successor outside the path still releases it.
 - [ ] `/a/repo-2` holding a running session doesn't make `/a/repo` needed; a symlinked spelling gives the same answer; a session anchored above the path doesn't count; a path that can't be canonicalized exits 2.
-- [ ] An unparseable session under the path makes it exit 1 naming it as unreadable; a store it can't list makes it exit 2.
-- [ ] Hashing the local store before and after shows no change, and the verb never calls a command that pulls, spools or restores.
+- [ ] An unparseable session under the path, alongside readable ones, makes it exit 1 naming it as unreadable, never 0; a store it can't list makes it exit 2.
+- [ ] Hashing the local store before and after shows no change, including on a store with an unreadable session, and the verb never calls a command that pulls, spools or restores.
 
-**Check**: koto's hosted CI runs the new tests; locally only `cargo build` and the new test module, in a scratch `KOTO_HOME` with every `KOTO_SESSION_*` name unset.
+**Check**: koto's hosted CI is the build of record. Every test builds its sessions, anchors and continues links as fixtures in its own temporary directory under a scratch `KOTO_HOME`, with every `KOTO_SESSION_*` name, `KOTO_SESSIONS_BASE` and `CLAUDE_CODE_SESSION_ID` unset, and asserts the resolved store is under that directory before running; no test reads or writes a real store or bucket. Locally only `cargo build`.
 
 **Dependencies**: None
 
