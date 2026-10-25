@@ -351,6 +351,20 @@ env = ["STORE_DIR"]
 	}
 }
 
+// TestBeforeRemoveEnvRefusalNamesTheField: a refused name in
+// [session.before_remove] env is reported under that table's field.
+func TestBeforeRemoveEnvRefusalNamesTheField(t *testing.T) {
+	for _, name := range []string{"API_TOKEN", "NIWA_THING"} {
+		_, err := Parse([]byte(sessionConfigWith(fmt.Sprintf("[session.before_remove]\ncommand = \"true\"\nenv = [%q]\n", name))))
+		if err == nil {
+			t.Fatalf("%q loaded without complaint", name)
+		}
+		if !strings.Contains(err.Error(), "session.before_remove.env") {
+			t.Errorf("the error for %q does not name the field: %v", name, err)
+		}
+	}
+}
+
 // TestBeforeRemoveTimeoutRefusals: an unparsable or non-positive timeout is
 // refused at load, naming the key.
 func TestBeforeRemoveTimeoutRefusals(t *testing.T) {

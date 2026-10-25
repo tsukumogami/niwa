@@ -41,9 +41,15 @@ import (
 // so a command can't put terminal escapes or text that reads like niwa's own
 // words into niwa's output.
 
-// Step names, which the command reads as NIWA_REMOVE_STEP.
+// Step names, which the command reads as NIWA_REMOVE_STEP. One per removal
+// pass that asks the gate.
 const (
-	removeStepReap = "reap"
+	removeStepReap             = "reap"
+	removeStepReapBackstop     = "reap-backstop"
+	removeStepDestroy          = "destroy"
+	removeStepDestroyWorkspace = "destroy-workspace"
+	removeStepWatchDiscard     = "watch-discard"
+	removeStepWorktreeSweep    = "worktree-sweep"
 )
 
 const (
@@ -54,18 +60,22 @@ const (
 	maxRemovalGateOutputBytes = 4096
 )
 
-// removalGateBudget is the wall time one pass's runs may take together. A run
-// that would start after it is spent keeps its path without running. A
-// variable so a test can shorten it.
-var removalGateBudget = 30 * time.Second
+// defaultRemovalGateBudget is the wall time one pass's runs may take, counted
+// from the start of the pass's first run. A run that would start after it is
+// spent keeps its path without running. A variable so a test can shorten it;
+// each gate copies it when it is built.
+var defaultRemovalGateBudget = 30 * time.Second
 
 // removalGate is one removal pass's pre-removal runs. It loads
-// [session.before_remove] once, on the first ask that needs it, and holds the
-// pass's budget. Each pass builds its own, so each has its own budget.
+// [session.before_remove] once, on the first question that needs it, and holds
+// the pass's budget. Each pass builds its own, so each has its own budget and
+// its own step name.
 type removalGate struct {
 	workspaceRoot string
 	step          string
-	// out takes every spare line. The command's own output never goes here.
+	budget        time.Duration
+	// out takes every spare line ask prints. The command's own output never
+	// goes here.
 	out io.Writer
 
 	loaded bool
@@ -76,7 +86,7 @@ type removalGate struct {
 }
 
 func newRemovalGate(workspaceRoot, step string, out io.Writer) *removalGate {
-	return &removalGate{workspaceRoot: workspaceRoot, step: step, out: out}
+	return &removalGate{workspaceRoot: workspaceRoot, step: step, budget: defaultRemovalGateBudget, out: out}
 }
 
 // load reads [session.before_remove] once. A workspace with no configuration
@@ -106,42 +116,41 @@ func (g *removalGate) active() bool {
 	return g.cfgErr != nil || strings.TrimSpace(g.cfg.Command) != ""
 }
 
-// ask runs the command for one path and reports whether the removal may go
-// ahead. With no command declared it allows without starting anything. When
-// it keeps the path it has printed the spare line by the time it returns.
-func (g *removalGate) ask(path string, sessionIDs []string) bool {
+// check runs the command for one path and returns whether the removal may go
+// ahead and, when it may not, why, in the words the spare line uses after the
+// instance name. It prints nothing, for a caller that reports reasons its own
+// way (destroy lists every reason an instance is kept before it refuses). With
+// no command declared it allows without starting anything.
+func (g *removalGate) check(path string, sessionIDs []string) (allowed bool, reason string) {
 	if !g.active() {
-		return true
+		return true, ""
 	}
-	name := filepath.Base(path)
 	if g.cfgErr != nil {
-		g.spare(name, fmt.Sprintf("could not read [session.before_remove] from %s: %v", workspaceConfigPath(g.workspaceRoot), g.cfgErr))
-		return false
+		return false, fmt.Sprintf("could not read [session.before_remove] from %s: %v", workspaceConfigPath(g.workspaceRoot), g.cfgErr)
 	}
 
 	if g.started.IsZero() {
 		g.started = time.Now()
 	}
-	remaining := removalGateBudget - time.Since(g.started)
+	remaining := g.budget - time.Since(g.started)
 	if remaining <= 0 {
-		g.spare(name, fmt.Sprintf("this step's %s before_remove time ran out before it could ask", removalGateBudget))
-		return false
+		return false, fmt.Sprintf("this step's %s before_remove time ran out before it could ask", g.budget)
 	}
 	timeout := g.cfg.TimeoutDuration()
 	if timeout > remaining {
 		timeout = remaining
 	}
-
-	allowed, reason := g.exec(strings.TrimSpace(g.cfg.Command), timeout, path, sessionIDs)
-	if !allowed {
-		g.spare(name, reason)
-	}
-	return allowed
+	return g.exec(strings.TrimSpace(g.cfg.Command), timeout, path, sessionIDs)
 }
 
-// spare prints the one line a kept path gets.
-func (g *removalGate) spare(name, reason string) {
-	fmt.Fprintf(g.out, "niwa: kept %s: %s\n", sanitizeRemovalGateText(name, 80), reason)
+// ask is check for a caller that only needs the answer: when the path is
+// kept it prints the one spare line naming the instance and why.
+func (g *removalGate) ask(path string, sessionIDs []string) bool {
+	allowed, reason := g.check(path, sessionIDs)
+	if !allowed {
+		fmt.Fprintf(g.out, "niwa: kept %s: %s\n", sanitizeRemovalGateText(filepath.Base(path), 80), reason)
+	}
+	return allowed
 }
 
 // exec runs command once. It returns true when the command exited 0, and
@@ -175,7 +184,11 @@ func (g *removalGate) exec(command string, timeout time.Duration, path string, s
 	case ctx.Err() != nil:
 		return false, fmt.Sprintf("before_remove timed out after %s", timeout)
 	case errors.Is(err, exec.ErrWaitDelay):
-		// The shell exited 0 and something it started kept a pipe open.
+		// The shell exited 0 and something it started kept a pipe open. The
+		// answer is the exit status, and it was 0: the command finished
+		// deciding before the wait gave up on the pipe, so this is an allow,
+		// not a failure to answer. Keeping here would let a command that
+		// leaves a background helper behind keep every path forever.
 		return true, ""
 	case errors.As(err, &exitErr):
 		if line := lastLine(output.String()); line != "" {

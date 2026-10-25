@@ -310,6 +310,70 @@ func TestRemovalGate_TimeoutAndStartFailureSpare(t *testing.T) {
 	})
 }
 
+// TestRemovalGate_CheckReturnsTheReasonWithoutPrinting: check gives a caller
+// the verdict and the reason and prints nothing, so destroy can list reasons
+// its own way; ask prints the same reason after the instance name.
+func TestRemovalGate_CheckReturnsTheReasonWithoutPrinting(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	appendBeforeRemoveConfig(t, root, `command = "echo 'run in progress'; exit 1"`)
+	inst := filepath.Join(root, "test-ws-check")
+
+	var out strings.Builder
+	gate := newRemovalGate(root, removeStepDestroy, &out)
+	allowed, reason := gate.check(inst, nil)
+	if allowed {
+		t.Fatal("check allowed a path the command refused")
+	}
+	if reason != `reason from before_remove: "run in progress"` {
+		t.Errorf("reason = %q", reason)
+	}
+	if out.Len() != 0 {
+		t.Errorf("check printed %q; it must print nothing", out.String())
+	}
+	if gate.ask(inst, nil) {
+		t.Fatal("ask allowed a path the command refused")
+	}
+	if want := "niwa: kept test-ws-check: " + reason + "\n"; out.String() != want {
+		t.Errorf("ask printed %q, want %q", out.String(), want)
+	}
+}
+
+// TestRemovalGate_SpentBudgetKeepsWithoutRunning: once a pass's budget is
+// spent, the next path is kept without starting the command, and the reason
+// says the time ran out.
+func TestRemovalGate_SpentBudgetKeepsWithoutRunning(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	log := filepath.Join(t.TempDir(), "runs.log")
+	appendBeforeRemoveConfig(t, root, fmt.Sprintf(`command = "echo run >> '%s'; sleep 1; exit 0"`, log))
+
+	gate := newRemovalGate(root, removeStepReap, &strings.Builder{})
+	gate.budget = 500 * time.Millisecond
+	if allowed, _ := gate.check(filepath.Join(root, "first"), nil); allowed {
+		t.Fatal("the first run outlived the budget and should have been cut")
+	}
+	allowed, reason := gate.check(filepath.Join(root, "second"), nil)
+	if allowed || !strings.Contains(reason, "time ran out") {
+		t.Errorf("second check = %v, %q; want kept because the time ran out", allowed, reason)
+	}
+	if runs := onReapRuns(t, log); len(runs) != 1 {
+		t.Errorf("the command ran %d times, want 1 (the second path must not start it)", len(runs))
+	}
+}
+
+// TestRemovalGate_UnreadableConfigKeeps: a workspace configuration that
+// exists but doesn't parse keeps every path and says why.
+func TestRemovalGate_UnreadableConfigKeeps(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	if err := os.WriteFile(workspaceConfigPath(root), []byte("[workspace\nname = "), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gate := newRemovalGate(root, removeStepReap, &strings.Builder{})
+	allowed, reason := gate.check(filepath.Join(root, "any"), nil)
+	if allowed || !strings.Contains(reason, "could not read [session.before_remove]") {
+		t.Errorf("check = %v, %q; want kept because the configuration can't be read", allowed, reason)
+	}
+}
+
 // TestRemovalGate_SilentNonZeroNamesTheStatus: a command that exits non-zero
 // with no output still gets a reason.
 func TestRemovalGate_SilentNonZeroNamesTheStatus(t *testing.T) {
