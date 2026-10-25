@@ -34,10 +34,11 @@ type SessionConfig struct {
 	Env     SessionEnvConfig     `toml:"env,omitempty"`
 	Posture SessionPostureConfig `toml:"posture,omitempty"`
 
-	// DispatchEnv and OnReap are read when niwa launches or removes a
-	// session, never at apply. See their types.
-	DispatchEnv SessionDispatchEnvConfig `toml:"dispatch_env,omitempty"`
-	OnReap      SessionOnReapConfig      `toml:"on_reap,omitempty"`
+	// DispatchEnv, OnReap and BeforeRemove are read when niwa launches or
+	// removes a session, never at apply. See their types.
+	DispatchEnv  SessionDispatchEnvConfig  `toml:"dispatch_env,omitempty"`
+	OnReap       SessionOnReapConfig       `toml:"on_reap,omitempty"`
+	BeforeRemove SessionBeforeRemoveConfig `toml:"before_remove,omitempty"`
 }
 
 // SessionPostureConfig is [session.posture]: how much a prepared session asks
@@ -168,6 +169,42 @@ func (s SessionOnReapConfig) TimeoutDuration() time.Duration {
 	return DefaultOnReapTimeout
 }
 
+// DefaultBeforeRemoveTimeout bounds one pre-removal run when
+// [session.before_remove] sets no timeout.
+const DefaultBeforeRemoveTimeout = 10 * time.Second
+
+// SessionBeforeRemoveConfig is [session.before_remove]: a command niwa runs
+// immediately before it removes a path a session may still need, and whose
+// answer decides whether the removal happens.
+//
+// It is the opposite of [session.on_reap] in the one way that matters. That
+// command runs after a removal, is retried when it fails and is eventually
+// given up on. This one runs before, and exit 0 is the only answer that lets
+// the removal go ahead: any other exit, a timeout or a failure to start keeps
+// the path, so a broken command can keep directories but never remove one niwa
+// would have kept without it. The two are separate tables so neither meaning
+// can be declared by mistake for the other.
+//
+// Command runs under sh -c from the workspace root with stdin empty and a
+// fixed environment: PATH, HOME, NIWA_REMOVE_PATH, NIWA_REMOVE_STEP,
+// NIWA_SESSION_IDS, and each name in Env that is set in niwa's environment.
+// Timeout bounds one run, "10s" when empty. The command has the trust level of
+// a hook the workspace configuration installs.
+type SessionBeforeRemoveConfig struct {
+	Command string   `toml:"command,omitempty"`
+	Timeout string   `toml:"timeout,omitempty"`
+	Env     []string `toml:"env,omitempty"`
+}
+
+// TimeoutDuration returns the per-run timeout. The load refused a value that
+// doesn't parse or isn't positive, so anything else reads as the default.
+func (s SessionBeforeRemoveConfig) TimeoutDuration() time.Duration {
+	if d, err := time.ParseDuration(strings.TrimSpace(s.Timeout)); err == nil && d > 0 {
+		return d
+	}
+	return DefaultBeforeRemoveTimeout
+}
+
 // ReapKeyEnv is the variable niwa sets to a session's reap key: the dispatch
 // id for a session niwa launched, the session id for one a SessionStart hook
 // provisioned an instance for.
@@ -267,14 +304,28 @@ func validateSessionDeclaration(s SessionConfig) error {
 	if err := checkList("session.on_reap.env", s.OnReap.Env); err != nil {
 		return err
 	}
-	if t := strings.TrimSpace(s.OnReap.Timeout); t != "" {
-		d, err := time.ParseDuration(t)
-		if err != nil {
-			return fmt.Errorf("session.on_reap.timeout: %q is not a duration (for example \"10s\")", s.OnReap.Timeout)
-		}
-		if d <= 0 {
-			return fmt.Errorf("session.on_reap.timeout: %q must be positive", s.OnReap.Timeout)
-		}
+	if err := checkTimeout("session.on_reap.timeout", s.OnReap.Timeout); err != nil {
+		return err
+	}
+	if err := checkList("session.before_remove.env", s.BeforeRemove.Env); err != nil {
+		return err
+	}
+	return checkTimeout("session.before_remove.timeout", s.BeforeRemove.Timeout)
+}
+
+// checkTimeout refuses a timeout that is set but doesn't parse as a duration,
+// or isn't positive. An empty value means the table's default.
+func checkTimeout(field, value string) error {
+	t := strings.TrimSpace(value)
+	if t == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(t)
+	if err != nil {
+		return fmt.Errorf("%s: %q is not a duration (for example \"10s\")", field, value)
+	}
+	if d <= 0 {
+		return fmt.Errorf("%s: %q must be positive", field, value)
 	}
 	return nil
 }

@@ -160,6 +160,11 @@ func deepCopySession(in config.SessionConfig) config.SessionConfig {
 			Timeout: in.OnReap.Timeout,
 			Env:     slices.Clone(in.OnReap.Env),
 		},
+		BeforeRemove: config.SessionBeforeRemoveConfig{
+			Command: in.BeforeRemove.Command,
+			Timeout: in.BeforeRemove.Timeout,
+			Env:     slices.Clone(in.BeforeRemove.Env),
+		},
 	}
 }
 

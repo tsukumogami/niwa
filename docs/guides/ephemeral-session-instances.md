@@ -424,6 +424,68 @@ dropped as before. A file that exists but can't be read or parsed counts as a
 failed run for every session that step removes, with the warning line, so the
 mappings are kept until the file is fixed (or ten reaps go by).
 
+## The pre-removal command
+
+`[session.on_reap]` runs after a session is removed. `[session.before_remove]`
+runs before, and decides whether the removal happens. It is how something
+outside niwa that knows a path is still needed, a workflow engine with a run
+bound under the instance, keeps that instance on disk, without niwa knowing
+anything about the engine.
+
+```toml
+[session.before_remove]
+command = "my-check-tool needed \"$NIWA_REMOVE_PATH\""
+timeout = "10s"          # per run; the default
+env = ["MY_TOOL_HOME"]   # names copied from niwa's environment, when set
+```
+
+niwa runs `command` under `sh -c` from the workspace root, in its own process
+group, with stdin at `/dev/null` and this environment and nothing else:
+
+- `PATH` and `HOME` from niwa's environment;
+- `NIWA_REMOVE_PATH`, the absolute path about to be removed;
+- `NIWA_REMOVE_STEP`, the step asking: `reap` for the mapped reap;
+- `NIWA_SESSION_IDS`, the session ids niwa maps to that instance,
+  space-separated, empty when there are none;
+- each name in `env` that is set in niwa's environment.
+
+`env` gets the same load-time refusals as the other session lists, and a
+`timeout` that doesn't parse or isn't positive is refused at load.
+
+**Exit 0 removes; anything else keeps.** Any other exit, a run past its
+timeout, a command that can't start, or a configuration file that can't be read
+keeps the path for this removal. The instance and its mapping are left exactly
+as they were, including the on-reap failure count, so the next reap asks again.
+niwa prints one line on the step's standard error:
+
+```
+niwa: kept <instance>: reason from before_remove: "<last line the command printed>"
+niwa: kept <instance>: before_remove timed out after 10s
+```
+
+The command's own output is never printed. niwa keeps the end of both its
+streams and quotes only the last non-empty line, cut to 200 bytes, with control
+characters and bidirectional overrides replaced. A command that exits non-zero
+without printing anything gets `before_remove exited with status <n>`.
+
+**Every failure keeps.** A broken or slow command keeps instances until it is
+fixed; it can never make niwa remove one it would have kept without it. Every
+reap says so with the lines above, so a broken command shows up the first time it
+matters.
+
+**Bounds.** Each run gets its timeout, and on timeout the whole process group is
+killed. One step's runs are sequential and share a 30-second budget: each run's
+timeout is cut to what is left of it, and a path whose run would start after it
+is spent is kept with a line saying the time ran out.
+
+**With nothing declared,** every removal behaves as it did before and niwa
+starts no process for it.
+
+**Where it runs.** The mapped reap: `niwa reap`, the idle-grace reclaim, and the
+reaps `niwa dispatch`, `niwa create` and `niwa watch` run first. It runs after
+niwa's own checks (the ephemeral marker, the liveness rule and the re-ask before
+a destroy), immediately before the instance is removed.
+
 ## Context-aware `niwa apply`
 
 Hosting the session hooks, the permission posture, and a root `CLAUDE.md` makes
