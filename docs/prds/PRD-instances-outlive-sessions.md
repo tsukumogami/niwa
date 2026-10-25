@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: In Progress
 problem: |
   Coordinators and developers who hold a dispatched worker at a pause, or
   leave a workflow run for a successor, lose the niwa instance and hook-made
@@ -24,7 +24,7 @@ source_issue: 369
 
 ## Status
 
-Accepted
+In Progress
 
 Absorbed [BRIEF-instances-outlive-sessions](docs/briefs/BRIEF-instances-outlive-sessions.md); carried in Absorbed Brief.
 
