@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 problem: |
   The tsukumogami workspace can't grant `cut-release`, the `gate-online` hook
   has no rule for the "Prepare Release" workflow dispatch that
@@ -40,7 +40,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
