@@ -95,23 +95,94 @@ dot-niwa's declarations (steps 9 and 10).
 
 ### Step 3: the gate guards the backstop and the watch discard, within its time bounds
 
-The backstop and `niwa watch`'s discard ask the gate; a run is cut at its timeout and the step at 30 seconds, sparing and saying so, and a caller-list test keeps new removal paths from skipping it.
+**Goal**: The reap's backstop for unmapped dispatch instances and `niwa watch`'s discard of a staged review instance ask the pre-removal gate before they remove anything, and a test keeps any later removal path from skipping it. Assumes step 1's gate API at 4f8f6db: `newRemovalGate(root, step, out)` per pass, `check(path, ids) (bool, string)` and `ask(path, ids) bool`, the `removeStepReapBackstop` and `removeStepWatchDiscard` names, and `sessionIDsByInstance(root)`.
+
+**Acceptance Criteria**:
+
+- [ ] With `[session.before_remove]` declared to print a reason and exit 1, `reapBackstop` leaves an unmapped, dispatch-named, past-TTL instance on disk and prints `niwa: kept <instance>: ...`; the command saw `NIWA_REMOVE_STEP=reap-backstop` and an empty `NIWA_SESSION_IDS`; with the command exiting 0 the backstop removes it.
+- [ ] With the same command, `niwa watch`'s discard of a staged review instance whose session is gone leaves the instance on disk with the same line, the command saw `NIWA_REMOVE_STEP=watch-discard`; with exit 0 it is discarded as before.
+- [ ] With nothing declared, the backstop and the discard behave as before and start no process for the gate.
+- [ ] With no timeout declared and four reapable instances whose commands each sleep 12 seconds, the first three runs are each cut at 10 seconds and keep their instances as timed out, and the fourth doesn't start and its line says the step's time ran out.
+- [ ] A test lists every non-test caller of `destroyInstanceFunc` and `worktree.DestroySession` and fails when a new one appears; the rollbacks after a failed dispatch or watch launch, `niwa reset`, and the explicit `niwa session destroy` and `niwa worktree destroy` paths are named in it as deliberately ungated.
+
+**Check**: `go test -count=1 -run 'TestRemovalGate|TestReapBackstop|TestWatch' ./internal/cli/` against scratch workspaces with stub commands; the new tests pass and the existing backstop and watch tests pass unchanged.
+
+**Dependencies**: Step 1
+
+**Files**: `internal/cli/reap.go`, `internal/cli/watch.go`, `internal/cli/removal_gate_test.go`
 
 ### Step 4: a held worker's hook-made worktree survives while its job is listed, and the sweep asks the gate
 
-The WorktreeCreate hook records the requesting session and whether it had a job entry, and the sweep keeps a job-backed worktree until the job is gone, then asks the gate for the worktree path.
+**Goal**: A worktree niwa's WorktreeCreate hook made for a session that had a Claude Code job entry is swept only once that job entry is gone, however idle its transcript, and the sweep asks the pre-removal gate before removing one. Assumes step 1's gate API at 4f8f6db: `newRemovalGate(root, removeStepWorktreeSweep, out)` built in `sweepHookWorktrees` and `ask(path, ids)`.
+
+**Acceptance Criteria**:
+
+- [ ] A WorktreeCreate hook run for a session with a job entry records the payload's session id (only when it is a well-formed session id) in the lifecycle record and records that it had a job entry; a run for a session with none records its id and that it had none.
+- [ ] A held worker's hook-made worktree, record and transcript both 48 hours old, job entry still listed, is kept by every sweep; once the job entry is removed, the next sweep removes it.
+- [ ] A worktree recorded with no job entry, and one whose record predates the change (no session id), are removed once record and transcript are older than the grace period, and kept while the transcript is younger.
+- [ ] A job-keyed worktree whose record is younger than the grace period, or that is changed since creation, is kept with its job entry gone.
+- [ ] With the jobs directory missing or unreadable, no job-keyed worktree is removed.
+- [ ] A worktree the sweep would otherwise remove is kept when the pre-removal command exits 1 for its path, which it sees with `NIWA_REMOVE_STEP=worktree-sweep` and the recorded session id in `NIWA_SESSION_IDS`, with a `niwa: kept` line.
+
+**Check**: `go test -count=1 -run 'TestSweep|TestHookWorktree|TestSessionFromHook|TestRemovalGate' ./internal/cli/ ./internal/worktree/` against scratch instances and a scratch jobs directory; the new tests pass and the existing sweep tests pass unchanged.
+
+**Dependencies**: Step 1
+
+**Files**: `internal/cli/reap_worktrees.go`, `internal/cli/session_from_hook_cmd.go`, `internal/worktree/session_lifecycle.go`
 
 ### Step 5: a dispatched worker's launch is recorded and outlives a destroy until its transcript goes
 
-`niwa dispatch` writes a validated launch record under the workspace root that `niwa destroy` leaves in place and the reap drops once Claude Code no longer holds the transcript.
+**Goal**: `niwa dispatch` writes a launch record for each worker it launches, holding what it launched the worker with, in a store outside the instance and the configuration directory, so the record survives `niwa destroy`; the reap removes a record only once Claude Code no longer holds the session's transcript. Uses nothing from step 1's gate.
+
+**Acceptance Criteria**:
+
+- [ ] After a dispatch, `<workspace root>/.niwa-launch/<dispatch id>.json` exists with mode 0600 in a 0700 directory and holds the schema `niwa.launch/v1`, dispatch id, session id, agent, instance name, permission mode, session name, model, the settings document passed, and the environment names and values niwa set for the worker.
+- [ ] No value of a name `ValidateSessionEnvName` refuses as a credential is written, and a dispatch whose record write fails warns and still completes.
+- [ ] After `niwa destroy` of that instance and the on-reap processing of its session, the record is still there.
+- [ ] A reap removes a record whose transcript Claude Code no longer holds, and keeps a record whose transcript exists or whose transcript directory can't be read.
+- [ ] A record file is written atomically and its dispatch id is validated before any path is built from it.
+
+**Check**: `go test -count=1 -run 'TestLaunchRecord|TestDispatch|TestReap' ./internal/workspace/ ./internal/cli/` with a stub agent binary in a scratch workspace; the new tests pass and the existing dispatch and reap tests pass unchanged.
+
+**Dependencies**: None
+
+**Files**: `internal/workspace/launch_store.go`, `internal/cli/dispatch.go`, `internal/cli/reap.go`
 
 ### Step 6: `niwa resume` brings a dispatched worker back in its recorded posture, restoring a destroyed instance and its trust
 
-`niwa resume <name> [prompt]` finds the worker's launch record, restores a missing instance under its original name with its trust grant, and resumes the session with the recorded permission mode, name, model, settings and environment.
+**Goal**: `niwa resume <instance name | session id | session name> [prompt]` finds the worker's launch record, validates it, restores a missing instance under its original name and path with its Claude trust grant, and resumes the session with the recorded launch, never more permissive than current policy. Assumes step 1's gate API is untouched; uses step 5's launch store.
+
+**Acceptance Criteria**:
+
+- [ ] With a stub `claude` recording its arguments, `niwa resume <instance name>` for a dispatched worker whose instance was destroyed restores the directory at the original path, writes the Claude trust entry for it, runs `claude --bg --resume <session id>` with `--permission-mode`, `--name=`, `--model=` and `--settings` from the record and `--` before the prompt, prints the session id, the permission mode and the restored commits, and says unpushed work isn't restored.
+- [ ] `niwa resume <session id>` and `niwa resume <session name>` resume the same worker; with the directory still present, nothing is restored and no trust entry is written.
+- [ ] A worker dispatched with `bypassPermissions`, after the workspace's policy is tightened so a new dispatch would get `default`, is resumed with `default` and a stderr notice naming both modes; a worker dispatched with `default` under a loosened policy is resumed with `default` and no notice.
+- [ ] `niwa resume` exits non-zero naming the argument and starts nothing for: no launch record; two matching records (both listed); a gone transcript; a running session; an original path occupied by a file, directory or symlink; a record naming an environment variable the current `[session.dispatch_env]` no longer passes; a record whose settings carry a key outside the set dispatch emits; a record whose model or session name starts with `-`; a record file not owned by the user or not mode 0600.
+- [ ] The resumed instance has a session mapping with the original dispatch id, written before the launch.
+
+**Check**: `go test -count=1 -run 'TestResume|TestLaunchRecord' ./internal/cli/ ./internal/workspace/` with a stub `claude` and a scratch workspace whose repositories are local bare repositories; the new tests pass.
+
+**Dependencies**: Step 5
+
+**Files**: `internal/cli/resume.go`, `internal/cli/dispatch_reentry.go`, `internal/cli/instance_from_hook.go`, `internal/workspace/launch_store.go`
 
 ### Step 7: `koto session needed` answers for a path from the runs anchored under it and their local successors
 
-In tsukumogami/koto, `koto session needed <PATH>` exits 1 while a run anchored under the path is running and no later member of its lineage is anchored outside it, 0 otherwise, and 2 when it can't decide, writing nothing.
+**Goal**: In tsukumogami/koto, a read-only `koto session needed <PATH>` exits 1 while a workflow session anchored at or under the path is running and no later member of its lineage (through the continues relation koto#481 added) is anchored outside it, 0 when no such session exists, and 2 when it can't decide, writing nothing. Independent of niwa's gate; niwa's `[session.before_remove]` calls it in step 10.
+
+**Acceptance Criteria**:
+
+- [ ] Given a path holding the execution anchor of a running session that nothing continues, the verb exits 1 and prints one line of at most 200 bytes naming that session; after a session anchored elsewhere continues it, or it reaches a terminal state, or it is cancelled, the verb exits 0.
+- [ ] With v1 and v2 (continuing v1) under the path and v3 (continuing v2) outside it, the verb exits 0; with v3 also under the path and running, it exits 1; a successor with no recorded anchor leaves the path needed; a terminal successor outside the path still releases it.
+- [ ] `/a/repo-2` holding a running session doesn't make `/a/repo` needed; a symlinked spelling gives the same answer; a session anchored above the path doesn't count; a path that can't be canonicalized exits 2.
+- [ ] An unparseable session under the path makes it exit 1 naming it as unreadable; a store it can't list makes it exit 2.
+- [ ] Hashing the local store before and after shows no change, and the verb never calls a command that pulls, spools or restores.
+
+**Check**: koto's hosted CI runs the new tests; locally only `cargo build` and the new test module, in a scratch `KOTO_HOME` with every `KOTO_SESSION_*` name unset.
+
+**Dependencies**: None
+
+**Files**: `src/session/needed.rs`, `src/cli/session.rs`, `docs/guides/cli-usage.md`
 
 ### Step 8: `koto session needed` judges successors only the bucket knows and imported copies
 
