@@ -876,12 +876,14 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// was composed, so the on-reap command can name this session once niwa
 	// removes it. An agent with no settings flag gets the process
 	// environment only.
-	workerEnv := applyLaunchEnv(spec, launchSettings, os.Environ(), launchEnvShape{
+	baseEnv := os.Environ()
+	envShape := launchEnvShape{
 		Lineage:     lineageValue,
 		Passthrough: passthroughNames,
 		Unset:       unsetNames,
 		ReapKey:     dispatchID,
-	})
+	}
+	workerEnv := applyLaunchEnv(spec, launchSettings, baseEnv, envShape)
 	// The MCP approval is the fourth contributor, and the second non-constant
 	// value (see renderLaunchSettings). A dispatched worker ignores the
 	// enabledMcpjsonServers list in the instance's own settings files and
@@ -920,11 +922,13 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// instance). Dropping the document instead would leave that contributor's
 	// record saying its key was sent, and appending it would launch with an
 	// empty flag element and a stray document.
+	launchDoc := ""
 	if doc, ok := renderLaunchSettings(launchSettings); ok {
 		if spec.Flags.Settings == "" {
 			return fmt.Errorf("niwa: error: internal: a launch setting was added for the %q agent, which has no settings flag", dispatchedAgent)
 		}
 		passthrough = append(passthrough, spec.Flags.Settings, doc)
+		launchDoc = doc
 	}
 
 	// (9d) Keep-alive arming. The opt-in resolves flag > downstream > host
@@ -1168,6 +1172,28 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 				"niwa: the work is kept at %s -- remove it with `niwa destroy` when you are done with it\n", instancePath)
 		}
 		return fmt.Errorf("niwa: error: writing dispatch session mapping: %w", err)
+	}
+
+	// (11a) Record what the worker was launched with, outside the instance,
+	// so a later resume can bring it back in the same posture after the
+	// instance is gone. Nothing reads the record during this dispatch, so a
+	// failed write costs only that later resume: it warns and the dispatch
+	// goes on.
+	launchRecord := workspace.LaunchRecord{
+		DispatchID:     dispatchID,
+		SessionID:      sessionID,
+		Agent:          string(dispatchedAgent),
+		InstanceName:   res.Name,
+		PermissionMode: permissionMode,
+		SessionName:    forwardedName,
+		Model:          resolvedModel,
+		Settings:       launchDoc,
+		Env:            launchEnvValues(baseEnv, envShape),
+	}
+	if err := writeLaunchRecordFunc(workspaceRoot, launchRecord); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"niwa: warning: could not write the launch record %s: %v\n",
+			filepath.Join(workspace.LaunchDir(workspaceRoot), dispatchID+".json"), err)
 	}
 
 	// (12) The mapping is durable. Close the capture window (the mapping binds

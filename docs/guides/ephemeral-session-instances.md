@@ -486,6 +486,33 @@ reaps `niwa dispatch`, `niwa create` and `niwa watch` run first. It runs after
 niwa's own checks (the ephemeral marker, the liveness rule and the re-ask before
 a destroy), immediately before the instance is removed.
 
+## The launch store
+
+`niwa dispatch` records what it launched each worker with in
+`<workspace root>/.niwa-launch/<dispatch id>.json`: the session id, the agent,
+the instance name, the permission mode, the session name, the model, the
+settings document it passed, and the environment names and values it set for
+the worker. The directory is 0700 and each record 0600. A value whose name the
+session lists would refuse as a credential is never written. The record is
+written once the session mapping is, atomically; a write that fails prints one
+warning and the dispatch goes on.
+
+The store sits outside every instance and outside `.niwa/`, so `niwa destroy`
+and the on-reap command leave it alone. It's there so a worker can be brought
+back in the posture it was dispatched with after its instance is gone.
+
+A reap removes a Claude Code worker's record once its transcript,
+`~/.claude/projects/<encoded instance path>/<session id>.jsonl`, no longer
+exists. It keeps the record when the transcript exists, when the transcript's
+directory can't be read, when `~/.claude/projects` itself is missing, when the
+record is under an hour old, and for an agent whose transcripts niwa doesn't
+know how to find. A file it can't read, or whose name isn't a dispatch id, is
+left in place with one warning line naming it.
+
+Keep `.niwa-launch/` out of anything published from the workspace root, next
+to `.niwa-lineage/`: the records hold the values of the names your
+`[session.dispatch_env]` passes through.
+
 ## Context-aware `niwa apply`
 
 Hosting the session hooks, the permission posture, and a root `CLAUDE.md` makes

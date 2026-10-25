@@ -63,6 +63,10 @@ var createLineageEntryFunc = workspace.CreateLineageEntry
 // after (10). It is a variable so a test can make the completion fail.
 var completeLineageEntryFunc = workspace.CompleteLineageEntry
 
+// writeLaunchRecordFunc writes the launch record at (11a). It is a variable so
+// a test can make the write fail.
+var writeLaunchRecordFunc = workspace.WriteLaunchRecord
+
 // dispatchLineageEntry is the entry a dispatch writes: its identity, and the
 // parent links and principal (2e) resolved.
 func dispatchLineageEntry(dispatchID, instance, agentName string, now time.Time, auth *dispatchAuthority) lineage.Entry {
