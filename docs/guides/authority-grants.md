@@ -698,8 +698,7 @@ needs, then decides by the answer:
 | `check` answer | Each needed authority |
 |----------------|-----------------------|
 | `bound`, held, decider `session`, author exclusion `off` | allow |
-| `bound`, not held, `merge-pr` or `close-issue` | deny, naming what the session holds and the authority it needs |
-| `bound`, not held, `cut-release` | ask, naming the same |
+| `bound`, not held | deny, naming what the session holds and the authority it needs |
 | `bound`, held, decider `dispatcher` | deny, naming the level |
 | `bound`, held, decider `person`, or author exclusion `on` | the verdict an instance off the exemption list gets |
 | `record-unusable` | the verdict an instance off the exemption list gets |
@@ -729,9 +728,9 @@ workflows keep their verdict.
 
 "The gate's verdict today" is the verdict for a command the gate already
 gated. A release workflow dispatch is often one it didn't, so the gate
-chooses that verdict when it adds the rule, and it may ask a session niwa
-didn't dispatch, a person's own included, rather than keep the allow it gave
-before. That makes the gate stricter, never wider.
+chooses that verdict when it adds the rule. For a release it asks a session
+niwa didn't dispatch, a person's own included, rather than keep the allow it
+gave before. That makes the gate stricter, never wider.
 
 A gate that reads command text covers only the commands it reads, so the
 table above isn't a full account of what `cut-release` guards. It stops a
@@ -743,10 +742,11 @@ a program in another language that does any of these. The control that holds
 against that is on the hosting side, such as a protected environment with
 required reviewers on each release workflow.
 
-A release tool can make the same bounded `check` call for its own session,
-to decide whether to ask a person for its go before it cuts, and before the
-installs that follow, treating any answer but a held grant the session
-decides as a reason to ask. That read is advisory. A session runs as the
+A release tool can make the same bounded `check` call for its own session.
+A held `cut-release` grant the session decides answers the tool's go: it
+cuts, and runs the installs that follow, without asking a person, just as a
+session holding `merge-pr` merges without asking. Any other answer leaves
+the go with a person. That read is advisory. A session runs as the
 operator and could edit its own record, so the answer can be stale or
 forged, and the gate isn't a boundary against that either. The gate still
 decides the release and the workflow dispatch it reads, so it, not the
