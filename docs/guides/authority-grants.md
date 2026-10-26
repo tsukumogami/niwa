@@ -720,10 +720,12 @@ as needing `cut-release`, and decides it by the table above as it decides
 name, such as `prepare-release.yml` or `release-prepare.yml`, and by display
 name, such as "Prepare Release", compared in any case. A dispatch whose
 workflow the gate can't read (a numeric workflow id, a shell expansion, a
-glob or a path in place of the name, no name, or more than one) is asked for
-every session, since the gate can't tell it isn't a release, and no grant
-lifts that. So is a `gh api` call that isn't a GET and whose endpoint is
-wholly a shell expansion. Dispatches of other workflows keep their verdict.
+glob, a path, another character bash or GitHub would expand or decode
+before matching, no name, or more than one) is asked for every
+session, since the gate can't tell it isn't a release, and no grant lifts
+that. So is a `gh api` call whose endpoint is wholly a shell expansion and
+that sets a method other than GET or passes a body flag. Dispatches of other
+workflows keep their verdict.
 
 "The gate's verdict today" is the verdict for a command the gate already
 gated. A release workflow dispatch is often one it didn't, so the gate
@@ -744,9 +746,11 @@ required reviewers on each release workflow.
 A release tool can make the same bounded `check` call for its own session,
 to decide whether to ask a person for its go before it cuts, and before the
 installs that follow, treating any answer but a held grant the session
-decides as a reason to ask. That read is advisory: the gate still decides
-the release and the workflow dispatch, so a tool whose read is wrong is
-still stopped there.
+decides as a reason to ask. That read is advisory. A session runs as the
+operator and could edit its own record, so the answer can be stale or
+forged, and the gate isn't a boundary against that either. The gate still
+decides the release and the workflow dispatch it reads, so it, not the
+tool's read, stays the control.
 
 Such a gate judges a bound session by its grant whatever the record's
 `grant_ceiling_source`. That supersedes the rule below for `none`, which
