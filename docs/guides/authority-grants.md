@@ -49,9 +49,19 @@ three:
 |-----------|--------|
 | `merge-pr` | merging a pull request, by any route (CLI, REST, GraphQL, auto-merge) |
 | `close-issue` | closing an issue; closing a pull request without merging is not covered |
-| `cut-release` | publishing a release or a release tag |
+| `cut-release` | publishing a release or a release tag, dispatching a repository's release workflow, and the host installs a release run makes after its own cut |
 
 Wherever niwa lists authorities it uses this order.
+
+`cut-release` covers a release however it starts. A repository that
+publishes through a release workflow is released by dispatching that
+workflow, so the dispatch needs `cut-release` just as creating the release
+directly does. The authority also covers the installs a release run makes on
+the host once its own release is published, such as reinstalling the
+released tool and re-running `niwa apply`, and only those: an install a
+session runs outside a release keeps whatever rules applied to it before. A
+gate doesn't read those installs as a release; the release run that makes
+them decides whether to ask a person by its session's grant.
 
 ### How the level and the grant combine
 
@@ -701,6 +711,46 @@ bound, or prints a document whose `schema` isn't exactly
 `author_exclusion` falls outside niwa's vocabularies. The grant never lifts a
 verdict the gate reached without it: a command the gate can't read, or one
 that also does something the grant doesn't cover, keeps its verdict.
+
+A release workflow dispatch is a release. The gate reads `gh workflow run`
+naming the repository's release workflow, and a `gh api` call other than a
+GET to that workflow's `actions/workflows/<workflow>/dispatches` endpoint,
+as needing `cut-release`, and decides it by the table above as it decides
+`gh release create`. Which workflows count is the gate's to declare: by file
+name, such as `prepare-release.yml` or `release-prepare.yml`, and by display
+name, such as "Prepare Release", compared in any case. A dispatch whose
+workflow the gate can't read (a numeric workflow id, a shell expansion, a
+glob, a path, another character bash or GitHub would expand or decode
+before matching, no name, or more than one) is asked for every
+session, since the gate can't tell it isn't a release, and no grant lifts
+that. So is a `gh api` call whose endpoint is wholly a shell expansion and
+that sets a method other than GET or passes a body flag. Dispatches of other
+workflows keep their verdict.
+
+"The gate's verdict today" is the verdict for a command the gate already
+gated. A release workflow dispatch is often one it didn't, so the gate
+chooses that verdict when it adds the rule, and it may ask a session niwa
+didn't dispatch, a person's own included, rather than keep the allow it gave
+before. That makes the gate stricter, never wider.
+
+A gate that reads command text covers only the commands it reads, so the
+table above isn't a full account of what `cut-release` guards. It stops a
+mistake, and an injected instruction that types a release command, but a
+session set on releasing can reach a release with no command the gate reads:
+pushing a tag a workflow publishes from, `gh release edit --draft=false` on a
+draft, a call to the REST releases endpoint, or a script file, a `gh` alias or
+a program in another language that does any of these. The control that holds
+against that is on the hosting side, such as a protected environment with
+required reviewers on each release workflow.
+
+A release tool can make the same bounded `check` call for its own session,
+to decide whether to ask a person for its go before it cuts, and before the
+installs that follow, treating any answer but a held grant the session
+decides as a reason to ask. That read is advisory. A session runs as the
+operator and could edit its own record, so the answer can be stale or
+forged, and the gate isn't a boundary against that either. The gate still
+decides the release and the workflow dispatch it reads, so it, not the
+tool's read, stays the control.
 
 Such a gate judges a bound session by its grant whatever the record's
 `grant_ceiling_source`. That supersedes the rule below for `none`, which
