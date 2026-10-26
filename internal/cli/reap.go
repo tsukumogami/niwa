@@ -839,6 +839,9 @@ func reapBackstop(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 	}
 	reportSparedInstances(os.Stderr, spared)
 
+	// An unmapped instance has no session ids to hand the command; its path
+	// is the whole question.
+	gate := newRemovalGate(workspaceRoot, removeStepReapBackstop, reapStderr)
 	reaped := 0
 	for _, t := range targets {
 		// The same re-ask the mapped sweep makes, for the same reason and with
@@ -853,6 +856,11 @@ func reapBackstop(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 			continue
 		}
 		if _, recorded := instanceHasRecordedSession(t.InstancePath, time.Now()); recorded {
+			continue
+		}
+		// The workspace's pre-removal command gets the last word, after the
+		// re-asks; a kept instance is asked again by the next backstop pass.
+		if !gate.ask(t.InstancePath, nil) {
 			continue
 		}
 		if err := destroyInstanceFunc(t.InstancePath); err != nil {

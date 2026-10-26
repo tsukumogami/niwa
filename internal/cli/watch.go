@@ -702,6 +702,7 @@ func pruneStagedRecords(ctx context.Context, out io.Writer, root string, client 
 	}
 	jobsDir := defaultJobsDir()
 	onReap := newOnReapStep(root, out)
+	gate := newRemovalGate(root, removeStepWatchDiscard, out)
 	for _, h := range handles {
 		rec, err := watch.LoadStagedRecord(root, h)
 		if err != nil {
@@ -709,15 +710,16 @@ func pruneStagedRecords(ctx context.Context, out io.Writer, root string, client 
 		}
 
 		if !stagedInstanceLiveFunc(jobsDir, rec.InstancePath) {
-			discardStagedRecord(out, root, h, rec, "session no longer live")
-			reapDiscardedReview(onReap, root, rec)
+			if discardStagedRecord(out, root, h, rec, "session no longer live", gate) {
+				reapDiscardedReview(onReap, root, rec)
+			}
 			continue
 		}
 
 		// A stale review whose session is still live is discarded without the
 		// on-reap command: its session hasn't gone anywhere.
 		if ok, reason := evalRecordFreshness(ctx, client, requested, rec); !ok {
-			discardStagedRecord(out, root, h, rec, reason)
+			discardStagedRecord(out, root, h, rec, reason, gate)
 		}
 		// live + fresh: keep the record and its session untouched.
 	}
@@ -754,7 +756,21 @@ func reapDiscardedReview(onReap *onReapStep, root string, rec watch.StagedRecord
 // discardStagedRecord tears down one staged review: best-effort destroy the
 // instance (so a stale session does not linger) then delete the record. The reason
 // is printed so the operator sees which condition retired the review.
-func discardStagedRecord(out io.Writer, root, handle string, rec watch.StagedRecord, reason string) {
+//
+// The workspace's pre-removal command is asked first. When it keeps the
+// instance, nothing is torn down: the instance and its record stay as they
+// were, so the next pass asks again, and it returns false. It returns true once
+// the review is discarded.
+func discardStagedRecord(out io.Writer, root, handle string, rec watch.StagedRecord, reason string, gate *removalGate) bool {
+	if rec.InstancePath != "" {
+		var ids []string
+		if workspace.ValidSessionID(rec.SessionID) {
+			ids = []string{rec.SessionID}
+		}
+		if !gate.ask(rec.InstancePath, ids) {
+			return false
+		}
+	}
 	fmt.Fprintf(out, "niwa watch: discarding staged review for %s/%s#%d (handle %s): %s\n",
 		rec.Owner, rec.Repo, rec.Number, handle, reason)
 	if rec.InstancePath != "" {
@@ -763,6 +779,7 @@ func discardStagedRecord(out io.Writer, root, handle string, rec watch.StagedRec
 	if err := watch.DeleteStagedRecord(root, handle); err != nil {
 		fmt.Fprintf(out, "niwa watch: warning: could not delete staged record %s: %v\n", handle, err)
 	}
+	return true
 }
 
 // currentHeads fetches the current head SHA of every previously-handled, in-scope
