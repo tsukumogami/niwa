@@ -36,7 +36,8 @@ var removalCallers = map[string]removalCaller{
 	"destroy.go:runDestroyWorkspace": {true,
 		"niwa destroy --workspace asks through destroyPreflight with step destroy-workspace for every instance before the confirmation"},
 
-	// Not gated yet.
+	// Not gated yet. The test fails once the sweep asks the gate, until this
+	// entry is marked gated, so it can't stay here by accident.
 	"reap_worktrees.go:sweepHookWorktreesIn": {false,
 		"the worktree sweep removes only an unchanged hook-made worktree whose Claude Code session has ended; it does not ask the gate yet, and step worktree-sweep is reserved for it"},
 
@@ -71,8 +72,10 @@ func TestRemovalCallers_EveryCallerIsAccountedFor(t *testing.T) {
 		t.Fatal(err)
 	}
 	fset := token.NewFileSet()
-	found := map[string]bool{}
-	asks := map[string]bool{}
+	// The first removal and the first gate ask in each function, by position,
+	// so a gated entry is held to asking before it removes.
+	found := map[string]token.Pos{}
+	asks := map[string]token.Pos{}
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
 			continue
@@ -97,10 +100,14 @@ func TestRemovalCallers_EveryCallerIsAccountedFor(t *testing.T) {
 				}
 				key := name + ":" + fn.Name.Name
 				if isRemovalCall(call.Fun) {
-					found[key] = true
+					if p, ok := found[key]; !ok || call.Pos() < p {
+						found[key] = call.Pos()
+					}
 				}
 				if isGateCall(call.Fun) {
-					asks[key] = true
+					if p, ok := asks[key]; !ok || call.Pos() < p {
+						asks[key] = call.Pos()
+					}
 				}
 				return true
 			})
@@ -114,19 +121,26 @@ func TestRemovalCallers_EveryCallerIsAccountedFor(t *testing.T) {
 		}
 	}
 	for k := range removalCallers {
-		if !found[k] {
+		if _, ok := found[k]; !ok {
 			stale = append(stale, k)
 		}
 	}
-	var ungated []string
+	var ungated, unmarked []string
 	for k, c := range removalCallers {
-		if c.gated && found[k] && !asks[k] {
+		removal, removes := found[k]
+		ask, asked := asks[k]
+		switch {
+		case !removes:
+		case c.gated && (!asked || ask > removal):
 			ungated = append(ungated, k)
+		case !c.gated && asked:
+			unmarked = append(unmarked, k)
 		}
 	}
 	sort.Strings(unlisted)
 	sort.Strings(stale)
 	sort.Strings(ungated)
+	sort.Strings(unmarked)
 	if len(unlisted) > 0 {
 		t.Errorf("removal callers not in removalCallers (decide whether each asks the pre-removal gate, then list it): %v", unlisted)
 	}
@@ -134,19 +148,23 @@ func TestRemovalCallers_EveryCallerIsAccountedFor(t *testing.T) {
 		t.Errorf("removalCallers names functions that no longer remove anything: %v", stale)
 	}
 	if len(ungated) > 0 {
-		t.Errorf("removalCallers marks these gated, but they no longer ask the gate: %v", ungated)
+		t.Errorf("removalCallers marks these gated, but they no longer ask the gate before they remove: %v", ungated)
+	}
+	if len(unmarked) > 0 {
+		t.Errorf("removalCallers marks these ungated, but they ask the gate (mark them gated): %v", unmarked)
 	}
 }
 
-// isGateCall reports whether fun reaches the pre-removal gate: building one
-// (newRemovalGate), destroy's preflight over it (destroyPreflight), or asking
-// one that was passed in (its ask or check method).
+// isGateCall reports whether fun asks the pre-removal gate: a removalGate's
+// ask or check, called on a value named gate, or destroy's preflight, which
+// asks it for every instance.
 func isGateCall(fun ast.Expr) bool {
 	switch f := fun.(type) {
 	case *ast.Ident:
-		return f.Name == "newRemovalGate" || f.Name == "destroyPreflight"
+		return f.Name == "destroyPreflight"
 	case *ast.SelectorExpr:
-		return f.Sel.Name == "ask" || f.Sel.Name == "check"
+		recv, ok := f.X.(*ast.Ident)
+		return ok && recv.Name == "gate" && (f.Sel.Name == "ask" || f.Sel.Name == "check")
 	}
 	return false
 }
