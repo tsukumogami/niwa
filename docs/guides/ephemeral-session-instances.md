@@ -542,6 +542,61 @@ Keep `.niwa-launch/` out of anything published from the workspace root, next
 to `.niwa-lineage/`: the records hold the values of the names your
 `[session.dispatch_env]` passes through.
 
+### `niwa resume`
+
+`niwa resume <instance name | session id | session name> [prompt]` brings a
+dispatched Claude Code worker back from its launch record. Run it anywhere in
+the workspace. The argument is matched against the records' instance names
+first, then their session ids, then their session names; the first of those
+that matches anything decides.
+
+When the instance was destroyed, resume restores it under its original name
+and path, through the same provisioning `niwa dispatch` uses, so a workspace
+with `[claude] trust_instances` on gets the trust entry back. Each repository
+is cloned at its current remote state: resume prints the commit each one came
+back at, and work that was never pushed from the destroyed instance isn't
+restored. An instance that is still there is used as it is.
+
+It writes the session mapping, with the original dispatch id, before it
+launches anything, then runs `claude --bg --resume <session id>` from the
+instance with the recorded `--permission-mode`, `--name=`, `--model=` and
+`--settings`, the recorded environment, and `--` before the prompt when one is
+given. It prints the session id and the permission mode it launched with. If
+Claude Code reports the conversation under a new id, the mapping and the
+launch record follow it.
+
+The permission mode is never more permissive than current policy. Resume
+works out the mode a new dispatch into the instance would get with no flag
+(the `[global] dispatch_permission_mode`, else the workspace's permissions
+posture) and launches with the stricter of that and the recorded one, in
+Claude Code's order `plan`, `default`, `acceptEdits`, `bypassPermissions`.
+When the current mode wins it prints a notice naming both.
+
+A record is read as input, not trusted because niwa wrote it. Resume refuses,
+naming the argument and before it restores, maps or launches anything, when:
+
+- no record matches, or more than one does (it lists them);
+- the session's transcript is gone, or Claude Code lists the session as
+  running (or can't list its sessions);
+- something other than the instance occupies its path: a file, a symlink, or
+  a directory without the instance's state;
+- the store isn't a real directory owned by you with mode 0700, or the record
+  is a symlink, isn't owned by you, or isn't mode 0600;
+- the record names an environment variable that is neither one niwa sets nor
+  one your current `[session.dispatch_env]` passes, or a value that is too
+  long or holds a control character;
+- its settings document holds a key `niwa dispatch` never emits (anything but
+  the remote-control, cross-session and MCP approval keys and `env`);
+- its model or session name doesn't start with a letter or digit, or holds
+  anything but letters, digits, `.`, `_` and `-`;
+- its permission mode, or the machine's `dispatch_permission_mode`, is outside
+  the order above;
+- the machine's authority settings fail the checks `niwa dispatch` makes.
+
+The instance path is always the workspace root joined with the recorded
+instance name, which must be a dispatch instance's name, and the transcript
+path is derived from it, so a record can't point either anywhere else.
+
 ## Context-aware `niwa apply`
 
 Hosting the session hooks, the permission posture, and a root `CLAUDE.md` makes

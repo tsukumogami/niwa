@@ -207,3 +207,65 @@ func reentryHints(spec agentplan.LaunchSpec, handle, workdir string) []string {
 	}
 	return lines
 }
+
+// resumeLaunch is what `niwa resume` starts a worker again with: the session,
+// the posture to launch it in, and an optional prompt. Every field except
+// SessionID and Workdir is optional, and an empty one adds no argument.
+type resumeLaunch struct {
+	SessionID      string
+	Workdir        string
+	PermissionMode string
+	SessionName    string
+	Model          string
+	Settings       string
+	Prompt         string
+}
+
+// reentryResumeArgs returns the argv, excluding the binary, that starts a
+// worker again on a dispatched session whose job is gone: the agent's
+// leading arguments, its resume-launch arguments and the session id, the
+// workdir grant, then the recorded flags, and the prompt last behind a bare
+// "--".
+//
+// It lives here for the reason reentryArgs does: it is a way back into a
+// session, so it carries the workdir grant like every other one. The session
+// name and the model are passed as single "--flag=value" elements, so no
+// value can be read as a flag of its own; the settings document starts with
+// "{" and rides the element after its flag. An agent that declares no
+// resume-launch arguments, or no spelling for an intent the launch carries,
+// gets nil: a resume that silently dropped a recorded flag would not be the
+// launch it was recorded as.
+func reentryResumeArgs(spec agentplan.LaunchSpec, l resumeLaunch) []string {
+	if len(spec.ResumeLaunchArgs) == 0 || l.SessionID == "" {
+		return nil
+	}
+	args := slices.Clone(spec.LeadingArgs)
+	args = append(args, spec.ResumeLaunchArgs...)
+	args = append(args, l.SessionID)
+	args = append(args, formatWorkdirGrant(spec, l.Workdir)...)
+	for _, f := range []struct {
+		flag, value string
+		joined      bool
+	}{
+		{spec.Flags.PermissionMode, l.PermissionMode, false},
+		{spec.Flags.DisplayName, l.SessionName, true},
+		{spec.Flags.Model, l.Model, true},
+		{spec.Flags.Settings, l.Settings, false},
+	} {
+		if f.value == "" {
+			continue
+		}
+		if f.flag == "" {
+			return nil
+		}
+		if f.joined {
+			args = append(args, f.flag+"="+f.value)
+		} else {
+			args = append(args, f.flag, f.value)
+		}
+	}
+	if l.Prompt != "" {
+		args = append(args, "--", l.Prompt)
+	}
+	return args
+}

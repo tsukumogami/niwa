@@ -367,6 +367,20 @@ type LaunchSpec struct {
 	// reach the session without niwa in the way. They are the agent's
 	// vocabulary, not niwa's.
 	HintVerbs []string
+
+	// ResumeLaunchArgs are the arguments, after LeadingArgs, that start a
+	// worker again on an existing session, followed by the session id. It is
+	// how `niwa resume` brings a dispatched worker back once the session's
+	// job is gone, which ResumeArgs (an attach to a live job) can't do. Empty
+	// for an agent niwa can't resume this way.
+	ResumeLaunchArgs []string
+
+	// PermissionModes is the agent's permission-mode vocabulary that
+	// `niwa resume` can order, strictest first. A resume launches with the
+	// stricter of the recorded mode and the one current policy gives, so a
+	// mode missing from this list can't be placed and is refused rather than
+	// guessed at. Empty for an agent with no such order.
+	PermissionModes []string
 }
 
 // launchSpecs is the per-agent table. It holds a row for each agent the
@@ -421,6 +435,10 @@ var launchSpecs = map[agent.Agent]LaunchSpec{
 		// that is what backgrounding it is for.
 		ResumeDuringTurn: true,
 		HintVerbs:        []string{"attach", "logs", "stop"},
+		// `claude --bg --resume <session id>` from the session's directory
+		// starts a background worker on the same conversation.
+		ResumeLaunchArgs: []string{"--resume"},
+		PermissionModes:  []string{"plan", "default", "acceptEdits", "bypassPermissions"},
 	},
 
 	agent.AgentCodex: {
