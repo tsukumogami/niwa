@@ -637,6 +637,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			if entryCreated {
 				_ = workspace.RemoveLineageEntry(workspaceRoot, dispatchID)
 			}
+			_ = workspace.RemoveAuthorityCopy(workspaceRoot, dispatchID)
 			_ = destroyInstanceFunc(instancePath)
 		}
 	}()
@@ -661,6 +662,13 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	authRecord = stampDispatchRecord(authRecord, auth, dispatchID, parentSessionID)
 	if err := writeAuthorityRecordFunc(instancePath, authRecord); err != nil {
 		return fmt.Errorf("niwa: error: writing the dispatch's authority record: %w", err)
+	}
+	// A copy of the record goes to the workspace root, beside the lineage
+	// store, so what this dispatch was granted still resolves once its
+	// instance is gone, and caps what its children hold then. A failure
+	// refuses the dispatch like the record's, and the rollback removes both.
+	if err := workspace.WriteAuthorityCopy(workspaceRoot, authRecord); err != nil {
+		return fmt.Errorf("niwa: error: writing the copy of the dispatch's authority record: %w", err)
 	}
 	// Right after the record, the dispatch's lineage entry goes into the
 	// workspace root's store, outside the instance, so it outlives it. A

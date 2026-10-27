@@ -7,11 +7,13 @@ decision: |
   it now, each `--grant` authority stays as recorded, and every one of them is
   kept only inside the current grant ceiling and inside the dispatcher's
   grant, itself resolved the same way up the lineage. The never-wider check at
-  dispatch caps a child by the same resolution of its dispatcher. A
-  dispatcher whose instance has been destroyed is passed over to its own
-  dispatcher; one that can't be established or read otherwise caps the
-  session at its own recorded grant, and a policy that can't be loaded fails
-  the lookup, so no failure widens a grant. The record format doesn't change.
+  dispatch caps a child by the same resolution of its dispatcher. Dispatch
+  keeps a copy of each record at the workspace root, so a dispatcher whose
+  instance has been destroyed is resolved from its copy; one with no copy (a
+  dispatch an older niwa made) is passed over to its own dispatcher. A
+  dispatcher that can't be established or read otherwise caps the session at
+  its own recorded grant, and a policy that can't be loaded fails the lookup.
+  The record format doesn't change.
 rationale: |
   A frozen list carries a widened role to no live session and passes it to no
   successor, and it keeps a narrowed role's authority live in every record
@@ -76,19 +78,28 @@ a `--parent-from` dispatch, the dispatch the calling session's own mapping
 names. A record with no parent dispatch and no mapped calling session has no
 dispatcher, and only the ceiling caps it.
 
-A dispatcher whose instance directory no longer exists (destroyed or
-reaped, its lineage entry kept) can't act any more, so it's passed
-over: its own dispatchers, found through its lineage entry, cap the child
-instead. Without this, a coordinator whose predecessors have been reaped
-would stay at its recorded grant for good, which is the lineage the issue is
-about. A session mapping that's gone caps nothing for the same reason: niwa
-removes mappings only when it removes their instances.
+A record goes with its instance, so dispatch also writes a copy of it, in
+the same format, to `.niwa-lineage-authority/<dispatch id>.json` under the
+workspace root, beside the lineage store, right after the record and before
+the lineage entry. A failed write refuses the dispatch, and the rollback
+removes the copy with the entry. A dispatcher whose instance directory no
+longer exists (destroyed or reaped, its lineage entry kept) is resolved from
+its copy exactly as a live record is: its role sources re-read, its
+`--grant` kept, capped up the lineage. So a coordinator whose predecessors
+have been reaped follows the role, and a dispatcher that held an authority
+only through `--grant` still keeps a widened role from reaching its child.
+
+A dispatcher with no copy, which is every dispatch niwa 0.38.0 or earlier
+made, can't act any more and nothing says what it held, so it's passed over:
+its own dispatchers, found through its lineage entry, cap the child instead.
+A session mapping that's gone caps nothing for the same reason: niwa removes
+mappings only when it removes their instances.
 
 Failures fail narrow:
 
 - A dispatcher that can't be established or read otherwise (a missing or
   unreadable lineage entry, an instance that exists without a usable record
-  of that dispatch, a record and an entry that name different parents, a
+  of that dispatch, a copy that exists and can't be used, a record and an entry that name different parents, a
   cycle, a chain deeper than the lineage walk's limit, or evidence that the
   dispatch ran inside an instance that had lost its record) caps the session
   at its own recorded grant. It can still narrow; it can't widen.
@@ -129,6 +140,18 @@ session from a hand-started one anyway. The guide points gates at `check`.
 
 ## Known limits
 
+Passing over a dispatcher with no copy can widen past what it held. When a
+dispatcher an older niwa made is gone, and it held less than the role its
+child was dispatched with (it had only `--grant`, say), a later widening of
+that role reaches the child, bounded by the ceiling and by the dispatchers
+above. Lineages dispatched by this niwa or later always have copies, so the
+gap closes as older lineages end; it's accepted because without it a
+coordinator lineage started on an older niwa could never take a widened
+role.
+
+Nothing removes old copies yet. Like lineage entries, they stay until the
+workspace itself is destroyed; each is a few hundred bytes.
+
 A dispatch made inside an instance that had lost its record was capped at
 nothing, so it was granted nothing. When it ran with no calling-session id,
 its record and lineage entry look the same as a dispatch with no dispatcher,
@@ -151,8 +174,9 @@ within the ceiling and within each dispatcher's current grant, and their
 successors can be dispatched with it. A narrowed role, a narrowed ceiling or a
 removed role takes effect on the next `check` and at the next dispatch, with
 no command to run. A session whose dispatcher's instance has been destroyed
-is capped by the dispatchers above it, so a coordinator lineage keeps
-following the role after its earlier members are reaped.
+is capped by that dispatcher's copy, so a coordinator lineage keeps following
+the role after its earlier members are reaped. Dispatch writes one more file,
+the copy, at the workspace root.
 
 `check` now reads config, so a config or overlay that can't be loaded makes
 every bound session's lookup fail until it's fixed, which gates read as not

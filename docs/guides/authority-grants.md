@@ -463,14 +463,21 @@ the workspace config, the overlay and the machine config as they are now:
   whatever the parent held when it dispatched the child.
 
 The dispatcher is found through the lineage entries, which outlive their
-instances. A dispatcher whose instance has been destroyed (reaped, say)
-can't act any more, so it's passed over and its own dispatcher caps the
-child instead; a successor coordinator whose predecessors are all gone holds
-what its role grants within the ceiling. When a dispatcher can't be
-established or read otherwise (its lineage entry is missing or unreadable,
-its instance is there with no usable record of that dispatch, the record and
-the entry disagree, the lineage loops or runs past 64 levels), the session is
-capped at its own recorded grant: it can still narrow, never widen. A policy
+instances. Dispatch also keeps a copy of every record at the workspace root,
+in `.niwa-lineage-authority/<dispatch id>.json`, because the record goes with
+its instance. A dispatcher whose instance has been destroyed (reaped, say)
+is resolved from that copy the same way, so a successor coordinator whose
+predecessors are gone still follows the role, within what they held. A
+dispatcher with no copy (one an older niwa dispatched) can't act any more
+and nothing says what it held, so it's passed over and its own dispatcher
+caps the child instead; until such lineages end, a widened role can reach a
+child past a gone dispatcher that held less, within the ceiling. When a
+dispatcher can't be established or read otherwise (its lineage entry is
+missing or unreadable, its instance is there with no usable record of that
+dispatch, its copy can't be used, the record and the entry disagree, the
+lineage loops or runs past 64 levels), the session is capped at its own
+recorded grant: it can still narrow, never widen. Nothing removes old copies
+yet; like lineage entries, they stay until the workspace is destroyed. A policy
 that can't be loaded fails `check` with exit 1, which every reader treats as
 holding nothing. Nothing needs running after a config change: no refresh and
 no `niwa apply` for the change to take effect, beyond whatever brings the new

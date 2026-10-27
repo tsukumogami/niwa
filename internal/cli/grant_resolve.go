@@ -18,11 +18,13 @@ import (
 //
 // A dispatch holds authority.CurrentGrant of its record, capped by what its
 // dispatchers hold now, each resolved the same way. The dispatchers are found
-// through the lineage store, which outlives instances: a dispatcher whose
-// instance directory is gone is passed through to its own dispatchers, since
-// it can't act any more. Anything else that keeps the dispatchers from being
-// established or read caps the dispatch at its own recorded grant instead, so
-// a failed lookup can narrow the answer but never widen it.
+// through the lineage store, which outlives instances. A dispatcher whose
+// instance directory is gone is resolved from the copy of its record dispatch
+// kept at the workspace root; with no copy (a dispatch an older niwa made) it
+// is passed over to its own dispatchers, since it can't act any more and
+// nothing says what it held. Anything else that keeps the dispatchers from
+// being established or read caps the dispatch at its own recorded grant
+// instead, so a failed lookup can narrow the answer but never widen it.
 type grantResolver struct {
 	root   string
 	policy authority.Policy
@@ -78,22 +80,28 @@ func (r grantResolver) dispatchersCap(id string, rec *authority.Record, seen map
 	return cap, true
 }
 
-// held is the most a child of dispatch id may hold now: its current grant
-// while its instance holds its record, and what its own dispatchers allow
-// once its instance is gone.
+// held is the most a child of dispatch id may hold now: its current grant,
+// from the record in its instance or, once the instance is gone, from the
+// copy at the workspace root; and what its own dispatchers allow when the
+// instance is gone with no copy.
 func (r grantResolver) held(id string, seen map[string]bool) (*authority.DispatcherCap, bool) {
 	entry, ok := readLineage(r.root, id)
 	if !ok || entry.DispatchID != id || entry.Instance == "." || entry.Instance == ".." || filepath.Base(entry.Instance) != entry.Instance {
 		return nil, false
 	}
 	instance := filepath.Join(r.root, entry.Instance)
-	if _, err := os.Lstat(instance); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+	var rec authority.Record
+	var present bool
+	_, err := os.Lstat(instance)
+	switch {
+	case err == nil:
+		rec, present, err = workspace.ReadAuthorityRecord(instance)
+	case errors.Is(err, fs.ErrNotExist):
+		rec, present, err = workspace.ReadAuthorityCopy(r.root, id)
+		if err == nil && !present {
 			return r.dispatchersCap(id, nil, seen)
 		}
-		return nil, false
 	}
-	rec, present, err := workspace.ReadAuthorityRecord(instance)
 	if err != nil || !present || rec.DispatchID != id {
 		return nil, false
 	}

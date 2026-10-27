@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"bytes"
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -280,7 +283,8 @@ func TestCheckLookupFailuresCapAtTheRecordedGrant(t *testing.T) {
 // operator's terminal at the workspace root, B by A and C by B, each from
 // the root with --parent-from its dispatcher's instance. A and B have been
 // reaped: their instances and session mappings are gone, their lineage
-// entries kept. C runs, bound to sessionC.
+// entries kept, and no copies of their records, which a test adds when it
+// wants them. C runs, bound to sessionC.
 func reapedChain(t *testing.T) (*showWorkspace, string) {
 	t.Helper()
 	w := newShowWorkspace(t, policyBefore)
@@ -312,8 +316,22 @@ func capUnder(t *testing.T, w *showWorkspace, dir, sessionVar string) (*authorit
 }
 
 func TestReapedCoordinatorChainTakesAWidenedRole(t *testing.T) {
+	for _, copies := range []bool{true, false} {
+		name := "with copies"
+		if !copies {
+			name = "with no copies, as an older niwa left them"
+		}
+		t.Run(name, func(t *testing.T) { reapedChainTakesAWidenedRole(t, copies) })
+	}
+}
+
+func reapedChainTakesAWidenedRole(t *testing.T, copies bool) {
 	resetParentFrom(t)
 	w, inst := reapedChain(t)
+	if copies {
+		writeCopy(t, w.root, coordinatorRecord(dispatchA, "", authority.ParentSourceNone))
+		writeCopy(t, w.root, coordinatorRecord(dispatchB, dispatchA, authority.ParentSourceAnchor))
+	}
 	setPolicy(t, w, policyWidened)
 	if got, want := grantLine(t, inst), "grant: merge-pr (role coordinator), close-issue (role coordinator), cut-release (role coordinator)"; got != want {
 		t.Errorf("C reads\n%s\nwant %s", got, want)
@@ -349,5 +367,85 @@ func TestDispatchCapFollowsANarrowedRole(t *testing.T) {
 	}
 	if err := authority.CapByDispatcher(child, cap); err == nil {
 		t.Error("a child got close-issue from a dispatcher whose role no longer names it")
+	}
+}
+
+// writeCopy keeps rec's copy at the workspace root, as dispatch does.
+func writeCopy(t *testing.T, root string, rec authority.Record) {
+	t.Helper()
+	if err := workspace.WriteAuthorityCopy(root, rec); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReapedDispatcherIsResolvedFromItsCopy(t *testing.T) {
+	// A, with the role, dispatched B with --grant merge-pr,close-issue and no
+	// role; B dispatched C with the role. Both are reaped, their copies kept.
+	// Widening the role can't give C what B never held.
+	w, inst := reapedChain(t)
+	writeCopy(t, w.root, coordinatorRecord(dispatchA, "", authority.ParentSourceNone))
+	b := showRecord(dispatchB, authority.Autonomous, authority.LayerWorkspace, authority.MergePR, authority.CloseIssue)
+	b.ParentDispatchID, b.ParentDispatchSource = dispatchA, authority.ParentSourceAnchor
+	writeCopy(t, w.root, b)
+	setPolicy(t, w, policyWidened)
+	if got, want := grantLine(t, inst), "grant: merge-pr (role coordinator), close-issue (role coordinator)"; got != want {
+		t.Errorf("C reads\n%s\nwant %s: B never held cut-release", got, want)
+	}
+
+	// With the role on B too, the widened role reaches C through the copies.
+	writeCopy(t, w.root, coordinatorRecord(dispatchB, dispatchA, authority.ParentSourceAnchor))
+	if got, want := grantLine(t, inst), "grant: merge-pr (role coordinator), close-issue (role coordinator), cut-release (role coordinator)"; got != want {
+		t.Errorf("C reads\n%s\nwant %s", got, want)
+	}
+
+	// A narrowing on the way up reaches C as well.
+	setPolicy(t, w, policyNarrowed)
+	if got, want := grantLine(t, inst), "grant: merge-pr (role coordinator)"; got != want {
+		t.Errorf("C reads\n%s\nwant %s", got, want)
+	}
+}
+
+func TestReapedDispatcherWithAnUnreadableCopyCapsAtTheRecordedGrant(t *testing.T) {
+	w, inst := reapedChain(t)
+	writeShowFile(t, workspace.AuthorityCopyPath(w.root, dispatchB), "{not json", 0o600)
+	setPolicy(t, w, policyWidened)
+	if got, want := grantLine(t, inst), "grant: merge-pr (role coordinator), close-issue (role coordinator)"; got != want {
+		t.Errorf("C reads\n%s\nwant %s", got, want)
+	}
+}
+
+func TestDispatchKeepsACopyOfTheRecordAtTheRoot(t *testing.T) {
+	root, f := authorityWorkspace(t, r8aExample, "")
+	if _, stderr, err := runDispatchCmd(t, "do a thing"); err != nil {
+		t.Fatalf("dispatch: %v\n%s", err, stderr)
+	}
+	rec := readRecord(t, f)
+	stored, err := os.ReadFile(workspace.AuthorityRecordPath(f.instancePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	copied, err := os.ReadFile(workspace.AuthorityCopyPath(root, rec.DispatchID))
+	if err != nil {
+		t.Fatalf("no copy of the record at the root: %v", err)
+	}
+	if !bytes.Equal(stored, copied) {
+		t.Errorf("the copy differs from the record:\n%s\nwant\n%s", copied, stored)
+	}
+}
+
+func TestDispatchRollbackRemovesTheCopy(t *testing.T) {
+	root, _ := authorityWorkspace(t, r8aExample, "")
+	prev := createLineageEntryFunc
+	createLineageEntryFunc = func(string, lineage.Entry) error { return errors.New("no space left on device") }
+	t.Cleanup(func() { createLineageEntryFunc = prev })
+	if _, _, err := runDispatchCmd(t, "do a thing"); err == nil {
+		t.Fatal("dispatch succeeded with the lineage write failing")
+	}
+	entries, err := os.ReadDir(filepath.Join(root, workspace.AuthorityCopyDirName))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the rollback left %d copies behind", len(entries))
 	}
 }
