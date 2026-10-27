@@ -717,7 +717,8 @@ func pruneStagedRecords(ctx context.Context, out io.Writer, root string, client 
 		}
 
 		// A stale review whose session is still live is discarded without the
-		// on-reap command: its session hasn't gone anywhere.
+		// on-reap command: its session hasn't gone anywhere. So whether the
+		// gate kept it changes nothing here, and the result is not read.
 		if ok, reason := evalRecordFreshness(ctx, client, requested, rec); !ok {
 			discardStagedRecord(out, root, h, rec, reason, gate)
 		}
