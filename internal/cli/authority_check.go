@@ -57,14 +57,21 @@ binding it reads. The answer's state is one of:
   not-dispatched   any other session, including one started by hand in the
                    instance
 
+A bound session's grant is resolved when this runs, not read from the list
+dispatch recorded: each role the record names grants what the workspace
+declares for it now, each --grant authority stays, and all of them are kept
+only inside the current grant ceiling and what the session's dispatcher holds
+now, resolved the same way up the lineage.
+
 --json prints one ` + authority.CheckSchemaV1 + ` document. Treat an authority as
 held only when this exits 0 and prints a document with that schema, "state":
 "bound" and the authority in its grant.
 
 Exit codes: 0 printed an answer (any state), 1 a -C that is empty, relative,
 missing or in no instance, a session id that isn't a lowercase UUID, a
-session mapping that can't be read, or the watchdog, each with nothing on
-stdout, 2 usage or a point name not matching ` + authority.NamePatternText + `.`,
+session mapping that can't be read, an authority policy that can't be loaded
+for a bound session, or the watchdog, each with nothing on stdout, 2 usage or
+a point name not matching ` + authority.NamePatternText + `.`,
 		Args: usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !cmd.Flags().Changed("session") {
@@ -110,8 +117,9 @@ stdout, 2 usage or a point name not matching ` + authority.NamePatternText + `.`
 // session's own mapping and the instance's record; with no mapping, the
 // lineage entries, the capture-pending file and the agent's session records
 // bindBeforeMapping names; and, for a bound session with a parent, the
-// parent's lineage entry. It loads no config and writes nothing. The session
-// id is checked before any path is built from it.
+// parent's lineage entry; for a bound session, the authority policy and the
+// lineage and records its grant is resolved through. It writes nothing. The
+// session id is checked before any path is built from it.
 func checkSession(sessionID, dir string, points []string) (authority.CheckDoc, error) {
 	if !workspace.ValidSessionID(sessionID) {
 		return authority.CheckDoc{}, readError("invalid --session %s: a session id is a lowercase UUID", strconv.Quote(sessionID))
@@ -130,7 +138,7 @@ func checkSession(sessionID, dir string, points []string) (authority.CheckDoc, e
 	m, err := authorityReadSessionMapping(found.WorkspaceRoot, sessionID)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return bindBeforeMapping(sessionID, found, points), nil
+			return bindBeforeMapping(sessionID, found, points)
 		}
 		// A mapping that exists but can't be read might be a dispatch's, so
 		// no state is claimed for it: the exit 1 a gate reads as a failed
@@ -146,7 +154,7 @@ func checkSession(sessionID, dir string, points []string) (authority.CheckDoc, e
 	if !mappingNamesInstance(m, found.Instance) {
 		return authority.CheckNotDispatched(authority.ReasonOtherInstance), nil
 	}
-	return bindToRecord(authority.BindingMapping, m.DispatchID, found, points), nil
+	return bindToRecord(authority.BindingMapping, m.DispatchID, found, points)
 }
 
 // bindBeforeMapping answers for a session with no mapping. Dispatch writes
@@ -166,7 +174,7 @@ func checkSession(sessionID, dir string, points []string) (authority.CheckDoc, e
 // Either one ties the session to a dispatch, so the record decides the rest
 // as it does for a mapping: a missing or malformed record, or one naming
 // another dispatch, is record-unusable. Anything else is not-dispatched.
-func bindBeforeMapping(sessionID string, found workspace.FoundInstance, points []string) authority.CheckDoc {
+func bindBeforeMapping(sessionID string, found workspace.FoundInstance, points []string) (authority.CheckDoc, error) {
 	rec, present, recErr := authorityReadRecord(found.Instance)
 	recordUsable := recErr == nil && present
 	pending, pendingFound, pendingErr := workspace.ReadCapturePending(found.Instance)
@@ -202,7 +210,7 @@ func bindBeforeMapping(sessionID string, found workspace.FoundInstance, points [
 	if capturePending && boundByRecords(sessionID, found, pending) {
 		return bindToRecord(authority.BindingRecords, pending.DispatchID, found, points)
 	}
-	return authority.CheckNotDispatched(authority.ReasonNoMapping)
+	return authority.CheckNotDispatched(authority.ReasonNoMapping), nil
 }
 
 // boundByRecords reports whether the agent's session records bind sessionID
@@ -286,8 +294,11 @@ func mappingNamesInstance(m workspace.SessionMapping, instance string) bool {
 
 // bindToRecord answers for the dispatched session of dispatchID once some
 // evidence has tied the session to it: bound when the instance's record is
-// usable and names that dispatch, record-unusable otherwise.
-func bindToRecord(binding authority.Binding, dispatchID string, found workspace.FoundInstance, points []string) authority.CheckDoc {
+// usable and names that dispatch, record-unusable otherwise. A bound
+// session's grant is the record's resolved against the policy as it stands
+// now (grantResolver), so a policy that can't be loaded fails the lookup
+// rather than answering from a list the policy may have narrowed since.
+func bindToRecord(binding authority.Binding, dispatchID string, found workspace.FoundInstance, points []string) (authority.CheckDoc, error) {
 	rec, present, err := authorityReadRecord(found.Instance)
 	switch {
 	case err != nil:
@@ -295,13 +306,22 @@ func bindToRecord(binding authority.Binding, dispatchID string, found workspace.
 		// or oversized file, bad contents) is one reason here: the document
 		// keeps a two-code vocabulary for a record that exists but can't be
 		// used, and each class fails the same way, holding nothing.
-		return authority.CheckRecordUnusable(dispatchID, authority.ReasonRecordMalformed)
+		return authority.CheckRecordUnusable(dispatchID, authority.ReasonRecordMalformed), nil
 	case !present:
-		return authority.CheckRecordUnusable(dispatchID, authority.ReasonRecordMissing)
+		return authority.CheckRecordUnusable(dispatchID, authority.ReasonRecordMissing), nil
 	case rec.DispatchID != dispatchID:
-		return authority.CheckRecordUnusable(dispatchID, authority.ReasonRecordOtherDispatch)
+		return authority.CheckRecordUnusable(dispatchID, authority.ReasonRecordOtherDispatch), nil
 	}
-	return authority.CheckBound(binding, rec, checkParent(found.WorkspaceRoot, rec), points)
+	policy, _, err := loadAuthorityPolicy(found.WorkspaceRoot)
+	if err != nil {
+		var ec *exitCodeError
+		if errors.As(err, &ec) {
+			err = ec.err
+		}
+		return authority.CheckDoc{}, readError("resolving the grant of dispatch %s: %v", dispatchID, err)
+	}
+	rec.Grant = grantResolver{root: found.WorkspaceRoot, policy: policy}.grant(rec)
+	return authority.CheckBound(binding, rec, checkParent(found.WorkspaceRoot, rec), points), nil
 }
 
 // checkParent names the record's parent dispatch, with the instance its

@@ -23,7 +23,7 @@ import (
 // session id yet.
 func captureWorkspace(t *testing.T) (*showWorkspace, string, string) {
 	t.Helper()
-	w := newShowWorkspace(t, "")
+	w := newShowWorkspace(t, checkPolicy)
 	inst := w.instance(t, "ws-1")
 	writeShowRecord(t, inst, showRecord(showDispatchA, authority.Autonomous, authority.LayerWorkspace, authority.MergePR))
 	writeLineage(t, w.root, showDispatchA, "ws-1", "")

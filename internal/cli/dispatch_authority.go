@@ -222,7 +222,7 @@ func resolveDispatchAuthority(warn io.Writer, cwd, workspaceRoot, wsConfigPath, 
 	}
 	// The child may hold no named authority its dispatcher doesn't, refused
 	// here with the rest of (2e), before anything exists.
-	auth.cap = dispatcherCap(workspaceRoot, sessionVar, parent, cwdInstance, cwdInInstance)
+	auth.cap = dispatcherCap(grantResolver{root: workspaceRoot, policy: policy}, sessionVar, parent, cwdInstance, cwdInInstance)
 	if err := authority.CapByDispatcher(resolved, auth.cap); err != nil {
 		return nil, authorityRefusal{err}
 	}
@@ -367,7 +367,11 @@ func dispatchParent(cwd, workspaceRoot string) (*authority.Record, string, works
 
 // dispatcherCap finds what this dispatch's dispatcher holds, the most the
 // child may be granted, or nil when there is no dispatcher to compare
-// against and only the grant ceiling limits the child.
+// against and only the grant ceiling limits the child. What a dispatcher
+// holds is its record's grant as grants resolves it now, not the list
+// recorded when it was dispatched, so a role widened since reaches the
+// children a lineage started earlier dispatches, and a narrowed one stops at
+// the dispatcher.
 //
 // Inside an instance (the working directory's, or the one --parent-from
 // names) the dispatcher is that instance's dispatch: its record's grant caps
@@ -388,23 +392,23 @@ func dispatchParent(cwd, workspaceRoot string) (*authority.Record, string, works
 // A dispatch from outside every instance that names an instance with
 // --parent-from takes both: the named instance's cap and the calling
 // session's, so the anchor can narrow what the child gets but never widen it.
-func dispatcherCap(workspaceRoot, sessionVar string, parent *authority.Record, cwdInstance workspace.FoundInstance, cwdInInstance bool) *authority.DispatcherCap {
-	anchored := instanceCap(workspaceRoot, parent, cwdInstance, cwdInInstance)
+func dispatcherCap(grants grantResolver, sessionVar string, parent *authority.Record, cwdInstance workspace.FoundInstance, cwdInInstance bool) *authority.DispatcherCap {
+	anchored := instanceCap(grants, parent, cwdInstance, cwdInInstance)
 	if cwdInInstance {
 		return anchored
 	}
 	// Outside every instance --parent-from may have chosen the instance, and
 	// it never adds to a grant: the calling session's own dispatcher, when it
 	// has one, still caps the child, whatever instance the anchor names.
-	return narrowerCap(anchored, sessionCap(workspaceRoot, sessionVar))
+	return narrowerCap(anchored, sessionCap(grants, sessionVar))
 }
 
 // instanceCap is the cap of the instance the dispatch runs from or names:
 // its record's grant, nothing for a dispatched instance whose record is gone,
 // and nil for an instance nothing dispatched or no instance at all.
-func instanceCap(workspaceRoot string, parent *authority.Record, cwdInstance workspace.FoundInstance, cwdInInstance bool) *authority.DispatcherCap {
+func instanceCap(grants grantResolver, parent *authority.Record, cwdInstance workspace.FoundInstance, cwdInInstance bool) *authority.DispatcherCap {
 	if parent != nil {
-		return &authority.DispatcherCap{DispatchID: parent.DispatchID, Held: authority.HeldAuthorities(parent.Grant)}
+		return &authority.DispatcherCap{DispatchID: parent.DispatchID, Held: authority.HeldAuthorities(grants.grant(*parent))}
 	}
 	instance := ""
 	switch {
@@ -419,7 +423,7 @@ func instanceCap(workspaceRoot string, parent *authority.Record, cwdInstance wor
 	if instance == "" {
 		return nil
 	}
-	if m, ok := dispatchMappingNaming(workspaceRoot, instance); ok {
+	if m, ok := dispatchMappingNaming(grants.root, instance); ok {
 		return &authority.DispatcherCap{DispatchID: m.DispatchID, Missing: true}
 	}
 	return nil
@@ -429,11 +433,11 @@ func instanceCap(workspaceRoot string, parent *authority.Record, cwdInstance wor
 // dispatch-written mapping names: that dispatch's record's grant, nothing
 // when the record is missing, unusable or names another dispatch, and nil
 // when the variable names no such mapping.
-func sessionCap(workspaceRoot, sessionVar string) *authority.DispatcherCap {
+func sessionCap(grants grantResolver, sessionVar string) *authority.DispatcherCap {
 	if !workspace.ValidSessionID(sessionVar) {
 		return nil
 	}
-	m, err := workspace.ReadSessionMapping(workspaceRoot, sessionVar)
+	m, err := workspace.ReadSessionMapping(grants.root, sessionVar)
 	if err != nil || m.Origin != workspace.MappingOriginDispatch {
 		return nil
 	}
@@ -441,7 +445,7 @@ func sessionCap(workspaceRoot, sessionVar string) *authority.DispatcherCap {
 		if found, ok, err := workspace.FindInstance(m.InstancePath); err == nil && ok {
 			rec, present, err := workspace.ReadAuthorityRecord(found.Instance)
 			if err == nil && present && rec.DispatchID == m.DispatchID {
-				return &authority.DispatcherCap{DispatchID: rec.DispatchID, Held: authority.HeldAuthorities(rec.Grant)}
+				return &authority.DispatcherCap{DispatchID: rec.DispatchID, Held: authority.HeldAuthorities(grants.grant(rec))}
 			}
 		}
 	}
