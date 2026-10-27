@@ -167,6 +167,9 @@ func TestSweepHookWorktrees_HeldWorkerKeptWhileJobListed(t *testing.T) {
 	if err := os.RemoveAll(entry); err != nil {
 		t.Fatal(err)
 	}
+	// An entry under the same prefix recorded for another session isn't this
+	// one's.
+	writeJobStateFile(t, jobs, heldSessionID[:8], heldSessionID[:8]+"-0000-0000-0000-000000000000", "", nil)
 	if n, out := sweep(t, f, jobs); n != 1 {
 		t.Fatalf("removed %d once the job entry is gone, want 1\nstderr:\n%s", n, out)
 	}
@@ -259,7 +262,8 @@ func TestSweepHookWorktrees_JobKeyedYoungOrChangedKept(t *testing.T) {
 }
 
 // TestSweepHookWorktrees_JobsDirMissingOrUnreadable: without a jobs directory
-// it can read, the sweep removes no job-keyed worktree.
+// it can read, or with an entry for the session it can't read, the sweep
+// removes no job-keyed worktree.
 func TestSweepHookWorktrees_JobsDirMissingOrUnreadable(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -283,6 +287,13 @@ func TestSweepHookWorktrees_JobsDirMissingOrUnreadable(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = os.Chmod(jobs, 0o755) })
+			return jobs
+		}},
+		{"entry unreadable", func(t *testing.T, jobs string) string {
+			state := filepath.Join(jobs, heldSessionID[:8], "state.json")
+			if err := os.WriteFile(state, []byte("{not json"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 			return jobs
 		}},
 	} {

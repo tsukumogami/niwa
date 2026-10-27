@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/workspace"
@@ -53,6 +54,8 @@ func sweepHookWorktrees(workspaceRoot, jobsDir string, now time.Time, stderr io.
 func sweepHookWorktreesIn(workspaceRoot string, instances []string, jobsDir string, now time.Time, stderr io.Writer) int {
 	grace := reapIdleGrace()
 	ctx := context.Background()
+	// One gate per sweep, so the whole sweep shares one time budget, as each
+	// reap pass does.
 	gate := newRemovalGate(workspaceRoot, removeStepWorktreeSweep, stderr)
 	removed := 0
 	for _, instance := range instances {
@@ -99,10 +102,9 @@ func sweepHookWorktreesIn(workspaceRoot string, instances []string, jobsDir stri
 // well-formed session id is job-keyed: it has ended once the record is at
 // least grace old and the jobs directory can be read and lists no entry for
 // that session. Its transcript isn't consulted, since a held worker's
-// transcript goes quiet while the worker is still resumable. A jobs directory
-// that is missing or can't be read is "can't tell", which is never ended.
-// Every other record (no job entry at create, a malformed id, or a record
-// from before the hook recorded either) goes by claudeSessionEnded.
+// transcript goes quiet while the worker is still resumable. Every other
+// record (no job entry at create, a malformed id, or a record from before the
+// hook recorded either) goes by claudeSessionEnded.
 func hookSessionEnded(st worktree.SessionLifecycleState, jobsDir string, now time.Time, grace time.Duration) bool {
 	if st.ClaudeSessionID == "" || st.ClaudeJobListed == nil || !*st.ClaudeJobListed {
 		return claudeSessionEnded(st, now, grace)
@@ -111,13 +113,34 @@ func hookSessionEnded(st worktree.SessionLifecycleState, jobsDir string, now tim
 	if err != nil || now.Sub(created) < grace {
 		return false
 	}
+	return jobEntryGone(jobsDir, st.ClaudeSessionID)
+}
+
+// jobEntryGone reports whether jobsDir positively lists no job entry for
+// sessionID. It looks where readJobState looks, at each directory whose name
+// is a prefix of the id. An entry recorded for another session is not this
+// one's. A jobs directory that is unset, missing or can't be read, and an
+// entry whose state can't be read, are "can't tell", which is never gone: the
+// worktree would be removed on exactly the evidence that couldn't be checked.
+func jobEntryGone(jobsDir, sessionID string) bool {
 	if jobsDir == "" {
 		return false
 	}
-	if _, err := os.ReadDir(jobsDir); err != nil {
+	entries, err := os.ReadDir(jobsDir)
+	if err != nil {
 		return false
 	}
-	return !sessionLive(jobsDir, st.ClaudeSessionID, now)
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || name == "" || len(name) > len(sessionID) || sessionID[:len(name)] != name {
+			continue
+		}
+		js, ok := decodeJobState(filepath.Join(jobsDir, name, "state.json"))
+		if !ok || js.SessionID == "" || js.SessionID == sessionID {
+			return false
+		}
+	}
+	return true
 }
 
 // claudeSessionEnded reports whether the Claude Code session that asked for
