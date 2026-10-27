@@ -95,6 +95,20 @@ func applyLaunchEnv(spec agentplan.LaunchSpec, settings map[string]any, base []s
 	return proc
 }
 
+// launchEnvValues returns the names and values applyLaunchEnv sets for the
+// worker from the same base and shape, for the launch record.
+func launchEnvValues(base []string, shape launchEnvShape) map[string]string {
+	_, env := shapeLaunchEnv(base, shape)
+	if env.Len() == 0 {
+		return nil
+	}
+	values := make(map[string]string, env.Len())
+	for _, k := range env.keys {
+		values[k] = env.values[k]
+	}
+	return values
+}
+
 // shapeLaunchEnv computes both halves of applyLaunchEnv. See there.
 func shapeLaunchEnv(base []string, shape launchEnvShape) ([]string, launchEnv) {
 	drop := map[string]bool{config.ReapKeyEnv: true}

@@ -613,6 +613,11 @@ func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 		onReap.settle(m)
 	}
 
+	// The launch records go only once their transcripts have, which is
+	// independent of whether any instance went above: a record outlives its
+	// instance on purpose.
+	sweepLaunchRecords(workspaceRoot, userHomeDir(), reapStderr, now)
+
 	// Second pass: the name+TTL backstop. This is a SEPARATE scan, not a
 	// branch in selectReapTargets, because EnumerateInstanceRecords derives
 	// Ephemeral solely from the mapping store -- an unmapped orphan is already
