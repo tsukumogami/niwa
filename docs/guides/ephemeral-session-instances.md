@@ -467,9 +467,11 @@ group, with stdin at `/dev/null` and this environment and nothing else:
   `reap-backstop` for the reap's backstop removing an unmapped dispatch
   instance past its TTL (with `NIWA_SESSION_IDS` empty, since there is no
   session to name), `destroy` for `niwa destroy`, `destroy-workspace` for
-  `niwa destroy --workspace` and `watch-discard` for `niwa watch` discarding a
+  `niwa destroy --workspace`, `watch-discard` for `niwa watch` discarding a
   staged review (with the review's session id in `NIWA_SESSION_IDS` when it has
-  a valid one);
+  a valid one) and `worktree-sweep` for the reap removing a worktree niwa's
+  WorktreeCreate hook made (with the session id the hook recorded for it, when
+  it has one; the line then names the worktree directory);
 - `NIWA_SESSION_IDS`, the session ids niwa maps to that instance,
   space-separated, empty when there are none;
 - each name in `env` that is set in niwa's environment.

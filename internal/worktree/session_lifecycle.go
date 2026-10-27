@@ -66,6 +66,15 @@ type SessionLifecycleState struct {
 	// asked the hook for this worktree. The reap sweep reads its modification
 	// time to tell whether that session has ended.
 	ClaudeTranscriptPath string `json:"claude_transcript_path,omitempty"`
+	// ClaudeSessionID is the Claude Code session id from the hook payload,
+	// recorded only when it is a well-formed session id. Empty on a record
+	// written before the field existed.
+	ClaudeSessionID string `json:"claude_session_id,omitempty"`
+	// ClaudeJobListed records whether that session had a Claude Code job
+	// entry when the hook ran. When it did, the reap sweep keeps the worktree
+	// for as long as the entry is listed, however idle the transcript; when it
+	// didn't, or nothing was recorded (nil), the sweep goes by the transcript.
+	ClaudeJobListed *bool `json:"claude_job_listed,omitempty"`
 	// IgnoredFingerprints records the git-ignored files the worktree held once
 	// niwa finished setting it up (its own materialized files and any setup
 	// output), each with a fingerprint of its contents. Automatic teardown

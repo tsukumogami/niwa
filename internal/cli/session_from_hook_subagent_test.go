@@ -261,7 +261,7 @@ func TestAutomaticTeardown_RequiresFingerprints(t *testing.T) {
 		t.Errorf("stderr should name the missing fingerprints:\n%s", errOut)
 	}
 	var stderr bytes.Buffer
-	if n := sweepHookWorktreesIn([]string{f.root}, time.Now(), &stderr); n != 0 {
+	if n := sweepHookWorktreesIn(f.root, []string{f.root}, t.TempDir(), time.Now(), &stderr); n != 0 {
 		t.Errorf("sweep removed %d worktrees without fingerprints", n)
 	}
 	assertKept(t, f, st)
@@ -417,7 +417,7 @@ func TestSweepHookWorktrees(t *testing.T) {
 	// The fixture's root is the instance itself, so the sweep gets it as its
 	// one instance.
 	var stderr bytes.Buffer
-	n := sweepHookWorktreesIn([]string{f.root}, time.Now(), &stderr)
+	n := sweepHookWorktreesIn(f.root, []string{f.root}, t.TempDir(), time.Now(), &stderr)
 	if n != 2 {
 		t.Errorf("removed %d, want 2\nstderr:\n%s", n, stderr.String())
 	}
@@ -449,7 +449,7 @@ func TestSweepHookWorktrees_OptedOutInstance(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	if n := sweepHookWorktreesIn([]string{f.root}, time.Now(), &stderr); n != 0 {
+	if n := sweepHookWorktreesIn(f.root, []string{f.root}, t.TempDir(), time.Now(), &stderr); n != 0 {
 		t.Errorf("removed %d from an opted-out instance\nstderr:\n%s", n, stderr.String())
 	}
 	assertKept(t, f, st)

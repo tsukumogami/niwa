@@ -20,6 +20,9 @@ import (
 //     agent that has no such hook.
 //   - the reaper's entry-present liveness rule and `niwa watch`'s review
 //     continuation, both of which read a Claude Code job entry.
+//   - the worktree hooks and sweep: the WorktreeCreate hook records whether
+//     the session that asked for a worktree had a job entry, and the reap's
+//     worktree sweep keeps that worktree while the entry is listed.
 //
 // The dispatch capture path no longer reads this file. Correlating a launched
 // worker to its instance is one behavior for whichever agent was launched, so
@@ -207,6 +210,35 @@ func readJobState(jobsDir, sessionID string) (jobState, bool) {
 		}
 	}
 	return jobState{}, false
+}
+
+// jobEntryGone reports whether jobsDir positively lists no job entry for
+// sessionID, for the worktree sweep's job-keyed rule (reap_worktrees.go). It
+// looks where readJobState looks, at each directory whose name is a prefix of
+// the id, and an entry recorded for another session is not this one's. Unlike
+// sessionLive it tells "gone" from "can't tell": a jobs directory that is
+// unset, missing or can't be read, and an entry whose state can't be read,
+// are never gone, since the worktree would be removed on exactly the evidence
+// that couldn't be checked.
+func jobEntryGone(jobsDir, sessionID string) bool {
+	if jobsDir == "" {
+		return false
+	}
+	entries, err := os.ReadDir(jobsDir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || name == "" || len(name) > len(sessionID) || sessionID[:len(name)] != name {
+			continue
+		}
+		js, ok := decodeJobState(filepath.Join(jobsDir, name, "state.json"))
+		if !ok || js.SessionID == "" || js.SessionID == sessionID {
+			return false
+		}
+	}
+	return true
 }
 
 // decodeJobState reads and decodes a single job-state file. ok=false on any
