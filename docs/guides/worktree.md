@@ -317,14 +317,29 @@ with `niwa worktree destroy <id>` once you're done with it. The hook never exits
 dispatch` and `niwa watch`, is the backstop for a subagent that ended without a
 `SubagentStop`, such as an interrupted run. It also covers a session that
 entered a hook-made worktree and never left. It removes an unchanged hook-made
-worktree once the Claude Code session that asked for it has ended: the worktree
-is older than the reap idle grace (`NIWA_REAP_IDLE_GRACE`, a day by default),
-and that session's transcript is gone or hasn't been written for that long. A
-session you leave idle for longer than the grace and then resume finds a clean
-worktree it was in gone, the same rule reap applies to idle ephemeral instances.
-A hook-made worktree whose payload carried no transcript path can't be judged
-and stays. Worktrees from `niwa worktree create`, hook-made ones recorded
-before this release, and those in an instance created with
+worktree once the Claude Code session that asked for it has ended, and never
+while the worktree is younger than the reap idle grace (`NIWA_REAP_IDLE_GRACE`,
+a day by default).
+
+How it tells the session has ended depends on what the hook saw. When the
+session had a Claude Code job entry (a background worker, listed in the Agent
+View), the worktree stays for as long as that entry is listed, however long
+the worker sits idle: a held worker is still resumable, and resuming it finds
+its worktree. Once the entry is gone, the next reap removes it. If the jobs
+directory is missing or can't be read, it stays. For any other session (one
+with no job entry, a payload whose `session_id` isn't a well-formed session
+id, or a worktree recorded before niwa kept the session id), the transcript
+decides: the worktree goes once the transcript is gone or hasn't been written
+for the grace. A session like that, left idle for longer than the grace and
+then resumed, finds a clean worktree it was in gone, the same rule reap applies
+to idle ephemeral instances. A hook-made worktree whose payload carried no
+transcript path, and no job entry, can't be judged and stays.
+
+Before it removes one, the sweep asks the workspace's
+[pre-removal command](ephemeral-session-instances.md#the-pre-removal-command)
+with `NIWA_REMOVE_STEP=worktree-sweep`, and a refusal keeps the worktree for
+that reap. Worktrees from `niwa worktree create`, hook-made ones recorded
+before the hook marked them, and those in an instance created with
 `--no-worktree-delegation` are never removed this way.
 
 ### Fallback on an older harness

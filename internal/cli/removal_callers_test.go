@@ -36,10 +36,8 @@ var removalCallers = map[string]removalCaller{
 	"destroy.go:runDestroyWorkspace": {true,
 		"niwa destroy --workspace asks through destroyPreflight with step destroy-workspace for every instance before the confirmation"},
 
-	// Not gated yet. The test fails once the sweep asks the gate, until this
-	// entry is marked gated, so it can't stay here by accident.
-	"reap_worktrees.go:sweepHookWorktreesIn": {false,
-		"the worktree sweep removes only an unchanged hook-made worktree whose Claude Code session has ended; it does not ask the gate yet, and step worktree-sweep is reserved for it"},
+	"reap_worktrees.go:sweepHookWorktreesIn": {true,
+		"the worktree sweep asks with step worktree-sweep and the worktree's recorded Claude session id before it removes an unchanged hook-made worktree"},
 
 	// Deliberately ungated.
 	"destroy.go:runDestroyEmptyWorkspace": {false,

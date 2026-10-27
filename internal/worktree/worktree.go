@@ -50,10 +50,12 @@ type CreateSessionParams struct {
 	ParentSessionID string
 	BranchPrefix    string
 	GitInvoker      GitInvoker
-	// CreatedBy and ClaudeTranscriptPath are copied into the session record;
-	// see SessionLifecycleState.
+	// CreatedBy, ClaudeTranscriptPath, ClaudeSessionID and ClaudeJobListed
+	// are copied into the session record; see SessionLifecycleState.
 	CreatedBy            string
 	ClaudeTranscriptPath string
+	ClaudeSessionID      string
+	ClaudeJobListed      *bool
 }
 
 // ErrSessionUnknownRole is returned by CreateSession when the named repo
@@ -392,6 +394,8 @@ func CreateSession(ctx context.Context, params CreateSessionParams) (sessionID, 
 	state := NewSessionLifecycleState(sid, params.Repo, params.Purpose, params.ParentSessionID, wtPath, branch)
 	state.CreatedBy = params.CreatedBy
 	state.ClaudeTranscriptPath = params.ClaudeTranscriptPath
+	state.ClaudeSessionID = params.ClaudeSessionID
+	state.ClaudeJobListed = params.ClaudeJobListed
 	// The base commit is best-effort: without it the session is simply never
 	// a candidate for automatic teardown, which is the safe direction.
 	if headOut, headErr := params.GitInvoker.CommandContext(ctx, "-C", wtPath, "rev-parse", "HEAD").Output(); headErr == nil {

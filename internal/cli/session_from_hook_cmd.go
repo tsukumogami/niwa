@@ -8,6 +8,7 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/workspace"
@@ -167,6 +168,7 @@ func runFromHookCreate(cmd *cobra.Command, payload hookPayload) error {
 	}
 
 	purpose := purposeFromHookName(target.Slug)
+	claudeSessionID, claudeJobListed := hookClaudeSession(defaultJobsDir(), payload.SessionID)
 
 	sessionID, worktreePath, branch, err := worktree.CreateSession(context.Background(), worktree.CreateSessionParams{
 		InstanceRoot: instanceRoot,
@@ -177,6 +179,8 @@ func runFromHookCreate(cmd *cobra.Command, payload hookPayload) error {
 		// SubagentStop hook and the reap sweep remove it later.
 		CreatedBy:            worktree.CreatedByWorktreeHook,
 		ClaudeTranscriptPath: hookTranscriptPath(payload.TranscriptPath),
+		ClaudeSessionID:      claudeSessionID,
+		ClaudeJobListed:      claudeJobListed,
 	})
 	if err != nil {
 		return fmt.Errorf("niwa: error: creating session for hook worktree: %w", err)
@@ -486,6 +490,20 @@ func hookTranscriptPath(p string) string {
 		return ""
 	}
 	return p
+}
+
+// hookClaudeSession returns the payload's session id when it is a well-formed
+// Claude session id, and whether that session has a Claude Code job entry
+// under jobsDir now. A malformed id records neither, so the reap sweep goes by
+// the transcript for that worktree. A job entry this hook can't find, the jobs
+// directory included, records none, which is also the transcript rule: the
+// sweep keeps a worktree for its job only on positive evidence of one.
+func hookClaudeSession(jobsDir, id string) (string, *bool) {
+	if !workspace.ValidSessionID(id) {
+		return "", nil
+	}
+	listed := sessionLive(jobsDir, id, time.Now())
+	return id, &listed
 }
 
 // purposeFromHookName derives a session purpose from Claude's untrusted

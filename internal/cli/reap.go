@@ -169,7 +169,7 @@ func runReap(cmd *cobra.Command, _ []string) error {
 	if n > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Reaped %d orphaned ephemeral instance(s)\n", n)
 	}
-	if m := sweepHookWorktrees(class.WorkspaceRoot, time.Now(), cmd.ErrOrStderr()); m > 0 {
+	if m := sweepHookWorktrees(class.WorkspaceRoot, defaultJobsDir(), time.Now(), cmd.ErrOrStderr()); m > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Removed %d unchanged worktree(s) whose session has ended\n", m)
 	}
 	return nil
@@ -893,5 +893,5 @@ func reapOpportunistically(workspaceRoot string) {
 		fmt.Fprintf(os.Stderr, "niwa: reaped %d orphaned ephemeral instance(s)\n", n)
 	}
 	// The worktree sweep prints a line per worktree it removes.
-	sweepHookWorktrees(workspaceRoot, time.Now(), os.Stderr)
+	sweepHookWorktrees(workspaceRoot, defaultJobsDir(), time.Now(), os.Stderr)
 }

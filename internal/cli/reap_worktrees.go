@@ -19,11 +19,17 @@ import (
 // covers a subagent that ended without a SubagentStop, such as an interrupted
 // run, and a session that entered a worktree and never left it.
 //
-// A session counts as ended when its record is older than the reap idle grace
-// (NIWA_REAP_IDLE_GRACE, 24h by default) and the transcript recorded at create
-// time is gone or hasn't been written for that long; see claudeSessionEnded.
-// A record with no transcript can't be judged and is left alone, as is every
-// record without the hook's marker or a base commit.
+// How a session counts as ended depends on what the hook recorded; see
+// hookSessionEnded. A worktree made for a session that had a Claude Code job
+// entry is kept for as long as that entry is listed under jobsDir, however
+// idle its transcript: a held background worker is still resumable. Any other
+// goes by its transcript (claudeSessionEnded). Either way the record must be
+// older than the reap idle grace (NIWA_REAP_IDLE_GRACE, 24h by default), and
+// a record without the hook's marker or a base commit is left alone.
+//
+// Before removing one it asks the workspace's pre-removal command, with step
+// worktree-sweep and the recorded Claude session id; a refusal keeps the
+// worktree for this pass and prints the gate's line.
 //
 // The destroy is DestroySession without force, so its attach-lock and dirty
 // guards still apply on top of the unchanged check. Unlike the hook's
@@ -32,7 +38,7 @@ import (
 // aren't atomic, but a session idle for the whole grace period is not writing
 // into the worktree in between. It returns how many worktrees it removed;
 // failures are reported on stderr and skipped.
-func sweepHookWorktrees(workspaceRoot string, now time.Time, stderr io.Writer) int {
+func sweepHookWorktrees(workspaceRoot, jobsDir string, now time.Time, stderr io.Writer) int {
 	instances, err := workspace.EnumerateInstances(workspaceRoot)
 	if err != nil {
 		return 0
@@ -40,13 +46,14 @@ func sweepHookWorktrees(workspaceRoot string, now time.Time, stderr io.Writer) i
 	if workspace.IsSingleInstanceLayout(workspaceRoot) {
 		instances = append(instances, workspaceRoot)
 	}
-	return sweepHookWorktreesIn(instances, now, stderr)
+	return sweepHookWorktreesIn(workspaceRoot, instances, jobsDir, now, stderr)
 }
 
 // sweepHookWorktreesIn is sweepHookWorktrees over a given list of instances.
-func sweepHookWorktreesIn(instances []string, now time.Time, stderr io.Writer) int {
+func sweepHookWorktreesIn(workspaceRoot string, instances []string, jobsDir string, now time.Time, stderr io.Writer) int {
 	grace := reapIdleGrace()
 	ctx := context.Background()
+	gate := newRemovalGate(workspaceRoot, removeStepWorktreeSweep, stderr)
 	removed := 0
 	for _, instance := range instances {
 		// An opted-out instance's worktrees aren't niwa's to tear down, as
@@ -62,11 +69,18 @@ func sweepHookWorktreesIn(instances []string, now time.Time, stderr io.Writer) i
 			if st.Status != worktree.SessionStatusActive || st.CreatedBy != worktree.CreatedByWorktreeHook {
 				continue
 			}
-			if !claudeSessionEnded(st, now, grace) {
+			if !hookSessionEnded(st, jobsDir, now, grace) {
 				continue
 			}
 			unchanged, _, err := worktree.WorktreeUnchanged(ctx, st, worktree.StdGitInvoker{})
 			if err != nil || !unchanged {
+				continue
+			}
+			var ids []string
+			if st.ClaudeSessionID != "" {
+				ids = []string{st.ClaudeSessionID}
+			}
+			if !gate.ask(st.WorktreePath, ids) {
 				continue
 			}
 			if _, err := worktree.DestroySession(ctx, instance, st.SessionID, false /* force */, worktree.StdGitInvoker{}); err != nil {
@@ -78,6 +92,32 @@ func sweepHookWorktreesIn(instances []string, now time.Time, stderr io.Writer) i
 		}
 	}
 	return removed
+}
+
+// hookSessionEnded reports whether the Claude Code session that asked for the
+// worktree has ended. A record whose hook run found a job entry for a
+// well-formed session id is job-keyed: it has ended once the record is at
+// least grace old and the jobs directory can be read and lists no entry for
+// that session. Its transcript isn't consulted, since a held worker's
+// transcript goes quiet while the worker is still resumable. A jobs directory
+// that is missing or can't be read is "can't tell", which is never ended.
+// Every other record (no job entry at create, a malformed id, or a record
+// from before the hook recorded either) goes by claudeSessionEnded.
+func hookSessionEnded(st worktree.SessionLifecycleState, jobsDir string, now time.Time, grace time.Duration) bool {
+	if st.ClaudeSessionID == "" || st.ClaudeJobListed == nil || !*st.ClaudeJobListed {
+		return claudeSessionEnded(st, now, grace)
+	}
+	created, err := time.Parse(time.RFC3339, st.CreationTime)
+	if err != nil || now.Sub(created) < grace {
+		return false
+	}
+	if jobsDir == "" {
+		return false
+	}
+	if _, err := os.ReadDir(jobsDir); err != nil {
+		return false
+	}
+	return !sessionLive(jobsDir, st.ClaudeSessionID, now)
 }
 
 // claudeSessionEnded reports whether the Claude Code session that asked for
