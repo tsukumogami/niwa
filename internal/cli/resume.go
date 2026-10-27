@@ -73,9 +73,16 @@ const (
 	maxResumeEnvValueLen = 16 << 10
 )
 
-// resumeTokenRe is the plain-token shape a recorded model and session name
-// must have: a letter or digit first, then letters, digits, '.', '_' and '-'.
+// resumeTokenRe is the plain-token shape a recorded session name must have: a
+// letter or digit first, then letters, digits, '.', '_' and '-'.
 var resumeTokenRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// resumeModelRe is the shape a recorded model must have. Dispatch forwards an
+// unrecognized model as given, so a full model id with a context suffix
+// ("[1m]"), a provider prefix or a path ("vendor/model:tag", "a@b") has to
+// resume too. The first character is still a letter or digit, and the value
+// rides one "--model=" element, so it can't be read as a flag.
+var resumeModelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@+\[\]-]*$`)
 
 // resumeRefusal is a refusal that names what was asked for.
 func resumeRefusal(arg, format string, args ...any) error {
@@ -232,7 +239,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 	mode, downgraded := stricterPermissionMode(spec.PermissionModes, rec.PermissionMode, current)
 	if downgraded {
 		fmt.Fprintf(stderr, "niwa resume: launching with --permission-mode %s, the mode current policy gives, instead of the recorded %s, which is more permissive\n",
-			current, displayMode(rec.PermissionMode))
+			mode, displayMode(rec.PermissionMode))
 	}
 
 	// The mapping goes in before the launch, so the reaper's backstop never
@@ -248,10 +255,20 @@ func runResume(cmd *cobra.Command, args []string) error {
 		DispatchID:   rec.DispatchID,
 		Created:      time.Now().UTC(),
 	}
-	if prev, err := workspace.ReadSessionMapping(root, rec.SessionID); err == nil {
+	prev, prevErr := workspace.ReadSessionMapping(root, rec.SessionID)
+	if prevErr == nil {
 		mapping.Handle = prev.Handle
 		mapping.Label = prev.Label
 		mapping.ParentSessionID = prev.ParentSessionID
+	}
+	// unmap undoes the mapping write when the launch doesn't happen: the
+	// mapping that was there before goes back, or none.
+	unmap := func() {
+		if prevErr == nil {
+			_ = workspace.WriteSessionMapping(root, prev)
+			return
+		}
+		_ = workspace.DeleteSessionMapping(root, rec.SessionID)
 	}
 	if err := workspace.WriteSessionMapping(root, mapping); err != nil {
 		rollback()
@@ -268,13 +285,13 @@ func runResume(cmd *cobra.Command, args []string) error {
 		Prompt:         prompt,
 	})
 	if argv == nil {
-		_ = workspace.DeleteSessionMapping(root, rec.SessionID)
+		unmap()
 		rollback()
 		return resumeRefusal(arg, "niwa can't build a resume command for a %s worker with this record", ag)
 	}
 	env := resumeEnv(os.Environ(), unset, rec.Env)
 	if err := resumeLaunchFunc(cmd.Context(), bin, argv, instancePath, env); err != nil {
-		_ = workspace.DeleteSessionMapping(root, rec.SessionID)
+		unmap()
 		rollback()
 		return fmt.Errorf("niwa: error: launching the resumed worker: %w", err)
 	}
@@ -380,12 +397,19 @@ func validateLaunchRecord(rec workspace.LaunchRecord, spec agentplan.LaunchSpec,
 	if rec.PermissionMode != "" && !slices.Contains(spec.PermissionModes, rec.PermissionMode) {
 		return fmt.Errorf("permission mode %q is not one resume can order (%s)", rec.PermissionMode, strings.Join(spec.PermissionModes, ", "))
 	}
-	for _, f := range []struct{ name, value string }{{"model", rec.Model}, {"session name", rec.SessionName}} {
+	for _, f := range []struct {
+		name, value string
+		re          *regexp.Regexp
+		chars       string
+	}{
+		{"model", rec.Model, resumeModelRe, "'.', '_', ':', '/', '@', '+', '[', ']' and '-'"},
+		{"session name", rec.SessionName, resumeTokenRe, "'.', '_' and '-'"},
+	} {
 		if f.value == "" {
 			continue
 		}
-		if len(f.value) > maxResumeTokenLen || !resumeTokenRe.MatchString(f.value) {
-			return fmt.Errorf("%s %q must start with a letter or digit and hold only letters, digits, '.', '_' and '-' (at most %d)", f.name, f.value, maxResumeTokenLen)
+		if len(f.value) > maxResumeTokenLen || !f.re.MatchString(f.value) {
+			return fmt.Errorf("%s %q must start with a letter or digit and hold only letters, digits, %s (at most %d)", f.name, f.value, f.chars, maxResumeTokenLen)
 		}
 	}
 	allowed := func(name string) bool {
@@ -520,6 +544,11 @@ func instancePresent(path, name string) (bool, error) {
 // current rather than recorded. order is strictest first. An empty mode is
 // the agent's default, which ranks as "default" when the order holds it.
 // Both modes must be in order or empty; the caller has checked.
+//
+// A downgrade to an empty current mode launches with "default" spelled out
+// rather than with no flag: with no flag the agent falls back to whatever
+// default mode its own settings name, which could be the permissive mode the
+// downgrade exists to take away.
 func stricterPermissionMode(order []string, recorded, current string) (string, bool) {
 	rank := func(m string) int {
 		if m == "" {
@@ -531,6 +560,9 @@ func stricterPermissionMode(order []string, recorded, current string) (string, b
 		return len(order)
 	}
 	if rank(current) < rank(recorded) {
+		if current == "" && slices.Contains(order, "default") {
+			return "default", true
+		}
 		return current, true
 	}
 	return recorded, false

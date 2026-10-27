@@ -370,6 +370,9 @@ func TestResumePermissionModeIsTheStricter(t *testing.T) {
 		{"acceptEdits", "plan", "plan", true},
 		{"acceptEdits", "bypassPermissions", "acceptEdits", false},
 		{"default", "default", "default", false},
+		// No current mode at all: the downgrade spells "default" out rather
+		// than leaving the mode to the agent's own settings.
+		{"bypassPermissions", "", "default", true},
 	}
 	for _, c := range cases {
 		t.Run(c.recorded+"_then_"+c.current, func(t *testing.T) {
@@ -379,7 +382,9 @@ func TestResumePermissionModeIsTheStricter(t *testing.T) {
 			f.writeRecord(t, rec)
 			f.writeTranscript(t, resumeTestSessionID)
 			f.presentInstance(t)
-			f.setHostMode(t, c.current)
+			if c.current != "" {
+				f.setHostMode(t, c.current)
+			}
 
 			stdout, stderr, err := runResumeCmd(t, resumeTestInstance)
 			if err != nil {
@@ -401,7 +406,7 @@ func TestResumePermissionModeIsTheStricter(t *testing.T) {
 			if hasNotice != c.notice {
 				t.Errorf("notice printed = %v, want %v:\n%s", hasNotice, c.notice, stderr)
 			}
-			if c.notice && !(strings.Contains(stderr, c.recorded) && strings.Contains(stderr, c.current)) {
+			if c.notice && !(strings.Contains(stderr, c.recorded) && strings.Contains(stderr, c.want)) {
 				t.Errorf("notice does not name both modes:\n%s", stderr)
 			}
 		})
@@ -410,11 +415,12 @@ func TestResumePermissionModeIsTheStricter(t *testing.T) {
 
 func TestResumeRefusals(t *testing.T) {
 	cases := []struct {
-		name    string
-		arg     string
-		present bool
-		setup   func(t *testing.T, f *resumeFixture)
-		want    string
+		name     string
+		arg      string
+		present  bool
+		setup    func(t *testing.T, f *resumeFixture)
+		want     string
+		alsoWant string
 	}{
 		{
 			name: "no launch record",
@@ -435,7 +441,8 @@ func TestResumeRefusals(t *testing.T) {
 				other.InstanceName = "rs+work-89abcdef"
 				f.writeRecord(t, other)
 			},
-			want: "rs+work-89abcdef",
+			want:     "rs+work-89abcdef",
+			alsoWant: resumeTestInstance,
 		},
 		{
 			name: "gone transcript",
@@ -599,6 +606,9 @@ func TestResumeRefusals(t *testing.T) {
 			if !strings.Contains(msg, c.want) {
 				t.Errorf("refusal lacks %q: %v", c.want, msg)
 			}
+			if c.alsoWant != "" && !strings.Contains(msg, c.alsoWant) {
+				t.Errorf("refusal lacks %q: %v", c.alsoWant, msg)
+			}
 			if calls := f.calls(t); len(calls) != 0 {
 				t.Errorf("stub claude was called: %q", calls)
 			}
@@ -614,6 +624,33 @@ func TestResumeRefusals(t *testing.T) {
 				t.Errorf("a session mapping was written")
 			}
 		})
+	}
+}
+
+// TestResumeRecordModelShapes pins which recorded models resume accepts:
+// dispatch forwards an unrecognized model as given, so a full model id must
+// resume, while anything that could read as a flag or carry a space is
+// refused.
+func TestResumeRecordModelShapes(t *testing.T) {
+	f := newResumeFixture(t, "")
+	spec, _ := agentplan.For(agent.AgentClaude).LaunchSpec()
+	for model, ok := range map[string]bool{
+		"opus":                     true,
+		"claude-opus-4-5[1m]":      true,
+		"vendor/model:tag":         true,
+		"model@2026-01-01":         true,
+		"--dangerously-skip-perms": false,
+		"[1m]":                     false,
+		"opus --permission-mode x": false,
+		"opus\nbypassPermissions":  false,
+		strings.Repeat("a", 129):   false,
+	} {
+		rec := f.record()
+		rec.Model = model
+		err := validateLaunchRecord(rec, spec, []string{resumeTestPassName})
+		if (err == nil) != ok {
+			t.Errorf("model %q: err = %v, want accepted = %v", model, err, ok)
+		}
 	}
 }
 

@@ -570,7 +570,10 @@ works out the mode a new dispatch into the instance would get with no flag
 (the `[global] dispatch_permission_mode`, else the workspace's permissions
 posture) and launches with the stricter of that and the recorded one, in
 Claude Code's order `plan`, `default`, `acceptEdits`, `bypassPermissions`.
-When the current mode wins it prints a notice naming both.
+When the current mode wins it prints a notice naming both. When current
+policy gives no mode at all, a more permissive recorded mode is replaced by
+`default`, passed explicitly, so Claude Code's own settings can't put the
+permissive mode back.
 
 A record is read as input, not trusted because niwa wrote it. Resume refuses,
 naming the argument and before it restores, maps or launches anything, when:
@@ -588,7 +591,8 @@ naming the argument and before it restores, maps or launches anything, when:
 - its settings document holds a key `niwa dispatch` never emits (anything but
   the remote-control, cross-session and MCP approval keys and `env`);
 - its model or session name doesn't start with a letter or digit, or holds
-  anything but letters, digits, `.`, `_` and `-`;
+  anything but letters, digits, `.`, `_` and `-` (a model may also hold `:`,
+  `/`, `@`, `+`, `[` and `]`, since dispatch passes a full model id through);
 - its permission mode, or the machine's `dispatch_permission_mode`, is outside
   the order above;
 - the machine's authority settings fail the checks `niwa dispatch` makes.
