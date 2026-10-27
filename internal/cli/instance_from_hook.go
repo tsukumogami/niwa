@@ -134,6 +134,14 @@ type provisionResult struct {
 // share the process and would otherwise overwrite each other's setting.
 var provisionInstanceFunc = realProvisionInstance
 
+// provisionInstanceNamedFunc creates the instance named name under
+// workspaceRoot, the name exactly as given rather than computed. `niwa resume`
+// restores a destroyed dispatch instance through it, since Claude Code keys a
+// transcript by its working directory and the session can only be resumed at
+// its original path. A package variable for the same reason as
+// provisionInstanceFunc.
+var provisionInstanceNamedFunc = realProvisionInstanceNamed
+
 // destroyInstanceFunc force-destroys the instance at instancePath. It is a
 // package variable so SessionEnd teardown tests can substitute a fake that
 // records the call without touching the filesystem.
@@ -544,6 +552,24 @@ func resolveHookWorkspaceRoot(cwd string) (string, bool) {
 // hook path and "+" for a user-supplied dispatch slug. It is wired into
 // provisionInstanceFunc; tests override that variable to avoid a real clone.
 func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, sep string, cloneWorkers int) (provisionResult, error) {
+	return provisionInstance(ctx, workspaceRoot, cwd, cloneWorkers, func(configName string) (string, error) {
+		return computeInstanceName(configName, namePrefix, sep, workspaceRoot)
+	})
+}
+
+// realProvisionInstanceNamed is the production provisionInstanceNamedFunc:
+// realProvisionInstance's path, minus the fresh-name step. The caller has
+// already checked that name is one path component and that nothing occupies
+// it; Create refuses an existing directory either way.
+func realProvisionInstanceNamed(ctx context.Context, workspaceRoot, name string) (provisionResult, error) {
+	return provisionInstance(ctx, workspaceRoot, workspaceRoot, 0, func(string) (string, error) {
+		return name, nil
+	})
+}
+
+// provisionInstance is the body both provisioners share. instanceName turns
+// the effective workspace name into the name of the instance to create.
+func provisionInstance(ctx context.Context, workspaceRoot, cwd string, cloneWorkers int, instanceName func(configName string) (string, error)) (provisionResult, error) {
 	configPath, configDir, err := config.Discover(cwd)
 	if err != nil {
 		return provisionResult{}, fmt.Errorf("discovering workspace config from %q: %w", cwd, err)
@@ -583,7 +609,7 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 		return provisionResult{}, err
 	}
 
-	instanceName, err := computeInstanceName(configName, namePrefix, sep, workspaceRoot)
+	name, err := instanceName(configName)
 	if err != nil {
 		return provisionResult{}, err
 	}
@@ -621,7 +647,7 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 	// cfg is the reconciled config loaded above, so nothing further is needed
 	// to make the setting reach them.
 	applier.StrictSecrets = strictSecretsFor(nil, false, cfg)
-	instancePath, err := applier.Create(ctx, cfg, configDir, workspaceRoot, instanceName)
+	instancePath, err := applier.Create(ctx, cfg, configDir, workspaceRoot, name)
 	if err != nil {
 		// The keys collected before the failure travel with it. A strict
 		// refusal is the one failure whose explanation is the report, and the
@@ -629,7 +655,7 @@ func realProvisionInstance(ctx context.Context, workspaceRoot, cwd, namePrefix, 
 		return provisionResult{Keys: keys.Report(), Notices: notices}, err
 	}
 
-	return provisionResult{Name: instanceName, Path: instancePath, Keys: keys.Report(), Notices: notices}, nil
+	return provisionResult{Name: name, Path: instancePath, Keys: keys.Report(), Notices: notices}, nil
 }
 
 // realDestroyInstance is the production teardown: it force-destroys the

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/authority"
@@ -161,6 +162,68 @@ func readLaunchRecordFile(path, dispatchID string) (LaunchRecord, error) {
 		return LaunchRecord{}, err
 	}
 	defer f.Close()
+	return decodeLaunchRecord(f, dispatchID)
+}
+
+// CheckLaunchStore refuses a launch store that isn't a real directory owned
+// by the current user with mode 0700. A record is only as trustworthy as the
+// directory that holds it, so a reader about to act on one (a resume) checks
+// the store first; a symlink in its place counts as not a directory.
+func CheckLaunchStore(root string) error {
+	dir := LaunchDir(root)
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("launch store %s is not a directory", dir)
+	}
+	if err := checkOwnerMode(info, 0o700); err != nil {
+		return fmt.Errorf("launch store %s: %w", dir, err)
+	}
+	return nil
+}
+
+// ReadLaunchRecordChecked reads the record for dispatchID the way a reader
+// about to act on it must: the file is opened without following a symlink,
+// and the open descriptor must be a regular file owned by the current user
+// with mode 0600. It makes ReadLaunchRecord's checks too.
+func ReadLaunchRecordChecked(root, dispatchID string) (LaunchRecord, error) {
+	path, err := launchRecordPath(root, dispatchID)
+	if err != nil {
+		return LaunchRecord{}, err
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return LaunchRecord{}, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return LaunchRecord{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return LaunchRecord{}, errors.New("launch record is not a regular file")
+	}
+	if err := checkOwnerMode(info, 0o600); err != nil {
+		return LaunchRecord{}, fmt.Errorf("launch record: %w", err)
+	}
+	return decodeLaunchRecord(f, dispatchID)
+}
+
+// checkOwnerMode refuses info unless the current user owns it and its
+// permission bits are exactly want.
+func checkOwnerMode(info fs.FileInfo, want fs.FileMode) error {
+	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Getuid() {
+		return errors.New("not owned by the current user")
+	}
+	if got := info.Mode().Perm(); got != want {
+		return fmt.Errorf("mode is %04o, want %04o", got, want)
+	}
+	return nil
+}
+
+func decodeLaunchRecord(f io.Reader, dispatchID string) (LaunchRecord, error) {
 	data, err := io.ReadAll(io.LimitReader(f, MaxLaunchRecordBytes+1))
 	if err != nil {
 		return LaunchRecord{}, err

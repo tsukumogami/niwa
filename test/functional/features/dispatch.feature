@@ -516,6 +516,39 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     And the dispatch session "abababab-abab-4bab-8bab-abababababab" is still listed
     And a dispatch-origin mapping exists for session "abababab-abab-4bab-8bab-abababababab"
 
+  # --- niwa resume brings a destroyed worker back ---
+  # Dispatch records what it launched the worker with, outside the instance,
+  # and the record outlives a destroy. niwa resume reads it, restores the
+  # instance under its original name and path, maps the session again and
+  # starts the worker with `claude --bg --resume <session id>`.
+
+  @critical
+  Scenario: niwa resume restores a destroyed dispatch instance and resumes its session
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch with session "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd"
+    When I run "niwa dispatch resume-me --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When the dispatch session "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd" has exited
+    And I destroy the dispatch instance from the workspace root with ""
+    Then the exit code is 0
+    And no dispatch instance remains
+    Given the Claude transcript of the dispatch session "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd" is kept
+    When I run "niwa resume cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd" from the workspace root
+    Then the exit code is 0
+    And the dispatch instance still exists
+    And the output contains "Resumed session cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd"
+    And the fake claude's last launch resumed session "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd"
+    And a dispatch-origin mapping exists for session "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd"
+
   # --- Reaper spares a live worker whose mapping was lost (backstop liveness) ---
   # Regression guard for the data-loss bug. An UNMAPPED, past-TTL dispatch
   # instance that a live worker is still rooted in must NOT be reclaimed by the

@@ -44,6 +44,8 @@ var removalCallers = map[string]removalCaller{
 		"niwa destroy --workspace on a workspace with no instances: there is no instance path to ask about"},
 	"dispatch.go:runDispatch": {false,
 		"the rollback after a failed dispatch removes the instance this same call created, which no session has used"},
+	"resume.go:runResume": {false,
+		"the rollback after a failed resume launch removes only an instance this same call restored, before the session started in it"},
 	"watch.go:stageReview": {false,
 		"the rollback after a failed watch launch removes the review instance this same call created"},
 	"reset.go:runReset": {false,

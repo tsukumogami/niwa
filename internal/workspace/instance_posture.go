@@ -42,3 +42,12 @@ func instancePermissionsPosture(cfg *config.WorkspaceConfig) string {
 		return ""
 	}
 }
+
+// PermissionsPosture is the posture a new instance created from cfg would
+// record, for a reader that needs the current policy for an instance it
+// didn't just provision (`niwa resume`). It reads the configuration as given,
+// without the overlay a provisioning run merges in, so the caller combines it
+// with what the instance itself recorded rather than trusting it alone.
+func PermissionsPosture(cfg *config.WorkspaceConfig) string {
+	return instancePermissionsPosture(cfg)
+}

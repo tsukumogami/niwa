@@ -220,3 +220,57 @@ func TestLaunchRecord_RemoveIsIdempotent(t *testing.T) {
 		t.Errorf("read after remove: %v", err)
 	}
 }
+
+func TestLaunchRecordCheckedRead(t *testing.T) {
+	root := t.TempDir()
+	rec := LaunchRecord{DispatchID: testLaunchDispatchID, SessionID: "s", Agent: "claude", InstanceName: "i"}
+	if err := WriteLaunchRecord(root, rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckLaunchStore(root); err != nil {
+		t.Fatalf("CheckLaunchStore on a store WriteLaunchRecord made: %v", err)
+	}
+	if got, err := ReadLaunchRecordChecked(root, testLaunchDispatchID); err != nil || got.SessionID != "s" {
+		t.Fatalf("ReadLaunchRecordChecked = %+v, %v", got, err)
+	}
+
+	path := filepath.Join(LaunchDir(root), testLaunchDispatchID+".json")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadLaunchRecordChecked(root, testLaunchDispatchID); err == nil || !strings.Contains(err.Error(), "mode") {
+		t.Errorf("a 0644 record was read: %v", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	moved := filepath.Join(t.TempDir(), "rec.json")
+	if err := os.Rename(path, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadLaunchRecordChecked(root, testLaunchDispatchID); err == nil {
+		t.Error("a symlinked record was read")
+	}
+
+	if err := os.Chmod(LaunchDir(root), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckLaunchStore(root); err == nil {
+		t.Error("a 0755 store passed")
+	}
+
+	other := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(other, "real"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(other, "real"), LaunchDir(other)); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckLaunchStore(other); err == nil {
+		t.Error("a symlinked store passed")
+	}
+}
