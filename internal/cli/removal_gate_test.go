@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tsukumogami/niwa/internal/watch"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -389,4 +392,325 @@ func TestRemovalGate_SilentNonZeroNamesTheStatus(t *testing.T) {
 	if kept := keptLines(out.String()); len(kept) != 1 || !strings.HasSuffix(kept[0], "before_remove exited with status 7") {
 		t.Errorf("spare lines = %q, want one naming status 7", kept)
 	}
+}
+
+// ---- The backstop and the watch discard ----
+
+// backstopInstance makes one unmapped, dispatch-named instance whose marker is
+// past the backstop's TTL, so the backstop targets it, and returns its path.
+func backstopInstance(t *testing.T, root, name string) string {
+	t.Helper()
+	inst := makeReapInstance(t, root, name)
+	writeDispatchMarkerAt(t, inst, time.Now().Add(-2*dispatchBackstopTTL))
+	return inst
+}
+
+// gateLogCommand returns a command fragment that appends one line per run --
+// "<NIWA_REMOVE_STEP>|<NIWA_SESSION_IDS>" -- to a log file, and the file.
+func gateLogCommand(t *testing.T) (command, logPath string) {
+	t.Helper()
+	logPath = filepath.Join(t.TempDir(), "gate.log")
+	return fmt.Sprintf(`printf '%%s|%%s\n' "$NIWA_REMOVE_STEP" "$NIWA_SESSION_IDS" >> '%s'`, logPath), logPath
+}
+
+// stubShellLogging points onReapShell at a script that logs each start and
+// exits 1, and returns the log, which exists only if something started.
+func stubShellLogging(t *testing.T) string {
+	t.Helper()
+	log := filepath.Join(t.TempDir(), "shell.log")
+	stub := filepath.Join(t.TempDir(), "sh")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho run >> '"+log+"'\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prev := onReapShell
+	onReapShell = stub
+	t.Cleanup(func() { onReapShell = prev })
+	return log
+}
+
+// TestRemovalGate_BackstopRefusalKeepsAndExitZeroRemoves: a command that
+// prints a reason and exits 1 keeps an unmapped, past-TTL dispatch instance
+// the backstop targets, and says why; the command saw step reap-backstop and
+// no session ids. Once the command exits 0, the backstop removes it.
+func TestRemovalGate_BackstopRefusalKeepsAndExitZeroRemoves(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	base, err := os.ReadFile(workspaceConfigPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst := backstopInstance(t, root, dispInstOld)
+	stubDestroyRemoving(t)
+	out := captureReapStderr(t)
+	logCmd, log := gateLogCommand(t)
+
+	setBeforeRemoveCommand(t, root, string(base), logCmd+"; echo 'kept by test'; exit 1")
+	n, err := reapBackstop(root, t.TempDir(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("backstop reclaimed %d instance(s); the gate kept it", n)
+	}
+	if _, err := os.Stat(inst); err != nil {
+		t.Fatalf("instance gone after a refusing gate: %v", err)
+	}
+	want := `niwa: kept ` + dispInstOld + `: reason from before_remove: "kept by test"`
+	if kept := keptLines(out.String()); len(kept) != 1 || kept[0] != want {
+		t.Errorf("spare lines = %q, want [%q]", kept, want)
+	}
+	if runs := onReapRuns(t, log); len(runs) != 1 || runs[0] != removeStepReapBackstop+"|" {
+		t.Errorf("gate runs = %q, want one with step %s and no session ids", runs, removeStepReapBackstop)
+	}
+
+	setBeforeRemoveCommand(t, root, string(base), logCmd+"; exit 0")
+	n, err = reapBackstop(root, t.TempDir(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("backstop with an allowing gate reclaimed %d, want 1", n)
+	}
+	if _, err := os.Stat(inst); !os.IsNotExist(err) {
+		t.Errorf("instance still on disk after an allowing gate: %v", err)
+	}
+	if runs := onReapRuns(t, log); len(runs) != 2 || runs[1] != removeStepReapBackstop+"|" {
+		t.Errorf("gate runs = %q, want a second with step %s and no session ids", runs, removeStepReapBackstop)
+	}
+}
+
+// TestRemovalGate_WatchDiscardRefusalKeepsAndExitZeroDiscards: niwa watch's
+// discard of a staged review whose session is gone asks the gate first. A
+// refusal keeps the instance and the staged record, prints the spare line and
+// runs no on-reap command; the command saw step watch-discard and the review's
+// session id. Once the command exits 0 the review is discarded as before and
+// on-reap runs.
+func TestRemovalGate_WatchDiscardRefusalKeepsAndExitZeroDiscards(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	onReapCmd, onReapLog := onReapLogCommand(t)
+	appendOnReapConfig(t, root, fmt.Sprintf("command = %q", onReapCmd))
+	base, err := os.ReadFile(workspaceConfigPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst := filepath.Join(root, "test-ws-review")
+	if err := os.MkdirAll(inst, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rec := watch.StagedRecord{Handle: "gone0001", Owner: "acme", Repo: "api", Number: 1, InstancePath: inst, DispatchedSHA: "aaaa111", SessionID: reapDeadSessionID, ReapKey: onReapDispatchID}
+	if err := watch.SaveStagedRecord(root, rec); err != nil {
+		t.Fatal(err)
+	}
+	origLive := stagedInstanceLiveFunc
+	stagedInstanceLiveFunc = func(_, _ string) bool { return false }
+	t.Cleanup(func() { stagedInstanceLiveFunc = origLive })
+	stubDestroyRemoving(t)
+	logCmd, log := gateLogCommand(t)
+
+	setBeforeRemoveCommand(t, root, string(base), logCmd+"; echo 'kept by test'; exit 1")
+	var out bytes.Buffer
+	pruneStagedRecords(context.Background(), &out, root, &fakeFreshnessClient{}, map[string]bool{})
+	if _, err := os.Stat(inst); err != nil {
+		t.Fatalf("instance gone after a refusing gate: %v", err)
+	}
+	if handles, _ := watch.ListStagedHandles(root); !equalStrings(handles, []string{"gone0001"}) {
+		t.Errorf("records left = %v, want the kept review's record", handles)
+	}
+	want := `niwa: kept test-ws-review: reason from before_remove: "kept by test"`
+	if kept := keptLines(out.String()); len(kept) != 1 || kept[0] != want {
+		t.Errorf("spare lines = %q, want [%q]", kept, want)
+	}
+	if strings.Contains(out.String(), "discarding staged review") {
+		t.Errorf("a kept review was reported discarded: %q", out.String())
+	}
+	if runs := onReapRuns(t, log); len(runs) != 1 || runs[0] != removeStepWatchDiscard+"|"+reapDeadSessionID {
+		t.Errorf("gate runs = %q, want one with step %s and the review's session id", runs, removeStepWatchDiscard)
+	}
+	if runs := onReapRuns(t, onReapLog); len(runs) != 0 {
+		t.Errorf("on-reap ran %q for a kept review; it runs only after a discard", runs)
+	}
+
+	setBeforeRemoveCommand(t, root, string(base), logCmd+"; exit 0")
+	out.Reset()
+	pruneStagedRecords(context.Background(), &out, root, &fakeFreshnessClient{}, map[string]bool{})
+	if _, err := os.Stat(inst); !os.IsNotExist(err) {
+		t.Errorf("instance still on disk after an allowing gate: %v", err)
+	}
+	if handles, _ := watch.ListStagedHandles(root); len(handles) != 0 {
+		t.Errorf("records left = %v, want the review discarded", handles)
+	}
+	if kept := keptLines(out.String()); len(kept) != 0 {
+		t.Errorf("spare lines with an allowing gate: %q", kept)
+	}
+	if runs := onReapRuns(t, onReapLog); len(runs) != 1 {
+		t.Errorf("on-reap runs = %q, want one after the discard", runs)
+	}
+}
+
+// TestRemovalGate_BackstopAndDiscardWithNothingDeclared: with no
+// [session.before_remove], the backstop removes its instance and the watch
+// discard discards its review as before, and no shell starts for the gate.
+func TestRemovalGate_BackstopAndDiscardWithNothingDeclared(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	inst := backstopInstance(t, root, dispInstOld)
+	review := filepath.Join(root, "test-ws-review")
+	if err := watch.SaveStagedRecord(root, watch.StagedRecord{Handle: "gone0001", Owner: "acme", Repo: "api", Number: 1, InstancePath: review, SessionID: reapDeadSessionID}); err != nil {
+		t.Fatal(err)
+	}
+	origLive := stagedInstanceLiveFunc
+	stagedInstanceLiveFunc = func(_, _ string) bool { return false }
+	t.Cleanup(func() { stagedInstanceLiveFunc = origLive })
+	destroyed := stubDestroyAll(t)
+	out := captureReapStderr(t)
+	shellLog := stubShellLogging(t)
+
+	n, err := reapBackstop(root, t.TempDir(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("backstop reclaimed %d, want 1", n)
+	}
+	var watchOut bytes.Buffer
+	pruneStagedRecords(context.Background(), &watchOut, root, &fakeFreshnessClient{}, map[string]bool{})
+	if want := []string{inst, review}; !equalStrings(*destroyed, want) {
+		t.Errorf("destroyed = %v, want %v", *destroyed, want)
+	}
+	if handles, _ := watch.ListStagedHandles(root); len(handles) != 0 {
+		t.Errorf("records left = %v, want the review discarded", handles)
+	}
+	if _, err := os.Stat(shellLog); !os.IsNotExist(err) {
+		t.Error("a shell started with nothing declared")
+	}
+	if kept := keptLines(out.String() + watchOut.String()); len(kept) != 0 {
+		t.Errorf("spare lines with nothing declared: %q", kept)
+	}
+}
+
+// TestRemovalGate_BackstopWithinTimeoutAndStartFailure: a command that sleeps
+// 2 seconds and exits 0 under a 10-second timeout lets the backstop remove
+// its instance; a shell that can't start keeps it and says so.
+func TestRemovalGate_BackstopWithinTimeoutAndStartFailure(t *testing.T) {
+	t.Run("within timeout", func(t *testing.T) {
+		root := setupHookWorkspace(t, true)
+		inst := backstopInstance(t, root, dispInstOld)
+		destroyed := stubDestroyAll(t)
+		out := captureReapStderr(t)
+		appendBeforeRemoveConfig(t, root, "command = \"sleep 2; exit 0\"\ntimeout = \"10s\"")
+
+		n, err := reapBackstop(root, t.TempDir(), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 || len(*destroyed) != 1 || (*destroyed)[0] != inst {
+			t.Fatalf("reclaimed %d, destroyed %v; want %s removed", n, *destroyed, inst)
+		}
+		if kept := keptLines(out.String()); len(kept) != 0 {
+			t.Errorf("spare lines = %q, want none", kept)
+		}
+	})
+	t.Run("start failure", func(t *testing.T) {
+		root := setupHookWorkspace(t, true)
+		inst := backstopInstance(t, root, dispInstOld)
+		destroyed := stubDestroyAll(t)
+		out := captureReapStderr(t)
+		appendBeforeRemoveConfig(t, root, `command = "exit 0"`)
+		prev := onReapShell
+		onReapShell = filepath.Join(t.TempDir(), "no-such-shell")
+		t.Cleanup(func() { onReapShell = prev })
+
+		n, err := reapBackstop(root, t.TempDir(), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 || len(*destroyed) != 0 {
+			t.Fatalf("reclaimed %d, destroyed %v; want %s kept when the command could not start", n, *destroyed, inst)
+		}
+		kept := keptLines(out.String())
+		if len(kept) != 1 || !strings.HasPrefix(kept[0], "niwa: kept "+dispInstOld+": ") || !strings.Contains(kept[0], "could not start") {
+			t.Errorf("spare lines = %q, want one naming the start failure", kept)
+		}
+	})
+}
+
+// backstopBudgetInstances makes four backstop targets for the budget tests.
+func backstopBudgetInstances(t *testing.T, root string) {
+	t.Helper()
+	for _, name := range []string{"test-ws+-0000a001", "test-ws+-0000a002", "test-ws+-0000a003", "test-ws+-0000a004"} {
+		backstopInstance(t, root, name)
+	}
+}
+
+// checkBackstopBudget runs one backstop pass over four targets whose command
+// never answers in time, and checks that three runs were cut by their timeout
+// and kept their instances, and the fourth kept its instance without running
+// because the step's time ran out. firstTimeout is what the first two lines
+// name; the third run's timeout is whatever was left of the budget.
+func checkBackstopBudget(t *testing.T, root, runLog, firstTimeout string, maxElapsed time.Duration) {
+	t.Helper()
+	destroyed := stubDestroyAll(t)
+	out := captureReapStderr(t)
+
+	start := time.Now()
+	n, err := reapBackstop(root, t.TempDir(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > maxElapsed {
+		t.Errorf("the backstop took %s, want at most %s", elapsed, maxElapsed)
+	}
+	if n != 0 || len(*destroyed) != 0 {
+		t.Fatalf("reclaimed %d, destroyed %v; want every instance kept", n, *destroyed)
+	}
+	kept := keptLines(out.String())
+	if len(kept) != 4 {
+		t.Fatalf("spare lines = %q, want one per instance", kept)
+	}
+	timedOut, ranOut := 0, 0
+	for i, line := range kept {
+		switch {
+		case strings.Contains(line, "before_remove timed out after "):
+			timedOut++
+			if i < 2 && !strings.HasSuffix(line, "timed out after "+firstTimeout) {
+				t.Errorf("line %d = %q, want it cut at %s", i, line, firstTimeout)
+			}
+		case strings.Contains(line, "time ran out"):
+			ranOut++
+		default:
+			t.Errorf("unexpected spare line %q", line)
+		}
+	}
+	if timedOut != 3 || ranOut != 1 || !strings.Contains(kept[3], "time ran out") {
+		t.Errorf("timed out %d, time ran out %d, want 3 then 1:\n%s", timedOut, ranOut, out.String())
+	}
+	if runs := onReapRuns(t, runLog); len(runs) != 3 {
+		t.Errorf("the command started %d times, want 3 (the fourth must not start)", len(runs))
+	}
+}
+
+// TestRemovalGate_BackstopBudget is the criterion as written: no timeout
+// declared, so each run gets the 10-second default, and four targets whose
+// command sleeps 12 seconds. The first three runs are cut and keep their
+// instances; the fourth doesn't start, since the 30-second budget is spent.
+func TestRemovalGate_BackstopBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("takes 30 seconds")
+	}
+	root := setupHookWorkspace(t, true)
+	backstopBudgetInstances(t, root)
+	runLog := filepath.Join(t.TempDir(), "runs.log")
+	appendBeforeRemoveConfig(t, root, fmt.Sprintf(`command = "echo run >> '%s'; sleep 12; exit 0"`, runLog))
+	checkBackstopBudget(t, root, runLog, "10s", 33*time.Second)
+}
+
+// TestRemovalGate_BackstopBudgetScaled is the same rule at a scale fast
+// enough for every run: a 3-second budget and a 1-second timeout.
+func TestRemovalGate_BackstopBudgetScaled(t *testing.T) {
+	prev := defaultRemovalGateBudget
+	defaultRemovalGateBudget = 3 * time.Second
+	t.Cleanup(func() { defaultRemovalGateBudget = prev })
+	root := setupHookWorkspace(t, true)
+	backstopBudgetInstances(t, root)
+	runLog := filepath.Join(t.TempDir(), "runs.log")
+	appendBeforeRemoveConfig(t, root, fmt.Sprintf("command = \"echo run >> '%s'; sleep 5; exit 0\"\ntimeout = \"1s\"", runLog))
+	checkBackstopBudget(t, root, runLog, "1s", 6*time.Second)
 }
