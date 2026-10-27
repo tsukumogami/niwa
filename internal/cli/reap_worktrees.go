@@ -7,7 +7,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/workspace"
@@ -114,33 +113,6 @@ func hookSessionEnded(st worktree.SessionLifecycleState, jobsDir string, now tim
 		return false
 	}
 	return jobEntryGone(jobsDir, st.ClaudeSessionID)
-}
-
-// jobEntryGone reports whether jobsDir positively lists no job entry for
-// sessionID. It looks where readJobState looks, at each directory whose name
-// is a prefix of the id. An entry recorded for another session is not this
-// one's. A jobs directory that is unset, missing or can't be read, and an
-// entry whose state can't be read, are "can't tell", which is never gone: the
-// worktree would be removed on exactly the evidence that couldn't be checked.
-func jobEntryGone(jobsDir, sessionID string) bool {
-	if jobsDir == "" {
-		return false
-	}
-	entries, err := os.ReadDir(jobsDir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if !e.IsDir() || name == "" || len(name) > len(sessionID) || sessionID[:len(name)] != name {
-			continue
-		}
-		js, ok := decodeJobState(filepath.Join(jobsDir, name, "state.json"))
-		if !ok || js.SessionID == "" || js.SessionID == sessionID {
-			return false
-		}
-	}
-	return true
 }
 
 // claudeSessionEnded reports whether the Claude Code session that asked for
