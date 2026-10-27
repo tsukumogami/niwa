@@ -204,9 +204,10 @@ func runResume(cmd *cobra.Command, args []string) error {
 	restored := false
 	posture := ""
 	if present {
-		// An instance resume didn't provision: the posture it recorded and the
-		// one the configuration gives now must both say bypass for the
-		// workspace rung to apply, so neither can loosen the other.
+		// An instance resume didn't provision: its posture counts only when
+		// the one it recorded equals the one the configuration gives now, so
+		// the workspace rung (which reads "bypass") applies only when both
+		// say it and neither can loosen the other.
 		if st, err := workspace.LoadState(instancePath); err == nil && st.ClaudePermissions == workspace.PermissionsPosture(wsConfig) {
 			posture = st.ClaudePermissions
 		}
@@ -242,6 +243,25 @@ func runResume(cmd *cobra.Command, args []string) error {
 			mode, displayMode(rec.PermissionMode))
 	}
 
+	// The command is built before the mapping is written, so a record it
+	// can't carry leaves no mapping behind. It needs the mode, and the mode
+	// needs a restored instance's posture, so it can't come before the
+	// restore; the agent check above already refuses an agent with no
+	// resume-launch arguments before anything is restored.
+	argv := reentryResumeArgs(spec, resumeLaunch{
+		SessionID:      rec.SessionID,
+		Workdir:        instancePath,
+		PermissionMode: mode,
+		SessionName:    rec.SessionName,
+		Model:          rec.Model,
+		Settings:       rec.Settings,
+		Prompt:         prompt,
+	})
+	if argv == nil {
+		rollback()
+		return resumeRefusal(arg, "niwa can't build a resume command for a %s worker with this record", ag)
+	}
+
 	// The mapping goes in before the launch, so the reaper's backstop never
 	// sees a restored dispatch instance as an unmapped orphan.
 	mapping := workspace.SessionMapping{
@@ -275,20 +295,6 @@ func runResume(cmd *cobra.Command, args []string) error {
 		return resumeRefusal(arg, "writing the session mapping: %v", err)
 	}
 
-	argv := reentryResumeArgs(spec, resumeLaunch{
-		SessionID:      rec.SessionID,
-		Workdir:        instancePath,
-		PermissionMode: mode,
-		SessionName:    rec.SessionName,
-		Model:          rec.Model,
-		Settings:       rec.Settings,
-		Prompt:         prompt,
-	})
-	if argv == nil {
-		unmap()
-		rollback()
-		return resumeRefusal(arg, "niwa can't build a resume command for a %s worker with this record", ag)
-	}
 	env := resumeEnv(os.Environ(), unset, rec.Env)
 	if err := resumeLaunchFunc(cmd.Context(), bin, argv, instancePath, env); err != nil {
 		unmap()
@@ -543,7 +549,9 @@ func instancePresent(path, name string) (bool, error) {
 // stricterPermissionMode returns the mode to launch with, and whether it is
 // current rather than recorded. order is strictest first. An empty mode is
 // the agent's default, which ranks as "default" when the order holds it.
-// Both modes must be in order or empty; the caller has checked.
+// Both modes must be in order or empty: the caller checks the recorded mode
+// and the host's, and derivePermissionMode adds only "bypassPermissions" from
+// the posture. A mode outside order would rank as the most permissive.
 //
 // A downgrade to an empty current mode launches with "default" spelled out
 // rather than with no flag: with no flag the agent falls back to whatever
