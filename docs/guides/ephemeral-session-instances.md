@@ -463,8 +463,13 @@ group, with stdin at `/dev/null` and this environment and nothing else:
 
 - `PATH` and `HOME` from niwa's environment;
 - `NIWA_REMOVE_PATH`, the absolute path about to be removed;
-- `NIWA_REMOVE_STEP`, the step asking: `reap` for the mapped reap, `destroy`
-  for `niwa destroy` and `destroy-workspace` for `niwa destroy --workspace`;
+- `NIWA_REMOVE_STEP`, the step asking: `reap` for the mapped reap,
+  `reap-backstop` for the reap's backstop removing an unmapped dispatch
+  instance past its TTL (with `NIWA_SESSION_IDS` empty, since there is no
+  session to name), `destroy` for `niwa destroy`, `destroy-workspace` for
+  `niwa destroy --workspace` and `watch-discard` for `niwa watch` discarding a
+  staged review (with the review's session id in `NIWA_SESSION_IDS` when it has
+  a valid one);
 - `NIWA_SESSION_IDS`, the session ids niwa maps to that instance,
   space-separated, empty when there are none;
 - each name in `env` that is set in niwa's environment.
