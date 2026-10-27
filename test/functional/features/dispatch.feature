@@ -439,8 +439,8 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
   # The dispatch mapping names the session that owns the instance. Once its
   # process has exited, destroy removes it with a bare `claude rm <id>`, so it
   # leaves the agents view with the instance, and deletes the mapping. A
-  # session still running is never removed, and --keep-session keeps a
-  # finished one.
+  # session still running stops the destroy unless --force overrides it, and
+  # is never removed either way; --keep-session keeps a finished one.
 
   @critical
   Scenario: niwa destroy removes the finished Claude session that owns the instance
@@ -466,7 +466,7 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     And the error output contains "removed Claude session eeeeeeee; its transcript is kept: claude --resume eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
 
   @critical
-  Scenario: niwa destroy keeps the owning Claude session while it is still running
+  Scenario: niwa destroy refuses while the owning Claude session runs, and --force keeps the session
     Given a clean niwa environment
     And a local git server is set up
     And a config repo "myws" exists with body:
@@ -481,6 +481,13 @@ Feature: niwa dispatch: provision, rollback, and reaper reclamation
     Then the exit code is 0
     And a dispatch instance was created with a well-formed instance file
     When I destroy the dispatch instance from the workspace root with ""
+    Then the exit code is not 0
+    And the error output contains "Claude session ffffffff"
+    And the error output contains "is still running"
+    And the error output contains "nothing was destroyed"
+    And a dispatch instance was created with a well-formed instance file
+    And the fake claude removed no session
+    When I destroy the dispatch instance from the workspace root with "--force"
     Then the exit code is 0
     And no dispatch instance remains
     And the fake claude removed no session

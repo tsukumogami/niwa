@@ -42,6 +42,27 @@ var (
 	removeClaudeSessionFunc = realRemoveClaudeSession
 )
 
+// claudeSessionLister lists Claude Code's background sessions.
+type claudeSessionLister func(context.Context) ([]claudeSessionRow, error)
+
+// listClaudeSessionsOnce returns a lister that asks listClaudeSessionsFunc on
+// its first call and hands every later call the same answer, error included,
+// so one destroy lists Claude Code's sessions at most once.
+func listClaudeSessionsOnce() claudeSessionLister {
+	var (
+		done bool
+		rows []claudeSessionRow
+		err  error
+	)
+	return func(ctx context.Context) ([]claudeSessionRow, error) {
+		if !done {
+			done = true
+			rows, err = listClaudeSessionsFunc(ctx)
+		}
+		return rows, err
+	}
+}
+
 const (
 	claudeListTimeout   = 30 * time.Second
 	claudeRemoveTimeout = 60 * time.Second
@@ -119,12 +140,19 @@ func realRemoveClaudeSession(ctx context.Context, id string) (string, error) {
 // instance directory is removed, while Claude Code can still inspect any
 // worktree the session made inside it.
 func removeOwningSessions(reporter *workspace.Reporter, workspaceRoot string, instanceDirs []string) {
+	removeOwningSessionsListed(reporter, workspaceRoot, instanceDirs, listClaudeSessionsFunc)
+}
+
+// removeOwningSessionsListed is removeOwningSessions reading the sessions
+// through list, so a destroy whose preflight already listed them doesn't ask
+// Claude Code twice.
+func removeOwningSessionsListed(reporter *workspace.Reporter, workspaceRoot string, instanceDirs []string, list claudeSessionLister) {
 	owners := owningClaudeMappings(reporter, workspaceRoot, instanceDirs)
 	if len(owners) == 0 {
 		return
 	}
 
-	rows, err := listClaudeSessionsFunc(context.Background())
+	rows, err := list(context.Background())
 	if err != nil {
 		reporter.Warn("could not check the Claude sessions these instances own (%v); left them in place", err)
 		return

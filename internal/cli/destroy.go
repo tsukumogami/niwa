@@ -72,8 +72,16 @@ root it refuses and points at --workspace.
 Destroying an instance also removes the Claude Code background session that
 owns it (the one niwa recorded when it provisioned or dispatched into the
 instance), with ` + "`claude rm`" + `. Claude Code keeps the session's transcript, so
-` + "`claude --resume <session-id>`" + ` still opens it. A session that is still
-running is left in place. Use --keep-session to keep the session.
+` + "`claude --resume <session-id>`" + ` still opens it. Use --keep-session to keep the
+session.
+
+Before any prompt, destroy refuses an instance something still needs: a
+session niwa mapped to it that Claude Code lists as running, or the
+workspace's [session.before_remove] command exiting non-zero for it. It lists
+every reason, removes nothing and exits non-zero. --force <name> prints the
+reasons as overridden and destroys the instance anyway, leaving a running
+session in place. --workspace refuses as a whole when any instance is still
+needed.
 
 When the workspace declares [session.on_reap], its command runs from the
 workspace root once for each session destroy removes or finds already gone,
@@ -172,6 +180,16 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingP
 		return err
 	}
 
+	// Before any prompt: a running session or the pre-removal command keeps
+	// the instance unless --force overrides them, and then each is named.
+	listSessions := listClaudeSessionsOnce()
+	if kept := destroyPreflight(workspaceRoot, []string{instanceDir}, removeStepDestroy, listSessions); len(kept) > 0 {
+		reportDestroyKept(cmd.ErrOrStderr(), kept, force)
+		if !force {
+			return fmt.Errorf("nothing was destroyed; once nothing needs it, run niwa destroy again, or use --force to destroy it anyway")
+		}
+	}
+
 	if !force {
 		scan, err := workspace.ScanInstance(instanceDir, workspace.WithForge(newDestroyForge()))
 		if err != nil {
@@ -196,7 +214,7 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingP
 
 	reporter := workspace.NewReporter(cmd.ErrOrStderr())
 	if !destroyKeepSession {
-		removeOwningSessions(reporter, workspaceRoot, []string{instanceDir})
+		removeOwningSessionsListed(reporter, workspaceRoot, []string{instanceDir}, listSessions)
 	}
 
 	if err := workspace.DestroyInstance(instanceDir,
@@ -390,6 +408,15 @@ func runDestroyWorkspace(cmd *cobra.Command, workspaceRoot, confirm string) erro
 		return fmt.Errorf("enumerating instances: %w", err)
 	}
 
+	// Before the scan and any prompt: the workspace goes whole or not at all,
+	// so one instance something still needs refuses all of it. --workspace
+	// takes no --force, so there is nothing to override this with.
+	listSessions := listClaudeSessionsOnce()
+	if kept := destroyPreflight(workspaceRoot, instances, removeStepDestroyWorkspace, listSessions); len(kept) > 0 {
+		reportDestroyKept(cmd.ErrOrStderr(), kept, false)
+		return fmt.Errorf("nothing was destroyed; %d instance(s) are still needed (destroy the others by name, or run niwa destroy --workspace again once nothing needs them)", len(kept))
+	}
+
 	// Scan for non-pushed work, so whoever confirms sees what would be lost.
 	scans, scanErr := workspace.ScanInstancesParallel(workspaceRoot, instances, 0, workspace.WithForge(newDestroyForge()))
 	if scanErr != nil {
@@ -430,7 +457,7 @@ func runDestroyWorkspace(cmd *cobra.Command, workspaceRoot, confirm string) erro
 
 	reporter := workspace.NewReporter(cmd.ErrOrStderr())
 	if !destroyKeepSession {
-		removeOwningSessions(reporter, workspaceRoot, instances)
+		removeOwningSessionsListed(reporter, workspaceRoot, instances, listSessions)
 	}
 
 	if err := workspace.DestroyWorkspace(workspaceRoot, workspace.DestroyWorkspaceOpts{
