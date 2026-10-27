@@ -9,14 +9,18 @@ import (
 )
 
 // capFor runs dispatcherCap the way resolveDispatchAuthority does, from dir
-// with sessionVar, after dispatchParent found (or didn't find) a parent.
+// with sessionVar, after dispatchParent found (or didn't find) a parent. The
+// policy's ceiling holds every authority, so a dispatcher's resolved grant is
+// what its record grants.
 func capFor(t *testing.T, root, dir, sessionVar string) *authority.DispatcherCap {
 	t.Helper()
 	parent, _, cwdInstance, cwdInInstance, err := dispatchParent(dir, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return dispatcherCap(root, sessionVar, parent, cwdInstance, cwdInInstance)
+	all := authority.Authorities()
+	grants := grantResolver{root: root, policy: authority.Policy{BaseCeiling: &all}}
+	return dispatcherCap(grants, sessionVar, parent, cwdInstance, cwdInInstance)
 }
 
 func resetParentFrom(t *testing.T) {

@@ -238,12 +238,16 @@ instance is removed.
 ### Never wider than the dispatcher
 
 A dispatch also can't grant its child a named authority its dispatcher
-doesn't hold. The dispatcher is found the way the parent link is:
+doesn't hold. What the dispatcher holds is its grant as it resolves now (see
+[When a role or the ceiling changes](#when-a-role-or-the-ceiling-changes)),
+not the list recorded when it was dispatched, so a role widened since can be
+passed down a lineage started earlier, and a role narrowed since can't. The
+dispatcher is found the way the parent link is:
 
 - Inside an instance (the working directory's, or the one `--parent-from`
-  names), it's that instance's dispatch, and its record's grant is the most
-  the child may get. A record that grants nothing, or one in a later schema
-  version, passes on nothing. An instance with no record that a
+  names), it's that instance's dispatch, and the grant its record resolves to
+  now is the most the child may get. A record that resolves to nothing, or one
+  in a later schema version, passes on nothing. An instance with no record that a
   dispatch-written session mapping still names was dispatched and lost its
   record, so it passes on nothing too.
 - At the workspace root there's no instance to read, so the dispatcher is the
@@ -335,8 +339,10 @@ is malformed refuses the dispatch rather than recording an empty parent.
 
 Every dispatch that launches a worker writes one record into the dispatched
 instance before the worker starts. It's never rewritten: `niwa apply`, a
-config change, a resume and other dispatches leave it as it was, and a wider
-grant means a new dispatch. It's removed with the instance (rollback,
+config change, a resume and other dispatches leave it as it was. What the
+session holds isn't frozen with it, though: `check` and the never-wider check
+resolve the record's roles against the policy as it stands, as [When a role
+or the ceiling changes](#when-a-role-or-the-ceiling-changes) describes. It's removed with the instance (rollback,
 `niwa reset`, `niwa destroy`, `niwa reap`). To keep a copy before destroying
 an instance, save its document first:
 
@@ -437,6 +443,43 @@ key naming the stored schema (a v1 record's document has no such key), the
 `dispatch_id`, `level` and `level_ceiling` both `strict` with sources
 `newer-version`, and empty grant fields. A record that is actually malformed
 fails the lookup.
+
+## When a role or the ceiling changes
+
+The record keeps what dispatch resolved, and `niwa authority check` and the
+never-wider check read a session's grant from it afresh each time, against
+the workspace config, the overlay and the machine config as they are now:
+
+- Each role the record names grants what the workspace declares for it now.
+  Widen a role and every live session dispatched with it holds the new
+  authority on its next `check`; narrow or remove it and the authority is
+  gone on the next `check`.
+- An authority given with `--grant` stays as recorded.
+- Every authority, from a role or `--grant`, is held only inside the current
+  grant ceiling, so narrowing the ceiling takes it away from every live
+  session too.
+- And only inside what the session's dispatcher holds now, resolved the same
+  way, up the lineage. A child never holds more than its parent does today,
+  whatever the parent held when it dispatched the child.
+
+The dispatcher is found through the lineage entries, which outlive their
+instances. A dispatcher whose instance has been destroyed (reaped, say)
+can't act any more, so it's passed over and its own dispatcher caps the
+child instead; a successor coordinator whose predecessors are all gone holds
+what its role grants within the ceiling. When a dispatcher can't be
+established or read otherwise (its lineage entry is missing or unreadable,
+its instance is there with no usable record of that dispatch, the record and
+the entry disagree, the lineage loops or runs past 64 levels), the session is
+capped at its own recorded grant: it can still narrow, never widen. A policy
+that can't be loaded fails `check` with exit 1, which every reader treats as
+holding nothing. Nothing needs running after a config change: no refresh and
+no `niwa apply` for the change to take effect, beyond whatever brings the new
+config onto the machine.
+
+The level isn't re-resolved; it stays as recorded. `niwa authority show`,
+`decide` and `niwa list --json` print the record as stored, so the
+by-instance reference checks below don't follow a role change: a gate that
+should follow one reads `check`.
 
 ## Reading it back
 
@@ -589,7 +632,10 @@ It exits 0 for every state. It exits 1 with nothing on stdout for a `-C`
 that is empty, relative, missing or in no instance, a session id that isn't
 a lowercase UUID, a session mapping that can't be read, and the two-second
 watchdog; and 2 for a usage error, such as a point name outside
-`^[a-z][a-z0-9-]{0,63}$`. It loads no config and writes nothing.
+`^[a-z][a-z0-9-]{0,63}$`. For a bound session it loads the authority policy
+to resolve the grant (see [When a role or the ceiling
+changes](#when-a-role-or-the-ceiling-changes)), and a policy that can't be
+loaded exits 1 with nothing on stdout too. It writes nothing.
 
 ### `niwa list --json`
 
@@ -882,16 +928,20 @@ only the original parent, by dispatch id, and says nothing about who
 supervises the child now. A coordinator that dispatches from the workspace
 root passes `--parent-from` with a directory in its own instance, so its
 children record it as their parent. It can pass on only what it holds
-itself, and a successor dispatched with `--role coordinator` from a
-coordinator holding less is refused. It reads its sessions' postures through
+itself, as its grant resolves now, and a successor dispatched with `--role
+coordinator` from a coordinator holding less is refused. Once a role is
+widened, a coordinator holds the new authority and can pass it on without
+being redispatched. It reads its sessions' postures through
 `niwa list --json`, or `niwa authority show --instance <name>`, and reads its
 own with `niwa authority check --session "$CLAUDE_CODE_SESSION_ID" -C
 <its instance root>`, the same call a gate on the binding makes.
 
 ## What the record does and doesn't guarantee
 
-The record states what was resolved at dispatch. It doesn't follow later
-policy changes, and a wider grant needs a new dispatch.
+The record states what was resolved at dispatch. What a session holds follows
+later role and ceiling changes through `check`, within its dispatchers'
+current grants, as described above; the level and an explicit `--grant` stay
+as recorded.
 
 It isn't tamper-proof. A dispatched session runs as the operator and can edit
 its own record, the workspace state that names the overlay, and its own

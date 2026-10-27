@@ -28,12 +28,17 @@ func checkMapping(t *testing.T, root, sessionID, instancePath, origin, dispatchI
 	}
 }
 
+// checkPolicy is the authority config the check fixtures' workspaces
+// declare: every authority in the ceiling, and the coordinator role the
+// released records name. check resolves a bound session's grant against it.
+const checkPolicy = "[authority]\nceiling = [\"merge-pr\", \"close-issue\", \"cut-release\"]\n\n[authority.roles.coordinator]\nauthorities = [\"merge-pr\", \"close-issue\"]\n"
+
 // boundWorkspace is a workspace with one instance whose record grants
 // merge-pr at autonomous to showDispatchA, and showSessionA mapped to it by
 // dispatch.
 func boundWorkspace(t *testing.T) (*showWorkspace, string) {
 	t.Helper()
-	w := newShowWorkspace(t, "")
+	w := newShowWorkspace(t, checkPolicy)
 	inst := w.instance(t, "ws-1")
 	writeShowRecord(t, inst, showRecord(showDispatchA, authority.Autonomous, authority.LayerWorkspace, authority.MergePR))
 	checkMapping(t, w.root, showSessionA, inst, "dispatch", showDispatchA)
@@ -330,9 +335,10 @@ func TestCheckReadsReleasedRecords(t *testing.T) {
 	}{
 		{"v0.36.0", "36363636-0360-4036-8036-363636363636", "grant: merge-pr (dispatch)"},
 		{"v0.37.0", "37373737-0370-4037-8037-373737373737", "grant: merge-pr (role coordinator), close-issue (dispatch, role coordinator)"},
+		{"v0.38.0", "38383838-0380-4038-8038-383838383838", "grant: merge-pr (role coordinator), close-issue (dispatch, role coordinator)"},
 	} {
 		t.Run(tc.version, func(t *testing.T) {
-			w := newShowWorkspace(t, "")
+			w := newShowWorkspace(t, checkPolicy)
 			inst := w.instance(t, "ws-1")
 			body, err := os.ReadFile(filepath.Join(recordFixtureDir, tc.version+".json"))
 			if err != nil {

@@ -1,0 +1,42 @@
+{
+  "schema": "niwa.authority.record/v1",
+  "record": true,
+  "dispatch_id": "38383838-0380-4038-8038-383838383838",
+  "parent_session_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  "parent_dispatch_id": "37373737-0370-4037-8037-373737373737",
+  "parent_dispatch_source": "anchor",
+  "parent_session_source": "handed",
+  "principal": {
+    "name": "operator",
+    "source": "inherited",
+    "trust": "handed"
+  },
+  "level": "autonomous",
+  "level_source": "workspace",
+  "level_ceiling": "autonomous",
+  "level_ceiling_source": "workspace",
+  "grant_ceiling": [
+    "merge-pr",
+    "close-issue"
+  ],
+  "grant_ceiling_source": "workspace",
+  "roles": [
+    "coordinator"
+  ],
+  "grant": [
+    {
+      "authority": "merge-pr",
+      "sources": [
+        "role:coordinator"
+      ]
+    },
+    {
+      "authority": "close-issue",
+      "sources": [
+        "dispatch",
+        "role:coordinator"
+      ]
+    }
+  ],
+  "unknown_grant": []
+}
