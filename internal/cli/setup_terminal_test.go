@@ -71,8 +71,10 @@ func TestNewProvisionApplier_NeverSignalsTerminal(t *testing.T) {
 // other code path turns the signal on behind them.
 //
 // Dispatch, watch and reap reach instance creation through
-// provisionInstanceFunc, whose production value is realProvisionInstance, so
-// pinning realProvisionInstance covers them along with the SessionStart hook.
+// provisionInstanceFunc, and resume through provisionInstanceNamedFunc. Both
+// production values (realProvisionInstance and realProvisionInstanceNamed)
+// share the body provisionInstance, so pinning provisionInstance covers them
+// along with the SessionStart hook.
 func TestSetupTerminalWiring(t *testing.T) {
 	fset := token.NewFileSet()
 	paths, err := filepath.Glob("*.go")
@@ -130,8 +132,8 @@ func TestSetupTerminalWiring(t *testing.T) {
 	}
 
 	provision := callers["newProvisionApplier"]
-	if len(provision) != 1 || provision[0] != "realProvisionInstance" {
-		t.Errorf("newProvisionApplier is called from %v, want exactly realProvisionInstance", provision)
+	if len(provision) != 1 || provision[0] != "provisionInstance" {
+		t.Errorf("newProvisionApplier is called from %v, want exactly provisionInstance", provision)
 	}
 
 	if len(assigners) != 1 || assigners[0] != "newInteractiveApplier" {

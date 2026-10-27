@@ -16,14 +16,22 @@ import (
 // TestClaudePermissionsHasOneReader pins who touches
 // InstanceState.ClaudePermissions. The recorded posture is trusted only for an
 // instance the calling process just provisioned, so it has exactly one reader
-// -- runDispatch, straight after its own Create -- and its only writers are the
-// instance pipeline's Create and Apply, copying the current run's result.
+// in dispatch -- runDispatch, straight after its own Create -- and its only
+// writers are the instance pipeline's Create and Apply, copying the current
+// run's result.
+//
+// runResume is the one other reader, and only to tighten a recorded mode,
+// never to loosen it: it reads the posture of an instance it just restored,
+// as dispatch does, and of an instance that was already there only when that
+// posture equals the one the current configuration gives. It also calls
+// derivePermissionMode, so the mode it launches with is never more permissive
+// than a new dispatch would get.
 //
 // It reads every non-test source under internal/ as a syntax tree, so a
 // mention in a comment is not a violation. A field read anywhere else (`niwa
 // watch`, `niwa list`, the workspace-root state `niwa init` saves,
 // effective-name resolution), a field-level copy from earlier state, or any use
-// of derivePermissionMode outside runDispatch fails it. It matches syntax only: a
+// of derivePermissionMode outside runDispatch and runResume fails it. It matches syntax only: a
 // whole-struct copy of loaded state, or a load-modify-save round trip, carries
 // the field forward without naming it and is not caught here.
 func TestClaudePermissionsHasOneReader(t *testing.T) {
@@ -88,8 +96,22 @@ func TestClaudePermissionsHasOneReader(t *testing.T) {
 	// A selector read is the only way to reach the field's value, and an
 	// assignment through one (x.ClaudePermissions = ...) is a selector too, so
 	// this one list covers reads and copies alike.
-	if len(reads) != 1 || reads[0].file != "cli/dispatch.go" || reads[0].fn != "runDispatch" {
-		t.Errorf("ClaudePermissions must be read in exactly one place, runDispatch in cli/dispatch.go; found %v", reads)
+	var dispatchReads, resumeReads int
+	for _, r := range reads {
+		switch {
+		case r.file == "cli/dispatch.go" && r.fn == "runDispatch":
+			dispatchReads++
+		case r.file == "cli/resume.go" && r.fn == "runResume":
+			resumeReads++
+		default:
+			t.Errorf("ClaudePermissions may be read only in runDispatch and runResume; found %s in %s (%s)", r.detail, r.file, r.fn)
+		}
+	}
+	if dispatchReads != 1 {
+		t.Errorf("ClaudePermissions must be read in exactly one place in dispatch, runDispatch in cli/dispatch.go; found %v", reads)
+	}
+	if resumeReads == 0 {
+		t.Errorf("runResume no longer reads ClaudePermissions; drop it from this pin")
 	}
 	for _, r := range reads {
 		if strings.HasPrefix(r.file, "watch/") || r.file == "cli/watch.go" {
@@ -101,8 +123,10 @@ func TestClaudePermissionsHasOneReader(t *testing.T) {
 	// recorded posture or by calling the derivation on something it read
 	// elsewhere and appending the result after a watch launch helper returns.
 	for _, d := range derives {
-		if d.file != "cli/dispatch.go" || (d.fn != "runDispatch" && d.fn != "derivePermissionMode") {
-			t.Errorf("derivePermissionMode may only be called from runDispatch; found it in %s (%s)", d.file, d.fn)
+		inDispatch := d.file == "cli/dispatch.go" && (d.fn == "runDispatch" || d.fn == "derivePermissionMode")
+		inResume := d.file == "cli/resume.go" && d.fn == "runResume"
+		if !inDispatch && !inResume {
+			t.Errorf("derivePermissionMode may only be called from runDispatch and runResume; found it in %s (%s)", d.file, d.fn)
 		}
 	}
 
