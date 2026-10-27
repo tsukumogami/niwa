@@ -831,9 +831,10 @@ func readDispatchMarkerTime(instancePath string) (time.Time, bool) {
 }
 
 // reapBackstop selects and reclaims dispatch-named, unmapped, past-TTL orphan
-// instances under workspaceRoot, returning the count actually destroyed. Each target is
+// instances under workspaceRoot, returning the count actually destroyed. Each target
+// the workspace's pre-removal command allows (step reap-backstop) is
 // force-destroyed via destroyInstanceFunc, the same path the primary sweep
-// uses. A destroy failure on one target is surfaced on
+// uses; one it keeps is left for the next pass. A destroy failure on one target is surfaced on
 // stderr and does not abort the rest. There is no mapping to delete (a backstop
 // target is unmapped by definition). jobsDir feeds the liveness gate in
 // selectBackstopTargets so a live-but-unmapped instance is never reclaimed.
@@ -844,6 +845,9 @@ func reapBackstop(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 	}
 	reportSparedInstances(os.Stderr, spared)
 
+	// An unmapped instance has no session ids to hand the command; its path
+	// is the whole question.
+	gate := newRemovalGate(workspaceRoot, removeStepReapBackstop, reapStderr)
 	reaped := 0
 	for _, t := range targets {
 		// The same re-ask the mapped sweep makes, for the same reason and with
@@ -858,6 +862,11 @@ func reapBackstop(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 			continue
 		}
 		if _, recorded := instanceHasRecordedSession(t.InstancePath, time.Now()); recorded {
+			continue
+		}
+		// The workspace's pre-removal command gets the last word, after the
+		// re-asks; a kept instance is asked again by the next backstop pass.
+		if !gate.ask(t.InstancePath, nil) {
 			continue
 		}
 		if err := destroyInstanceFunc(t.InstancePath); err != nil {
