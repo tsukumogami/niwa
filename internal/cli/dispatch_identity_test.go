@@ -122,6 +122,52 @@ func TestDispatch_IdentityEnv(t *testing.T) {
 	}
 }
 
+// TestDispatch_IdentityEnv_LaterDaemonTurn: a later turn of a background
+// worker is started by Claude Code's daemon, not by niwa, so niwa's launch
+// environment doesn't reach it; what the daemon keeps is the worker's launch
+// flags, the --settings document among them. Rebuilding that turn's
+// environment from a daemon environment that holds neither variable (one
+// carrying stale values, to show they don't survive either) plus the kept
+// document's env gives both variables with the dispatch's values. That the
+// daemon keeps the document across turns is Claude Code's behaviour, which
+// test/live/lineage_live_test.go checks for the same document.
+func TestDispatch_IdentityEnv_LaterDaemonTurn(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	f := installDispatchFakes(t, root)
+	var reqs []launchRequest
+	captureLaunchRequest(f, &reqs)
+	dispatchDetach = true
+
+	if _, stderr, err := runDispatchCmd(t, "do a thing"); err != nil {
+		t.Fatalf("dispatch: %v\n%s", err, stderr)
+	}
+	dispatchID, _ := readSingleMappingJSON(t, root)["dispatch_id"].(string)
+
+	// The flags the daemon keeps: the pass-through, without niwa's process
+	// environment.
+	kept, ok := settingsEnvOf(t, reqs[0].Passthrough)
+	if !ok {
+		t.Fatalf("the launch flags hold no --settings document: %v", reqs[0].Passthrough)
+	}
+	turn := []string{"PATH=/usr/bin", "NIWA_DISPATCH_ID=daemon-stale", "NIWA_WORKSPACE=daemon-stale"}
+	overlaid := make([]string, 0, len(turn)+len(kept))
+	for _, kv := range turn {
+		name, _, _ := strings.Cut(kv, "=")
+		if _, set := kept[name]; !set {
+			overlaid = append(overlaid, kv)
+		}
+	}
+	for name, value := range kept {
+		overlaid = append(overlaid, name+"="+value)
+	}
+	for name, want := range map[string]string{config.DispatchIDEnv: dispatchID, config.WorkspaceEnv: "test-ws"} {
+		if v, _ := envValue(t, overlaid, name); v != want {
+			t.Errorf("later turn %s = %q, want %q", name, v, want)
+		}
+	}
+}
+
 // TestDispatch_IdentityEnv_Codex: an agent with no settings document still
 // gets both variables in its launch environment.
 func TestDispatch_IdentityEnv_Codex(t *testing.T) {
