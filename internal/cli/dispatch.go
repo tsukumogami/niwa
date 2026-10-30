@@ -882,14 +882,27 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	}
 	// The reap key is the dispatch id, set whether or not a lineage value
 	// was composed, so the on-reap command can name this session once niwa
-	// removes it. An agent with no settings flag gets the process
-	// environment only.
+	// removes it. NIWA_DISPATCH_ID and NIWA_WORKSPACE are set for every
+	// agent, so tools inside the worker can name the dispatch and workspace
+	// they run under. A workspace name that doesn't fit their alphabet is
+	// left out with a warning that doesn't quote it. An agent with no
+	// settings flag gets the process environment only.
+	identityWorkspace := ""
+	if wsConfig != nil {
+		identityWorkspace = wsConfig.Workspace.Name
+	}
+	if identityWorkspace != "" && !validDispatchIdentity(identityWorkspace) {
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: %s left out: the workspace name doesn't fit its alphabet\n", config.WorkspaceEnv)
+		identityWorkspace = ""
+	}
 	baseEnv := os.Environ()
 	envShape := launchEnvShape{
 		Lineage:     lineageValue,
 		Passthrough: passthroughNames,
 		Unset:       unsetNames,
 		ReapKey:     dispatchID,
+		DispatchID:  dispatchID,
+		Workspace:   identityWorkspace,
 	}
 	workerEnv := applyLaunchEnv(spec, launchSettings, baseEnv, envShape)
 	// The MCP approval is the fourth contributor, and the second non-constant

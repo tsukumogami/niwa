@@ -28,6 +28,16 @@ func validReapKey(key string) bool {
 	return reapKeyPattern.MatchString(key)
 }
 
+// dispatchIdentityPattern is the only shape NIWA_DISPATCH_ID and
+// NIWA_WORKSPACE may have. Tools inside the worker copy them into their own
+// telemetry, so a value outside it is left unset rather than sent.
+var dispatchIdentityPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+
+// validDispatchIdentity reports whether v may be set as an identity value.
+func validDispatchIdentity(v string) bool {
+	return dispatchIdentityPattern.MatchString(v)
+}
+
 // launchEnvShape is what a launch does to the worker's environment on top of
 // the environment it starts from.
 type launchEnvShape struct {
@@ -39,6 +49,12 @@ type launchEnvShape struct {
 	// ReapKey is the value NIWA_REAP_KEY gets. One that doesn't match
 	// reapKeyPattern is not set, and an inherited value is removed either way.
 	ReapKey string
+	// DispatchID and Workspace are the values NIWA_DISPATCH_ID and
+	// NIWA_WORKSPACE get. Only dispatch fills them. One that doesn't match
+	// dispatchIdentityPattern is not set, and an inherited value is removed
+	// either way, so a launch that isn't a dispatch never carries one.
+	DispatchID string
+	Workspace  string
 }
 
 // dispatchEnvLists reads [session.dispatch_env] from a loaded workspace
@@ -72,13 +88,13 @@ func loadDispatchEnvLists(workspaceRoot string) (passthrough, unset []string) {
 // gets the process environment only.
 //
 // The process environment is base with every Unset name, any inherited
-// NIWA_REAP_KEY and, when a lineage value is composed, the inherited
-// OTEL_RESOURCE_ATTRIBUTES removed; then the lineage value and the reap key
-// are appended. Passthrough names need nothing here: base is niwa's own
+// NIWA_REAP_KEY, NIWA_DISPATCH_ID and NIWA_WORKSPACE and, when a lineage value
+// is composed, the inherited OTEL_RESOURCE_ATTRIBUTES removed; then the
+// lineage value, the reap key and the dispatch identity are appended. Passthrough names need nothing here: base is niwa's own
 // environment, so a declared name that is set is already in it.
 //
 // The settings env holds the lineage value, each Passthrough name set in base
-// with its value from base, and the reap key. A name set to an empty string is
+// with its value from base, the reap key and the dispatch identity. A name set to an empty string is
 // set; one absent from base is skipped without a word.
 //
 // The gate is the agent's settings flag, not a capability-table row of its
@@ -111,7 +127,7 @@ func launchEnvValues(base []string, shape launchEnvShape) map[string]string {
 
 // shapeLaunchEnv computes both halves of applyLaunchEnv. See there.
 func shapeLaunchEnv(base []string, shape launchEnvShape) ([]string, launchEnv) {
-	drop := map[string]bool{config.ReapKeyEnv: true}
+	drop := map[string]bool{config.ReapKeyEnv: true, config.DispatchIDEnv: true, config.WorkspaceEnv: true}
 	for _, n := range shape.Unset {
 		drop[n] = true
 	}
@@ -143,6 +159,15 @@ func shapeLaunchEnv(base []string, shape launchEnvShape) ([]string, launchEnv) {
 	if validReapKey(shape.ReapKey) {
 		proc = append(proc, config.ReapKeyEnv+"="+shape.ReapKey)
 		env.Set(config.ReapKeyEnv, shape.ReapKey)
+	}
+	for _, id := range []struct{ name, value string }{
+		{config.DispatchIDEnv, shape.DispatchID},
+		{config.WorkspaceEnv, shape.Workspace},
+	} {
+		if validDispatchIdentity(id.value) {
+			proc = append(proc, id.name+"="+id.value)
+			env.Set(id.name, id.value)
+		}
 	}
 	return proc, env
 }
