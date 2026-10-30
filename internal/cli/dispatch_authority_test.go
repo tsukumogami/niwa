@@ -1176,7 +1176,7 @@ func TestDispatchAuthority_SettingsEnvCarriesAuthorityPassthroughAndReapKey(t *t
 	if !ok {
 		t.Fatal("no settings document in the launch")
 	}
-	wantKeys := []string{"OTEL_RESOURCE_ATTRIBUTES", "PASS_MARK", config.ReapKeyEnv}
+	wantKeys := []string{"OTEL_RESOURCE_ATTRIBUTES", "PASS_MARK", config.ReapKeyEnv, config.DispatchIDEnv, config.WorkspaceEnv}
 	if keys := settingsEnvKeys(t, req.Passthrough); !reflect.DeepEqual(keys, wantKeys) {
 		t.Errorf("settings env keys = %v, want %v", keys, wantKeys)
 	}
@@ -1248,15 +1248,15 @@ func TestDispatchAuthority_CodexGetsNoAuthorityAttributes(t *testing.T) {
 // stripAuthorityAttributes removes the two authority lineage entries from
 // every OTEL_RESOURCE_ATTRIBUTES value in a pass-through, and blanks the
 // dispatch id, which differs per dispatch, both in the lineage value and as
-// the NIWA_REAP_KEY settings env value.
+// the NIWA_REAP_KEY and NIWA_DISPATCH_ID settings env values.
 func stripAuthorityAttributes(pass []string) []string {
 	re := regexp.MustCompile(`,?niwa\.authority\.(level|grant)=[^,"]*`)
 	id := regexp.MustCompile(`niwa\.dispatch\.id=[0-9a-f-]{36}`)
-	reapKey := regexp.MustCompile(`"` + config.ReapKeyEnv + `":"[^"]*"`)
+	envIDs := regexp.MustCompile(`"(` + config.ReapKeyEnv + `|` + config.DispatchIDEnv + `)":"[^"]*"`)
 	out := make([]string, len(pass))
 	for i, p := range pass {
 		p = id.ReplaceAllString(re.ReplaceAllString(p, ""), "niwa.dispatch.id=<id>")
-		out[i] = reapKey.ReplaceAllString(p, `"`+config.ReapKeyEnv+`":"<id>"`)
+		out[i] = envIDs.ReplaceAllString(p, `"$1":"<id>"`)
 	}
 	return out
 }

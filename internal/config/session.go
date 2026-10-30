@@ -210,11 +210,20 @@ func (s SessionBeforeRemoveConfig) TimeoutDuration() time.Duration {
 // provisioned an instance for.
 const ReapKeyEnv = "NIWA_REAP_KEY"
 
+// DispatchIDEnv and WorkspaceEnv carry a dispatched worker's identity: the
+// dispatch id and the workspace name. Only `niwa dispatch` sets them; every
+// other launch removes an inherited value.
+const (
+	DispatchIDEnv = "NIWA_DISPATCH_ID"
+	WorkspaceEnv  = "NIWA_WORKSPACE"
+)
+
 // LaunchSettingsEnvNames are the names niwa itself writes into a launched
 // worker's settings env object. A declared name equal to one of them would
-// fight niwa for the slot. The NIWA_ prefix already covers the reap key; it is
-// listed so this stays the one place that says what niwa sets.
-var LaunchSettingsEnvNames = []string{"OTEL_RESOURCE_ATTRIBUTES", ReapKeyEnv}
+// fight niwa for the slot. The NIWA_ prefix already covers the reap key and
+// the identity names; they are listed so this stays the one place that says
+// what niwa sets.
+var LaunchSettingsEnvNames = []string{"OTEL_RESOURCE_ATTRIBUTES", ReapKeyEnv, DispatchIDEnv, WorkspaceEnv}
 
 // credentialSuffixes and credentialPrefixes are the shapes of a variable name
 // that usually holds a credential, matched against the upper-cased name.
