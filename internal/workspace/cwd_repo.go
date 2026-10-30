@@ -21,17 +21,19 @@ type repoCandidate struct {
 // <instanceRoot>/<group>/<repo>.
 //
 // Filtering mirrors EnumerateRepos: the reserved control directories (".niwa",
-// ".claude") and dot-prefixed entries are skipped, and names must pass
-// ValidName. Unreadable group directories are skipped rather than failing the
-// whole walk. Unlike EnumerateRepos this returns paths (not just names) and
-// requires a .git entry, because the resolver needs to map a filesystem
-// location back to a specific repo.
+// ".claude") and dot-prefixed groups are skipped, a dot-prefixed repo
+// directory counts only when the instance state declares it (isRepoDirName),
+// and names must pass ValidName. Unreadable group directories are skipped
+// rather than failing the whole walk. Unlike EnumerateRepos this returns paths
+// (not just names) and requires a .git entry, because the resolver needs to
+// map a filesystem location back to a specific repo.
 func enumerateRepoCandidates(instanceRoot string) ([]repoCandidate, error) {
 	entries, err := os.ReadDir(instanceRoot)
 	if err != nil {
 		return nil, fmt.Errorf("reading instance root: %w", err)
 	}
 
+	declared := declaredRepoNames(instanceRoot)
 	var candidates []repoCandidate
 	for _, entry := range entries {
 		name := entry.Name()
@@ -59,7 +61,7 @@ func enumerateRepoCandidates(instanceRoot string) ([]repoCandidate, error) {
 			if !r.IsDir() {
 				continue
 			}
-			if len(rname) > 0 && rname[0] == '.' {
+			if !isRepoDirName(rname, declared) {
 				continue
 			}
 			if !ValidName(rname) {

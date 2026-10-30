@@ -586,7 +586,8 @@ func ephemeralInstancePaths(workspaceRoot string) map[string]bool {
 // Entries are skipped when:
 //   - The top-level entry is one of the reserved control directories
 //     (".niwa", ".claude") or starts with "."
-//   - The second-level entry starts with "."
+//   - The second-level entry fails isRepoDirName: it starts with "." and is
+//     not a repo the instance state declares
 //   - Either name fails ValidName (see ValidName for details)
 //
 // When the same repo name appears under multiple groups, it is returned
@@ -603,6 +604,7 @@ func EnumerateRepos(instanceRoot string) ([]string, error) {
 		return nil, fmt.Errorf("reading instance root: %w", err)
 	}
 
+	declared := declaredRepoNames(instanceRoot)
 	seen := make(map[string]struct{})
 	for _, entry := range entries {
 		name := entry.Name()
@@ -630,7 +632,7 @@ func EnumerateRepos(instanceRoot string) ([]string, error) {
 			if !r.IsDir() {
 				continue
 			}
-			if len(rname) > 0 && rname[0] == '.' {
+			if !isRepoDirName(rname, declared) {
 				continue
 			}
 			if !ValidName(rname) {
@@ -649,6 +651,36 @@ func EnumerateRepos(instanceRoot string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// declaredRepoNames returns the repo names the instance state lists: the
+// configured set as of the last apply. A missing or unreadable state declares
+// none.
+func declaredRepoNames(instanceRoot string) map[string]bool {
+	state, err := LoadState(instanceRoot)
+	if err != nil {
+		return nil
+	}
+	names := make(map[string]bool, len(state.Repos))
+	for name := range state.Repos {
+		names[name] = true
+	}
+	return names
+}
+
+// isRepoDirName reports whether a directory named name inside a group
+// directory can be a repo for the repo walks. The walks skip dot-named
+// directories so a hidden one never passes for a repo, but a repo the
+// workspace declares under such a name, like an org's .github repo, counts
+// when declared lists it. niwa's state dir, .claude and .git never count.
+func isRepoDirName(name string, declared map[string]bool) bool {
+	if len(name) == 0 || name[0] != '.' {
+		return true
+	}
+	if name == StateDir || name == ".claude" || name == ".git" {
+		return false
+	}
+	return declared[name]
 }
 
 // ValidName reports whether a filesystem-derived name is safe to emit through

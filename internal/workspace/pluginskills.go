@@ -428,14 +428,17 @@ func splitPluginEntry(entry string) (string, string) {
 // classified, which is the better source when there is one. This exists for the
 // worktree path, which prepares one worktree of one repository and never
 // classifies the rest -- and still has to resolve a marketplace that lives in a
-// sibling repository. Dot-directories are skipped at both levels, which keeps
-// niwa's own .niwa out of the walk.
+// sibling repository. Dot-named groups are skipped, which keeps niwa's own
+// .niwa out of the walk, and a dot-named repo directory counts only when the
+// instance state declares it (isRepoDirName), as the apply's classified set
+// would hold it.
 func instanceRepoIndex(instanceRoot string) map[string]string {
 	index := map[string]string{}
 	groups, err := os.ReadDir(instanceRoot)
 	if err != nil {
 		return index
 	}
+	declared := declaredRepoNames(instanceRoot)
 	for _, g := range groups {
 		if !g.IsDir() || strings.HasPrefix(g.Name(), ".") {
 			continue
@@ -446,7 +449,7 @@ func instanceRepoIndex(instanceRoot string) map[string]string {
 			continue
 		}
 		for _, r := range repos {
-			if !r.IsDir() || strings.HasPrefix(r.Name(), ".") {
+			if !r.IsDir() || !isRepoDirName(r.Name(), declared) {
 				continue
 			}
 			if _, taken := index[r.Name()]; taken {
