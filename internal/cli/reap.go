@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -529,6 +531,68 @@ func selectStoredMappingTargets(workspaceRoot, jobsDir string, now time.Time) ([
 	return out, nil
 }
 
+// settleStoredMapping runs the on-reap command for one mapping
+// selectStoredMappingTargets chose and settles the mapping, under the lock of
+// the instance the mapping names.
+//
+// The selection is stale by the time it is acted on: the target loop runs
+// first and can take a long time, and in that window a `niwa resume` can
+// restore the instance, write a new mapping for the session and launch into
+// it. Running the command then would close a live session's state, and a
+// successful run would delete the mapping resume just wrote. So the lock is
+// taken first, and only then is everything that justified the settlement read
+// again: the instance is still absent, the session is still gone and the
+// mapping on disk is still the one selection read. The lock is held through
+// the run and the mapping's deletion or update.
+//
+// A held lock spares the mapping for this sweep with one "niwa: kept" line
+// naming the holder; a mapping that changed is spared with a "niwa: kept"
+// line saying so. An instance that came back or a session that is live again
+// is left alone without a word, as selection leaves it. The next reap asks
+// again in every case.
+func settleStoredMapping(workspaceRoot, jobsDir string, m workspace.SessionMapping, onReap *onReapStep) {
+	if m.InstancePath != "" {
+		release, err := takeInstanceLock(m.InstancePath, "reap")
+		if err != nil {
+			reportInstanceLockKept(reapStderr, m.InstancePath, err)
+			return
+		}
+		defer release()
+
+		if _, err := os.Lstat(filepath.Clean(m.InstancePath)); !os.IsNotExist(err) {
+			return
+		}
+	}
+	if verdict, _ := sessionState(m.Agent, m.SessionID, jobsDir, m.InstancePath, time.Now()); verdict != sessionIsGone {
+		return
+	}
+	current, err := workspace.ReadSessionMapping(workspaceRoot, m.SessionID)
+	if err != nil {
+		// Gone already (another command settled it) or unreadable: either
+		// way there is nothing this sweep can settle safely.
+		return
+	}
+	if !sameSessionMapping(current, m) {
+		name := m.SessionID
+		if m.InstancePath != "" {
+			name = filepath.Base(m.InstancePath)
+		}
+		fmt.Fprintf(reapStderr, "niwa: kept %s: its session record changed while the reap ran; the next reap asks again\n",
+			sanitizeRemovalGateText(name, 80))
+		return
+	}
+	onReap.settle(current)
+}
+
+// sameSessionMapping reports whether a and b record the same mapping, field
+// for field as they would be written. Encoding both compares times by their
+// written form, which a decoded time.Time's location pointer would not.
+func sameSessionMapping(a, b workspace.SessionMapping) bool {
+	ea, errA := json.Marshal(a)
+	eb, errB := json.Marshal(b)
+	return errA == nil && errB == nil && bytes.Equal(ea, eb)
+}
+
 // reapWorkspace selects and reclaims orphaned ephemeral instances under
 // workspaceRoot, returning the count actually destroyed. For each target it
 // force-destroys the instance (via destroyInstanceFunc, the non-interactive
@@ -566,51 +630,68 @@ func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 	reaped := 0
 	for _, t := range targets {
 		// Selection happened before the spared report was printed and before
-		// every earlier destroy in this loop, so a verdict reached up there is
-		// already seconds old by the time it is acted on. For a session
-		// reclaimed on idleness that gap is a window somebody can resume into:
-		// the probe said no writer, a resume took the lock, and the directory
-		// it is now working in is about to be destroyed.
+		// every earlier destroy in this loop, so the verdict that chose the
+		// target is stale by the time it is acted on: the session can have
+		// come back, a resume can have relaunched into the instance, or
+		// another worker can be rooted there now.
 		//
-		// So that verdict alone is re-asked immediately before the destroy, at
-		// the cost of one stat and at most one lock probe. It does not close
-		// the race -- nothing check-then-act can -- but it narrows it from the
-		// length of a whole sweep to the length of one syscall pair. The notice
-		// printed below is the other reason to bother: without this it could
-		// tell a developer that nobody had been working in a directory
-		// somebody had just opened.
-		if t.Notice.Reason != "" {
-			if verdict, _ := sessionState(t.Agent, t.SessionID, jobsDir, t.InstancePath, time.Now()); verdict != sessionIsGone {
-				continue
+		// So the instance's lock is taken first, and only then is everything
+		// that justified the destroy read again: the liveness verdict, for
+		// every agent and not only one whose liveness is read from activity,
+		// and the two guards that spare an instance a worker is rooted in. The
+		// lock is held through the removal gate, the destroy and the mapping's
+		// settlement, so no other niwa command can act on the instance between
+		// this re-read and the instance being gone.
+		//
+		// A held lock spares the instance for this sweep, with one "niwa:
+		// kept" line naming the holder, and the next sweep asks again. A kept
+		// target is left exactly as it was, mapping and on-reap failure count
+		// included.
+		reclaimed := func() bool {
+			release, err := takeInstanceLock(t.InstancePath, "reap")
+			if err != nil {
+				reportInstanceLockKept(reapStderr, t.InstancePath, err)
+				return false
 			}
+			defer release()
+
+			rereadAt := time.Now()
+			if verdict, _ := sessionState(t.Agent, t.SessionID, jobsDir, t.InstancePath, rereadAt); verdict != sessionIsGone {
+				return false
+			}
+			if _, recorded := instanceHasRecordedSession(t.InstancePath, rereadAt); recorded || instanceHasLiveJob(jobsDir, t.InstancePath) {
+				return false
+			}
+			if !gate.ask(t.InstancePath, sessionIDs[t.InstancePath]) {
+				return false
+			}
+			if err := destroyInstanceFunc(t.InstancePath); err != nil {
+				fmt.Fprintf(os.Stderr, "niwa: warning: reaping instance %s: %v\n", t.InstancePath, err)
+				// Leave the mapping in place so a later reap retries this
+				// target rather than orphaning the mapping for a
+				// still-present instance.
+				return false
+			}
+			// The session is gone and so is its instance. The mapping goes
+			// once the on-reap command has run for it; a failed run keeps it
+			// for the next reap. Both happen before the lock is released, so
+			// the next command to take it finds neither.
+			onReap.settle(t.Mapping)
+			// Printed after the destroy rather than before it, so the line is
+			// a report of something that happened rather than of something
+			// intended: a destroy that fails above says nothing here.
+			if t.Notice.Reason != "" {
+				fmt.Fprintf(os.Stderr, "niwa: reclaimed %s: %s\n", t.Notice.Name, t.Notice.Reason)
+			}
+			return true
+		}()
+		if reclaimed {
+			reaped++
 		}
-		// A kept target is left exactly as it was, mapping and on-reap
-		// failure count included, so the next reap asks again.
-		if !gate.ask(t.InstancePath, sessionIDs[t.InstancePath]) {
-			continue
-		}
-		if err := destroyInstanceFunc(t.InstancePath); err != nil {
-			fmt.Fprintf(os.Stderr, "niwa: warning: reaping instance %s: %v\n", t.InstancePath, err)
-			// Leave the mapping in place so a later reap retries this target
-			// rather than orphaning the mapping for a still-present instance.
-			continue
-		}
-		// The session is gone and so is its instance. The mapping goes once
-		// the on-reap command has run for it; a failed run keeps it for the
-		// next reap.
-		onReap.settle(t.Mapping)
-		// Printed after the destroy rather than before it, so the line is a
-		// report of something that happened rather than of something intended:
-		// a destroy that fails above continues without saying the instance is
-		// gone.
-		if t.Notice.Reason != "" {
-			fmt.Fprintf(os.Stderr, "niwa: reclaimed %s: %s\n", t.Notice.Name, t.Notice.Reason)
-		}
-		reaped++
 	}
 
 	for _, m := range stored {
-		onReap.settle(m)
+		settleStoredMapping(workspaceRoot, jobsDir, m, onReap)
 	}
 
 	// The launch records go only once their transcripts have, which is
@@ -854,26 +935,43 @@ func reapBackstop(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 		// a wider window to close: selection ran before the spared report and
 		// before every earlier destroy in this loop, and this is the half of
 		// the reaper with no mapping to consult, so these two guards are the
-		// whole of what stands between a live worker and its directory.
+		// whole of what stands between a live worker and its directory. They
+		// are read once the instance's lock is taken, and it is held through
+		// the removal gate and the destroy, so no niwa command can launch into
+		// the instance between the re-read and the removal. A held lock spares
+		// the instance for this pass.
 		//
-		// It costs one scan of the job tree and one of each agent's records,
-		// which is what selection already paid for this instance moments ago.
-		if instanceHasLiveJob(jobsDir, t.InstancePath) {
-			continue
+		// The re-read costs one scan of the job tree and one of each agent's
+		// records, which is what selection already paid for this instance
+		// moments ago.
+		reclaimed := func() bool {
+			release, err := takeInstanceLock(t.InstancePath, "reap")
+			if err != nil {
+				reportInstanceLockKept(reapStderr, t.InstancePath, err)
+				return false
+			}
+			defer release()
+
+			if instanceHasLiveJob(jobsDir, t.InstancePath) {
+				return false
+			}
+			if _, recorded := instanceHasRecordedSession(t.InstancePath, time.Now()); recorded {
+				return false
+			}
+			// The workspace's pre-removal command gets the last word, after the
+			// re-asks; a kept instance is asked again by the next backstop pass.
+			if !gate.ask(t.InstancePath, nil) {
+				return false
+			}
+			if err := destroyInstanceFunc(t.InstancePath); err != nil {
+				fmt.Fprintf(os.Stderr, "niwa: warning: reaping orphaned dispatch instance %s: %v\n", t.InstancePath, err)
+				return false
+			}
+			return true
+		}()
+		if reclaimed {
+			reaped++
 		}
-		if _, recorded := instanceHasRecordedSession(t.InstancePath, time.Now()); recorded {
-			continue
-		}
-		// The workspace's pre-removal command gets the last word, after the
-		// re-asks; a kept instance is asked again by the next backstop pass.
-		if !gate.ask(t.InstancePath, nil) {
-			continue
-		}
-		if err := destroyInstanceFunc(t.InstancePath); err != nil {
-			fmt.Fprintf(os.Stderr, "niwa: warning: reaping orphaned dispatch instance %s: %v\n", t.InstancePath, err)
-			continue
-		}
-		reaped++
 	}
 
 	return reaped, nil
