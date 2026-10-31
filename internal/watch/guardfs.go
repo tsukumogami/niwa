@@ -220,8 +220,8 @@ const (
 // relative to the instance root. A relative target is resolved against root; ".."
 // components are collapsed by filepath.Clean; and symlinks on the deepest existing
 // ancestor of BOTH target and root are resolved, so an in-instance symlink pointing
-// outside cannot be used to escape (and a symlinked root such as macOS /var ->
-// /private/var still compares equal to itself).
+// outside cannot be used to escape (and a symlinked root, such as macOS's /var,
+// which links into the system's private tree, still compares equal to itself).
 //
 // Inside the instance, three cases are refused whatever the posture:
 //
