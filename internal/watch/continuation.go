@@ -48,9 +48,10 @@ type JobActivity struct {
 	// Tempo is the session tempo field: "idle", "active", "blocked", ...
 	Tempo string
 	// InFlightTasks is the count of in-flight sub-tasks (inFlight.tasks). It is
-	// advisory only: a nonzero value forces Busy, but a zero value is NOT on its
-	// own sufficient for idle (stale teammate counts can persist after a turn
-	// ends), so ActivityDetachedIdle also requires State/Tempo agreement.
+	// advisory only: a nonzero value forces Busy unless CronOnly says every task
+	// is an armed self-wake, but a zero value is NOT on its own sufficient for
+	// idle (stale teammate counts can persist after a turn ends), so
+	// ActivityDetachedIdle also requires State/Tempo agreement.
 	InFlightTasks int
 	// NonCronInFlight counts the in-flight tasks that aren't a session-scoped
 	// self-wake (kind "session_cron"). It is computed only when the job state's

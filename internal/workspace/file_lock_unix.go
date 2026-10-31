@@ -216,12 +216,13 @@ func readLockHolder(f *os.File) string {
 	return line
 }
 
-// sanitizeLockHolder drops invalid UTF-8 and every control character (C0, DEL
-// and C1), and trims surrounding space.
+// sanitizeLockHolder drops invalid UTF-8, every control character (C0, DEL
+// and C1) and every format character (bidi overrides, zero-width marks), and
+// trims surrounding space.
 func sanitizeLockHolder(s string) string {
 	s = strings.ToValidUTF8(s, "")
 	s = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return -1
 		}
 		return r

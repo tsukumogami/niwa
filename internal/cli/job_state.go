@@ -60,8 +60,9 @@ type jobState struct {
 	State string `json:"state"`
 	Tempo string `json:"tempo"`
 	// InFlight.Tasks counts in-flight sub-tasks. Advisory only: a nonzero value
-	// forces busy, but a zero value is not sufficient for idle on its own (stale
-	// teammate counts persist after a turn ends).
+	// forces busy unless every task is an armed session_cron self-wake (see
+	// jobActivityFromState), but a zero value is not sufficient for idle on its
+	// own (stale teammate counts persist after a turn ends).
 	//
 	// InFlight.Kinds lists the kinds of the in-flight tasks ("session_cron",
 	// "local_bash", ...). It is lenient: any shape other than an array of
@@ -415,6 +416,9 @@ func readJobStateEntryChecked(dir, sessionID string) (jobState, []byte, error) {
 // (state.json's respawnFlags), which a flagless `claude --bg --resume` wake
 // re-applies. It reads through readJobStateChecked and accepts only a flat
 // array of strings; an absent or null field, or any other shape, is an error.
+// The key and shape are as Claude Code 2.1.314 writes them for a dispatched
+// worker (e.g. --permission-mode, --name, --settings, --model with their
+// values); a change in either fails here rather than being guessed at.
 //
 // The saved options include the --settings document, which carries
 // environment values, so no error from here includes an option's value.
