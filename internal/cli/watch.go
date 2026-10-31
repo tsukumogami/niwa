@@ -437,12 +437,35 @@ func recordJobActivity(jobsDir string, rec watch.StagedRecord) watch.JobActivity
 	if js.SessionID != "" && js.SessionID != rec.SessionID {
 		return watch.JobActivity{Readable: false}
 	}
+	return jobActivityFromState(js)
+}
+
+// jobActivityFromState projects a decoded job state onto the classifier's
+// input. A cron-only in-flight set is recognized only when inFlight.kinds
+// accounts for every in-flight task (one kind per task); then NonCronInFlight
+// counts the tasks whose kind isn't session_cron and CronOnly is true when
+// there are none. In every other case each task counts as non-cron, so a
+// shortfall in kinds fails closed to busy.
+func jobActivityFromState(js jobState) watch.JobActivity {
+	tasks := js.InFlight.Tasks
+	nonCron, cronOnly := tasks, false
+	if tasks > 0 && len(js.InFlight.Kinds) == tasks {
+		nonCron = 0
+		for _, kind := range js.InFlight.Kinds {
+			if kind != "session_cron" {
+				nonCron++
+			}
+		}
+		cronOnly = nonCron == 0
+	}
 	return watch.JobActivity{
-		Readable:      true,
-		State:         js.State,
-		Tempo:         js.Tempo,
-		InFlightTasks: js.InFlight.Tasks,
-		AwaitingInput: len(js.Block) > 0 || js.Needs != "",
+		Readable:        true,
+		State:           js.State,
+		Tempo:           js.Tempo,
+		InFlightTasks:   tasks,
+		NonCronInFlight: nonCron,
+		CronOnly:        cronOnly,
+		AwaitingInput:   len(js.Block) > 0 || js.Needs != "",
 	}
 }
 
