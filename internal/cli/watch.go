@@ -741,10 +741,11 @@ func pruneStagedRecords(ctx context.Context, out io.Writer, root string, client 
 // A record that names its review's instance takes that instance's lock before
 // reading the session's liveness, and holds it through the freshness check,
 // the instance's destroy and the record's deletion. Another niwa command that
-// holds the lock -- one continuing the review in place, say, which stops the
-// session and wakes it again -- is never raced by the discard: while the lock
-// is held, the record is kept, with one line naming the holder, and the next
-// pass asks again.
+// holds the lock -- a resume, a destroy or a reap acting on the instance -- is
+// never raced by the discard: while the lock is held, the record is kept, with
+// one line naming the holder, and the next pass asks again. A review
+// continuation (continueReview) takes no lock, so this does not keep the
+// discard off an instance a continuation is stopping and waking.
 func pruneStagedRecord(ctx context.Context, out io.Writer, root, h string, rec watch.StagedRecord, client prFreshnessClient, requested map[string]bool, jobsDir string, onReap *onReapStep, gate *removalGate) {
 	if rec.InstancePath != "" {
 		release, err := takeInstanceLock(rec.InstancePath, "watch")
