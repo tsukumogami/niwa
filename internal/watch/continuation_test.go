@@ -66,6 +66,74 @@ func TestClassifySessionActivity(t *testing.T) {
 			in:   JobActivity{Readable: true},
 			want: ActivityDeadUnknown,
 		},
+		{
+			name: "armed idle worker is detached-idle",
+			in:   JobActivity{Readable: true, State: "working", Tempo: "idle", InFlightTasks: 1, CronOnly: true},
+			want: ActivityDetachedIdle,
+		},
+		{
+			name: "done+idle with only an armed self-wake is detached-idle",
+			in:   JobActivity{Readable: true, State: "done", Tempo: "idle", InFlightTasks: 1, CronOnly: true},
+			want: ActivityDetachedIdle,
+		},
+		{
+			// The tempo reading for an armed worker mid-turn is "active" on
+			// Claude Code 2.1.314. It was read from an existing job file on
+			// the development host, of a real dispatched worker mid-turn with
+			// one session_cron task in flight, not from a worker armed for the
+			// purpose on a disposable host. Because it reads "active", the job
+			// state alone separates that worker from an armed idle one. A
+			// confirmation on a disposable host, with a worker armed for the
+			// purpose, is still owed.
+			name: "armed worker mid-turn is busy",
+			in:   JobActivity{Readable: true, State: "working", Tempo: "active", InFlightTasks: 1, CronOnly: true},
+			want: ActivityBusy,
+		},
+		{
+			name: "cron plus a non-cron task is busy",
+			in:   JobActivity{Readable: true, State: "working", Tempo: "idle", InFlightTasks: 2, NonCronInFlight: 1},
+			want: ActivityBusy,
+		},
+		{
+			name: "kinds short of the task count count every task",
+			in:   JobActivity{Readable: true, State: "working", Tempo: "idle", InFlightTasks: 2, NonCronInFlight: 2},
+			want: ActivityBusy,
+		},
+		{
+			name: "a non-cron task is busy even when CronOnly is set",
+			in:   JobActivity{Readable: true, State: "working", Tempo: "idle", InFlightTasks: 1, CronOnly: true, NonCronInFlight: 1},
+			want: ActivityBusy,
+		},
+		{
+			name: "cron-only awaiting a human is attached",
+			in:   JobActivity{Readable: true, State: "working", Tempo: "idle", InFlightTasks: 1, CronOnly: true, AwaitingInput: true},
+			want: ActivityAttached,
+		},
+		{
+			name: "cron-only with blocked tempo is attached",
+			in:   JobActivity{Readable: true, State: "working", Tempo: "blocked", InFlightTasks: 1, CronOnly: true},
+			want: ActivityAttached,
+		},
+		{
+			name: "cron-only working with empty tempo fails closed",
+			in:   JobActivity{Readable: true, State: "working", Tempo: "", InFlightTasks: 1, CronOnly: true},
+			want: ActivityDeadUnknown,
+		},
+		{
+			name: "cron-only working with paused tempo fails closed",
+			in:   JobActivity{Readable: true, State: "working", Tempo: "paused", InFlightTasks: 1, CronOnly: true},
+			want: ActivityDeadUnknown,
+		},
+		{
+			name: "cron-only queued+idle fails closed",
+			in:   JobActivity{Readable: true, State: "queued", Tempo: "idle", InFlightTasks: 1, CronOnly: true},
+			want: ActivityDeadUnknown,
+		},
+		{
+			name: "working+idle with nothing in flight and no CronOnly stays busy",
+			in:   JobActivity{Readable: true, State: "working", Tempo: "idle", InFlightTasks: 0, CronOnly: false},
+			want: ActivityBusy,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,6 +164,30 @@ func TestClassifyOnlyDetachedIdleIsContinuable(t *testing.T) {
 					if !wantContinuable && got == ActivityDetachedIdle {
 						t.Fatalf("unexpectedly continuable for %+v", in)
 					}
+				}
+			}
+		}
+	}
+}
+
+// TestClassifyCronOnlyContinuable sweeps the same states, tempos and awaiting
+// values as TestClassifyOnlyDetachedIdleIsContinuable for an armed worker (one
+// in-flight task, cron-only). It is continuable exactly when the tempo is idle,
+// the state is done or working, and no human is awaited.
+func TestClassifyCronOnlyContinuable(t *testing.T) {
+	states := []string{"done", "working", "blocked", "queued", ""}
+	tempos := []string{"idle", "active", "blocked", "paused", ""}
+	for _, st := range states {
+		for _, tp := range tempos {
+			for _, awaiting := range []bool{false, true} {
+				in := JobActivity{Readable: true, State: st, Tempo: tp, InFlightTasks: 1, CronOnly: true, NonCronInFlight: 0, AwaitingInput: awaiting}
+				got := ClassifySessionActivity(in)
+				wantContinuable := tp == "idle" && (st == "done" || st == "working") && !awaiting
+				if wantContinuable && got != ActivityDetachedIdle {
+					t.Fatalf("expected DetachedIdle for %+v, got %v", in, got)
+				}
+				if !wantContinuable && got == ActivityDetachedIdle {
+					t.Fatalf("unexpectedly continuable for %+v", in)
 				}
 			}
 		}

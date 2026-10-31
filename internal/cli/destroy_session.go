@@ -24,15 +24,49 @@ import (
 // Code reports "done" for a session that finished its task whether or not its
 // process has exited, and a finished session can sit at done/idle with a live
 // process.
+//
+// Cwd is the directory the session runs in. Absent decodes to "", which roots
+// the session nowhere.
 type claudeSessionRow struct {
 	ID        string `json:"id"`
 	SessionID string `json:"sessionId"`
+	Cwd       string `json:"cwd"`
 	PID       int    `json:"pid"`
 	Status    string `json:"status"`
 }
 
 func (r claudeSessionRow) running() bool {
 	return r.PID != 0 || r.Status != ""
+}
+
+// sessionsRootedAtInstance returns the rows rooted at instancePath other than
+// the mapped session. A row is rooted at the instance when its cwd, made
+// canonical (cleaned, symlinks resolved), equals the canonical instance path
+// or lies under it at a path-separator boundary, so a session working in a
+// repo or worktree inside the instance counts and "<parent>/inst-2" is not
+// under "<parent>/inst". A row with an empty or relative cwd is rooted nowhere.
+//
+// The mapped session is excluded only by its full session id, never by path
+// or short id, so a different session that happens to share a short id or a
+// directory is still reported. An empty mappedSessionID excludes nothing.
+func sessionsRootedAtInstance(rows []claudeSessionRow, instancePath, mappedSessionID string) []claudeSessionRow {
+	if instancePath == "" {
+		return nil
+	}
+	instance := workspace.CanonicalPath(instancePath)
+	var rooted []claudeSessionRow
+	for _, r := range rows {
+		if mappedSessionID != "" && r.SessionID == mappedSessionID {
+			continue
+		}
+		if r.Cwd == "" || !filepath.IsAbs(r.Cwd) {
+			continue
+		}
+		if pathWithin(workspace.CanonicalPath(r.Cwd), instance) {
+			rooted = append(rooted, r)
+		}
+	}
+	return rooted
 }
 
 // Seams over the two claude invocations, so tests never reach a real Claude

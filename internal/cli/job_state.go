@@ -2,9 +2,14 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -55,10 +60,17 @@ type jobState struct {
 	State string `json:"state"`
 	Tempo string `json:"tempo"`
 	// InFlight.Tasks counts in-flight sub-tasks. Advisory only: a nonzero value
-	// forces busy, but a zero value is not sufficient for idle on its own (stale
-	// teammate counts persist after a turn ends).
+	// forces busy unless every task is an armed session_cron self-wake (see
+	// jobActivityFromState), but a zero value is not sufficient for idle on its
+	// own (stale teammate counts persist after a turn ends).
+	//
+	// InFlight.Kinds lists the kinds of the in-flight tasks ("session_cron",
+	// "local_bash", ...). It is lenient: any shape other than an array of
+	// strings decodes as empty instead of failing the whole decode, so a change
+	// in this field can never break the reaper's liveness reads.
 	InFlight struct {
-		Tasks int `json:"tasks"`
+		Tasks int          `json:"tasks"`
+		Kinds jobTaskKinds `json:"kinds"`
 	} `json:"inFlight"`
 	// Block is present (non-nil) when the session is blocked on a pending
 	// question; Needs is non-empty when it needs a human answer. Either marks
@@ -253,4 +265,193 @@ func decodeJobState(path string) (jobState, bool) {
 		return jobState{}, false
 	}
 	return js, true
+}
+
+// jobTaskKinds is inFlight.kinds. Its decoder never fails: a value that is not
+// an array of strings leaves it empty, and the classifier then counts every
+// in-flight task as busy.
+type jobTaskKinds []string
+
+func (k *jobTaskKinds) UnmarshalJSON(data []byte) error {
+	var kinds []string
+	if err := json.Unmarshal(data, &kinds); err != nil {
+		*k = nil
+		return nil
+	}
+	*k = kinds
+	return nil
+}
+
+// jobStateOwnerUID is the uid a job-state file must belong to for the checked
+// read. A package variable so tests can check the ownership refusal.
+var jobStateOwnerUID = os.Getuid
+
+// maxJobStateBytes bounds the checked read. Real state files are a few
+// kilobytes.
+const maxJobStateBytes = 1 << 20
+
+// readJobStateChecked is the job-state read for commands about to act on a
+// session (retask, and watch's continuation). The lenient readers above stay
+// as they are, because the reaper's liveness rule depends on them; this one
+// treats state.json as data a compromised worker could have shaped.
+//
+// It locates the entry the way readJobState does (the directory named by the
+// full id, then a directory whose name is a prefix of the id). The job
+// directory must be a real directory, and state.json is opened without
+// following a symlink and without blocking on a FIFO, then must be a regular
+// file owned by the current user. The decoded sessionId must be non-empty and
+// equal sessionID.
+//
+// A missing entry returns an error for which errors.Is(err, fs.ErrNotExist) is
+// true; every other failure does not, so a caller can tell "the job entry is
+// gone" from "the job state can't be trusted".
+func readJobStateChecked(jobsDir, sessionID string) (jobState, error) {
+	js, _, err := readJobStateFileChecked(jobsDir, sessionID)
+	return js, err
+}
+
+// readJobStateFileChecked is readJobStateChecked returning the raw file as
+// well, for readers of fields jobState doesn't carry.
+func readJobStateFileChecked(jobsDir, sessionID string) (jobState, []byte, error) {
+	if jobsDir == "" {
+		return jobState{}, nil, errors.New("no Claude Code jobs directory")
+	}
+	if sessionID == "" || strings.ContainsAny(sessionID, `/\`) || sessionID == "." || sessionID == ".." {
+		return jobState{}, nil, errors.New("not a usable session id")
+	}
+
+	candidates := []string{sessionID}
+	if entries, err := os.ReadDir(jobsDir); err == nil {
+		for _, e := range entries {
+			name := e.Name()
+			if name == "" || name == sessionID || len(name) > len(sessionID) || sessionID[:len(name)] != name {
+				continue
+			}
+			candidates = append(candidates, name)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return jobState{}, nil, fmt.Errorf("reading the Claude Code jobs directory: %w", err)
+	}
+
+	// The first entry whose state names this session wins. An entry that
+	// exists but can't be trusted is reported only when no other candidate
+	// matches, so a stray prefix directory can't hide the real entry.
+	var firstErr error
+	for _, name := range candidates {
+		js, data, err := readJobStateEntryChecked(filepath.Join(jobsDir, name), sessionID)
+		if err == nil {
+			return js, data, nil
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		return jobState{}, nil, firstErr
+	}
+	return jobState{}, nil, fmt.Errorf("no Claude Code job entry for session %s: %w", sessionID, fs.ErrNotExist)
+}
+
+// readJobStateEntryChecked reads one job directory's state.json under the
+// checked rules.
+func readJobStateEntryChecked(dir, sessionID string) (jobState, []byte, error) {
+	dirInfo, err := os.Lstat(dir)
+	if err != nil {
+		return jobState{}, nil, err
+	}
+	if !dirInfo.IsDir() {
+		if dirInfo.Mode()&fs.ModeSymlink != 0 {
+			return jobState{}, nil, fmt.Errorf("job directory %s is a symlink", dir)
+		}
+		return jobState{}, nil, fmt.Errorf("job directory %s is not a directory", dir)
+	}
+
+	path := filepath.Join(dir, "state.json")
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return jobState{}, nil, err
+		}
+		return jobState{}, nil, fmt.Errorf("opening %s (only a regular file is read, never through a symlink): %w", path, err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return jobState{}, nil, fmt.Errorf("inspecting %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return jobState{}, nil, fmt.Errorf("%s is not a regular file (mode %s)", path, info.Mode().Type())
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != jobStateOwnerUID() {
+		return jobState{}, nil, fmt.Errorf("%s is not owned by the current user", path)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(f, maxJobStateBytes+1))
+	if err != nil {
+		return jobState{}, nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	if len(data) > maxJobStateBytes {
+		return jobState{}, nil, fmt.Errorf("%s is larger than %d bytes", path, maxJobStateBytes)
+	}
+	var js jobState
+	if err := json.Unmarshal(data, &js); err != nil {
+		// The decoder's message can quote the file's content, so it is not
+		// passed on.
+		return jobState{}, nil, fmt.Errorf("%s is not a valid job state", path)
+	}
+	if js.SessionID == "" {
+		return jobState{}, nil, fmt.Errorf("%s records no session id", path)
+	}
+	if js.SessionID != sessionID {
+		return jobState{}, nil, fmt.Errorf("%s belongs to another session", path)
+	}
+	return js, data, nil
+}
+
+// readSavedOptions returns the option argv Claude Code saved for the session
+// (state.json's respawnFlags), which a flagless `claude --bg --resume` wake
+// re-applies. It reads through readJobStateChecked and accepts only a flat
+// array of strings; an absent or null field, or any other shape, is an error.
+// The key and shape are as Claude Code 2.1.314 writes them for a dispatched
+// worker (e.g. --permission-mode, --name, --settings, --model with their
+// values); a change in either fails here rather than being guessed at.
+//
+// The saved options include the --settings document, which carries
+// environment values, so no error from here includes an option's value.
+func readSavedOptions(jobsDir, sessionID string) ([]string, error) {
+	_, data, err := readJobStateFileChecked(jobsDir, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		RespawnFlags json.RawMessage `json:"respawnFlags"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, errors.New("the job state's saved options could not be decoded")
+	}
+	raw := strings.TrimSpace(string(doc.RespawnFlags))
+	if raw == "" || raw == "null" {
+		return nil, errors.New("the job state records no saved options")
+	}
+	var elems []json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &elems); err != nil {
+		return nil, errors.New("the job state's saved options are not an array")
+	}
+	opts := make([]string, 0, len(elems))
+	for i, e := range elems {
+		trimmed := strings.TrimSpace(string(e))
+		if !strings.HasPrefix(trimmed, `"`) {
+			return nil, fmt.Errorf("saved option %d is not a string", i)
+		}
+		var s string
+		if err := json.Unmarshal([]byte(trimmed), &s); err != nil {
+			return nil, fmt.Errorf("saved option %d is not a string", i)
+		}
+		opts = append(opts, s)
+	}
+	return opts, nil
 }
