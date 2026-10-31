@@ -995,3 +995,242 @@ func TestInstanceLock_NoLockFileInsideInstanceOrWorkspace(t *testing.T) {
 		assertNoNewLockPath(t, before, niwaDirPaths(t, root))
 	})
 }
+
+// ---- races the per-instance lock alone can't see ----
+
+// TestDestroyWorkspace_InstanceRestoredAfterEnumeration_Kept: destroy
+// --workspace locks the instances it enumerated. An instance a resume
+// restores after that (its lock held by the resume, never by destroy) must
+// not be removed with the workspace, whether its state file is written yet
+// or not, and nothing else is removed either. A free directory that is not
+// an instance still goes with the root, as before.
+func TestDestroyWorkspace_InstanceRestoredAfterEnumeration_Kept(t *testing.T) {
+	const resumeHolder = "niwa resume (pid 4343)"
+	for _, tc := range []struct {
+		name      string
+		withState bool
+	}{
+		{"restored", true},
+		{"restoring", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lockTestHome(t)
+			root := destroyTestSetup(t, []string{"alpha", "beta", "gamma"})
+			delta := filepath.Join(root, "delta")
+			fake := fakeClaudeSessions{}
+			installFakeClaudeSessions(t, &fake)
+			restored := false
+			installFakeInstanceLock(t, &fakeInstanceLock{
+				errFor: lockErrorFor(heldBy(resumeHolder), delta),
+				// The resume restores delta once destroy holds its last
+				// lock, so delta is on disk for the scan and the prompt
+				// and for everything after them.
+				onAcquire: func(p string) {
+					if restored || filepath.Base(p) != "gamma" {
+						return
+					}
+					restored = true
+					if tc.withState {
+						makeReapInstance(t, root, "delta")
+					} else if err := os.MkdirAll(filepath.Join(delta, "repo"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				},
+			})
+			chdirTo(t, root)
+			quietDestroyCmd()
+			setDestroyFlags(t, false, true, "testws")
+
+			err := runDestroy(destroyCmd, nil)
+			if !restored {
+				t.Fatal("the resume step never ran")
+			}
+			if err == nil {
+				t.Fatal("destroy --workspace succeeded with an instance it never checked in the workspace")
+			}
+			if !strings.Contains(err.Error(), "delta") {
+				t.Errorf("error %q does not name delta", err)
+			}
+			if !exists(delta) {
+				t.Error("the restored instance was removed")
+			}
+			if !exists(root) {
+				t.Error("the workspace root was removed")
+			}
+			assertInstancesExist(t, root, "alpha", "beta", "gamma")
+			if len(fake.removed) != 0 {
+				t.Errorf("sessions removed: %v", fake.removed)
+			}
+		})
+	}
+
+	t.Run("free_stray_directory", func(t *testing.T) {
+		lockTestHome(t)
+		root := destroyTestSetup(t, []string{"alpha"})
+		if err := os.MkdirAll(filepath.Join(root, "stray"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		installFakeClaudeSessions(t, &fakeClaudeSessions{})
+		chdirTo(t, root)
+		t.Cleanup(func() { _ = os.Chdir(filepath.Dir(root)) })
+		quietDestroyCmd()
+		setDestroyFlags(t, false, true, "testws")
+
+		if err := runDestroy(destroyCmd, nil); err != nil {
+			t.Fatalf("destroy --workspace: %v", err)
+		}
+		if exists(root) {
+			t.Error("the workspace root survived")
+		}
+	})
+}
+
+// storedMappingFixture is a mapping whose instance is gone and whose session
+// is gone, so the reaper's stored-mapping walk selects it, plus one regular
+// target whose destroy runs first and gives a test a step between selection
+// and settlement.
+type storedMappingFixture struct {
+	root, jobsDir, gone, other, logPath string
+}
+
+func newStoredMappingFixture(t *testing.T) storedMappingFixture {
+	t.Helper()
+	lockTestHome(t)
+	root := setupHookWorkspace(t, true)
+	command, logPath := onReapLogCommand(t)
+	appendOnReapConfig(t, root, fmt.Sprintf("command = %q", command))
+	gone := filepath.Join(root, "test-ws-gone")
+	mapEphemeral(t, root, reapDeadSessionID, gone, true)
+	other := makeReapInstance(t, root, "test-ws-other")
+	mapEphemeral(t, root, onReapSID2, other, true)
+	return storedMappingFixture{root: root, jobsDir: t.TempDir(), gone: gone, other: other, logPath: logPath}
+}
+
+// ranFor reports whether the on-reap log has a run for sid.
+func ranFor(t *testing.T, logPath, sid string) bool {
+	t.Helper()
+	for _, r := range onReapRuns(t, logPath) {
+		if strings.HasPrefix(r, sid+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestReap_StoredMapping_ResumeBetweenSelectionAndSettle_Spared: the reaper
+// selects a stored mapping (instance gone, session gone) before its target
+// loop. A resume that restores the instance and writes a new mapping for the
+// session while that loop runs must not have the on-reap command run for the
+// now-live session, nor its new mapping deleted.
+func TestReap_StoredMapping_ResumeBetweenSelectionAndSettle_Spared(t *testing.T) {
+	f := newStoredMappingFixture(t)
+	captureReapStderr(t)
+	var resumed workspace.SessionMapping
+	prev := destroyInstanceFunc
+	destroyInstanceFunc = func(path string) error {
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
+		if resumed.SessionID != "" {
+			return nil
+		}
+		// The resume: restore the instance and write the session's new
+		// mapping, as runResume does under the instance's lock.
+		makeReapInstance(t, f.root, filepath.Base(f.gone))
+		resumed = workspace.SessionMapping{
+			SessionID:    reapDeadSessionID,
+			InstanceName: filepath.Base(f.gone),
+			InstancePath: f.gone,
+			Ephemeral:    true,
+			Origin:       workspace.MappingOriginDispatch,
+			Created:      time.Now().UTC().Add(time.Second).Truncate(time.Second),
+		}
+		return workspace.WriteSessionMapping(f.root, resumed)
+	}
+	t.Cleanup(func() { destroyInstanceFunc = prev })
+
+	if _, err := reapWorkspace(f.root, f.jobsDir, time.Now()); err != nil {
+		t.Fatalf("reapWorkspace: %v", err)
+	}
+	if resumed.SessionID == "" {
+		t.Fatal("the resume step never ran")
+	}
+	if ranFor(t, f.logPath, reapDeadSessionID) {
+		t.Error("the on-reap command ran for the resumed session")
+	}
+	got, err := workspace.ReadSessionMapping(f.root, reapDeadSessionID)
+	if err != nil {
+		t.Fatalf("the resumed session's mapping is gone: %v", err)
+	}
+	if !sameSessionMapping(got, resumed) {
+		t.Errorf("the resumed session's mapping changed: got %+v, want %+v", got, resumed)
+	}
+	if !exists(f.gone) {
+		t.Error("the restored instance is gone")
+	}
+}
+
+// TestReap_StoredMapping_LockHeld_Spared: a stored mapping whose instance's
+// lock another command holds (a resume part-way through restoring it) is kept
+// for this sweep, with one "niwa: kept" line naming the holder, and the
+// on-reap command doesn't run for it. A mapping that changed under the lock is
+// kept the same way.
+func TestReap_StoredMapping_LockHeld_Spared(t *testing.T) {
+	t.Run("held", func(t *testing.T) {
+		f := newStoredMappingFixture(t)
+		stubDestroyRemoving(t)
+		stderr := captureReapStderr(t)
+		before := readMapping(t, f.root, reapDeadSessionID)
+		installFakeInstanceLock(t, &fakeInstanceLock{errFor: lockErrorFor(heldBy(lockTestHolder), f.gone)})
+
+		if _, err := reapWorkspace(f.root, f.jobsDir, time.Now()); err != nil {
+			t.Fatalf("reapWorkspace: %v", err)
+		}
+		if ranFor(t, f.logPath, reapDeadSessionID) {
+			t.Error("the on-reap command ran while the instance's lock was held")
+		}
+		if after := readMapping(t, f.root, reapDeadSessionID); !sameSessionMapping(after, before) {
+			t.Errorf("the mapping changed: %+v -> %+v", before, after)
+		}
+		if !strings.Contains(stderr.String(), "niwa: kept test-ws-gone: ") || !strings.Contains(stderr.String(), lockTestHolder) {
+			t.Errorf("no kept line naming the holder:\n%s", stderr.String())
+		}
+		// The free target in the same sweep was still reclaimed.
+		if !ranFor(t, f.logPath, onReapSID2) {
+			t.Error("the other target's on-reap command did not run")
+		}
+	})
+
+	t.Run("mapping_changed_under_lock", func(t *testing.T) {
+		f := newStoredMappingFixture(t)
+		stubDestroyRemoving(t)
+		stderr := captureReapStderr(t)
+		var rewritten workspace.SessionMapping
+		installFakeInstanceLock(t, &fakeInstanceLock{onAcquire: func(p string) {
+			if filepath.Clean(p) != filepath.Clean(f.gone) || rewritten.SessionID != "" {
+				return
+			}
+			rewritten = readMapping(t, f.root, reapDeadSessionID)
+			rewritten.DispatchID = "d2d2d2d2-0000-4000-8000-000000000002"
+			if err := workspace.WriteSessionMapping(f.root, rewritten); err != nil {
+				t.Fatal(err)
+			}
+		}})
+
+		if _, err := reapWorkspace(f.root, f.jobsDir, time.Now()); err != nil {
+			t.Fatalf("reapWorkspace: %v", err)
+		}
+		if rewritten.SessionID == "" {
+			t.Fatal("the stored mapping's lock was never taken")
+		}
+		if ranFor(t, f.logPath, reapDeadSessionID) {
+			t.Error("the on-reap command ran for a mapping that changed under the lock")
+		}
+		if after := readMapping(t, f.root, reapDeadSessionID); !sameSessionMapping(after, rewritten) {
+			t.Errorf("the rewritten mapping changed: got %+v, want %+v", after, rewritten)
+		}
+		if !strings.Contains(stderr.String(), "niwa: kept test-ws-gone: its session record changed") {
+			t.Errorf("no kept line for the changed mapping:\n%s", stderr.String())
+		}
+	})
+}

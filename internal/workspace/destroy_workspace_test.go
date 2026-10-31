@@ -107,3 +107,53 @@ func TestDestroyWorkspace_NonexistentRoot(t *testing.T) {
 		t.Errorf("error message should mention workspace root; got: %v", err)
 	}
 }
+
+// TestDestroyWorkspace_ListedOnly: given the caller's list, an instance on
+// disk outside it refuses the whole operation before anything is removed, and
+// a refusing BeforeRootRemoval keeps the root once the listed instances are
+// gone.
+func TestDestroyWorkspace_ListedOnly(t *testing.T) {
+	t.Run("unlisted_before", func(t *testing.T) {
+		root := destroySetupWorkspace(t)
+		a := destroySetupInstance(t, root, "alpha")
+		extra := destroySetupInstance(t, root, "delta")
+
+		err := DestroyWorkspace(root, DestroyWorkspaceOpts{Instances: []string{a}})
+		if err == nil || !strings.Contains(err.Error(), "delta") {
+			t.Fatalf("DestroyWorkspace = %v, want a refusal naming delta", err)
+		}
+		for _, dir := range []string{a, extra, root} {
+			if _, err := os.Stat(dir); err != nil {
+				t.Errorf("%s was removed: %v", dir, err)
+			}
+		}
+	})
+
+	t.Run("hook_refuses", func(t *testing.T) {
+		root := destroySetupWorkspace(t)
+		a := destroySetupInstance(t, root, "alpha")
+		err := DestroyWorkspace(root, DestroyWorkspaceOpts{
+			Instances:         []string{a},
+			BeforeRootRemoval: func() error { return os.ErrExist },
+		})
+		if err == nil {
+			t.Fatal("DestroyWorkspace succeeded though the hook refused")
+		}
+		if _, err := os.Stat(a); !os.IsNotExist(err) {
+			t.Errorf("the listed instance survived: %v", err)
+		}
+		if _, err := os.Stat(root); err != nil {
+			t.Errorf("the workspace root was removed though the hook refused: %v", err)
+		}
+	})
+
+	t.Run("empty_list", func(t *testing.T) {
+		root := destroySetupWorkspace(t)
+		if err := DestroyWorkspace(root, DestroyWorkspaceOpts{Instances: []string{}}); err != nil {
+			t.Fatalf("DestroyWorkspace: %v", err)
+		}
+		if _, err := os.Stat(root); !os.IsNotExist(err) {
+			t.Errorf("the empty workspace root survived: %v", err)
+		}
+	})
+}

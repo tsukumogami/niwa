@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -529,6 +531,68 @@ func selectStoredMappingTargets(workspaceRoot, jobsDir string, now time.Time) ([
 	return out, nil
 }
 
+// settleStoredMapping runs the on-reap command for one mapping
+// selectStoredMappingTargets chose and settles the mapping, under the lock of
+// the instance the mapping names.
+//
+// The selection is stale by the time it is acted on: the target loop runs
+// first and can take a long time, and in that window a `niwa resume` can
+// restore the instance, write a new mapping for the session and launch into
+// it. Running the command then would close a live session's state, and a
+// successful run would delete the mapping resume just wrote. So the lock is
+// taken first, and only then is everything that justified the settlement read
+// again: the instance is still absent, the session is still gone and the
+// mapping on disk is still the one selection read. The lock is held through
+// the run and the mapping's deletion or update.
+//
+// A held lock spares the mapping for this sweep with one "niwa: kept" line
+// naming the holder; a mapping that changed is spared with a "niwa: kept"
+// line saying so. An instance that came back or a session that is live again
+// is left alone without a word, as selection leaves it. The next reap asks
+// again in every case.
+func settleStoredMapping(workspaceRoot, jobsDir string, m workspace.SessionMapping, onReap *onReapStep) {
+	if m.InstancePath != "" {
+		release, err := takeInstanceLock(m.InstancePath, "reap")
+		if err != nil {
+			reportInstanceLockKept(reapStderr, m.InstancePath, err)
+			return
+		}
+		defer release()
+
+		if _, err := os.Lstat(filepath.Clean(m.InstancePath)); !os.IsNotExist(err) {
+			return
+		}
+	}
+	if verdict, _ := sessionState(m.Agent, m.SessionID, jobsDir, m.InstancePath, time.Now()); verdict != sessionIsGone {
+		return
+	}
+	current, err := workspace.ReadSessionMapping(workspaceRoot, m.SessionID)
+	if err != nil {
+		// Gone already (another command settled it) or unreadable: either
+		// way there is nothing this sweep can settle safely.
+		return
+	}
+	if !sameSessionMapping(current, m) {
+		name := m.SessionID
+		if m.InstancePath != "" {
+			name = filepath.Base(m.InstancePath)
+		}
+		fmt.Fprintf(reapStderr, "niwa: kept %s: its session record changed while the reap ran; the next reap asks again\n",
+			sanitizeRemovalGateText(name, 80))
+		return
+	}
+	onReap.settle(current)
+}
+
+// sameSessionMapping reports whether a and b record the same mapping, field
+// for field as they would be written. Encoding both compares times by their
+// written form, which a decoded time.Time's location pointer would not.
+func sameSessionMapping(a, b workspace.SessionMapping) bool {
+	ea, errA := json.Marshal(a)
+	eb, errB := json.Marshal(b)
+	return errA == nil && errB == nil && bytes.Equal(ea, eb)
+}
+
 // reapWorkspace selects and reclaims orphaned ephemeral instances under
 // workspaceRoot, returning the count actually destroyed. For each target it
 // force-destroys the instance (via destroyInstanceFunc, the non-interactive
@@ -627,7 +691,7 @@ func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 	}
 
 	for _, m := range stored {
-		onReap.settle(m)
+		settleStoredMapping(workspaceRoot, jobsDir, m, onReap)
 	}
 
 	// The launch records go only once their transcripts have, which is
