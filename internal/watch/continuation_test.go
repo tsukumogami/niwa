@@ -77,9 +77,14 @@ func TestClassifySessionActivity(t *testing.T) {
 			want: ActivityDetachedIdle,
 		},
 		{
-			// Claude Code 2.1.314's state.json reads tempo "active" for a
-			// session mid-turn with a session_cron task in flight, so the job
-			// state alone tells an armed worker mid-turn from an armed idle one.
+			// The tempo reading for an armed worker mid-turn is "active" on
+			// Claude Code 2.1.314. It was read from an existing job file on
+			// the development host, of a real dispatched worker mid-turn with
+			// one session_cron task in flight, not from a worker armed for the
+			// purpose on a disposable host. Because it reads "active", the job
+			// state alone separates that worker from an armed idle one. A
+			// confirmation on a disposable host, with a worker armed for the
+			// purpose, is still owed.
 			name: "armed worker mid-turn is busy",
 			in:   JobActivity{Readable: true, State: "working", Tempo: "active", InFlightTasks: 1, CronOnly: true},
 			want: ActivityBusy,

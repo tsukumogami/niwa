@@ -86,7 +86,9 @@ type JobActivity struct {
 //
 // Claude Code 2.1.314's state.json reads tempo "active" for a session in the
 // middle of a turn with a session_cron task in flight, so an armed worker
-// mid-turn classifies busy here.
+// mid-turn classifies busy here. That reading comes from an existing job file
+// of a real dispatched worker on the development host; a confirmation on a
+// disposable host is still owed (see the armed mid-turn case in the tests).
 func ClassifySessionActivity(a JobActivity) SessionActivity {
 	if !a.Readable {
 		return ActivityDeadUnknown

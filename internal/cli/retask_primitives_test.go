@@ -284,9 +284,11 @@ func TestReadJobStateChecked(t *testing.T) {
 
 func TestReadSavedOptions(t *testing.T) {
 	const sid = "88888888-8888-4888-8888-888888888888"
-	// The shape of a dispatched worker's state.json (Claude Code 2.1.314),
-	// values scrubbed: the saved option argv is respawnFlags, a flat array of
-	// strings.
+	// The saved option argv is state.json's respawnFlags, a flat array of
+	// strings. The key and shape were read from real Claude Code 2.1.314 job
+	// files of dispatched workers on the development host, and this fixture
+	// copies that shape with every value scrubbed. A confirmation against a
+	// freshly dispatched worker on a disposable host is still owed.
 	state := func(flags string) string {
 		doc := `{"state":"done","detail":"","tempo":"idle","inFlight":{"tasks":0,"queued":0,"kinds":[],"drainableMonitors":0},` +
 			`"template":"bg","intent":"","name":"w-1","nameSource":"flag","sessionId":"` + sid + `","resumeSessionId":"` + sid + `",` +
