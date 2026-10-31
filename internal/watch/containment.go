@@ -8,10 +8,14 @@ import (
 	"strings"
 )
 
-// Matcher strings for the PreToolUse hooks. They are also the identity used to
-// dedupe (an entry is "already present" iff some hook shares its matcher), with
-// one exception: the session-reach deny hook's identity is its matcher AND its
-// command (see sessionReachDenyMatcher).
+// Matcher strings for the PreToolUse hooks. A review hook's identity is its
+// matcher AND its exact command, under the PreToolUse event, with a handler that
+// holds only "type" and "command" (see preToolUseHasHook). ApplyReviewSettings
+// dedupes on that identity and VerifyReviewSettings requires it, so an entry that
+// keeps niwa's matcher but runs something else, carries an extra handler key, or
+// sits under another event never stands in for niwa's hook. Two hooks may share a
+// matcher (the post-guard and the session-command deny both match Bash); their
+// commands tell them apart.
 //
 // How Claude Code compares a matcher (read from the 2.1.267 and 2.1.268
 // bundles): a matcher made only of letters, digits, underscores, and "|" is split
@@ -73,9 +77,16 @@ const (
 	//   - Hooks load when a session starts, so it applies only after watch
 	//     re-stages or resumes a review; a review staged before the hook existed
 	//     runs without it until then.
-	//   - A disableAllHooks setting in any settings source turns it off, along with
-	//     every other review hook.
+	//   - A disableAllHooks setting turns it off, along with every other review
+	//     hook. ApplyReviewSettings refuses one in the instance's settings.json or
+	//     settings.local.json; one in a settings source outside the instance (the
+	//     user's own, say) isn't checked.
 	sessionReachDenyMatcher = "SendMessage|SendFile|RemoteTrigger|ListAgents"
+	// sessionCommandDenyMatcher matches Bash so the session-command deny can refuse
+	// a review Bash command that runs niwa's or Claude Code's session commands
+	// (see sessionCommandDenyHook). It shares the matcher with the post-guard as a
+	// distinct entry; the two are told apart by their commands.
+	sessionCommandDenyMatcher = "Bash"
 )
 
 // sessionReachDenyMessage is the refusal line the session-reach deny hook writes
@@ -83,12 +94,24 @@ const (
 // Keep it stable: tests and docs quote it verbatim.
 const sessionReachDenyMessage = "niwa watch: review sessions don't reach other sessions"
 
+// sessionCommandDenyMessage is the refusal line the session-command deny writes to
+// stderr when a review Bash command names niwa's or Claude Code's session commands
+// (niwa retask, resume or dispatch; claude --resume, -r, attach, stop or rm).
+// Keep it stable: tests and docs quote it verbatim.
+//
+// The deny behind it is a string match on the command text. A script, a variable
+// or quoting tricks get around it, so it is a second line that catches the plain
+// cases, never a boundary. What keeps a sandboxed review's Bash off the Claude Code
+// daemon is the OS sandbox denying all network, unix sockets included (see
+// noEgressSandboxStanza).
+const sessionCommandDenyMessage = "niwa watch: review sessions don't run session commands"
+
 // guardBinPath returns the absolute path to the niwa binary the filesystem-guard
-// hook invokes (as `<niwa> watch guard-fs`). In production it is the running
-// executable; tests override it to point at a built binary. If the executable
-// path cannot be determined it falls back to "niwa" (resolved on PATH) -- and the
-// hook wrapper fails closed (deny) if even that is not found, so a bad path can
-// never silently allow an out-of-instance write.
+// and session-command deny hooks invoke (as `<niwa> watch guard-fs` and `<niwa>
+// watch guard-bash`). In production it is the running executable; tests override
+// it to point at a built binary. If the executable path cannot be determined it
+// falls back to "niwa" (resolved on PATH) -- and the hook wrapper fails closed
+// (deny) if even that is not found, so a bad path can never silently allow a call.
 var guardBinPath = func() string {
 	if p, err := os.Executable(); err == nil {
 		return p
@@ -191,37 +214,82 @@ func sessionReachDenyHook() map[string]any {
 // letting the guard infer it from CLAUDE_PROJECT_DIR or cwd) makes the containment
 // root niwa's own record, immune to an ambient value inherited wider than the instance.
 //
-// The wrapper has two shapes selected by ask:
+// The guard runs under failClosedWrapper in both postures, which maps any non-zero
+// exit, a missing binary included, to exit 2 (block). The posture changes what the
+// guard decides:
 //
 //   - ask == false (hard-deny posture, the shipped floor): the guard exits 0 (inside)
-//     or non-zero (outside / fail-closed) and the wrapper maps any non-zero to exit 2
-//     (block). An out-of-instance write is a hard deny -- correct under
-//     bypassPermissions, where a hook's ask is inert.
+//     or non-zero (outside / fail-closed). An out-of-instance write is a hard deny --
+//     correct under bypassPermissions, where a hook's ask is inert.
 //   - ask == true (operator-approval posture): the guard runs with --ask-outside and
-//     prints an allow/ask PreToolUse decision on stdout, so the wrapper passes the exit
-//     code straight through (0 for a resolved decision, 2 for a fail-closed deny).
-//     Under a non-bypass permission mode the harness honors the decision, so an
-//     out-of-instance write surfaces an operator approval that fails closed if
-//     unanswered, while an in-instance write is auto-approved.
+//     prints an allow/ask PreToolUse decision on stdout and exits 0, or exits 2 for a
+//     fail-closed deny. Under a non-bypass permission mode the harness honors the
+//     decision, so an out-of-instance write surfaces an operator approval that fails
+//     closed if unanswered, while an in-instance write is auto-approved.
+//
+// In both postures a write to the instance's own .claude/ tree or .mcp.json, through
+// a symlink that can't be resolved, or to a file with more than one hard link is a
+// hard deny, never an operator approval (see GuardFSDecision). The command, built by
+// fsGuardCommand, names this instance and posture and is part of the hook's
+// identity.
 func fsGuardHook(instancePath string, ask bool) map[string]any {
-	var cmd string
-	if ask {
-		cmd = fmt.Sprintf(
-			`%s watch guard-fs --root %s --ask-outside`,
-			shellQuote(guardBinPath()), shellQuote(instancePath),
-		)
-	} else {
-		cmd = fmt.Sprintf(
-			`%s watch guard-fs --root %s; ec=$?; if [ "$ec" = "0" ]; then exit 0; else exit 2; fi`,
-			shellQuote(guardBinPath()), shellQuote(instancePath),
-		)
-	}
 	return map[string]any{
 		"matcher": fsGuardMatcher,
 		"hooks": []any{
 			map[string]any{
 				"type":    "command",
-				"command": cmd,
+				"command": fsGuardCommand(instancePath, ask),
+			},
+		},
+	}
+}
+
+// fsGuardCommand returns the filesystem guard's hook command for an instance and a
+// posture. It is part of the hook's identity, so VerifyReviewSettings rebuilds it
+// from the instance path and posture: an entry whose --root names another
+// directory, or that was built for the other posture, is not niwa's guard.
+func fsGuardCommand(instancePath string, ask bool) string {
+	guard := fmt.Sprintf(`%s watch guard-fs --root %s`, shellQuote(guardBinPath()), shellQuote(instancePath))
+	if ask {
+		guard += " --ask-outside"
+	}
+	return guard + failClosedWrapper
+}
+
+// failClosedWrapper follows a guard invocation in a hook command. It passes exit 0
+// through and turns any other exit into 2, the one code Claude Code treats as a
+// block: a guard that denies, crashes, or isn't found (exit 127) all block. On the
+// non-zero path it drains stdin first, because a guard that never ran left the
+// payload unread, and an unread payload larger than a pipe buffer makes Claude
+// Code's write fail, which its hook runner reports as a non-blocking result.
+const failClosedWrapper = `; ec=$?; if [ "$ec" = "0" ]; then exit 0; else cat >/dev/null 2>&1; exit 2; fi`
+
+// sessionCommandDenyCommand returns the session-command deny's hook command: it
+// runs `<niwa> watch guard-bash` on the payload, under the fail-closed wrapper.
+func sessionCommandDenyCommand() string {
+	return shellQuote(guardBinPath()) + " watch guard-bash" + failClosedWrapper
+}
+
+// sessionCommandDenyHook returns the PreToolUse hook that refuses a review Bash
+// command naming niwa's or Claude Code's session commands: niwa retask, niwa
+// resume, niwa dispatch, claude --resume (or -r), claude attach, claude stop and
+// claude rm. It is applied and required in every containment mode, for fresh
+// stages and continuations alike. The decision is GuardBashDecision's, which
+// exits 2 with sessionCommandDenyMessage on stderr; unreadable or unparseable
+// input and a missing niwa binary block too.
+//
+// It is a string match on the command text, not a boundary: a script, a variable
+// or quoting tricks get around it. It supplements the OS sandbox, whose denial of
+// all network, unix sockets included, is what keeps a sandboxed review's Bash off
+// the Claude Code daemon those commands talk to. With watch_sandbox = off it is
+// accident prevention only, like the post-guard.
+func sessionCommandDenyHook() map[string]any {
+	return map[string]any{
+		"matcher": sessionCommandDenyMatcher,
+		"hooks": []any{
+			map[string]any{
+				"type":    "command",
+				"command": sessionCommandDenyCommand(),
 			},
 		},
 	}
@@ -267,27 +335,38 @@ func postGuardHook() map[string]any {
 
 // ApplyReviewSettings merges the review-session settings into a provisioned
 // instance's .claude/settings.json and re-verifies they survived the merge,
-// preserving any existing hooks and other keys. Two PreToolUse hooks are appended
-// in every mode: the post-guard (dedup by matcher) and the session-reach deny hook,
-// which refuses SendMessage, SendFile, RemoteTrigger, and ListAgents. The deny hook
-// is deduped by matcher AND command: an existing entry with the same matcher but a
-// different command is kept, and niwa's hook is added beside it. When sandbox is
-// true the no-egress sandbox stanza is written (fully owned, so no pre-existing
-// sandbox config can relax the posture) and both the egress-deny and the
-// filesystem-guard PreToolUse hooks are appended (dedup by matcher) -- the two
-// channels the OS sandbox does not cage.
+// preserving any existing hooks and other keys. Three PreToolUse hooks are added in
+// every mode: the post-guard, the session-reach deny (which refuses SendMessage,
+// SendFile, RemoteTrigger and ListAgents) and the session-command deny (which
+// refuses review Bash commands that run niwa's or Claude Code's session commands).
+// When sandbox is true the no-egress sandbox stanza is written (fully owned, so no
+// pre-existing sandbox config can relax the posture) and the egress-deny and
+// filesystem-guard PreToolUse hooks are added -- the two channels the OS sandbox does
+// not cage.
+//
+// Every hook is deduped by its identity, matcher AND exact command under PreToolUse
+// with a handler holding only "type" and "command" (see preToolUseHasHook): an
+// existing entry with niwa's matcher but a different command, or an extra handler
+// key, is kept, and niwa's hook is added beside it. Re-applying to an unchanged
+// instance leaves settings.json byte-identical, so the function can run before
+// every wake of an existing review.
+//
+// A disableAllHooks set to anything but false, in either the instance's
+// .claude/settings.json or its .claude/settings.local.json, turns every review hook
+// off. ApplyReviewSettings refuses it before writing anything and leaves the key
+// where it is: the review must not launch, and removing the key would hide what
+// set it.
 //
 // The ask flag selects the out-of-instance-write posture (it is meaningful only when
 // sandbox is true):
 //
-//   - ask == false (hard-deny posture, the shipped floor): the emitted settings are
-//     the PR #198 shape plus the session-reach deny hook. permissions.defaultMode
+//   - ask == false (hard-deny posture, the shipped floor): permissions.defaultMode
 //     is NOT set here: this function does not choose a mode and leaves any the
 //     instance's settings already hold. No auto-allow hook is added, and the
-//     filesystem guard uses its exit-code wrapper (out-of-instance = hard deny).
+//     filesystem guard denies an out-of-instance write.
 //   - ask == true (operator-approval posture): niwa fully owns
 //     permissions.defaultMode = "default" (so a hook ask is honored instead of
-//     silently allowed), appends the Bash/Read/Glob/Grep auto-allow hook (so the
+//     silently allowed), adds the Bash/Read/Glob/Grep auto-allow hook (so the
 //     non-bypass session does not hang on the normal review tools), and wires the
 //     filesystem guard with --ask-outside (out-of-instance = operator ask). The caller
 //     seeds workspace trust separately; this function assembles the settings only.
@@ -295,7 +374,8 @@ func postGuardHook() map[string]any {
 // The re-verification is the per-instance check that runs before launch; a dropped or
 // relaxed stanza or hook means the PR must not be launched.
 func ApplyReviewSettings(instancePath string, sandbox, ask bool) error {
-	settingsPath := filepath.Join(instancePath, ".claude", "settings.json")
+	claudeDir := filepath.Join(instancePath, ".claude")
+	settingsPath := filepath.Join(claudeDir, "settings.json")
 	settings := map[string]any{}
 	if data, err := os.ReadFile(settingsPath); err == nil {
 		if err := json.Unmarshal(data, &settings); err != nil {
@@ -303,6 +383,21 @@ func ApplyReviewSettings(instancePath string, sandbox, ask bool) error {
 		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("apply review settings: reading %s: %w", settingsPath, err)
+	}
+	if err := refuseDisableAllHooks(settings); err != nil {
+		return fmt.Errorf("apply review settings: %s: %w", settingsPath, err)
+	}
+	localPath := filepath.Join(claudeDir, "settings.local.json")
+	if data, err := os.ReadFile(localPath); err == nil {
+		local := map[string]any{}
+		if err := json.Unmarshal(data, &local); err != nil {
+			return fmt.Errorf("apply review settings: parsing %s: %w", localPath, err)
+		}
+		if err := refuseDisableAllHooks(local); err != nil {
+			return fmt.Errorf("apply review settings: %s: %w", localPath, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("apply review settings: reading %s: %w", localPath, err)
 	}
 
 	if sandbox {
@@ -331,27 +426,12 @@ func ApplyReviewSettings(instancePath string, sandbox, ask bool) error {
 	}
 	preToolUse, _ := hooks["PreToolUse"].([]any)
 
-	// Always append the Bash post-guard, deduped by matcher.
-	if !preToolUseHasMatcher(preToolUse, postGuardMatcher) {
-		preToolUse = append(preToolUse, postGuardHook())
-	}
-	// Always append the session-reach deny hook, deduped by matcher AND command so a
+	// Add each review hook this mode needs, deduped by matcher AND command so a
 	// same-matcher entry running something else can't stand in for it.
-	if !preToolUseHasHook(preToolUse, sessionReachDenyMatcher, sessionReachDenyCommand()) {
-		preToolUse = append(preToolUse, sessionReachDenyHook())
-	}
-	// In sandbox mode, append the egress-deny and filesystem-guard hooks (the two
-	// channels the OS sandbox does not cage), each deduped by matcher.
-	if sandbox && !preToolUseHasMatcher(preToolUse, egressDenyMatcher) {
-		preToolUse = append(preToolUse, egressDenyHook())
-	}
-	// In the ask posture, append the auto-allow hook for the normal review tools so
-	// the non-bypass session runs autonomously.
-	if sandbox && ask && !preToolUseHasMatcher(preToolUse, autoAllowMatcher) {
-		preToolUse = append(preToolUse, autoAllowHook())
-	}
-	if sandbox && !preToolUseHasMatcher(preToolUse, fsGuardMatcher) {
-		preToolUse = append(preToolUse, fsGuardHook(instancePath, ask))
+	for _, h := range reviewHooks(instancePath, sandbox, ask) {
+		if !preToolUseHasHook(preToolUse, h.matcher, h.command) {
+			preToolUse = append(preToolUse, h.build())
+		}
 	}
 	hooks["PreToolUse"] = preToolUse
 	settings["hooks"] = hooks
@@ -360,7 +440,7 @@ func ApplyReviewSettings(instancePath string, sandbox, ask bool) error {
 	if err != nil {
 		return fmt.Errorf("apply review settings: encoding settings: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
 		return fmt.Errorf("apply review settings: creating .claude dir: %w", err)
 	}
 	if err := os.WriteFile(settingsPath, out, 0o644); err != nil {
@@ -376,21 +456,78 @@ func ApplyReviewSettings(instancePath string, sandbox, ask bool) error {
 	if err := json.Unmarshal(data, &merged); err != nil {
 		return fmt.Errorf("apply review settings: re-parsing settings: %w", err)
 	}
-	return VerifyReviewSettings(merged, sandbox, ask)
+	return VerifyReviewSettings(merged, instancePath, sandbox, ask)
 }
 
-// VerifyReviewSettings re-reads a merged settings document and asserts the
-// review-session settings survived the merge. Two PreToolUse hooks are required in
-// every mode: the post-guard (matcher "Bash") and the session-reach deny hook, which
-// must match on both matcher (sessionReachDenyMatcher) and niwa's exact command, so a
-// same-matcher hook running something else does not satisfy the check. When sandbox
-// is true it additionally asserts the no-egress sandbox stanza (enabled, empty
-// allowedDomains, failIfUnavailable, no unsandboxed escape hatch), the egress-deny
-// PreToolUse hook (matcher "WebFetch|WebSearch|mcp__"), AND the filesystem-guard
-// PreToolUse hook (matcher "Write|Edit|MultiEdit|NotebookEdit"). When ask is true it
-// also asserts the operator-approval posture: permissions.defaultMode == "default" and
-// the Bash/Read/Glob/Grep auto-allow PreToolUse hook.
-func VerifyReviewSettings(merged map[string]any, sandbox, ask bool) error {
+// reviewHook is one PreToolUse hook a review session needs: its name (for error
+// messages), its identity (matcher and exact command) and the entry that installs it.
+type reviewHook struct {
+	name             string
+	matcher, command string
+	build            func() map[string]any
+}
+
+// reviewHooks lists the PreToolUse hooks a review in this mode needs, in the order
+// ApplyReviewSettings adds them. The post-guard, the session-reach deny and the
+// session-command deny apply in every mode; the egress deny and the filesystem guard
+// in sandbox mode; the auto-allow in the sandboxed operator-approval posture.
+func reviewHooks(instancePath string, sandbox, ask bool) []reviewHook {
+	hooks := []reviewHook{
+		{"post-guard", postGuardMatcher, hookCommand(postGuardHook()), postGuardHook},
+		{"session-reach deny", sessionReachDenyMatcher, sessionReachDenyCommand(), sessionReachDenyHook},
+		{"session-command deny", sessionCommandDenyMatcher, sessionCommandDenyCommand(), sessionCommandDenyHook},
+	}
+	if sandbox {
+		hooks = append(hooks, reviewHook{"egress-deny", egressDenyMatcher, hookCommand(egressDenyHook()), egressDenyHook})
+		if ask {
+			hooks = append(hooks, reviewHook{"auto-allow", autoAllowMatcher, hookCommand(autoAllowHook()), autoAllowHook})
+		}
+		fs := func() map[string]any { return fsGuardHook(instancePath, ask) }
+		hooks = append(hooks, reviewHook{"filesystem-guard", fsGuardMatcher, fsGuardCommand(instancePath, ask), fs})
+	}
+	return hooks
+}
+
+// hookCommand returns the command of the single handler in a hook entry niwa builds.
+func hookCommand(entry map[string]any) string {
+	inner, _ := entry["hooks"].([]any)
+	if len(inner) != 1 {
+		return ""
+	}
+	h, _ := inner[0].(map[string]any)
+	cmd, _ := h["command"].(string)
+	return cmd
+}
+
+// refuseDisableAllHooks returns an error naming disableAllHooks when a settings
+// document sets it to anything other than JSON false. Claude Code's
+// disableAllHooks turns every hook off, the review's guards included.
+func refuseDisableAllHooks(doc map[string]any) error {
+	v, ok := doc["disableAllHooks"]
+	if !ok {
+		return nil
+	}
+	if b, isBool := v.(bool); isBool && !b {
+		return nil
+	}
+	return fmt.Errorf("review settings check: disableAllHooks is set (%v); it turns off every review hook, so the review must not launch", v)
+}
+
+// VerifyReviewSettings checks a merged settings document for everything a review
+// in this mode needs. Every review hook ApplyReviewSettings installs must be
+// present under PreToolUse by its identity, matcher AND exact command with a
+// handler holding only "type" and "command" (see preToolUseHasHook): the
+// post-guard, the session-reach deny and the session-command deny in every mode;
+// in sandbox mode the egress deny and the filesystem guard, whose command names
+// instancePath and the posture; and in the operator-approval posture the
+// auto-allow. A disableAllHooks set to anything but false fails, as does, in
+// sandbox mode, a relaxed no-egress stanza (enabled, empty allowedDomains,
+// failIfUnavailable, no unsandboxed escape hatch) and, when ask is true, a
+// permissions.defaultMode other than "default".
+func VerifyReviewSettings(merged map[string]any, instancePath string, sandbox, ask bool) error {
+	if err := refuseDisableAllHooks(merged); err != nil {
+		return err
+	}
 	if sandbox {
 		sb, ok := merged["sandbox"].(map[string]any)
 		if !ok {
@@ -419,20 +556,8 @@ func VerifyReviewSettings(merged map[string]any, sandbox, ask bool) error {
 		if allow, _ := sb["allowUnsandboxedCommands"].(bool); allow {
 			return fmt.Errorf("review settings check: sandbox.allowUnsandboxedCommands must be false")
 		}
-		// The egress-deny hook closes the out-of-sandbox network channels WebFetch and
-		// WebSearch, which the OS sandbox does not cage (its MCP token covers no tool on
-		// current Claude Code; see egressDenyMatcher).
-		if !hasPreToolUseMatcher(merged, egressDenyMatcher) {
-			return fmt.Errorf("review settings check: egress-deny PreToolUse hook (matcher %q) missing", egressDenyMatcher)
-		}
-		// The filesystem-guard hook closes the out-of-sandbox write channel
-		// (Write/Edit/NotebookEdit) that the OS sandbox does not cage.
-		if !hasPreToolUseMatcher(merged, fsGuardMatcher) {
-			return fmt.Errorf("review settings check: filesystem-guard PreToolUse hook (matcher %q) missing", fsGuardMatcher)
-		}
 		// The operator-approval posture additionally requires the non-bypass permission
-		// mode (so a hook ask is honored) and the auto-allow hook (so the non-bypass
-		// session runs autonomously).
+		// mode, so a hook ask is honored.
 		if ask {
 			perms, ok := merged["permissions"].(map[string]any)
 			if !ok {
@@ -441,18 +566,12 @@ func VerifyReviewSettings(merged map[string]any, sandbox, ask bool) error {
 			if mode, _ := perms["defaultMode"].(string); mode != "default" {
 				return fmt.Errorf("review settings check: permissions.defaultMode must be \"default\" under the operator-approval posture, got %q", mode)
 			}
-			if !hasPreToolUseMatcher(merged, autoAllowMatcher) {
-				return fmt.Errorf("review settings check: auto-allow PreToolUse hook (matcher %q) missing under the operator-approval posture", autoAllowMatcher)
-			}
 		}
 	}
-	// The Bash post-guard is required in every mode.
-	if !hasPreToolUseMatcher(merged, postGuardMatcher) {
-		return fmt.Errorf("review settings check: post-guard PreToolUse hook (matcher %q) missing", postGuardMatcher)
-	}
-	// The session-reach deny hook is required in every mode, by matcher and command.
-	if !hasPreToolUseHook(merged, sessionReachDenyMatcher, sessionReachDenyCommand()) {
-		return fmt.Errorf("review settings check: session-reach deny PreToolUse hook (matcher %q) missing", sessionReachDenyMatcher)
+	for _, h := range reviewHooks(instancePath, sandbox, ask) {
+		if !hasPreToolUseHook(merged, h.matcher, h.command) {
+			return fmt.Errorf("review settings check: %s PreToolUse hook (matcher %q) missing", h.name, h.matcher)
+		}
 	}
 	return nil
 }
@@ -468,38 +587,17 @@ func preToolUseEntries(merged map[string]any) []any {
 	return preToolUse
 }
 
-// hasPreToolUseMatcher walks merged["hooks"]["PreToolUse"] (a []any of maps) and
-// returns true if any entry's "matcher" equals the given string.
-func hasPreToolUseMatcher(merged map[string]any, matcher string) bool {
-	return preToolUseHasMatcher(preToolUseEntries(merged), matcher)
-}
-
 // hasPreToolUseHook walks merged["hooks"]["PreToolUse"] and reports whether some
 // entry has the given matcher and a command hook running exactly the given command.
 func hasPreToolUseHook(merged map[string]any, matcher, command string) bool {
 	return preToolUseHasHook(preToolUseEntries(merged), matcher, command)
 }
 
-// preToolUseHasMatcher reports whether any entry in a PreToolUse array has the
-// given matcher. Shared by the apply-time dedupe and the verify-time check.
-func preToolUseHasMatcher(preToolUse []any, matcher string) bool {
-	for _, entry := range preToolUse {
-		m, ok := entry.(map[string]any)
-		if !ok {
-			continue
-		}
-		if s, _ := m["matcher"].(string); s == matcher {
-			return true
-		}
-	}
-	return false
-}
-
 // preToolUseHasHook reports whether any entry in a PreToolUse array has the given
 // matcher and, among its hooks, one holding exactly the keys "type" (equal to
-// "command") and "command" (equal to the given string). It is the identity for the
-// session-reach deny hook, where the matcher alone isn't enough; the other hooks keep
-// using preToolUseHasMatcher. Any extra handler key is refused because Claude Code
+// "command") and "command" (equal to the given string). It is the identity of every
+// review hook: the matcher alone isn't enough, since an entry can keep niwa's matcher
+// and run something else. Any extra handler key is refused because Claude Code
 // honors fields such as async, once, if, and timeout that can keep a hook with the
 // right command from blocking. Shared by the apply-time dedupe and the verify-time
 // check.

@@ -238,7 +238,7 @@ func TestReviewSettingsOverMaterializedPostures(t *testing.T) {
 					t.Fatalf("ApplyReviewSettings: %v", err)
 				}
 				merged := readPostureDoc(t, filepath.Join(instance, ".claude", "settings.json"), "")
-				if err := watch.VerifyReviewSettings(merged, true, operatorApproval); err != nil {
+				if err := watch.VerifyReviewSettings(merged, instance, true, operatorApproval); err != nil {
 					t.Fatalf("VerifyReviewSettings: %v", err)
 				}
 				want := sc.hardDenyMode
