@@ -83,6 +83,12 @@ reasons as overridden and destroys the instance anyway, leaving a running
 session in place. --workspace refuses as a whole when any instance is still
 needed.
 
+While another niwa command (a resume, a reap or another destroy) is acting on
+an instance, destroy keeps it, names that command and exits non-zero without
+waiting. --force does not override another niwa command holding the
+instance's lock. --workspace refuses as a whole when any instance's lock is
+held.
+
 When the workspace declares [session.on_reap], its command runs from the
 workspace root once for each session destroy removes or finds already gone,
 and the session's record is deleted only once the command succeeds. A failed
@@ -179,6 +185,18 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingP
 	if err := workspace.ValidateInstanceDir(instanceDir); err != nil {
 		return err
 	}
+
+	// The instance's lock is taken before anything is checked and held until
+	// the directory is gone, so no other niwa command (a resume relaunching
+	// the session, say) can act on the instance between the running-session
+	// check below and the `claude rm` and removal that follow it. --force
+	// overrides what the checks find, never another command's hold.
+	release, err := takeInstanceLock(instanceDir, "destroy")
+	if err != nil {
+		return fmt.Errorf("nothing was destroyed: instance %s was kept: %s; run niwa destroy again once it is done",
+			filepath.Base(instanceDir), instanceLockReason(err))
+	}
+	defer release()
 
 	// Before any prompt: a running session or the pre-removal command keeps
 	// the instance unless --force overrides them, and then each is named.
@@ -406,6 +424,24 @@ func runDestroyWorkspace(cmd *cobra.Command, workspaceRoot, confirm string) erro
 	instances, err := workspace.EnumerateInstances(workspaceRoot)
 	if err != nil {
 		return fmt.Errorf("enumerating instances: %w", err)
+	}
+
+	// Every instance's lock is taken before anything is checked and held
+	// until the workspace is gone. The workspace goes whole or not at all, so
+	// one instance another niwa command is acting on refuses all of it.
+	releases := make([]func(), 0, len(instances))
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	for _, inst := range instances {
+		release, err := takeInstanceLock(inst, "destroy")
+		if err != nil {
+			return fmt.Errorf("nothing was destroyed: instance %s was kept: %s; run niwa destroy --workspace again once it is done",
+				filepath.Base(inst), instanceLockReason(err))
+		}
+		releases = append(releases, release)
 	}
 
 	// Before the scan and any prompt: the workspace goes whole or not at all,

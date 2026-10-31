@@ -731,22 +731,45 @@ func pruneStagedRecords(ctx context.Context, out io.Writer, root string, client 
 		if err != nil {
 			continue // skip-and-continue: a bad record is not fatal to the pass
 		}
-
-		if !stagedInstanceLiveFunc(jobsDir, rec.InstancePath) {
-			if discardStagedRecord(out, root, h, rec, "session no longer live", gate) {
-				reapDiscardedReview(onReap, root, rec)
-			}
-			continue
-		}
-
-		// A stale review whose session is still live is discarded without the
-		// on-reap command: its session hasn't gone anywhere. So whether the
-		// gate kept it changes nothing here, and the result is not read.
-		if ok, reason := evalRecordFreshness(ctx, client, requested, rec); !ok {
-			discardStagedRecord(out, root, h, rec, reason, gate)
-		}
-		// live + fresh: keep the record and its session untouched.
+		pruneStagedRecord(ctx, out, root, h, rec, client, requested, jobsDir, onReap, gate)
 	}
+}
+
+// pruneStagedRecord decides one staged record: discard it when its session is
+// gone or its review is stale, keep it otherwise.
+//
+// A record that names its review's instance takes that instance's lock before
+// reading the session's liveness, and holds it through the freshness check,
+// the instance's destroy and the record's deletion. Another niwa command that
+// holds the lock -- one continuing the review in place, say, which stops the
+// session and wakes it again -- is never raced by the discard: while the lock
+// is held, the record is kept, with one line naming the holder, and the next
+// pass asks again.
+func pruneStagedRecord(ctx context.Context, out io.Writer, root, h string, rec watch.StagedRecord, client prFreshnessClient, requested map[string]bool, jobsDir string, onReap *onReapStep, gate *removalGate) {
+	if rec.InstancePath != "" {
+		release, err := takeInstanceLock(rec.InstancePath, "watch")
+		if err != nil {
+			fmt.Fprintf(out, "niwa watch: kept staged review for %s/%s#%d (handle %s): %s\n",
+				rec.Owner, rec.Repo, rec.Number, h, instanceLockReason(err))
+			return
+		}
+		defer release()
+	}
+
+	if !stagedInstanceLiveFunc(jobsDir, rec.InstancePath) {
+		if discardStagedRecord(out, root, h, rec, "session no longer live", gate) {
+			reapDiscardedReview(onReap, root, rec)
+		}
+		return
+	}
+
+	// A stale review whose session is still live is discarded without the
+	// on-reap command: its session hasn't gone anywhere. So whether the gate
+	// kept it changes nothing here, and the result is not read.
+	if ok, reason := evalRecordFreshness(ctx, client, requested, rec); !ok {
+		discardStagedRecord(out, root, h, rec, reason, gate)
+	}
+	// live + fresh: keep the record and its session untouched.
 }
 
 // reapDiscardedReview runs the workspace's on-reap command for a staged review
