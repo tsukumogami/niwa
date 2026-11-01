@@ -26,6 +26,7 @@ rationale: |
   an address when niwa has one) rather than a reviewer or an excluded
   author leaves the author-exclusion rule to its own work. A cap authority
   would be a label no gate can enforce.
+upstream: docs/prds/PRD-authority-grants.md
 ---
 
 # DESIGN: authority-read-settlers
