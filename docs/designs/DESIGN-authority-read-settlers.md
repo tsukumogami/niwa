@@ -42,8 +42,10 @@ session use to learn what a session holds. It binds a session to its
 dispatch and answers `bound`, `record-unusable` or `not-dispatched`. For a
 bound session it adds, per `--point`, the decider and author-exclusion
 value that `niwa authority decide` computes
-([DESIGN-authority-grants](current/DESIGN-authority-grants.md), PRD R2,
-R26, R27). A coordinator that has to work out who settles each finishing
+([DESIGN-authority-grants](current/DESIGN-authority-grants.md), R2, R26
+and R27 of [PRD-authority-grants](../prds/PRD-authority-grants.md)).
+Requirement numbers below are that PRD's unless they say "gates", which
+means [PRD-gates-honour-grant](../prds/PRD-gates-honour-grant.md). A coordinator that has to work out who settles each finishing
 step (merging a pull request, closing an issue, cutting a release, tearing
 down an instance) and where to send that step finds five gaps in today's
 answer:
@@ -512,9 +514,14 @@ config don't change.
   `CheckDoc` gains `Session *CheckSession` (`{session_id, instance}`).
 - **`internal/authority/decide.go`.** One small helper narrows a
   `dispatcher` decider to `person` for an answer with no dispatcher seat
-  and returns the source suffix. `fromLevel`, the declarations seam and
-  their order don't change.
-- **`internal/cli/authority_check.go`.** On `not-dispatched` with points
+  and returns the source suffix. "The narrower of two levels" uses the
+  `Level` order R1 already defines (`autonomous` < `supervised` <
+  `strict`), the same comparison dispatch's ceilings use. `fromLevel`, the
+  declarations seam and their order don't change.
+- **`internal/cli/authority_check.go`.** This layer resolves every point
+  and passes the answers into the constructors, at each of the call sites
+  that build a non-bound document today; `internal/authority` stays free
+  of config and file reads. On `not-dispatched` with points
   asked, it loads the policy the way `decide` does with no record, reads
   the instance's own record when one exists and narrows to it (`strict`
   when it can't be read), and resolves each point. On `record-unusable` it
@@ -525,8 +532,15 @@ config don't change.
   `ParentDispatchID`, and the name passes `niwa list`'s shape check
   (`dispatchSessionNameRe`); any failure there drops the name and keeps
   the id, never failing the lookup. In
-  every state it sets `session` from `--session` and the instance it
-  resolved.
+  every state it sets `session` from `--session` and the name of the
+  instance it resolved (the base name of the instance path, as `parent`
+  already reports names). `session` echoes the request; it proves nothing
+  about who is asking.
+- **`CheckDoc.Text()`.** The plain output gains one `point:` line per
+  point (`<point>: <decider>, author exclusion <value> (<source>)`) in
+  every state, and, on `bound`, a `dispatcher:` line naming the parent's
+  `session_name` when present, else its session id, else its dispatch id.
+  It prints only values the JSON carries, so the same name guard applies.
 - **`docs/guides/authority-grants.md`.** New entries for the non-bound
   points and their `source` strings, the `teardown` point and its
   narrowing-only use, the delivery facts and their limits, and the
@@ -625,21 +639,22 @@ Deliverables:
 `parent` for a root dispatcher, `parent.session_id`, and the guarded
 `session_name` and `accepts_session_messages`. Tests for each guard (no
 mapping, hook origin, a different dispatch id, a bad name) and a check
-that the gate's fixture answers still parse. Depends on Phase 1 only for
-the shared `CheckDoc` changes.
+that the gate's fixture answers still parse. It touches `CheckParent`
+and the bound path, not the non-bound constructors, so it can land
+before or after Phase 1.
 
 Deliverables:
 - `internal/authority/check.go`, `internal/cli/authority_check.go`
 - tests beside each
 
-### Phase 3: the guide (niwa)
+### Guide entries land with their code
 
-Documents the non-bound points, the `source` grammar, the `teardown` point
-and its narrowing-only use, the delivery facts and their limits, and that
-niwa defines no cap-change authority. Lands with Phase 2 or after it.
-
-Deliverables:
-- `docs/guides/authority-grants.md`
+Each phase carries its own `docs/guides/authority-grants.md` entries, so
+the guide never documents behaviour niwa doesn't have: Phase 1 adds the
+non-bound points, the `source` grammar and the `teardown` point with its
+narrowing-only use; Phase 2 adds the delivery facts, their limits and the
+note that the output is host-local. The cap-change non-goal goes in with
+whichever lands first.
 
 ### Follow-up outside niwa
 
@@ -675,7 +690,14 @@ changes no gate verdict and grants nothing.
   session in the parent's instance from being named as the dispatcher by
   accident; they don't stop someone who can write `.niwa/` files, and a
   forged `session_name` can misdirect a request, not grant anything: the
-  recipient still decides with its own authority.
+  recipient still decides with its own authority. One case is worth naming:
+  a caller that sends its own work for review to `parent` could have that
+  review pointed at a seat the editor controls. Nothing here catches that;
+  the author-exclusion work decides who may review, and until it does this
+  stays the accepted residual risk of editable records. Likewise a bound
+  worker that deletes its own mapping falls to `not-dispatched` and gets a
+  non-bound answer, which is never wider than `decide` for that directory
+  and still holds no grant.
 - **Handling the mapping read.** The record's parent session id is read
   with the record's own id check, but the mapping path is built only from
   an id that passes the lowercase-UUID check `--session` already uses. Any
@@ -732,7 +754,10 @@ changes no gate verdict and grants nothing.
 - The guide states the name's limit, and routers prefer their own
   successor chain.
 - A failed lookup lands on the same verdict as `not-dispatched` in both
-  callers, so a broken config costs routing, not safety.
+  callers, so a broken config costs routing, not safety. Routing then
+  falls back to the caller's own rule without saying so; the lookup's
+  exit 1 is the signal, and `niwa authority decide` in the same directory
+  shows the config error.
 - The guide documents every `source` string; readers already accept new
   members.
 - The decision to add a cap-change authority reopens, in R3's existing
