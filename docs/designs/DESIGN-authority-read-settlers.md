@@ -522,7 +522,9 @@ config don't change.
   `parent` whenever `ParentSessionID` or `ParentDispatchID` is set, and
   reads the one mapping keyed by `ParentSessionID`, keeping its name only
   when `origin` is `dispatch`, its `dispatch_id` equals the record's
-  `ParentDispatchID`, and the name passes `niwa list`'s shape check. In
+  `ParentDispatchID`, and the name passes `niwa list`'s shape check
+  (`dispatchSessionNameRe`); any failure there drops the name and keeps
+  the id, never failing the lookup. In
   every state it sets `session` from `--session` and the instance it
   resolved.
 - **`docs/guides/authority-grants.md`.** New entries for the non-bound
@@ -660,12 +662,30 @@ changes no gate verdict and grants nothing.
   callers keep deciding non-bound states on `state` with `grant: []`. A
   caller that misreads a non-bound point as permission still finds no
   grant.
+- **Routing facts aren't permits.** A non-bound `decider=session` says no
+  seat above has to settle the point; it never lets the session take the
+  action, which still needs a grant and the gate. `teardown` has no
+  authority behind it, so its answer only narrows a caller's permission
+  reading. Tests pin both: for every level, a non-bound point is never
+  wider than `niwa authority decide` for the same directory, and an
+  unreadable instance record answers `strict`.
 - **Trust in the delivery facts.** The record and the mappings are files
-  the session's own user can edit (PRD Out of Scope, unchanged here). A
+  the session's own user can edit (PRD Out of Scope, unchanged here). The
+  dispatch-origin and dispatch-id guards keep a hand-started or later
+  session in the parent's instance from being named as the dispatcher by
+  accident; they don't stop someone who can write `.niwa/` files, and a
   forged `session_name` can misdirect a request, not grant anything: the
-  recipient still decides with its own authority. The dispatch-origin and
-  dispatch-id guards keep a hand-started or later session in the parent's
-  instance from being named as the dispatcher by accident.
+  recipient still decides with its own authority.
+- **Handling the mapping read.** The record's parent session id is read
+  with the record's own id check, but the mapping path is built only from
+  an id that passes the lowercase-UUID check `--session` already uses. Any
+  failure on that path (an id of another shape, a missing or unreadable
+  file, a hook origin, a missing or different dispatch id) leaves out
+  `session_name` and `accepts_session_messages`, keeps `session_id`, and
+  never fails the lookup. A name is kept only when it matches the pattern
+  dispatch writes and `niwa list` checks
+  (`^[a-z0-9](?:[a-z0-9_]{0,38}[a-z0-9])?-[0-9a-f]{8}$`), which admits no
+  control or escape characters. A router still treats the name as data.
 - **Stale addresses.** A name can outlive the seat it names when a
   coordinator is replaced and its instance kept. The guide says a name
   proves nothing about who holds the seat now, and a router with its own
@@ -673,7 +693,9 @@ changes no gate verdict and grants nothing.
 - **Data exposure.** Session ids, session names and instance names are
   already readable through `niwa list --json` and `niwa lineage show` by
   the same user. The answer is printed only to the caller; nothing in this
-  design writes it to a commit, a pull request body or any remote surface.
+  design writes it to a commit, a pull request body or any remote surface,
+  and the guide says the output is host-local and isn't for pasting into
+  commits, pull requests or issues.
 - **Cost.** At most one more mapping file read on the bound path and a
   fixed set of config files plus one record on the non-bound path when
   points are asked, all local, inside the gate's 3-second bound.
