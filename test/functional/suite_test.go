@@ -166,6 +166,10 @@ type testState struct {
 	background *backgroundNiwa
 	interrupt  interruptFakes
 
+	// retask is what the retask scenarios remember between steps; see
+	// retask_steps_test.go.
+	retask *retaskScenario
+
 	// authority is what the dispatch-authority scenarios remember between
 	// steps; see dispatch_authority_steps_test.go.
 	authority authorityScenario
@@ -567,6 +571,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	registerDispatchSpillSteps(ctx)
 	registerDispatchLineageSteps(ctx)
 	registerNiwaResumeSteps(ctx)
+	registerRetaskSteps(ctx)
 	registerDispatchAuthoritySteps(ctx)
 	registerLineageStoreSteps(ctx)
 	registerAuthorityReadSteps(ctx)
