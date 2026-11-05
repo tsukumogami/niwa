@@ -1,10 +1,31 @@
-# Live OS-sandbox egress gate for `niwa watch` (Issue 5 / ED2).
+# Live OS-sandbox egress gate for `niwa watch`.
 #
-# Runs the two live containment tests that a normal PR run SKIPS:
-#   - TestContainedSessionDeniesEgress_OnHarness (ED1 fresh-stage containment)
-#   - TestResumedSessionDeniesEgress_OnHarness   (ED2 continuation re-entry)
-# Each launches a REAL `claude` session under the OS no-egress sandbox and asserts
-# a raw Bash TCP connect from inside it is denied at the OS layer.
+# Runs the live containment tests that a normal PR run SKIPS:
+#   - internal/watch: TestContainedSessionDeniesEgress_OnHarness (fresh-stage
+#     containment)
+#   - internal/cli: TestResumedSessionDeniesEgress_OnHarness (the review
+#     continuation's live gate, moved here from internal/watch). It stages a
+#     review through the production launch, stops it, runs the pre-wake gate,
+#     wakes it with no flags, checks the wake kept the session id and started
+#     no copy, checks a raw TCP connect from the woken session is denied, wakes
+#     it a second time, and runs two subtests: stanza_written_after_settle and
+#     pr_clone_settings_not_loaded.
+# Each launches REAL `claude` sessions under the OS no-egress sandbox.
+#
+# Re-run this workflow for each Claude Code upgrade used with `niwa watch`, on
+# the PR's final head. The continuation relies on Claude Code continuing a
+# stopped background session under its own id on a flagless resume and on the
+# options it saves with the job; both are Claude Code behavior that can change
+# between releases. The run records the Claude Code version it checked.
+#
+# What the job log records:
+#   - the `claude --version` output (its own step, also in the job summary);
+#   - the live gate's report: the exact flags the job's state file saved for
+#     the review stage (the --settings value replaced by its key list, never
+#     the value), whether claude.ai still reaches the woken session (recorded,
+#     not asserted; field names only), and the pass of each subtest;
+#   - an enforcement step that fails the job when the gate's preconditions
+#     held but the gate skipped, didn't pass, or left a report line out.
 #
 # This is DELIBERATELY manual-only (workflow_dispatch). It is not a PR gate:
 #   - it is slow (each test launches real agent turns, minutes each);
@@ -21,8 +42,8 @@
 #     userns restriction (ubuntu-24.04 restricts it by default; the step below
 #     installs the least-privilege bwrap profile via sudo, which is passwordless
 #     on GitHub runners).
-# When ANTHROPIC_API_KEY is absent, the job is a no-op (the tests skip because
-# `claude` cannot authenticate) rather than a false pass.
+# When ANTHROPIC_API_KEY is absent, the job is a no-op (claude isn't installed,
+# the tests skip, and the enforcement step doesn't run) rather than a false pass.
 
 name: Watch live egress gate
 
@@ -38,6 +59,10 @@ jobs:
   live-egress:
     name: Live egress gate (disposable host)
     runs-on: ubuntu-latest
+    env:
+      # Whether the secret is set, as "true" or "false"; never its value. A
+      # step's own env isn't visible to its `if`, so the steps test this.
+      HAS_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -61,28 +86,118 @@ jobs:
           go build -o /tmp/niwa ./cmd/niwa
           BWRAP="$(command -v bwrap)"
           sudo /tmp/niwa setup-sandbox --apply-profile --bwrap-path "$BWRAP" || true
-          # Confirm the sandbox can now build a netns; if not, the gate will skip
-          # its sandbox-dependent assertions rather than false-pass.
+          # Confirm the sandbox can now build a netns. Only then does the
+          # enforcement step below hold the live gate to a pass.
           if bwrap --ro-bind / / --unshare-net --die-with-parent true; then
             echo "netns OK: the OS sandbox can be enforced on this runner"
+            echo "NIWA_NETNS_OK=1" >> "$GITHUB_ENV"
           else
             echo "::warning::bwrap still cannot create a netns; the live egress tests will not be able to enforce the sandbox here"
           fi
 
       - name: Install Claude CLI
-        if: env.ANTHROPIC_API_KEY != ''
+        if: env.HAS_ANTHROPIC_API_KEY == 'true'
         run: npm install -g @anthropic-ai/claude-code
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
-      - name: Run the live egress gate
+      - name: Record the Claude Code version
+        run: |
+          if command -v claude >/dev/null 2>&1; then
+            version="$(claude --version 2>&1 | head -n 1)"
+          else
+            version="claude not on PATH"
+          fi
+          echo "Claude Code version: $version"
+          {
+            echo "### Claude Code version"
+            echo
+            echo '```'
+            echo "$version"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run the fresh-stage egress gate (internal/watch)
         # Double-gated on purpose: NIWA_WATCH_LIVE_TEST=1 opts into the live gate,
         # NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST=1 asserts this is a throwaway host
         # (true for an ephemeral CI runner, never a developer workstation). The
         # tests self-skip (never false-pass) when claude or the sandbox is absent.
         run: |
-          go test ./internal/watch/ -run DeniesEgress -v -timeout 20m
+          set -o pipefail
+          go test ./internal/watch/ -run DeniesEgress -v -timeout 20m 2>&1 | tee "$RUNNER_TEMP/watch-egress.log"
         env:
           NIWA_WATCH_LIVE_TEST: "1"
           NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST: "1"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Run the continuation live gate (internal/cli)
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          go test ./internal/cli/ -run '^TestResumedSessionDeniesEgress_OnHarness$' -v -timeout 30m 2>&1 | tee "$RUNNER_TEMP/watch-live-gate.log"
+        env:
+          NIWA_WATCH_LIVE_TEST: "1"
+          NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST: "1"
+          NIWA_WATCH_LIVE_REPORT: ${{ runner.temp }}/watch-live-report.txt
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Print the live gate report
+        if: always()
+        run: |
+          report="$RUNNER_TEMP/watch-live-report.txt"
+          echo "=== live gate report ($report) ==="
+          {
+            echo "### Live gate report"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -s "$report" ]; then
+            cat "$report"
+            {
+              echo '```'
+              cat "$report"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "(no report was written)"
+            echo "No report was written." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Enforce the continuation live gate
+        # Runs only when the gate's preconditions hold: the API key is present,
+        # the network namespace check succeeded, and claude is on PATH. Then a
+        # skip, a missing pass, or a missing report line fails the job.
+        if: ${{ always() && env.HAS_ANTHROPIC_API_KEY == 'true' && env.NIWA_NETNS_OK == '1' }}
+        run: |
+          if ! command -v claude >/dev/null 2>&1; then
+            echo "claude is not on PATH; the gate's preconditions don't hold, so it isn't enforced"
+            exit 0
+          fi
+          log="$RUNNER_TEMP/watch-live-gate.log"
+          report="$RUNNER_TEMP/watch-live-report.txt"
+          gate=TestResumedSessionDeniesEgress_OnHarness
+          fail=0
+          if [ ! -s "$log" ]; then
+            echo "::error::the live gate's test output is missing"
+            fail=1
+          else
+            if grep -qF -- "--- SKIP: $gate" "$log"; then
+              echo "::error::$gate skipped although its preconditions hold"
+              fail=1
+            fi
+            for name in "$gate" "$gate/stanza_written_after_settle" "$gate/pr_clone_settings_not_loaded"; do
+              if ! grep -qF -- "--- PASS: $name " "$log"; then
+                echo "::error::no PASS line for $name"
+                fail=1
+              fi
+            done
+          fi
+          for pattern in \
+            '^claude_version: ' \
+            '^saved_flags_review_stage: ' \
+            '^claude_ai_reach_after_wake: (present|absent|unknown)' \
+            '^subtest stanza_written_after_settle: pass$' \
+            '^subtest pr_clone_settings_not_loaded: pass$'; do
+            if [ ! -s "$report" ] || ! grep -qE -- "$pattern" "$report"; then
+              echo "::error::the live gate report has no line matching $pattern"
+              fail=1
+            fi
+          done
+          exit "$fail"
