@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -314,6 +315,20 @@ func TestWatchCharacterization_StageReview(t *testing.T) {
 			}
 			if rec.InstancePath != instancePath {
 				t.Errorf("record InstancePath = %q, want %q", rec.InstancePath, instancePath)
+			}
+			// The stage records the digest of the settings it applied; a
+			// fresh digest of the staged instance matches it.
+			if rec.SettingsDigest == "" {
+				t.Error("record SettingsDigest is empty")
+			} else if fresh, err := watch.ReviewSettingsDigest(instancePath); err != nil || fresh != rec.SettingsDigest {
+				t.Errorf("record SettingsDigest = %q, fresh digest = %q (err %v)", rec.SettingsDigest, fresh, err)
+			}
+			// It covers the settings file ApplyReviewSettings wrote.
+			if paths, err := watch.ReviewSettingsDigestChanges(`{"v":1,"f":{}}`, rec.SettingsDigest); err != nil || !slices.Contains(paths, ".claude/settings.json") {
+				t.Errorf("record SettingsDigest covers %v (err %v), want .claude/settings.json among them", paths, err)
+			}
+			if rec.ContinuationHalted != "" {
+				t.Errorf("record ContinuationHalted = %q, want empty", rec.ContinuationHalted)
 			}
 
 			assertStdoutLine(t, stdout.String(), tc.wantLine)

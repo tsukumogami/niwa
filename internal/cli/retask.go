@@ -145,6 +145,17 @@ const (
 	retaskCallerWatch = "watch"
 )
 
+// retaskLockCommand is the command the core names as the instance lock's
+// holder. A destroy, reap, resume or watch prune that finds the lock held
+// reports the holder, and a user who never ran `niwa retask` should be told
+// it is `niwa watch` continuing a review.
+func retaskLockCommand(kind string) string {
+	if kind == retaskCallerWatch {
+		return "watch"
+	}
+	return verbRetask
+}
+
 // Seams over what the core reads and runs, so a test can answer them.
 var (
 	// retaskClaudeVersionFunc runs `<bin> --version` and returns its output.
@@ -407,7 +418,7 @@ func retaskCore(ctx context.Context, v workerView, c retaskCaller) (retaskResult
 	// (1) The lock is taken before anything else is read or run, and held
 	// until the core returns. A platform without flock refuses: retask's stop
 	// and wake must not race a destroy, a reap or a resume.
-	release, err := tryInstanceLockFunc(v.InstancePath, instanceLockHolder(verbRetask))
+	release, err := tryInstanceLockFunc(v.InstancePath, instanceLockHolder(retaskLockCommand(c.Kind)))
 	if err != nil {
 		return r.refuse(retaskConcurrency, "%s", instanceLockReason(err))
 	}

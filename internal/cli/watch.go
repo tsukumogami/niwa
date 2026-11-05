@@ -934,6 +934,15 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	if err := watch.ApplyReviewSettings(instancePath, plan.sandbox, askPosture); err != nil {
 		return err
 	}
+	// The digest of what Claude Code loads from the instance root, taken right
+	// after the settings are applied and before the session can touch anything.
+	// A continuation compares against it and won't wake a record without one, so
+	// a digest that can't be taken fails the stage rather than saving a review
+	// that could never be continued.
+	settingsDigest, err := watch.ReviewSettingsDigest(instancePath)
+	if err != nil {
+		return fmt.Errorf("recording the review instance's settings digest: %w", err)
+	}
 
 	prompt := watch.BuildReviewPrompt(pr, watch.DefaultCloneRelDir, watch.DefaultDraftRelPath)
 
@@ -962,17 +971,18 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 
 	// Record ONLY on success, so a failed stage does not suppress a re-attempt.
 	rec := watch.StagedRecord{
-		Handle:        slug,
-		Owner:         pr.Owner,
-		Repo:          pr.Repo,
-		Number:        pr.Number,
-		URL:           pr.URL,
-		DraftPath:     filepath.Join(instancePath, watch.DefaultDraftRelPath),
-		InstancePath:  instancePath,
-		DispatchedSHA: head.SHA,
-		SessionID:     sessionID,
-		ShortID:       shortID,
-		ReapKey:       reapKey,
+		Handle:         slug,
+		Owner:          pr.Owner,
+		Repo:           pr.Repo,
+		Number:         pr.Number,
+		URL:            pr.URL,
+		DraftPath:      filepath.Join(instancePath, watch.DefaultDraftRelPath),
+		InstancePath:   instancePath,
+		DispatchedSHA:  head.SHA,
+		SessionID:      sessionID,
+		ShortID:        shortID,
+		ReapKey:        reapKey,
+		SettingsDigest: settingsDigest,
 	}
 	if err := watch.SaveStagedRecord(root, rec); err != nil {
 		return err

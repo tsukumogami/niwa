@@ -1441,6 +1441,82 @@ func TestRetaskHostileIDs(t *testing.T) {
 	}
 }
 
+// TestRetaskCoreLockHolderNamesCaller pins the holder the core writes into
+// the instance lock: `niwa retask` for the CLI, `niwa watch` for a watch
+// continuation, so a destroy, reap or resume that finds the lock held names
+// the command the user actually ran.
+func TestRetaskCoreLockHolderNamesCaller(t *testing.T) {
+	recordHolders := func(t *testing.T) *[]string {
+		t.Helper()
+		var holders []string
+		prev := tryInstanceLockFunc
+		tryInstanceLockFunc = func(inst, holder string) (func(), error) {
+			holders = append(holders, holder)
+			return prev(inst, holder)
+		}
+		t.Cleanup(func() { tryInstanceLockFunc = prev })
+		return &holders
+	}
+
+	t.Run("cli", func(t *testing.T) {
+		rf := newRetaskFixture(t, nil)
+		holders := recordHolders(t)
+		if _, _, err := rf.run(t, resumeTestInstance, retaskTestPrompt); err != nil {
+			t.Fatalf("retask: %v", err)
+		}
+		if want := instanceLockHolder(verbRetask); !slices.Contains(*holders, want) {
+			t.Errorf("lock holders = %q, want %q among them", *holders, want)
+		}
+		for _, h := range *holders {
+			if strings.Contains(h, "niwa watch") {
+				t.Errorf("the CLI path took the lock as %q", h)
+			}
+		}
+	})
+
+	t.Run("watch", func(t *testing.T) {
+		rf := newRetaskFixture(t, nil)
+		holders := recordHolders(t)
+		spec, _ := agentplan.For(agent.AgentClaude).LaunchSpec()
+		view := workerView{
+			SessionID:    resumeTestSessionID,
+			ShortID:      retaskTestShort,
+			InstancePath: rf.instancePath(),
+			Staged:       &watch.StagedRecord{SessionID: resumeTestSessionID, ShortID: retaskTestShort, InstancePath: rf.instancePath()},
+			Root:         rf.root,
+			Spec:         spec,
+		}
+		// PreStop runs under the core's lock: a second taker there sees the
+		// holder the core recorded. Its error ends the run before any stop.
+		stopHere := errors.New("probe done")
+		var probeErr error
+		_, err := retaskCore(context.Background(), view, retaskCaller{
+			Kind:   retaskCallerWatch,
+			Prompt: retaskTestPrompt,
+			PreStop: func(context.Context, workerSnapshot) error {
+				release, perr := workspace.TryFileLock(workspace.InstanceLockPath(rf.home, rf.instancePath()), "probe")
+				if release != nil {
+					release()
+				}
+				probeErr = perr
+				return stopHere
+			},
+		})
+		if !errors.Is(err, stopHere) {
+			t.Fatalf("core = %v, want the PreStop probe's error", err)
+		}
+		if want := instanceLockHolder("watch"); len(*holders) != 1 || (*holders)[0] != want {
+			t.Errorf("lock holders = %q, want only %q", *holders, want)
+		}
+		if !errors.Is(probeErr, workspace.ErrLockHeld) || !strings.Contains(probeErr.Error(), "niwa watch (pid") {
+			t.Errorf("probe under the core's lock = %v, want held by niwa watch (pid N)", probeErr)
+		}
+		if stops, _, wakes := actionCount(rf.stubCalls(t)); stops != 0 || wakes != 0 {
+			t.Errorf("stops = %d, wakes = %d after a PreStop refusal", stops, wakes)
+		}
+	})
+}
+
 func TestRetaskCoreWatchCaller(t *testing.T) {
 	watchView := func(rf *retaskFixture) workerView {
 		spec, _ := agentplan.For(agent.AgentClaude).LaunchSpec()
