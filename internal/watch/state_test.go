@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -246,6 +247,107 @@ func TestStagedRecord_RoundTrip(t *testing.T) {
 	}
 	if len(handles) != 1 || handles[0] != "abcd1234" {
 		t.Fatalf("ListStagedHandles = %v", handles)
+	}
+}
+
+func TestStagedRecord_NewFieldsOmitEmpty(t *testing.T) {
+	rec := StagedRecord{Handle: "abcd1234", Owner: "acme", Repo: "api", Number: 42, SessionID: "s", ShortID: "x"}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{"continuation_halted", "settings_digest"} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("empty %s was marshaled: %s", key, data)
+		}
+	}
+	rec.ContinuationHalted, rec.SettingsDigest = "abc123", `{"v":1,"f":{}}`
+	data, err = json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{`"continuation_halted":"abc123"`, `"settings_digest":`} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("set field %s missing: %s", key, data)
+		}
+	}
+
+	// A record as SaveStagedRecord wrote it before the fields existed loads
+	// with both empty.
+	ws := t.TempDir()
+	dir := filepath.Join(ws, stagedRecordsRelDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `{
+  "handle": "abcd1234",
+  "owner": "acme",
+  "repo": "api",
+  "number": 42,
+  "url": "https://github.com/acme/api/pull/42",
+  "draft_path": "/ws/inst/watch-review-draft.md",
+  "instance_path": "/ws/inst",
+  "dispatched_sha": "abcdef1234567",
+  "session_id": "5f0c2d1e-0000-4000-8000-000000000000",
+  "short_id": "5f0c2d1e",
+  "reap_key": "k"
+}`
+	if err := os.WriteFile(filepath.Join(dir, "abcd1234.json"), []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadStagedRecord(ws, "abcd1234")
+	if err != nil {
+		t.Fatalf("LoadStagedRecord: %v", err)
+	}
+	if got.ContinuationHalted != "" || got.SettingsDigest != "" {
+		t.Fatalf("legacy record loaded with new fields set: %+v", got)
+	}
+	if got.SessionID == "" || got.DispatchedSHA != "abcdef1234567" {
+		t.Fatalf("legacy record lost its fields: %+v", got)
+	}
+}
+
+func TestSaveStagedRecordAtomic(t *testing.T) {
+	ws := t.TempDir()
+	rec := StagedRecord{Handle: "abcd1234", Owner: "acme", Repo: "api", Number: 42, SettingsDigest: `{"v":1,"f":{}}`}
+	for i := 0; i < 2; i++ {
+		rec.DispatchedSHA = strings.Repeat("a", i+1)
+		if err := SaveStagedRecord(ws, rec); err != nil {
+			t.Fatalf("SaveStagedRecord: %v", err)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(ws, stagedRecordsRelDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "abcd1234.json" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("records dir holds %v, want only abcd1234.json (no temp file left)", names)
+	}
+	fi, err := os.Stat(filepath.Join(ws, stagedRecordsRelDir, "abcd1234.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Errorf("record mode = %v, want 0644", fi.Mode().Perm())
+	}
+	got, err := LoadStagedRecord(ws, "abcd1234")
+	if err != nil {
+		t.Fatalf("LoadStagedRecord: %v", err)
+	}
+	if got != rec {
+		t.Fatalf("got %+v want %+v", got, rec)
+	}
+	// A leftover temp file is not reported as a handle.
+	if err := os.WriteFile(filepath.Join(ws, stagedRecordsRelDir, ".rec-123"), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	handles, err := ListStagedHandles(ws)
+	if err != nil || len(handles) != 1 || handles[0] != "abcd1234" {
+		t.Fatalf("ListStagedHandles = %v, %v", handles, err)
 	}
 }
 
