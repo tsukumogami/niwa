@@ -490,8 +490,9 @@ containment unchanged, with input validation on the new persisted fields.
   command for a review that was continued. Issue #460's reproduction showed a
   flagless resume continuing the stopped session under the same id on Claude Code
   2.1.314 (macOS arm64), and continuation defers on a build below that version. The
-  `watch-live-egress` workflow records the Claude Code version it checked in its job
-  log and summary, and is re-run for each Claude Code upgrade used with watch.
+  live gate that checks this is local-only: it is re-run locally for each Claude
+  Code upgrade used with watch, and its report records the Claude Code version it
+  checked.
 - **The resume execution + OS-sandbox re-entry were not executed in the authoring
   run.** The classifier, decision flip, id capture/validation, cap-neutrality, and
   the two-way liveness cross-check are all unit-tested offline; the actual
@@ -505,7 +506,17 @@ containment unchanged, with input validation on the new persisted fields.
   or a second session is rooted at the instance, checks egress from inside the
   woken session, and wakes a second time to cover chaining. Its copy check also has
   an offline test, `TestLiveGateCopyCheck`, that runs in normal CI.
-  Both live tests are **disposable/CI-host only**: to run a real authenticated
+  The continuation gate is **local-only**. CI has no API key for its sessions and
+  no disposable host for them, so it never runs there: the test checks for CI
+  (`GITHUB_ACTIONS=true` or `CI=true`) before anything else and skips with a message
+  that says it is local-only and gives the command to run it locally, even when the
+  opt-ins are set. Its skip decision has an offline test, `TestLiveGateRunDecision`.
+  It is re-run locally, on a disposable host, for each Claude Code upgrade used with
+  watch; `NIWA_WATCH_LIVE_REPORT` names a file for its report (the Claude Code
+  version, the review stage's saved flags with the `--settings` value reduced to
+  its key list, whether claude.ai still reaches the woken session, and each
+  subtest's pass).
+  Both live tests are **disposable-host only**: to run a real authenticated
   `claude` session they symlink the developer's real `~/.claude` into an isolated
   HOME, so a no-egress run on a primary workstation makes those throwaway sessions
   look like the user's own login broke. They are double-gated --
@@ -515,9 +526,14 @@ containment unchanged, with input validation on the new persisted fields.
   PASSED (fresh-session egress denied at the OS layer) and the resumed gate of that
   time, which relaunched with flags, went *inconclusive* (the resumed session did not
   write the probe result in time -- no egress leak observed). The rewritten gate
-  fails rather than going inconclusive once its opt-ins hold, and the
-  `watch-live-egress` workflow fails the job when its preconditions hold and the gate
-  skips, doesn't pass, or leaves out a line of its report. Containment on the wake
+  fails rather than going inconclusive or skipping once its opt-ins hold outside
+  CI: a missing `claude`, an isolated HOME that can't be set up, or an egress probe
+  that can't reach the network outside the sandbox each fail it. The
+  `watch-live-egress` workflow no longer runs the gate. It needs no secret, runs on
+  pull requests that touch the watch code, and fails the job unless the gate
+  reports a skip with its local-only reason and the offline copy-check and
+  skip-decision tests pass, so the gate can't drift into a silent pass in CI.
+  Containment on the wake
   comes from the files and saved options the pre-wake gate checked (see Security), a
   code-reviewable property, but the empirical woken-session egress assertion should
   be run on a disposable bwrap/claude host before relying on continuation in

@@ -45,12 +45,16 @@ import (
 // settles, the other plants settings and an MCP server in the PR clone and
 // checks neither is loaded.
 //
-// It runs only with NIWA_WATCH_LIVE_TEST=1 and
-// NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST=1, on a host other than Windows with
-// claude on PATH; otherwise it skips. Once those hold, every later step fails
-// the test rather than skipping it, so a run that can't prove the boundary
-// never reads as a pass. When NIWA_WATCH_LIVE_REPORT names a file, the test
-// appends its report lines there (see appendLiveGateReport).
+// The gate is local-only. In CI it always skips, with a message saying so
+// and how to run it locally, even when the opt-ins are set. Outside CI it
+// runs only with NIWA_WATCH_LIVE_TEST=1 and
+// NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST=1, on a host other than Windows; once
+// those hold, every unmet precondition (claude missing from PATH, the
+// isolated HOME, the egress probe) and every later step fails the test rather
+// than skipping it, so a run that can't prove the boundary never reads as a
+// pass. Re-run it locally for each Claude Code upgrade used with niwa watch.
+// When NIWA_WATCH_LIVE_REPORT names a file, the test appends its report lines
+// there (see appendLiveGateReport).
 func TestResumedSessionDeniesEgress_OnHarness(t *testing.T) {
 	requireLiveGateHost(t)
 
@@ -133,28 +137,67 @@ func TestResumedSessionDeniesEgress_OnHarness(t *testing.T) {
 	}
 }
 
-// requireLiveGateHost skips unless the live gate's double opt-in is set and
-// the host can run it. NIWA_WATCH_LIVE_TEST=1 opts in; and because the gate
-// runs real authenticated claude sessions that share the real ~/.claude
-// (symlinked into an isolated HOME) under a no-egress sandbox,
-// NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST=1 has to confirm the host is a
-// disposable or CI one, never a developer's own machine. These are the only
-// skips: everything after them fails.
+// liveGateDecision is what the live gate does on this host before any
+// precondition is checked.
+type liveGateDecision int
+
+const (
+	liveGateRun liveGateDecision = iota
+	liveGateSkipCI
+	liveGateSkipNotOptedIn
+)
+
+// liveGateHowTo says how to run the live gate locally. Every skip carries it.
+const liveGateHowTo = "run it locally, on a disposable host (it drives real authenticated claude sessions that share your ~/.claude), with: " +
+	"NIWA_WATCH_LIVE_TEST=1 NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST=1 " +
+	"go test ./internal/cli/ -count=1 -v -run '^TestResumedSessionDeniesEgress_OnHarness$' -timeout 30m"
+
+// liveGateSkipCIReason is the CI skip message. The watch-live-egress workflow
+// checks for "local-only, skipped in CI", so keep that phrase.
+const liveGateSkipCIReason = "live egress gate is local-only, skipped in CI; " + liveGateHowTo
+
+// liveGateSkipNotOptedInReason is the local skip message without the opt-ins.
+const liveGateSkipNotOptedInReason = "live egress gate is local-only and not opted in; " + liveGateHowTo
+
+// liveGateRunDecision decides from the environment whether the live gate
+// runs. The CI check comes first, so opt-ins set in a workflow can't run the
+// gate there: CI has no API key for it and no disposable host. CI is detected
+// by GITHUB_ACTIONS=true, which GitHub Actions always sets, or by CI=true (or
+// CI=1), which GitHub Actions and most other CI systems set; either one is
+// enough, so a CI system other than GitHub Actions skips too. A developer
+// shell that exports CI=true skips the same way, visibly, with the reason.
+// Outside CI the gate runs only when both NIWA_WATCH_LIVE_TEST=1 and
+// NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST=1 are set.
+func liveGateRunDecision(getenv func(string) string) liveGateDecision {
+	ci := strings.ToLower(strings.TrimSpace(getenv("CI")))
+	if strings.EqualFold(strings.TrimSpace(getenv("GITHUB_ACTIONS")), "true") || ci == "true" || ci == "1" {
+		return liveGateSkipCI
+	}
+	if getenv("NIWA_WATCH_LIVE_TEST") != "1" || getenv("NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST") != "1" {
+		return liveGateSkipNotOptedIn
+	}
+	return liveGateRun
+}
+
+// requireLiveGateHost skips in CI, skips outside CI without the double
+// opt-in, and skips on Windows, where the OS sandbox the gate checks doesn't
+// exist (the feature fails closed there, so there is no boundary to probe).
+// Those are the only skips. Once the gate is opted in on a host that can run
+// it, a missing precondition fails the test: an opted-in run that silently
+// skipped would read like a pass.
 func requireLiveGateHost(t *testing.T) {
 	t.Helper()
-	if os.Getenv("NIWA_WATCH_LIVE_TEST") != "1" {
-		t.Skip("live containment gate: set NIWA_WATCH_LIVE_TEST=1 to run; skipping (never a false pass)")
-	}
-	if os.Getenv("NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST") != "1" {
-		t.Skip("live containment gate: it runs REAL authenticated claude sessions " +
-			"against your real ~/.claude under a no-egress sandbox. Run it ONLY on a disposable or CI " +
-			"host, never your primary workstation. Set NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST=1 to confirm.")
+	switch liveGateRunDecision(os.Getenv) {
+	case liveGateSkipCI:
+		t.Skip(liveGateSkipCIReason)
+	case liveGateSkipNotOptedIn:
+		t.Skip(liveGateSkipNotOptedInReason)
 	}
 	if runtime.GOOS == "windows" {
-		t.Skip("the OS sandbox is unavailable on Windows (the feature fails closed there)")
+		t.Skip("live egress gate: the OS sandbox is unavailable on Windows (the feature fails closed there), so there is no boundary to check")
 	}
 	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skip("claude not on PATH; the live containment gate needs it")
+		t.Fatalf("live egress gate is opted in, but claude isn't on PATH (%v); install Claude Code or unset NIWA_WATCH_LIVE_TEST", err)
 	}
 }
 
@@ -541,8 +584,9 @@ func liveGateCopyCheck(rows []claudeSessionRow, stagedID, inst string) error {
 }
 
 // appendLiveGateReport appends one line to the file NIWA_WATCH_LIVE_REPORT
-// names, when it names one, and logs it either way. The workflow prints the
-// file into the job log and checks it for the lines it requires.
+// names, when it names one, and logs it either way. A local run keeps the
+// file as the record of what it checked: the Claude Code version, the saved
+// review-stage flags, the claude.ai reach line and each subtest's pass.
 func appendLiveGateReport(t *testing.T, line string) {
 	t.Helper()
 	t.Logf("live gate report: %s", line)
@@ -668,6 +712,59 @@ func liveGateInstFiles(dir string) string {
 		names = append(names, e.Name())
 	}
 	return strings.Join(names, ", ")
+}
+
+// TestLiveGateRunDecision pins the live gate's skip decision: CI always
+// skips, even with both opt-ins; outside CI it runs only with both.
+func TestLiveGateRunDecision(t *testing.T) {
+	both := map[string]string{"NIWA_WATCH_LIVE_TEST": "1", "NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST": "1"}
+	with := func(base map[string]string, kv ...string) map[string]string {
+		m := map[string]string{}
+		for k, v := range base {
+			m[k] = v
+		}
+		for i := 0; i+1 < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		return m
+	}
+	cases := []struct {
+		name string
+		env  map[string]string
+		want liveGateDecision
+	}{
+		{"github actions with both opt-ins", with(both, "GITHUB_ACTIONS", "true"), liveGateSkipCI},
+		{"CI=true with both opt-ins", with(both, "CI", "true"), liveGateSkipCI},
+		{"CI=1 with both opt-ins", with(both, "CI", "1"), liveGateSkipCI},
+		{"github actions without opt-ins", map[string]string{"GITHUB_ACTIONS": "true", "CI": "true"}, liveGateSkipCI},
+		{"not CI without opt-ins", map[string]string{}, liveGateSkipNotOptedIn},
+		{"not CI with both opt-ins", both, liveGateRun},
+		{"CI=false with both opt-ins", with(both, "CI", "false", "GITHUB_ACTIONS", ""), liveGateRun},
+		{"only NIWA_WATCH_LIVE_TEST", map[string]string{"NIWA_WATCH_LIVE_TEST": "1"}, liveGateSkipNotOptedIn},
+		{"only the disposable-host opt-in", map[string]string{"NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST": "1"}, liveGateSkipNotOptedIn},
+		{"opt-in not 1", with(both, "NIWA_WATCH_LIVE_TEST", "true"), liveGateSkipNotOptedIn},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := liveGateRunDecision(func(k string) string { return tc.env[k] })
+			if got != tc.want {
+				t.Fatalf("liveGateRunDecision(%v) = %d, want %d", tc.env, got, tc.want)
+			}
+		})
+	}
+
+	// Both skips say the gate is local-only and how to run it; the workflow
+	// looks for the CI one's phrase.
+	if !strings.Contains(liveGateSkipCIReason, "local-only, skipped in CI") {
+		t.Errorf("the CI skip reason lost the phrase the workflow checks: %q", liveGateSkipCIReason)
+	}
+	for _, reason := range []string{liveGateSkipCIReason, liveGateSkipNotOptedInReason} {
+		for _, want := range []string{"local-only", "NIWA_WATCH_LIVE_TEST=1", "NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST=1", "go test ./internal/cli/"} {
+			if !strings.Contains(reason, want) {
+				t.Errorf("skip reason %q lacks %q", reason, want)
+			}
+		}
+	}
 }
 
 // TestLiveGateRawStatus runs the live gate's egress oracle parse offline: only
