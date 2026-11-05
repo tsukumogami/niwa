@@ -27,6 +27,12 @@ import (
 // derivePermissionMode, so the mode it launches with is never more permissive
 // than a new dispatch would get.
 //
+// niwa retask's checkOptionsAndPolicy reads it the same way and for the same
+// reason, only to refuse: a worker whose recorded mode is looser than the one
+// current policy gives a new dispatch is not woken at all, since a wake keeps
+// the recorded mode. It reads the posture of an instance that is already
+// there only when it equals the one the configuration gives, as resume does.
+//
 // It reads every non-test source under internal/ as a syntax tree, so a
 // mention in a comment is not a violation. A field read anywhere else (`niwa
 // watch`, `niwa list`, the workspace-root state `niwa init` saves,
@@ -103,6 +109,8 @@ func TestClaudePermissionsHasOneReader(t *testing.T) {
 			dispatchReads++
 		case r.file == "cli/resume.go" && r.fn == "runResume":
 			resumeReads++
+		case r.file == "cli/retask.go" && r.fn == "checkOptionsAndPolicy":
+			// retask's refusal-only read, described above.
 		default:
 			t.Errorf("ClaudePermissions may be read only in runDispatch and runResume; found %s in %s (%s)", r.detail, r.file, r.fn)
 		}
@@ -125,6 +133,10 @@ func TestClaudePermissionsHasOneReader(t *testing.T) {
 	for _, d := range derives {
 		inDispatch := d.file == "cli/dispatch.go" && (d.fn == "runDispatch" || d.fn == "derivePermissionMode")
 		inResume := d.file == "cli/resume.go" && d.fn == "runResume"
+		if d.file == "cli/retask.go" && d.fn == "checkOptionsAndPolicy" {
+			// retask derives the current mode only to refuse a looser one.
+			continue
+		}
 		if !inDispatch && !inResume {
 			t.Errorf("derivePermissionMode may only be called from runDispatch and runResume; found it in %s (%s)", d.file, d.fn)
 		}

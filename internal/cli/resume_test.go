@@ -657,6 +657,94 @@ func TestResumeRefusesStoppedWithJobEntry(t *testing.T) {
 	}
 }
 
+// TestResumeRunningRefusalNamesRetask: a resume of a running worker points at
+// both ways to reach it, attaching and handing it a task in place.
+func TestResumeRunningRefusalNamesRetask(t *testing.T) {
+	f := newResumeFixture(t, "")
+	f.writeRecord(t, f.record())
+	f.writeTranscript(t, resumeTestSessionID)
+	f.presentInstance(t)
+	f.sessions = []claudeSessionRow{{ID: "11111111", SessionID: resumeTestSessionID, Cwd: f.instancePath(), PID: 4242, Status: "idle"}}
+
+	_, _, err := runResumeCmd(t, resumeTestInstance)
+	if err == nil {
+		t.Fatal("resume succeeded on a running worker")
+	}
+	for _, w := range []string{"still running", "claude attach 11111111", "niwa retask"} {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("refusal lacks %q: %v", w, err)
+		}
+	}
+	if calls := f.calls(t); len(calls) != 0 {
+		t.Errorf("stub claude was called: %q", calls)
+	}
+}
+
+// TestResumeRefusalNamesVerb: the preamble resume and retask share words a
+// refusal for the verb that asked.
+func TestResumeRefusalNamesVerb(t *testing.T) {
+	f := newResumeFixture(t, "")
+	f.writeRecord(t, f.record())
+	const arg = "rs+other-89abcdef"
+
+	_, _, err := runResumeCmd(t, arg)
+	if err == nil || !strings.HasPrefix(err.Error(), `niwa: error: cannot resume "`) {
+		t.Errorf("resume refusal = %v, want it to start with cannot resume", err)
+	}
+	for verb, prefix := range map[string]string{
+		verbResume: `niwa: error: cannot resume "` + arg + `": no launch record`,
+		verbRetask: `niwa: error: cannot retask "` + arg + `": unknown-target: no launch record`,
+	} {
+		_, err := resolveLaunchRecord(f.root, verb, arg)
+		if err == nil || !strings.HasPrefix(err.Error(), prefix) {
+			t.Errorf("%s: refusal = %v, want it to start with %q", verb, err, prefix)
+		}
+	}
+}
+
+// TestResumeNewIdentifiers: resume finds a worker whose job entry is gone by
+// its short id, its dispatch id and its full instance path too.
+func TestResumeNewIdentifiers(t *testing.T) {
+	for _, arg := range []string{"11111111", resumeTestDispatchID, ""} {
+		name := arg
+		if arg == "" {
+			name = "full instance path"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newResumeFixture(t, "")
+			f.writeRecord(t, f.record())
+			f.writeTranscript(t, resumeTestSessionID)
+			f.presentInstance(t)
+			if err := workspace.WriteSessionMapping(f.root, workspace.SessionMapping{
+				SessionID:    resumeTestSessionID,
+				InstanceName: resumeTestInstance,
+				InstancePath: f.instancePath(),
+				Agent:        string(agent.AgentClaude),
+				Origin:       workspace.MappingOriginDispatch,
+				DispatchID:   resumeTestDispatchID,
+				Handle:       "11111111",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if arg == "" {
+				arg = f.instancePath()
+			}
+			if _, stderr, err := runResumeCmd(t, arg); err != nil {
+				t.Fatalf("resume %s: %v\nstderr:\n%s", arg, err, stderr)
+			}
+			var launched bool
+			for _, c := range f.calls(t) {
+				if args := argsOf(c); len(args) >= 3 && args[0] == "--bg" && args[1] == "--resume" && args[2] == resumeTestSessionID {
+					launched = true
+				}
+			}
+			if !launched {
+				t.Errorf("resume %s logged no --bg --resume %s launch: %q", arg, resumeTestSessionID, f.calls(t))
+			}
+		})
+	}
+}
+
 // TestResumeRecordModelShapes pins which recorded models resume accepts:
 // dispatch forwards an unrecognized model as given, so a full model id must
 // resume, while anything that could read as a flag or carry a space is
