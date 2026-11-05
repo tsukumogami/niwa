@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,10 +57,13 @@ import (
 func TestResumedSessionDeniesEgress_OnHarness(t *testing.T) {
 	requireLiveGateHost(t)
 
-	// The probe must reach the network outside the sandbox, so its failure
-	// inside the woken session is a real signal.
-	if err := liveGateEgressReachable(); err != nil {
-		t.Fatalf("the egress probe failed outside the sandbox (%v); it must reach the network here for an in-sandbox failure to mean anything", err)
+	// The exact probe command must connect outside the sandbox, so its failure
+	// inside the woken session is a real signal. A missing shell (126, 127) or
+	// a host with no route out is inconclusive, never a skip.
+	if st, err := liveGateHostProbe(context.Background()); err != nil {
+		t.Fatalf("inconclusive: the egress probe couldn't run on the host (%v)", err)
+	} else if st != 0 {
+		t.Fatalf("inconclusive: the egress probe %q exited %d on the host; it must connect (status 0) outside the sandbox for an in-sandbox failure to mean anything", liveGateProbeCommand, st)
 	}
 
 	h := newLiveGateHarness(t)
@@ -152,9 +154,30 @@ const liveGateHowTo = "run it locally, on a disposable host (it drives real auth
 	"NIWA_WATCH_LIVE_TEST=1 NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST=1 " +
 	"go test ./internal/cli/ -count=1 -v -run '^TestResumedSessionDeniesEgress_OnHarness$' -timeout 30m"
 
-// liveGateSkipCIReason is the CI skip message. The watch-live-egress workflow
-// checks for "local-only, skipped in CI", so keep that phrase.
-const liveGateSkipCIReason = "live egress gate is local-only, skipped in CI; " + liveGateHowTo
+// liveGateSkipCIPrefix starts the CI skip message. The watch-live-egress
+// workflow greps for exactly this text, so keep it.
+const liveGateSkipCIPrefix = "live egress gate is local-only, skipped in CI"
+
+// liveGateCIVariable names the variable that made liveGateRunDecision see CI,
+// and its value, or "", "" when neither is set to a CI value.
+func liveGateCIVariable(getenv func(string) string) (name, value string) {
+	if v := getenv("GITHUB_ACTIONS"); strings.EqualFold(strings.TrimSpace(v), "true") {
+		return "GITHUB_ACTIONS", v
+	}
+	if v := getenv("CI"); v != "" {
+		if ci := strings.ToLower(strings.TrimSpace(v)); ci == "true" || ci == "1" {
+			return "CI", v
+		}
+	}
+	return "", ""
+}
+
+// liveGateSkipCIReason is the CI skip message. It names the variable that
+// triggered the skip, so a developer with CI=true in their shell sees why.
+func liveGateSkipCIReason(getenv func(string) string) string {
+	name, value := liveGateCIVariable(getenv)
+	return liveGateSkipCIPrefix + " (" + name + "=" + strconv.Quote(value) + " is set); " + liveGateHowTo
+}
 
 // liveGateSkipNotOptedInReason is the local skip message without the opt-ins.
 const liveGateSkipNotOptedInReason = "live egress gate is local-only and not opted in; " + liveGateHowTo
@@ -189,7 +212,7 @@ func requireLiveGateHost(t *testing.T) {
 	t.Helper()
 	switch liveGateRunDecision(os.Getenv) {
 	case liveGateSkipCI:
-		t.Skip(liveGateSkipCIReason)
+		t.Skip(liveGateSkipCIReason(os.Getenv))
 	case liveGateSkipNotOptedIn:
 		t.Skip(liveGateSkipNotOptedInReason)
 	}
@@ -201,16 +224,34 @@ func requireLiveGateHost(t *testing.T) {
 	}
 }
 
-// liveGateEgressReachable reports nil when a raw TCP connect to a literal IP,
-// or a dial to a hostname, reaches the network from this process.
-func liveGateEgressReachable() error {
-	for _, addr := range []string{"1.1.1.1:443", "example.com:443"} {
-		if c, err := net.DialTimeout("tcp", addr, 3*time.Second); err == nil {
-			_ = c.Close()
-			return nil
-		}
+// liveGateProbeScript is the raw TCP connect the woken session runs and the
+// test runs first on the host. It exits 0 on a connect, 1 when the connect
+// fails, and 124 when it hangs past 5 seconds and is killed. It uses no
+// `timeout`: stock macOS doesn't ship it, so a probe built on it exits 127
+// there, the session reports RAW=127, and a "non-zero means denied" oracle
+// would pass without ever trying a connect. The bound is a background killer
+// instead, which works on macOS bash 3.2 and on Linux. The script has no
+// single quotes, so it nests inside bash -c '...'.
+const liveGateProbeScript = `(exec 3<>/dev/tcp/1.1.1.1/443) & p=$!; (sleep 5; kill $p) 2>/dev/null & k=$!; wait $p; s=$?; kill $k 2>/dev/null; if [ $s -gt 125 ]; then s=124; fi; exit $s`
+
+// liveGateProbeCommand is the command line the session is asked to run.
+const liveGateProbeCommand = "bash -c '" + liveGateProbeScript + "' 2>/dev/null"
+
+// liveGateHostProbe runs the exact probe command on the host and returns its
+// exit status. A status other than 0 means the host can't reach out or the
+// probe itself is broken; either way the in-sandbox result would mean nothing.
+func liveGateHostProbe(ctx context.Context) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	err := exec.CommandContext(ctx, "sh", "-c", liveGateProbeCommand).Run()
+	if err == nil {
+		return 0, nil
 	}
-	return errors.New("all egress attempts were blocked")
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode(), nil
+	}
+	return 0, err
 }
 
 // liveGateHarness is the live gate's shared setup: a workspace root with no
@@ -464,23 +505,37 @@ func (h *liveGateHarness) wakeAndCheck(t *testing.T, ctx context.Context, r *liv
 	return wokenRow
 }
 
-// liveGateRawStatus reads the probe's exit status from the last RAW= line of
-// the session's result file. Only a number counts: a missing line or a value
-// that isn't one (an agent's prose, an empty status) is an error, so the
-// oracle never reads it as a denial.
+// liveGateRawStatus reads the probe's exit status from the RAW= lines of the
+// session's result file. A RAW=0 on any line means the connect succeeded, and
+// wins over later lines. Otherwise the last RAW line decides, and only a
+// status of 1 to 125 counts as a denial (a connect failure, or 124 for the
+// probe's timeout kill). Everything else is an error, so the oracle never
+// reads it as a denial: a missing line, prose or an empty value, a negative or
+// out-of-range number, and 126 or 127, which mean the shell couldn't run the
+// command (for example a probe built on `timeout` on stock macOS, which has
+// none).
 func liveGateRawStatus(content string) (int, error) {
-	raw, found := "", false
+	raw, found, zero := "", false, false
 	for _, line := range strings.Split(content, "\n") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "RAW="); ok {
 			raw, found = strings.TrimSpace(v), true
+			if n, err := strconv.Atoi(raw); err == nil && n == 0 {
+				zero = true
+			}
 		}
 	}
 	if !found {
 		return 0, errors.New("no RAW line")
 	}
+	if zero {
+		return 0, nil
+	}
 	n, err := strconv.Atoi(raw)
 	if err != nil {
 		return 0, fmt.Errorf("RAW value %q is not a numeric exit status", raw)
+	}
+	if n < 1 || n > 125 {
+		return 0, fmt.Errorf("RAW=%d is not a connect failure or timeout (126 and 127 mean the probe didn't run)", n)
 	}
 	return n, nil
 }
@@ -490,7 +545,7 @@ func liveGateRawStatus(content string) (int, error) {
 // exit status in marker.
 func liveGateProbePrompt(marker string) string {
 	return "You are testing a no-egress sandbox after being woken. Run exactly this one Bash command with the Bash tool: " +
-		"timeout 5 bash -c 'echo > /dev/tcp/1.1.1.1/443' 2>/dev/null; printf 'RAW=%s' \"$?\"\n" +
+		liveGateProbeCommand + "; printf 'RAW=%s' \"$?\"\n" +
 		"Then use the Write tool to write a file named " + marker + " in the current directory whose only line is RAW=<the number the Bash command printed>. Then STOP."
 }
 
@@ -755,10 +810,23 @@ func TestLiveGateRunDecision(t *testing.T) {
 
 	// Both skips say the gate is local-only and how to run it; the workflow
 	// looks for the CI one's phrase.
-	if !strings.Contains(liveGateSkipCIReason, "local-only, skipped in CI") {
-		t.Errorf("the CI skip reason lost the phrase the workflow checks: %q", liveGateSkipCIReason)
+	ciReason := func(env map[string]string) string {
+		return liveGateSkipCIReason(func(k string) string { return env[k] })
 	}
-	for _, reason := range []string{liveGateSkipCIReason, liveGateSkipNotOptedInReason} {
+	ghReason := ciReason(map[string]string{"GITHUB_ACTIONS": "true", "CI": "true"})
+	ciOnly := ciReason(map[string]string{"CI": "1"})
+	for _, tc := range []struct{ reason, want string }{
+		{ghReason, `GITHUB_ACTIONS="true"`},
+		{ciOnly, `CI="1"`},
+	} {
+		if !strings.Contains(tc.reason, liveGateSkipCIPrefix) || !strings.HasPrefix(tc.reason, "live egress gate is local-only, skipped in CI") {
+			t.Errorf("the CI skip reason lost the phrase the workflow checks: %q", tc.reason)
+		}
+		if !strings.Contains(tc.reason, tc.want) {
+			t.Errorf("the CI skip reason %q doesn't name the variable as %s", tc.reason, tc.want)
+		}
+	}
+	for _, reason := range []string{ghReason, liveGateSkipNotOptedInReason} {
 		for _, want := range []string{"local-only", "NIWA_WATCH_LIVE_TEST=1", "NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST=1", "go test ./internal/cli/"} {
 			if !strings.Contains(reason, want) {
 				t.Errorf("skip reason %q lacks %q", reason, want)
@@ -780,8 +848,16 @@ func TestLiveGateRawStatus(t *testing.T) {
 		{"denied", "RAW=1", 1, false},
 		{"timed out", "RAW=124", 124, false},
 		{"connected", "RAW=0", 0, false},
-		{"last line wins", "RAW=0\nRAW=1", 1, false},
+		{"zero on an earlier line is still a connect", "RAW=0\nRAW=1", 0, false},
+		{"zero on a later line", "RAW=1\nRAW=0", 0, false},
+		{"last non-zero line wins", "RAW=1\nRAW=2", 2, false},
+		{"two", "RAW=2", 2, false},
 		{"surrounding text", "probe done\n  RAW=1  \n", 1, false},
+		{"126 cannot execute", "RAW=126", 0, true},
+		{"127 command not found", "RAW=127", 0, true},
+		{"255", "RAW=255", 0, true},
+		{"negative", "RAW=-1", 0, true},
+		{"empty content", "", 0, true},
 		{"no RAW line", "the probe ran", 0, true},
 		{"empty value", "RAW=", 0, true},
 		{"placeholder", "RAW=<the number the Bash command printed>", 0, true},
