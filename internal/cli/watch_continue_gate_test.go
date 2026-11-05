@@ -319,6 +319,39 @@ func TestContinueReview_ChangeDuringGateRefuses(t *testing.T) {
 	}
 }
 
+// TestContinueReview_SettingsEditDuringFetchRefuses: an edit to
+// .claude/settings.json made during the fetch is caught before the re-apply
+// can merge it. The post-apply check alone lets that path change, so without
+// the digest taken just before the re-apply the edit would be woken and
+// recorded as the new baseline.
+func TestContinueReview_SettingsEditDuringFetchRefuses(t *testing.T) {
+	f := newWatchContinueFixture(t, true, nil)
+	const statusCmd = "sh -c planted-status-line"
+	fired := false
+	f.fetchHook = func() {
+		fired = true
+		editReviewSettings(t, f.inst, func(s map[string]any) {
+			s["statusLine"] = map[string]any{"type": "command", "command": statusCmd}
+		})
+	}
+	before := f.recordBytes(t)
+
+	out, _, err := f.run(t)
+	if !fired {
+		t.Fatal("the fetch never ran, so the test checks nothing")
+	}
+	line := f.assertGateRefused(t, out, err, watchDeferSettingsDigest, before)
+	if !strings.Contains(line, strconv.Quote(".claude/settings.json")) {
+		t.Errorf("defer line doesn't name settings.json:\n%s", line)
+	}
+	if strings.Contains(out, statusCmd) || strings.Contains(out, "statusLine") {
+		t.Errorf("the pass printed the written content:\n%s", out)
+	}
+	if got := f.loadRecord(t).SettingsDigest; got != f.stageDigest {
+		t.Errorf("the record's digest moved:\n record %s\n staged %s", got, f.stageDigest)
+	}
+}
+
 // TestContinueReview_DigestRefusalText: the digest refusal names the changed
 // paths relative to the instance, says what changed and what else causes it,
 // and gives the recovery, without quoting any content or settings value.

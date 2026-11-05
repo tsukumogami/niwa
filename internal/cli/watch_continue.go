@@ -416,8 +416,9 @@ func snapshotReviewSettings(inst string) reviewSettingsSnapshot {
 }
 
 // runReviewWakeGate is the containment gate a review session passes before
-// every wake, in this order: resolve the write posture; re-apply the file
-// layer (watch.ApplyReviewSettings) and verify it from disk; refuse when
+// every wake, in this order: resolve the write posture; refuse when the
+// instance no longer matches pre at any path; re-apply the file layer
+// (watch.ApplyReviewSettings) and verify it from disk; refuse when
 // .claude/settings.local.json or .mcp.json exists; compare the recorded
 // settings digest with pre, the instance as it stood before the re-apply; and
 // check the saved option argv opts. It returns the write posture and the
@@ -429,6 +430,26 @@ func snapshotReviewSettings(inst string) reviewSettingsSnapshot {
 // seed the instance's Claude trust, but never the staged record.
 func runReviewWakeGate(stderr io.Writer, inst string, rec watch.StagedRecord, sandbox bool, opts []string, pre reviewSettingsSnapshot) (bool, string, error) {
 	ask := resolveAskPosture(stderr, inst, sandbox)
+
+	// The re-apply merges whatever .claude/settings.json holds, and the
+	// post-apply check below can't tell that file's edits from the re-apply's.
+	// So the instance is compared with pre once more before anything is
+	// written: an edit made during the head fetch, by a process that outlived
+	// the stop, would otherwise be merged and recorded as the new baseline.
+	// When pre itself failed, the digest check below refuses.
+	if pre.err == nil {
+		before, err := watch.ReviewSettingsDigest(inst)
+		if err != nil {
+			return false, "", watchDefer(watchDeferSettingsDigest, "the review instance's settings digest can't be taken before re-applying its settings")
+		}
+		window, err := watch.ReviewSettingsDigestChanges(pre.digest, before)
+		if err != nil {
+			return false, "", watchDefer(watchDeferSettingsDigest, "the review instance's settings digests can't be compared")
+		}
+		if len(window) > 0 {
+			return false, "", watchDefer(watchDeferSettingsDigest, "%s", digestWindowRefusalText(window, rec.ShortID))
+		}
+	}
 
 	// The errors of the re-apply and the verify can quote a settings value,
 	// so the defer line names the file and the kinds of cause instead.
