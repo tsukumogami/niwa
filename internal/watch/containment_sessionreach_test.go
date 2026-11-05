@@ -29,11 +29,11 @@ var reviewToolNames = []string{
 	"Bash", "Read", "Glob", "Grep", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch",
 }
 
-// reviewDocFor builds a hand-made settings document holding everything the given
-// mode requires except the session-reach deny hook, plus any extra PreToolUse
-// entries.
+// reviewDocFor builds a hand-made settings document for the instance "/inst"
+// holding everything the given mode requires except the session-reach deny hook,
+// plus any extra PreToolUse entries.
 func reviewDocFor(sandbox, ask bool, extra ...any) map[string]any {
-	pre := []any{postGuardHook()}
+	pre := []any{postGuardHook(), sessionCommandDenyHook()}
 	doc := map[string]any{}
 	if sandbox {
 		doc["sandbox"] = noEgressSandboxStanza()
@@ -255,10 +255,10 @@ func TestApplyReviewSettings_SessionReachDenyEveryMode(t *testing.T) {
 			if n := countPreToolUseMatcher(t, got, sessionReachDenyMatcher); n != 1 {
 				t.Errorf("deny hook must be present exactly once, got %d", n)
 			}
-			if err := VerifyReviewSettings(got, mode.sandbox, mode.ask); err != nil {
+			if err := VerifyReviewSettings(got, inst, mode.sandbox, mode.ask); err != nil {
 				t.Fatalf("applied settings must verify: %v", err)
 			}
-			err := VerifyReviewSettings(withoutSessionReachDeny(got), mode.sandbox, mode.ask)
+			err := VerifyReviewSettings(withoutSessionReachDeny(got), inst, mode.sandbox, mode.ask)
 			if err == nil {
 				t.Fatal("settings without the deny hook must fail verification")
 			}
@@ -297,20 +297,20 @@ func TestSessionReachDeny_ImpostorCannotStandIn(t *testing.T) {
 			if !hasPreToolUseHook(got, sessionReachDenyMatcher, "exit 0") {
 				t.Error("the pre-existing impostor entry must be kept")
 			}
-			if err := VerifyReviewSettings(got, mode.sandbox, mode.ask); err != nil {
+			if err := VerifyReviewSettings(got, inst, mode.sandbox, mode.ask); err != nil {
 				t.Errorf("settings with niwa's hook beside the impostor must verify: %v", err)
 			}
 
 			// Sanity: the hand-built document verifies once niwa's hook is present.
-			if err := VerifyReviewSettings(reviewDocFor(mode.sandbox, mode.ask, sessionReachDenyHook()), mode.sandbox, mode.ask); err != nil {
+			if err := VerifyReviewSettings(reviewDocFor(mode.sandbox, mode.ask, sessionReachDenyHook()), "/inst", mode.sandbox, mode.ask); err != nil {
 				t.Fatalf("hand-built doc with niwa's hook must verify: %v", err)
 			}
 			impostorOnly := reviewDocFor(mode.sandbox, mode.ask, commandHook(sessionReachDenyMatcher, "exit 0"))
-			if err := VerifyReviewSettings(impostorOnly, mode.sandbox, mode.ask); err == nil {
+			if err := VerifyReviewSettings(impostorOnly, "/inst", mode.sandbox, mode.ask); err == nil {
 				t.Error("a same-matcher hook with a different command must not satisfy verification")
 			}
 			wrongMatcher := reviewDocFor(mode.sandbox, mode.ask, commandHook("SendMessage", sessionReachDenyCommand()))
-			if err := VerifyReviewSettings(wrongMatcher, mode.sandbox, mode.ask); err == nil {
+			if err := VerifyReviewSettings(wrongMatcher, "/inst", mode.sandbox, mode.ask); err == nil {
 				t.Error("niwa's command under a different matcher must not satisfy verification")
 			}
 		})
@@ -334,7 +334,7 @@ func TestSessionReachDeny_ExtraHandlerKeysCannotStandIn(t *testing.T) {
 				}},
 			}
 			for _, mode := range reviewModes {
-				if err := VerifyReviewSettings(reviewDocFor(mode.sandbox, mode.ask, variant), mode.sandbox, mode.ask); err == nil {
+				if err := VerifyReviewSettings(reviewDocFor(mode.sandbox, mode.ask, variant), "/inst", mode.sandbox, mode.ask); err == nil {
 					t.Errorf("%s: a deny entry carrying %q must not satisfy verification", mode.name, key)
 				}
 			}
@@ -390,7 +390,7 @@ func TestApplyReviewSettings_AddsSessionReachDenyToPreFeatureSettings(t *testing
 			if hasPreToolUseMatcher(pre, sessionReachDenyMatcher) {
 				t.Fatal("fixture must be in the pre-feature shape")
 			}
-			if err := VerifyReviewSettings(pre, mode.sandbox, mode.ask); err == nil {
+			if err := VerifyReviewSettings(pre, "/inst", mode.sandbox, mode.ask); err == nil {
 				t.Fatal("a pre-feature document must no longer verify")
 			}
 			writeJSON(t, filepath.Join(claudeDir, "settings.json"), pre)
@@ -401,13 +401,9 @@ func TestApplyReviewSettings_AddsSessionReachDenyToPreFeatureSettings(t *testing
 			if n := countPreToolUseMatcher(t, got, sessionReachDenyMatcher); n != 1 {
 				t.Errorf("re-apply must add the deny hook exactly once, got %d", n)
 			}
-			for _, m := range []string{postGuardMatcher, egressDenyMatcher, fsGuardMatcher, autoAllowMatcher} {
-				want := 0
-				if hasPreToolUseMatcher(pre, m) {
-					want = 1
-				}
-				if n := countPreToolUseMatcher(t, got, m); n != want {
-					t.Errorf("matcher %q: got %d entries, want %d", m, n, want)
+			for _, h := range reviewHooks(inst, mode.sandbox, mode.ask) {
+				if n := countPreToolUseHook(got, h.matcher, h.command); n != 1 {
+					t.Errorf("%s: got %d entries, want 1", h.name, n)
 				}
 			}
 		})

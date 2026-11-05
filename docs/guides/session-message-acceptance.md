@@ -275,8 +275,25 @@ Its limits:
 - Hooks load when a session starts, so a review staged before this shipped runs
   without the hook until watch re-stages or resumes it. Let in-flight reviews
   re-stage before you turn the behavior on.
-- A `disableAllHooks` setting in any settings source turns it off, along with
-  every other review hook.
+- A `disableAllHooks` setting turns it off, along with every other review hook.
+  Watch refuses to launch a review whose instance `.claude/settings.json` or
+  `.claude/settings.local.json` sets it; one in a settings source outside the
+  instance isn't checked.
+
+Review Bash also carries a second deny on the `Bash` matcher, for commands that
+run niwa's or Claude Code's session commands: `niwa retask`, `niwa resume`,
+`niwa dispatch`, `claude --resume` (or `-r`), `claude attach`, `claude stop` and
+`claude rm`. A refused command gets
+
+```
+niwa watch: review sessions don't run session commands
+```
+
+That deny is a string match on the command text, and a script, a variable or
+quoting tricks get around it. It catches the plain cases and is accident
+prevention with `watch_sandbox = off`. In sandbox mode, what keeps review Bash
+off the Claude Code daemon those commands talk to is the no-egress stanza, which
+denies all network, unix sockets included.
 
 Messages *into* review sessions aren't refused; this feature doesn't change that
 direction.

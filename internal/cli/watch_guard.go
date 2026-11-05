@@ -45,3 +45,25 @@ func init() {
 		"surface an out-of-instance write as an operator approval (ask) instead of a hard deny")
 	watchCmd.AddCommand(guardFsCmd)
 }
+
+// guardBashCmd is the session-command deny for contained review sessions. It is not
+// a user-facing verb: the review-session settings wire it as a Bash PreToolUse hook
+// (`niwa watch guard-bash`). It reads the hook payload from stdin and exits 2 for a
+// command that runs niwa retask, resume or dispatch, or claude --resume, -r, attach,
+// stop or rm, and 0 otherwise. It is a string match that supplements the OS
+// sandbox, not a boundary. It is hidden from help.
+var guardBashCmd = &cobra.Command{
+	Use:           "guard-bash",
+	Short:         "internal: PreToolUse session-command deny for contained review sessions",
+	Hidden:        true,
+	Args:          cobra.NoArgs,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	Run: func(_ *cobra.Command, _ []string) {
+		os.Exit(watch.GuardBashDecision(os.Stdin, os.Stderr))
+	},
+}
+
+func init() {
+	watchCmd.AddCommand(guardBashCmd)
+}
