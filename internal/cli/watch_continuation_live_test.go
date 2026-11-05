@@ -410,20 +410,36 @@ func (h *liveGateHarness) wakeAndCheck(t *testing.T, ctx context.Context, r *liv
 	if content == "" {
 		t.Fatalf("the woken session never wrote %s, so the block can't be confirmed (instance holds: %s)", marker, liveGateInstFiles(r.inst))
 	}
-	rawStatus := ""
-	for _, line := range strings.Split(content, "\n") {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "RAW="); ok {
-			rawStatus = v
-		}
+	rawStatus, err := liveGateRawStatus(content)
+	if err != nil {
+		t.Fatalf("inconclusive: %s: %v (got %q)", marker, err, content)
 	}
-	switch rawStatus {
-	case "":
-		t.Fatalf("%s has no RAW line (got %q)", marker, content)
-	case "0":
+	if rawStatus == 0 {
 		t.Fatalf("EGRESS NOT BLOCKED: a raw TCP connect to 1.1.1.1:443 succeeded from inside the woken session %s (%q)", r.rec.ShortID, content)
 	}
 	t.Logf("live gate: woken %s denied egress (%s)", r.rec.ShortID, content)
 	return wokenRow
+}
+
+// liveGateRawStatus reads the probe's exit status from the last RAW= line of
+// the session's result file. Only a number counts: a missing line or a value
+// that isn't one (an agent's prose, an empty status) is an error, so the
+// oracle never reads it as a denial.
+func liveGateRawStatus(content string) (int, error) {
+	raw, found := "", false
+	for _, line := range strings.Split(content, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "RAW="); ok {
+			raw, found = strings.TrimSpace(v), true
+		}
+	}
+	if !found {
+		return 0, errors.New("no RAW line")
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("RAW value %q is not a numeric exit status", raw)
+	}
+	return n, nil
 }
 
 // liveGateProbePrompt asks the woken session for one raw TCP connect to a
@@ -652,6 +668,43 @@ func liveGateInstFiles(dir string) string {
 		names = append(names, e.Name())
 	}
 	return strings.Join(names, ", ")
+}
+
+// TestLiveGateRawStatus runs the live gate's egress oracle parse offline: only
+// a numeric RAW value is a verdict, and anything else is inconclusive rather
+// than a denial.
+func TestLiveGateRawStatus(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    int
+		wantErr bool
+	}{
+		{"denied", "RAW=1", 1, false},
+		{"timed out", "RAW=124", 124, false},
+		{"connected", "RAW=0", 0, false},
+		{"last line wins", "RAW=0\nRAW=1", 1, false},
+		{"surrounding text", "probe done\n  RAW=1  \n", 1, false},
+		{"no RAW line", "the probe ran", 0, true},
+		{"empty value", "RAW=", 0, true},
+		{"placeholder", "RAW=<the number the Bash command printed>", 0, true},
+		{"prose", "RAW=blocked", 0, true},
+		{"trailing text", "RAW=1 (denied)", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := liveGateRawStatus(tc.content)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("liveGateRawStatus(%q) = %d, nil; want an error", tc.content, got)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("liveGateRawStatus(%q) = %d, %v; want %d, nil", tc.content, got, err, tc.want)
+			}
+		})
+	}
 }
 
 // TestLiveGateCopyCheck runs the live gate's copy check offline. A gate that
