@@ -725,3 +725,23 @@ func TestModeForNeedsBothItsInputs(t *testing.T) {
 		t.Errorf("an unset runner resolves to %d, want the %d fail-safe", got, LaunchBackgrounded)
 	}
 }
+
+// TestLaunchSpecRetaskDelivery pins which agents `niwa retask` can hand a
+// next task in place: Claude declares the flagless wake, Codex declares
+// nothing, so a retask of a Codex worker refuses before it runs anything.
+func TestLaunchSpecRetaskDelivery(t *testing.T) {
+	claude, ok := For(agent.AgentClaude).LaunchSpec()
+	if !ok {
+		t.Fatal("no Claude launch spec")
+	}
+	if claude.RetaskDelivery != RetaskFlaglessWake {
+		t.Errorf("Claude's RetaskDelivery = %d, want RetaskFlaglessWake", claude.RetaskDelivery)
+	}
+	codex, ok := For(agent.AgentCodex).LaunchSpec()
+	if !ok {
+		t.Fatal("no Codex launch spec")
+	}
+	if codex.RetaskDelivery != RetaskNone {
+		t.Errorf("Codex's RetaskDelivery = %d, want RetaskNone", codex.RetaskDelivery)
+	}
+}

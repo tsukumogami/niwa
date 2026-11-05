@@ -381,7 +381,30 @@ type LaunchSpec struct {
 	// mode missing from this list can't be placed and is refused rather than
 	// guessed at. Empty for an agent with no such order.
 	PermissionModes []string
+
+	// RetaskDelivery says how `niwa retask` hands a worker whose job entry is
+	// still listed its next task in the same session, RetaskNone for an agent
+	// niwa can't retask. It is a declaration rather than a flag so a retask
+	// against an agent that never declared one refuses before it stops
+	// anything.
+	RetaskDelivery RetaskDelivery
 }
+
+// RetaskDelivery is how an agent's worker is handed its next task in place.
+type RetaskDelivery uint8
+
+const (
+	// RetaskNone means the agent declares no way to hand a listed worker more
+	// work in the same session.
+	RetaskNone RetaskDelivery = iota
+
+	// RetaskFlaglessWake means the worker is stopped if it is live, left to
+	// settle, and woken with LeadingArgs, ResumeLaunchArgs, the session id, a
+	// bare "--" and the prompt, with no other argument. The agent re-applies
+	// the options it saved with the job, so the session keeps its id, its job
+	// entry and its handle; any added flag would start a copy instead.
+	RetaskFlaglessWake
+)
 
 // launchSpecs is the per-agent table. It holds a row for each agent the
 // declaration table says DispatchLaunch is implemented for, and no others.
@@ -439,6 +462,11 @@ var launchSpecs = map[agent.Agent]LaunchSpec{
 		// starts a background worker on the same conversation.
 		ResumeLaunchArgs: []string{"--resume"},
 		PermissionModes:  []string{"plan", "default", "acceptEdits", "bypassPermissions"},
+		// `claude --bg --resume <session id> -- <prompt>`, run once the
+		// session has stopped and settled, continues that session in the
+		// background under the same id. A resume carrying any flag of its
+		// own, or issued before the stop settles, starts a copy.
+		RetaskDelivery: RetaskFlaglessWake,
 	},
 
 	agent.AgentCodex: {
