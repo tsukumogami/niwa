@@ -32,13 +32,22 @@ func init() {
 }
 
 var resumeCmd = &cobra.Command{
-	Use:   "resume <instance-name | session-id | session-name> [prompt]",
+	Use:   "resume <target> [prompt]",
 	Short: "Bring a dispatched worker back in the posture it was dispatched with",
 	Long: `Resume a worker niwa dispatch launched, from the launch record dispatch
 wrote for it.
 
-The argument names the worker by its instance name, its session id, or its
-session name, tried in that order. When the instance was destroyed, resume
+The target names the worker by its instance name, its full instance path, its
+session id, its session name, its short id or its dispatch id, tried in that
+order and matched exactly, never by prefix.
+
+Resume owns a worker whose job entry Claude Code no longer lists, or whose
+instance is gone. A worker whose instance is there and whose job entry is
+still listed is niwa retask's, which hands it its next task in the same
+session: resume refuses it, since a resume that passes the recorded flags
+would make Claude Code start a copy of it.
+
+When the instance was destroyed, resume
 restores it under its original name and path first (with its Claude trust
 grant when the workspace opts in), cloning each repository at its current
 remote state: unpushed work from the destroyed instance isn't restored.
@@ -86,9 +95,187 @@ var resumeTokenRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 // rides one "--model=" element, so it can't be read as a flag.
 var resumeModelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@+\[\]-]*$`)
 
-// resumeRefusal is a refusal that names what was asked for.
-func resumeRefusal(arg, format string, args ...any) error {
-	return fmt.Errorf("niwa: error: cannot resume %q: %s", arg, fmt.Sprintf(format, args...))
+// The two verbs that act on a dispatched worker through its launch record.
+// They split the worker's states between them: retask owns a worker whose
+// instance is there and whose job entry Claude Code still lists, resume owns
+// one whose job entry or instance is gone. Each one's refusal names the other.
+const (
+	verbResume = "resume"
+	verbRetask = "retask"
+)
+
+// workerRefusal is a refusal by resume or retask that names what was asked
+// for. A retask refusal carries one of retask's stable state words right after
+// the target (see retaskStateWords), so a script can tell which state refused;
+// a resume refusal carries none, as it always has.
+type workerRefusal struct {
+	Verb   string
+	Target string
+	State  string
+	Detail string
+}
+
+func (e *workerRefusal) Error() string {
+	if e.Verb == verbRetask && e.State != "" {
+		return fmt.Sprintf("niwa: error: cannot %s %q: %s: %s", e.Verb, e.Target, e.State, e.Detail)
+	}
+	return fmt.Sprintf("niwa: error: cannot %s %q: %s", e.Verb, e.Target, e.Detail)
+}
+
+// workerRefuse is a refusal by verb naming arg, in state (a retask state word;
+// resume leaves it out of its text).
+func workerRefuse(verb, arg, state, format string, args ...any) error {
+	return &workerRefusal{Verb: verb, Target: arg, State: state, Detail: fmt.Sprintf(format, args...)}
+}
+
+// resumeRefusal is a refusal by verb that names what was asked for and
+// carries no state word: the shape of every resume refusal.
+func resumeRefusal(verb, arg, format string, args ...any) error {
+	return workerRefuse(verb, arg, "", format, args...)
+}
+
+// workerTarget is what resolveWorkerTarget found for a verb's argument: the
+// workspace, the machine's dispatch permission mode, the launch record and the
+// agent's declaration, with the instance path derived from the record.
+type workerTarget struct {
+	Root         string
+	HostMode     string
+	WSConfig     *config.WorkspaceConfig
+	Record       workspace.LaunchRecord
+	Agent        agent.Agent
+	Spec         agentplan.LaunchSpec
+	Passthrough  []string
+	Unset        []string
+	InstancePath string
+}
+
+// resolveWorkerTarget is the preamble resume and retask share, run before
+// either takes the instance's lock: the workspace and machine configuration,
+// the launch record arg names (resolveLaunchRecord), the agent's declaration
+// and the record's checks. The instance checks that need the lock are
+// checkWorkerInstance's, which each verb calls once it holds it.
+func resolveWorkerTarget(cmd *cobra.Command, verb, arg string) (workerTarget, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return workerTarget{}, fmt.Errorf("niwa: error: getting working directory: %w", err)
+	}
+	class, err := workspace.ClassifyCwd(cwd)
+	if err != nil {
+		return workerTarget{}, fmt.Errorf("niwa: error: classifying working directory: %w", err)
+	}
+	if class.WorkspaceRoot == "" {
+		return workerTarget{}, fmt.Errorf("niwa: error: not inside a niwa workspace; run %s from within a workspace", verb)
+	}
+	root := class.WorkspaceRoot
+
+	// The machine checks dispatch makes at its (2a), with the same refusals:
+	// the configuration loads, its dispatch permission mode is one Claude
+	// Code accepts, and its authority keys hold valid values.
+	cfgPath := globalConfigPathForError()
+	gc, err := config.LoadGlobalConfig()
+	if err != nil {
+		return workerTarget{}, fmt.Errorf("niwa: error: loading %s: %w", cfgPath, err)
+	}
+	hostMode, err := gc.DispatchPermissionMode()
+	if err != nil {
+		return workerTarget{}, fmt.Errorf("niwa: error: %w (in %s)", err, cfgPath)
+	}
+	if err := checkMachineAuthority(gc, cfgPath); err != nil {
+		return workerTarget{}, err
+	}
+
+	wsConfig, err := loadWorkerWorkspaceConfig(root, verb, arg)
+	if err != nil {
+		return workerTarget{}, err
+	}
+	t, err := resolveWorkerAt(root, wsConfig, verb, arg)
+	if err != nil {
+		return workerTarget{}, err
+	}
+	t.HostMode = hostMode
+	if hostMode != "" && !slices.Contains(t.Spec.PermissionModes, hostMode) {
+		return workerTarget{}, workerRefuse(verb, arg, retaskPolicyTightened,
+			"the current [global] dispatch_permission_mode %q can't be ordered against the recorded mode; %s orders only %s",
+			hostMode, verb, strings.Join(t.Spec.PermissionModes, ", "))
+	}
+	return t, nil
+}
+
+// loadWorkerWorkspaceConfig loads the workspace configuration, which decides
+// which environment names a record may carry and the permissions posture, so
+// a configuration that can't be read refuses rather than checking against
+// nothing.
+func loadWorkerWorkspaceConfig(root, verb, arg string) (*config.WorkspaceConfig, error) {
+	path := filepath.Join(root, workspace.StateDir, workspace.WorkspaceConfigFile)
+	loaded, err := config.Load(path)
+	if err != nil {
+		return nil, workerRefuse(verb, arg, retaskStateUnknown, "loading the workspace configuration %s: %v", path, err)
+	}
+	return loaded.Config, nil
+}
+
+// resolveWorkerAt resolves arg to its launch record under root and checks the
+// record against the agent's declaration and the workspace's passthrough list.
+// The agent must declare the verb: a resume-launch for resume, a retask
+// delivery for retask.
+func resolveWorkerAt(root string, wsConfig *config.WorkspaceConfig, verb, arg string) (workerTarget, error) {
+	rec, err := resolveLaunchRecord(root, verb, arg)
+	if err != nil {
+		return workerTarget{}, err
+	}
+	ag, err := agent.ParseAgent(rec.Agent)
+	if err != nil {
+		return workerTarget{}, workerRefuse(verb, arg, retaskAgentUnsupported, "the launch record names agent %q, which niwa doesn't know", rec.Agent)
+	}
+	spec, ok := dispatchLaunchSpec(ag)
+	switch verb {
+	case verbRetask:
+		if !ok || spec.RetaskDelivery == agentplan.RetaskNone || len(spec.ResumeLaunchArgs) == 0 {
+			return workerTarget{}, workerRefuse(verb, arg, retaskAgentUnsupported,
+				"niwa can't retask a %s worker: the agent declares no way to hand a worker its next task in the same session", ag)
+		}
+	default:
+		if !ok || len(spec.ResumeLaunchArgs) == 0 || len(spec.PermissionModes) == 0 {
+			return workerTarget{}, resumeRefusal(verb, arg, "niwa can't resume a %s worker", ag)
+		}
+	}
+	passthrough, unset := dispatchEnvLists(wsConfig)
+	if err := validateLaunchRecord(rec, spec, passthrough); err != nil {
+		return workerTarget{}, workerRefuse(verb, arg, retaskInvalidRecord, "launch record %s: %v", rec.DispatchID, err)
+	}
+	return workerTarget{
+		Root:        root,
+		WSConfig:    wsConfig,
+		Record:      rec,
+		Agent:       ag,
+		Spec:        spec,
+		Passthrough: passthrough,
+		Unset:       unset,
+		// The instance path is derived, never read from the record.
+		InstancePath: filepath.Join(root, rec.InstanceName),
+	}, nil
+}
+
+// checkWorkerInstance is the instance check both verbs make once they hold
+// the instance's lock: whether the instance is there (present), refusing when
+// something else occupies its path, and whether the session's transcript is.
+func checkWorkerInstance(verb, arg, instancePath, instanceName, sessionID string) (bool, error) {
+	present, err := instancePresent(instancePath, instanceName)
+	if err != nil {
+		return false, workerRefuse(verb, arg, retaskInstanceOccupied, "%v", err)
+	}
+	home := userHomeDir()
+	if home == "" {
+		return false, workerRefuse(verb, arg, retaskStateUnknown, "the home directory can't be resolved, so the session's transcript can't be checked")
+	}
+	transcript := sessionattach.TranscriptPath(home, instancePath, sessionID)
+	if _, err := os.Lstat(transcript); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, workerRefuse(verb, arg, retaskTranscriptGone, "the transcript of session %s is gone, so there is nothing to %s", sessionID, verb)
+		}
+		return false, workerRefuse(verb, arg, retaskTranscriptGone, "reading the transcript of session %s: %v", sessionID, err)
+	}
+	return present, nil
 }
 
 func runResume(cmd *cobra.Command, args []string) error {
@@ -100,75 +287,18 @@ func runResume(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		if len(prompt) > maxArgStringBytes || strings.ContainsRune(prompt, 0) {
-			return resumeRefusal(arg, "the prompt must fit in one argument and hold no NUL byte")
+			return resumeRefusal(verbResume, arg, "the prompt must fit in one argument and hold no NUL byte")
 		}
 	}
 	stderr := cmd.ErrOrStderr()
 	out := cmd.OutOrStdout()
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("niwa: error: getting working directory: %w", err)
-	}
-	class, err := workspace.ClassifyCwd(cwd)
-	if err != nil {
-		return fmt.Errorf("niwa: error: classifying working directory: %w", err)
-	}
-	if class.WorkspaceRoot == "" {
-		return fmt.Errorf("niwa: error: not inside a niwa workspace; run resume from within a workspace")
-	}
-	root := class.WorkspaceRoot
-
-	// The machine checks dispatch makes at its (2a), with the same refusals:
-	// the configuration loads, its dispatch permission mode is one Claude
-	// Code accepts, and its authority keys hold valid values.
-	cfgPath := globalConfigPathForError()
-	gc, err := config.LoadGlobalConfig()
-	if err != nil {
-		return fmt.Errorf("niwa: error: loading %s: %w", cfgPath, err)
-	}
-	hostMode, err := gc.DispatchPermissionMode()
-	if err != nil {
-		return fmt.Errorf("niwa: error: %w (in %s)", err, cfgPath)
-	}
-	if err := checkMachineAuthority(gc, cfgPath); err != nil {
-		return err
-	}
-
-	// The workspace configuration decides which environment names may be
-	// replayed and the posture, so a configuration that can't be read
-	// refuses rather than replaying against nothing.
-	wsConfigPath := filepath.Join(root, workspace.StateDir, workspace.WorkspaceConfigFile)
-	wsLoaded, err := config.Load(wsConfigPath)
-	if err != nil {
-		return resumeRefusal(arg, "loading the workspace configuration %s: %v", wsConfigPath, err)
-	}
-	wsConfig := wsLoaded.Config
-
-	rec, err := resolveLaunchRecord(root, arg)
+	t, err := resolveWorkerTarget(cmd, verbResume, arg)
 	if err != nil {
 		return err
 	}
-
-	ag, err := agent.ParseAgent(rec.Agent)
-	if err != nil {
-		return resumeRefusal(arg, "the launch record names agent %q, which niwa doesn't know", rec.Agent)
-	}
-	spec, ok := dispatchLaunchSpec(ag)
-	if !ok || len(spec.ResumeLaunchArgs) == 0 || len(spec.PermissionModes) == 0 {
-		return resumeRefusal(arg, "niwa can't resume a %s worker", ag)
-	}
-	passthrough, unset := dispatchEnvLists(wsConfig)
-	if err := validateLaunchRecord(rec, spec, passthrough); err != nil {
-		return resumeRefusal(arg, "launch record %s: %v", rec.DispatchID, err)
-	}
-	if hostMode != "" && !slices.Contains(spec.PermissionModes, hostMode) {
-		return resumeRefusal(arg, "the current [global] dispatch_permission_mode %q can't be ordered against the recorded mode; resume orders only %s",
-			hostMode, strings.Join(spec.PermissionModes, ", "))
-	}
-
-	// The instance path is derived, never read from the record.
-	instancePath := filepath.Join(root, rec.InstanceName)
+	root, rec, spec, ag := t.Root, t.Record, t.Spec, t.Agent
+	wsConfig, hostMode, unset, instancePath := t.WSConfig, t.HostMode, t.Unset, t.InstancePath
 
 	// The instance's lock comes before every check about the instance and is
 	// held until resume returns, through the restore, the mapping write, the
@@ -178,40 +308,47 @@ func runResume(cmd *cobra.Command, args []string) error {
 	// same hold, which is why the lock is never taken inside the destroy seam.
 	release, err := takeInstanceLock(instancePath, "resume")
 	if err != nil {
-		return resumeRefusal(arg, "%s", instanceLockReason(err))
+		return resumeRefusal(verbResume, arg, "%s", instanceLockReason(err))
 	}
 	defer release()
 
-	present, err := instancePresent(instancePath, rec.InstanceName)
+	present, err := checkWorkerInstance(verbResume, arg, instancePath, rec.InstanceName, rec.SessionID)
 	if err != nil {
-		return resumeRefusal(arg, "%v", err)
+		return err
 	}
-
 	home := userHomeDir()
-	if home == "" {
-		return resumeRefusal(arg, "the home directory can't be resolved, so the session's transcript can't be checked")
-	}
-	transcript := sessionattach.TranscriptPath(home, instancePath, rec.SessionID)
-	if _, err := os.Lstat(transcript); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return resumeRefusal(arg, "the transcript of session %s is gone, so there is nothing to resume", rec.SessionID)
-		}
-		return resumeRefusal(arg, "reading the transcript of session %s: %v", rec.SessionID, err)
-	}
 
 	rows, err := listClaudeSessionsFunc(cmd.Context())
 	if err != nil {
-		return resumeRefusal(arg, "could not list Claude Code's sessions to check whether session %s is running (%v)", rec.SessionID, err)
+		return resumeRefusal(verbResume, arg, "could not list Claude Code's sessions to check whether session %s is running (%v)", rec.SessionID, err)
 	}
 	for _, r := range rows {
-		if r.SessionID == rec.SessionID && r.running() {
-			return resumeRefusal(arg, "%s; attach to it instead", runningSessionReason(r, workspace.SessionMapping{SessionID: rec.SessionID, SessionName: rec.SessionName}))
+		if r.SessionID != rec.SessionID {
+			continue
+		}
+		if r.running() {
+			attach := "claude attach <short id>"
+			if safeRetaskHandle(r.ID) {
+				attach = "claude attach " + r.ID
+			}
+			return resumeRefusal(verbResume, arg, "%s; attach to it with %s, or hand it its next task with niwa retask %s <prompt> once its turn ends",
+				runningSessionReason(r, workspace.SessionMapping{SessionID: rec.SessionID, SessionName: rec.SessionName}), attach, shellToken(arg))
+		}
+		// Claude Code still lists the stopped session's job entry and keeps
+		// its launch options with it, so a resume that passes flags of its
+		// own starts a copy rather than continuing it (#461). Continuing it in
+		// place is retask's job. An instance that is gone is still resume's:
+		// it restores the instance and launches into it.
+		if present {
+			return resumeRefusal(verbResume, arg,
+				"Claude Code still lists the job entry of session %s, which is stopped, and a resume would start a copy of it; hand it its next task in the same session with niwa retask %s <prompt>",
+				rec.SessionID, shellToken(arg))
 		}
 	}
 
 	bin, err := lookAgentBinary(spec.Binary)
 	if err != nil {
-		return resumeRefusal(arg, "%s binary not found in PATH", spec.Binary)
+		return resumeRefusal(verbResume, arg, "%s binary not found in PATH", spec.Binary)
 	}
 
 	// Every check has passed. From here on the work is restoring, mapping
@@ -231,7 +368,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 		fmt.Fprint(stderr, keyreport.RenderText(res.Keys))
 		renderNotices(stderr, res.Notices)
 		if err != nil {
-			return resumeRefusal(arg, "restoring instance %s: %v", rec.InstanceName, err)
+			return resumeRefusal(verbResume, arg, "restoring instance %s: %v", rec.InstanceName, err)
 		}
 		restored = true
 		// Provisioned moments ago by this process, so its recorded posture
@@ -274,7 +411,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 	})
 	if argv == nil {
 		rollback()
-		return resumeRefusal(arg, "niwa can't build a resume command for a %s worker with this record", ag)
+		return resumeRefusal(verbResume, arg, "niwa can't build a resume command for a %s worker with this record", ag)
 	}
 
 	// The mapping goes in before the launch, so the reaper's backstop never
@@ -307,7 +444,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 	}
 	if err := workspace.WriteSessionMapping(root, mapping); err != nil {
 		rollback()
-		return resumeRefusal(arg, "writing the session mapping: %v", err)
+		return resumeRefusal(verbResume, arg, "writing the session mapping: %v", err)
 	}
 
 	env := resumeEnv(os.Environ(), unset, rec.Env)
@@ -352,31 +489,62 @@ func runResume(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// resolveLaunchRecord finds the one launch record arg names: by instance
-// name, then by session id, then by session name, taking the first of those
-// that matches anything. No match refuses naming the argument; more than one
-// refuses listing them. The record it returns has been read a second time,
-// strictly (ReadLaunchRecordChecked), from a store that passed
-// CheckLaunchStore.
-func resolveLaunchRecord(root, arg string) (workspace.LaunchRecord, error) {
+// resolveLaunchRecord finds the one launch record arg names, for verb. It
+// matches six identifiers, each exactly and never by prefix, in this order,
+// taking the first that matches anything: the instance name, the full
+// instance path (an absolute path whose parent is the workspace root), the
+// session id, the session name, the short id (the handle a session mapping
+// records for the record's session) and the dispatch id. No match refuses
+// naming the argument; more than one refuses listing them. The record it
+// returns has been read a second time, strictly (ReadLaunchRecordChecked),
+// from a store that passed CheckLaunchStore.
+func resolveLaunchRecord(root, verb, arg string) (workspace.LaunchRecord, error) {
 	if err := workspace.CheckLaunchStore(root); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return workspace.LaunchRecord{}, resumeRefusal(arg, "no launch record names it")
+			return workspace.LaunchRecord{}, workerRefuse(verb, arg, retaskUnknownTarget, "no launch record names it")
 		}
-		return workspace.LaunchRecord{}, resumeRefusal(arg, "%v", err)
+		return workspace.LaunchRecord{}, workerRefuse(verb, arg, retaskInvalidRecord, "%v", err)
 	}
 	entries, err := workspace.ListLaunchRecords(root)
 	if err != nil {
-		return workspace.LaunchRecord{}, resumeRefusal(arg, "reading the launch store %s: %v", workspace.LaunchDir(root), err)
+		return workspace.LaunchRecord{}, workerRefuse(verb, arg, retaskInvalidRecord, "reading the launch store %s: %v", workspace.LaunchDir(root), err)
 	}
+
+	// A full instance path names the instance only when its parent is the
+	// workspace root, so a path inside an instance, or one outside the
+	// workspace that ends in an instance's name, names nothing.
+	pathName := ""
+	if filepath.IsAbs(arg) {
+		clean := filepath.Clean(arg)
+		if workspace.CanonicalPath(filepath.Dir(clean)) == workspace.CanonicalPath(root) {
+			pathName = filepath.Base(clean)
+		}
+	}
+	// The short id is the handle a session mapping recorded for a session.
+	// An unreadable store answers nothing for this identifier rather than
+	// refusing the others.
+	handleSessions := map[string]bool{}
+	if arg != "" {
+		if mappings, err := workspace.ListSessionMappings(root); err == nil {
+			for _, m := range mappings {
+				if m.Handle == arg && m.SessionID != "" {
+					handleSessions[m.SessionID] = true
+				}
+			}
+		}
+	}
+
 	var matches []workspace.LaunchRecord
-	for _, field := range []func(workspace.LaunchRecord) string{
-		func(r workspace.LaunchRecord) string { return r.InstanceName },
-		func(r workspace.LaunchRecord) string { return r.SessionID },
-		func(r workspace.LaunchRecord) string { return r.SessionName },
+	for _, match := range []func(workspace.LaunchRecord) bool{
+		func(r workspace.LaunchRecord) bool { return r.InstanceName == arg },
+		func(r workspace.LaunchRecord) bool { return pathName != "" && r.InstanceName == pathName },
+		func(r workspace.LaunchRecord) bool { return r.SessionID == arg },
+		func(r workspace.LaunchRecord) bool { return r.SessionName == arg },
+		func(r workspace.LaunchRecord) bool { return handleSessions[r.SessionID] },
+		func(r workspace.LaunchRecord) bool { return r.DispatchID == arg },
 	} {
 		for _, e := range entries {
-			if e.Err == nil && field(e.Record) != "" && field(e.Record) == arg {
+			if e.Err == nil && arg != "" && match(e.Record) {
 				matches = append(matches, e.Record)
 			}
 		}
@@ -386,7 +554,7 @@ func resolveLaunchRecord(root, arg string) (workspace.LaunchRecord, error) {
 	}
 	switch len(matches) {
 	case 0:
-		return workspace.LaunchRecord{}, resumeRefusal(arg, "no launch record names it")
+		return workspace.LaunchRecord{}, workerRefuse(verb, arg, retaskUnknownTarget, "no launch record names it")
 	case 1:
 	default:
 		var b strings.Builder
@@ -397,11 +565,11 @@ func resolveLaunchRecord(root, arg string) (workspace.LaunchRecord, error) {
 				fmt.Fprintf(&b, ", session name %s", m.SessionName)
 			}
 		}
-		return workspace.LaunchRecord{}, resumeRefusal(arg, "%s", b.String())
+		return workspace.LaunchRecord{}, workerRefuse(verb, arg, retaskAmbiguousTarget, "%s", b.String())
 	}
 	rec, err := workspace.ReadLaunchRecordChecked(root, matches[0].DispatchID)
 	if err != nil {
-		return workspace.LaunchRecord{}, resumeRefusal(arg, "launch record %s: %v", matches[0].DispatchID, err)
+		return workspace.LaunchRecord{}, workerRefuse(verb, arg, retaskInvalidRecord, "launch record %s: %v", matches[0].DispatchID, err)
 	}
 	return rec, nil
 }
