@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -342,7 +343,8 @@ func (wc *watchContinuation) preWake(ctx context.Context, snap workerSnapshot) e
 	// digest as it stands after the re-apply, so a change only niwa made (a
 	// new guard binary path after an upgrade) doesn't refuse the next wake,
 	// while an edit by the session still shows up in the next pre-apply
-	// digest.
+	// digest. The gate has already refused a post digest that differs from
+	// pre anywhere but .claude/settings.json.
 	nr := wc.rec
 	nr.ContinuationHalted = wc.head.SHA
 	nr.SettingsDigest = post
@@ -419,7 +421,8 @@ func snapshotReviewSettings(inst string) reviewSettingsSnapshot {
 // .claude/settings.local.json or .mcp.json exists; compare the recorded
 // settings digest with pre, the instance as it stood before the re-apply; and
 // check the saved option argv opts. It returns the write posture and the
-// digest after the re-apply, which the caller records with the pending marker.
+// digest after the re-apply, which the caller records with the pending marker,
+// once that digest is checked to differ from pre only in .claude/settings.json.
 //
 // Every refusal is a *watchDeferError whose reason names paths, flags and
 // state words only. It writes the instance's settings (the re-apply) and may
@@ -476,6 +479,19 @@ func runReviewWakeGate(stderr io.Writer, inst string, rec watch.StagedRecord, sa
 	if err != nil {
 		return false, "", watchDefer(watchDeferSettingsDigest, "the review instance's settings digest can't be taken after re-applying its settings")
 	}
+	// post becomes the record's baseline, so it must differ from pre only by
+	// the re-apply. Anything else changed between the pre-apply digest and now
+	// (during the fetch or the gate, by a process the stop didn't end) would
+	// otherwise be recorded as the starting point and never refuse a wake.
+	// The re-apply rewrites .claude/settings.json and nothing else.
+	window, err := watch.ReviewSettingsDigestChanges(pre.digest, post)
+	if err != nil {
+		return false, "", watchDefer(watchDeferSettingsDigest, "the review instance's settings digests can't be compared")
+	}
+	window = slices.DeleteFunc(window, func(p string) bool { return p == ".claude/settings.json" })
+	if len(window) > 0 {
+		return false, "", watchDefer(watchDeferSettingsDigest, "%s", digestWindowRefusalText(window, rec.ShortID))
+	}
 	return ask, post, nil
 }
 
@@ -486,6 +502,21 @@ const digestMaxNamed = 10
 // relative to the instance and quoted, what that means and what to do. It
 // names no content and no value.
 func digestRefusalText(changed []string, short string) string {
+	return fmt.Sprintf("the review instance changed since the review was staged (%s); a niwa apply in the instance since then also causes this, not only an edit by the review agent; dismiss the review session with claude rm %s and a later pass stages a fresh review",
+		digestPathList(changed), short)
+}
+
+// digestWindowRefusalText is the settings-digest refusal for a change made
+// while the continuation fetched the head and ran the gate. Like
+// digestRefusalText it names paths only.
+func digestWindowRefusalText(changed []string, short string) string {
+	return fmt.Sprintf("the review instance changed while the wake was being prepared (%s); something is still writing into the instance; dismiss the review session with claude rm %s and a later pass stages a fresh review",
+		digestPathList(changed), short)
+}
+
+// digestPathList quotes up to digestMaxNamed changed paths and counts the
+// rest.
+func digestPathList(changed []string) string {
 	named := changed
 	if len(named) > digestMaxNamed {
 		named = named[:digestMaxNamed]
@@ -498,8 +529,7 @@ func digestRefusalText(changed []string, short string) string {
 	if extra := len(changed) - len(named); extra > 0 {
 		list += fmt.Sprintf(" and %d more", extra)
 	}
-	return fmt.Sprintf("the review instance changed since the review was staged (%s); a niwa apply in the instance since then also causes this, not only an edit by the review agent; dismiss the review session with claude rm %s and a later pass stages a fresh review",
-		list, short)
+	return list
 }
 
 // readReviewSettings reads the instance's .claude/settings.json.

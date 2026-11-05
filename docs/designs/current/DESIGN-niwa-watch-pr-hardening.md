@@ -353,14 +353,24 @@ are reviewed against it.
     other flag or shape refuses.
   - Once all three pass, a pending marker (`continuation_halted`, naming the head
     the wake is about to send) goes into the staged record with the digest as it
-    stands after the re-apply, before the wake runs. A confirmed wake clears it. A
+    stands after the re-apply, before the wake runs. That digest is compared with
+    the pre-apply one first, and a change to any path other than
+    `.claude/settings.json` (the only file the re-apply writes) refuses the wake,
+    so a write made during the fetch or the gate never becomes the recorded
+    baseline. A confirmed wake clears the marker. A
     copy, or a wake that can't be confirmed, leaves it set, and a record carrying it
     is never woken again until the review is dismissed.
 
   The fresh checkout at the new head is fetched with the shipped inert-data path
   (`FetchPRHead`, outside the sandbox) only after the stop settles. A gate refusal
-  defers the PR and sends nothing. Whether the OS no-egress sandbox re-enters over
-  the woken session's Bash, the strongest ED1 control, is a testable sub-claim:
+  defers the PR and sends nothing. The gate's "no session process is running"
+  guarantee rests on Claude Code's listing row showing no pid and no status, so a
+  detached process the agent started that outlives `claude stop` could still write
+  the instance root between the gate and the wake; the pre/post digest comparison
+  narrows this to the window after the marker write.
+
+  Whether the OS no-egress sandbox re-enters over the woken session's Bash, the
+  strongest ED1 control, is a testable sub-claim:
   the live gate `TestResumedSessionDeniesEgress_OnHarness` (`internal/cli`) checks
   that a raw TCP connect from inside the woken session is denied at the OS layer,
   not merely that the hooks are present.

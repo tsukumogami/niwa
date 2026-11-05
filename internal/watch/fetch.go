@@ -69,10 +69,11 @@ const pinnedSSHCommand = "ssh"
 // filesystem), the clone is left without one. niwa runs no further git in the
 // clone, so what the agent later writes to that .git never reaches niwa's process.
 //
-// Residual: while a review session is still running (today's continuation fetches
-// before it stops the session), sandboxed Bash could swap checkoutDir for a symlink
-// between its removal and the checkout. That can redirect where the PR's files are
-// written, never what git reads as config or hooks.
+// Residual: a continuation fetches only after the session's stop has settled, under
+// the instance lock, so no review session should be running. A process the session
+// started that outlived the stop could still swap checkoutDir for a symlink between
+// its removal and the checkout. That can redirect where the PR's files are written,
+// never what git reads as config or hooks.
 //
 // sha must be a validated commit SHA. token, when non-empty, authenticates the
 // fetch to a private repo via an HTTP auth header (the fetch is trusted niwa code
