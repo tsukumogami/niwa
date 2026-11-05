@@ -627,6 +627,36 @@ func TestResumeRefusals(t *testing.T) {
 	}
 }
 
+// TestResumeRefusesStoppedWithJobEntry is the #461 repro: a worker whose job
+// entry Claude Code still lists, stopped (its row has no pid and no status),
+// in an instance that is still there. A resume that replays the recorded
+// flags makes Claude Code start a copy of it, so resume refuses and points at
+// niwa retask, which continues the same session.
+func TestResumeRefusesStoppedWithJobEntry(t *testing.T) {
+	f := newResumeFixture(t, "")
+	f.writeRecord(t, f.record())
+	f.writeTranscript(t, resumeTestSessionID)
+	f.presentInstance(t)
+	f.sessions = []claudeSessionRow{{ID: "11111111", SessionID: resumeTestSessionID, Cwd: f.instancePath()}}
+
+	_, stderr, err := runResumeCmd(t, resumeTestInstance, "BRAVO")
+	for _, c := range f.calls(t) {
+		if args := argsOf(c); len(args) > 0 && args[0] == "--bg" {
+			t.Errorf("niwa resume launched a stopped worker whose job entry Claude Code still lists, which starts a copy: %q", args)
+		}
+	}
+	if err == nil {
+		t.Fatalf("niwa resume succeeded on a stopped worker whose job entry is still listed; want a refusal naming niwa retask\nstderr:\n%s", stderr)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "cannot resume") || !strings.Contains(msg, "niwa retask") {
+		t.Errorf("refusal does not say cannot resume and name niwa retask: %v", msg)
+	}
+	if _, err := workspace.ReadSessionMapping(f.root, resumeTestSessionID); err == nil {
+		t.Errorf("a session mapping was written")
+	}
+}
+
 // TestResumeRecordModelShapes pins which recorded models resume accepts:
 // dispatch forwards an unrecognized model as given, so a full model id must
 // resume, while anything that could read as a flag or carry a space is
