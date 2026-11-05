@@ -11,3 +11,9 @@ package workspace
 func acquireFileLock(string, string) (func(), error) {
 	return func() {}, nil
 }
+
+// TryFileLock has no lock to take here. It reports ErrLockUnsupported so the
+// caller decides, rather than proceeding as if it held the lock.
+func TryFileLock(string, string) (func(), error) {
+	return nil, ErrLockUnsupported
+}

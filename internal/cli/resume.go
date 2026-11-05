@@ -53,7 +53,9 @@ Resume refuses, before it restores or launches anything, when no record or
 more than one matches, when the session's transcript is gone or the session is
 still running, when something other than the instance occupies its path, and
 when the record fails a check: it is read as input, not trusted because niwa
-wrote it.`,
+wrote it. It also refuses, without waiting, while another niwa command (a
+destroy, a reap or another resume) is acting on the instance, and names that
+command.`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: runResume,
 }
@@ -167,6 +169,19 @@ func runResume(cmd *cobra.Command, args []string) error {
 
 	// The instance path is derived, never read from the record.
 	instancePath := filepath.Join(root, rec.InstanceName)
+
+	// The instance's lock comes before every check about the instance and is
+	// held until resume returns, through the restore, the mapping write, the
+	// launch and the capture. A destroy, a reap or another resume can't act on
+	// the instance between resume finding the session not running and
+	// launching into it. A restore that fails later is rolled back under this
+	// same hold, which is why the lock is never taken inside the destroy seam.
+	release, err := takeInstanceLock(instancePath, "resume")
+	if err != nil {
+		return resumeRefusal(arg, "%s", instanceLockReason(err))
+	}
+	defer release()
+
 	present, err := instancePresent(instancePath, rec.InstanceName)
 	if err != nil {
 		return resumeRefusal(arg, "%v", err)

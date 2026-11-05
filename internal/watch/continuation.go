@@ -48,24 +48,47 @@ type JobActivity struct {
 	// Tempo is the session tempo field: "idle", "active", "blocked", ...
 	Tempo string
 	// InFlightTasks is the count of in-flight sub-tasks (inFlight.tasks). It is
-	// advisory only: a nonzero value forces Busy, but a zero value is NOT on its
-	// own sufficient for idle (stale teammate counts can persist after a turn
-	// ends), so ActivityDetachedIdle also requires State/Tempo agreement.
+	// advisory only: a nonzero value forces Busy unless CronOnly says every task
+	// is an armed self-wake, but a zero value is NOT on its own sufficient for
+	// idle (stale teammate counts can persist after a turn ends), so
+	// ActivityDetachedIdle also requires State/Tempo agreement.
 	InFlightTasks int
+	// NonCronInFlight counts the in-flight tasks that aren't a session-scoped
+	// self-wake (kind "session_cron"). It is computed only when the job state's
+	// inFlight.kinds accounts for every in-flight task; otherwise it equals
+	// InFlightTasks, so every task counts.
+	NonCronInFlight int
+	// CronOnly is true when every in-flight task is a session_cron self-wake,
+	// as a keep-alive-armed worker's job state reads while it sits idle. It is
+	// never true unless inFlight.kinds accounts for every task.
+	CronOnly bool
 	// AwaitingInput is true when the session has a pending block or needs an
 	// answer (the `block` / `needs` fields) -- a human is being awaited.
 	AwaitingInput bool
 }
 
 // ClassifySessionActivity is the pure, fail-closed classifier. It returns
-// ActivityDetachedIdle ONLY on positive confirmation that the session reached a
-// terminal turn (State == "done") and is idle (Tempo == "idle") with nothing in
-// flight and no human prompt outstanding. Every other input -- an unreadable
+// ActivityDetachedIdle ONLY on positive confirmation that the session is idle
+// (Tempo == "idle") with no human prompt outstanding, and either reached a
+// terminal turn (State == "done") or reads State == "working" only because a
+// keep-alive self-wake is armed (CronOnly). Every other input -- an unreadable
 // state, a session awaiting a human, any active/mid-turn signal, or an
 // unrecognized field combination -- yields a non-continuable class the decision
 // layer maps to Defer. Requiring BOTH state and tempo to agree (rather than
 // either alone) guards against a partially-written state.json being misread as
 // idle.
+//
+// A keep-alive-armed worker keeps one session_cron task in flight and its job
+// state reads "working" while it waits, so without the CronOnly discount it
+// could never be woken in place. The discount applies only when the job
+// state's kinds account for every in-flight task (see JobActivity.CronOnly).
+// Watch review sessions are never armed, so no watch decision changes.
+//
+// Claude Code 2.1.314's state.json reads tempo "active" for a session in the
+// middle of a turn with a session_cron task in flight, so an armed worker
+// mid-turn classifies busy here. That reading comes from an existing job file
+// of a real dispatched worker on the development host; a confirmation on a
+// disposable host is still owed (see the armed mid-turn case in the tests).
 func ClassifySessionActivity(a JobActivity) SessionActivity {
 	if !a.Readable {
 		return ActivityDeadUnknown
@@ -76,12 +99,17 @@ func ClassifySessionActivity(a JobActivity) SessionActivity {
 		return ActivityAttached
 	}
 	// Any active signal is busy (mid-turn). InFlightTasks alone is not trusted
-	// as an idle signal, but a positive count is enough to force busy.
-	if a.State == "working" || a.Tempo == "active" || a.InFlightTasks > 0 {
+	// as an idle signal, but a positive count of anything but an armed
+	// self-wake is enough to force busy.
+	if a.Tempo == "active" || a.NonCronInFlight > 0 {
 		return ActivityBusy
 	}
-	// Positive detached-idle: the turn reached terminal AND the tempo is idle.
-	if a.State == "done" && a.Tempo == "idle" {
+	if !a.CronOnly && (a.InFlightTasks > 0 || a.State == "working") {
+		return ActivityBusy
+	}
+	// Positive detached-idle: the tempo is idle AND the turn reached terminal,
+	// or the only thing keeping the job "working" is an armed self-wake.
+	if a.Tempo == "idle" && (a.State == "done" || (a.State == "working" && a.CronOnly)) {
 		return ActivityDetachedIdle
 	}
 	// Anything else is an unrecognized combination -> fail closed.
