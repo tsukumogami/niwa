@@ -514,6 +514,9 @@ var excusedAgentNamingFiles = map[string]string{
 	"destroy_session.go":    "removes, at destroy, the background session one agent's harness lists in its agents view, through that agent's own listing and rm verbs; the other agent's harness has no such listing or verb, so its mappings are skipped at run time rather than routed through a declaration (the ephemeral provisioning that writes most of these mappings is EphemeralSessions, row 17, AgentCannotReceive for the other agent)",
 	"repo_resolve.go":       "skips one agent's own directory when enumerating a workspace's repositories; the name is a directory to ignore rather than a delivery to make, and ignoring one that is not there costs nothing",
 	"watch.go":              "the review continuation is that agent's harness surface throughout -- RemoteControl (row 20) is declared NoSuchConcept for the other, and the sensitive-location guard reasons about that agent's own home directory",
+	// Split out of watch.go with the continuation it holds, so it carries
+	// the same reason.
+	"watch_continue.go": "the review continuation's pre-wake gate re-reads and verifies the project settings file that agent's harness loads from the review instance, under the same RemoteControl (row 20) declaration as watch.go",
 
 	// Kept to its own file so the excusal covers the launch-record sweep and
 	// not the rest of the reap.

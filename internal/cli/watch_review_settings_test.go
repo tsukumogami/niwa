@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/tsukumogami/niwa/internal/watch"
 )
@@ -98,8 +97,8 @@ func assertReviewSettingsCarryDenies(t *testing.T, inst string, sandbox bool) ma
 // TestWatchReviewSettings_StageAndContinueCarryNewDenies: a fresh stage and a
 // continuation, sandboxed and not, both leave the instance's settings verifying
 // with the session-command deny (and, sandboxed, this instance's filesystem guard),
-// and a continuation whose settings hold an "exit 0" impostor on the Bash matcher
-// ends with niwa's real post-guard and session-command deny beside it.
+// and a continuation of a review staged with an "exit 0" impostor on the Bash
+// matcher ends with niwa's real post-guard and session-command deny beside it.
 func TestWatchReviewSettings_StageAndContinueCarryNewDenies(t *testing.T) {
 	plans := []struct {
 		name        string
@@ -126,50 +125,31 @@ func TestWatchReviewSettings_StageAndContinueCarryNewDenies(t *testing.T) {
 		})
 
 		t.Run("continue/"+tc.name, func(t *testing.T) {
-			root, home := setupWatchCharEnv(t)
-			installWatchCharFakes(t)
-			stubWatchTrust(t, home, tc.unparseable)
-			client := newPullHeadServer(t)
-			cmd, stdout, _ := newWatchCharCmd()
+			// The instance's settings hold an impostor on the Bash matcher
+			// when the review is staged, so the digest the stage records
+			// includes it: an impostor planted after the stage is a change
+			// the digest refuses, which TestContinueReviewGate covers.
+			f := newWatchContinueFixture(t, tc.plan.sandbox, func(_ *watchContinueFixture, s *watchContinueSetup) {
+				s.Unparseable = tc.unparseable
+				s.BeforeApply = func(t *testing.T, inst string) {
+					claudeDir := filepath.Join(inst, ".claude")
+					if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+						t.Fatal(err)
+					}
+					impostor := `{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "exit 0"}]}]}}`
+					if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(impostor), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+			inst := f.inst
 
-			inst := filepath.Join(root, "test-ws+watch_acme_widget_7-4e33acfa")
-			if err := writeMinimalInstanceState(inst); err != nil {
-				t.Fatal(err)
-			}
-			// The instance's settings hold an impostor on the Bash matcher.
-			claudeDir := filepath.Join(inst, ".claude")
-			if err := os.MkdirAll(claudeDir, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			impostor := `{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "exit 0"}]}]}}`
-			if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(impostor), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			jobsDir := filepath.Join(home, ".claude", "jobs")
-			writeJobStateFile(t, jobsDir, watchCharShortID, watchCharSessionID, inst, nil)
-			rec := watch.StagedRecord{
-				Handle:        "watch_acme_widget_7",
-				Owner:         "acme",
-				Repo:          "widget",
-				Number:        7,
-				URL:           watchCharPRURL,
-				InstancePath:  inst,
-				DispatchedSHA: watchCharOldSHA,
-				SessionID:     watchCharSessionID,
-				ShortID:       watchCharShortID,
-			}
-			if err := watch.SaveStagedRecord(root, rec); err != nil {
-				t.Fatal(err)
-			}
-			if !sessionLive(jobsDir, watchCharSessionID, time.Now()) || !instanceHasLiveJob(jobsDir, inst) {
-				t.Fatal("precondition: the review session must read as live")
-			}
-
-			if err := continueReview(cmd, root, root, "", client, watchCharPR, rec, tc.plan); err != nil {
+			out, _, err := f.run(t)
+			if err != nil {
 				t.Fatalf("continueReview: %v", err)
 			}
-			if strings.Contains(stdout.String(), "skipping continuation") {
-				t.Fatalf("continuation was skipped:\n%s", stdout.String())
+			if !strings.Contains(out, "niwa watch: continued review for acme/widget#7") {
+				t.Fatalf("the continuation didn't deliver:\n%s", out)
 			}
 			doc := assertReviewSettingsCarryDenies(t, inst, tc.plan.sandbox)
 			kept := false

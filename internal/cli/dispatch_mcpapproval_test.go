@@ -388,20 +388,22 @@ func TestDispatch_MCPApproval_UnreadableStateWarns(t *testing.T) {
 	}
 }
 
-// TestWatchLaunches_CarryNoMCPApproval: niwa watch review launches build their
-// own passthrough and never reach step (9c), so neither carries the key.
+// TestWatchLaunches_CarryNoMCPApproval: the niwa watch review launch builds its
+// own passthrough and never reaches step (9c), so it doesn't carry the key. A
+// continuation launches nothing: its wake carries the session id and the
+// prompt and no option at all.
 func TestWatchLaunches_CarryNoMCPApproval(t *testing.T) {
 	for _, sandbox := range []bool{false, true} {
-		for name, req := range map[string]launchRequest{
-			"review": watchReviewLaunch("/tmp/inst", "slug", "review this", sandbox, launchEnvShape{}),
-			"resume": watchResumeLaunch("/tmp/inst", "handle", "11111111-1111-4111-8111-111111111111", "continue", sandbox, launchEnvShape{}),
-		} {
-			for _, el := range req.Passthrough {
-				if strings.Contains(el, config.EnabledMcpjsonServersKey) || strings.Contains(el, "enableAllProjectMcpServers") {
-					t.Fatalf("%s launch (sandbox %v) carries an MCP approval: %v", name, sandbox, req.Passthrough)
-				}
+		req := watchReviewLaunch("/tmp/inst", "slug", "review this", sandbox, launchEnvShape{})
+		for _, el := range req.Passthrough {
+			if strings.Contains(el, config.EnabledMcpjsonServersKey) || strings.Contains(el, "enableAllProjectMcpServers") {
+				t.Fatalf("review launch (sandbox %v) carries an MCP approval: %v", sandbox, req.Passthrough)
 			}
 		}
+	}
+	const id = "11111111-1111-4111-8111-111111111111"
+	if got, want := resumeWakeArgs(claudeLaunchSpec(), id, "/tmp/inst", "continue"), []string{"--bg", "--resume", id, "--", "continue"}; !slices.Equal(got, want) {
+		t.Fatalf("continuation wake argv = %q, want %q", got, want)
 	}
 }
 

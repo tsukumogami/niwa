@@ -380,12 +380,13 @@ func TestDispatch_HostPermissionMode_NoSettingRegression(t *testing.T) {
 }
 
 // TestWatch_IgnoresHostPermissionMode: `niwa watch` never reads the machine
-// setting. Its fresh-review launch through stageReview, and both launch
-// builders, produce identical argv with and without a machine setting present
+// setting. Its fresh-review launch through stageReview, and the launch
+// builder, produce identical argv with and without a machine setting present
 // -- including bypassPermissions, the value that would matter most if it
-// leaked.
+// leaked. (A continuation's wake carries no option at all; see
+// TestWatchLaunches_CarryNoPermissionMode.)
 func TestWatch_IgnoresHostPermissionMode(t *testing.T) {
-	stage := func(t *testing.T, hostBody string) ([]string, []string, []string) {
+	stage := func(t *testing.T, hostBody string) ([]string, []string) {
 		t.Helper()
 		root, home := setupWatchCharEnv(t)
 		if hostBody != "" {
@@ -410,22 +411,18 @@ func TestWatch_IgnoresHostPermissionMode(t *testing.T) {
 		}
 		inst := fakes.provisioned.path
 		fresh := watchReviewLaunch(inst, "watch_acme_widget_7", "review", true, launchEnvShape{})
-		resume := watchResumeLaunch(inst, "watch_acme_widget_7", watchCharSessionID, "again", true, launchEnvShape{})
-		return fakes.launches[0].Passthrough, fresh.Passthrough, resume.Passthrough
+		return fakes.launches[0].Passthrough, fresh.Passthrough
 	}
 
-	baseStaged, baseFresh, baseResume := stage(t, "")
+	baseStaged, baseFresh := stage(t, "")
 	for _, m := range config.DispatchPermissionModes {
 		t.Run(m, func(t *testing.T) {
-			staged, fresh, resume := stage(t, hostModeTOML(m))
+			staged, fresh := stage(t, hostModeTOML(m))
 			if !reflect.DeepEqual(staged, baseStaged) {
 				t.Errorf("staged review argv = %q, want %q (as without a machine setting)", staged, baseStaged)
 			}
 			if !reflect.DeepEqual(fresh, baseFresh) {
 				t.Errorf("fresh review argv = %q, want %q", fresh, baseFresh)
-			}
-			if !reflect.DeepEqual(resume, baseResume) {
-				t.Errorf("continuation argv = %q, want %q", resume, baseResume)
 			}
 			requireNoPermissionMode(t, staged)
 		})

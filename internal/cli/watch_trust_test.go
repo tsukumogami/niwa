@@ -4,16 +4,84 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/tsukumogami/niwa/internal/claudetrust"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
+
+// resolveAskPostureCallers names every non-test function in this package
+// that calls resolveAskPosture, as "<file>:<function>", with why it may.
+// resolveAskPosture seeds Claude trust for the instance root, so a new caller
+// has to be added here on purpose.
+var resolveAskPostureCallers = map[string]string{
+	"watch.go:stageReview": "a fresh review stage resolves its write posture before it applies the review settings",
+	"watch_continue.go:runReviewWakeGate": "the pre-wake gate of a review continuation resolves the posture again " +
+		"before it re-applies the review settings, under the instance lock after the stop settled",
+}
+
+// TestResolveAskPostureCallers fails when a non-test function calls
+// resolveAskPosture and isn't in resolveAskPostureCallers, or when a listed
+// one no longer does.
+func TestResolveAskPostureCallers(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	found := map[string]bool{}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				// A reference counts, not only a call: a function value
+				// handed elsewhere reaches the trust write just the same.
+				if id, ok := n.(*ast.Ident); ok && id.Name == "resolveAskPosture" {
+					found[name+":"+fn.Name.Name] = true
+				}
+				return true
+			})
+		}
+	}
+	var unlisted, stale []string
+	for k := range found {
+		if _, ok := resolveAskPostureCallers[k]; !ok {
+			unlisted = append(unlisted, k)
+		}
+	}
+	for k := range resolveAskPostureCallers {
+		if !found[k] {
+			stale = append(stale, k)
+		}
+	}
+	sort.Strings(unlisted)
+	sort.Strings(stale)
+	if len(unlisted) > 0 {
+		t.Errorf("resolveAskPosture callers not in resolveAskPostureCallers (it seeds Claude trust; list each on purpose): %v", unlisted)
+	}
+	if len(stale) > 0 {
+		t.Errorf("resolveAskPostureCallers names functions that no longer call it: %v", stale)
+	}
+}
 
 // These tests drive resolveAskPosture through the real claudetrust writer. HOME
 // and the reviewHomeDir seam point at a t.TempDir and CLAUDE_CONFIG_DIR is

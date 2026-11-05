@@ -3,13 +3,14 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/testutil/claudestub"
 	"github.com/tsukumogami/niwa/internal/watch"
 )
 
@@ -28,88 +30,19 @@ import (
 // dispatch path's own tests cannot speak for it: they assert what runDispatch
 // builds, and `niwa watch` builds its own launch through the same launcher
 // without going anywhere near runDispatch. So this test observes the argv the
-// claude binary is actually handed at BOTH of watch's launch sites, with
-// `dispatchLaunch` left pointing at the real launcher and neither
-// realDispatchLaunch nor buildLaunchArgs replaced. A fake `claude` first on
-// PATH records what it received.
+// claude binary is actually handed at BOTH of watch's sites -- the stage's
+// launch, with `dispatchLaunch` left pointing at the real launcher and neither
+// realDispatchLaunch nor buildLaunchArgs replaced, and the continuation's wake
+// through the real retask core. The copy-rule stub `claude`
+// (internal/testutil/claudestub) first on PATH records what it received, and
+// saves the stage's options with the job the way Claude Code does, so the
+// continuation wakes a session the stage really launched.
 //
 // Everything it does replace sits outside the launch and was already a seam:
-// provisioning, the session-id capture, the `claude stop` that precedes a
-// resume, and instance destruction. If stageReview, continueReview,
-// realDispatchLaunch, or buildLaunchArgs ever starts putting the key in, this
-// fails.
-
-// watchFakeClaudeScript is the fake `claude` the test puts first on PATH. Every
-// invocation records its argv NUL-separated into a fresh file under a recording
-// directory beside the binary, and exits 0 for --bg. Anything else exits
-// non-zero, so an unexpected invocation is loud rather than silently recorded
-// as a launch.
-//
-// The --bg branch also writes the Claude Code job state a real launch leaves
-// behind. Nothing in this test reads it -- the capture is stubbed at both sites
-// and the resume's liveness check is fed by seedLiveJob -- but a fake that
-// launched and left no trace would be a worse stand-in for the next test that
-// reaches for it, and writing it costs two lines.
-const watchFakeClaudeScript = `#!/bin/sh
-d=$(dirname "$0")
-recdir="$d/recorded"
-mkdir -p "$recdir"
-rec=$(mktemp "$recdir/argv-XXXXXX")
-printf '%s\0' "$@" > "$rec"
-case "$1" in
-  --bg)
-    sid="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-    short=$(printf '%s' "$sid" | cut -c1-8)
-    jobdir="$HOME/.claude/jobs/$short"
-    mkdir -p "$jobdir"
-    cwd=$(pwd)
-    printf '{"sessionId":"%s","template":"bg","state":"running","cwd":"%s"}\n' "$sid" "$cwd" > "$jobdir/state.json"
-    exit 0
-    ;;
-  *)
-    echo "fake claude: unsupported invocation: $*" >&2
-    exit 1
-    ;;
-esac
-`
-
-// watchFakeClaude installs the fake claude first on PATH and returns the
-// directory its recordings land in.
-func watchFakeClaude(t *testing.T) (recordDir string) {
-	t.Helper()
-	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(watchFakeClaudeScript), 0o755); err != nil {
-		t.Fatalf("writing the fake claude: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return filepath.Join(binDir, "recorded")
-}
-
-// recordedLaunches reads every argv the fake claude recorded, newest last, each
-// split back into its elements.
-func recordedLaunches(t *testing.T, recordDir string) [][]string {
-	t.Helper()
-	entries, err := os.ReadDir(recordDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		t.Fatalf("reading the recordings: %v", err)
-	}
-	var out [][]string
-	for _, e := range entries {
-		data, err := os.ReadFile(filepath.Join(recordDir, e.Name()))
-		if err != nil {
-			t.Fatalf("reading recording %s: %v", e.Name(), err)
-		}
-		elems := strings.Split(string(data), "\x00")
-		if n := len(elems); n > 0 && elems[n-1] == "" {
-			elems = elems[:n-1]
-		}
-		out = append(out, elems)
-	}
-	return out
-}
+// provisioning, the session-id capture (answered from the stub's own job
+// entry), and instance destruction. If stageReview, continueReview,
+// realDispatchLaunch, buildLaunchArgs or the wake ever starts putting the key
+// in, this fails.
 
 // watchInboundSourceRepo builds a one-commit git repository the hardened PR-head
 // fetch can pull from, and returns its path and head SHA. The two uploadpack
@@ -149,7 +82,7 @@ func watchInboundSourceRepo(t *testing.T) (repoDir, sha string) {
 	return repoDir, run("rev-parse", "HEAD")
 }
 
-// watchInboundGitHub serves the one GitHub call both launch sites make.
+// watchInboundGitHub serves the one GitHub call both sites make.
 func watchInboundGitHub(t *testing.T, cloneURL, sha string) *github.APIClient {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -170,8 +103,8 @@ func watchInboundGitHub(t *testing.T, cloneURL, sha string) *github.APIClient {
 }
 
 // TestWatchReviewLaunchesNeverCarryCrossSessionInbound drives both `niwa watch`
-// launch sites with the machine setting on and the --accept-session-messages
-// flag variable on, and reads what the claude binary was handed.
+// sites with the machine setting on and the --accept-session-messages flag
+// variable on, and reads what the claude binary was handed.
 func TestWatchReviewLaunchesNeverCarryCrossSessionInbound(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
@@ -189,50 +122,66 @@ func TestWatchReviewLaunchesNeverCarryCrossSessionInbound(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("XDG_CONFIG_HOME", configHome)
-	home := t.TempDir()
+	home := canonicalTempDir(t)
 	t.Setenv("HOME", home)
 	resetDispatchFlags(t)
 	on := true
 	dispatchAcceptSessionMessages = &on
 
-	recordDir := watchFakeClaude(t)
+	stub, err := claudestub.New(t.TempDir(), home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stub.BinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, kv := range stub.Env() {
+		k, v, _ := strings.Cut(kv, "=")
+		t.Setenv(k, v)
+	}
+	shortenRetaskBounds(t, 5*time.Second, 5*time.Second)
+	prevList := listClaudeSessionsFunc
+	listClaudeSessionsFunc = realListClaudeSessions
+	t.Cleanup(func() { listClaudeSessionsFunc = prevList })
+
 	repoDir, sha := watchInboundSourceRepo(t)
 	client := watchInboundGitHub(t, repoDir, sha)
 
-	root := t.TempDir()
+	// Canonical, because the stub records a session's cwd with symlinks
+	// resolved, and the liveness checks compare it with the instance path.
+	root := canonicalTempDir(t)
 	pr := github.PRRef{Owner: "acme", Repo: "widgets", Number: 7, URL: "https://example.test/pr/7"}
 	// The uncontained plan: resolveAskPosture returns false straight away, so
 	// nothing reaches the real ~/.claude.json trust file. Containment is not
-	// what this test is about -- the launch argv is.
+	// what this test is about -- the argv is.
 	plan := reviewPlan{sandbox: false}
 
-	// Seams outside the launch. The capture would otherwise scan the jobs dir
-	// and the stop would run `claude stop`, and neither is part of what the
-	// worker binary is handed.
+	// Seams outside the launch.
 	prevProvision := provisionInstanceFunc
 	prevCapture := watchCapture
-	prevStop := stopSessionFunc
 	prevDestroy := destroyInstanceFunc
 	t.Cleanup(func() {
 		provisionInstanceFunc = prevProvision
 		watchCapture = prevCapture
-		stopSessionFunc = prevStop
 		destroyInstanceFunc = prevDestroy
 	})
 
 	instancePath := filepath.Join(root, "review-instance")
 	provisionInstanceFunc = func(_ context.Context, _, _, namePrefix, sep string, _ int) (provisionResult, error) {
-		if err := os.MkdirAll(filepath.Join(instancePath, ".niwa"), 0o755); err != nil {
+		// The retask core reads the instance state, as it does any instance.
+		if err := writeMinimalInstanceState(instancePath); err != nil {
 			return provisionResult{}, err
 		}
 		return provisionResult{Name: "review" + sep + namePrefix, Path: instancePath}, nil
 	}
-	const capturedSession = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	// The capture answers with the session the stub's launch minted.
 	watchCapture = func(_ agentplan.SessionRecords, _, _ string, _ time.Duration, _ func() time.Time, _ time.Duration) (string, string, error) {
-		return capturedSession, capturedSession[:8], nil
+		shorts, err := stub.JobEntries()
+		if err != nil || len(shorts) != 1 {
+			return "", "", errors.New("the stub holds no single job entry")
+		}
+		sid, err := stub.SessionID(shorts[0])
+		return sid, shorts[0], err
 	}
 	destroyInstanceFunc = func(string) error { return nil }
-	stopSessionFunc = func(context.Context, string) error { return nil }
 
 	cmd := &cobra.Command{}
 	cmd.SetOut(io.Discard)
@@ -243,35 +192,37 @@ func TestWatchReviewLaunchesNeverCarryCrossSessionInbound(t *testing.T) {
 	if err := stageReview(cmd, root, root, "", client, pr, plan); err != nil {
 		t.Fatalf("stageReview: %v", err)
 	}
-	stageArgv := onlyBackgroundLaunch(t, recordedLaunches(t, recordDir), "the fresh stage")
+	stageArgv := onlyBackgroundLaunch(t, stub, "the fresh stage")
 	assertNoCrossSessionInbound(t, stageArgv, "the fresh stage")
 	assertLastElementIs(t, stageArgv, watch.BuildReviewPrompt(pr, watch.DefaultCloneRelDir, watch.DefaultDraftRelPath), "the fresh stage")
 
-	// --- Site 2: the resume.
-	if err := os.RemoveAll(recordDir); err != nil {
+	// --- Site 2: the continuation, of the record the stage saved.
+	if err := os.Remove(stub.Log); err != nil {
 		t.Fatalf("clearing the recordings between sites: %v", err)
 	}
-	rec := watch.StagedRecord{
-		Handle:        "watch-acme-widgets-7",
-		Owner:         pr.Owner,
-		Repo:          pr.Repo,
-		Number:        pr.Number,
-		URL:           pr.URL,
-		DraftPath:     filepath.Join(instancePath, watch.DefaultDraftRelPath),
-		InstancePath:  instancePath,
-		DispatchedSHA: sha,
-		SessionID:     capturedSession,
-		ShortID:       capturedSession[:8],
+	handles, err := watch.ListStagedHandles(root)
+	if err != nil || len(handles) != 1 {
+		t.Fatalf("staged handles = %q (err %v), want the one the stage saved", handles, err)
 	}
-	seedLiveJob(t, home, rec.ShortID, capturedSession, instancePath)
+	rec, err := watch.LoadStagedRecord(root, handles[0])
+	if err != nil {
+		t.Fatalf("loading the staged record: %v", err)
+	}
+	if rec.SessionID == "" || rec.SettingsDigest == "" {
+		t.Fatalf("the stage saved no session id or settings digest: %+v", rec)
+	}
 
+	out := &strings.Builder{}
+	cmd.SetOut(out)
 	if err := continueReview(cmd, root, root, "", client, pr, rec, plan); err != nil {
 		t.Fatalf("continueReview: %v", err)
 	}
-	resumeArgv := onlyBackgroundLaunch(t, recordedLaunches(t, recordDir), "the resume")
-	assertNoCrossSessionInbound(t, resumeArgv, "the resume")
-	assertLastElementIs(t, resumeArgv, watch.BuildResumePrompt(watch.DefaultCloneRelDir, watch.DefaultDraftRelPath), "the resume")
-	assertResumesSession(t, resumeArgv, capturedSession)
+	wakeArgv := onlyBackgroundLaunch(t, stub, "the continuation")
+	want := []string{"--bg", "--resume", rec.SessionID, "--", watch.BuildResumePrompt(watch.DefaultCloneRelDir, watch.DefaultDraftRelPath)}
+	if !slices.Equal(wakeArgv, want) {
+		t.Fatalf("the continuation handed claude %q, want exactly %q\nstdout:\n%s", wakeArgv, want, out)
+	}
+	assertNoCrossSessionInbound(t, wakeArgv, "the continuation")
 
 	// The argv is one of two ways the behavior could reach a review session.
 	// The other is the instance's own settings file, which ApplyReviewSettings
@@ -287,35 +238,19 @@ func TestWatchReviewLaunchesNeverCarryCrossSessionInbound(t *testing.T) {
 	}
 }
 
-// seedLiveJob writes the Claude Code job state that makes continueReview's
-// two-way liveness cross-check pass: an entry for the session id, rooted in the
-// instance directory.
-func seedLiveJob(t *testing.T, home, shortID, sessionID, instancePath string) {
+// onlyBackgroundLaunch asserts the stub recorded exactly one --bg invocation
+// and returns its argv. More than one would mean the site launched twice; none
+// would mean the recording is not the real launch and every assertion below it
+// is vacuous.
+func onlyBackgroundLaunch(t *testing.T, stub *claudestub.Stub, site string) []string {
 	t.Helper()
-	dir := filepath.Join(home, ".claude", "jobs", shortID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	calls, err := stub.Calls()
+	if err != nil {
 		t.Fatal(err)
 	}
-	body := fmt.Sprintf(`{"sessionId":%q,"template":"bg","state":"running","cwd":%q}`, sessionID, instancePath)
-	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// onlyBackgroundLaunch asserts the site produced exactly one --bg invocation and
-// returns its argv. More than one would mean the site launched twice; none would
-// mean the recording is not the real launch and every assertion below it is
-// vacuous.
-func onlyBackgroundLaunch(t *testing.T, launches [][]string, site string) []string {
-	t.Helper()
-	var bg [][]string
-	for _, argv := range launches {
-		if len(argv) > 0 && argv[0] == "--bg" {
-			bg = append(bg, argv)
-		}
-	}
+	bg := wakeCalls(calls)
 	if len(bg) != 1 {
-		t.Fatalf("%s recorded %d --bg invocations, want exactly 1; all recordings: %q", site, len(bg), launches)
+		t.Fatalf("%s recorded %d --bg invocations, want exactly 1; all recordings:\n%s", site, len(bg), claudestub.Quote(calls))
 	}
 	return bg[0]
 }
@@ -334,7 +269,7 @@ func assertNoCrossSessionInbound(t *testing.T, argv []string, site string) {
 
 // assertLastElementIs checks the argv ends with the site's own prompt, which is
 // what says the recording is that site's real launch rather than some other
-// invocation that happened to land in the directory.
+// invocation that happened to land in the log.
 func assertLastElementIs(t *testing.T, argv []string, want, site string) {
 	t.Helper()
 	if len(argv) == 0 {
@@ -343,21 +278,4 @@ func assertLastElementIs(t *testing.T, argv []string, want, site string) {
 	if got := argv[len(argv)-1]; got != want {
 		t.Errorf("%s: last argv element = %q; want the site's prompt %q", site, got, want)
 	}
-}
-
-// assertResumesSession checks the resume site carried --resume followed by the
-// staged session id, the other half of "this is the real launch".
-func assertResumesSession(t *testing.T, argv []string, sessionID string) {
-	t.Helper()
-	for i, e := range argv {
-		if e != "--resume" {
-			continue
-		}
-		if i+1 < len(argv) && argv[i+1] == sessionID {
-			return
-		}
-		t.Fatalf("the resume carried --resume followed by %q; want the staged session id %q\nfull argv: %q",
-			argv[i+1:], sessionID, argv)
-	}
-	t.Fatalf("the resume did not carry --resume at all; full argv: %q", argv)
 }
