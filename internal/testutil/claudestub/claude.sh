@@ -165,7 +165,7 @@ launch() {
   la_prompt=$(prompt_of "$@")
   la_sid=$(mint)
   la_short=$(printf '%s' "$la_sid" | cut -c1-8)
-  la_cwd=$(pwd)
+  la_cwd=$(pwd -P)
   new_session "$la_short" "$la_sid" "$la_cwd" "$(flags_json "$@")"
   write_job "$la_short"
   transcript "$la_cwd" "$la_sid" "$la_prompt"
@@ -175,7 +175,7 @@ launch() {
 wake() {
   wk_sid="$1"
   shift
-  printf '%s' "$(pwd)" > "$state/last-wake-cwd"
+  printf '%s' "$(pwd -P)" > "$state/last-wake-cwd"
   wk_prompt=$(prompt_of "$@")
   wk_short=''
   for wk_d in "$sessions"/*; do
@@ -187,9 +187,9 @@ wake() {
     # No job entry: Claude Code starts a worker on the conversation, under
     # its own id, with the options this resume passed.
     wk_short=$(printf '%s' "$wk_sid" | cut -c1-8)
-    new_session "$wk_short" "$wk_sid" "$(pwd)" "$(flags_json "$@")"
+    new_session "$wk_short" "$wk_sid" "$(pwd -P)" "$(flags_json "$@")"
     write_job "$wk_short"
-    transcript "$(pwd)" "$wk_sid" "$wk_prompt"
+    transcript "$(pwd -P)" "$wk_sid" "$wk_prompt"
     printf 'backgrounded · %s\n' "$wk_short"
     return 0
   fi
