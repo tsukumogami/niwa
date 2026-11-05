@@ -544,11 +544,22 @@ to `.niwa-lineage/`: the records hold the values of the names your
 
 ### `niwa resume`
 
-`niwa resume <instance name | session id | session name> [prompt]` brings a
-dispatched Claude Code worker back from its launch record. Run it anywhere in
-the workspace. The argument is matched against the records' instance names
-first, then their session ids, then their session names; the first of those
-that matches anything decides.
+`niwa resume <target> [prompt]` brings a dispatched Claude Code worker back
+from its launch record. Run it anywhere in the workspace. The target is
+matched, exactly and never by prefix, against six identifiers in this order,
+and the first that matches anything decides: the instance name, the full
+instance path (an absolute path whose parent is the workspace root), the
+session id, the session name, the short id (the handle `niwa dispatch`
+printed and recorded in the session mapping) and the dispatch id.
+
+Resume owns a worker whose job entry Claude Code no longer lists, or whose
+instance is gone. A worker whose instance is there and whose job entry is
+still listed belongs to [`niwa retask`](#niwa-retask): Claude Code keeps a
+stopped background session's launch options with its job and starts a copy
+when a resume passes flags of its own, so resume refuses such a worker
+instead of starting a copy, and names `niwa retask`. A worker that is still
+running is refused too, with the `claude attach <short id>` that reaches it
+and a pointer to `niwa retask` once its turn ends.
 
 When the instance was destroyed, resume restores it under its original name
 and path, through the same provisioning `niwa dispatch` uses, so a workspace
@@ -581,6 +592,8 @@ naming the argument and before it restores, maps or launches anything, when:
 - no record matches, or more than one does (it lists them);
 - the session's transcript is gone, or Claude Code lists the session as
   running (or can't list its sessions);
+- the instance is there and Claude Code still lists the session's job entry,
+  stopped (that worker is `niwa retask`'s);
 - something other than the instance occupies its path: a file, a symlink, or
   a directory without the instance's state;
 - the store isn't a real directory owned by you with mode 0700, or the record
@@ -600,6 +613,92 @@ naming the argument and before it restores, maps or launches anything, when:
 The instance path is always the workspace root joined with the recorded
 instance name, which must be a dispatch instance's name, and the transcript
 path is derived from it, so a record can't point either anywhere else.
+
+### `niwa retask`
+
+`niwa retask <target> <prompt>` hands a dispatched Claude Code worker its next
+task in the same session: the same session id, the same job entry, the same
+short id, and the context of its earlier work. Run it anywhere in the
+workspace. The target is matched exactly as `niwa resume` matches it, against
+the instance name, the full instance path, the session id, the session name,
+the short id and the dispatch id, never by prefix; a target that matches more
+than one record refuses and lists them. A prompt that begins with a dash goes
+after `--`: `niwa retask <target> -- "--a prompt"`.
+
+Retask owns a worker whose instance is there and whose job entry Claude Code
+still lists, whether its process is live and idle or stopped. Under the
+instance's lock, it:
+
+1. checks the Claude Code build with `claude --version` (2.1.314 or later);
+2. reads the worker's row in `claude agents --json --all` and its job state,
+   and checks that the options Claude Code saved with the job are the ones
+   the launch record holds;
+3. stops a live worker with `claude stop <short id>`, after matching the row's
+   full session id to the mapping, and waits until the listing shows the row
+   with no pid and no status (every 250 ms, for up to 15 seconds);
+4. runs exactly `claude --bg --resume <session id> -- <prompt>` from the
+   instance, with no other argument, so Claude Code re-applies the saved
+   options and continues the session under the same id;
+5. checks the listing (every 500 ms, for up to 20 seconds) until the same
+   session is running, and removes a copy the wake started instead.
+
+It writes nothing: the session mapping, the launch record, the short id, the
+keep-alive self-wake and the remote-control setting stay attached to the
+session they already name. On success it prints the session id, the instance
+and the `claude attach`, `claude logs` and `claude stop` lines for the short
+id.
+
+A busy worker is refused, not queued: send the follow-up again once its turn
+ends. Retask can't see a `claude attach` viewer that is attached but silent,
+and stops the worker under it like any other live idle worker.
+
+Every refusal names one state word, right after the target:
+`niwa: error: cannot retask "<target>": <state>: ...`. The words are stable,
+so a script can act on them.
+
+| State | Meaning | Next step |
+|-------|---------|-----------|
+| `unknown-target` | No launch record matches the target exactly. | Check the target against `niwa list`. |
+| `ambiguous-target` | More than one record matches; the error lists their dispatch ids. | Use the dispatch id or the instance name. |
+| `invalid-record` | The launch record or the session mapping fails a check, or holds an id niwa won't pass to a command. | Inspect the record under `.niwa-launch/`. |
+| `instance-gone` | The instance directory is gone. Retask never restores one. | `niwa resume <target> <prompt>`. |
+| `instance-occupied` | Something other than the instance occupies its path. | Move it away. |
+| `transcript-gone` | The session's transcript is gone. | Nothing to continue; dispatch again. |
+| `job-entry-gone` | Claude Code no longer lists the session. | `niwa resume <target> <prompt>`. |
+| `state-unknown` | The listing and the job state don't agree, or don't read as a state retask acts on. | Check `claude agents`. |
+| `awaiting-input` | The worker is waiting for an answer. | `claude attach <short id>`. |
+| `busy` | The worker is in the middle of a turn. | Retry once it's idle. |
+| `policy-tightened` | The recorded permission mode is looser than the one current policy gives a new dispatch. | Change the policy back, or dispatch again. |
+| `options-drift` | The options Claude Code saved for the job differ from the launch record; the error names the flag, never its value. | Dispatch again. |
+| `stray-session` | Another session is rooted in the instance; retask leaves it alone. | Stop or remove that session yourself. |
+| `concurrency` | Another niwa command holds the instance's lock (it is named), or the platform has no file locking. | Retry once it finishes. |
+| `agent-unsupported` | The worker's agent declares no way to hand it a task in place. | `niwa resume` once its job is gone. |
+| `build-forks` | The Claude Code build is older than 2.1.314, or can't be read. | Upgrade, or use the escape below. |
+| `stop-failed` | `claude stop` failed. | Retry `niwa retask`. |
+| `settle-timeout` | The stop didn't settle in time, so retask didn't wake the worker. | Retry `niwa retask`. |
+| `copy-started` | Claude Code started a copy instead of continuing the session; retask removed the copy. | Retry, or use the escape below. |
+| `copy-left` | A copy started and retask couldn't remove it; the error prints the `claude stop` and `claude rm` lines that do. | Run them, then retry. |
+| `wake-unconfirmed` | The wake ran but the listing never showed the same session running. | Check `niwa list` and `claude logs <short id>`. |
+
+After `stop-failed`, `settle-timeout`, `copy-started` and `copy-left` the
+worker may have been left stopped; it stays resumable with another
+`niwa retask`, and a keep-alive worker's self-wake is silent until the next
+wake. After `copy-started`, `copy-left` and `wake-unconfirmed` the prompt may
+already have been acted on: check `niwa list` and `claude logs <short id>`
+before sending it again.
+
+Retask removes a copy only when its ids pass niwa's checks, a fresh listing
+taken just before the removal still lists it, its working directory is inside
+the instance, it isn't the worker's own session, and it wasn't rooted at the
+instance before the wake. It stops the copy, waits for the stop to settle,
+then runs `claude rm`.
+
+If a Claude Code build always starts a copy, take the worker out of retask's
+hands: `claude rm <short id>`, then `niwa resume <instance> "<prompt>"`, which
+starts it again on the same conversation from its launch record.
+
+Prompts appear in the process table and in Claude Code's transcripts, a
+removed copy's included, so they must not carry secrets.
 
 ## Context-aware `niwa apply`
 

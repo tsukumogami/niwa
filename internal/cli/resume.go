@@ -32,13 +32,22 @@ func init() {
 }
 
 var resumeCmd = &cobra.Command{
-	Use:   "resume <instance-name | session-id | session-name> [prompt]",
+	Use:   "resume <target> [prompt]",
 	Short: "Bring a dispatched worker back in the posture it was dispatched with",
 	Long: `Resume a worker niwa dispatch launched, from the launch record dispatch
 wrote for it.
 
-The argument names the worker by its instance name, its session id, or its
-session name, tried in that order. When the instance was destroyed, resume
+The target names the worker by its instance name, its full instance path, its
+session id, its session name, its short id or its dispatch id, tried in that
+order and matched exactly, never by prefix.
+
+Resume owns a worker whose job entry Claude Code no longer lists, or whose
+instance is gone. A worker whose instance is there and whose job entry is
+still listed is niwa retask's, which hands it its next task in the same
+session: resume refuses it, since a resume that passes the recorded flags
+would make Claude Code start a copy of it.
+
+When the instance was destroyed, resume
 restores it under its original name and path first (with its Claude trust
 grant when the workspace opts in), cloning each repository at its current
 remote state: unpushed work from the destroyed instance isn't restored.
