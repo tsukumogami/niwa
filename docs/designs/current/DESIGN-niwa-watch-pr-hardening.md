@@ -486,8 +486,10 @@ containment unchanged, with input validation on the new persisted fields.
   directly: it applies the production sandboxed review settings, launches a real
   `claude --bg` session, and from that session's Bash tries six writes against
   `.claude/` and `.mcp.json`. It was run once at 9634ff8 on a throwaway EC2 t3.large
-  (Ubuntu 24.04.5 LTS, Go 1.25.3, Claude Code 2.1.318) with both opt-in variables
-  set, and PASSED in 11.65s: CREATE_SETTINGS_LOCAL, APPEND_SETTINGS, CREATE_SKILL,
+  (Ubuntu 24.04.5 LTS, Go 1.25.3, Claude Code 2.1.318) with
+  `NIWA_WATCH_LIVE_TEST=1` and `NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST=1` set, Go on
+  `PATH` (the test builds niwa for the review hooks) and an authenticated
+  `~/.claude`, and PASSED in 11.65s: CREATE_SETTINGS_LOCAL, APPEND_SETTINGS, CREATE_SKILL,
   CREATE_MCP_JSON, RENAME_CLAUDE_DIR and HARDLINK_SETTINGS were all refused and none
   landed. The host was terminated afterwards. Repeating the run on stock Ubuntu
   24.04 needs two pieces of host setup the test doesn't do itself:
@@ -496,13 +498,16 @@ containment unchanged, with input validation on the new persisted fields.
     not permitted`, because 24.04 sets `kernel.apparmor_restrict_unprivileged_userns=1`.
     The run left that sysctl at 1 and added a per-binary AppArmor profile for
     `/usr/bin/bwrap` (`flags=(unconfined)` with a `userns,` rule), the shape later
-    Ubuntu releases ship. Without it the sandbox can't start and `failIfUnavailable`
+    Ubuntu releases ship. That's the same profile `niwa setup-sandbox` installs at
+    `/etc/apparmor.d/niwa-bwrap`, so running that command is the simplest way to
+    repeat this step. Without it the sandbox can't start and `failIfUnavailable`
     refuses the session, so the test never reaches its probe.
   - Workspace trust for the test's instance. The instance is a `t.TempDir()`, and
     Claude Code refuses to launch in an untrusted directory ("Workspace not
     trusted..."), failing before any probe runs. The run pointed `TMPDIR` at a
     directory under the home and set `hasTrustDialogAccepted=true` for that path in
-    `~/.claude.json`.
+    the real `~/.claude.json`, which the test copies into its isolated HOME at
+    startup.
 
 ### Mitigations carried into the plan
 
