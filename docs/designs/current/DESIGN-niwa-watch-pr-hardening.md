@@ -480,6 +480,29 @@ containment unchanged, with input validation on the new persisted fields.
   fresh stage), a code-reviewable property, but the empirical resumed-egress assertion
   should be run on a disposable bwrap/claude host before relying on continuation in
   `watch_sandbox=required` mode.
+- **A sandboxed review's Bash can't write the instance's Claude Code settings
+  (verified by a live run).** The filesystem guard covers only the built-in file
+  tools, so `TestReviewSandboxBashSettingsWrites_OnHarness` checks the Bash path
+  directly: it applies the production sandboxed review settings, launches a real
+  `claude --bg` session, and from that session's Bash tries six writes against
+  `.claude/` and `.mcp.json`. It was run once at 9634ff8 on a throwaway EC2 t3.large
+  (Ubuntu 24.04.5 LTS, Go 1.25.3, Claude Code 2.1.318) with both opt-in variables
+  set, and PASSED in 11.65s: CREATE_SETTINGS_LOCAL, APPEND_SETTINGS, CREATE_SKILL,
+  CREATE_MCP_JSON, RENAME_CLAUDE_DIR and HARDLINK_SETTINGS were all refused and none
+  landed. The host was terminated afterwards. Repeating the run on stock Ubuntu
+  24.04 needs two pieces of host setup the test doesn't do itself:
+  - `bubblewrap` and `socat` from apt, plus a way for `bwrap` to create its user
+    namespace. Out of the box it fails with `loopback: Failed RTM_NEWADDR: Operation
+    not permitted`, because 24.04 sets `kernel.apparmor_restrict_unprivileged_userns=1`.
+    The run left that sysctl at 1 and added a per-binary AppArmor profile for
+    `/usr/bin/bwrap` (`flags=(unconfined)` with a `userns,` rule), the shape later
+    Ubuntu releases ship. Without it the sandbox can't start and `failIfUnavailable`
+    refuses the session, so the test never reaches its probe.
+  - Workspace trust for the test's instance. The instance is a `t.TempDir()`, and
+    Claude Code refuses to launch in an untrusted directory ("Workspace not
+    trusted..."), failing before any probe runs. The run pointed `TMPDIR` at a
+    directory under the home and set `hasTrustDialogAccepted=true` for that path in
+    `~/.claude.json`.
 
 ### Mitigations carried into the plan
 
