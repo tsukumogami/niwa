@@ -248,7 +248,7 @@ func TestVerifyReviewSettings_RequiresAskPostureBits(t *testing.T) {
 	base := map[string]any{
 		"sandbox": noEgressSandboxStanza(),
 		"hooks": map[string]any{
-			"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), sessionCommandDenyHook(), egressDenyHook(), fsGuardHook("/inst", false)},
+			"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), sessionCommandDenyHook(), mcpDenyHook(), egressDenyHook(), fsGuardHook("/inst", false)},
 		},
 	}
 	if err := VerifyReviewSettings(base, "/inst", true, false); err != nil {
@@ -263,7 +263,7 @@ func TestVerifyReviewSettings_RequiresAskPostureBits(t *testing.T) {
 		"sandbox":     noEgressSandboxStanza(),
 		"permissions": map[string]any{"defaultMode": "default"},
 		"hooks": map[string]any{
-			"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), sessionCommandDenyHook(), egressDenyHook(), fsGuardHook("/inst", true)},
+			"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), sessionCommandDenyHook(), mcpDenyHook(), egressDenyHook(), fsGuardHook("/inst", true)},
 		},
 	}
 	if err := VerifyReviewSettings(withMode, "/inst", true, true); err == nil || !strings.Contains(err.Error(), "auto-allow") {
@@ -275,7 +275,7 @@ func TestVerifyReviewSettings_RequiresAskPostureBits(t *testing.T) {
 		"sandbox":     noEgressSandboxStanza(),
 		"permissions": map[string]any{"defaultMode": "default"},
 		"hooks": map[string]any{
-			"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), sessionCommandDenyHook(), egressDenyHook(), autoAllowHook(), fsGuardHook("/inst", true)},
+			"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), sessionCommandDenyHook(), mcpDenyHook(), egressDenyHook(), autoAllowHook(), fsGuardHook("/inst", true)},
 		},
 	}
 	if err := VerifyReviewSettings(full, "/inst", true, true); err != nil {
@@ -372,7 +372,7 @@ func TestVerifyReviewSettings_RequiresPostGuard(t *testing.T) {
 	noGuard := map[string]any{
 		"sandbox": noEgressSandboxStanza(),
 		"hooks": map[string]any{
-			"PreToolUse": []any{sessionReachDenyHook(), sessionCommandDenyHook(), egressDenyHook(), fsGuardHook("/inst", false)},
+			"PreToolUse": []any{sessionReachDenyHook(), sessionCommandDenyHook(), mcpDenyHook(), egressDenyHook(), fsGuardHook("/inst", false)},
 		},
 	}
 	if err := VerifyReviewSettings(noGuard, "/inst", true, false); err == nil || !strings.Contains(err.Error(), "post-guard") {
@@ -386,7 +386,7 @@ func TestVerifyReviewSettings_RequiresEgressDeny(t *testing.T) {
 	noEgress := map[string]any{
 		"sandbox": noEgressSandboxStanza(),
 		"hooks": map[string]any{
-			"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), sessionCommandDenyHook(), fsGuardHook("/inst", false)},
+			"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), sessionCommandDenyHook(), mcpDenyHook(), fsGuardHook("/inst", false)},
 		},
 	}
 	if err := VerifyReviewSettings(noEgress, "/inst", true, false); err == nil || !strings.Contains(err.Error(), "egress-deny") {
@@ -406,7 +406,7 @@ func TestVerifyReviewSettings_RequiresFSGuard(t *testing.T) {
 		"hooks": map[string]any{
 			// Has the post-guard, session-reach deny, and egress-deny hooks, but not
 			// the filesystem guard.
-			"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), sessionCommandDenyHook(), egressDenyHook()},
+			"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), sessionCommandDenyHook(), mcpDenyHook(), egressDenyHook()},
 		},
 	}
 	if err := VerifyReviewSettings(noFSGuard, "/inst", true, false); err == nil || !strings.Contains(err.Error(), "filesystem-guard") {
@@ -426,7 +426,7 @@ func TestVerifyReviewSettings_RejectsRelaxations(t *testing.T) {
 		return map[string]any{
 			"sandbox": noEgressSandboxStanza(),
 			"hooks": map[string]any{
-				"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), sessionCommandDenyHook(), egressDenyHook(), fsGuardHook("/inst", false)},
+				"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), sessionCommandDenyHook(), mcpDenyHook(), egressDenyHook(), fsGuardHook("/inst", false)},
 			},
 		}
 	}
@@ -465,7 +465,7 @@ func TestVerifyReviewSettings_RejectsRelaxations(t *testing.T) {
 
 	// Missing sandbox stanza (a merge dropped it) -> reject.
 	noSandbox := map[string]any{
-		"hooks": map[string]any{"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), sessionCommandDenyHook(), egressDenyHook(), fsGuardHook("/inst", false)}},
+		"hooks": map[string]any{"PreToolUse": []any{postGuardHook(), sessionReachDenyHook(), sessionCommandDenyHook(), mcpDenyHook(), egressDenyHook(), fsGuardHook("/inst", false)}},
 	}
 	if err := VerifyReviewSettings(noSandbox, "/inst", true, false); err == nil || !strings.Contains(err.Error(), "sandbox stanza missing") {
 		t.Errorf("missing sandbox stanza must be rejected for that reason, got %v", err)

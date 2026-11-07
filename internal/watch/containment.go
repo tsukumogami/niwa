@@ -30,10 +30,18 @@ import (
 // on "|" into an exact list of tool names, with aliases resolved. For PreToolUse
 // it also accepts commas, spaces, and hyphens there, splitting on "|" or "," and
 // trimming each token. A matcher with any other character, such as ".", "*", or
-// "(", is treated as a regular expression. Every matcher below is in the
-// exact-list form, so each token names exactly one tool, never a prefix or a
-// substring.
+// "(", is treated as a regular expression. Every matcher below except
+// mcpDenyMatcher is in the exact-list form, so each token names exactly one
+// tool, never a prefix or a substring. mcpDenyMatcher is the one regular
+// expression: it has to cover a prefix.
 const (
+	// mcpDenyMatcher matches every MCP tool. Claude Code names MCP tools
+	// mcp__<server>__<tool>, and the "^" makes it compare the matcher as a regular
+	// expression, so this covers every server's tools rather than only a tool
+	// literally named mcp__. MCP tools run in the MCP server's own process, outside
+	// the OS sandbox and the filesystem guard, so mcpDenyHook refuses them in every
+	// mode, sandbox on or off.
+	mcpDenyMatcher = "^mcp__"
 	// egressDenyMatcher matches the out-of-sandbox egress channels WebFetch and
 	// WebSearch, plus the "mcp__" token written to cover every MCP tool. These make
 	// network calls OUTSIDE the OS sandbox (which cages only Bash subprocesses), so
@@ -101,6 +109,10 @@ const (
 // to stderr, which Claude Code shows the session when the hook blocks a tool call.
 // Keep it stable: tests and docs quote it verbatim.
 const sessionReachDenyMessage = "niwa watch: review sessions don't reach other sessions"
+
+// mcpDenyMessage is the refusal line the MCP deny hook writes to stderr when a
+// review session calls an MCP tool. Keep it stable: tests quote it verbatim.
+const mcpDenyMessage = "niwa watch: review sessions don't call MCP tools"
 
 // sessionCommandDenyMessage is the refusal line the session-command deny writes to
 // stderr when a review Bash command names niwa's or Claude Code's session commands
@@ -217,6 +229,36 @@ func sessionReachDenyHook() map[string]any {
 			map[string]any{
 				"type":    "command",
 				"command": sessionReachDenyCommand(),
+			},
+		},
+	}
+}
+
+// mcpDenyCommand returns the shell command of the MCP deny hook. It has the
+// session-reach deny's shape: it reads stdin to the end (see
+// sessionReachDenyCommand for why), writes mcpDenyMessage and a newline to stderr,
+// nothing to stdout, and exits 2 whatever stdin holds. The command is part of the
+// hook's identity (see preToolUseHasHook).
+func mcpDenyCommand() string {
+	return `cat >/dev/null 2>&1; printf '%s\n' ` + shellQuote(mcpDenyMessage) + ` >&2; exit 2`
+}
+
+// mcpDenyHook returns the PreToolUse hook that refuses every MCP tool call (see
+// mcpDenyMatcher). It is applied and required in every containment mode, for
+// fresh stages and continuations alike. With watch_sandbox = off a review session
+// loads whatever MCP servers the user, project or instance configuration declares,
+// and neither the egress-deny hook nor --strict-mcp-config is there, so this hook
+// is what keeps the session from calling them. Like the other review hooks it
+// blocks by exiting 2, which holds under every permission mode, including
+// bypassPermissions, and a disableAllHooks setting turns it off (which
+// ApplyReviewSettings refuses in the instance's own settings).
+func mcpDenyHook() map[string]any {
+	return map[string]any{
+		"matcher": mcpDenyMatcher,
+		"hooks": []any{
+			map[string]any{
+				"type":    "command",
+				"command": mcpDenyCommand(),
 			},
 		},
 	}
@@ -353,10 +395,11 @@ func postGuardHook() map[string]any {
 
 // ApplyReviewSettings merges the review-session settings into a provisioned
 // instance's .claude/settings.json and re-verifies they survived the merge,
-// preserving any existing hooks and other keys. Three PreToolUse hooks are added in
+// preserving any existing hooks and other keys. Four PreToolUse hooks are added in
 // every mode: the post-guard, the session-reach deny (which refuses SendMessage,
-// SendFile, RemoteTrigger and ListAgents) and the session-command deny (which
-// refuses review Bash commands that run niwa's or Claude Code's session commands).
+// SendFile, RemoteTrigger and ListAgents), the session-command deny (which
+// refuses review Bash commands that run niwa's or Claude Code's session commands)
+// and the MCP deny (which refuses every mcp__ tool).
 // When sandbox is true the no-egress sandbox stanza is written (fully owned, so no
 // pre-existing sandbox config can relax the posture) and the egress-deny and
 // filesystem-guard PreToolUse hooks are added -- the two channels the OS sandbox does
@@ -486,14 +529,15 @@ type reviewHook struct {
 }
 
 // reviewHooks lists the PreToolUse hooks a review in this mode needs, in the order
-// ApplyReviewSettings adds them. The post-guard, the session-reach deny and the
-// session-command deny apply in every mode; the egress deny and the filesystem guard
+// ApplyReviewSettings adds them. The post-guard, the session-reach deny, the
+// session-command deny and the MCP deny apply in every mode; the egress deny and the filesystem guard
 // in sandbox mode; the auto-allow in the sandboxed operator-approval posture.
 func reviewHooks(instancePath string, sandbox, ask bool) []reviewHook {
 	hooks := []reviewHook{
 		{"post-guard", postGuardMatcher, hookCommand(postGuardHook()), postGuardHook},
 		{"session-reach deny", sessionReachDenyMatcher, sessionReachDenyCommand(), sessionReachDenyHook},
 		{"session-command deny", sessionCommandDenyMatcher, sessionCommandDenyCommand(), sessionCommandDenyHook},
+		{"MCP deny", mcpDenyMatcher, mcpDenyCommand(), mcpDenyHook},
 	}
 	if sandbox {
 		hooks = append(hooks, reviewHook{"egress-deny", egressDenyMatcher, hookCommand(egressDenyHook()), egressDenyHook})
@@ -535,7 +579,7 @@ func refuseDisableAllHooks(doc map[string]any) error {
 // in this mode needs. Every review hook ApplyReviewSettings installs must be
 // present under PreToolUse by its identity, matcher AND exact command with a
 // handler holding only "type" and "command" (see preToolUseHasHook): the
-// post-guard, the session-reach deny and the session-command deny in every mode;
+// post-guard, the session-reach deny, the session-command deny and the MCP deny in every mode;
 // in sandbox mode the egress deny and the filesystem guard, whose command names
 // instancePath and the posture; and in the operator-approval posture the
 // auto-allow. A disableAllHooks set to anything but false fails, as does, in

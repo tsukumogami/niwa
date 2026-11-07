@@ -33,7 +33,7 @@ var reviewToolNames = []string{
 // holding everything the given mode requires except the session-reach deny hook,
 // plus any extra PreToolUse entries.
 func reviewDocFor(sandbox, ask bool, extra ...any) map[string]any {
-	pre := []any{postGuardHook(), sessionCommandDenyHook()}
+	pre := []any{postGuardHook(), sessionCommandDenyHook(), mcpDenyHook()}
 	doc := map[string]any{}
 	if sandbox {
 		doc["sandbox"] = noEgressSandboxStanza()
