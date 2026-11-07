@@ -219,6 +219,10 @@ func requireLiveGateHost(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("live egress gate: the OS sandbox is unavailable on Windows (the feature fails closed there), so there is no boundary to check")
 	}
+	// TestMain puts stub agent binaries first on PATH, so a unit test can't
+	// start a real session. The gate drives the real claude: restore the PATH
+	// the test binary started with before looking it up.
+	t.Setenv("PATH", preStubPath)
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Fatalf("live egress gate is opted in, but claude isn't on PATH (%v); install Claude Code or unset NIWA_WATCH_LIVE_TEST", err)
 	}
@@ -285,9 +289,11 @@ func newLiveGateHarness(t *testing.T) *liveGateHarness {
 	}
 	t.Cleanup(watch.SetGuardBinPath(guardBin))
 
-	realHome, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("resolving the real HOME: %v", err)
+	// TestMain points HOME at a throwaway directory; the gate needs the real
+	// one, for ~/.claude.
+	realHome := preStubHome
+	if realHome == "" {
+		t.Fatal("resolving the real HOME: HOME was unset when the test binary started")
 	}
 	testHome := t.TempDir()
 	if err := os.Symlink(filepath.Join(realHome, ".claude"), filepath.Join(testHome, ".claude")); err != nil {
