@@ -2,11 +2,15 @@ package watch
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // readSettings reads and parses an instance's .claude/settings.json.
@@ -518,5 +522,287 @@ func TestHasPreToolUseHook(t *testing.T) {
 	}
 	if hasPreToolUseHook(map[string]any{"hooks": map[string]any{"PreToolUse": "nope"}}, postGuardMatcher, hookCommand(postGuardHook())) {
 		t.Error("non-array PreToolUse must not report a hook present")
+	}
+}
+
+// putFile writes content at inst/rel, creating parent directories.
+func putFile(t *testing.T, inst, rel, content string) {
+	t.Helper()
+	p := filepath.Join(inst, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// newDigestInstance builds a review instance holding every kind of path the
+// settings digest covers, a PR clone with its own Claude Code files, and two
+// symlinks under .claude/skills: one to a file inside the instance and one to
+// a file outside it.
+func newDigestInstance(t *testing.T) (inst, outside string) {
+	t.Helper()
+	inst, outside = t.TempDir(), t.TempDir()
+	putFile(t, inst, ".claude/settings.json", `{"hooks":{}}`)
+	putFile(t, inst, ".claude/skills/review/SKILL.md", "skill")
+	putFile(t, inst, ".claude/agents/a.md", "agent")
+	putFile(t, inst, ".claude/commands/c.md", "command")
+	putFile(t, inst, "CLAUDE.md", "instructions-plain-text")
+	putFile(t, inst, "shared/linked-skill.md", "linked")
+	putFile(t, inst, "pr-clone/.claude/settings.json", `{}`)
+	putFile(t, inst, "pr-clone/.mcp.json", `{}`)
+	putFile(t, inst, "pr-clone/CLAUDE.md", "clone")
+	putFile(t, outside, "outside.md", "outside")
+	if err := os.Symlink(filepath.Join(inst, "shared", "linked-skill.md"), filepath.Join(inst, ".claude", "skills", "linked.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "outside.md"), filepath.Join(inst, ".claude", "skills", "outside.md")); err != nil {
+		t.Fatal(err)
+	}
+	return inst, outside
+}
+
+func mustDigest(t *testing.T, inst string) string {
+	t.Helper()
+	d, err := ReviewSettingsDigest(inst)
+	if err != nil {
+		t.Fatalf("ReviewSettingsDigest: %v", err)
+	}
+	return d
+}
+
+func TestReviewSettingsDigest(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(t *testing.T, inst, outside string)
+		changes bool
+	}{
+		{"settings_json_edited", func(t *testing.T, inst, _ string) {
+			putFile(t, inst, ".claude/settings.json", `{"hooks":{},"statusLine":{"type":"command","command":"x"}}`)
+		}, true},
+		{"skill_added", func(t *testing.T, inst, _ string) { putFile(t, inst, ".claude/skills/new/SKILL.md", "new") }, true},
+		{"agent_added", func(t *testing.T, inst, _ string) { putFile(t, inst, ".claude/agents/new.md", "new") }, true},
+		{"command_added", func(t *testing.T, inst, _ string) { putFile(t, inst, ".claude/commands/new.md", "new") }, true},
+		{"claude_md_edited", func(t *testing.T, inst, _ string) { putFile(t, inst, "CLAUDE.md", "edited") }, true},
+		{"claude_local_md_added", func(t *testing.T, inst, _ string) { putFile(t, inst, "CLAUDE.local.md", "new") }, true},
+		{"linked_file_inside_instance_edited", func(t *testing.T, inst, _ string) { putFile(t, inst, "shared/linked-skill.md", "edited") }, true},
+		{"file_removed", func(t *testing.T, inst, _ string) {
+			if err := os.Remove(filepath.Join(inst, ".claude", "agents", "a.md")); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"outside_link_retargeted", func(t *testing.T, inst, outside string) {
+			putFile(t, outside, "other.md", "outside")
+			link := filepath.Join(inst, ".claude", "skills", "outside.md")
+			if err := os.Remove(link); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(outside, "other.md"), link); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"pr_clone_settings_json", func(t *testing.T, inst, _ string) {
+			putFile(t, inst, "pr-clone/.claude/settings.json", `{"hooks":{"SessionStart":[]}}`)
+		}, false},
+		{"pr_clone_mcp_json", func(t *testing.T, inst, _ string) {
+			putFile(t, inst, "pr-clone/.mcp.json", `{"mcpServers":{"x":{"command":"x"}}}`)
+		}, false},
+		{"pr_clone_claude_md", func(t *testing.T, inst, _ string) { putFile(t, inst, "pr-clone/CLAUDE.md", "edited") }, false},
+		{"pr_clone_new_file", func(t *testing.T, inst, _ string) { putFile(t, inst, "pr-clone/.claude/skills/x/SKILL.md", "x") }, false},
+		{"outside_link_target_edited", func(t *testing.T, _, outside string) { putFile(t, outside, "outside.md", "edited") }, false},
+		{"unlinked_instance_file_edited", func(t *testing.T, inst, _ string) { putFile(t, inst, "shared/unlinked.md", "x") }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inst, outside := newDigestInstance(t)
+			before := mustDigest(t, inst)
+			if again := mustDigest(t, inst); again != before {
+				t.Fatalf("digest is not stable across two reads of an unchanged instance")
+			}
+			tc.mutate(t, inst, outside)
+			after := mustDigest(t, inst)
+			if tc.changes && after == before {
+				t.Fatalf("digest did not change")
+			}
+			if !tc.changes && after != before {
+				t.Fatalf("digest changed:\nbefore %s\nafter  %s", before, after)
+			}
+		})
+	}
+
+	t.Run("no_content_in_digest", func(t *testing.T) {
+		inst, _ := newDigestInstance(t)
+		if d := mustDigest(t, inst); strings.Contains(d, "instructions-plain-text") || strings.Contains(d, "pr-clone") {
+			t.Fatalf("digest carries content or the PR clone: %s", d)
+		}
+	})
+
+	t.Run("fifo_does_not_hang", func(t *testing.T) {
+		inst, _ := newDigestInstance(t)
+		before := mustDigest(t, inst)
+		if err := syscall.Mkfifo(filepath.Join(inst, ".claude", "pipe"), 0o600); err != nil {
+			t.Skipf("mkfifo: %v", err)
+		}
+		type result struct {
+			d   string
+			err error
+		}
+		done := make(chan result, 1)
+		go func() {
+			d, err := ReviewSettingsDigest(inst)
+			done <- result{d, err}
+		}()
+		select {
+		case r := <-done:
+			if r.err != nil {
+				t.Fatalf("ReviewSettingsDigest: %v", r.err)
+			}
+			if r.d == before {
+				t.Fatalf("a FIFO under .claude did not change the digest")
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("ReviewSettingsDigest hung on a FIFO")
+		}
+	})
+
+	t.Run("claude_dir_symlink_not_descended", func(t *testing.T) {
+		inst := t.TempDir()
+		elsewhere := t.TempDir()
+		putFile(t, elsewhere, "settings.json", "{}")
+		if err := os.Symlink(elsewhere, filepath.Join(inst, ".claude")); err != nil {
+			t.Fatal(err)
+		}
+		before := mustDigest(t, inst)
+		putFile(t, elsewhere, "settings.json", `{"x":1}`)
+		if mustDigest(t, inst) != before {
+			t.Fatalf("a .claude symlink was descended")
+		}
+	})
+
+	t.Run("bounds", func(t *testing.T) {
+		inst, _ := newDigestInstance(t)
+		origEntries, origBytes := digestMaxEntries, digestMaxBytes
+		t.Cleanup(func() { digestMaxEntries, digestMaxBytes = origEntries, origBytes })
+		digestMaxEntries = 3
+		if _, err := ReviewSettingsDigest(inst); err == nil {
+			t.Error("digest over the entry bound did not fail")
+		}
+		digestMaxEntries, digestMaxBytes = origEntries, 10
+		if _, err := ReviewSettingsDigest(inst); err == nil {
+			t.Error("digest over the byte bound did not fail")
+		}
+	})
+
+	t.Run("missing_instance_errors", func(t *testing.T) {
+		if _, err := ReviewSettingsDigest(filepath.Join(t.TempDir(), "gone")); err == nil {
+			t.Fatal("digest of a missing instance did not fail")
+		}
+	})
+}
+
+func TestReviewSettingsDigestChanges(t *testing.T) {
+	inst, _ := newDigestInstance(t)
+	recorded := mustDigest(t, inst)
+
+	if got, err := ReviewSettingsDigestChanges(recorded, recorded); err != nil || len(got) != 0 {
+		t.Fatalf("unchanged: got %v, %v", got, err)
+	}
+
+	putFile(t, inst, ".claude/settings.json", `{"env":{"X":"y"}}`)
+	putFile(t, inst, "CLAUDE.local.md", "new")
+	putFile(t, inst, ".claude/commands/new.md", "new")
+	if err := os.Remove(filepath.Join(inst, ".claude", "agents", "a.md")); err != nil {
+		t.Fatal(err)
+	}
+	putFile(t, inst, "pr-clone/.mcp.json", `{"x":1}`)
+	got, err := ReviewSettingsDigestChanges(recorded, mustDigest(t, inst))
+	if err != nil {
+		t.Fatalf("ReviewSettingsDigestChanges: %v", err)
+	}
+	want := []string{".claude/agents/a.md", ".claude/commands/new.md", ".claude/settings.json", "CLAUDE.local.md"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("changes = %v, want %v", got, want)
+	}
+
+	for _, bad := range []string{"", "not json", `{"v":2,"f":{}}`, `{"v":1}`} {
+		if _, err := ReviewSettingsDigestChanges(bad, recorded); err == nil {
+			t.Errorf("recorded %q was accepted", bad)
+		}
+	}
+	if _, err := ReviewSettingsDigestChanges(recorded, "not json"); err == nil {
+		t.Error("an unreadable current digest was accepted")
+	}
+}
+
+func TestCheckReviewSavedOptions(t *testing.T) {
+	// The secret-looking marker stands in for an environment value: no
+	// refusal may print it.
+	const secret = "s3cr3t-marker"
+	doc := `{"env":{"NIWA_REAP_KEY":"` + secret + `"}}`
+	cases := []struct {
+		name     string
+		opts     []string
+		sandbox  bool
+		wantFlag string // "" with refused=false means accepted
+		refused  bool
+	}{
+		// Accepted: what a review stage saves.
+		{"sandboxed_stage", []string{"--name", "watch_acme_widget_7", "--strict-mcp-config", "--settings", doc}, true, "", false},
+		{"unsandboxed_stage", []string{"--name", "watch_acme_widget_7", "--settings", doc}, false, "", false},
+		{"unsandboxed_with_strict", []string{"--name", "watch_acme_widget_7", "--strict-mcp-config", "--settings", doc}, false, "", false},
+		{"joined_values", []string{"--name=watch_acme_widget_7", "--strict-mcp-config", "--settings=" + doc}, true, "", false},
+		{"no_settings_doc", []string{"--name", "watch_acme_widget_7"}, false, "", false},
+
+		// Refused.
+		{"strict_missing_sandboxed", []string{"--name", "watch_acme_widget_7", "--settings", doc}, true, "--strict-mcp-config", true},
+		{"strict_with_value", []string{"--strict-mcp-config=" + secret}, false, "--strict-mcp-config", true},
+		{"settings_permissions_key", []string{"--settings", `{"env":{"A":"` + secret + `"},"permissions":{"allow":["Bash"]}}`}, false, "--settings", true},
+		{"settings_hooks_key", []string{"--settings", `{"env":{},"hooks":{"x":"` + secret + `"}}`}, false, "--settings", true},
+		{"settings_not_json", []string{"--settings", "not json " + secret}, false, "--settings", true},
+		{"settings_env_not_object", []string{"--settings", `{"env":"` + secret + `"}`}, false, "--settings", true},
+		{"settings_null", []string{"--settings", "null"}, false, "--settings", true},
+		{"settings_twice", []string{"--settings", doc, "--settings", doc}, false, "--settings", true},
+		{"settings_missing_value", []string{"--settings"}, false, "--settings", true},
+		{"permission_mode", []string{"--name", "x", "--permission-mode", "bypassPermissions"}, false, "--permission-mode", true},
+		{"permission_mode_joined", []string{"--permission-mode=default"}, false, "--permission-mode", true},
+		{"mcp_config", []string{"--mcp-config", "/tmp/mcp.json"}, false, "--mcp-config", true},
+		{"setting_sources", []string{"--setting-sources", "user,project"}, false, "--setting-sources", true},
+		{"add_dir", []string{"--add-dir", "/"}, false, "--add-dir", true},
+		{"plugin_dir", []string{"--plugin-dir", "/tmp/p"}, false, "--plugin-dir", true},
+		{"dangerously_skip_permissions", []string{"--dangerously-skip-permissions"}, false, "--dangerously-skip-permissions", true},
+		{"dangerously_other", []string{"--dangerously-load-development-channels", "x"}, false, "--dangerously-load-development-channels", true},
+		{"unknown_flag", []string{"--foo"}, false, "--foo", true},
+		{"name_value_is_a_flag", []string{"--name", "--permission-mode", "bypassPermissions"}, false, "--name", true},
+		{"name_missing_value", []string{"--name"}, false, "--name", true},
+		{"positional", []string{"--name", "x", "stray-" + secret}, false, "", true},
+		{"short_flag", []string{"-p", secret}, false, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckReviewSavedOptions(tc.opts, tc.sandbox)
+			if !tc.refused {
+				if err != nil {
+					t.Fatalf("refused: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("accepted")
+			}
+			var soe *SavedOptionsError
+			if !errors.As(err, &soe) {
+				t.Fatalf("error %T is not a *SavedOptionsError: %v", err, err)
+			}
+			if soe.Flag != tc.wantFlag {
+				t.Errorf("Flag = %q, want %q", soe.Flag, tc.wantFlag)
+			}
+			if tc.wantFlag != "" && !strings.Contains(err.Error(), tc.wantFlag) {
+				t.Errorf("error %q does not name %s", err, tc.wantFlag)
+			}
+			if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), `"env"`) {
+				t.Errorf("error prints an option value: %q", err)
+			}
+		})
 	}
 }

@@ -229,7 +229,13 @@ func ReadLog(path string) ([][]string, error) {
 		return nil, err
 	}
 	var calls [][]string
-	for _, el := range strings.Split(string(data), "\x00") {
+	// Every element ends in a NUL, so the split's last piece is the empty
+	// tail after the final one, not an argument of the last call.
+	elems := strings.Split(string(data), "\x00")
+	if n := len(elems); n > 0 && elems[n-1] == "" {
+		elems = elems[:n-1]
+	}
+	for _, el := range elems {
 		if el == "\x01CALL" {
 			calls = append(calls, []string{})
 			continue

@@ -1,11 +1,19 @@
 package watch
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
+	"syscall"
 )
 
 // Matcher strings for the PreToolUse hooks. A review hook's identity is its
@@ -117,6 +125,16 @@ var guardBinPath = func() string {
 		return p
 	}
 	return "niwa"
+}
+
+// SetGuardBinPath points the guard hooks at p until the returned restore runs.
+// It is for tests only: tests in other packages that write review settings
+// need the hook commands to name a built niwa binary (or a fixed path) rather
+// than the test executable. Production code never calls it.
+func SetGuardBinPath(p string) (restore func()) {
+	prev := guardBinPath
+	guardBinPath = func() string { return p }
+	return func() { guardBinPath = prev }
 }
 
 // shellQuote single-quotes s for safe embedding in the hook command string.
@@ -624,4 +642,345 @@ func preToolUseHasHook(preToolUse []any, matcher, command string) bool {
 		}
 	}
 	return false
+}
+
+// settingsDigestVersion is the manifest format ReviewSettingsDigest writes. A
+// recorded digest of any other version is refused rather than compared.
+const settingsDigestVersion = 1
+
+// settingsDigestRoots are the instance-relative paths whose content Claude Code
+// loads into a session started at the instance root: the .claude tree
+// (settings files, skills, agents, commands) and the two instruction files.
+// The PR clone (DefaultCloneRelDir) is not among them, so a push alone never
+// changes the digest.
+var settingsDigestRoots = []string{".claude", "CLAUDE.md", "CLAUDE.local.md"}
+
+// digestMaxEntries and digestMaxBytes bound ReviewSettingsDigest's walk, so a
+// tree an agent filled with files can't stall a watch pass. Going over either
+// is an error, which a continuation treats as a refusal. They are variables
+// only so tests can lower them.
+var (
+	digestMaxEntries       = 20000
+	digestMaxBytes   int64 = 256 << 20
+)
+
+// settingsManifest is the decoded form of a settings digest: one entry per
+// instance-relative path (forward slashes).
+type settingsManifest struct {
+	V int               `json:"v"`
+	F map[string]string `json:"f"`
+}
+
+// ReviewSettingsDigest returns a digest of everything under the review
+// instance's root that Claude Code loads into the session: the .claude tree,
+// CLAUDE.md and CLAUDE.local.md. A root that is absent gets no entry.
+//
+// The digest is a manifest rather than a single hash, serialized as compact
+// JSON {"v":1,"f":{"<rel>":"<entry>"}}, so a continuation that finds a change
+// can name the paths that changed (ReviewSettingsDigestChanges). It carries
+// paths and hashes only, never content. The entries are:
+//
+//   - a directory: "d";
+//   - a regular file: "f:" + sha256 of its content, read through a no-follow,
+//     non-blocking open and checked to be regular after opening;
+//   - a symlink: "l:" + sha256 of its link text, plus "+f:" + sha256 of the
+//     target's content when the link resolves to a regular file inside the
+//     instance. A link is never descended or read outside the instance, so a
+//     link pointing elsewhere changes the digest only when its text changes. A
+//     link to a directory is recorded by its text alone;
+//   - anything else (a FIFO, a socket, a device): "o:" + its type. It is never
+//     opened, so a FIFO can't hang the walk.
+//
+// A .claude that is itself a symlink gets a link entry and isn't descended.
+func ReviewSettingsDigest(instancePath string) (string, error) {
+	realRoot, err := filepath.EvalSymlinks(instancePath)
+	if err != nil {
+		return "", fmt.Errorf("settings digest: resolving the instance: %w", err)
+	}
+	d := &digestWalk{inst: instancePath, realRoot: realRoot, entries: map[string]string{}}
+	for _, name := range settingsDigestRoots {
+		p := filepath.Join(instancePath, name)
+		fi, err := os.Lstat(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("settings digest: %w", err)
+		}
+		if name == ".claude" && fi.IsDir() {
+			// WalkDir reports symlinks as links and never follows them.
+			err = filepath.WalkDir(p, func(path string, de fs.DirEntry, werr error) error {
+				if werr != nil {
+					return werr
+				}
+				return d.add(path, de.Type())
+			})
+		} else {
+			err = d.add(p, fi.Mode().Type())
+		}
+		if err != nil {
+			return "", fmt.Errorf("settings digest: %w", err)
+		}
+	}
+	out, err := json.Marshal(settingsManifest{V: settingsDigestVersion, F: d.entries})
+	if err != nil {
+		return "", fmt.Errorf("settings digest: encoding: %w", err)
+	}
+	return string(out), nil
+}
+
+// digestWalk accumulates ReviewSettingsDigest's entries and its bounds.
+type digestWalk struct {
+	inst, realRoot string
+	entries        map[string]string
+	hashed         int64
+}
+
+func (d *digestWalk) add(path string, typ fs.FileMode) error {
+	if len(d.entries) >= digestMaxEntries {
+		return fmt.Errorf("the review instance holds more than %d entries to digest", digestMaxEntries)
+	}
+	rel, err := filepath.Rel(d.inst, path)
+	if err != nil {
+		return err
+	}
+	var entry string
+	switch {
+	case typ.IsDir():
+		entry = "d"
+	case typ.IsRegular():
+		sum, err := d.hashFile(path)
+		if err != nil {
+			return err
+		}
+		entry = "f:" + sum
+	case typ&fs.ModeSymlink != 0:
+		entry, err = d.linkEntry(path)
+		if err != nil {
+			return err
+		}
+	default:
+		entry = "o:" + typ.String()
+	}
+	d.entries[filepath.ToSlash(rel)] = entry
+	return nil
+}
+
+// hashFile hashes a regular file's content. The open neither follows a
+// symlink nor blocks (a FIFO swapped in after the walk's Lstat opens without
+// waiting for a writer), and the fstat after it refuses anything that isn't a
+// regular file by then.
+func (d *digestWalk) hashFile(path string) (string, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is not a regular file", path)
+	}
+	h := sha256.New()
+	n, err := io.Copy(h, io.LimitReader(f, digestMaxBytes-d.hashed+1))
+	d.hashed += n
+	if err != nil {
+		return "", err
+	}
+	if d.hashed > digestMaxBytes {
+		return "", fmt.Errorf("the review instance holds more than %d bytes to digest", digestMaxBytes)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// linkEntry records a symlink by its link text and, when it resolves to a
+// regular file inside the instance, by that file's content too: an edit to a
+// file a skill links to changes what the session loads.
+func (d *digestWalk) linkEntry(path string) (string, error) {
+	target, err := os.Readlink(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(target))
+	entry := "l:" + hex.EncodeToString(sum[:])
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		// A dangling or looping link loads nothing, so its text is all there is.
+		return entry, nil
+	}
+	// withinDir compares at a separator, so /inst-other is not inside /inst.
+	if !withinDir(resolved, d.realRoot) {
+		return entry, nil
+	}
+	fi, err := os.Lstat(resolved)
+	if err != nil || !fi.Mode().IsRegular() {
+		return entry, nil
+	}
+	content, err := d.hashFile(resolved)
+	if err != nil {
+		return "", err
+	}
+	return entry + "+f:" + content, nil
+}
+
+// ReviewSettingsDigestChanges compares a recorded ReviewSettingsDigest with a
+// current one and returns the instance-relative paths that were added,
+// removed or changed, sorted. An empty or unreadable recorded digest is an
+// error, never "no changes": a review whose digest is missing must not be
+// woken as if nothing had changed.
+func ReviewSettingsDigestChanges(recorded, current string) ([]string, error) {
+	if recorded == "" {
+		return nil, errors.New("no settings digest was recorded for the review")
+	}
+	rec, err := parseSettingsManifest(recorded)
+	if err != nil {
+		return nil, fmt.Errorf("the recorded settings digest %w", err)
+	}
+	cur, err := parseSettingsManifest(current)
+	if err != nil {
+		return nil, fmt.Errorf("the current settings digest %w", err)
+	}
+	var changed []string
+	for p, e := range rec.F {
+		if ce, ok := cur.F[p]; !ok || ce != e {
+			changed = append(changed, p)
+		}
+	}
+	for p := range cur.F {
+		if _, ok := rec.F[p]; !ok {
+			changed = append(changed, p)
+		}
+	}
+	sort.Strings(changed)
+	return changed, nil
+}
+
+func parseSettingsManifest(s string) (settingsManifest, error) {
+	var m settingsManifest
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		return m, errors.New("can't be read")
+	}
+	if m.V != settingsDigestVersion || m.F == nil {
+		return m, errors.New("has an unknown format")
+	}
+	return m, nil
+}
+
+// harmlessSavedOptions lists the saved option names a continuation lets
+// through unchecked, mapped to whether the option takes a value. A name is
+// added here only from a live run's record of what Claude Code saves for a
+// review stage, never on a guess: an option on this list is re-applied by
+// every wake without anyone looking at it. --strict-mcp-config and --settings
+// are not on it; CheckReviewSavedOptions checks them.
+var harmlessSavedOptions = map[string]bool{
+	"--name": true,
+}
+
+// savedOptionNamePattern is the shape of an option name the checker will
+// name in a refusal. Anything else is refused without being printed, since it
+// could be a value (a stray settings document, say).
+var savedOptionNamePattern = regexp.MustCompile(`^--[a-z0-9-]+$`)
+
+// SavedOptionsError is CheckReviewSavedOptions' refusal. Flag names the
+// offending option (empty when the element wasn't a well-formed option name);
+// Why says what is wrong with it. Neither ever holds an option's value: the
+// --settings document carries environment values.
+type SavedOptionsError struct {
+	Flag string
+	Why  string
+}
+
+func (e *SavedOptionsError) Error() string {
+	if e.Flag == "" {
+		return "saved options: " + e.Why
+	}
+	return "saved option " + e.Flag + ": " + e.Why
+}
+
+// CheckReviewSavedOptions checks the option argv Claude Code saved for a
+// review session (its job state's respawnFlags), which a flagless wake
+// re-applies. Because the wake carries no flags of its own, these saved
+// options are the flag layer of the review's containment, and anything the
+// stage didn't put there must not ride along.
+//
+// It accepts the harmless names (harmlessSavedOptions), --strict-mcp-config
+// with no value (required when sandbox is true), and one --settings whose
+// value is a JSON object holding only an "env" object. Both "--x v" and
+// "--x=v" are parsed. Everything else is refused: --permission-mode,
+// --mcp-config, --setting-sources, --add-dir, --plugin-dir, any
+// --dangerously-* name, unknown flags, and positional elements.
+func CheckReviewSavedOptions(opts []string, sandbox bool) error {
+	sawStrict, sawSettings := false, false
+	for i := 0; i < len(opts); i++ {
+		name, value, joined := strings.Cut(opts[i], "=")
+		if !savedOptionNamePattern.MatchString(name) {
+			return &SavedOptionsError{Why: fmt.Sprintf("element %d is an unrecognized option", i+1)}
+		}
+		if name == "--strict-mcp-config" {
+			if joined {
+				return &SavedOptionsError{Flag: name, Why: "takes no value but was saved with one"}
+			}
+			sawStrict = true
+			continue
+		}
+		takesValue, harmless := harmlessSavedOptions[name]
+		if name == "--settings" {
+			if sawSettings {
+				return &SavedOptionsError{Flag: name, Why: "was saved more than once"}
+			}
+			sawSettings, takesValue = true, true
+		} else if !harmless {
+			return &SavedOptionsError{Flag: name, Why: "isn't an option a review stage saves, and a wake would re-apply it"}
+		}
+		if !takesValue {
+			if joined {
+				return &SavedOptionsError{Flag: name, Why: "takes no value but was saved with one"}
+			}
+			continue
+		}
+		if !joined {
+			if i+1 >= len(opts) {
+				return &SavedOptionsError{Flag: name, Why: "was saved without its value"}
+			}
+			i++
+			value = opts[i]
+		}
+		// A value starting with a dash could be read as an option by Claude
+		// Code's own parser, so what this loop skipped as a value might be
+		// re-applied as a flag.
+		if strings.HasPrefix(value, "-") {
+			return &SavedOptionsError{Flag: name, Why: "was saved with a value that starts with a dash"}
+		}
+		if name == "--settings" {
+			if why := checkSavedSettingsDoc(value); why != "" {
+				return &SavedOptionsError{Flag: name, Why: why}
+			}
+		}
+	}
+	if sandbox && !sawStrict {
+		return &SavedOptionsError{Flag: "--strict-mcp-config", Why: "is missing, and a sandboxed review needs it to keep MCP servers from loading"}
+	}
+	return nil
+}
+
+// checkSavedSettingsDoc returns why a saved --settings value is refused, or
+// "" when it is a JSON object whose only key is an "env" object. The reason
+// never quotes the document. Decoding into a map keeps key matching exact
+// (a struct would match "ENV" or "Env" too).
+func checkSavedSettingsDoc(value string) string {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(value), &doc); err != nil || doc == nil {
+		return "its value isn't a JSON object"
+	}
+	env, ok := doc["env"]
+	if !ok || len(doc) != 1 {
+		return "its value must hold env and nothing else"
+	}
+	var envDoc map[string]json.RawMessage
+	if err := json.Unmarshal(env, &envDoc); err != nil || envDoc == nil {
+		return "its env isn't a JSON object"
+	}
+	return ""
 }

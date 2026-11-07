@@ -334,9 +334,27 @@ type StagedRecord struct {
 	// existed; the session id stands in then. It is checked against the reap
 	// key pattern before any use.
 	ReapKey string `json:"reap_key,omitempty"`
+	// ContinuationHalted is the pending marker of a continuation: the PR head SHA
+	// a wake is about to deliver the re-review prompt for. It is written under
+	// the instance lock just before the wake and cleared once the wake is
+	// confirmed (or refused before it ran). A record that still carries it either
+	// had its prompt delivered without confirmation or started a copy, so it is
+	// never continued again: watch defers it until the review session is
+	// dismissed. Empty in a record written before the field existed.
+	ContinuationHalted string `json:"continuation_halted,omitempty"`
+	// SettingsDigest is ReviewSettingsDigest of the review instance, taken right
+	// after the stage applied the review settings (and refreshed after each
+	// continuation re-applies them). A continuation compares it with the
+	// instance as it stands before the wake and refuses when anything Claude Code
+	// loads from the instance root changed. Empty in a record written before the
+	// field existed; such a record is never continued.
+	SettingsDigest string `json:"settings_digest,omitempty"`
 }
 
-// SaveStagedRecord writes a staged-review record keyed by handle.
+// SaveStagedRecord writes a staged-review record keyed by handle. The write is
+// atomic (a temp file in the same directory, then a rename): a torn record
+// would load as "no record", the PR would read as having no live review, and
+// watch would stage a second review beside the one still running.
 func SaveStagedRecord(workspaceRoot string, rec StagedRecord) error {
 	if !isSafeHandle(rec.Handle) {
 		return fmt.Errorf("refusing to save record with unsafe handle %q", rec.Handle)
@@ -349,9 +367,38 @@ func SaveStagedRecord(workspaceRoot string, rec StagedRecord) error {
 	if err != nil {
 		return fmt.Errorf("encoding staged record: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, rec.Handle+".json"), data, 0o644); err != nil {
+	// The temp name has no .json suffix, so ListStagedHandles never reports a
+	// half-written file as a handle.
+	tmp, err := os.CreateTemp(dir, ".rec-*")
+	if err != nil {
 		return fmt.Errorf("writing staged record: %w", err)
 	}
+	tmpName := tmp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("writing staged record: %w", err)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("writing staged record: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("writing staged record: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("writing staged record: %w", err)
+	}
+	if err := os.Rename(tmpName, filepath.Join(dir, rec.Handle+".json")); err != nil {
+		return fmt.Errorf("writing staged record: %w", err)
+	}
+	committed = true
 	return nil
 }
 

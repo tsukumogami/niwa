@@ -314,8 +314,8 @@ deferrable — matching the walking-skeleton philosophy of the parent roadmap.
   unknown — the shipped capture yields a session UUID, not necessarily the id
   `claude --resume` wants); if it cannot, the live-idle branch stays `Defer` and
   Phase D reduces to a documented non-goal. Then persist the ids, build the
-  idle/attached classifier, and wire stop-and-resume through the fresh-dispatch
-  launch wrapper (so the OS sandbox re-enters — see Security). Flips the
+  idle/attached classifier, and wire stop-and-resume as a flagless wake behind a
+  pre-wake containment gate (so the OS sandbox re-enters — see Security). Flips the
   live-and-idle branch from `Defer` to `Continue`. If D proves larger than one PR's
   worth, A-C still ship as real hardening and D becomes a bounded follow-up; the
   `Defer` fallback is safe and never regresses the two-live-sessions invariant.
@@ -329,23 +329,51 @@ over WebFetch/WebSearch/MCP + `--strict-mcp-config`, with the agent drafting and
 never posting). This design must not weaken that boundary; several new surfaces
 are reviewed against it.
 
-- **Continuation must re-apply, never relax, containment — via the same launch
-  wrapper as fresh dispatch.** A continued session runs on a *new* untrusted diff.
+- **Continuation re-applies, never relaxes, containment, and checks it before
+  every wake.** A continued session runs on a *new* untrusted diff. The wake
+  carries no flags of its own: niwa stops the review session, waits until its row
+  in `claude agents --json --all` shows no pid and no status, and wakes it with
+  `claude --bg --resume <session-id> -- <prompt>`. Claude Code then re-applies the
+  options it saved with the job when the review was staged; a resume that passes
+  flags of its own would start a copy instead. So the wake's containment comes
+  only from files and saved options, and a pre-wake gate checks both under the
+  instance lock after the stop settles and before every wake:
+  - The file layer is re-applied and verified. `ApplyReviewSettings` re-writes the
+    review settings (sandbox stanza, hooks identified by matcher and command,
+    post-guard, `disableAllHooks` refused), the result is verified from disk, and a
+    `.claude/settings.local.json` or `.mcp.json` in the instance refuses the wake.
+  - A digest of what Claude Code loads from the instance root (the `.claude/` tree,
+    `CLAUDE.md` and `CLAUDE.local.md`, one hash per path, the PR clone left out) is
+    taken before the re-apply and compared with the digest recorded at stage. Any
+    change since stage refuses the wake and names the changed paths, and a record
+    with no recorded digest is never woken.
+  - The saved options in the job's state file are read through the checked
+    job-state read and checked: only `--name`, `--strict-mcp-config` (required for
+    a sandboxed review) and a `--settings` document holding only `env` pass; any
+    other flag or shape refuses.
+  - Once all three pass, a pending marker (`continuation_halted`, naming the head
+    the wake is about to send) goes into the staged record with the digest as it
+    stands after the re-apply, before the wake runs. That digest is compared with
+    the pre-apply one first, and a change to any path other than
+    `.claude/settings.json` (the only file the re-apply writes) refuses the wake,
+    so a write made during the fetch or the gate never becomes the recorded
+    baseline. A confirmed wake clears the marker. A
+    copy, or a wake that can't be confirmed, leaves it set, and a record carrying it
+    is never woken again until the review is dismissed.
+
   The fresh checkout at the new head is fetched with the shipped inert-data path
-  (`FetchPRHead`, outside the sandbox), and the instance's review settings
-  (`ApplyReviewSettings` — sandbox stanza, hooks, post-guard) are re-asserted
-  before resume. Critically, "re-assert containment" is not just re-writing
-  settings on disk: the resume MUST launch through the same sandbox-applying path a
-  fresh `dispatchLaunch` uses, so the OS no-egress sandbox re-enters over the
-  session's Bash — the strongest ED1 control — and does not silently degrade to the
-  hook layer only. The continuation path therefore reuses the fresh-dispatch launch
-  wrapper, not the lighter `sessionattach` attach path (which was built for trusted
-  worktree sessions and applies no sandbox). If containment cannot be enforced on
-  resume, the pass fails closed exactly as `stageReview` does today
-  (`resolveReviewPlan` refusal), never resuming uncontained. This is a testable
-  sub-claim, not an atomic assertion: the plan carries an integration test that a
-  *resumed* watch session's Bash egress is denied at the OS layer, not merely that
-  the hooks are present.
+  (`FetchPRHead`, outside the sandbox) only after the stop settles. A gate refusal
+  defers the PR and sends nothing. The gate's "no session process is running"
+  guarantee rests on Claude Code's listing row showing no pid and no status, so a
+  detached process the agent started that outlives `claude stop` could still write
+  the instance root between the gate and the wake; the pre/post digest comparison
+  narrows this to the window after the marker write.
+
+  Whether the OS no-egress sandbox re-enters over the woken session's Bash, the
+  strongest ED1 control, is a testable sub-claim:
+  the live gate `TestResumedSessionDeniesEgress_OnHarness` (`internal/cli`) checks
+  that a raw TCP connect from inside the woken session is denied at the OS layer,
+  not merely that the hooks are present.
 - **Compounded untrusted context is bounded by egress denial, not context
   hygiene.** `claude --resume` carries the prior transcript (earlier untrusted PR
   content) into the new turn, and the instance lives across iterations. Because
@@ -445,40 +473,70 @@ containment unchanged, with input validation on the new persisted fields.
   are dispatched detached; the normal flow is read-draft-then-dismiss (dismissal
   removes the job entry → not live → not continued); the two-way liveness
   cross-check; and stop-before-resume. Accepted as a narrow residual, not closed.
-- **`--resume` + `--name` works, and `--bg` mints a new session id (verified by a
-  live smoke).** `claude --bg --resume <uuid> --name <slug>` launches cleanly and
-  carries the prior conversation forward (context is preserved). But `--bg` mints a
-  *new* session id (it ignores `--session-id`), so the resumed session's id differs
-  from the one the record stored. Because `sessionLive` treats any lingering job
-  entry as live — and `claude stop` leaves the stopped entry present — a record left
-  pointing at the stopped id would read as live-and-idle and drive a wrong second
-  resume that loses the just-added review. `continueReview` therefore re-captures the
-  session ids after resume (like a fresh stage). Today that re-capture is *ambiguous*
-  (the stopped prior entry and the resumed one share the instance cwd), so it yields
-  empty ids and the record becomes non-continuable until dismissal: continuation is
-  correct **once per session**, a further re-request before the human dismisses it
-  Defers, and it re-stages Fresh after dismissal (the review is never lost, only its
-  context carry-over for that interim push). **Chainable** continuation across
-  multiple pushes before a dismissal needs a capture-newest disambiguation — a
-  bounded follow-up that lights up with no change at the `continueReview` call site.
+- **The wake continues the review session under its own id, and continuation
+  chains.** An earlier build relaunched the session with `--resume`, `--name` and
+  niwa's own flags right after `claude stop` returned. Claude Code starts a copy
+  under a different id when a resume passes flags of its own, or when the stopped
+  session still shows as running, so that relaunch left a second session at the
+  instance; the re-capture that followed found two jobs at the instance, cleared the
+  ids, and continuation worked once per session at best. `continueReview` now goes
+  through the shared retask core as a watch caller: the core waits for the stop to
+  settle and wakes with no flags (see Security), so the session keeps its id. The
+  staged record's `SessionID` and `ShortID` don't change, the re-capture after the
+  wake is gone, and a review continues at each new head across any number of
+  pushes until it's dismissed. The core confirms the wake from the session listing;
+  a second session rooted at the instance is removed as a copy and halts the
+  record. Because the ids are kept, `reapDiscardedReview` also runs the on-reap
+  command for a review that was continued. Issue #460's reproduction showed a
+  flagless resume continuing the stopped session under the same id on Claude Code
+  2.1.314 (macOS arm64), and continuation defers on a build below that version. The
+  live gate that checks this is local-only: it is re-run locally for each Claude
+  Code upgrade used with watch, and its report records the Claude Code version it
+  checked.
 - **The resume execution + OS-sandbox re-entry were not executed in the authoring
   run.** The classifier, decision flip, id capture/validation, cap-neutrality, and
   the two-way liveness cross-check are all unit-tested offline; the actual
-  stop-and-resume execution and the containment re-entry are covered by
-  `TestResumedSessionDeniesEgress_OnHarness` (and the ED1 `TestContainedSessionDeniesEgress_OnHarness`).
-  Both are **disposable/CI-host only**: to run a real authenticated `claude` session
-  they symlink the developer's real `~/.claude` into an isolated HOME, so a
-  no-egress run on a primary workstation makes those throwaway sessions look like the
-  user's own login broke. They are double-gated -- `NIWA_WATCH_LIVE_TEST=1` AND
-  `NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST=1` -- and skip loudly otherwise, so they are
-  never run casually on a real machine. On the one real run attempted, the contained
-  gate PASSED (fresh-session egress denied at the OS layer); the resumed gate went
-  *inconclusive* (the resumed session did not write the probe result in time -- no
-  egress leak observed), and the test now dumps the resumed session's logs/transcript
-  on that path so a CI re-run is decisive. Containment is inherited structurally (same
-  `ApplyReviewSettings` + `dispatchLaunch` path + pass-level fail-closed refusal as a
-  fresh stage), a code-reviewable property, but the empirical resumed-egress assertion
-  should be run on a disposable bwrap/claude host before relying on continuation in
+  stop-and-wake execution and the containment re-entry are covered by
+  `TestResumedSessionDeniesEgress_OnHarness` in `internal/cli` (and the ED1
+  `TestContainedSessionDeniesEgress_OnHarness` in `internal/watch`). The
+  continuation gate moved to `internal/cli` so it drives the production pieces: it
+  stages through `watchReviewLaunch`, stops and waits for the settle, runs the
+  pre-wake gate against the job's real state file, wakes with no flags through the
+  production deliverer, fails if the woken session's id differs from the staged one
+  or a second session is rooted at the instance, checks egress from inside the
+  woken session, and wakes a second time to cover chaining. Its copy check also has
+  an offline test, `TestLiveGateCopyCheck`, that runs in normal CI.
+  The continuation gate is **local-only**. CI has no API key for its sessions and
+  no disposable host for them, so it never runs there: the test checks for CI
+  (`GITHUB_ACTIONS=true` or `CI=true`) before anything else and skips with a message
+  that says it is local-only and gives the command to run it locally, even when the
+  opt-ins are set. Its skip decision has an offline test, `TestLiveGateRunDecision`.
+  It is re-run locally, on a disposable host, for each Claude Code upgrade used with
+  watch; `NIWA_WATCH_LIVE_REPORT` names a file for its report (the Claude Code
+  version, the review stage's saved flags with the `--settings` value reduced to
+  its key list, whether claude.ai still reaches the woken session, and each
+  subtest's pass).
+  Both live tests are **disposable-host only**: to run a real authenticated
+  `claude` session they symlink the developer's real `~/.claude` into an isolated
+  HOME, so a no-egress run on a primary workstation makes those throwaway sessions
+  look like the user's own login broke. They are double-gated --
+  `NIWA_WATCH_LIVE_TEST=1` AND `NIWA_WATCH_LIVE_TEST_DISPOSABLE_HOST=1` -- and skip
+  loudly otherwise, so they are never run casually on a real machine. On the one
+  real run attempted, before the continuation gate was rewritten, the contained gate
+  PASSED (fresh-session egress denied at the OS layer) and the resumed gate of that
+  time, which relaunched with flags, went *inconclusive* (the resumed session did not
+  write the probe result in time -- no egress leak observed). The rewritten gate
+  fails rather than going inconclusive or skipping once its opt-ins hold outside
+  CI: a missing `claude`, an isolated HOME that can't be set up, or an egress probe
+  that can't reach the network outside the sandbox each fail it. The
+  `watch-live-egress` workflow no longer runs the gate. It needs no secret, runs on
+  pull requests that touch the watch code, and fails the job unless the gate
+  reports a skip with its local-only reason and the offline copy-check and
+  skip-decision tests pass, so the gate can't drift into a silent pass in CI.
+  Containment on the wake
+  comes from the files and saved options the pre-wake gate checked (see Security), a
+  code-reviewable property, but the empirical woken-session egress assertion should
+  be run on a disposable bwrap/claude host before relying on continuation in
   `watch_sandbox=required` mode.
 - **A sandboxed review's Bash can't write the instance's Claude Code settings
   (verified by a live run).** The filesystem guard covers only the built-in file
@@ -515,8 +573,10 @@ containment unchanged, with input validation on the new persisted fields.
 - Cross-check liveness two ways and fail-closed to `Fresh`/`Defer` on doubt.
 - Validate the id fields (charset) and confine `InstancePath` (under the managed
   instances root) before they become CLI args or path/checkout targets.
-- Re-assert containment on every resume via the fresh-dispatch launch wrapper (OS
-  sandbox re-entry, not hook-only); fail closed if it cannot be enforced. Carry an
-  integration test that a resumed session's Bash egress is denied at the OS layer.
+- Re-assert and check containment before every wake through the pre-wake gate
+  (file layer re-applied and verified, settings digest compared, saved options
+  checked), and wake with no flags so the session keeps its id; defer if any check
+  refuses. Carry a live integration test that a woken session's Bash egress is
+  denied at the OS layer.
 - Keep the re-review prompt a fixed template; PR content enters only as inert
   checkout data.

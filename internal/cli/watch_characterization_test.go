@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -19,12 +20,14 @@ import (
 	"github.com/tsukumogami/niwa/internal/claudetrust"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/testutil/claudestub"
 	"github.com/tsukumogami/niwa/internal/watch"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
 // These tests characterize what `niwa watch` forwards to the review agent it
-// launches, at staging (stageReview) and at resume (continueReview). Every
+// launches at staging (stageReview), and what its continuation
+// (continueReview) hands the binary when it wakes that agent. Every
 // expectation is a string literal on purpose: computing it through the slug
 // sanitizer, the passthrough builder or the write-posture helper would make the
 // assertion quote the code under test, so a change inside those helpers that
@@ -41,12 +44,11 @@ const (
 	watchCharCloneURL  = "https://github.com/acme/widget.git"
 	watchCharPRURL     = "https://github.com/acme/widget/pull/7"
 
-	// The settings document each launch carries: its reap key and nothing
-	// else, since the fixture workspace declares no [session.dispatch_env].
-	// A fresh stage mints its key from the pinned random source; the
-	// continuation's record predates the key and falls back to its session id.
-	watchCharStageSettings  = `{"env":{"NIWA_REAP_KEY":"abababab-abab-4bab-abab-abababababab"}}`
-	watchCharResumeSettings = `{"env":{"NIWA_REAP_KEY":"` + watchCharSessionID + `"}}`
+	// The settings document the stage launch carries: its reap key and
+	// nothing else, since the fixture workspace declares no
+	// [session.dispatch_env]. A fresh stage mints its key from the pinned
+	// random source.
+	watchCharStageSettings = `{"env":{"NIWA_REAP_KEY":"abababab-abab-4bab-abab-abababababab"}}`
 )
 
 var watchCharPR = github.PRRef{Owner: "acme", Repo: "widget", Number: 7, URL: watchCharPRURL}
@@ -315,6 +317,20 @@ func TestWatchCharacterization_StageReview(t *testing.T) {
 			if rec.InstancePath != instancePath {
 				t.Errorf("record InstancePath = %q, want %q", rec.InstancePath, instancePath)
 			}
+			// The stage records the digest of the settings it applied; a
+			// fresh digest of the staged instance matches it.
+			if rec.SettingsDigest == "" {
+				t.Error("record SettingsDigest is empty")
+			} else if fresh, err := watch.ReviewSettingsDigest(instancePath); err != nil || fresh != rec.SettingsDigest {
+				t.Errorf("record SettingsDigest = %q, fresh digest = %q (err %v)", rec.SettingsDigest, fresh, err)
+			}
+			// It covers the settings file ApplyReviewSettings wrote.
+			if paths, err := watch.ReviewSettingsDigestChanges(`{"v":1,"f":{}}`, rec.SettingsDigest); err != nil || !slices.Contains(paths, ".claude/settings.json") {
+				t.Errorf("record SettingsDigest covers %v (err %v), want .claude/settings.json among them", paths, err)
+			}
+			if rec.ContinuationHalted != "" {
+				t.Errorf("record ContinuationHalted = %q, want empty", rec.ContinuationHalted)
+			}
 
 			assertStdoutLine(t, stdout.String(), tc.wantLine)
 
@@ -390,137 +406,93 @@ func TestWatchCharacterization_StageReview(t *testing.T) {
 	})
 }
 
+// TestWatchCharacterization_ContinueReview runs a continuation against the
+// copy-rule stub `claude` (newWatchContinueFixture). The binary is handed the
+// flagless wake and nothing else, the review keeps its session id and short id
+// (a continuation captures nothing), and the record moves to the new head.
 func TestWatchCharacterization_ContinueReview(t *testing.T) {
 	cases := []struct {
-		name            string
-		plan            reviewPlan
-		unparseable     bool
-		wantPassthrough []string
-		wantLine        string
-		wantRecorded    bool
+		name         string
+		sandbox      bool
+		unparseable  bool
+		wantLine     string
+		wantRecorded bool
 	}{
 		{
-			name:            "unsandboxed",
-			plan:            reviewPlan{},
-			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--resume", "5f0c2d1e-7a3b-4c9d-8e2f-1a2b3c4d5e6f", "--settings", watchCharResumeSettings},
-			wantLine:        "niwa watch: continued review for acme/widget#7 (handle watch_acme_widget_7)",
-			wantRecorded:    false,
+			name:         "unsandboxed",
+			wantLine:     "niwa watch: continued review for acme/widget#7 (handle watch_acme_widget_7)",
+			wantRecorded: false,
 		},
 		{
-			name:            "sandboxed_ask",
-			plan:            reviewPlan{sandbox: true},
-			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--resume", "5f0c2d1e-7a3b-4c9d-8e2f-1a2b3c4d5e6f", "--strict-mcp-config", "--settings", watchCharResumeSettings},
-			wantLine:        "niwa watch: continued review for acme/widget#7 (handle watch_acme_widget_7) -- out-of-instance writes surface an operator approval",
-			wantRecorded:    true,
+			name:         "sandboxed_ask",
+			sandbox:      true,
+			wantLine:     "niwa watch: continued review for acme/widget#7 (handle watch_acme_widget_7) -- out-of-instance writes surface an operator approval",
+			wantRecorded: true,
 		},
 		{
-			name:            "sandboxed_deny",
-			plan:            reviewPlan{sandbox: true},
-			unparseable:     true,
-			wantPassthrough: []string{"--name", "watch_acme_widget_7", "--resume", "5f0c2d1e-7a3b-4c9d-8e2f-1a2b3c4d5e6f", "--strict-mcp-config", "--settings", watchCharResumeSettings},
-			wantLine:        "niwa watch: continued review for acme/widget#7 (handle watch_acme_widget_7) -- out-of-instance writes are hard-denied",
-			wantRecorded:    false,
+			name:         "sandboxed_deny",
+			sandbox:      true,
+			unparseable:  true,
+			wantLine:     "niwa watch: continued review for acme/widget#7 (handle watch_acme_widget_7) -- out-of-instance writes are hard-denied",
+			wantRecorded: false,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			root, home := setupWatchCharEnv(t)
-			fakes := installWatchCharFakes(t)
-			stubWatchTrust(t, home, tc.unparseable)
-			client := newPullHeadServer(t)
-			cmd, stdout, _ := newWatchCharCmd()
-
-			inst := filepath.Join(root, "test-ws+watch_acme_widget_7-4e33acfa")
-			if err := writeMinimalInstanceState(inst); err != nil {
-				t.Fatal(err)
-			}
-			jobsDir := filepath.Join(home, ".claude", "jobs")
-			writeJobStateFile(t, jobsDir, watchCharShortID, watchCharSessionID, inst, nil)
-
-			rec := watch.StagedRecord{
-				Handle:        "watch_acme_widget_7",
-				Owner:         "acme",
-				Repo:          "widget",
-				Number:        7,
-				URL:           watchCharPRURL,
-				InstancePath:  inst,
-				DispatchedSHA: watchCharOldSHA,
-				SessionID:     watchCharSessionID,
-				ShortID:       watchCharShortID,
-			}
-			if err := watch.SaveStagedRecord(root, rec); err != nil {
-				t.Fatal(err)
+			f := newWatchContinueFixture(t, tc.sandbox, func(_ *watchContinueFixture, s *watchContinueSetup) {
+				s.Unparseable = tc.unparseable
+			})
+			out, _, err := f.run(t)
+			if err != nil {
+				t.Fatalf("continueReview: %v\nstdout:\n%s", err, out)
 			}
 
-			// Both liveness checks must pass, or continueReview silently takes
-			// its "skipping continuation" no-op and the test pins nothing.
-			if got := defaultJobsDir(); got != jobsDir {
-				t.Fatalf("defaultJobsDir = %q, want %q", got, jobsDir)
+			calls := f.calls(t)
+			wantWake := []string{"--bg", "--resume", "5f0c2d1e-7a3b-4c9d-8e2f-1a2b3c4d5e6f", "--", watch.BuildResumePrompt("pr-clone", watch.DefaultDraftRelPath)}
+			if wakes := wakeCalls(calls); len(wakes) != 1 || !reflect.DeepEqual(wakes[0], wantWake) {
+				t.Errorf("wake calls = %q, want exactly [%q]", wakes, wantWake)
 			}
-			if !sessionLive(jobsDir, watchCharSessionID, time.Now()) {
-				t.Fatal("precondition: sessionLive is false")
+			if n := claudestub.Count(calls, "stop", "5f0c2d1e"); n != 1 || claudestub.Count(calls, "stop") != 1 {
+				t.Errorf("stub log holds %d stops of 5f0c2d1e, want exactly one stop:\n%s", n, claudestub.Quote(calls))
 			}
-			if !instanceHasLiveJob(jobsDir, inst) {
-				t.Fatal("precondition: instanceHasLiveJob is false")
-			}
-
-			if err := continueReview(cmd, root, root, "", client, watchCharPR, rec, tc.plan); err != nil {
-				t.Fatalf("continueReview: %v", err)
-			}
-			out := stdout.String()
-			if strings.Contains(out, "skipping continuation") {
-				t.Fatalf("continuation was skipped:\n%s", out)
+			if len(f.fakes.launches) != 0 {
+				t.Errorf("launches = %d, want 0", len(f.fakes.launches))
 			}
 
-			if len(fakes.launches) != 1 {
-				t.Fatalf("launches = %d, want 1", len(fakes.launches))
+			if len(f.fakes.fetches) != 1 {
+				t.Fatalf("fetches = %d, want 1", len(f.fakes.fetches))
 			}
-			launch := fakes.launches[0]
-			if !reflect.DeepEqual(launch.Passthrough, tc.wantPassthrough) {
-				t.Errorf("passthrough = %q, want %q", launch.Passthrough, tc.wantPassthrough)
-			}
-			assertSingleNameValue(t, launch.Passthrough, "watch_acme_widget_7")
-			if launch.InstanceDir != inst {
-				t.Errorf("launch InstanceDir = %q, want %q", launch.InstanceDir, inst)
-			}
-
-			if !reflect.DeepEqual(fakes.stops, []string{"5f0c2d1e"}) {
-				t.Errorf("stops = %q, want [5f0c2d1e]", fakes.stops)
-			}
-			if len(fakes.fetches) != 1 {
-				t.Fatalf("fetches = %d, want 1", len(fakes.fetches))
-			}
-			fetch := fakes.fetches[0]
+			fetch := f.fakes.fetches[0]
 			if fetch.sha != "0123456789abcdef0123456789abcdef01234567" {
 				t.Errorf("fetch sha = %q", fetch.sha)
 			}
-			if want := filepath.Join(inst, "pr-clone"); fetch.dir != want {
+			if want := filepath.Join(f.inst, "pr-clone"); fetch.dir != want {
 				t.Errorf("fetch dir = %q, want %q", fetch.dir, want)
 			}
 
 			assertStdoutLine(t, out, tc.wantLine)
 
-			got, err := watch.LoadStagedRecord(root, "watch_acme_widget_7")
-			if err != nil {
-				t.Fatalf("LoadStagedRecord: %v", err)
-			}
+			got := f.loadRecord(t)
 			if got.Handle != "watch_acme_widget_7" {
 				t.Errorf("record Handle = %q, want %q", got.Handle, "watch_acme_widget_7")
 			}
 			if got.DispatchedSHA != "0123456789abcdef0123456789abcdef01234567" {
 				t.Errorf("record DispatchedSHA = %q", got.DispatchedSHA)
 			}
-			// The re-capture misses (stubbed), so today the ids are cleared and
-			// the record stops being continuable.
-			if got.SessionID != "" || got.ShortID != "" {
-				t.Errorf("record ids = (%q, %q), want both cleared by the capture miss", got.SessionID, got.ShortID)
+			// The wake continues the same session, so the ids are kept and the
+			// record stays continuable at the next push.
+			if got.SessionID != "5f0c2d1e-7a3b-4c9d-8e2f-1a2b3c4d5e6f" || got.ShortID != "5f0c2d1e" {
+				t.Errorf("record ids = (%q, %q), want the staged ids kept", got.SessionID, got.ShortID)
+			}
+			if got.ContinuationHalted != "" {
+				t.Errorf("record continuation_halted = %q, want empty after a delivered wake", got.ContinuationHalted)
 			}
 
-			if g := recordedGrant(t, inst); (g != nil) != tc.wantRecorded {
+			if g := recordedGrant(t, f.inst); (g != nil) != tc.wantRecorded {
 				t.Errorf("recorded trust = %+v, want recorded %v", g, tc.wantRecorded)
 			}
-			if len(*fakes.destroyed) != 0 {
-				t.Errorf("a continuation destroyed %q", *fakes.destroyed)
+			if len(*f.fakes.destroyed) != 0 {
+				t.Errorf("a continuation destroyed %q", *f.fakes.destroyed)
 			}
 		})
 	}
@@ -530,8 +502,10 @@ func TestWatchCharacterization_ContinueReview(t *testing.T) {
 // dispatch gets, through the same launch-request path: the declared
 // pass-through name in its settings env and launch environment, the declared
 // unset name in neither, and an inherited NIWA_REAP_KEY replaced by the key
-// the review is minted. The key is kept in the staged record, and the
-// continuation launches with the same one.
+// the review is minted. The key is kept in the staged record. A continuation
+// launches nothing: the wake re-applies the settings document saved with the
+// job, key included, and its own environment is checked in
+// TestContinueReview_FlaglessWake.
 func TestWatchReviewLaunch_EnvShaping(t *testing.T) {
 	root, home := setupWatchCharEnv(t)
 	writeDispatchEnvConfig(t, root, `"PASS_MARK"`, `"DROP_MARK"`)
@@ -574,13 +548,5 @@ func TestWatchReviewLaunch_EnvShaping(t *testing.T) {
 	}
 	if rec.ReapKey != minted {
 		t.Errorf("record reap key = %q, want %q", rec.ReapKey, minted)
-	}
-
-	resume := watchResumeLaunch(rec.InstancePath, rec.Handle, watchCharSessionID, "again", false, watchLaunchEnv(root, rec.ReapKey))
-	if v, _ := envValue(t, resume.Env, config.ReapKeyEnv); v != minted {
-		t.Errorf("continuation NIWA_REAP_KEY = %q, want the review's key", v)
-	}
-	if _, ok := envValue(t, resume.Env, "DROP_MARK"); ok {
-		t.Error("an unset name reached the continuation's launch environment")
 	}
 }

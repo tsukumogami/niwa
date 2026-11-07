@@ -10,7 +10,6 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/config"
-	"github.com/tsukumogami/niwa/internal/watch"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -226,9 +225,11 @@ func TestDispatch_IdentityEnv_WorkspaceNameOutsideAlphabet(t *testing.T) {
 	}
 }
 
-// TestWatchReviewLaunch_NoDispatchIdentity: a `niwa watch` review and its
-// continuation are not dispatches, so neither carries NIWA_DISPATCH_ID or
-// NIWA_WORKSPACE, even when the process running watch inherited them.
+// TestWatchReviewLaunch_NoDispatchIdentity: a `niwa watch` review is not a
+// dispatch, so it carries neither NIWA_DISPATCH_ID nor NIWA_WORKSPACE, even
+// when the process running watch inherited them. Its continuation launches
+// nothing; the environment its wake runs with is checked the same way in
+// TestContinueReview_FlaglessWake.
 func TestWatchReviewLaunch_NoDispatchIdentity(t *testing.T) {
 	root, home := setupWatchCharEnv(t)
 	fakes := installWatchCharFakes(t)
@@ -241,13 +242,8 @@ func TestWatchReviewLaunch_NoDispatchIdentity(t *testing.T) {
 	if err := stageReview(cmd, root, root, "", client, watchCharPR, reviewPlan{}); err != nil {
 		t.Fatalf("stageReview: %v", err)
 	}
-	rec, err := watch.LoadStagedRecord(root, "watch_acme_widget_7")
-	if err != nil {
-		t.Fatal(err)
-	}
 	launches := map[string]launchRequest{
-		"review":       fakes.launches[0],
-		"continuation": watchResumeLaunch(rec.InstancePath, rec.Handle, watchCharSessionID, "again", false, watchLaunchEnv(root, rec.ReapKey)),
+		"review": fakes.launches[0],
 	}
 	for what, l := range launches {
 		settingsEnv, _ := settingsEnvOf(t, l.Passthrough)

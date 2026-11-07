@@ -203,6 +203,54 @@ func TestPruneStagedRecords_OnReapUsesMapping(t *testing.T) {
 	}
 }
 
+// TestPruneStagedRecords_KeepsHaltedRecord: a halted record (its continuation's
+// wake may have gone out) is kept while its instance has a live job, however
+// stale its PR reads -- no longer requested, or force-pushed off the
+// dispatched head -- with one line saying how to dismiss it. Once the job is
+// gone it is discarded like any dead record.
+func TestPruneStagedRecords_KeepsHaltedRecord(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	const halted = "ffff444ffff444ffff444ffff444ffff444ffff4"
+	recs := []watch.StagedRecord{
+		{Handle: "notreq001", Owner: "acme", Repo: "api", Number: 1, InstancePath: "/inst/notreq", DispatchedSHA: "aaaa111", ShortID: "5f0c2d1e", ContinuationHalted: halted},
+		{Handle: "diverg002", Owner: "acme", Repo: "api", Number: 2, InstancePath: "/inst/div", DispatchedSHA: "bbbb222", ShortID: "5f0c2d1f", ContinuationHalted: halted},
+		{Handle: "gone00003", Owner: "acme", Repo: "api", Number: 3, InstancePath: "/inst/gone", DispatchedSHA: "cccc333", ShortID: "5f0c2d20", ContinuationHalted: halted},
+	}
+	for _, r := range recs {
+		if err := watch.SaveStagedRecord(root, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	origLive := stagedInstanceLiveFunc
+	stagedInstanceLiveFunc = func(_, instancePath string) bool { return instancePath != "/inst/gone" }
+	t.Cleanup(func() { stagedInstanceLiveFunc = origLive })
+	destroyed := stubDestroyAll(t)
+	client := &fakeFreshnessClient{
+		headByNum: map[int]github.PullHead{2: {SHA: "ffff222"}},
+		ancestry:  map[string]github.Ancestry{"bbbb222..ffff222": github.AncestryDiverged},
+	}
+
+	var out bytes.Buffer
+	pruneStagedRecords(context.Background(), &out, root, client, map[string]bool{"acme/api#2": true})
+
+	got, err := watch.ListStagedHandles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"diverg002", "notreq001"}; !equalStrings(got, want) {
+		t.Errorf("surviving handles = %v, want the two live halted records %v", got, want)
+	}
+	if want := []string{"/inst/gone"}; !equalStrings(*destroyed, want) {
+		t.Errorf("destroyed = %v, want %v", *destroyed, want)
+	}
+	for _, line := range []string{
+		"niwa watch: kept staged review for acme/api#1 (handle notreq001): its continuation is halted; dismiss the review session with claude rm 5f0c2d1e and a later pass stages a fresh review",
+		"niwa watch: kept staged review for acme/api#2 (handle diverg002): its continuation is halted; dismiss the review session with claude rm 5f0c2d1f and a later pass stages a fresh review",
+	} {
+		assertStdoutLine(t, out.String(), line)
+	}
+}
+
 // TestPruneStagedRecords_BadRecordSkipped proves a record that fails to load does
 // not abort the sweep: a good record alongside it is still evaluated and kept.
 func TestPruneStagedRecords_BadRecordSkipped(t *testing.T) {

@@ -518,10 +518,10 @@ func TestDispatch_PermissionMode_IgnoresGeneratedSettings(t *testing.T) {
 	})
 }
 
-// TestWatchLaunches_CarryNoPermissionMode builds both `niwa watch` launches
-// through the helpers the watch sites call, for a real bypass instance. A watch
-// site that started deriving a mode from the instance's recorded posture would
-// forward bypassPermissions here.
+// TestWatchLaunches_CarryNoPermissionMode builds the `niwa watch` review launch
+// through the helper the watch site calls, for a real bypass instance, and the
+// continuation's wake argv. A watch site that started deriving a mode from the
+// instance's recorded posture would forward bypassPermissions here.
 func TestWatchLaunches_CarryNoPermissionMode(t *testing.T) {
 	root := setupDeclaredDispatchWorkspace(t, postureS1)
 	setHostConfig(t, "")
@@ -533,16 +533,16 @@ func TestWatchLaunches_CarryNoPermissionMode(t *testing.T) {
 
 	for _, sandbox := range []bool{false, true} {
 		fresh := watchReviewLaunch(instancePath, "watch-o-r-1", "review", sandbox, launchEnvShape{})
-		resume := watchResumeLaunch(instancePath, "handle1", dispatchTestSessionID, "again", sandbox, launchEnvShape{})
-		for name, req := range map[string]launchRequest{"fresh review": fresh, "continuation": resume} {
-			if req.InstanceDir != instancePath {
-				t.Fatalf("%s: InstanceDir = %q, want %q", name, req.InstanceDir, instancePath)
-			}
-			requireNoPermissionMode(t, req.Passthrough)
+		if fresh.InstanceDir != instancePath {
+			t.Fatalf("fresh review: InstanceDir = %q, want %q", fresh.InstanceDir, instancePath)
 		}
-		if !containsSubsequence(resume.Passthrough, []string{"--resume", dispatchTestSessionID}) {
-			t.Fatalf("continuation lost --resume: %v", resume.Passthrough)
-		}
+		requireNoPermissionMode(t, fresh.Passthrough)
+	}
+	// The continuation wakes the staged session with its id and the prompt
+	// and nothing else, so no mode can ride on it.
+	wake := resumeWakeArgs(claudeLaunchSpec(), dispatchTestSessionID, instancePath, "again")
+	if want := []string{"--bg", "--resume", dispatchTestSessionID, "--", "again"}; !slices.Equal(wake, want) {
+		t.Fatalf("continuation wake argv = %q, want %q", wake, want)
 	}
 }
 
@@ -653,18 +653,4 @@ func TestReentryUnderBypass_ListResume(t *testing.T) {
 	if got, want := sessionResumeCommand(m), "claude attach "+m.Handle; got != want {
 		t.Fatalf("niwa list resume column = %q, want %q", got, want)
 	}
-}
-
-// containsSubsequence reports whether want appears as a contiguous
-// subsequence anywhere in got.
-func containsSubsequence(got, want []string) bool {
-	if len(want) == 0 {
-		return true
-	}
-	for i := 0; i+len(want) <= len(got); i++ {
-		if slices.Equal(got[i:i+len(want)], want) {
-			return true
-		}
-	}
-	return false
 }
