@@ -37,12 +37,21 @@ exit 1
 // someone removes it by hand. CI never notices, because CI has no agent
 // installed.
 func TestMain(m *testing.M) {
+	// The MCP deny live test re-runs this test binary as its stub MCP server.
+	if dir := os.Getenv(liveMCPStubDirEnv); dir != "" {
+		os.Exit(runLiveMCPStub(dir, os.Stdin, os.Stdout))
+	}
 	// A run started from inside a Claude Code session inherits the session's
 	// launch directory, which the worktree hooks anchor on. Tests that want an
 	// anchor set it themselves.
 	os.Unsetenv("CLAUDE_PROJECT_DIR")
 	os.Exit(runWithAgentStubs(m))
 }
+
+// preStubHome and preStubPath are HOME and PATH as the test binary started with,
+// before runWithAgentStubs replaced them. Only the live gates read them: they
+// drive the real claude, which needs the developer's PATH and ~/.claude.
+var preStubHome, preStubPath string
 
 // runWithAgentStubs runs the package's tests with the agent binaries stubbed
 // and fails the run if any stub was invoked. It also points XDG_STATE_HOME
@@ -59,6 +68,7 @@ func TestMain(m *testing.M) {
 // Tests that set PATH themselves -- emptying it, or prepending their own fake
 // -- are unaffected: t.Setenv replaces the value set here for that test only.
 func runWithAgentStubs(m *testing.M) int {
+	preStubHome, preStubPath = os.Getenv("HOME"), os.Getenv("PATH")
 	dir, err := os.MkdirTemp("", "niwa-cli-agent-stubs-")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "creating the agent stub directory: %v\n", err)
