@@ -885,13 +885,12 @@ that instance, and only that instance, to the ref it resolves then.
 > declaration (without a ref) on every pre-install. On a machine that
 > has one, the pinned registration is refused and the plugins install
 > from the source already declared, usually the default branch. niwa
-> prints a warning naming the marketplace and the pin it couldn't apply.
-> niwa never writes to the user's settings and never removes the
-> declaration itself. The one-time fix is `claude plugin marketplace
-> remove <name>`, then `niwa apply` in each instance. The remove
-> uninstalls that marketplace's plugins from every project on the
-> machine, and each project gets them back, pinned, when it's
-> re-applied.
+> reports this at error level in the summary after the apply, naming the
+> marketplace, the pin it couldn't apply and the declaration that
+> blocks it. The apply itself still succeeds. niwa never writes to the
+> user's settings and leaves that declaration alone, because every
+> project on the machine shares it. The pin applies on the next
+> `niwa apply` once the declaration no longer exists.
 
 ### Automatic record healing
 

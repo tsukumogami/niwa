@@ -153,7 +153,7 @@ func prewarmDeclaredPlugins(instanceRoot string, reporter *workspace.Reporter, s
 		case err == nil:
 			pinned[name] = mkt.Source.Ref != ""
 		case mkt.Source.Ref != "" && isDeclaredSourceConflict(err):
-			errorPrewarm(reporter, "marketplace %q: pin %s not applied: this HOME already declares %q in ~/.claude/settings.json with a different source (earlier niwa versions wrote it), and Claude Code refuses a per-instance pin while that declaration exists, so plugins install from the registered source instead. One-time fix: run `claude plugin marketplace remove %s`, then `niwa apply` in each instance. The remove uninstalls %q's plugins from every project on this machine until that project is re-applied", name, mkt.Source.Ref, name, name, name)
+			errorPrewarm(reporter, "marketplace %q: pin %s not applied: this HOME already declares %q in ~/.claude/settings.json with a different source (earlier niwa versions wrote it), and Claude Code refuses a per-instance pin while that declaration exists, so plugins install from the registered source instead. niwa leaves that declaration alone because every project on this machine shares it; the pin applies on the next `niwa apply` once it no longer exists", name, mkt.Source.Ref, name)
 		case mkt.Source.Ref != "":
 			errorPrewarm(reporter, "marketplace %q: pin %s not applied: pre-warming %s failed: %v; plugins install from whatever is registered, or on startup", name, mkt.Source.Ref, target, err)
 		default:
@@ -204,7 +204,7 @@ func prewarmDeclaredPlugins(instanceRoot string, reporter *workspace.Reporter, s
 // source "differs from the one declared"; newer ones say it "doesn't match its
 // extraKnownMarketplaces entry". The apostrophe is matched in both its straight
 // and typographic forms so a change in the CLI's punctuation does not drop the
-// remedy.
+// conflict report.
 var declaredSourceConflictPhrases = []string{
 	"differs from the one declared",
 	"doesn't match its extraKnownMarketplaces entry",
