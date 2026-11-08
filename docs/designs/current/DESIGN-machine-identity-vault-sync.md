@@ -1407,6 +1407,17 @@ SOURCE / FALLBACK columns hold categorical strings.
 Same as R23. Tokens obtained from universal-auth flow through the
 existing Infisical backend's `--token` mechanism, not via env vars.
 
+**Decision change (2026-11):** the `--token` mechanism put the token
+on the `infisical export` argv, which every local user can read in the
+process table (`ps`) while the export runs. The token now reaches only
+the export child, as `INFISICAL_UNIVERSAL_AUTH_ACCESS_TOKEN` in that
+child's environment, and never its argv. niwa's own process
+environment and every other tool niwa spawns still never carry it, and
+client credentials still never reach any environment (R23 unchanged).
+What remains exposed: processes running as the same user and root can
+read the export child's environment while it runs. See "JWT on argv"
+in `DESIGN-vault-multi-org-auth.md` for the full reasoning.
+
 ### R29 — Override-visibility (R31 in vault-integration PRD)
 
 **Threat**: A precedence override is silent and the user can't

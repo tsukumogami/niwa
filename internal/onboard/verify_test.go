@@ -62,7 +62,7 @@ type fakeVerifyCommander struct {
 	stdout string
 }
 
-func (f *fakeVerifyCommander) Run(_ context.Context, _ string, _ []string) ([]byte, []byte, int, error) {
+func (f *fakeVerifyCommander) Run(_ context.Context, _ string, _ []string, _ []string) ([]byte, []byte, int, error) {
 	return []byte(f.stdout), nil, 0, nil
 }
 

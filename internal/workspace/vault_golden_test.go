@@ -40,7 +40,7 @@ type goldenExportCommander struct {
 	exitCode int
 }
 
-func (c goldenExportCommander) Run(_ context.Context, _ string, _ []string) ([]byte, []byte, int, error) {
+func (c goldenExportCommander) Run(_ context.Context, _ string, _ []string, _ []string) ([]byte, []byte, int, error) {
 	return []byte(c.stdout), []byte(c.stderr), c.exitCode, nil
 }
 

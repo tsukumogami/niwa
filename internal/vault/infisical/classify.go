@@ -104,7 +104,7 @@ type probeResult struct {
 func runProbe(ctx context.Context, c commander) probeResult {
 	callCtx, cancel := withCallDeadline(ctx, callBound(probeTimeout))
 	defer cancel()
-	stdout, stderr, _, err := c.Run(callCtx, "infisical", []string{"login", "status", "--json"})
+	stdout, stderr, _, err := c.Run(callCtx, "infisical", []string{"login", "status", "--json"}, nil)
 	var r probeResult
 	if callTimedOut(callCtx, err) {
 		r.timedOut = true

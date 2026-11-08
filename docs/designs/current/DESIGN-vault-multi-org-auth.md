@@ -408,6 +408,27 @@ days). The PRD's threat model does not defend against same-user
 process inspection, so this is accepted. The alternative (passing via
 environment variable) is equally visible to same-user processes.
 
+**Decision change (2026-11): the JWT moves to the export child's
+environment.** The reasoning above holds for same-user processes, but
+argv also crosses the user boundary and a process's environment
+doesn't. Any local user can read another user's process arguments with
+`ps`; on Linux, `proc(5)` documents `/proc/<pid>/cmdline` as readable by
+every user (unless `/proc` is mounted with `hidepid`) while
+`/proc/<pid>/environ` sits behind a ptrace access check. The JWT stays
+valid long after the export, so one read is enough. niwa now sets it
+as `INFISICAL_UNIVERSAL_AUTH_ACCESS_TOKEN` in the `infisical export`
+child's environment only, replacing any inherited entry of that name,
+and passes no `--token`. The CLI reads that variable first when the
+flag is absent, ahead of `INFISICAL_TOKEN`, so a token already in the
+user's environment can't take precedence over niwa's. niwa's own
+process environment is not modified, and no other subprocess gets the
+JWT.
+
+What the environment route still exposes: processes running as the
+same user (with ptrace access to the child) and root can read the
+child's environment while it runs, and any process the CLI itself
+forks inherits it.
+
 The client_secret is NOT passed on argv — it goes via HTTP POST body
 (`net/http`), keeping it out of the process table.
 

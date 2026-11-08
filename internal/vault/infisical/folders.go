@@ -82,7 +82,7 @@ func CreateSecretsFolder(ctx context.Context, c commander, projectID, env, path 
 		"--env", env,
 		"--path", path,
 	}
-	_, stderrBytes, exitCode, err := c.Run(ctx, "infisical", args)
+	_, stderrBytes, exitCode, err := c.Run(ctx, "infisical", args, nil)
 	// Stdout is never read here, so its size cap is no failure.
 	if err != nil && !errors.Is(err, errOutputTooLarge) {
 		// Also taken, deliberately, for exec.ErrWaitDelay (the CLI

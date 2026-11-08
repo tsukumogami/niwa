@@ -82,7 +82,7 @@ type goldenCommander struct {
 	calls [][]string
 }
 
-func (c *goldenCommander) Run(_ context.Context, _ string, args []string) ([]byte, []byte, int, error) {
+func (c *goldenCommander) Run(_ context.Context, _ string, args []string, _ []string) ([]byte, []byte, int, error) {
 	c.mu.Lock()
 	c.calls = append(c.calls, append([]string(nil), args...))
 	c.mu.Unlock()

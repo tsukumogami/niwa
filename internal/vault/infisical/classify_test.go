@@ -63,7 +63,7 @@ type scriptCommander struct {
 	exports, probes atomic.Int32
 }
 
-func (c *scriptCommander) Run(ctx context.Context, _ string, args []string) ([]byte, []byte, int, error) {
+func (c *scriptCommander) Run(ctx context.Context, _ string, args []string, _ []string) ([]byte, []byte, int, error) {
 	if len(args) >= 2 && args[0] == "login" && args[1] == "status" {
 		c.probes.Add(1)
 		if c.probeHang {
@@ -394,9 +394,9 @@ type argRecorder struct {
 	args  []string
 }
 
-func (r *argRecorder) Run(ctx context.Context, name string, args []string) ([]byte, []byte, int, error) {
+func (r *argRecorder) Run(ctx context.Context, name string, args []string, env []string) ([]byte, []byte, int, error) {
 	r.args = append([]string(nil), args...)
-	return r.inner.Run(ctx, name, args)
+	return r.inner.Run(ctx, name, args, env)
 }
 
 // R9: under one run state, a logged-out domain costs one export and one
@@ -570,7 +570,7 @@ type cancellingCommander struct {
 	probes      int
 }
 
-func (c *cancellingCommander) Run(_ context.Context, _ string, args []string) ([]byte, []byte, int, error) {
+func (c *cancellingCommander) Run(_ context.Context, _ string, args []string, _ []string) ([]byte, []byte, int, error) {
 	if args[0] == "login" {
 		c.probes++
 		if c.duringProbe {

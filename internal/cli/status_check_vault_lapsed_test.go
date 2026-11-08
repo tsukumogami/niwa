@@ -18,7 +18,7 @@ type lapsedInfisical struct {
 	exports, probes atomic.Int32
 }
 
-func (c *lapsedInfisical) Run(_ context.Context, _ string, args []string) ([]byte, []byte, int, error) {
+func (c *lapsedInfisical) Run(_ context.Context, _ string, args []string, _ []string) ([]byte, []byte, int, error) {
 	if len(args) >= 2 && args[0] == "login" && args[1] == "status" {
 		c.probes.Add(1)
 		return []byte(`{"sessions":[]}`), nil, 0, nil
