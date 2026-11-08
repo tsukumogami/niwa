@@ -201,10 +201,12 @@ func TestPrewarm_UpdatesOnlyPinnedMarketplacesAfterASuccessfulAdd(t *testing.T) 
 // marketplace with another source, Claude Code refuses the pinned add. That must
 // never be silent: an error-level line in the deferred summary block names the
 // marketplace, the pin not applied and, for a declared-source conflict, the
-// one-time remedy. Each wording Claude Code has used for the refusal must reach
-// the remedy; any other failure gets the generic form.
+// user-scope declaration that blocks it. Each wording Claude Code has used for
+// the refusal must reach the conflict report; any other failure gets the generic
+// form. The conflict report must never suggest `marketplace remove`: it
+// uninstalls the marketplace's plugins from every project in the HOME.
 func TestPrewarm_RefusedPinIsReportedByName(t *testing.T) {
-	remedy := []string{"error: ", `marketplace "koto"`, "pin v0.13.0 not applied", "already declares", "claude plugin marketplace remove koto", "niwa apply", "uninstalls"}
+	conflict := []string{"error: ", `marketplace "koto"`, "pin v0.13.0 not applied", "already declares", "~/.claude/settings.json", "niwa apply"}
 	cases := []struct {
 		name     string
 		addErr   string
@@ -214,17 +216,20 @@ func TestPrewarm_RefusedPinIsReportedByName(t *testing.T) {
 		{
 			name:     "declared-source conflict, older wording",
 			addErr:   "exit status 1: Cannot add marketplace \"koto\": its network source differs from the one declared for it in settings",
-			wantText: remedy,
+			wantText: conflict,
+			notText:  []string{"marketplace remove"},
 		},
 		{
 			name:     "declared-source conflict, extraKnownMarketplaces wording",
 			addErr:   "exit status 1: Failed to add marketplace: Cannot add marketplace \"koto\": its source doesn't match its extraKnownMarketplaces entry in user or managed settings; add it from the source that entry lists, or change the entry.",
-			wantText: remedy,
+			wantText: conflict,
+			notText:  []string{"marketplace remove"},
 		},
 		{
 			name:     "declared-source conflict, typographic apostrophe",
 			addErr:   "exit status 1: Cannot add marketplace \"koto\": its source doesn\u2019t match its extraKnownMarketplaces entry in user or managed settings",
-			wantText: remedy,
+			wantText: conflict,
+			notText:  []string{"marketplace remove"},
 		},
 		{
 			name:     "any other failure",
