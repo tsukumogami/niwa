@@ -369,7 +369,7 @@ dispatched from it beyond the grant ceiling.
   "parent_dispatch_id": "",
   "parent_dispatch_source": "none",
   "parent_session_source": "none",
-  "principal": {"name": "", "source": "none", "trust": "observed"},
+  "principal": {"name": "", "source": "none", "trust": "none"},
   "level": "strict",
   "level_source": "flag",
   "level_ceiling": "supervised",

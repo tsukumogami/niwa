@@ -197,8 +197,9 @@ parent dispatch link is `observed`, the parent session isn't `unverified`, and
 the parent's own principal trust is `observed`. Anything else, such as a
 worker a coordinator dispatches from the workspace root (a `mapped` link) or
 one dispatched with `--parent-from`, gets trust `handed`. A parent link whose
-entry can't be read gives the declared principal, or none, with trust
-`handed`. A worker can read its own principal with
+entry can't be read gives the declared principal with trust `handed`. A
+principal with no name, whichever way it came, has trust `none`: niwa observed
+nobody. A worker can read its own principal with
 `niwa lineage show` or `niwa authority show` from its instance, and passes it
 on by dispatching from there.
 

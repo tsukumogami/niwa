@@ -610,7 +610,7 @@ type Link struct {
 type Principal struct {
     Name   string `json:"name"`
     Source string `json:"source"` // inherited | declared | none
-    Trust  string `json:"trust"`  // observed | handed
+    Trust  string `json:"trust"`  // observed | handed | none
 }
 
 type Entry struct {

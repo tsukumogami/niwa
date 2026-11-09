@@ -239,13 +239,17 @@ func (c callerSession) Stripped() bool {
 
 // strippedReason says why a stripped caller holds none, for the refusal.
 func (c callerSession) strippedReason() string {
-	return fmt.Sprintf("this runs in an agent session (%s is set) but no calling session resolves (%s is unset or names no session, and no session record names one); set %s, or dispatch from your own terminal",
+	return fmt.Sprintf("this runs in an agent session (%s is set) but no calling session resolves (%s is unset or names no session, and no session record names one); set %s to this session's id, or run it from a terminal outside any agent session",
 		c.Marker, c.varName, c.varName)
 }
 
 // maxCallerRecordBytes caps the caller's session record read. A session's
 // own record is a small JSON object.
 const maxCallerRecordBytes = 1 << 20
+
+// callerRecordOwnerUID is the uid the caller's session record must belong
+// to. Tests replace it to check that a record someone else owns is not read.
+var callerRecordOwnerUID = os.Getuid
 
 // readCallerRecordID returns the session id in the record held by dir, laid
 // out as r declares, or "" when it can't be read safely. The directory comes
@@ -269,7 +273,7 @@ func readCallerRecordID(dir string, r agentplan.SessionRecords) string {
 	if err != nil || !info.Mode().IsRegular() {
 		return ""
 	}
-	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Getuid() {
+	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != callerRecordOwnerUID() {
 		return ""
 	}
 	data, err := io.ReadAll(io.LimitReader(f, maxCallerRecordBytes+1))

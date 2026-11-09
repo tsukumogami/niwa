@@ -43,7 +43,7 @@ Feature: niwa dispatch: resolve, refuse and record a dispatch's authority
         "principal": {
           "name": "",
           "source": "none",
-          "trust": "observed"
+          "trust": "none"
         },
         "level": "supervised",
         "level_source": "workspace",

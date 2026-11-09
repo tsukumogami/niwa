@@ -3,9 +3,114 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/tsukumogami/niwa/internal/authority"
+	"github.com/tsukumogami/niwa/internal/workspace"
 )
+
+// callerCapFor runs callerCap the way resolveDispatchAuthority does, from dir
+// for caller, with a ceiling holding every authority, as capFor does for
+// dispatcherCap.
+func callerCapFor(t *testing.T, root, dir string, caller callerSession) *authority.DispatcherCap {
+	t.Helper()
+	parent, _, cwdInstance, cwdInInstance, err := dispatchParent(dir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := authority.Authorities()
+	grants := grantResolver{root: root, policy: authority.Policy{BaseCeiling: &all}}
+	return callerCap(grants, caller, parent, cwdInstance, cwdInInstance)
+}
+
+// TestCallerCap: a stripped caller holds none wherever it dispatches from,
+// and outside every instance the record's session and the variable's each
+// cap the child, so the child gets only what both dispatchers hold.
+func TestCallerCap(t *testing.T) {
+	resetParentFrom(t)
+	w := newShowWorkspace(t, "")
+	narrow := w.instance(t, "ws-narrow")
+	writeShowRecord(t, narrow, showRecord(showDispatchA, authority.Autonomous, authority.LayerWorkspace, authority.MergePR))
+	checkMapping(t, w.root, showSessionA, narrow, workspace.MappingOriginDispatch, showDispatchA)
+	wide := w.instance(t, "ws-wide")
+	writeShowRecord(t, wide, showRecord(showDispatchB, authority.Autonomous, authority.LayerWorkspace, authority.MergePR, authority.CloseIssue))
+	checkMapping(t, w.root, showSessionB, wide, workspace.MappingOriginDispatch, showDispatchB)
+	const unmapped = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+
+	stripped := callerSession{Marker: "CLAUDECODE", varName: "CLAUDE_CODE_SESSION_ID"}
+	mergeOnly := []authority.Authority{authority.MergePR}
+	for _, tc := range []struct {
+		name, dir, anchor string
+		caller            callerSession
+		wantStripped      bool
+		wantHeld          []authority.Authority // nil with wantNil for no cap
+		wantNil           bool
+	}{
+		{"stripped, inside a granted instance", wide, "", stripped, true, nil, false},
+		{"stripped, at the root with --parent-from a granted instance", w.root, wide, stripped, true, nil, false},
+		{"stripped, at the root", w.root, "", stripped, true, nil, false},
+		{"variable narrow, record wide", w.root, "", callerSession{Var: showSessionA, RecordID: showSessionB}, false, mergeOnly, false},
+		{"variable wide, record narrow", w.root, "", callerSession{Var: showSessionB, RecordID: showSessionA}, false, mergeOnly, false},
+		{"variable unmapped, record narrow", w.root, "", callerSession{Var: unmapped, RecordID: showSessionA}, false, mergeOnly, false},
+		// A record naming a session no mapping knows is a session niwa
+		// didn't dispatch: no dispatcher to cap by, and not stripped.
+		{"record valid but unmapped", w.root, "", callerSession{RecordID: unmapped, Marker: "CLAUDE_JOB_DIR"}, false, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.anchor != "" {
+				dispatchParentFrom, dispatchParentFromSet = tc.anchor, true
+				t.Cleanup(func() { dispatchParentFrom, dispatchParentFromSet = "", false })
+			}
+			got := callerCapFor(t, w.root, tc.dir, tc.caller)
+			if tc.wantNil {
+				if got != nil {
+					t.Errorf("cap = %+v, want none", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("cap = nil, want one holding %v", tc.wantHeld)
+			}
+			if (got.Stripped != "") != tc.wantStripped || len(got.Held) != len(tc.wantHeld) ||
+				(len(tc.wantHeld) > 0 && !reflect.DeepEqual(got.Held, tc.wantHeld)) {
+				t.Errorf("cap = %+v, want held %v stripped %v", got, tc.wantHeld, tc.wantStripped)
+			}
+		})
+	}
+}
+
+// TestDispatchCallerSession_StrippedRefusalSaysWhy: the refusal for a
+// stripped caller names the variable that marked the agent session, not
+// only the never-wider rule.
+func TestDispatchCallerSession_StrippedRefusalSaysWhy(t *testing.T) {
+	resetParentFrom(t)
+	authorityWorkspace(t, r8aExample, "")
+	agentSessionEnv(t, "")
+	dispatchRoles = []string{"coordinator"}
+	_, stderr, err := runDispatchCmd(t, "do a thing")
+	if err == nil {
+		t.Fatalf("a stripped caller dispatched --role coordinator\n%s", stderr)
+	}
+	if !strings.Contains(err.Error(), "CLAUDECODE is set") || !strings.Contains(err.Error(), "no calling session resolves") {
+		t.Errorf("refusal = %v, want it to say the agent session marker is set and no session resolves", err)
+	}
+}
+
+// TestDispatchCallerSession_StrippedRecordNamesNoSession: a stripped
+// caller's record names no parent session.
+func TestDispatchCallerSession_StrippedRecordNamesNoSession(t *testing.T) {
+	resetParentFrom(t)
+	_, f := authorityWorkspace(t, r8aExample, "")
+	agentSessionEnv(t, "")
+	if _, stderr, err := runDispatchCmd(t, "do a thing"); err != nil {
+		t.Fatalf("dispatch: %v\n%s", err, stderr)
+	}
+	if rec := readRecord(t, f); rec.ParentSessionID != "" || rec.ParentSessionSource != "stripped" {
+		t.Errorf("parent session = %q (%s), want none recorded as stripped", rec.ParentSessionID, rec.ParentSessionSource)
+	}
+}
 
 // envOf is a getenv reading only the given values.
 func envOf(vals map[string]string) func(string) string {
@@ -120,6 +225,14 @@ func TestReadCallerRecordID_OnlyASafeRecordIsRead(t *testing.T) {
 		}
 		if got := readCallerRecordID(dir, r); got != "" {
 			t.Errorf("read %q from an oversized record", got)
+		}
+	})
+	t.Run("record owned by someone else", func(t *testing.T) {
+		prev := callerRecordOwnerUID
+		callerRecordOwnerUID = func() int { return os.Getuid() + 1 }
+		t.Cleanup(func() { callerRecordOwnerUID = prev })
+		if got := readCallerRecordID(good, r); got != "" {
+			t.Errorf("read %q from a record another user owns", got)
 		}
 	})
 	t.Run("record not JSON", func(t *testing.T) {
