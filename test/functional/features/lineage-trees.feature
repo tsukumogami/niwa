@@ -107,7 +107,7 @@ Feature: the lineage record holds whole dispatch trees after their instances are
     When I run "niwa lineage show {imported.dispatch} --json" naming kept dispatches from the workspace root
     Then the lineage chain is:
       | dispatch | parent session                              | parent dispatch | principal          |
-      | imported | 1e1e1e1e-0000-4000-8000-1e1e1e1e1e1e handed | none            | none none observed |
+      | imported | 1e1e1e1e-0000-4000-8000-1e1e1e1e1e1e handed | none            | none none none |
     Given the dispatching session is the session of "imported"
     When I dispatch with "" from the workspace root
     Then the exit code is 0
@@ -115,8 +115,8 @@ Feature: the lineage record holds whole dispatch trees after their instances are
     When I run "niwa lineage show {colliding.dispatch} --json" naming kept dispatches from the workspace root
     Then the lineage chain is:
       | dispatch  | parent session                              | parent dispatch | principal          |
-      | colliding | imported handed                             | imported mapped | none inherited handed |
-      | imported  | 1e1e1e1e-0000-4000-8000-1e1e1e1e1e1e handed | none            | none none observed |
+      | colliding | imported handed                             | imported mapped | none inherited none |
+      | imported  | 1e1e1e1e-0000-4000-8000-1e1e1e1e1e1e handed | none            | none none none |
     Given the mapping of "colliding" records no dispatch id
     And the dispatching session is the session of "colliding"
     When I dispatch with "" from the workspace root
@@ -125,7 +125,7 @@ Feature: the lineage record holds whole dispatch trees after their instances are
     When I run "niwa lineage show {unlinked.dispatch} --json" naming kept dispatches from the workspace root
     Then the lineage chain is:
       | dispatch | parent session   | parent dispatch | principal          |
-      | unlinked | colliding handed | none            | none none observed |
+      | unlinked | colliding handed | none            | none none none |
 
   Scenario Outline: an entry survives <teardown>
     Given a config repo "ws" exists with authority fixture "<fixture>"

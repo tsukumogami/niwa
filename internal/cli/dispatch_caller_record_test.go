@@ -47,16 +47,17 @@ func TestCallerCap(t *testing.T) {
 		wantStripped      bool
 		wantHeld          []authority.Authority // nil with wantNil for no cap
 		wantNil           bool
+		wantID            string // the dispatch the refusal names: the record's session's, when it narrows
 	}{
-		{"stripped, inside a granted instance", wide, "", stripped, true, nil, false},
-		{"stripped, at the root with --parent-from a granted instance", w.root, wide, stripped, true, nil, false},
-		{"stripped, at the root", w.root, "", stripped, true, nil, false},
-		{"variable narrow, record wide", w.root, "", callerSession{Var: showSessionA, RecordID: showSessionB}, false, mergeOnly, false},
-		{"variable wide, record narrow", w.root, "", callerSession{Var: showSessionB, RecordID: showSessionA}, false, mergeOnly, false},
-		{"variable unmapped, record narrow", w.root, "", callerSession{Var: unmapped, RecordID: showSessionA}, false, mergeOnly, false},
+		{"stripped, inside a granted instance", wide, "", stripped, true, nil, false, ""},
+		{"stripped, at the root with --parent-from a granted instance", w.root, wide, stripped, true, nil, false, ""},
+		{"stripped, at the root", w.root, "", stripped, true, nil, false, ""},
+		{"variable narrow, record wide", w.root, "", callerSession{Var: showSessionA, RecordID: showSessionB}, false, mergeOnly, false, showDispatchB},
+		{"variable wide, record narrow", w.root, "", callerSession{Var: showSessionB, RecordID: showSessionA}, false, mergeOnly, false, showDispatchA},
+		{"variable unmapped, record narrow", w.root, "", callerSession{Var: unmapped, RecordID: showSessionA}, false, mergeOnly, false, showDispatchA},
 		// A record naming a session no mapping knows is a session niwa
 		// didn't dispatch: no dispatcher to cap by, and not stripped.
-		{"record valid but unmapped", w.root, "", callerSession{RecordID: unmapped, Marker: "CLAUDE_JOB_DIR"}, false, nil, true},
+		{"record valid but unmapped", w.root, "", callerSession{RecordID: unmapped, Marker: "CLAUDE_JOB_DIR"}, false, nil, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.anchor != "" {
@@ -72,6 +73,9 @@ func TestCallerCap(t *testing.T) {
 			}
 			if got == nil {
 				t.Fatalf("cap = nil, want one holding %v", tc.wantHeld)
+			}
+			if got.DispatchID != tc.wantID {
+				t.Errorf("cap names dispatch %q, want %q", got.DispatchID, tc.wantID)
 			}
 			if (got.Stripped != "") != tc.wantStripped || len(got.Held) != len(tc.wantHeld) ||
 				(len(tc.wantHeld) > 0 && !reflect.DeepEqual(got.Held, tc.wantHeld)) {
