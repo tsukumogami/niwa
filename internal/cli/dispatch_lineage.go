@@ -11,8 +11,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 
 	"github.com/tsukumogami/niwa/internal/agentplan"
+	"github.com/tsukumogami/niwa/internal/authority"
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
@@ -177,6 +179,113 @@ func parentSessionVar(spec agentplan.LaunchSpec, getenv func(string) string) str
 		return ""
 	}
 	return getenv(spec.Lineage.ParentSessionEnv)
+}
+
+// callerSession is the session calling `niwa dispatch`, as the environment
+// the agent's launch spec describes names it. Var is the session variable's
+// raw value. RecordID is the session id in the running session's own record,
+// read from the directory the spec's record variable names, so the caller
+// still has a session when the variable alone was unset; "" when the spec
+// names no such variable, it is unset, or the record can't be read. Marker is
+// the first of the spec's agent-session variables found set, the record
+// variable included, or "" when none is: a plain terminal sets none of them.
+type callerSession struct {
+	Var      string
+	RecordID string
+	Marker   string
+
+	varName string // the spec's session variable, for the stripped reason
+}
+
+// readCallerSession reads the calling session once, at (2e). A record that
+// is missing, unsafe to read or names no session leaves RecordID empty; it
+// never fails the dispatch, since a caller with no session either has none
+// (a plain terminal) or is stripped, and both are decided from what is here.
+func readCallerSession(spec agentplan.LaunchSpec, getenv func(string) string) callerSession {
+	l := spec.Lineage
+	c := callerSession{Var: parentSessionVar(spec, getenv), varName: l.ParentSessionEnv}
+	if l.SessionRecordEnv != "" {
+		if dir := getenv(l.SessionRecordEnv); dir != "" {
+			c.Marker = l.SessionRecordEnv
+			c.RecordID = readCallerRecordID(dir, spec.Records)
+		}
+	}
+	for _, name := range l.SessionMarkerEnv {
+		if c.Marker == "" && getenv(name) != "" {
+			c.Marker = name
+		}
+	}
+	return c
+}
+
+// ID is the calling session's id: the variable when it holds a session id,
+// else the one the session's record names, else "".
+func (c callerSession) ID() string {
+	switch {
+	case authority.ValidSessionID(c.Var):
+		return c.Var
+	case authority.ValidSessionID(c.RecordID):
+		return c.RecordID
+	}
+	return ""
+}
+
+// Stripped says the caller runs in an agent session but no calling session
+// resolves: the variable was unset or malformed, and no record stood in for
+// it. Such a caller holds no named authority, wherever it dispatches from.
+func (c callerSession) Stripped() bool {
+	return c.Marker != "" && c.ID() == ""
+}
+
+// strippedReason says why a stripped caller holds none, for the refusal.
+func (c callerSession) strippedReason() string {
+	return fmt.Sprintf("this runs in an agent session (%s is set) but no calling session resolves (%s is unset or names no session, and no session record names one); set %s, or dispatch from your own terminal",
+		c.Marker, c.varName, c.varName)
+}
+
+// maxCallerRecordBytes caps the caller's session record read. A session's
+// own record is a small JSON object.
+const maxCallerRecordBytes = 1 << 20
+
+// readCallerRecordID returns the session id in the record held by dir, laid
+// out as r declares, or "" when it can't be read safely. The directory comes
+// from the environment, so only an absolute path to a real directory is
+// read, the record is opened without following a symlink or blocking on a
+// fifo, and it must be a regular file the current user owns, no larger than
+// maxCallerRecordBytes.
+func readCallerRecordID(dir string, r agentplan.SessionRecords) string {
+	if r.FileName == "" || !filepath.IsAbs(dir) {
+		return ""
+	}
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+		return ""
+	}
+	f, err := os.OpenFile(filepath.Join(dir, r.FileName), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Getuid() {
+		return ""
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxCallerRecordBytes+1))
+	if err != nil || len(data) > maxCallerRecordBytes {
+		return ""
+	}
+	if r.FirstLineOnly {
+		if i := strings.IndexByte(string(data), '\n'); i >= 0 {
+			data = data[:i]
+		}
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return ""
+	}
+	return stringAt(doc, r.IDPath)
 }
 
 // validateRequestedSkill checks a --skill value.

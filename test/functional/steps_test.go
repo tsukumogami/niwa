@@ -119,6 +119,12 @@ func (s *testState) buildEnv() []string {
 			strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR=") ||
 			strings.HasPrefix(kv, "OTEL_RESOURCE_ATTRIBUTES=") ||
 			strings.HasPrefix(kv, "CLAUDE_CODE_SESSION_ID=") ||
+			// The other variables a Claude Code session sets in its
+			// commands: with them and no session id, dispatch reads the
+			// suite as a stripped agent session.
+			strings.HasPrefix(kv, "CLAUDECODE=") ||
+			strings.HasPrefix(kv, "CLAUDE_CODE_ENTRYPOINT=") ||
+			strings.HasPrefix(kv, "CLAUDE_JOB_DIR=") ||
 			// The worktree hooks anchor on this. A suite run from inside a
 			// Claude Code session would otherwise point every hook scenario
 			// at the developer's own project.

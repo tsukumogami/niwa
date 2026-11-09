@@ -32,6 +32,10 @@ const (
 	SourceMapped     = "mapped"
 	SourceUnverified = "unverified"
 	SourceNone       = "none"
+	// SourceStripped is a parent session link whose caller ran in an agent
+	// session but named no session niwa could resolve: the session variable
+	// was unset and no session record stood in for it. The link has no id.
+	SourceStripped = "stripped"
 )
 
 // The principal sources, beside SourceNone.
@@ -44,6 +48,9 @@ const (
 const (
 	TrustObserved = "observed"
 	TrustHanded   = "handed"
+	// TrustNone is the trust of a principal with no name: niwa observed
+	// nobody, so there is nothing to vouch for.
+	TrustNone = "none"
 )
 
 // Link is a parent link: the parent's id, empty when there is none, and how
@@ -58,7 +65,7 @@ type Link struct {
 type Principal struct {
 	Name   string `json:"name"`
 	Source string `json:"source"` // inherited | declared | none
-	Trust  string `json:"trust"`  // observed | handed
+	Trust  string `json:"trust"`  // observed | handed | none
 }
 
 // Entry is one dispatch's lineage entry. Its fields are declared in the order

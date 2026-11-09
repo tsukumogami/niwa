@@ -189,6 +189,11 @@ func resetDispatchFlags(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
+	// A test run from inside an agent session inherits its markers; clear
+	// them so the dispatcher reads as a plain terminal unless a test says not.
+	for _, name := range []string{"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_JOB_DIR"} {
+		t.Setenv(name, "")
+	}
 
 	t.Cleanup(func() {
 		dispatchLabel = prevLabel

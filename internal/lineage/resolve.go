@@ -10,7 +10,8 @@ import (
 // principal. Resolve applies the source rules to it and does no I/O, so
 // every row of the rules is a table test.
 type Inputs struct {
-	SessionVar          string // raw value of the launch spec's variable
+	SessionVar          string // the calling session: the launch spec's variable, else the id its session record names
+	CallerStripped      bool   // the caller ran in an agent session, but no calling session resolved
 	ParentFromSet       bool
 	CwdInInstance       bool
 	NewestMappedSession string // "" when the instance has no mapping, or the instance came from --parent-from
@@ -43,31 +44,38 @@ func Resolve(in Inputs) (parentSession, parentDispatch Link, p Principal) {
 // parent dispatch link, the parent session link not contradicted by the
 // instance's mapping, and the parent's own principal. Otherwise the declared
 // principal, or none. When a parent link has an id but its entry couldn't
-// be used, the person should have come from that parent, so the trust is
-// handed.
+// be used, or the caller was stripped of its session, the person should
+// have come from a parent, so the trust is handed. A principal with no name
+// has trust none, whichever row produced it: niwa observed nobody.
 func resolvePrincipal(in Inputs, parentSession, parentDispatch Link) Principal {
 	hasParent := parentDispatch.ID != ""
 	if hasParent && in.ParentEntry != nil && in.ParentEntry.DispatchID == parentDispatch.ID {
+		name := in.ParentEntry.Principal.Name
 		trust := TrustHanded
-		if parentDispatch.Source == SourceObserved && parentSession.Source != SourceUnverified &&
-			in.ParentEntry.Principal.Trust == TrustObserved {
+		switch {
+		case name == "":
+			trust = TrustNone
+		case parentDispatch.Source == SourceObserved && parentSession.Source != SourceUnverified &&
+			in.ParentEntry.Principal.Trust == TrustObserved:
 			trust = TrustObserved
 		}
-		return Principal{Name: in.ParentEntry.Principal.Name, Source: PrincipalInherited, Trust: trust}
+		return Principal{Name: name, Source: PrincipalInherited, Trust: trust}
+	}
+	if in.DeclaredPrincipal == "" {
+		return Principal{Source: SourceNone, Trust: TrustNone}
 	}
 	trust := TrustObserved
-	if hasParent {
+	if hasParent || in.CallerStripped {
 		trust = TrustHanded
 	}
-	if in.DeclaredPrincipal != "" {
-		return Principal{Name: in.DeclaredPrincipal, Source: PrincipalDeclared, Trust: trust}
-	}
-	return Principal{Source: SourceNone, Trust: trust}
+	return Principal{Name: in.DeclaredPrincipal, Source: PrincipalDeclared, Trust: trust}
 }
 
 func resolveParentSession(in Inputs) Link {
 	id := in.SessionVar
 	switch {
+	case in.CallerStripped:
+		return Link{Source: SourceStripped}
 	case !authority.ValidSessionID(id):
 		return Link{Source: SourceNone}
 	case in.ParentFromSet, !in.CwdInInstance, in.NewestMappedSession == "":

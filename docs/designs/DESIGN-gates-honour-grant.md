@@ -767,10 +767,13 @@ who authored the work.
 dispatch runs from, or at the workspace root the dispatch the calling
 session's dispatch-written mapping names, and `--parent-from` only chooses
 the instance; it never adds to a grant. A session started by hand inside a
-granted instance can dispatch a child up to that instance's grant, and a
-session that changes to a directory outside every instance with no mapped
-session variable dispatches with no cap beyond the ceiling; the PRD records
-both as known limitations for the later enforcement work.
+granted instance can dispatch a child up to that instance's grant. At the
+root, a session whose variable is unset is still identified by its own
+session record, and one that runs in an agent session but names no session
+at all holds none; a caller that also clears every variable its agent sets
+reads as a plain terminal and dispatches with no cap beyond the ceiling. The
+PRD records the remaining cases as known limitations for the later
+enforcement work.
 
 ## Consequences
 

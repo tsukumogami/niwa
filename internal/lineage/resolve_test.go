@@ -23,6 +23,8 @@ func TestResolveParentSession(t *testing.T) {
 		{"variable unset", Inputs{CwdInInstance: true, NewestMappedSession: testSession}, Link{Source: SourceNone}},
 		{"variable malformed", Inputs{SessionVar: "not a session id", CwdInInstance: true, NewestMappedSession: "not a session id"}, Link{Source: SourceNone}},
 		{"variable too short", Inputs{SessionVar: "abc"}, Link{Source: SourceNone}},
+		{"caller stripped", Inputs{CallerStripped: true}, Link{Source: SourceStripped}},
+		{"caller stripped inside an instance", Inputs{CallerStripped: true, CwdInInstance: true, NewestMappedSession: testSession}, Link{Source: SourceStripped}},
 		{"--parent-from given", Inputs{SessionVar: testSession, ParentFromSet: true, CwdInInstance: true, NewestMappedSession: testOtherSession}, Link{ID: testSession, Source: SourceHanded}},
 		{"--parent-from from the root", Inputs{SessionVar: testSession, ParentFromSet: true}, Link{ID: testSession, Source: SourceHanded}},
 		{"no instance", Inputs{SessionVar: testSession}, Link{ID: testSession, Source: SourceHanded}},
