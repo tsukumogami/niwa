@@ -53,8 +53,8 @@ func putStubOnPath(t *testing.T, stub string) {
 // touch the environment still exercise the production commander.
 type stubCommander struct{ path string }
 
-func (s stubCommander) Run(ctx context.Context, _ string, args []string) ([]byte, []byte, int, error) {
-	return defaultCommander{}.Run(ctx, s.path, args)
+func (s stubCommander) Run(ctx context.Context, _ string, args []string, env []string) ([]byte, []byte, int, error) {
+	return defaultCommander{}.Run(ctx, s.path, args, env)
 }
 
 // hangingCommander is a fake that simulates a CLI that never answers:
@@ -62,7 +62,7 @@ func (s stubCommander) Run(ctx context.Context, _ string, args []string) ([]byte
 // in for a hang should.
 type hangingCommander struct{}
 
-func (hangingCommander) Run(ctx context.Context, _ string, _ []string) ([]byte, []byte, int, error) {
+func (hangingCommander) Run(ctx context.Context, _ string, _ []string, _ []string) ([]byte, []byte, int, error) {
 	<-ctx.Done()
 	return nil, nil, -1, nil
 }
@@ -146,7 +146,7 @@ func waitForPID(path string, timeout time.Duration) bool {
 // one.
 type forkGatedCommander struct{ pidFile string }
 
-func (g forkGatedCommander) Run(ctx context.Context, name string, args []string) ([]byte, []byte, int, error) {
+func (g forkGatedCommander) Run(ctx context.Context, name string, args []string, env []string) ([]byte, []byte, int, error) {
 	runCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
 	defer cancel(nil)
 	stop := context.AfterFunc(ctx, func() {
@@ -154,7 +154,7 @@ func (g forkGatedCommander) Run(ctx context.Context, name string, args []string)
 		cancel(context.Cause(ctx))
 	})
 	defer stop()
-	return defaultCommander{}.Run(runCtx, name, args)
+	return defaultCommander{}.Run(runCtx, name, args, env)
 }
 
 // readPID reads the PID a stub wrote to path, waiting briefly for the
@@ -292,13 +292,13 @@ func TestDefaultCommander_NormalRunSendsNoGroupSignal(t *testing.T) {
 	kills := countGroupKills(t)
 
 	ok := writeInfisicalStub(t, `echo '{"API_KEY":"value"}'`)
-	stdout, _, code, err := defaultCommander{}.Run(context.Background(), ok, []string{"export"})
+	stdout, _, code, err := defaultCommander{}.Run(context.Background(), ok, []string{"export"}, nil)
 	if err != nil || code != 0 || !strings.Contains(string(stdout), "API_KEY") {
 		t.Fatalf("Run = (%q, %d, %v), want the stub's output with exit 0", stdout, code, err)
 	}
 
 	failing := writeInfisicalStub(t, "echo 'error: something' >&2\nexit 3")
-	_, stderr, code, err := defaultCommander{}.Run(context.Background(), failing, nil)
+	_, stderr, code, err := defaultCommander{}.Run(context.Background(), failing, nil, nil)
 	if err != nil || code != 3 || !strings.Contains(string(stderr), "something") {
 		t.Fatalf("Run = (stderr %q, %d, %v), want exit 3 with captured stderr", stderr, code, err)
 	}
@@ -312,7 +312,7 @@ func TestDefaultCommander_NormalRunSendsNoGroupSignal(t *testing.T) {
 // error, which the export maps to "client not installed".
 func TestDefaultCommander_StartFailure(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "infisical")
-	_, _, code, err := defaultCommander{}.Run(context.Background(), missing, nil)
+	_, _, code, err := defaultCommander{}.Run(context.Background(), missing, nil, nil)
 	if code != -1 || err == nil {
 		t.Fatalf("Run on a missing binary = (%d, %v), want (-1, non-nil)", code, err)
 	}

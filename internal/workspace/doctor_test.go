@@ -31,7 +31,7 @@ type fakeExportCommander struct {
 	exitCode int
 }
 
-func (f *fakeExportCommander) Run(_ context.Context, _ string, _ []string) ([]byte, []byte, int, error) {
+func (f *fakeExportCommander) Run(_ context.Context, _ string, _ []string, _ []string) ([]byte, []byte, int, error) {
 	return []byte(f.stdout), []byte(f.stderr), f.exitCode, nil
 }
 

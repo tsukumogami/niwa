@@ -95,7 +95,7 @@ if (exec 3<>/dev/tty) 2>/dev/null; then echo tty=opened; else echo tty=denied; f
 	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	stdout, stderr, code, err := defaultCommander{}.Run(context.Background(), stub, nil)
+	stdout, stderr, code, err := defaultCommander{}.Run(context.Background(), stub, nil, nil)
 	if err != nil || code != 0 {
 		fmt.Fprintf(&report, "run: code=%d err=%v stderr=%q\n", code, err, stderr)
 	}

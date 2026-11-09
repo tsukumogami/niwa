@@ -39,6 +39,9 @@ type fakeCommander struct {
 	// capturedArgs is the most recent export argv. Inspect after a
 	// Run to assert secrets never appear there.
 	capturedArgs []string
+	// capturedEnv is the most recent export's env extras (nil when the
+	// export passed none).
+	capturedEnv []string
 	// capturedName is the subprocess name (always "infisical" for
 	// this backend).
 	capturedName string
@@ -50,9 +53,9 @@ type fakeCommander struct {
 	probeCount int32
 }
 
-// Run implements the commander interface. Captures arguments and
-// returns the preconfigured output.
-func (f *fakeCommander) Run(_ context.Context, name string, args []string) ([]byte, []byte, int, error) {
+// Run implements the commander interface. Captures arguments and env
+// extras and returns the preconfigured output.
+func (f *fakeCommander) Run(_ context.Context, name string, args []string, env []string) ([]byte, []byte, int, error) {
 	if len(args) >= 2 && args[0] == "login" && args[1] == "status" {
 		atomic.AddInt32(&f.probeCount, 1)
 		if f.probeStdout != nil {
@@ -67,6 +70,7 @@ func (f *fakeCommander) Run(_ context.Context, name string, args []string) ([]by
 	copied := make([]string, len(args))
 	copy(copied, args)
 	f.capturedArgs = copied
+	f.capturedEnv = append([]string(nil), env...)
 	return f.stdout, f.stderr, f.exitCode, f.runErr
 }
 
@@ -870,22 +874,24 @@ func TestTokenPassedToSubprocess(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 
-	// Verify --token appears in the captured args.
-	found := false
-	for i, arg := range cmd.capturedArgs {
-		if arg == "--token" {
-			if i+1 < len(cmd.capturedArgs) && cmd.capturedArgs[i+1] == "eyJhbGciOiJIUzI1NiJ9.test-jwt-body.sig" {
-				found = true
-			}
-			break
+	// The token reaches the export through its environment only, never
+	// its argv. Failure messages mask the token.
+	const token = "eyJhbGciOiJIUzI1NiJ9.test-jwt-body.sig"
+	mask := func(s []string) string {
+		return strings.ReplaceAll(strings.Join(s, " "), token, "<token>")
+	}
+	for _, arg := range cmd.capturedArgs {
+		if arg == "--token" || strings.HasPrefix(arg, "--token=") || strings.Contains(arg, token) {
+			t.Fatalf("the token reached the export's argv: %s", mask(cmd.capturedArgs))
 		}
 	}
-	if !found {
-		t.Errorf("--token not found in args: %v", cmd.capturedArgs)
+	want := universalAuthTokenEnvVar + "=" + token
+	if len(cmd.capturedEnv) != 1 || cmd.capturedEnv[0] != want {
+		t.Errorf("export env = %q, want exactly [%s=<token>]", mask(cmd.capturedEnv), universalAuthTokenEnvVar)
 	}
 }
 
-func TestNoTokenOmitsFlag(t *testing.T) {
+func TestNoTokenPassesNoEnv(t *testing.T) {
 	cmd := &fakeCommander{stdout: jsonBody(map[string]string{"K": "value-long-enough"})}
 	f := &Factory{}
 	p, err := f.Open(context.Background(), vault.ProviderConfig{
@@ -907,5 +913,71 @@ func TestNoTokenOmitsFlag(t *testing.T) {
 			t.Errorf("--token should not be in args when token is empty: %v", cmd.capturedArgs)
 			break
 		}
+	}
+	if len(cmd.capturedEnv) != 0 {
+		t.Errorf("export env = %q, want none: with no token the child inherits the environment unchanged", cmd.capturedEnv)
+	}
+}
+
+// TestChildEnv pins how defaultCommander builds a child's environment
+// from the parent's: no extras means nil (inherit unchanged), and an
+// extra replaces every same-name entry instead of adding a second one.
+// All values are fakes.
+func TestChildEnv(t *testing.T) {
+	tests := []struct {
+		name   string
+		base   []string
+		extras []string
+		want   []string
+	}{
+		{
+			name: "no extras inherits unchanged",
+			base: []string{"A=1", "B=2"},
+			want: nil,
+		},
+		{
+			name:   "empty extras inherits unchanged",
+			base:   []string{"A=1"},
+			extras: []string{},
+			want:   nil,
+		},
+		{
+			name:   "extra replaces the inherited entry",
+			base:   []string{"A=1", "T=inherited", "B=2"},
+			extras: []string{"T=minted"},
+			want:   []string{"A=1", "B=2", "T=minted"},
+		},
+		{
+			name:   "extra replaces every duplicate",
+			base:   []string{"T=one", "A=1", "T=two"},
+			extras: []string{"T=minted"},
+			want:   []string{"A=1", "T=minted"},
+		},
+		{
+			name:   "a name that only shares a prefix is kept",
+			base:   []string{"INFISICAL_TOKEN=x", "INFISICAL_TOKEN_X=y"},
+			extras: []string{"INFISICAL_TOKEN=minted"},
+			want:   []string{"INFISICAL_TOKEN_X=y", "INFISICAL_TOKEN=minted"},
+		},
+		{
+			name:   "extra with no inherited entry is added",
+			base:   []string{"A=1"},
+			extras: []string{"T=minted"},
+			want:   []string{"A=1", "T=minted"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := childEnv(tt.base, tt.extras)
+			if tt.want == nil {
+				if got != nil {
+					t.Fatalf("childEnv = %q, want nil", got)
+				}
+				return
+			}
+			if strings.Join(got, "\x00") != strings.Join(tt.want, "\x00") {
+				t.Fatalf("childEnv = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

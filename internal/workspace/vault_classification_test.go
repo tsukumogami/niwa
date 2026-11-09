@@ -20,7 +20,7 @@ type lapsedCommander struct {
 	exports, probes int
 }
 
-func (c *lapsedCommander) Run(_ context.Context, _ string, args []string) ([]byte, []byte, int, error) {
+func (c *lapsedCommander) Run(_ context.Context, _ string, args []string, _ []string) ([]byte, []byte, int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(args) >= 2 && args[0] == "login" && args[1] == "status" {

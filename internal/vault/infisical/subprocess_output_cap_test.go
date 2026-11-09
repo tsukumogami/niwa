@@ -57,7 +57,7 @@ func TestCappedBuffer(t *testing.T) {
 // and a large stderr is truncated with no error of its own.
 func TestDefaultCommander_RealCaps(t *testing.T) {
 	stub := writeInfisicalStub(t, "head -c 33554500 /dev/zero\nyes x | head -c 1048600 >&2\nexit 0")
-	stdout, stderr, code, err := defaultCommander{}.Run(context.Background(), stub, nil)
+	stdout, stderr, code, err := defaultCommander{}.Run(context.Background(), stub, nil, nil)
 	if !errors.Is(err, errOutputTooLarge) {
 		t.Fatalf("err = %v, want errOutputTooLarge", err)
 	}
@@ -75,7 +75,7 @@ func TestDefaultCommander_RealCaps(t *testing.T) {
 func TestDefaultCommander_StderrOverCapIsNotAnError(t *testing.T) {
 	shrinkOutputCaps(t, 64, 12)
 	stub := writeInfisicalStub(t, "echo ok\necho 'first' >&2\necho 'a long complaint cut by the cap' >&2\nexit 4")
-	stdout, stderr, code, err := defaultCommander{}.Run(context.Background(), stub, nil)
+	stdout, stderr, code, err := defaultCommander{}.Run(context.Background(), stub, nil, nil)
 	if err != nil || code != 4 {
 		t.Fatalf("Run = (%d, %v), want (4, nil)", code, err)
 	}

@@ -40,7 +40,9 @@
 // `infisical login`, etc.). niwa passes `cmd.Env = nil` to inherit the
 // parent environment unchanged — this keeps auth transparent to the
 // user and avoids the anti-pattern of niwa itself handling Infisical
-// tokens.
+// tokens. The one exception is a token niwa minted for a provider
+// (config "token"): the export child alone gets it, as
+// INFISICAL_UNIVERSAL_AUTH_ACCESS_TOKEN in its environment.
 //
 // Argv hygiene (R21): `--projectId`, `--env`, `--path` are passed on
 // argv because they are NOT secrets (they identify, they are not
@@ -117,7 +119,7 @@ func (Factory) Kind() string {
 //	"path"       string     // optional. Folder path inside the project, default "/".
 //	"name"       string     // optional. Provider handle for Registry bookkeeping.
 //	"api_url"    string     // optional. Read only to name the store identity's API domain.
-//	"token"      string     // optional. A token niwa minted; passed to export via --token.
+//	"token"      string     // optional. A token niwa minted; set in the export child's environment, never its arguments.
 //	"_commander" commander  // test-only. Swaps the subprocess runner for a fake.
 //
 // Unknown keys are ignored — forward compatibility for future
@@ -174,8 +176,10 @@ func (Factory) Open(_ context.Context, config vault.ProviderConfig) (vault.Provi
 		p.name = s
 	}
 
-	// Optional per-provider auth token. When present, passed via --token
-	// to infisical export, bypassing the CLI's stored session. Used for
+	// Optional per-provider auth token. When present, set as
+	// INFISICAL_UNIVERSAL_AUTH_ACCESS_TOKEN in the infisical export
+	// child's environment (never its arguments), bypassing the CLI's
+	// stored session. Used for
 	// multi-org scenarios where the CLI session is scoped to a different
 	// org than this provider's project. Injected by apply.go from the
 	// local credential file (~/.config/niwa/provider-auth.toml).
@@ -221,7 +225,7 @@ type Provider struct {
 	project string
 	env     string
 	path    string // Factory.Open-time default path (used when Ref.Path is empty)
-	token   string // optional JWT for multi-org auth; passed via --token to subprocess
+	token   string // optional JWT for multi-org auth; reaches the export child through its environment only
 	// apiDomain is the normalised scheme and host of the provider's
 	// API URL: the store identity's domain and the run-state key. It
 	// comes from niwa's configuration, not from the CLI, which picks

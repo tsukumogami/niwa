@@ -53,18 +53,59 @@ import (
 // A fake that simulates a hang should block on <-ctx.Done(), so the
 // caller's deadline is what ends it.
 //
+// env holds extra NAME=value entries for this one child. Each replaces
+// any inherited entry of the same name; nil or empty means the child
+// inherits the parent environment unchanged. A secret the child needs
+// goes here, never in args: process arguments are visible to every
+// local user in the process table.
+//
 // Production callers use defaultCommander, which shells out via
-// os/exec with Env = nil (inherit the parent environment).
+// os/exec.
 type commander interface {
-	Run(ctx context.Context, name string, args []string) (stdout, stderr []byte, exitCode int, err error)
+	Run(ctx context.Context, name string, args []string, env []string) (stdout, stderr []byte, exitCode int, err error)
+}
+
+// universalAuthTokenEnvVar is the environment variable the Infisical
+// CLI reads its access token from when no --token flag is given. It is
+// the first name the CLI checks, ahead of INFISICAL_TOKEN, so a value
+// niwa sets in the export child takes precedence over any inherited
+// one, as the flag did.
+const universalAuthTokenEnvVar = "INFISICAL_UNIVERSAL_AUTH_ACCESS_TOKEN"
+
+// childEnv returns the environment for a child given the parent's
+// entries (base) and the per-child extras: base with every entry whose
+// name matches an extra removed, then the extras. It returns nil when
+// there are no extras, so the caller leaves cmd.Env nil and the child
+// inherits the parent environment unchanged.
+func childEnv(base, extras []string) []string {
+	if len(extras) == 0 {
+		return nil
+	}
+	names := make(map[string]bool, len(extras))
+	for _, e := range extras {
+		name, _, _ := strings.Cut(e, "=")
+		names[name] = true
+	}
+	env := make([]string, 0, len(base)+len(extras))
+	for _, e := range base {
+		name, _, _ := strings.Cut(e, "=")
+		if names[name] {
+			continue
+		}
+		env = append(env, e)
+	}
+	return append(env, extras...)
 }
 
 // defaultCommander is the production commander. It wraps os/exec
 // with the niwa-specific subprocess hygiene invariants:
 //
-//   - cmd.Env = nil (inherit the parent's environment unchanged).
-//     niwa never filters or extends; the Infisical CLI reads its own
-//     auth from INFISICAL_TOKEN / ~/.infisical config.
+//   - cmd.Env = nil (inherit the parent's environment unchanged)
+//     unless the call passes env extras. Only the export passes any:
+//     the token niwa minted, as universalAuthTokenEnvVar. Extras
+//     replace same-name inherited entries and touch nothing else; with
+//     none, the Infisical CLI reads its own auth from INFISICAL_TOKEN /
+//     ~/.infisical config.
 //   - Stdout and stderr are captured into buffers capped at
 //     maxStdoutBytes and maxStderrBytes (bounds.go) — neither is
 //     streamed to the parent process's stdio. This upholds R22: no
@@ -95,7 +136,7 @@ var killProcessGroup = func(pgid int) error {
 
 // Run executes `infisical <args...>` and returns its captured output,
 // in the shapes the commander interface lists.
-func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]byte, []byte, int, error) {
+func (defaultCommander) Run(ctx context.Context, name string, args []string, env []string) ([]byte, []byte, int, error) {
 	devNull, err := os.Open(os.DevNull)
 	if err != nil {
 		return nil, nil, -1, err
@@ -103,11 +144,11 @@ func (defaultCommander) Run(ctx context.Context, name string, args []string) ([]
 	defer devNull.Close()
 
 	cmd := exec.CommandContext(ctx, name, args...)
-	// R28: never extend Env with secrets. Default behavior of
-	// exec.Cmd is Env = nil which inherits the parent's environment
-	// — exactly what we want so the Infisical CLI sees
-	// INFISICAL_TOKEN (or equivalent) unchanged.
-	cmd.Env = nil
+	// With no extras, Env stays nil and the child inherits the parent's
+	// environment unchanged, so the Infisical CLI sees INFISICAL_TOKEN
+	// (or equivalent) as the user set it. Extras go to this child only:
+	// niwa's own environment is never modified.
+	cmd.Env = childEnv(os.Environ(), env)
 	cmd.Stdin = devNull
 	stdout := &cappedBuffer{limit: maxStdoutBytes}
 	stderr := &cappedBuffer{limit: maxStderrBytes, keepStatusLine: true}
@@ -231,17 +272,23 @@ func runInfisicalExport(ctx context.Context, c commander, project, env, path, to
 		"--path", path,
 		"--format", "json",
 	}
-	// Multi-org auth: when a per-provider token is available, pass it
-	// via --token to bypass the CLI's stored session. The token is a
-	// short-lived JWT obtained from Infisical's universal-auth endpoint.
-	// When empty, the CLI uses its stored session (single-org default).
+	// Multi-org auth: when a per-provider token is available, it
+	// bypasses the CLI's stored session. The token is a JWT obtained
+	// from Infisical's universal-auth endpoint. It reaches the export
+	// child through that child's environment only, never through
+	// --token: process arguments are readable by every local user in
+	// the process table for as long as the child runs, and the token
+	// outlives the export. When empty, the CLI uses its stored session
+	// (single-org default) and the child's environment is inherited
+	// unchanged.
+	var childExtras []string
 	if token != "" {
-		args = append(args, "--token", token)
+		childExtras = []string{universalAuthTokenEnvVar + "=" + token}
 	}
 	bound := callBound(exportTimeout)
 	callCtx, cancel := withCallDeadline(ctx, bound)
 	defer cancel()
-	stdout, stderrBytes, exitCode, err := c.Run(callCtx, "infisical", args)
+	stdout, stderrBytes, exitCode, err := c.Run(callCtx, "infisical", args, childExtras)
 	minted := token != ""
 	if callTimedOut(callCtx, err) {
 		// Checked first: a killed child comes back as exit -1 with no
