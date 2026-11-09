@@ -29,7 +29,7 @@ func TestResolvePrincipal(t *testing.T) {
 		want Principal
 	}{
 		{"nothing declared, no parent", func() Inputs { return Inputs{} },
-			Principal{Source: SourceNone, Trust: TrustObserved}},
+			Principal{Source: SourceNone, Trust: TrustNone}},
 		{"declared, no parent", func() Inputs { return Inputs{DeclaredPrincipal: "dana@example.com"} },
 			Principal{Name: "dana@example.com", Source: PrincipalDeclared, Trust: TrustObserved}},
 		{"inherited through observed links", func() Inputs {
@@ -80,23 +80,28 @@ func TestResolvePrincipal(t *testing.T) {
 			in.ParentEntry = parentEntry(testParentID, "", TrustObserved)
 			in.DeclaredPrincipal = "dana"
 			return in
-		}, Principal{Source: PrincipalInherited, Trust: TrustObserved}},
+		}, Principal{Source: PrincipalInherited, Trust: TrustNone}},
 		{"parent entry unusable, declared", func() Inputs {
 			in := inside()
 			in.DeclaredPrincipal = "dana"
 			return in
 		}, Principal{Name: "dana", Source: PrincipalDeclared, Trust: TrustHanded}},
 		{"parent entry unusable, nothing declared", func() Inputs { return inside() },
-			Principal{Source: SourceNone, Trust: TrustHanded}},
+			Principal{Source: SourceNone, Trust: TrustNone}},
 		{"mapped parent entry unusable", func() Inputs {
 			return Inputs{SessionVar: testSession, RootMappedDispatch: testMappedID, ParentDispatchFrom: authority.ParentSourceNone}
-		}, Principal{Source: SourceNone, Trust: TrustHanded}},
+		}, Principal{Source: SourceNone, Trust: TrustNone}},
 		{"an entry for another dispatch is not the parent's", func() Inputs {
 			in := inside()
 			in.ParentEntry = parentEntry(testMappedID, "mallory", TrustObserved)
 			in.DeclaredPrincipal = "dana"
 			return in
 		}, Principal{Name: "dana", Source: PrincipalDeclared, Trust: TrustHanded}},
+		{"stripped caller, declared", func() Inputs {
+			return Inputs{CallerStripped: true, DeclaredPrincipal: "dana"}
+		}, Principal{Name: "dana", Source: PrincipalDeclared, Trust: TrustHanded}},
+		{"stripped caller, nothing declared", func() Inputs { return Inputs{CallerStripped: true} },
+			Principal{Source: SourceNone, Trust: TrustNone}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

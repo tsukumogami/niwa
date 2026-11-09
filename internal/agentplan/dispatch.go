@@ -164,6 +164,18 @@ type Lineage struct {
 	// ParentSessionEnv is the variable the agent sets, in the commands its
 	// sessions run, to the running session's id. Empty when there is none.
 	ParentSessionEnv string
+
+	// SessionRecordEnv is the variable the agent sets, in the commands its
+	// sessions run, to the directory holding the running session's own record
+	// (laid out as Records declares it). It still names the session when
+	// ParentSessionEnv has been unset. Empty when there is none.
+	SessionRecordEnv string
+
+	// SessionMarkerEnv lists variables the agent sets, in the commands its
+	// sessions run, that say a command runs inside one of its sessions without
+	// naming which. With one of these or SessionRecordEnv set and no session
+	// resolving, the caller is treated as a session stripped of its id.
+	SessionMarkerEnv []string
 }
 
 // SessionRecords describes where an agent writes the record that says which
@@ -452,6 +464,8 @@ var launchSpecs = map[agent.Agent]LaunchSpec{
 			SettingsHomePath: []string{".claude"},
 			SettingsFile:     "settings.json",
 			ParentSessionEnv: "CLAUDE_CODE_SESSION_ID",
+			SessionRecordEnv: "CLAUDE_JOB_DIR",
+			SessionMarkerEnv: []string{"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"},
 		},
 		ResumeArgs: []string{"attach"},
 		// A backgrounded session is meant to be attached to while it works;

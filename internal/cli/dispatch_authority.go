@@ -171,11 +171,11 @@ func parseDispatchRequest(level string, levelSet bool, grants, roles []string) (
 // may fall back to a default because the file was unreadable), finds the
 // overlay the way provisioning will, validates the three layers, parses and
 // resolves the request, and reads the dispatcher's own record for the parent
-// link. sessionVar is the raw value of the variable the launch spec names for
-// the calling session, read once by the caller at this step; the lineage
-// links are resolved from it and from what this step finds. Every refusal
-// returns before the preflight, so nothing exists yet.
-func resolveDispatchAuthority(warn io.Writer, cwd, workspaceRoot, wsConfigPath, sessionVar string, wsConfig *config.WorkspaceConfig, cfgErr error, gc *config.GlobalConfig) (*dispatchAuthority, error) {
+// link. caller is the calling session as the launch spec's environment names
+// it, read once by the caller at this step; the dispatcher cap and the
+// lineage links are resolved from it and from what this step finds. Every
+// refusal returns before the preflight, so nothing exists yet.
+func resolveDispatchAuthority(warn io.Writer, cwd, workspaceRoot, wsConfigPath string, caller callerSession, wsConfig *config.WorkspaceConfig, cfgErr error, gc *config.GlobalConfig) (*dispatchAuthority, error) {
 	if cfgErr != nil || wsConfig == nil {
 		if cfgErr == nil {
 			cfgErr = errors.New("no configuration was loaded")
@@ -222,13 +222,17 @@ func resolveDispatchAuthority(warn io.Writer, cwd, workspaceRoot, wsConfigPath, 
 	}
 	// The child may hold no named authority its dispatcher doesn't, refused
 	// here with the rest of (2e), before anything exists.
-	auth.cap = dispatcherCap(grantResolver{root: workspaceRoot, policy: policy}, sessionVar, parent, cwdInstance, cwdInInstance)
+	auth.cap = callerCap(grantResolver{root: workspaceRoot, policy: policy}, caller, parent, cwdInstance, cwdInInstance)
 	if err := authority.CapByDispatcher(resolved, auth.cap); err != nil {
 		return nil, authorityRefusal{err}
 	}
+	if caller.Stripped() {
+		fmt.Fprintf(warn, "niwa dispatch: warning: %s is set but no calling session resolves, so the parent session is recorded as stripped and the dispatch holds no named authority\n", caller.Marker)
+	}
 	// checkMachineAuthority refused an invalid principal at (2a).
 	declared, _ := gc.Principal()
-	in := gatherLineageInputs(workspaceRoot, sessionVar, cwdInstance, cwdInInstance, auth.parentID, parentSrc, declared)
+	in := gatherLineageInputs(workspaceRoot, caller.ID(), cwdInstance, cwdInInstance, auth.parentID, parentSrc, declared)
+	in.CallerStripped = caller.Stripped()
 	auth.parentSession, auth.parentDispatch, auth.principal = lineage.Resolve(in)
 	return auth, nil
 }
@@ -401,6 +405,23 @@ func dispatcherCap(grants grantResolver, sessionVar string, parent *authority.Re
 	// it never adds to a grant: the calling session's own dispatcher, when it
 	// has one, still caps the child, whatever instance the anchor names.
 	return narrowerCap(anchored, sessionCap(grants, sessionVar))
+}
+
+// callerCap is dispatcherCap for the calling session the environment names.
+// A stripped caller holds none, wherever it dispatches from: it runs in an
+// agent session that can't be identified, so nothing it holds can be read.
+// Outside every instance, when the session's own record names a session the
+// variable doesn't, that session's dispatcher caps the child too, so unsetting
+// or replacing the variable never widens what the child may hold.
+func callerCap(grants grantResolver, caller callerSession, parent *authority.Record, cwdInstance workspace.FoundInstance, cwdInInstance bool) *authority.DispatcherCap {
+	if caller.Stripped() {
+		return &authority.DispatcherCap{Stripped: caller.strippedReason()}
+	}
+	cap := dispatcherCap(grants, caller.Var, parent, cwdInstance, cwdInInstance)
+	if cwdInInstance || caller.RecordID == "" || caller.RecordID == caller.Var {
+		return cap
+	}
+	return narrowerCap(cap, sessionCap(grants, caller.RecordID))
 }
 
 // instanceCap is the cap of the instance the dispatch runs from or names:

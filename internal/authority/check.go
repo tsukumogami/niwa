@@ -192,6 +192,10 @@ type DispatcherCap struct {
 	// Missing says the dispatcher's record is gone or can't be used, which
 	// the refusal says rather than naming an empty grant.
 	Missing bool
+	// Stripped, when set, says the calling session couldn't be identified
+	// though the caller runs in an agent session, so it holds none, and is
+	// the reason the refusal gives. DispatchID is then empty.
+	Stripped string
 }
 
 // WiderThanDispatcherError refuses a request for an authority the dispatcher
@@ -212,7 +216,10 @@ func (e *WiderThanDispatcherError) Error() string {
 		held = strings.Join(names, ", ")
 	}
 	where := fmt.Sprintf("the dispatcher holds %s (dispatch %s)", held, e.Cap.DispatchID)
-	if e.Cap.Missing {
+	switch {
+	case e.Cap.Stripped != "":
+		where = "the dispatcher holds none: " + e.Cap.Stripped
+	case e.Cap.Missing:
 		where = fmt.Sprintf("the dispatcher's record is missing or can't be used, so it holds none (dispatch %s)", e.Cap.DispatchID)
 	}
 	lines := make([]string, len(e.Offenders))

@@ -321,7 +321,7 @@ func TestDispatchAuthority_MissingWorkspaceConfigRefuses(t *testing.T) {
 	root := setupDispatchWorkspace(t)
 	resetDispatchFlags(t)
 	path := filepath.Join(root, config.ConfigDir, config.ConfigFile)
-	_, err := resolveDispatchAuthority(&bytes.Buffer{}, root, root, path, "", nil, os.ErrNotExist, nil)
+	_, err := resolveDispatchAuthority(&bytes.Buffer{}, root, root, path, callerSession{}, nil, os.ErrNotExist, nil)
 	if err == nil || !strings.Contains(err.Error(), "loading "+path) {
 		t.Fatalf("err = %v; want a refusal naming %s", err, path)
 	}
@@ -726,7 +726,7 @@ func TestDispatchAuthority_WholeRecord(t *testing.T) {
   "principal": {
     "name": "",
     "source": "none",
-    "trust": "observed"
+    "trust": "none"
   },
   "level": "supervised",
   "level_source": "workspace",

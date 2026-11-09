@@ -30,7 +30,7 @@ Feature: niwa dispatch writes a lineage entry and niwa lineage show reads it
     When I run "niwa lineage show" for the dispatch with ""
     Then the exit code is 0
     And the output contains "parent dispatch: none"
-    And the output contains "principal:       none, source none, trust observed"
+    And the output contains "principal:       none, source none, trust none (not observed)"
     And nothing under the workspace root's .niwa names the dispatch
 
   @critical

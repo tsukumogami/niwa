@@ -64,7 +64,7 @@ func TestDispatchLineage_WritesEntryBesideTheRecord(t *testing.T) {
 		SessionID:      dispatchTestSessionID,
 		ParentSession:  lineage.Link{Source: "none"},
 		ParentDispatch: lineage.Link{Source: "none"},
-		Principal:      lineage.Principal{Source: "none", Trust: "observed"},
+		Principal:      lineage.Principal{Source: "none", Trust: "none"},
 	}
 	if e != want {
 		t.Errorf("entry = %+v\nwant    %+v", e, want)

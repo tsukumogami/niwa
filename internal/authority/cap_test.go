@@ -51,6 +51,8 @@ func TestCapByDispatcherHoldingNothing(t *testing.T) {
 			"authority merge-pr (requested by --grant) is wider than the dispatcher's grant: the dispatcher holds none (dispatch 3c803591-4c01-486f-a927-f96ec399d6a7)"},
 		{"a missing record", DispatcherCap{DispatchID: "3c803591-4c01-486f-a927-f96ec399d6a7", Missing: true},
 			"authority merge-pr (requested by --grant) is wider than the dispatcher's grant: the dispatcher's record is missing or can't be used, so it holds none (dispatch 3c803591-4c01-486f-a927-f96ec399d6a7)"},
+		{"a stripped caller", DispatcherCap{Stripped: "no calling session resolves"},
+			"authority merge-pr (requested by --grant) is wider than the dispatcher's grant: the dispatcher holds none: no calling session resolves"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := Record{Grant: []GrantEntry{{Authority: MergePR, Sources: []Source{SourceDispatch}}}}

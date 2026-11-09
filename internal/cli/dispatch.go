@@ -432,7 +432,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// and never asks for a prompt. The calling session's variable is read
 	// here, once; its parent session link's id is the calling session's id
 	// for the rest of the dispatch.
-	auth, err := resolveDispatchAuthority(cmd.ErrOrStderr(), cwd, workspaceRoot, wsConfigPath, parentSessionVar(spec, os.Getenv), wsConfig, cfgErr, gc)
+	auth, err := resolveDispatchAuthority(cmd.ErrOrStderr(), cwd, workspaceRoot, wsConfigPath, readCallerSession(spec, os.Getenv), wsConfig, cfgErr, gc)
 	if err != nil {
 		return err
 	}

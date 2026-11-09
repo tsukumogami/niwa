@@ -143,7 +143,7 @@ func theLineageShowOutputIsTheDispatchsEntry(ctx context.Context) error {
 		"origin":          "dispatch",
 		"parent_session":  none,
 		"parent_dispatch": none,
-		"principal":       map[string]interface{}{"name": "", "source": "none", "trust": "observed"},
+		"principal":       map[string]interface{}{"name": "", "source": "none", "trust": "none"},
 	}
 	for k, want := range checks {
 		if !reflect.DeepEqual(e[k], want) {

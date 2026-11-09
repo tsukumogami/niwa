@@ -85,7 +85,7 @@ func TestDispatchLineage_PrincipalOutsideTheMachineConfigHasNoEffect(t *testing.
 				t.Fatalf("dispatch: %v\n%s", err, stderr)
 			}
 			got := dispatchedEntry(t, root, f).Parsed.Entry.Principal
-			if got != (lineage.Principal{Source: "none", Trust: "observed"}) {
+			if got != (lineage.Principal{Source: "none", Trust: "none"}) {
 				t.Errorf("principal = %+v, want none", got)
 			}
 		})
