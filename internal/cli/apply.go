@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -281,9 +282,18 @@ func runApply(cmd *cobra.Command, args []string) error {
 	// every failing instance in the returned error, which Execute prints once;
 	// printing here as well rendered the same multi-line message twice under
 	// two different prefixes.
+	//
+	// Instances can be removed while the loop runs. One that is gone by the
+	// time its apply fails has nothing left to converge, so it is skipped with
+	// a warning rather than failing the run: a failure exit then always means
+	// an instance that still exists did not converge.
 	var applyErrors []instanceError
 	for _, instanceRoot := range scope.Instances {
 		if applyErr := applier.Apply(cmd.Context(), cfg, configDir, instanceRoot); applyErr != nil {
+			if instanceRemoved(instanceRoot) {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: skipped %s: the instance was removed during apply\n", instanceRoot)
+				continue
+			}
 			applyErrors = append(applyErrors, instanceError{
 				instance: instanceRoot,
 				err:      applyErr,
@@ -461,6 +471,15 @@ func updateRegistry(configPath, configDir, workspaceName string) error {
 type instanceError struct {
 	instance string
 	err      error
+}
+
+// instanceRemoved reports whether instanceRoot is no longer an instance: its
+// state file, the mark EnumerateInstances listed it by, no longer exists. Any
+// other stat error leaves the instance counted as present, so its failure
+// still fails the run.
+func instanceRemoved(instanceRoot string) bool {
+	_, err := os.Stat(filepath.Join(instanceRoot, workspace.StateDir, workspace.StateFile))
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // combineInstanceErrors returns a single error summarizing all instance failures.
