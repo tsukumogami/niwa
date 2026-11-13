@@ -74,6 +74,7 @@ contributor so no later step can regress it unnoticed.
 
 - [ ] `ProfileSettings` for the coordinator profile returns `permissions: {deny: [the seven names in declared order]}`, `disableBundledSkills: true`, and env `ENABLE_CLAUDEAI_MCP_SERVERS=false`.
 - [ ] A profile with only `drop_tools` returns no `disableBundledSkills` key and no env entry. A profile with only `drop_account_connectors` returns no `permissions` key.
+- [ ] `ProfileEnvNames()` for Claude returns `ENABLE_CLAUDEAI_MCP_SERVERS`, and the Claude self-wake tool set is `CronCreate` and `ScheduleWakeup`.
 - [ ] `Lookup(DispatchProfile, codex)` is unsupported with a non-empty reason, and the generated Codex gap list names it.
 - [ ] The existing binding and dispatch-path scan tests pass, and no file under `internal/cli` names an agent.
 
@@ -91,14 +92,15 @@ contributor so no later step can regress it unnoticed.
 
 - [ ] With a fake Claude spec, `--profile coordinator` produces one `--settings` element whose document holds the deny list, `disableBundledSkills: true` and `env.ENABLE_CLAUDEAI_MCP_SERVERS = "false"`, alongside the keys the other contributors add. The launched process environment also carries the env value.
 - [ ] Without `--profile`, the argv and the `--settings` document are byte-identical to the ones the current code produces for the same fixtures, with and without remote control, inbound acceptance and MCP approval.
-- [ ] Each of these refuses before an instance is provisioned, exits non-zero, and names the cause: an unknown profile; `--profile` with the Codex harness, printing the row's reason; a profile dropping `ToolSearch`; and a profile dropping `CronCreate` or `CronList` when keep-alive resolves on.
+- [ ] Each of these refuses before an instance is provisioned, exits non-zero, and names the cause: an unknown profile; `--profile` with the Codex harness, printing the row's reason; a profile dropping `ToolSearch`; and a profile dropping both `CronCreate` and `ScheduleWakeup` when keep-alive resolves on. A profile dropping only one of them is accepted.
+- [ ] A profiled launch's process environment and settings `env` block carry `NIWA_DISPATCH_PROFILE=coordinator`. A launch without `--profile` from a base environment holding `NIWA_DISPATCH_PROFILE` and `ENABLE_CLAUDEAI_MCP_SERVERS=false` produces a worker environment with neither, and its argv and `--settings` document still match the no-profile fixtures. A launch without `--profile` from a base holding `ENABLE_CLAUDEAI_MCP_SERVERS=false` but no marker keeps the switch.
 - [ ] The session mapping carries `dispatch_profile: "coordinator"`, `niwa list --json` shows it, and the post-launch audit line names it. A dispatch without the flag writes no such field.
 
 **Check**: `go test ./internal/cli/ -run Dispatch` passes, and the new scenario in `dispatch-profile.feature` shows the profiled document and the unchanged no-profile argv.
 
 **Dependencies**: Step 2
 
-**Files**: `internal/cli/dispatch.go`, `internal/cli/dispatch_profile.go`, `internal/cli/dispatch_profile_test.go`, `internal/workspace/session_map.go`, `internal/cli/list.go`, `test/functional/features/dispatch-profile.feature`
+**Files**: `internal/cli/dispatch.go`, `internal/cli/dispatch_env.go`, `internal/cli/dispatch_profile.go`, `internal/cli/dispatch_profile_test.go`, `internal/workspace/session_map.go`, `internal/cli/list.go`, `test/functional/features/dispatch-profile.feature`
 
 ### Step 4: niwa resume keeps a profiled session's profile
 
@@ -126,7 +128,7 @@ contributor so no later step can regress it unnoticed.
 
 - [ ] The guide gives the coordinator profile from the design as its example and explains that a profiled coordinator's entry skill has to start its prompt as a slash command.
 - [ ] Each of the three checks is written as steps a reviewer can follow: how to read turn-0 context from the transcript's first `usage`, the deferred tools to load and use, and what an interactive session must still show.
-- [ ] Run against this branch's build: a coordinator dispatched with `--profile coordinator` reads below 35,000 tokens at turn 0 and uses SendMessage, a Cron tool and TaskStop without error. A dispatch without the profile and an interactive session show their full tool lists, AskUserQuestion and Skill included. The figures go in the pull request's test plan.
+- [ ] Run against this branch's build: a coordinator dispatched with `--profile coordinator` reads below 35,000 tokens at turn 0 and uses SendMessage, a Cron tool and TaskStop without error. A dispatch without the profile, made once from a plain shell and once from inside that profiled coordinator, and an interactive session all show their full tool lists, AskUserQuestion and Skill included, and the account connectors in `/mcp`. The live run also records whether the coordinator's leading slash invocation expanded under `--bg` with Skill denied, which answers the design's first open question. The figures go in the pull request's test plan.
 - [ ] CLAUDE.md's guide index gains the new guide.
 - [ ] A niwa release carries `--profile`.
 
