@@ -119,6 +119,16 @@ agent's `LaunchFlags`, resume's ordered options and retask's checked options
 would have to learn, for no reach the settings slot lacks. `--tools` is an
 allowlist, the shape Decision 2 rejects.
 
+**Rejected: forwarding `--disable-slash-commands`.** It removes the Skill
+tool and its listing, and the second set of launches read about 6K fewer
+tokens at turn 0 with it than with the deny list alone. It's a forwarded flag
+with the same cost as the two above. It also touches the one thing a profiled
+coordinator still needs from slash commands: its entry skill arrives as a
+leading slash invocation, and whether that still expands under this flag
+wasn't measured. The deny list already lands well below the target, so the
+extra cut isn't worth that risk. A later profile can add it once a launch
+shows the leading invocation survives.
+
 **Rejected: writing the profile into the workspace or instance settings
 files.** Those files configure every session started in the instance,
 including the owner's own. That breaks the third Evidence check by
@@ -146,7 +156,7 @@ role split settles.** The coordinator profile drops:
 |------|------------------|----------|
 | Artifact, Workflow, SendFeedback, ReportFindings, EnterWorktree | `permissions.deny` | never called in 17 tenures |
 | AskUserQuestion | `permissions.deny` | needed only in a session the owner starts; a dispatched coordinator reports by message |
-| Skill (and with it the whole skill listing) | `permissions.deny` | needed only in a session the owner starts; a leading slash command in the prompt still expands with the tool denied (measured in print mode only; open for `--bg`, see Open Questions) |
+| Skill (and with it the whole skill listing) | `permissions.deny` | needed only in a session the owner starts; a leading slash command in the prompt still expands with the tool denied (measured in print mode and under `--bg`) |
 | bundled skills | `disableBundledSkills: true` | never called in 17 tenures |
 | account connectors | `ENABLE_CLAUDEAI_MCP_SERVERS=false` | never called in 17 tenures |
 
@@ -316,11 +326,10 @@ dispatches a coordinator has to do two things:
   `/<plugin>:coordinate <args>`, rather than a sentence asking the session to
   run it.
 
-Print-mode launches measured that a leading slash command is expanded by the
-CLI with the Skill tool denied. Whether a `claude --bg` launch, which is how
-coordinators run, expands it the same way hasn't been measured yet; see Open
-Questions. A prompt that only asks the session to run the skill would leave a
-profiled coordinator unable to load it in either case. The dispatcher is
+The trimmed launches measured that a leading slash command is expanded by the
+CLI with the Skill tool denied, in print mode and under `--bg`. A prompt that
+only asks the session to run the skill would leave a profiled coordinator
+unable to load it. The dispatcher is
 the coordination skill's own dispatch step, which lives outside this
 repository. It can't pass `--profile` before a niwa release carries the flag,
 so the plan puts that change after the release.
@@ -399,36 +408,34 @@ an instance root, with the coordinator profile as a launch settings document.
 - **Deferred tools.** Under the profile, ToolSearch returned SendMessage,
   CronCreate, CronList and TaskStop. SendMessage delivered to another session,
   TaskStop stopped a background command, and CronList listed the job
-  CronCreate made. A second trimmed launch is repeating this check; until it
-  reports, this is one measurement (see Open Questions).
+  CronCreate made.
 - **Keep-alive.** Both sessions, given niwa's keep-alive arming text, armed it
-  with CronCreate, the profiled one with ScheduleWakeup denied. The design
-  doesn't rest on this: the profile keeps both self-wake tools, and dispatch
-  refuses only a profile that drops all of them.
+  with CronCreate, the profiled one with ScheduleWakeup denied. The arming
+  text asks for a recurring self-wake, which is CronCreate's job, so the
+  keep-alive doesn't need ScheduleWakeup. The profile keeps both anyway, and
+  dispatch refuses only a profile that drops all of them.
 - **The Skill tool.** In print-mode launches, denying it cut about 10K tokens
   on its own. A prompt beginning with a plugin skill's slash command still
-  expanded that skill with the tool denied. This wasn't measured under
-  `--bg`.
+  expanded that skill with the tool denied.
+
+A second set of trimmed launches repeated the load-bearing checks, on Sonnet
+rather than Opus:
+
+- **Deferred tools.** SendMessage, CronCreate, CronDelete and TaskStop loaded
+  through ToolSearch under a deny-list trim, under a `--tools` allowlist, and
+  under `--disable-slash-commands`.
+- **The Skill tool under `--bg`.** A leading slash command still expanded in
+  a `--bg` session with Skill denied, so the coordinator's entry skill reaches
+  it the way coordinators actually run.
+- **Context.** Turn 0 read 26,956 tokens with the launch settings and the
+  deny list, 21,069 with `--disable-slash-commands` added, and about 16K under
+  the allowlist. An untrimmed Opus session read 58,151. Model choice moves
+  these figures, so the first check is read on the model coordinators run on.
+- **Removed tools leave the system prompt too.** With Artifact disabled, its
+  paragraph was gone from the system prompt, not only its tool entry.
 - **Connectors.** `ENABLE_CLAUDEAI_MCP_SERVERS=false` in the settings env
   removed the account connector and left the plugin's and the workspace's MCP
   servers in place.
-
-## Open Questions
-
-These are measurements still to come back. Each names what changes if it
-comes back the other way.
-
-1. **Does a leading slash command expand under `claude --bg` with the Skill
-   tool denied?** Measured only in print mode so far. If it doesn't, the
-   coordinator profile can't deny Skill, the row comes out of Decision 2's
-   table, and the turn-0 figure loses about 10K of its cut. The design's
-   other choices don't move. The plan's step 5 live run answers it at the
-   latest.
-2. **Do deferred tools still load through ToolSearch under the deny list, on
-   a second launch?** One trimmed launch said yes. A deny rule names only the
-   tools it removes, so nothing in the design expects otherwise, but the
-   carrier choice in Decision 1 is restated from the second launch's result
-   before this design is accepted.
 
 ## Security Considerations
 
@@ -453,9 +460,15 @@ Every other launch path is unchanged.
   then `--profile` refuses for Codex.
 - A Claude Code release that renames a dropped tool silently stops dropping
   it. The guide's live check, rerun on upgrades, is what catches that.
-- A dispatched coordinator under the profile sees a SessionStart hint about
-  EnterWorktree that it can't act on. Coordinators implement nothing, so the
-  hint costs nothing but the line.
+- A dispatched coordinator under the profile is still told to use
+  EnterWorktree, by a SessionStart hint and by the background session's own
+  system prompt, which asks for isolation before the first file edit. With
+  the tool denied it can't comply. Coordinators implement nothing, and the
+  system prompt's own fallback is to continue in place when EnterWorktree
+  fails, so the cost is the lines. A coordinator that does edit a file works
+  in its instance's checkout, the same place it works today when the tool
+  call fails. The guide says so, and the first check's transcript is read for
+  a coordinator that stalls on the instruction instead.
 - A coordinator's entry skill has to arrive as a slash command at the start of
   its prompt, since it can't call the Skill tool.
 - Anything else started from a profiled coordinator's shell, other than a
