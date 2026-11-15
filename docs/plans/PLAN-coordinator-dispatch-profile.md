@@ -56,7 +56,8 @@ contributor so no later step can regress it unnoticed.
 
 - [ ] A workspace.toml with the coordinator profile from the design loads, and `SessionConfig.DispatchProfiles["coordinator"]` holds the seven tool names and both booleans true.
 - [ ] Load refuses, naming the profile and the entry: a profile name outside `^[a-z0-9][a-z0-9-]*$`, a tool name in lowercase (`advisor`), a scoped rule (`Bash(git *)`), and a profile that declares no drop at all.
-- [ ] `mcp__claude_ai_Example` is accepted as a tool name.
+- [ ] `mcp__claude_ai_Example` is accepted as a tool name. The grammar is one exported function, `config.ValidateProfileToolName`, and no other package holds its own copy of the pattern.
+- [ ] `config.ProfileEnvNames` holds `ENABLE_CLAUDEAI_MCP_SERVERS`, and load refuses `[session.dispatch_env]` naming it as a passthrough or an unset name.
 - [ ] The vault resolver's deep copy of `[session]` clones `DispatchProfiles`, and a test mutating the copy's `drop_tools` leaves the original unchanged.
 - [ ] `niwa apply` writes no file that differs from a run without the table. The table is dispatch-time only.
 
@@ -74,9 +75,8 @@ contributor so no later step can regress it unnoticed.
 
 - [ ] `ProfileSettings` for the coordinator profile returns `permissions: {deny: [the seven names in declared order]}`, `disableBundledSkills: true`, and env `ENABLE_CLAUDEAI_MCP_SERVERS=false`.
 - [ ] A profile with only `drop_tools` returns no `disableBundledSkills` key and no env entry. A profile with only `drop_account_connectors` returns no `permissions` key.
-- [ ] `ProfileSettings` takes the agent: asked for Codex it returns an error naming the unsupported row, never an empty spelling.
-- [ ] The deny list is a `profileDenyList` that marshals to exactly `{"deny":[...]}`, and marshalling one holding a name that fails the tool-name grammar returns an error.
-- [ ] `ProfileRequiredTools(claude)` returns `ToolSearch` and `CronCreate`. `AllProfileEnvNames()` takes no agent and returns `ENABLE_CLAUDEAI_MCP_SERVERS`; a test adds a fake agent with its own profile env name and sees the union grow.
+- [ ] `ProfileSettings` takes the agent and a plain drops struct and returns an error: asked for Codex it returns one naming the unsupported row, never an empty spelling. `internal/agentplan` still imports only `internal/agent`.
+- [ ] `ProfileRequiredTools(claude)` returns `ToolSearch` and `CronCreate`. `AllProfileEnvNames()` takes no agent and returns `ENABLE_CLAUDEAI_MCP_SERVERS`, and a test fails if any agent's spelling sets an env name outside it.
 - [ ] `Lookup(DispatchProfile, codex)` is unsupported with a non-empty reason, and the generated Codex gap list names it.
 - [ ] The existing binding and dispatch-path scan tests pass, and no file under `internal/cli` names an agent.
 
@@ -98,7 +98,8 @@ contributor so no later step can regress it unnoticed.
 - [ ] `NIWA_DISPATCH_PROFILE` is in `config.LaunchSettingsEnvNames`, and `[session.dispatch_env]` declaring it is refused at load.
 - [ ] A profiled launch's process environment and settings `env` block carry `NIWA_DISPATCH_PROFILE=coordinator`. A launch without `--profile` from a base environment holding `NIWA_DISPATCH_PROFILE` and `ENABLE_CLAUDEAI_MCP_SERVERS=false` produces a worker environment with neither, and its argv and `--settings` document still match the no-profile fixtures. The same holds when that launch's agent is Codex (a fake Codex spec). A launch without `--profile` from a base holding `ENABLE_CLAUDEAI_MCP_SERVERS=false` but no marker keeps the switch.
 - [ ] The launch record carries `DispatchProfile: "coordinator"` and holds `NIWA_DISPATCH_PROFILE` and `ENABLE_CLAUDEAI_MCP_SERVERS` in its `Env`, as written by `WriteLaunchRecord`. The session mapping carries `dispatch_profile: "coordinator"`, `niwa list --json` shows it, and the post-launch audit line names it. A dispatch without the flag writes no such field in either.
-- [ ] `renderLaunchSettings`' doc comment names the deny list as its third non-constant exception, and the existing constants-rule test covers it.
+- [ ] `renderLaunchSettings`' doc comment names the deny list as its third non-constant exception, and the existing constants-rule test covers it. The deny list is a `profileDenyList` in `dispatch_settings.go` that marshals to exactly `{"deny":[...]}`, and marshalling one holding a name that fails `config.ValidateProfileToolName` returns an error.
+- [ ] A test in `internal/cli` fails when `agentplan.AllProfileEnvNames()` and `config.ProfileEnvNames` differ.
 
 **Check**: `go test ./internal/cli/ -run Dispatch` passes, and the new scenario in `dispatch-profile.feature` shows the profiled document and the unchanged no-profile argv.
 
@@ -119,7 +120,7 @@ contributor so no later step can regress it unnoticed.
 - [ ] The resume refuses, naming the profile, when the recorded profile was removed from the config, when its `drop_tools` changed, and when the recorded document holds a `permissions` key but the record names no profile.
 - [ ] A `permissions` value holding anything but `deny` (an `allow` list, say) refuses, whatever the profile says.
 - [ ] Records made without a profile resume exactly as before; the existing resume tests pass unchanged.
-- [ ] `niwa retask` on a profiled worker passes its saved-options check, and its test asserts that no flag is added on the wake.
+- [ ] `niwa retask` on a profiled worker passes its saved-options check, and its test asserts that no flag is added on the wake. Retask refuses, naming the profile, when the recorded profile was removed or changed, since it runs the same `validateLaunchRecord`.
 
 **Check**: `go test ./internal/cli/ -run 'Resume|Retask'` passes, including the profiled resume and each refusal.
 

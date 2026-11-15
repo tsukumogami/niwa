@@ -255,27 +255,52 @@ workspace config, and the vault resolver's deep copy clones it.
 routed as a launch capability, is implemented for Claude and unsupported for
 Codex with a reason. Three functions carry the per-agent facts:
 
-- `ProfileSettings(agent, profile) (keys map[string]any, env map[string]string)`
-  returns the agent's spelling. For Claude that's `permissions: {deny: [...]}`,
+- `ProfileSettings(agent, drops) (keys map[string]any, env map[string]string, err error)`
+  returns the agent's spelling, or an error naming the unsupported row for an
+  agent without one. `drops` is a plain struct of the three fields, so
+  `internal/agentplan` keeps its one dependency (`internal/agent`) and
+  doesn't import `internal/config`. For Claude that's `permissions: {deny: [...]}`,
   `disableBundledSkills: true`, and `ENABLE_CLAUDEAI_MCP_SERVERS: "false"` for
-  the env block. The deny list is a typed value, `profileDenyList`, that can
+  the env block. It returns the deny names as a plain list. The dispatch
+  side wraps them in a typed value, `profileDenyList`, in
+  `internal/cli/dispatch_settings.go` next to `mcpApprovalList`, which can
   marshal to nothing but `{"deny": [...]}` over names that pass the tool-name
-  grammar, the way `mcpApprovalList` marshals the MCP approval names.
+  grammar.
 - `ProfileRequiredTools(agent)` returns the tools a profile may not drop.
 - `AllProfileEnvNames()` returns the union, over every agent, of the env
   names a profile can set. It takes no agent on purpose: the stripping below
   runs in `shapeLaunchEnv`, which `niwa resume` and the retask wake also call
   and which never knows which agent launched the dispatcher's own session.
 
+Two rules live in `internal/config` and nowhere else, so there's one copy of
+each: the tool-name grammar (`ValidateProfileToolName`), which config load,
+the deny-list renderer and resume all call; and `config.ProfileEnvNames`, the
+env names a profile may set. `internal/agentplan` doesn't import either, so
+a test in `internal/cli`, which imports both packages, fails when
+`agentplan.AllProfileEnvNames()` and `config.ProfileEnvNames` differ. Config
+load refuses every name in `ProfileEnvNames` in `[session.dispatch_env]`, as
+a passthrough or an unset name. Otherwise a workspace could pass the
+connectors switch through and fight the profile for the same `env` entry, and
+resume would accept the switch through the passthrough rule on a record that
+names no profile.
+
+The name check at config load is the gate that counts. `renderLaunchSettings`
+runs after provisioning and panics on a marshal error, so a bad name must
+never get that far. The render-time check only guards against a contributor
+that skipped the load.
+
 Spelling it here keeps every agent name off the dispatch path, which the
 existing dispatch-path scan enforces.
 
 **Dispatch (`internal/cli/dispatch.go`).** `--profile <name>` is resolved
 after the agent and before provisioning, so a refusal leaves nothing behind.
-A fifth contributor adds the profile's keys to `launchSettings` after the MCP
-approval contributor, and its env value joins the launch environment through
-`launchEnvShape`, so `applyLaunchEnv` puts it in both the env block and the
-process environment. With no `--profile`, the contributor adds nothing and the
+The profile contributes in two places, because today's code consumes the
+env shape before the MCP approval contributor runs (`applyLaunchEnv` is
+called first). The profile's env values and the marker go on
+`launchEnvShape` before that call, so `applyLaunchEnv` puts them in both the
+env block and the process environment. The profile's settings keys are a
+fifth contributor, added to `launchSettings` after the MCP approval
+contributor. With no `--profile`, the contributor adds nothing and the
 rendered document is unchanged. A unit test pins that. More pieces:
 
 - `renderLaunchSettings` documents that every value it renders is a constant
@@ -294,7 +319,8 @@ rendered document is unchanged. A unit test pins that. More pieces:
 
 **Keeping the profile from travelling down.** A worker's environment starts
 from the dispatcher's own (`os.Environ()` in `realDispatchLaunch`), and
-`shapeLaunchEnv` removes only the reap key, the dispatch identity and the
+`shapeLaunchEnv` removes only the reap key, the dispatch identity,
+`OTEL_RESOURCE_ATTRIBUTES` when it sets a lineage value, and the
 `[session.dispatch_env]` unset names. A profiled coordinator carries
 `ENABLE_CLAUDEAI_MCP_SERVERS=false` in its process environment and in its
 settings `env` block, and Claude Code hands that environment to the commands
@@ -358,9 +384,15 @@ resumed. The changes:
 Every profile key is refused when the record names no profile. A profile
 that has since been removed or changed refuses the resume and names the
 profile, the same rule the env check already applies to
-`[session.dispatch_env]`. `niwa retask` needs no change. Its flagless wake
-re-applies the options the job saved, `--settings` included, and its option
-check already compares the saved document with the record.
+`[session.dispatch_env]`.
+
+`niwa retask` needs no code of its own, but it depends on this change. It
+runs the same `validateLaunchRecord` that resume does, so without the
+changes above a profiled worker couldn't be retasked either, and a profile
+that has since been removed or changed refuses retask as well as resume. Its
+flagless wake re-applies the options the job saved, `--settings` included,
+and its option check already compares the saved document with the record.
+The guide says both.
 
 **The coordinator's dispatcher.** A coordinator under the profile can't
 call the Skill tool. Its entry skill has to reach it another way, so whatever
@@ -495,7 +527,9 @@ smuggling a scoped permission rule into the document.
 ## Consequences
 
 **Positive.** A coordinator tenure pays about 30K fewer tokens on every turn.
-The selection is explicit on the dispatch line and recorded on the mapping.
+The selection is explicit on the dispatch line and recorded on the launch
+record, which resume and retask read, with a copy on the mapping for
+`niwa list`.
 Every other launch path is unchanged.
 
 **Negative.**
