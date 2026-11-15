@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -537,5 +538,41 @@ func TestProfileEnvNamesRefusedInDispatchEnv(t *testing.T) {
 	// launched worker, so the name is not refused there.
 	if _, err := Parse([]byte(sessionConfigWith("[session.on_reap]\ncommand = \"true\"\nenv = [\"ENABLE_CLAUDEAI_MCP_SERVERS\"]\n"))); err != nil {
 		t.Errorf("the on-reap list refused a profile env name: %v", err)
+	}
+}
+
+// TestDispatchProfileMarkerRefusedInDispatchEnv: the profile marker is a name
+// niwa sets on a profiled launch, so it is one of the launch settings env
+// names and a workspace that declares it in [session.dispatch_env], in either
+// list, doesn't load.
+func TestDispatchProfileMarkerRefusedInDispatchEnv(t *testing.T) {
+	if !slices.Contains(LaunchSettingsEnvNames, DispatchProfileEnv) || DispatchProfileEnv != "NIWA_DISPATCH_PROFILE" {
+		t.Fatalf("LaunchSettingsEnvNames = %v, want it to hold NIWA_DISPATCH_PROFILE", LaunchSettingsEnvNames)
+	}
+	for _, list := range []string{"passthrough", "unset"} {
+		t.Run(list, func(t *testing.T) {
+			_, err := Parse([]byte(sessionConfigWith(fmt.Sprintf("[session.dispatch_env]\n%s = [\"NIWA_DISPATCH_PROFILE\"]\n", list))))
+			if err == nil {
+				t.Fatal("loaded without complaint")
+			}
+			if !strings.Contains(err.Error(), "NIWA_DISPATCH_PROFILE") {
+				t.Errorf("the error does not name the entry: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidProfileName: the recorded-name check accepts exactly the names
+// config load accepts.
+func TestValidProfileName(t *testing.T) {
+	for _, ok := range []string{"coordinator", "a", "0-lean", "co-ord-1"} {
+		if !ValidProfileName(ok) {
+			t.Errorf("ValidProfileName(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"", "-lead", "Coordinator", "co ord", "co_ord", "co\nord", "\x1b[31m"} {
+		if ValidProfileName(bad) {
+			t.Errorf("ValidProfileName(%q) = true, want false", bad)
+		}
 	}
 }

@@ -74,6 +74,15 @@ func (p SessionDispatchProfile) IsEmpty() bool {
 // profileNamePattern is what a dispatch profile's name must look like.
 var profileNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
+// ValidProfileName reports whether name has the shape a dispatch profile's
+// name has. Config load refuses any other name, so a reader of a profile name
+// recorded in a file any same-user process can edit, such as a session
+// mapping, uses this to tell a value niwa could have written from one it
+// couldn't.
+func ValidProfileName(name string) bool {
+	return profileNamePattern.MatchString(name)
+}
+
 // profileToolNamePatterns are the two shapes a dropped tool's name may take: a
 // built-in tool, which starts upper-case, and an MCP tool.
 var profileToolNamePatterns = []*regexp.Regexp{
@@ -284,12 +293,19 @@ const (
 	WorkspaceEnv  = "NIWA_WORKSPACE"
 )
 
+// DispatchProfileEnv marks a launch made with a dispatch profile: `niwa
+// dispatch --profile <name>` sets it to the profile's name. A launch that
+// inherits it removes it, along with every environment name a profile can
+// set, so a worker dispatched without a profile from inside a profiled one
+// doesn't inherit the profile.
+const DispatchProfileEnv = "NIWA_DISPATCH_PROFILE"
+
 // LaunchSettingsEnvNames are the names niwa itself writes into a launched
 // worker's settings env object. A declared name equal to one of them would
 // fight niwa for the slot. The NIWA_ prefix already covers the reap key and
 // the identity names; they are listed so this stays the one place that says
 // what niwa sets.
-var LaunchSettingsEnvNames = []string{"OTEL_RESOURCE_ATTRIBUTES", ReapKeyEnv, DispatchIDEnv, WorkspaceEnv}
+var LaunchSettingsEnvNames = []string{"OTEL_RESOURCE_ATTRIBUTES", ReapKeyEnv, DispatchIDEnv, WorkspaceEnv, DispatchProfileEnv}
 
 // credentialSuffixes and credentialPrefixes are the shapes of a variable name
 // that usually holds a credential, matched against the upper-cased name.
@@ -418,7 +434,7 @@ func validateDispatchProfiles(profiles map[string]SessionDispatchProfile) error 
 	}
 	slices.Sort(names)
 	for _, name := range names {
-		if !profileNamePattern.MatchString(name) {
+		if !ValidProfileName(name) {
 			return fmt.Errorf("session.dispatch_profiles: %q is not a profile name: use lowercase letters, digits and '-', starting with a letter or digit", name)
 		}
 		p := profiles[name]

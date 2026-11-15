@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+
+	"github.com/tsukumogami/niwa/internal/config"
 )
 
 // renderLaunchSettings renders the inline settings document a dispatch passes
@@ -27,7 +29,7 @@ import (
 // settings files, so anything a caller could influence here would let that
 // caller rewrite the worker's configuration.
 //
-// Two values are exceptions, and they are named here so they stay the only
+// Three values are exceptions, and they are named here so they stay the only
 // ones. The first is the launch environment contributor's "env" key, a
 // launchEnv (dispatch_env.go) that can marshal to nothing but a JSON object of
 // string values. Its keys come from three places and no others:
@@ -57,6 +59,16 @@ import (
 // Each name must match mcpServerNamePattern and at most
 // maxLaunchMCPServers are sent, so a hand-edited state file can't push a
 // key-like or instruction-like string into the document.
+//
+// The third is a dispatch profile's permissions key, a profileDenyList that
+// can marshal to nothing but {"deny":[...]}. Its names come from the
+// workspace config's [session.dispatch_profiles], which config load accepted
+// only as names passing config.ValidateProfileToolName, and the list checks
+// each name against that grammar again when it marshals. The check at load is
+// the one that counts: this function runs after provisioning and panics on a
+// marshal error, so the render-time check only guards against a contributor
+// that skipped the load. The profile's other key, disableBundledSkills, is a
+// constant true and needs no exception.
 //
 // An empty or nil map returns ("", false), and the caller then appends no
 // settings flag at all. A value encoding/json can't encode panics, since only
@@ -112,6 +124,29 @@ func (l mcpApprovalList) MarshalJSON() ([]byte, error) {
 		names = []string{}
 	}
 	return json.Marshal(names)
+}
+
+// profileDenyList is the launch settings document's permissions value for a
+// profiled launch. Its one field is unexported, and it marshals to exactly
+// {"deny":[...]} over names that pass config.ValidateProfileToolName, so no
+// name can add a key, an allow rule, or change the document's shape.
+type profileDenyList struct{ names []string }
+
+// MarshalJSON renders {"deny":[...]}, [] when empty, and refuses a name
+// outside the tool-name grammar.
+func (l profileDenyList) MarshalJSON() ([]byte, error) {
+	names := l.names
+	if names == nil {
+		names = []string{}
+	}
+	for _, n := range names {
+		if err := config.ValidateProfileToolName(n); err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(struct {
+		Deny []string `json:"deny"`
+	}{Deny: names})
 }
 
 // maxWarnedNameBytes bounds how much of a dropped name a warning prints.

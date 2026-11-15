@@ -55,8 +55,14 @@ type LaunchRecord struct {
 	// verbatim, "" when none was.
 	Settings string `json:"settings,omitempty"`
 	// Env holds the names and values niwa set in the worker's environment.
-	Env       map[string]string `json:"env,omitempty"`
-	WrittenAt time.Time         `json:"written_at"`
+	Env map[string]string `json:"env,omitempty"`
+	// DispatchProfile is the [session.dispatch_profiles] name the worker was
+	// launched with, "" when it had none. Resume checks the recorded settings
+	// document and env against what this name resolves to in the workspace's
+	// current config. omitempty keeps records written without a profile, and
+	// before the field existed, byte-identical.
+	DispatchProfile string    `json:"dispatch_profile,omitempty"`
+	WrittenAt       time.Time `json:"written_at"`
 }
 
 // LaunchDir returns the launch store's directory for a workspace root.

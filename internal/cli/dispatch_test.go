@@ -162,6 +162,7 @@ func resetDispatchFlags(t *testing.T) {
 	prevAcceptSessionMessages := dispatchAcceptSessionMessages
 	prevBrief := dispatchBrief
 	prevSkill := dispatchSkill
+	prevProfile := dispatchProfile
 	prevLevel := dispatchLevel
 	prevLevelSet := dispatchLevelSet
 	prevGrants := dispatchGrants
@@ -186,6 +187,7 @@ func resetDispatchFlags(t *testing.T) {
 	dispatchAcceptSessionMessages = nil
 	dispatchBrief = ""
 	dispatchSkill = ""
+	dispatchProfile = ""
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
@@ -207,6 +209,7 @@ func resetDispatchFlags(t *testing.T) {
 		dispatchAcceptSessionMessages = prevAcceptSessionMessages
 		dispatchBrief = prevBrief
 		dispatchSkill = prevSkill
+		dispatchProfile = prevProfile
 		dispatchLevel = prevLevel
 		dispatchLevelSet = prevLevelSet
 		dispatchGrants = prevGrants
