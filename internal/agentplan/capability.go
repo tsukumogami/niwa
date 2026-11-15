@@ -37,7 +37,7 @@ package agentplan
 import "fmt"
 
 // Capability names one thing a workspace preparation can deliver to an agent
-// session. The set is closed: the constants below are the 26 rows of the
+// session. The set is closed: the constants below are the 27 rows of the
 // capability matrix in docs/prds/PRD-agent-capability-contract.md, in matrix
 // order, and adding a member is a product decision rather than an
 // implementation detail.
@@ -145,6 +145,12 @@ const (
 	// niwa's lineage resource attributes on its telemetry, beside the ones the
 	// developer's own settings set (row 26).
 	DispatchResourceAttributes
+
+	// DispatchProfile is a dispatched background worker launched with a named
+	// profile from the workspace config applied: tools denied by name, bundled
+	// skills off and the account's connectors left unloaded, so the worker
+	// starts with less in its context (row 27).
+	DispatchProfile
 )
 
 // Route names how a capability's delivery reaches a session. It is a property
@@ -207,6 +213,7 @@ var catalog = []capabilityRow{
 	{GitExcludeBookkeeping, "git-exclude-bookkeeping", RouteProcedure},
 	{DispatchInboundAcceptance, "dispatch-inbound-acceptance", RouteLaunch},
 	{DispatchResourceAttributes, "dispatch-resource-attributes", RouteLaunch},
+	{DispatchProfile, "dispatch-profile", RouteLaunch},
 }
 
 // All returns every capability in matrix order. The result is a fresh slice, so
@@ -239,7 +246,7 @@ func (c Capability) Route() Route {
 	return 0
 }
 
-// row finds the catalog entry for c. The scan is linear over 26 entries, which
+// row finds the catalog entry for c. The scan is linear over 27 entries, which
 // costs less than the map plus init needed to avoid it.
 func (c Capability) row() (capabilityRow, bool) {
 	for _, row := range catalog {
