@@ -396,3 +396,146 @@ func TestOnReapTimeoutRefusals(t *testing.T) {
 		})
 	}
 }
+
+// coordinatorProfile is the coordinator profile the design gives as its
+// example.
+const coordinatorProfile = `
+[session.dispatch_profiles.coordinator]
+drop_tools = ["Artifact", "Workflow", "SendFeedback", "ReportFindings",
+              "EnterWorktree", "AskUserQuestion", "Skill"]
+drop_bundled_skills = true
+drop_account_connectors = true
+`
+
+// TestDispatchProfileParses pins the authored shape of
+// [session.dispatch_profiles.<name>]: the design's coordinator profile loads
+// with its seven tools in declared order and both switches on, and no key
+// surfaces as an unknown field.
+func TestDispatchProfileParses(t *testing.T) {
+	result, err := Parse([]byte(sessionConfigWith(coordinatorProfile)))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Warnings) != 0 {
+		t.Errorf("parsing reported %v; every documented key must decode", result.Warnings)
+	}
+	p, ok := result.Config.Session.DispatchProfiles["coordinator"]
+	if !ok {
+		t.Fatalf("no coordinator profile in %+v", result.Config.Session.DispatchProfiles)
+	}
+	want := []string{"Artifact", "Workflow", "SendFeedback", "ReportFindings", "EnterWorktree", "AskUserQuestion", "Skill"}
+	if strings.Join(p.DropTools, ",") != strings.Join(want, ",") {
+		t.Errorf("drop_tools = %v, want %v", p.DropTools, want)
+	}
+	if !p.DropBundledSkills || !p.DropAccountConnectors {
+		t.Errorf("switches = %+v, want both true", p)
+	}
+	// The profiles are dispatch-time only and count toward no apply-time
+	// declaration.
+	if !result.Config.Session.Env.IsEmpty() || !result.Config.Session.DispatchEnv.IsEmpty() {
+		t.Error("a dispatch profile made another [session] table report itself declared")
+	}
+}
+
+// TestDispatchProfileRefusals is every load-time refusal of a profile. Each
+// must fail to load with an error naming the profile and the entry.
+func TestDispatchProfileRefusals(t *testing.T) {
+	cases := []struct {
+		name     string
+		fragment string
+		mentions []string
+	}{
+		{"name with uppercase", "[session.dispatch_profiles.Coordinator]\ndrop_bundled_skills = true\n", []string{`"Coordinator"`}},
+		{"name with underscore", "[session.dispatch_profiles.my_profile]\ndrop_bundled_skills = true\n", []string{`"my_profile"`}},
+		{"name starting with a dash", "[session.dispatch_profiles.-x]\ndrop_bundled_skills = true\n", []string{`"-x"`}},
+		{"lowercase tool", "[session.dispatch_profiles.coord]\ndrop_tools = [\"advisor\"]\n", []string{"coord", `"advisor"`}},
+		{"scoped rule", "[session.dispatch_profiles.coord]\ndrop_tools = [\"Bash(git *)\"]\n", []string{"coord", `"Bash(git *)"`}},
+		{"mcp prefix alone", "[session.dispatch_profiles.coord]\ndrop_tools = [\"mcp__\"]\n", []string{"coord", `"mcp__"`}},
+		{"duplicate tool", "[session.dispatch_profiles.coord]\ndrop_tools = [\"Skill\", \"Skill\"]\n", []string{"coord", `"Skill"`}},
+		{"no drop at all", "[session.dispatch_profiles.coord]\ndrop_tools = []\ndrop_bundled_skills = false\n", []string{"coord"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte(sessionConfigWith(tc.fragment)))
+			if err == nil {
+				t.Fatal("loaded without complaint")
+			}
+			for _, m := range tc.mentions {
+				if !strings.Contains(err.Error(), m) {
+					t.Errorf("the error does not name %s: %v", m, err)
+				}
+			}
+		})
+	}
+}
+
+// TestValidateProfileToolName is the grammar on its own: whole built-in tool
+// names and MCP tool names pass, everything else is refused.
+func TestValidateProfileToolName(t *testing.T) {
+	for _, ok := range []string{"Artifact", "AskUserQuestion", "Skill", "X", "Tool2", "mcp__claude_ai_Example", "mcp__server-name__tool"} {
+		if err := ValidateProfileToolName(ok); err != nil {
+			t.Errorf("%q refused: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "advisor", "skill", "Bash(git *)", "Bash(*)", "mcp__", "mcp__a b", "Mcp__x", "Tool-Name", "Tool_Name", "*", " Skill"} {
+		if err := ValidateProfileToolName(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+// TestDispatchProfileAcceptsMCPToolNames: an MCP tool name is a whole tool
+// and loads.
+func TestDispatchProfileAcceptsMCPToolNames(t *testing.T) {
+	result, err := Parse([]byte(sessionConfigWith("[session.dispatch_profiles.slim]\ndrop_tools = [\"mcp__claude_ai_Example\"]\n")))
+	if err != nil {
+		t.Fatalf("an MCP tool name was refused: %v", err)
+	}
+	if got := result.Config.Session.DispatchProfiles["slim"].DropTools; len(got) != 1 || got[0] != "mcp__claude_ai_Example" {
+		t.Errorf("drop_tools = %v", got)
+	}
+}
+
+// TestDispatchProfileSingleDropLoads: each drop on its own is a profile.
+func TestDispatchProfileSingleDropLoads(t *testing.T) {
+	for name, fragment := range map[string]string{
+		"tools only":      "[session.dispatch_profiles.a]\ndrop_tools = [\"Skill\"]\n",
+		"skills only":     "[session.dispatch_profiles.b]\ndrop_bundled_skills = true\n",
+		"connectors only": "[session.dispatch_profiles.c-2]\ndrop_account_connectors = true\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse([]byte(sessionConfigWith(fragment))); err != nil {
+				t.Errorf("refused: %v", err)
+			}
+		})
+	}
+}
+
+// TestProfileEnvNamesRefusedInDispatchEnv: a name a dispatch profile owns
+// can't be declared in [session.dispatch_env], in either list and in any
+// letter case, and the refusal names the entry and says a profile owns it.
+func TestProfileEnvNamesRefusedInDispatchEnv(t *testing.T) {
+	if len(ProfileEnvNames) != 1 || ProfileEnvNames[0] != "ENABLE_CLAUDEAI_MCP_SERVERS" {
+		t.Fatalf("ProfileEnvNames = %v, want [ENABLE_CLAUDEAI_MCP_SERVERS]", ProfileEnvNames)
+	}
+	for _, list := range []string{"passthrough", "unset"} {
+		for _, entry := range []string{"ENABLE_CLAUDEAI_MCP_SERVERS", "enable_claudeai_mcp_servers"} {
+			t.Run(list+"/"+entry, func(t *testing.T) {
+				_, err := Parse([]byte(sessionConfigWith(fmt.Sprintf("[session.dispatch_env]\n%s = [%q]\n", list, entry))))
+				if err == nil {
+					t.Fatal("loaded without complaint")
+				}
+				for _, m := range []string{fmt.Sprintf("%q", entry), "session.dispatch_env." + list, "dispatch profile owns"} {
+					if !strings.Contains(err.Error(), m) {
+						t.Errorf("the error does not say %s: %v", m, err)
+					}
+				}
+			})
+		}
+	}
+	// The on-reap list reaches only the reap command's environment, never a
+	// launched worker, so the name is not refused there.
+	if _, err := Parse([]byte(sessionConfigWith("[session.on_reap]\ncommand = \"true\"\nenv = [\"ENABLE_CLAUDEAI_MCP_SERVERS\"]\n"))); err != nil {
+		t.Errorf("the on-reap list refused a profile env name: %v", err)
+	}
+}

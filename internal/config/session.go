@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -39,7 +40,72 @@ type SessionConfig struct {
 	DispatchEnv  SessionDispatchEnvConfig  `toml:"dispatch_env,omitempty"`
 	OnReap       SessionOnReapConfig       `toml:"on_reap,omitempty"`
 	BeforeRemove SessionBeforeRemoveConfig `toml:"before_remove,omitempty"`
+
+	// DispatchProfiles is [session.dispatch_profiles.<name>], keyed by the
+	// profile name. Like DispatchEnv it is read only when `niwa dispatch
+	// --profile <name>` launches a worker, never at apply. See
+	// SessionDispatchProfile.
+	DispatchProfiles map[string]SessionDispatchProfile `toml:"dispatch_profiles,omitempty"`
 }
+
+// SessionDispatchProfile is one [session.dispatch_profiles.<name>] table:
+// what a dispatch that selects the profile removes from the launched session.
+//
+// The keys name what is removed, not how an agent spells it. The per-agent
+// spelling lives in internal/agentplan, so the workspace file states intent
+// and an agent without a spelling refuses the profile instead of ignoring it.
+// A profile only removes; nothing here can grant a tool.
+//
+// DropTools names whole tools, each matching ValidateProfileToolName.
+// DropBundledSkills removes the agent's bundled skills. DropAccountConnectors
+// stops the account-level connectors from loading. A profile must declare at
+// least one of the three.
+type SessionDispatchProfile struct {
+	DropTools             []string `toml:"drop_tools,omitempty"`
+	DropBundledSkills     bool     `toml:"drop_bundled_skills,omitempty"`
+	DropAccountConnectors bool     `toml:"drop_account_connectors,omitempty"`
+}
+
+// IsEmpty reports whether the profile declares no drop at all.
+func (p SessionDispatchProfile) IsEmpty() bool {
+	return len(p.DropTools) == 0 && !p.DropBundledSkills && !p.DropAccountConnectors
+}
+
+// profileNamePattern is what a dispatch profile's name must look like.
+var profileNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
+// profileToolNamePatterns are the two shapes a dropped tool's name may take: a
+// built-in tool, which starts upper-case, and an MCP tool.
+var profileToolNamePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`),
+	regexp.MustCompile(`^mcp__[A-Za-z0-9_-]+$`),
+}
+
+// ValidateProfileToolName reports why name may not appear in a dispatch
+// profile's drop_tools, or nil when it may. It is the one copy of the grammar:
+// config load, the dispatch-time deny-list renderer and resume all call it.
+//
+// The grammar refuses a lowercase name, which the agent treats as an unusable
+// entry, and a scoped rule such as `Bash(git *)`: a scoped rule is a
+// permission rule, not a removal, and doesn't belong in a profile.
+func ValidateProfileToolName(name string) error {
+	for _, p := range profileToolNamePatterns {
+		if p.MatchString(name) {
+			return nil
+		}
+	}
+	return fmt.Errorf("not a whole-tool name: use a tool name such as \"Artifact\" or \"mcp__server_tool\", with no lowercase start and no scoped rule")
+}
+
+// ProfileEnvNames are the environment names a dispatch profile may set in a
+// launched worker's environment. A workspace may not declare any of them in
+// [session.dispatch_env], as a passthrough or an unset name: the profile owns
+// the slot, and a passthrough would both fight the profile for it and let a
+// resume accept the value on a record that names no profile.
+//
+// internal/agentplan can't import this package, so a test in internal/cli
+// holds this list equal to agentplan.AllProfileEnvNames().
+var ProfileEnvNames = []string{"ENABLE_CLAUDEAI_MCP_SERVERS"}
 
 // SessionPostureConfig is [session.posture]: how much a prepared session asks
 // before it acts, and how much of the machine it may touch when it does.
@@ -309,6 +375,25 @@ func validateSessionDeclaration(s SessionConfig) error {
 			return fmt.Errorf("session.dispatch_env: %q is listed in both passthrough and unset", name)
 		}
 	}
+	for _, list := range []struct {
+		field string
+		names []string
+	}{
+		{"session.dispatch_env.passthrough", s.DispatchEnv.Passthrough},
+		{"session.dispatch_env.unset", s.DispatchEnv.Unset},
+	} {
+		for _, name := range list.names {
+			upper := strings.ToUpper(name)
+			for _, owned := range ProfileEnvNames {
+				if upper == owned {
+					return fmt.Errorf("%s: %q: a dispatch profile owns %s; remove the entry and declare the drop in [session.dispatch_profiles.<name>] instead", list.field, name, owned)
+				}
+			}
+		}
+	}
+	if err := validateDispatchProfiles(s.DispatchProfiles); err != nil {
+		return err
+	}
 
 	if err := checkList("session.on_reap.env", s.OnReap.Env); err != nil {
 		return err
@@ -320,6 +405,39 @@ func validateSessionDeclaration(s SessionConfig) error {
 		return err
 	}
 	return checkTimeout("session.before_remove.timeout", s.BeforeRemove.Timeout)
+}
+
+// validateDispatchProfiles applies the load-time refusals for
+// [session.dispatch_profiles]. This is the gate that counts: the dispatch-time
+// renderer runs after an instance is provisioned, so a bad name has to stop
+// here. Profiles are checked in name order so the first refusal is stable.
+func validateDispatchProfiles(profiles map[string]SessionDispatchProfile) error {
+	names := make([]string, 0, len(profiles))
+	for name := range profiles {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		if !profileNamePattern.MatchString(name) {
+			return fmt.Errorf("session.dispatch_profiles: %q is not a profile name: use lowercase letters, digits and '-', starting with a letter or digit", name)
+		}
+		p := profiles[name]
+		field := "session.dispatch_profiles." + name
+		if p.IsEmpty() {
+			return fmt.Errorf("%s: the profile drops nothing; declare drop_tools, drop_bundled_skills or drop_account_connectors", field)
+		}
+		seen := make(map[string]bool, len(p.DropTools))
+		for _, tool := range p.DropTools {
+			if err := ValidateProfileToolName(tool); err != nil {
+				return fmt.Errorf("%s.drop_tools: %q: %w", field, tool, err)
+			}
+			if seen[tool] {
+				return fmt.Errorf("%s.drop_tools: %q is listed more than once", field, tool)
+			}
+			seen[tool] = true
+		}
+	}
+	return nil
 }
 
 // checkTimeout refuses a timeout that is set but doesn't parse as a duration,

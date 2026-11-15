@@ -165,7 +165,26 @@ func deepCopySession(in config.SessionConfig) config.SessionConfig {
 			Timeout: in.BeforeRemove.Timeout,
 			Env:     slices.Clone(in.BeforeRemove.Env),
 		},
+		DispatchProfiles: deepCopyDispatchProfiles(in.DispatchProfiles),
 	}
+}
+
+// deepCopyDispatchProfiles clones [session.dispatch_profiles] down to each
+// profile's drop_tools slice, so a change to the copy never reaches the
+// caller's config.
+func deepCopyDispatchProfiles(in map[string]config.SessionDispatchProfile) map[string]config.SessionDispatchProfile {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]config.SessionDispatchProfile, len(in))
+	for name, p := range in {
+		out[name] = config.SessionDispatchProfile{
+			DropTools:             slices.Clone(p.DropTools),
+			DropBundledSkills:     p.DropBundledSkills,
+			DropAccountConnectors: p.DropAccountConnectors,
+		}
+	}
+	return out
 }
 
 func deepCopyGlobalConfigOverride(in *config.GlobalConfigOverride) *config.GlobalConfigOverride {
