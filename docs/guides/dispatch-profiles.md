@@ -189,6 +189,12 @@ saved document with the record.
 
 Records made without a profile resume and retask exactly as before.
 
+Name the worker by the session name niwa recorded, not the `--name` you
+dispatched it with. niwa turns `-` into `_` and adds a suffix, so
+`--name cdp-check` is recorded as something like `cdp_check-3e7ef6ea`, and
+that's the name a retask takes. The dispatch prints it as the session name,
+and `niwa list` shows it.
+
 ## Upgrading
 
 A workspace that lists `ENABLE_CLAUDEAI_MCP_SERVERS` in
@@ -230,10 +236,13 @@ The model moves it too, so read it on the model coordinators run on.
 a coordinator:
 
 ```bash
-niwa dispatch --profile coordinator --name cdp-check --detach "/<plugin>:coordinate <args>"
+niwa dispatch --profile coordinator --model opus --name cdp-check --detach "/<plugin>:coordinate <args>"
 ```
 
-Its turn-0 sum must be below 35,000. Then have the session load SendMessage,
+Every dispatch in these checks names its model with `--model`, the one
+coordinators run on, so the turn-0 figures compare and none of them depends
+on a default. Its turn-0 sum must be below 35,000. Then retask the session,
+which also exercises retask on a profiled worker, to load SendMessage,
 CronCreate, CronList, CronDelete and TaskStop through ToolSearch and use each:
 send a message to a named session; create, list and delete a cron; start a
 background command and stop it. The transcript shows each call returning
@@ -243,8 +252,9 @@ and the coordinator went on with its work rather than stalling on the
 EnterWorktree instruction.
 
 **2. A dispatch without the profile is unchanged.** Dispatch the same prompt
-without `--profile`, twice: once from a plain shell, and once from inside the
-profiled coordinator of the first check, through its own Bash tool. Each
+without `--profile`, with the same `--model`, twice: once from a plain shell,
+and once from inside the profiled coordinator of the first check, through its
+own Bash tool. Each
 worker's turn-0 sum and tool list match a dispatch made with the previous
 niwa, within the connecting-server variation above. For the worker dispatched
 from inside the coordinator, its environment holds neither
@@ -272,9 +282,28 @@ expanded with Skill denied, under `--bg` too. `ENABLE_CLAUDEAI_MCP_SERVERS=false
 removed the account connector and left the plugin's and the workspace's MCP
 servers.
 
-The three checks above haven't yet been run through `--profile` on a niwa
-build. This section records the Claude Code version they last passed on once
-they have.
+The first two checks passed through `--profile` on Claude Code 2.1.325, with
+every dispatch on `--model opus` from the same workspace and the same MCP
+servers connected:
+
+- The profiled coordinator read 27,300 tokens at turn 0. ToolSearch loaded
+  SendMessage, CronCreate, CronList, CronDelete and TaskStop, and each call
+  returned without an error. The leading slash command expanded with Skill
+  denied, no account connector tool was listed, and the session went on
+  without calling EnterWorktree. Its environment held
+  `NIWA_DISPATCH_PROFILE=coordinator` and `ENABLE_CLAUDEAI_MCP_SERVERS=false`,
+  and a retask of it came back under the same profile.
+- Without the profile, a dispatch from the previous niwa read 56,888 tokens,
+  one from this build in a plain shell read 56,918, and one from inside the
+  profiled coordinator read 56,889. All three listed the same tools,
+  AskUserQuestion, Skill and the account connectors' tools among them. None
+  held either variable, and the plain dispatch's settings document carried no
+  `permissions` or `disableBundledSkills` key.
+
+The third check is still open. It's run by hand by the workspace owner and
+tracked separately from the first two. It still has to show that a session
+started by hand keeps its full tools: AskUserQuestion and Skill, the account
+connectors in `/mcp`, and the bundled and account skills.
 
 ## See also
 
