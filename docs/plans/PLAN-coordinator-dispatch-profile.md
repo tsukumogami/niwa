@@ -57,7 +57,7 @@ contributor so no later step can regress it unnoticed.
 - [ ] A workspace.toml with the coordinator profile from the design loads, and `SessionConfig.DispatchProfiles["coordinator"]` holds the seven tool names and both booleans true.
 - [ ] Load refuses, naming the profile and the entry: a profile name outside `^[a-z0-9][a-z0-9-]*$`, a tool name in lowercase (`advisor`), a scoped rule (`Bash(git *)`), and a profile that declares no drop at all.
 - [ ] `mcp__claude_ai_Example` is accepted as a tool name. The grammar is one exported function, `config.ValidateProfileToolName`, and no other package holds its own copy of the pattern.
-- [ ] `config.ProfileEnvNames` holds `ENABLE_CLAUDEAI_MCP_SERVERS`, and load refuses `[session.dispatch_env]` naming it as a passthrough or an unset name.
+- [ ] `config.ProfileEnvNames` holds `ENABLE_CLAUDEAI_MCP_SERVERS`, and load refuses `[session.dispatch_env]` naming it as a passthrough or an unset name, with a message that names the entry and says a dispatch profile owns the name.
 - [ ] The vault resolver's deep copy of `[session]` clones `DispatchProfiles`, and a test mutating the copy's `drop_tools` leaves the original unchanged.
 - [ ] `niwa apply` writes no file that differs from a run without the table. The table is dispatch-time only.
 
@@ -109,7 +109,7 @@ contributor so no later step can regress it unnoticed.
 
 ### Step 4: niwa resume keeps a profiled session's profile
 
-**Goal**: Resume reads the profile from the launch record, and its env and settings checks accept the profile's keys and the marker when they equal what the recorded `DispatchProfile` resolves to in the workspace's current config, and refuse them otherwise.
+**Goal**: Resume reads the profile from the launch record, and its env and settings checks accept the profile's keys and the marker when they equal what the recorded `DispatchProfile` resolves to in the workspace's current config, and refuse them otherwise. `validateLaunchRecord` takes only the passthrough list today, so its signature changes to take the resolved profile, which `resolveWorkerAt` computes from the workspace config it already holds.
 
 **Acceptance Criteria**:
 
@@ -138,6 +138,7 @@ contributor so no later step can regress it unnoticed.
 - [ ] Each of the three checks is written as steps a reviewer can follow: how to read turn-0 context from the transcript's first `usage`, the deferred tools to load and use, and what an interactive session must still show.
 - [ ] Run against this branch's build: a coordinator dispatched with `--profile coordinator` reads below 35,000 tokens at turn 0 and uses SendMessage, a Cron tool and TaskStop without error. A dispatch without the profile, made once from a plain shell and once from inside that profiled coordinator, and an interactive session all show their full tool lists, AskUserQuestion and Skill included, and the account connectors in `/mcp`. The live run also confirms the coordinator's leading slash invocation expanded under `--bg` with Skill denied, and that the coordinator didn't stall on the EnterWorktree instruction. The figures go in the pull request's test plan.
 - [ ] CLAUDE.md's guide index gains the new guide.
+- [ ] The guide and the release notes name the upgrade break: a workspace listing `ENABLE_CLAUDEAI_MCP_SERVERS` in `[session.dispatch_env]` no longer loads and has to remove the entry.
 - [ ] A niwa release carries `--profile`.
 
 **Check**: The live run's three results, read from the transcripts as the guide describes, are recorded in the pull request's test plan.

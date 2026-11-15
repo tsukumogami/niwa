@@ -284,10 +284,17 @@ connectors switch through and fight the profile for the same `env` entry, and
 resume would accept the switch through the passthrough rule on a record that
 names no profile.
 
+That refusal is an upgrade break for a workspace that already lists the
+name in `[session.dispatch_env]`: today it loads, and after this change the
+whole config refuses to load, `niwa apply` included. The refusal message
+names the entry and says a dispatch profile owns that name, and the guide
+and the release notes tell an owner to remove it.
+
 The name check at config load is the gate that counts. `renderLaunchSettings`
-runs after provisioning and panics on a marshal error, so a bad name must
-never get that far. The render-time check only guards against a contributor
-that skipped the load.
+runs after provisioning and panics on a marshal error, so a bad name that got
+that far would leave the provisioned instance behind. The render-time check
+isn't a safe fallback; it only guards against a contributor that skipped the
+load.
 
 Spelling it here keeps every agent name off the dispatch path, which the
 existing dispatch-path scan enforces.
