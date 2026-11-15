@@ -28,8 +28,8 @@ A workspace declares named dispatch profiles under
 applies one to that launch only. For Claude, a new contributor adds the
 profile's `permissions.deny` list, `disableBundledSkills` and the
 account-connector switch to the launch `--settings` document. Codex refuses
-the flag through its capability row. The session mapping records the profile,
-`niwa list` shows it, and `niwa resume` accepts the profile's keys when they
+the flag through its capability row. The launch record and the session
+mapping record the profile, `niwa list` shows it, and `niwa resume` accepts the profile's keys when they
 match what the recorded profile resolves to now. A dispatch without
 `--profile` produces today's argv and document byte for byte. Once a niwa
 release carries the flag, the coordination skill in tsukumogami/shirabe
@@ -74,7 +74,9 @@ contributor so no later step can regress it unnoticed.
 
 - [ ] `ProfileSettings` for the coordinator profile returns `permissions: {deny: [the seven names in declared order]}`, `disableBundledSkills: true`, and env `ENABLE_CLAUDEAI_MCP_SERVERS=false`.
 - [ ] A profile with only `drop_tools` returns no `disableBundledSkills` key and no env entry. A profile with only `drop_account_connectors` returns no `permissions` key.
-- [ ] `ProfileEnvNames()` for Claude returns `ENABLE_CLAUDEAI_MCP_SERVERS`, and the Claude self-wake tool set is `CronCreate` and `ScheduleWakeup`.
+- [ ] `ProfileSettings` takes the agent: asked for Codex it returns an error naming the unsupported row, never an empty spelling.
+- [ ] The deny list is a `profileDenyList` that marshals to exactly `{"deny":[...]}`, and marshalling one holding a name that fails the tool-name grammar returns an error.
+- [ ] `ProfileRequiredTools(claude)` returns `ToolSearch` and `CronCreate`. `AllProfileEnvNames()` takes no agent and returns `ENABLE_CLAUDEAI_MCP_SERVERS`; a test adds a fake agent with its own profile env name and sees the union grow.
 - [ ] `Lookup(DispatchProfile, codex)` is unsupported with a non-empty reason, and the generated Codex gap list names it.
 - [ ] The existing binding and dispatch-path scan tests pass, and no file under `internal/cli` names an agent.
 
@@ -86,29 +88,34 @@ contributor so no later step can regress it unnoticed.
 
 ### Step 3: niwa dispatch applies a profile to one launch and records it
 
-**Goal**: `niwa dispatch --profile <name>` adds the profile's keys to the launch settings document and its env value to the launch environment. The mapping records the profile, `niwa list` shows it, and a dispatch without the flag is unchanged.
+**Goal**: `niwa dispatch --profile <name>` adds the profile's keys to the launch settings document and its env value to the launch environment. The launch record and the mapping record the profile, `niwa list` shows it, and a dispatch without the flag is unchanged.
 
 **Acceptance Criteria**:
 
 - [ ] With a fake Claude spec, `--profile coordinator` produces one `--settings` element whose document holds the deny list, `disableBundledSkills: true` and `env.ENABLE_CLAUDEAI_MCP_SERVERS = "false"`, alongside the keys the other contributors add. The launched process environment also carries the env value.
 - [ ] Without `--profile`, the argv and the `--settings` document are byte-identical to the ones the current code produces for the same fixtures, with and without remote control, inbound acceptance and MCP approval.
-- [ ] Each of these refuses before an instance is provisioned, exits non-zero, and names the cause: an unknown profile; `--profile` with the Codex harness, printing the row's reason; a profile dropping `ToolSearch`; and a profile dropping both `CronCreate` and `ScheduleWakeup` when keep-alive resolves on. A profile dropping only one of them is accepted.
-- [ ] A profiled launch's process environment and settings `env` block carry `NIWA_DISPATCH_PROFILE=coordinator`. A launch without `--profile` from a base environment holding `NIWA_DISPATCH_PROFILE` and `ENABLE_CLAUDEAI_MCP_SERVERS=false` produces a worker environment with neither, and its argv and `--settings` document still match the no-profile fixtures. A launch without `--profile` from a base holding `ENABLE_CLAUDEAI_MCP_SERVERS=false` but no marker keeps the switch.
-- [ ] The session mapping carries `dispatch_profile: "coordinator"`, `niwa list --json` shows it, and the post-launch audit line names it. A dispatch without the flag writes no such field.
+- [ ] Each of these refuses before an instance is provisioned, exits non-zero, and names the cause: an unknown profile; `--profile` with the Codex harness, printing the row's reason; a profile dropping `ToolSearch`; and a profile dropping `CronCreate`, with keep-alive off as well as on. A profile dropping `ScheduleWakeup` is accepted.
+- [ ] `NIWA_DISPATCH_PROFILE` is in `config.LaunchSettingsEnvNames`, and `[session.dispatch_env]` declaring it is refused at load.
+- [ ] A profiled launch's process environment and settings `env` block carry `NIWA_DISPATCH_PROFILE=coordinator`. A launch without `--profile` from a base environment holding `NIWA_DISPATCH_PROFILE` and `ENABLE_CLAUDEAI_MCP_SERVERS=false` produces a worker environment with neither, and its argv and `--settings` document still match the no-profile fixtures. The same holds when that launch's agent is Codex (a fake Codex spec). A launch without `--profile` from a base holding `ENABLE_CLAUDEAI_MCP_SERVERS=false` but no marker keeps the switch.
+- [ ] The launch record carries `DispatchProfile: "coordinator"` and holds `NIWA_DISPATCH_PROFILE` and `ENABLE_CLAUDEAI_MCP_SERVERS` in its `Env`, as written by `WriteLaunchRecord`. The session mapping carries `dispatch_profile: "coordinator"`, `niwa list --json` shows it, and the post-launch audit line names it. A dispatch without the flag writes no such field in either.
+- [ ] `renderLaunchSettings`' doc comment names the deny list as its third non-constant exception, and the existing constants-rule test covers it.
 
 **Check**: `go test ./internal/cli/ -run Dispatch` passes, and the new scenario in `dispatch-profile.feature` shows the profiled document and the unchanged no-profile argv.
 
 **Dependencies**: Step 2
 
-**Files**: `internal/cli/dispatch.go`, `internal/cli/dispatch_env.go`, `internal/cli/dispatch_profile.go`, `internal/cli/dispatch_profile_test.go`, `internal/workspace/session_map.go`, `internal/cli/list.go`, `test/functional/features/dispatch-profile.feature`
+**Files**: `internal/cli/dispatch.go`, `internal/cli/dispatch_env.go`, `internal/cli/dispatch_settings.go`, `internal/cli/dispatch_profile.go`, `internal/cli/dispatch_profile_test.go`, `internal/config/session.go`, `internal/workspace/launch_store.go`, `internal/workspace/session_map.go`, `internal/cli/list.go`, `test/functional/features/dispatch-profile.feature`
 
 ### Step 4: niwa resume keeps a profiled session's profile
 
-**Goal**: `checkResumeSettings` accepts the profile's keys when they equal what the recorded `dispatch_profile` resolves to in the workspace's current config, and refuses them otherwise.
+**Goal**: Resume reads the profile from the launch record, and its env and settings checks accept the profile's keys and the marker when they equal what the recorded `DispatchProfile` resolves to in the workspace's current config, and refuse them otherwise.
 
 **Acceptance Criteria**:
 
-- [ ] A record dispatched with `--profile coordinator` resumes, and the relaunch carries the same `--settings` document.
+- [ ] The record a real step 3 dispatch writes (through the dispatch path with a fake launcher, not built by hand) for `--profile coordinator` resumes, and the relaunch carries the same `--settings` document and environment.
+- [ ] The same record resumes after its session mapping is deleted, as a reap leaves it, and the rewritten mapping carries `dispatch_profile: "coordinator"`.
+- [ ] The resume refuses, naming the cause, when `NIWA_DISPATCH_PROFILE` in the record's `Env` or settings `env` differs from the record's `DispatchProfile`, and when `ENABLE_CLAUDEAI_MCP_SERVERS` is present but the record names no profile.
+- [ ] A deny-list name failing the tool-name grammar in a recorded document refuses.
 - [ ] The resume refuses, naming the profile, when the recorded profile was removed from the config, when its `drop_tools` changed, and when the recorded document holds a `permissions` key but the record names no profile.
 - [ ] A `permissions` value holding anything but `deny` (an `allow` list, say) refuses, whatever the profile says.
 - [ ] Records made without a profile resume exactly as before; the existing resume tests pass unchanged.
@@ -118,7 +125,7 @@ contributor so no later step can regress it unnoticed.
 
 **Dependencies**: Step 3
 
-**Files**: `internal/cli/resume.go`, `internal/cli/resume_test.go`, `internal/cli/retask_test.go`
+**Files**: `internal/cli/resume.go`, `internal/cli/resume_test.go`, `internal/cli/retask_test.go`, `internal/workspace/launch_store.go`
 
 ### Step 5: the guide documents profiles and the three live checks
 

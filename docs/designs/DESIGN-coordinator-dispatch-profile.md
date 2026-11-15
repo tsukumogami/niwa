@@ -18,9 +18,9 @@ decision: |
   coordinator profile drops Artifact, Workflow, SendFeedback, ReportFindings,
   EnterWorktree, AskUserQuestion and Skill, the bundled skills, and the account
   connectors. It keeps Agent, ToolSearch, SendMessage, the Cron tools,
-  TaskStop and the workspace's own MCP servers. The mapping records the profile
-  name, and `niwa resume` accepts the profile's keys when they match what the
-  recorded profile resolves to now.
+  TaskStop and the workspace's own MCP servers. The launch record and the
+  mapping record the profile name, and `niwa resume` accepts the profile's
+  keys when they match what the recorded profile resolves to now.
 rationale: |
   The launch settings document is the one per-launch channel niwa already owns,
   so nothing reaches a session that wasn't dispatched with the profile.
@@ -30,8 +30,9 @@ rationale: |
   can't recover a missing tool mid-tenure. Two trimmed `--bg` launches measured
   turn-0 context at 51.5K without the profile and 21.2K with it. Under the
   profile, SendMessage, the Cron tools and TaskStop loaded through ToolSearch
-  and ran. The profile keeps every self-wake tool, so the keep-alive works
-  whichever one a session picks. A profiled launch marks its environment, and
+  and ran. niwa's keep-alive is a recurring session cron, so dispatch refuses
+  a profile that drops CronCreate or ToolSearch. A profiled launch marks its
+  environment, and
   a launch without the profile strips what a marked environment carries, so
   a worker a profiled coordinator dispatches starts as today.
 user_visible_surface: true
@@ -218,15 +219,18 @@ Several things refuse before anything is provisioned:
   implemented (Codex today, with the row's reason). A profile asked for and
   silently not applied would leave a coordinator at full context with nobody
   told;
-- a profile that drops ToolSearch, since no deferred tool could load;
-- a profile that drops every tool able to schedule a self-wake (CronCreate and
-  ScheduleWakeup for Claude) on a launch whose keep-alive resolved on, since
-  the arming would have nothing to arm with.
+- a profile that drops a tool the agent's dispatch path depends on.
+  `internal/agentplan` lists these per agent as `ProfileRequiredTools`; for
+  Claude they're ToolSearch, since no deferred tool could load without it,
+  and CronCreate, since niwa's keep-alive is a recurring session cron
+  (`niwa list` and `niwa watch` recognize an armed keep-alive only as an
+  in-flight `session_cron` task).
 
-The last rule doesn't depend on which tool a session picks. niwa's arming
-text asks for "one recurring, session-scoped self-wake" and names no tool, so
-the refusal names the whole set, and `internal/agentplan` holds that set as a
-per-agent fact. The coordinator profile drops neither tool.
+The required-tool rule holds whether or not keep-alive is on. Keep-alive
+resolves only after the instance is provisioned, from its materialized
+settings, so a rule that waited for it couldn't refuse before provisioning.
+A profile that drops CronCreate has no use worth that exception: the
+coordinator profile keeps it, and ScheduleWakeup can't stand in for it.
 
 **Rejected: a `--profile` selected from a machine `[global]` default.** A
 machine default would apply to every dispatch from that host, which breaks the
@@ -249,12 +253,22 @@ workspace config, and the vault resolver's deep copy clones it.
 
 **Capability row (`internal/agentplan`).** A new `DispatchProfile` capability,
 routed as a launch capability, is implemented for Claude and unsupported for
-Codex with a reason. A function
-`ProfileSettings(profile) (keys map[string]any, env map[string]string)`
-returns Claude's spelling: `permissions: {deny: [...]}`,
-`disableBundledSkills: true`, and `ENABLE_CLAUDEAI_MCP_SERVERS: "false"` for
-the env block. Spelling it here keeps every agent name off the dispatch path,
-which the existing dispatch-path scan enforces.
+Codex with a reason. Three functions carry the per-agent facts:
+
+- `ProfileSettings(agent, profile) (keys map[string]any, env map[string]string)`
+  returns the agent's spelling. For Claude that's `permissions: {deny: [...]}`,
+  `disableBundledSkills: true`, and `ENABLE_CLAUDEAI_MCP_SERVERS: "false"` for
+  the env block. The deny list is a typed value, `profileDenyList`, that can
+  marshal to nothing but `{"deny": [...]}` over names that pass the tool-name
+  grammar, the way `mcpApprovalList` marshals the MCP approval names.
+- `ProfileRequiredTools(agent)` returns the tools a profile may not drop.
+- `AllProfileEnvNames()` returns the union, over every agent, of the env
+  names a profile can set. It takes no agent on purpose: the stripping below
+  runs in `shapeLaunchEnv`, which `niwa resume` and the retask wake also call
+  and which never knows which agent launched the dispatcher's own session.
+
+Spelling it here keeps every agent name off the dispatch path, which the
+existing dispatch-path scan enforces.
 
 **Dispatch (`internal/cli/dispatch.go`).** `--profile <name>` is resolved
 after the agent and before provisioning, so a refusal leaves nothing behind.
@@ -262,11 +276,21 @@ A fifth contributor adds the profile's keys to `launchSettings` after the MCP
 approval contributor, and its env value joins the launch environment through
 `launchEnvShape`, so `applyLaunchEnv` puts it in both the env block and the
 process environment. With no `--profile`, the contributor adds nothing and the
-rendered document is unchanged. A unit test pins that. Three more pieces:
+rendered document is unchanged. A unit test pins that. More pieces:
 
-- the session mapping gains `dispatch_profile`, and `niwa list` shows it;
-- the audit line printed after the launch names the profile;
-- the profile stops at the session it was asked for (below).
+- `renderLaunchSettings` documents that every value it renders is a constant
+  except two named ones, the launch env object and the MCP approval list.
+  The deny list's names come from the workspace config, so it becomes the
+  third named exception, and its doc comment says why it's safe: a
+  `profileDenyList` marshals to one `{"deny": [...]}` object over names that
+  passed the tool-name grammar at load and pass it again at render.
+  `disableBundledSkills` is a constant `true` and needs no exception.
+- The launch record (`workspace.LaunchRecord`) gains `DispatchProfile`, and
+  so does the session mapping. The record is the one that matters: `niwa
+  resume` validates and relaunches from it, and it survives a reap that
+  removes the mapping. `niwa list` shows the mapping's copy.
+- The audit line printed after the launch names the profile.
+- The profile stops at the session it was asked for (below).
 
 **Keeping the profile from travelling down.** A worker's environment starts
 from the dispatcher's own (`os.Environ()` in `realDispatchLaunch`), and
@@ -282,10 +306,18 @@ makes.
 So a profiled launch also sets a marker, `NIWA_DISPATCH_PROFILE=<name>`,
 alongside the profile's env values, through the same `launchEnvShape`. On
 every launch, `shapeLaunchEnv` checks the inherited environment for that
-marker. When it's there, the launch removes the marker and every env name a
-profile can set for that agent, which `internal/agentplan` lists as
-`ProfileEnvNames()`, before it adds its own values. A profiled launch then
-sets them again from its own profile. The result:
+marker. When it's there, the launch removes the marker and every name in
+`agentplan.AllProfileEnvNames()`, the union across agents, before it adds its
+own values. Using the union means a Codex worker dispatched from a profiled
+Claude coordinator loses the Claude switch too, even though Codex has no
+profile of its own. A profiled launch then sets its own values again.
+
+The marker is a name niwa sets itself, so it joins
+`config.LaunchSettingsEnvNames`. That's the list that already holds the reap
+key and the dispatch identity, and joining it does three things: a workspace
+can't declare the name in `[session.dispatch_env]`, `WriteLaunchRecord`
+records it in the launch record's `Env` (a `NIWA_`-prefixed name is
+otherwise left out), and resume's env checks know it. The result:
 
 - a worker dispatched without `--profile` from inside a profiled coordinator
   gets neither the switch nor the marker, so it starts as a dispatch from a
@@ -301,21 +333,34 @@ sets them again from its own profile. The result:
 The deny list and `disableBundledSkills` need no such step. They ride only
 the profiled worker's argv, which no child process inherits.
 
-**Resume (`internal/cli/resume.go`).** `checkResumeSettings` refuses every
-key dispatch doesn't emit, so a profiled session couldn't be resumed today.
-It learns three keys:
+**Resume (`internal/cli/resume.go`).** Resume works from the launch record,
+not the mapping. It reads the record's `DispatchProfile`, and when it
+rewrites the mapping for the relaunch it copies the profile name onto it, so
+`niwa list` still shows it. `validateLaunchRecord` checks the record's `Env`
+with `checkResumeEnv` and its settings document with `checkResumeSettings`,
+both against one allow-check. Today that check admits only
+`LaunchSettingsEnvNames` and the passthrough names, and the settings check
+refuses every key dispatch doesn't emit, so a profiled session couldn't be
+resumed. The changes:
 
-- `permissions`, accepted when it's exactly `{deny: [...]}`;
-- `disableBundledSkills`, accepted when it's `true`;
-- the connectors name in `env`.
+- the allow-check admits `NIWA_DISPATCH_PROFILE` (now in
+  `LaunchSettingsEnvNames`) only when its value equals the record's
+  `DispatchProfile`, in both the record's `Env` and the settings `env`
+  object;
+- it admits each name in the recorded profile's env values (for Claude,
+  `ENABLE_CLAUDEAI_MCP_SERVERS`) only when the record names a profile and the
+  value equals what that profile resolves to now;
+- `checkResumeSettings` learns `permissions`, accepted only when it's exactly
+  `{deny: [...]}`, every name passes the tool-name grammar, and the list
+  equals the recorded profile's resolution; and `disableBundledSkills`,
+  accepted only when it's `true` and the recorded profile sets it.
 
-Each is accepted only when it equals what the recorded `dispatch_profile`
-resolves to in the workspace's current config, the same rule the env check
-already applies to `[session.dispatch_env]`. A profile that has since been
-removed or changed refuses the resume and names the profile. `niwa retask`
-needs no change. Its flagless wake re-applies the options the job saved,
-`--settings` included, and its option check already compares the saved
-document with the record.
+Every profile key is refused when the record names no profile. A profile
+that has since been removed or changed refuses the resume and names the
+profile, the same rule the env check already applies to
+`[session.dispatch_env]`. `niwa retask` needs no change. Its flagless wake
+re-applies the options the job saved, `--settings` included, and its option
+check already compares the saved document with the record.
 
 **The coordinator's dispatcher.** A coordinator under the profile can't
 call the Skill tool. Its entry skill has to reach it another way, so whatever
@@ -412,8 +457,8 @@ an instance root, with the coordinator profile as a launch settings document.
 - **Keep-alive.** Both sessions, given niwa's keep-alive arming text, armed it
   with CronCreate, the profiled one with ScheduleWakeup denied. The arming
   text asks for a recurring self-wake, which is CronCreate's job, so the
-  keep-alive doesn't need ScheduleWakeup. The profile keeps both anyway, and
-  dispatch refuses only a profile that drops all of them.
+  keep-alive doesn't need ScheduleWakeup. CronCreate is the tool it does
+  need, so dispatch refuses a profile that drops it.
 - **The Skill tool.** In print-mode launches, denying it cut about 10K tokens
   on its own. A prompt beginning with a plugin skill's slash command still
   expanded that skill with the tool denied.
