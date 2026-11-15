@@ -1,0 +1,564 @@
+---
+schema: design/v1
+status: Planned
+problem: |
+  A coordinator that niwa dispatches starts with every tool, skill listing,
+  account connector and MCP server the host offers, and its turn-0 context is
+  about 59K tokens. Across 17 measured coordinator tenures most of that surface
+  was never called. niwa has no way to start one dispatched session with less
+  while leaving other dispatches, and the sessions the owner starts by hand,
+  exactly as they are.
+decision: |
+  A workspace declares named dispatch profiles under
+  `[session.dispatch_profiles.<name>]`, and `niwa dispatch --profile <name>`
+  selects one for that launch only. A Claude profile rides the launch
+  `--settings` document niwa already sends, as a new contributor that adds a
+  `permissions.deny` list of whole-tool names, `disableBundledSkills`, and
+  `ENABLE_CLAUDEAI_MCP_SERVERS=false` in the document's env block. The
+  coordinator profile drops Artifact, Workflow, SendFeedback, ReportFindings,
+  EnterWorktree, AskUserQuestion and Skill, the bundled skills, and the account
+  connectors. It keeps Agent, ToolSearch, SendMessage, the Cron tools,
+  TaskStop and the workspace's own MCP servers. The launch record and the
+  mapping record the profile name, and `niwa resume` accepts the profile's
+  keys when they match what the recorded profile resolves to now.
+rationale: |
+  The launch settings document is the one per-launch channel niwa already owns,
+  so nothing reaches a session that wasn't dispatched with the profile.
+  Workspace or instance settings would also reach the owner's interactive
+  sessions. A denylist of measured-unused items is backed by evidence for every
+  entry. An allowlist would also drop tools nobody measured, and a coordinator
+  can't recover a missing tool mid-tenure. Two trimmed `--bg` launches measured
+  turn-0 context at 51.5K without the profile and 21.2K with it. Under the
+  profile, SendMessage, the Cron tools and TaskStop loaded through ToolSearch
+  and ran. niwa's keep-alive is a recurring session cron, so dispatch refuses
+  a profile that drops CronCreate or ToolSearch. A profiled launch marks its
+  environment, and
+  a launch without the profile strips what a marked environment carries, so
+  a worker a profiled coordinator dispatches starts as today.
+user_visible_surface: true
+decision_provenance: inline-resolved
+---
+
+# DESIGN: Coordinator dispatch profile
+
+## Status
+
+Planned
+
+## Context and Problem Statement
+
+`niwa dispatch` launches a Claude worker as `claude --bg` with an argv that
+`runDispatch` builds in `internal/cli/dispatch.go`. The argv carries
+`--model`, `--permission-mode`, `--agent` and `--name`. It also carries one
+`--settings` document, built from contributors (remote control, accepting
+session messages, the launch environment, the MCP approval list) and rendered
+once by `renderLaunchSettings` in `internal/cli/dispatch_settings.go`. Nothing
+on that path removes anything from the session. The worker gets whatever the
+host's settings, plugins and account give an interactive session.
+
+For a coordinator that's a lot. A coordinator drives other sessions and
+implements nothing itself, and its turn-0 context measures 59.2K tokens.
+Across 17 coordinator tenures these items were never called:
+
+- the Artifact, Workflow, SendFeedback, ReportFindings and EnterWorktree tools;
+- the claude.ai account connectors;
+- the built-in and account skills;
+- the advisor.
+
+Only the merge seat used the Agent tool. AskUserQuestion and the Skill tool
+were needed only in a session the owner started by hand. Every token of that
+surface is paid again on every turn of a tenure that can run for days.
+
+The trim has to be per dispatch. A workspace-wide setting would also reach
+the owner's interactive sessions, which must keep AskUserQuestion, the Skill
+tool and every connector they have today. And a session dispatched without the
+profile must start exactly as it does now.
+
+## Decision Drivers
+
+- **Per dispatch, never ambient.** Only a launch that asks for the profile
+  gets it. Interactive sessions and other dispatches can't change at all.
+- **Evidence per dropped item.** Each item a profile drops must have
+  measurement saying the role doesn't use it. A wrong drop breaks a tenure,
+  because the session has no way to get a tool back.
+- **The coordinator's working tools survive.** SendMessage, the Cron tools and
+  TaskStop are deferred tools that load through ToolSearch. The keep-alive niwa
+  arms at dispatch has to keep working.
+- **The profile doesn't travel down.** A coordinator's job is running
+  `niwa dispatch`. A worker it dispatches without the profile must start as
+  today, so nothing the profile puts in the coordinator's environment may
+  reach that worker.
+- **The profile survives resume and retask.** A coordinator brought back by
+  `niwa resume` or handed its next task by `niwa retask` must come back under
+  the same profile.
+- **Agent-neutral dispatch path.** Per-agent facts stay in
+  `internal/agentplan`, and the dispatch path consults a capability row, as
+  remote control and inbound acceptance already do.
+
+## Considered Options
+
+### Decision 1: Which carrier the profile rides
+
+Resolved inline. The profile has to reach Claude Code at launch through something niwa passes
+to that one process.
+
+**Chosen: a new contributor to the launch `--settings` document.** Claude
+Code removes a tool from the model's tool list when a `permissions.deny` rule
+names the whole tool. The `disableBundledSkills` settings key removes the
+bundled skills. `ENABLE_CLAUDEAI_MCP_SERVERS=false` in the env block stops the
+account connectors from loading. The trimmed launches measured all three
+arriving through `--settings`. The document is niwa's existing single
+settings slot. It rides only the launched worker's argv, it already merges
+several contributors into one value, and `niwa resume` already validates it.
+Deny rules win over allow rules from any other settings source, so nothing in
+the host's or the instance's settings can widen the trim back.
+
+**Rejected: forwarding `--disallowedTools` or `--tools` on the argv.** Both
+work. A trimmed launch with `--tools` loaded SendMessage, the Cron tools and
+TaskStop through ToolSearch too. But each is a new forwarded flag that every
+agent's `LaunchFlags`, resume's ordered options and retask's checked options
+would have to learn, for no reach the settings slot lacks. `--tools` is an
+allowlist, the shape Decision 2 rejects.
+
+**Rejected: forwarding `--disable-slash-commands`.** It removes the Skill
+tool and its listing, and the second set of launches read about 6K fewer
+tokens at turn 0 with it than with the deny list alone. It's a forwarded flag
+with the same cost as the two above. It also touches the one thing a profiled
+coordinator still needs from slash commands: its entry skill arrives as a
+leading slash invocation, and whether that still expands under this flag
+wasn't measured. The deny list already lands well below the target, so the
+extra cut isn't worth that risk. A later profile can add it once a launch
+shows the leading invocation survives.
+
+**Rejected: writing the profile into the workspace or instance settings
+files.** Those files configure every session started in the instance,
+including the owner's own. That breaks the third Evidence check by
+construction.
+
+**Rejected: running the coordinator as a custom `--agent` whose definition
+lists its tools.** `--agent` is already the operator's passthrough for a
+subagent type. An agent definition also replaces the session's system prompt,
+which changes far more than the surface this design trims.
+
+**Rejected: `--strict-mcp-config` for the connectors.** It drops every MCP
+server not named in `--mcp-config`, including the workspace's own servers and
+plugin servers that the profile has no evidence to drop.
+`ENABLE_CLAUDEAI_MCP_SERVERS=false` drops only the account connectors. In the
+trimmed launches the plugin's server and the workspace's server stayed.
+
+### Decision 2: Which items are safe to drop
+
+Resolved inline.
+
+**Chosen: a denylist of the items measured as unused, plus two the owner's
+role split settles.** The coordinator profile drops:
+
+| Item | How it's dropped | Evidence |
+|------|------------------|----------|
+| Artifact, Workflow, SendFeedback, ReportFindings, EnterWorktree | `permissions.deny` | never called in 17 tenures |
+| AskUserQuestion | `permissions.deny` | needed only in a session the owner starts; a dispatched coordinator reports by message |
+| Skill (and with it the whole skill listing) | `permissions.deny` | needed only in a session the owner starts; a leading slash command in the prompt still expands with the tool denied (measured in print mode and under `--bg`) |
+| bundled skills | `disableBundledSkills: true` | never called in 17 tenures |
+| account connectors | `ENABLE_CLAUDEAI_MCP_SERVERS=false` | never called in 17 tenures |
+
+It keeps:
+
+- Agent, which the merge seat uses;
+- ToolSearch, which is how every deferred tool loads;
+- SendMessage, ListAgents, CronCreate, CronList, CronDelete, TaskStop and
+  Monitor, along with the rest of the core tools;
+- ScheduleWakeup, which a profile may drop but has no reason to;
+- the workspace's and plugins' MCP servers.
+
+The advisor has no entry. Neither trimmed launch on the measuring host offered
+an advisor tool, so there's nothing to deny and no name to measure a deny
+against. Claude Code also flags a lowercase name in a deny list as an
+unusable entry.
+
+**Rejected: an allowlist of the tools a coordinator was seen calling.** It
+fits the outcome's wording ("none of the rest") more literally, but it would
+also drop every tool the 17 tenures didn't happen to need: PushNotification,
+the Task tools, any tool a later Claude Code release adds. A coordinator that
+needs one of those mid-tenure has no way to get it back. The denylist already
+meets the turn-0 target with room to spare, and new entries can join it as
+tenures show more unused items.
+
+**Rejected: `skillOverrides` entries switching skills off one by one.** That
+means about a hundred names that change whenever a plugin updates, while
+denying the Skill tool drops the listing whole. The entry skill still reaches
+the coordinator, because a prompt that begins with `/<plugin>:<skill>` is
+expanded by the CLI rather than by the Skill tool.
+
+### Decision 3: Where the profile is declared and how a dispatch selects it
+
+Resolved inline.
+
+**Chosen: `[session.dispatch_profiles.<name>]` in the workspace config,
+selected by `niwa dispatch --profile <name>`.** Like `[session.dispatch_env]`,
+it's read only at dispatch and never at apply. The table holds three keys:
+
+```toml
+[session.dispatch_profiles.coordinator]
+drop_tools = ["Artifact", "Workflow", "SendFeedback", "ReportFindings",
+              "EnterWorktree", "AskUserQuestion", "Skill"]
+drop_bundled_skills = true
+drop_account_connectors = true
+```
+
+The keys name what's removed, not how Claude Code spells it. `internal/agentplan`
+maps them to the settings keys, so the workspace file states intent and the
+spelling lives with the other per-agent facts. A tool name must match
+`^[A-Z][A-Za-z0-9]*$` or `^mcp__[A-Za-z0-9_-]+$`. That refuses lowercase names
+and scoped rules such as `Bash(git *)`: a scoped rule is a permission rule,
+not a removal, and doesn't belong in a profile.
+
+Several things refuse before anything is provisioned:
+
+- an unknown profile name;
+- a profile asked for on an agent whose `DispatchProfile` capability row isn't
+  implemented (Codex today, with the row's reason). A profile asked for and
+  silently not applied would leave a coordinator at full context with nobody
+  told;
+- a profile that drops a tool the agent's dispatch path depends on.
+  `internal/agentplan` lists these per agent as `ProfileRequiredTools`; for
+  Claude they're ToolSearch, since no deferred tool could load without it,
+  and CronCreate, since niwa's keep-alive is a recurring session cron
+  (`niwa list` and `niwa watch` recognize an armed keep-alive only as an
+  in-flight `session_cron` task).
+
+The required-tool rule holds whether or not keep-alive is on. Keep-alive
+resolves only after the instance is provisioned, from its materialized
+settings, so a rule that waited for it couldn't refuse before provisioning.
+A profile that drops CronCreate has no use worth that exception: the
+coordinator profile keeps it, and ScheduleWakeup can't stand in for it.
+
+**Rejected: a `--profile` selected from a machine `[global]` default.** A
+machine default would apply to every dispatch from that host, which breaks the
+second Evidence check for every launch that didn't ask.
+
+## Decision Outcome
+
+A coordinator dispatched with `--profile coordinator` gets the denylist,
+`disableBundledSkills`, and the connectors switch in its one launch settings
+document. Other launches get today's document, byte for byte. Interactive
+sessions read no file niwa changed.
+
+## Solution Architecture
+
+**Config (`internal/config`).** `SessionConfig` gains
+`DispatchProfiles map[string]SessionDispatchProfile`. Load checks the profile
+name (`^[a-z0-9][a-z0-9-]*$`), each tool name's grammar, and that a profile
+declares at least one drop. Like the other `[session]` tables it lives in the
+workspace config, and the vault resolver's deep copy clones it.
+
+**Capability row (`internal/agentplan`).** A new `DispatchProfile` capability,
+routed as a launch capability, is implemented for Claude and unsupported for
+Codex with a reason. Three functions carry the per-agent facts:
+
+- `ProfileSettings(agent, drops) (keys map[string]any, env map[string]string, err error)`
+  returns the agent's spelling, or an error naming the unsupported row for an
+  agent without one. `drops` is a plain struct of the three fields, so
+  `internal/agentplan` keeps its one dependency (`internal/agent`) and
+  doesn't import `internal/config`. For Claude that's `permissions: {deny: [...]}`,
+  `disableBundledSkills: true`, and `ENABLE_CLAUDEAI_MCP_SERVERS: "false"` for
+  the env block. It returns the deny names as a plain list. The dispatch
+  side wraps them in a typed value, `profileDenyList`, in
+  `internal/cli/dispatch_settings.go` next to `mcpApprovalList`, which can
+  marshal to nothing but `{"deny": [...]}` over names that pass the tool-name
+  grammar.
+- `ProfileRequiredTools(agent)` returns the tools a profile may not drop.
+- `AllProfileEnvNames()` returns the union, over every agent, of the env
+  names a profile can set. It takes no agent on purpose: the stripping below
+  runs in `shapeLaunchEnv`, which `niwa resume` and the retask wake also call
+  and which never knows which agent launched the dispatcher's own session.
+
+Two rules live in `internal/config` and nowhere else, so there's one copy of
+each: the tool-name grammar (`ValidateProfileToolName`), which config load,
+the deny-list renderer and resume all call; and `config.ProfileEnvNames`, the
+env names a profile may set. `internal/agentplan` doesn't import either, so
+a test in `internal/cli`, which imports both packages, fails when
+`agentplan.AllProfileEnvNames()` and `config.ProfileEnvNames` differ. Config
+load refuses every name in `ProfileEnvNames` in `[session.dispatch_env]`, as
+a passthrough or an unset name. Otherwise a workspace could pass the
+connectors switch through and fight the profile for the same `env` entry, and
+resume would accept the switch through the passthrough rule on a record that
+names no profile.
+
+That refusal is an upgrade break for a workspace that already lists the
+name in `[session.dispatch_env]`: today it loads, and after this change the
+whole config refuses to load, `niwa apply` included. The refusal message
+names the entry and says a dispatch profile owns that name, and the guide
+and the release notes tell an owner to remove it.
+
+The name check at config load is the gate that counts. `renderLaunchSettings`
+runs after provisioning and panics on a marshal error, so a bad name that got
+that far would leave the provisioned instance behind. The render-time check
+isn't a safe fallback; it only guards against a contributor that skipped the
+load.
+
+Spelling it here keeps every agent name off the dispatch path, which the
+existing dispatch-path scan enforces.
+
+**Dispatch (`internal/cli/dispatch.go`).** `--profile <name>` is resolved
+after the agent and before provisioning, so a refusal leaves nothing behind.
+The profile contributes in two places, because today's code consumes the
+env shape before the MCP approval contributor runs (`applyLaunchEnv` is
+called first). The profile's env values and the marker go on
+`launchEnvShape` before that call, so `applyLaunchEnv` puts them in both the
+env block and the process environment. The profile's settings keys are a
+fifth contributor, added to `launchSettings` after the MCP approval
+contributor. With no `--profile`, the contributor adds nothing and the
+rendered document is unchanged. A unit test pins that. More pieces:
+
+- `renderLaunchSettings` documents that every value it renders is a constant
+  except two named ones, the launch env object and the MCP approval list.
+  The deny list's names come from the workspace config, so it becomes the
+  third named exception, and its doc comment says why it's safe: a
+  `profileDenyList` marshals to one `{"deny": [...]}` object over names that
+  passed the tool-name grammar at load and pass it again at render.
+  `disableBundledSkills` is a constant `true` and needs no exception.
+- The launch record (`workspace.LaunchRecord`) gains `DispatchProfile`, and
+  so does the session mapping. The record is the one that matters: `niwa
+  resume` validates and relaunches from it, and it survives a reap that
+  removes the mapping. `niwa list` shows the mapping's copy.
+- The audit line printed after the launch names the profile.
+- The profile stops at the session it was asked for (below).
+
+**Keeping the profile from travelling down.** A worker's environment starts
+from the dispatcher's own (`os.Environ()` in `realDispatchLaunch`), and
+`shapeLaunchEnv` removes only the reap key, the dispatch identity,
+`OTEL_RESOURCE_ATTRIBUTES` when it sets a lineage value, and the
+`[session.dispatch_env]` unset names. A profiled coordinator carries
+`ENABLE_CLAUDEAI_MCP_SERVERS=false` in its process environment and in its
+settings `env` block, and Claude Code hands that environment to the commands
+its tools run. Left alone, every worker the coordinator dispatched without
+the profile would inherit the switch and start without its connectors, which
+breaks the second Evidence check for exactly the dispatches a coordinator
+makes.
+
+So a profiled launch also sets a marker, `NIWA_DISPATCH_PROFILE=<name>`,
+alongside the profile's env values, through the same `launchEnvShape`. On
+every launch, `shapeLaunchEnv` checks the inherited environment for that
+marker. When it's there, the launch removes the marker and every name in
+`agentplan.AllProfileEnvNames()`, the union across agents, before it adds its
+own values. Using the union means a Codex worker dispatched from a profiled
+Claude coordinator loses the Claude switch too, even though Codex has no
+profile of its own. A profiled launch then sets its own values again.
+
+The marker is a name niwa sets itself, so it joins
+`config.LaunchSettingsEnvNames`. That's the list that already holds the reap
+key and the dispatch identity, and joining it does three things: a workspace
+can't declare the name in `[session.dispatch_env]`, `WriteLaunchRecord`
+records it in the launch record's `Env` (a `NIWA_`-prefixed name is
+otherwise left out), and resume's env checks know it. The result:
+
+- a worker dispatched without `--profile` from inside a profiled coordinator
+  gets neither the switch nor the marker, so it starts as a dispatch from a
+  plain shell does;
+- a worker dispatched from a shell without the marker inherits exactly what
+  it inherits today. An owner who exported `ENABLE_CLAUDEAI_MCP_SERVERS`
+  themselves keeps that choice, because nothing is removed without the
+  marker;
+- the argv and the `--settings` document of an unprofiled launch don't
+  change at all. The removal touches only the process environment, and only
+  when the marker is present.
+
+The deny list and `disableBundledSkills` need no such step. They ride only
+the profiled worker's argv, which no child process inherits.
+
+**Resume (`internal/cli/resume.go`).** Resume works from the launch record,
+not the mapping. It reads the record's `DispatchProfile`, and when it
+rewrites the mapping for the relaunch it copies the profile name onto it, so
+`niwa list` still shows it. `validateLaunchRecord` checks the record's `Env`
+with `checkResumeEnv` and its settings document with `checkResumeSettings`,
+both against one allow-check. Today that check admits only
+`LaunchSettingsEnvNames` and the passthrough names, and the settings check
+refuses every key dispatch doesn't emit, so a profiled session couldn't be
+resumed. The changes:
+
+- the allow-check admits `NIWA_DISPATCH_PROFILE` (now in
+  `LaunchSettingsEnvNames`) only when its value equals the record's
+  `DispatchProfile`, in both the record's `Env` and the settings `env`
+  object;
+- it admits each name in the recorded profile's env values (for Claude,
+  `ENABLE_CLAUDEAI_MCP_SERVERS`) only when the record names a profile and the
+  value equals what that profile resolves to now;
+- `checkResumeSettings` learns `permissions`, accepted only when it's exactly
+  `{deny: [...]}`, every name passes the tool-name grammar, and the list
+  equals the recorded profile's resolution; and `disableBundledSkills`,
+  accepted only when it's `true` and the recorded profile sets it.
+
+Every profile key is refused when the record names no profile. A profile
+that has since been removed or changed refuses the resume and names the
+profile, the same rule the env check already applies to
+`[session.dispatch_env]`.
+
+`niwa retask` needs no code of its own, but it depends on this change. It
+runs the same `validateLaunchRecord` that resume does, so without the
+changes above a profiled worker couldn't be retasked either, and a profile
+that has since been removed or changed refuses retask as well as resume. Its
+flagless wake re-applies the options the job saved, `--settings` included,
+and its option check already compares the saved document with the record.
+The guide says both.
+
+**The coordinator's dispatcher.** A coordinator under the profile can't
+call the Skill tool. Its entry skill has to reach it another way, so whatever
+dispatches a coordinator has to do two things:
+
+- pass `--profile coordinator`;
+- start the prompt with the skill's slash invocation,
+  `/<plugin>:coordinate <args>`, rather than a sentence asking the session to
+  run it.
+
+The trimmed launches measured that a leading slash command is expanded by the
+CLI with the Skill tool denied, in print mode and under `--bg`. A prompt that
+only asks the session to run the skill would leave a profiled coordinator
+unable to load it. The dispatcher is
+the coordination skill's own dispatch step, which lives outside this
+repository. It can't pass `--profile` before a niwa release carries the flag,
+so the plan puts that change after the release.
+
+**Docs.** A guide, `docs/guides/dispatch-profiles.md`, covers the table, the
+flag, the refusals, what a profile can't drop, and the three checks below with
+the Claude Code version they last passed on.
+
+## Implementation Approach
+
+The work goes in dependency order:
+
+1. The config table and its load checks.
+2. The capability row and Claude's spelling.
+3. The dispatch flag and contributor, with the byte-identical no-profile test
+   and the record field.
+4. The resume acceptance.
+5. The guide and the live checks, ending in a niwa release.
+6. The coordinator's dispatcher passes the profile and leads its prompt with
+   the slash invocation.
+
+`docs/plans/PLAN-coordinator-dispatch-profile.md` has the issues.
+
+## Evidence
+
+These are the acceptance checks for the implementation. A reviewer runs them
+against a workspace that declares the coordinator profile above.
+
+**1. A coordinator under the profile starts below 35K and keeps its tools.**
+Dispatch a coordinator with
+`niwa dispatch --profile coordinator --name cdp-check --detach "<coordinator prompt>"`.
+Open the worker's transcript under the Claude Code projects directory for the
+instance path, and add `input_tokens`, `cache_creation_input_tokens` and
+`cache_read_input_tokens` from the first assistant message's `usage`. The sum
+must be below 35,000. Today's figure is 59,200. Then have the session load
+SendMessage, CronCreate, CronList, CronDelete and TaskStop through ToolSearch
+and use each one:
+
+- send a message to a named session;
+- create, list and delete a cron;
+- start a background command and stop it.
+
+The transcript shows each call returning without an error.
+
+**2. A dispatch without the profile is unchanged.** Dispatch the same prompt
+without `--profile`. The launch argv and `--settings` document match what
+today's niwa produces for that workspace; the unit test in the plan pins
+this. The worker's turn-0 sum and its reported tool list match a dispatch made
+with today's niwa, within the variation that MCP servers still connecting at
+turn 0 produce.
+
+The check is run twice: once from a plain shell, and once from inside the
+profiled coordinator of the first check, which runs the same unprofiled
+`niwa dispatch` from its own Bash tool. Both workers must start exactly as
+today. For the second one, the worker's environment holds neither
+`ENABLE_CLAUDEAI_MCP_SERVERS` nor `NIWA_DISPATCH_PROFILE`, `/mcp` lists the
+account connectors, and its tool list includes AskUserQuestion and Skill. A
+unit test pins the environment half: a launch without `--profile`, from a
+base environment carrying the marker and the switch, produces a worker
+environment with neither.
+
+**3. An interactive session is unchanged.** Start `claude` by hand in the same
+instance. AskUserQuestion and the Skill tool are in its tool list, `/mcp`
+lists the account connectors, and the skill listing includes the bundled and
+account skills. niwa writes the profile into no settings file, so this holds
+by construction. The check guards against a regression that would put it
+there.
+
+**What the trimmed launches measured.** These ran on Claude Code 2.1.319 from
+an instance root, with the coordinator profile as a launch settings document.
+
+- **Context.** A backgrounded session started at 51.5K tokens of turn-0
+  context without the profile and 21.2K with it, a cut of about 30K. A
+  coordinator measured at 59.2K today would land near 29K, which is a
+  projection the first check confirms.
+- **Deferred tools.** Under the profile, ToolSearch returned SendMessage,
+  CronCreate, CronList and TaskStop. SendMessage delivered to another session,
+  TaskStop stopped a background command, and CronList listed the job
+  CronCreate made.
+- **Keep-alive.** Both sessions, given niwa's keep-alive arming text, armed it
+  with CronCreate, the profiled one with ScheduleWakeup denied. The arming
+  text asks for a recurring self-wake, which is CronCreate's job, so the
+  keep-alive doesn't need ScheduleWakeup. CronCreate is the tool it does
+  need, so dispatch refuses a profile that drops it.
+- **The Skill tool.** In print-mode launches, denying it cut about 10K tokens
+  on its own. A prompt beginning with a plugin skill's slash command still
+  expanded that skill with the tool denied.
+
+A second set of trimmed launches repeated the load-bearing checks, on Sonnet
+rather than Opus:
+
+- **Deferred tools.** SendMessage, CronCreate, CronDelete and TaskStop loaded
+  through ToolSearch under a deny-list trim, under a `--tools` allowlist, and
+  under `--disable-slash-commands`.
+- **The Skill tool under `--bg`.** A leading slash command still expanded in
+  a `--bg` session with Skill denied, so the coordinator's entry skill reaches
+  it the way coordinators actually run.
+- **Context.** Turn 0 read 26,956 tokens with the launch settings and the
+  deny list, 21,069 with `--disable-slash-commands` added, and about 16K under
+  the allowlist. An untrimmed Opus session read 58,151. Model choice moves
+  these figures, so the first check is read on the model coordinators run on.
+- **Removed tools leave the system prompt too.** With Artifact disabled, its
+  paragraph was gone from the system prompt, not only its tool entry.
+- **Connectors.** `ENABLE_CLAUDEAI_MCP_SERVERS=false` in the settings env
+  removed the account connector and left the plugin's and the workspace's MCP
+  servers in place.
+
+## Security Considerations
+
+A profile only removes. A deny list can't grant a tool, so a planted or stale
+profile can at worst leave a session with less than it needs, and the resume
+check refuses a recorded profile that no longer matches the config. The
+document still rides the worker's argv, where other users of the host can read
+it in a process listing. The profile's values are tool names and a fixed
+boolean switch, never credentials. The tool-name grammar keeps a profile from
+smuggling a scoped permission rule into the document.
+
+## Consequences
+
+**Positive.** A coordinator tenure pays about 30K fewer tokens on every turn.
+The selection is explicit on the dispatch line and recorded on the launch
+record, which resume and retask read, with a copy on the mapping for
+`niwa list`.
+Every other launch path is unchanged.
+
+**Negative.**
+
+- A profile is Claude Code's vocabulary: tool names and the connectors switch.
+  A Codex profile needs its own spelling and its own measurements, and until
+  then `--profile` refuses for Codex.
+- A Claude Code release that renames a dropped tool silently stops dropping
+  it. The guide's live check, rerun on upgrades, is what catches that.
+- A dispatched coordinator under the profile is still told to use
+  EnterWorktree, by a SessionStart hint and by the background session's own
+  system prompt, which asks for isolation before the first file edit. With
+  the tool denied it can't comply. Coordinators implement nothing, and the
+  system prompt's own fallback is to continue in place when EnterWorktree
+  fails, so the cost is the lines. A coordinator that does edit a file works
+  in its instance's checkout, the same place it works today when the tool
+  call fails. The guide says so, and the first check's transcript is read for
+  a coordinator that stalls on the instruction instead.
+- A coordinator's entry skill has to arrive as a slash command at the start of
+  its prompt, since it can't call the Skill tool.
+- Anything else started from a profiled coordinator's shell, other than a
+  `niwa` launch, still inherits the connectors switch. An owner who opens
+  `claude` by hand from inside that shell gets a session without account
+  connectors. Owners start their sessions from their own terminals, so this
+  is a note rather than a case the design handles.
