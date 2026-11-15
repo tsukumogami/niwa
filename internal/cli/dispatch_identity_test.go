@@ -271,7 +271,7 @@ func TestResume_KeepsDispatchIdentity(t *testing.T) {
 		Settings:     `{"env":{"NIWA_REAP_KEY":"` + id + `","NIWA_DISPATCH_ID":"` + id + `","NIWA_WORKSPACE":"test-ws"}}`,
 		Env:          map[string]string{config.ReapKeyEnv: id, config.DispatchIDEnv: id, config.WorkspaceEnv: "test-ws"},
 	}
-	if err := validateLaunchRecord(rec, claudeLaunchSpec(), nil); err != nil {
+	if err := validateLaunchRecord(rec, claudeLaunchSpec(), nil, dispatchLaunchProfile{}); err != nil {
 		t.Fatalf("a record with the dispatch identity was refused: %v", err)
 	}
 	env := resumeEnv([]string{"NIWA_DISPATCH_ID=stale-id", "NIWA_WORKSPACE=stale-ws"}, nil, rec.Env)

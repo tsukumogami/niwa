@@ -765,10 +765,277 @@ func TestResumeRecordModelShapes(t *testing.T) {
 	} {
 		rec := f.record()
 		rec.Model = model
-		err := validateLaunchRecord(rec, spec, []string{resumeTestPassName})
+		err := validateLaunchRecord(rec, spec, []string{resumeTestPassName}, dispatchLaunchProfile{})
 		if (err == nil) != ok {
 			t.Errorf("model %q: err = %v, want accepted = %v", model, err, ok)
 		}
+	}
+}
+
+// profiledDispatchRecord runs a real `niwa dispatch --profile coordinator`
+// through the dispatch path with a fake launcher, in a subtest so the
+// dispatch fakes are gone before the resume runs, and returns the launch
+// record it wrote. Only its identities move onto the resume fixture's
+// dispatch, session and instance; the settings document, the environment and
+// the profile are what the dispatch recorded.
+func profiledDispatchRecord(t *testing.T) workspace.LaunchRecord {
+	t.Helper()
+	var rec workspace.LaunchRecord
+	t.Run("dispatch", func(t *testing.T) {
+		got := runProfileFixtureDispatch(t, profileFixtureCase{name: "profiled", decl: coordinatorProfileDecl}, withProfile("coordinator"))
+		r, err := workspace.ReadLaunchRecord(got.root, profileFixtureDispatchID)
+		if err != nil {
+			t.Fatalf("reading the dispatch's launch record: %v", err)
+		}
+		rec = r
+	})
+	if rec.DispatchProfile != "coordinator" || rec.Settings == "" {
+		t.Fatalf("the profiled dispatch recorded profile %q, settings %q", rec.DispatchProfile, rec.Settings)
+	}
+	rec.DispatchID = resumeTestDispatchID
+	rec.SessionID = resumeTestSessionID
+	rec.InstanceName = resumeTestInstance
+	rec.WrittenAt = time.Now().UTC().Add(-time.Hour)
+	return rec
+}
+
+// editSettings returns doc with mut applied to its decoded top level.
+func editSettings(t *testing.T, doc string, mut func(map[string]any)) string {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(doc), &m); err != nil {
+		t.Fatalf("decoding the settings document: %v\n%s", err, doc)
+	}
+	mut(m)
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
+// editSettingsEnv returns doc with mut applied to its env object.
+func editSettingsEnv(t *testing.T, doc string, mut func(map[string]any)) string {
+	t.Helper()
+	return editSettings(t, doc, func(m map[string]any) {
+		env, _ := m["env"].(map[string]any)
+		if env == nil {
+			env = map[string]any{}
+		}
+		mut(env)
+		m["env"] = env
+	})
+}
+
+// TestResumeProfiledRecord: the record a profiled dispatch writes resumes
+// after a reap has deleted its session mapping. The relaunch carries the
+// recorded settings document and environment, and the rewritten mapping
+// carries the profile.
+func TestResumeProfiledRecord(t *testing.T) {
+	rec := profiledDispatchRecord(t)
+	f := newResumeFixture(t, coordinatorProfileDecl)
+	f.writeRecord(t, rec)
+	f.writeTranscript(t, resumeTestSessionID)
+	if _, err := workspace.ReadSessionMapping(f.root, resumeTestSessionID); err == nil {
+		t.Fatal("the fixture already holds a session mapping")
+	}
+	// A dispatcher that itself runs under a profile: its marker and switch
+	// must not leak past the recorded values.
+	t.Setenv(config.DispatchProfileEnv, "other")
+	t.Setenv("ENABLE_CLAUDEAI_MCP_SERVERS", "true")
+
+	var launchedEnv []string
+	prevLaunch := resumeLaunchFunc
+	resumeLaunchFunc = func(ctx context.Context, bin string, args []string, dir string, env []string) error {
+		launchedEnv = env
+		return prevLaunch(ctx, bin, args, dir, env)
+	}
+	t.Cleanup(func() { resumeLaunchFunc = prevLaunch })
+
+	_, stderr, err := runResumeCmd(t, resumeTestInstance, "-carry on")
+	if err != nil {
+		t.Fatalf("resume: %v\nstderr:\n%s", err, stderr)
+	}
+	var launches [][]string
+	for _, c := range f.calls(t) {
+		if a := argsOf(c); len(a) > 0 && a[0] == "--bg" {
+			launches = append(launches, a)
+		}
+	}
+	if len(launches) != 1 {
+		t.Fatalf("stub claude launched %d times, want 1", len(launches))
+	}
+	if i := indexOf(launches[0], "--settings"); i < 0 || i+1 >= len(launches[0]) || launches[0][i+1] != rec.Settings {
+		t.Errorf("the relaunch's --settings is not the recorded document:\n got %q\nwant %q", launches[0], rec.Settings)
+	}
+	for name, want := range rec.Env {
+		if v, ok := envLookup(launchedEnv, name); !ok || v != want {
+			t.Errorf("relaunch env %s = %q (%v), want the recorded %q", name, v, ok, want)
+		}
+	}
+	for _, name := range []string{config.DispatchProfileEnv, "ENABLE_CLAUDEAI_MCP_SERVERS"} {
+		if _, ok := rec.Env[name]; !ok {
+			t.Errorf("the profiled record's Env lacks %s: %#v", name, rec.Env)
+		}
+	}
+	m, err := workspace.ReadSessionMapping(f.root, resumeTestSessionID)
+	if err != nil {
+		t.Fatalf("no session mapping after the resume: %v", err)
+	}
+	if m.DispatchProfile != "coordinator" {
+		t.Errorf("rewritten mapping DispatchProfile = %q, want coordinator", m.DispatchProfile)
+	}
+}
+
+// TestResumeProfileRefusals: a profiled record whose settings or env differ
+// from what its profile resolves to now, a profile that's gone or changed, and
+// profile keys or env on a record that names no profile each refuse before
+// anything is restored or launched, naming the cause.
+func TestResumeProfileRefusals(t *testing.T) {
+	profiled := profiledDispatchRecord(t)
+	changedDecl := strings.Replace(coordinatorProfileDecl, `, "Skill"]`, `]`, 1)
+	if changedDecl == coordinatorProfileDecl {
+		t.Fatal("the changed profile is the same as the coordinator profile")
+	}
+	cases := []struct {
+		name  string
+		decl  string
+		rec   func(t *testing.T, f *resumeFixture) workspace.LaunchRecord
+		wants []string
+	}{
+		{
+			name: "marker in Env differs from the profile",
+			decl: coordinatorProfileDecl,
+			rec: func(t *testing.T, f *resumeFixture) workspace.LaunchRecord {
+				r := profiled
+				r.Env = map[string]string{}
+				for k, v := range profiled.Env {
+					r.Env[k] = v
+				}
+				r.Env[config.DispatchProfileEnv] = "other"
+				return r
+			},
+			wants: []string{config.DispatchProfileEnv, `"other"`, `"coordinator"`},
+		},
+		{
+			name: "marker in settings env differs from the profile",
+			decl: coordinatorProfileDecl,
+			rec: func(t *testing.T, f *resumeFixture) workspace.LaunchRecord {
+				r := profiled
+				r.Settings = editSettingsEnv(t, r.Settings, func(env map[string]any) { env[config.DispatchProfileEnv] = "other" })
+				return r
+			},
+			wants: []string{"settings", config.DispatchProfileEnv, `"coordinator"`},
+		},
+		{
+			name: "connectors switch on a record with no profile",
+			decl: coordinatorProfileDecl,
+			rec: func(t *testing.T, f *resumeFixture) workspace.LaunchRecord {
+				r := f.record()
+				r.Env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
+				return r
+			},
+			wants: []string{"ENABLE_CLAUDEAI_MCP_SERVERS", "names none"},
+		},
+		{
+			name: "marker on a record with no profile",
+			decl: coordinatorProfileDecl,
+			rec: func(t *testing.T, f *resumeFixture) workspace.LaunchRecord {
+				r := f.record()
+				r.Settings = editSettingsEnv(t, r.Settings, func(env map[string]any) { env[config.DispatchProfileEnv] = "coordinator" })
+				return r
+			},
+			wants: []string{config.DispatchProfileEnv, "names no dispatch profile"},
+		},
+		{
+			name: "deny name outside the tool-name grammar",
+			decl: coordinatorProfileDecl,
+			rec: func(t *testing.T, f *resumeFixture) workspace.LaunchRecord {
+				r := profiled
+				r.Settings = editSettings(t, r.Settings, func(m map[string]any) {
+					m["permissions"] = map[string]any{"deny": []any{"Artifact", "Bash(rm:*)"}}
+				})
+				return r
+			},
+			wants: []string{"Bash(rm:*)", "not a whole-tool name"},
+		},
+		{
+			name: "recorded profile removed from the config",
+			decl: "",
+			rec: func(t *testing.T, f *resumeFixture) workspace.LaunchRecord {
+				return profiled
+			},
+			wants: []string{`"coordinator"`, "unknown dispatch profile"},
+		},
+		{
+			name: "recorded profile's drop_tools changed",
+			decl: changedDecl,
+			rec: func(t *testing.T, f *resumeFixture) workspace.LaunchRecord {
+				return profiled
+			},
+			wants: []string{`"coordinator"`, "drop_tools"},
+		},
+		{
+			name: "permissions key on a record with no profile",
+			decl: coordinatorProfileDecl,
+			rec: func(t *testing.T, f *resumeFixture) workspace.LaunchRecord {
+				r := f.record()
+				r.Settings = editSettings(t, r.Settings, func(m map[string]any) {
+					m["permissions"] = map[string]any{"deny": []any{"Artifact"}}
+				})
+				return r
+			},
+			wants: []string{"permissions", "names no dispatch profile"},
+		},
+		{
+			name: "permissions with an allow list on a profiled record",
+			decl: coordinatorProfileDecl,
+			rec: func(t *testing.T, f *resumeFixture) workspace.LaunchRecord {
+				r := profiled
+				r.Settings = editSettings(t, r.Settings, func(m map[string]any) {
+					m["permissions"] = map[string]any{"deny": coordinatorDenyNames, "allow": []any{"Bash"}}
+				})
+				return r
+			},
+			wants: []string{"permissions", "only a deny list"},
+		},
+		{
+			name: "permissions with an allow list on a record with no profile",
+			decl: "",
+			rec: func(t *testing.T, f *resumeFixture) workspace.LaunchRecord {
+				r := f.record()
+				r.Settings = editSettings(t, r.Settings, func(m map[string]any) {
+					m["permissions"] = map[string]any{"allow": []any{"Bash"}}
+				})
+				return r
+			},
+			wants: []string{"permissions", "only a deny list"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newResumeFixture(t, c.decl)
+			f.writeRecord(t, c.rec(t, f))
+			f.writeTranscript(t, resumeTestSessionID)
+			_, stderr, err := runResumeCmd(t, resumeTestInstance)
+			if err == nil {
+				t.Fatalf("resume succeeded; want a refusal\nstderr:\n%s", stderr)
+			}
+			for _, w := range append([]string{`"` + resumeTestInstance + `"`}, c.wants...) {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("refusal lacks %q: %v", w, err)
+				}
+			}
+			if calls := f.calls(t); len(calls) != 0 {
+				t.Errorf("stub claude was called: %q", calls)
+			}
+			if _, err := os.Lstat(f.instancePath()); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("something was created at %s (%v)", f.instancePath(), err)
+			}
+			if _, err := workspace.ReadSessionMapping(f.root, resumeTestSessionID); err == nil {
+				t.Errorf("a session mapping was written")
+			}
+		})
 	}
 }
 
