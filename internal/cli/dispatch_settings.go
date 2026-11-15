@@ -32,7 +32,7 @@ import (
 // Three values are exceptions, and they are named here so they stay the only
 // ones. The first is the launch environment contributor's "env" key, a
 // launchEnv (dispatch_env.go) that can marshal to nothing but a JSON object of
-// string values. Its keys come from three places and no others:
+// string values. Its keys come from these places and no others:
 //
 //   - OTEL_RESOURCE_ATTRIBUTES, the lineage value composed in
 //     dispatch_lineage.go from niwa's own entries, each checked against an
@@ -45,7 +45,13 @@ import (
 //     credential. Their values are copied verbatim from niwa's own
 //     environment, the developer's shell, and are never read from a file a
 //     repository controls;
-//   - NIWA_REAP_KEY, whose value must match reapKeyPattern.
+//   - NIWA_REAP_KEY, whose value must match reapKeyPattern;
+//   - NIWA_DISPATCH_ID and NIWA_WORKSPACE, whose values must match
+//     dispatchIdentityPattern;
+//   - for a profiled dispatch, NIWA_DISPATCH_PROFILE, whose value is a
+//     profile name config.ValidProfileName accepts, and the profile's own env
+//     values, the constants agentplan.ProfileSettings spells for the agent
+//     (ENABLE_CLAUDEAI_MCP_SERVERS=false for Claude).
 //
 // Every key and value is a JSON string inside the one "env" object, so nothing
 // in them can add a settings key outside it.
