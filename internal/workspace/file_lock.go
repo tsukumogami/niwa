@@ -3,20 +3,25 @@ package workspace
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"path/filepath"
+
+	"github.com/tsukumogami/niwa/internal/filelock"
 )
 
-// ErrLockHeld is returned by TryFileLock when another holder has the lock. The
-// error that wraps it names the holder, as read from the lock file with every
-// control character removed, or "another niwa command" when the holder has not
-// written its line yet.
-var ErrLockHeld = errors.New("lock is held")
+// ErrLockHeld is returned by TryFileLock when another holder has the lock. It
+// is filelock.ErrLockHeld, so errors.Is matches either name.
+var ErrLockHeld = filelock.ErrLockHeld
 
 // ErrLockUnsupported is returned by TryFileLock on a platform without flock.
-// Callers decide what an unlockable platform means for them; nothing is
-// substituted for the lock.
-var ErrLockUnsupported = errors.New("file locking is not supported on this platform")
+// It is filelock.ErrLockUnsupported.
+var ErrLockUnsupported = filelock.ErrLockUnsupported
+
+// TryFileLock takes an exclusive advisory lock on path without waiting. The
+// lock itself lives in internal/filelock, where internal/mirror can reach it
+// without importing this package; see filelock.TryFileLock for the contract.
+func TryFileLock(path, holder string) (func(), error) {
+	return filelock.TryFileLock(path, holder)
+}
 
 // InstanceLockPath returns the per-instance lock file for instancePath, in
 // niwa's own lock directory under home (~/.niwa/locks).
@@ -34,12 +39,7 @@ func InstanceLockPath(home, instancePath string) string {
 }
 
 // CanonicalPath returns p made absolute, cleaned and with every symlink along
-// it resolved. A path that no longer exists (an instance already removed) is
-// resolved as far as its nearest existing ancestor, with the rest rejoined, so
-// the answer for a path stays the same after the path is deleted.
+// it resolved; see filelock.CanonicalPath.
 func CanonicalPath(p string) string {
-	if abs, err := filepath.Abs(p); err == nil {
-		p = abs
-	}
-	return filepath.Clean(resolveExistingPrefix(filepath.Clean(p)))
+	return filelock.CanonicalPath(p)
 }
