@@ -100,38 +100,27 @@ Four things have to hold at once, and they pull against each other:
 
 From the requirements:
 
-- **Nobody acts (R1).** The check runs inside `niwa create`, `niwa apply`,
-  `niwa dispatch` and the SessionStart hook path at least. No daemon, no
-  schedule, and no by-hand repair, which the workspace owner ruled out.
-- **Five faults at least (R2):** the mirror directory missing; its object
-  store missing or empty; a pack or its index deleted; a pack truncated or
-  overwritten; `HEAD` or `config` missing or unreadable by git.
-- **Restore before use, borrowers untouched (R3, R10).** A broken mirror is
-  restored before the command depends on it, with no prompt and no re-clone.
-  The only thing niwa may change in a borrower is its alternates entry, so an
-  instance's unpushed commits are never at risk.
-- **Borrowers recover in full (R4).** Afterwards `git log` over every local
-  and remote-tracking ref reads to the root and `git fsck` is clean.
-- **One restore at a time (R5).** Concurrent commands produce one sound
-  mirror, and no borrower sees a partial one.
-- **Failure is no worse than nothing (R6).** niwa removes nothing at the
-  mirror's location until a replacement is ready, leaves borrowers alone, says
-  so, retries next command, and lets a command that doesn't need the mirror
-  finish.
-- **Visible afterwards (R7)** in command output and niwa's log, naming the
-  mirror, the fault and the result.
-- **Keep what the remote drops (R8).** The refresh never prunes, and niwa
-  never runs a collection in the mirror that drops unreachable objects.
-- **Decide the deleted-remote-commits case (R9)**, and show it by test.
-- **Location is settled (R11):** under `~/.niwa/`, in a directory keyed by
-  the workspace root's canonical path, never under the root's `.niwa/` or in
-  an instance.
-- **A test anyone can rerun (R12, R13):** functional scenarios that build
-  their own remote, mirror and two borrowers in the sandbox home, borrowers
-  made the way a reference clone would be, one command, Linux and macOS CI.
-- **Cheap when healthy (R14):** no network and under 100 ms per mirror.
-- **A contract for reference clones (R15):** where a mirror lives, the call
-  that checks and restores it, its guarantees, and the full-clone fallback.
+- **Nobody acts (R1):** the check runs inside create, apply, dispatch and
+  the SessionStart hook; no daemon, schedule or by-hand repair.
+- **Five faults at least (R2):** mirror directory missing; object store
+  missing or empty; a pack or index deleted; a pack truncated or
+  overwritten; `HEAD` or `config` missing or unreadable.
+- **Restore before use, borrowers untouched (R3, R10):** no prompt, no
+  re-clone, and nothing in a borrower changes but its alternates entry.
+- **Borrowers recover in full (R4):** every ref reads to the root and
+  `git fsck` is clean.
+- **One restore at a time (R5)** and **failure no worse than nothing (R6):**
+  nothing at the mirror's location is removed until a replacement is ready,
+  and a command that doesn't need the mirror finishes.
+- **Visible afterwards (R7)** in output and niwa's log.
+- **Keep what the remote drops (R8)** and **decide the deleted-commits case
+  (R9)**, shown by test.
+- **Location (R11):** under `~/.niwa/`, keyed by the workspace root's
+  canonical path.
+- **A rerunnable test (R12, R13)** on Linux and macOS, borrowers made the
+  way a reference clone would be.
+- **Cheap when healthy (R14):** no network, under 100 ms per mirror.
+- **A contract for reference clones (R15).**
 
 Implementation drivers: reuse niwa's lock directory, clone pipeline and test
 git server rather than new infrastructure; assume only portable git, with no
@@ -175,12 +164,20 @@ most once a day per mirror during refresh, which is where silent bit rot is
 caught.
 
 The restore takes the mirror's lock, checks again, clones `--mirror` with an
-empty `--template=` into a temporary directory, writes the retention config,
-salvages the old store, writes the manifest, renames the temporary directory
-to its final name, renames a new symlink over the old one, and only then
-removes the old store. A failure at any step removes only the temporary
-directory. Salvage copies only regular files (by `Lstat`, never through a
-link) named like a pack and its `.idx` or a loose object, keeps those that
+empty `--template=` into a temporary directory, passing
+`-c transfer.fsckObjects=true -c fetch.fsckObjects=true` and both unpack
+limits on the command line so the clone itself runs under them, writes the
+retention config, salvages the old store, writes the new state file and
+manifest to a temporary name in `.meta/`, renames the temporary directory to
+its final name, renames a new symlink over the old one, renames the state
+file into place, and only then removes the old store. A lock-free check that
+lands between the swap and the state rename sees a mismatch, waits for the
+lock, and passes on its recheck, so no second restore follows. A failure
+before the store's rename removes only the temporary directory. One between
+that rename and the swap leaves an unused `.store/` directory; the next
+restore, under the lock, salvages from it and removes it by exact name,
+never one the link names. Salvage copies only regular files (by `Lstat`,
+never through a link) named like a pack and its `.idx` or a loose object, keeps those that
 pass `git verify-pack` or hash correctly, and never copies the old `config`,
 hooks, `info/`, alternates or `packed-refs`. Before any move or delete, the
 link's target must be a relative `.store/<repo-id>-<stamp>-<rand>` naming a
@@ -234,7 +231,10 @@ The mirror's config sets `fetch.prune=false`, `gc.auto=0`,
 `gc.reflogExpireUnreachable=never`, so a force-pushed branch's earlier tip
 stays reachable through the reflog. `transfer.fsckObjects=true` and
 `fetch.fsckObjects=true` refuse a malformed object from the remote before
-every borrower reads it. niwa never runs `gc`, `repack -d`, `prune` or
+every borrower reads it. `transfer.unpackLimit=1` and `fetch.unpackLimit=1`
+make every fetch land as a pack, since git otherwise explodes a small fetch
+into loose objects the manifest doesn't track and the check can't see go
+missing. niwa never runs `gc`, `repack -d`, `prune` or
 `maintenance` in a mirror, and every refresh and restore rewrites the whole
 config from this fixed set, the remote URL and the refspec, so no other key
 survives. Every commit the mirror ever fetched stays reachable, so even a
@@ -247,8 +247,9 @@ grace only delays the loss.
 
 **A `refs/niwa/kept/*` namespace written on every refresh.** Rejected for
 routine retention because no-prune plus reflogs does the same with less code
-and no extra refs to list. Decision 3 uses that namespace only to pin
-commits recovered after a restore.
+and no extra refs to list. A restore uses that namespace only, to pin both
+commits it salvages from the old store and commits Decision 3 recovers by
+id.
 
 **`gc.pruneExpire=never` alone.** Rejected because a person's `git gc`
 still drops the objects once the ref is gone, and nothing names them.
@@ -295,9 +296,14 @@ the first missing commit. niwa checks each id is full-length hex, so none
 reads as an option, and fetches them from the repo's own remote into the
 mirror over protocol v2, deduplicated, within at most two rounds, 32 ids,
 60 s a fetch and 120 s in all, one id at a time if a batch fails, and pins
-each as `refs/niwa/kept/<sha>`. A second probe alone decides each ref's
+each as `refs/niwa/kept/<sha>`, the namespace that also holds commits
+salvaged from the old store. A second probe alone decides each ref's
 fate. A ref still failing is unrecoverable; that's the limit, not a failed
 restore, so the restore counts as done and doesn't retry.
+
+This cuts both ways. A commit the remote removed, one holding a secret
+included, but still serves by id comes back into the mirror and is pinned
+whenever a borrower's ref still reaches it.
 
 The report names instance, repo, mirror, ref and missing commit with the
 reason: built on commits pushed and later deleted from the remote; the mirror
@@ -386,7 +392,7 @@ the check compares the store with the manifest, offline. A broken mirror is
 rebuilt beside the old one from the remote, topped up with every intact pack
 the old store holds, and put in place by renaming a new link over the old, so
 no borrower is re-cloned or edited. One lock per mirror serializes this; a
-failure removes only the temporary directory, and the next command retries.
+failure leaves the old link and store in place, and the next command retries.
 
 Retention keeps what the remote drops while the mirror exists. When the
 mirror is then lost, a borrower's local branch on pushed commits the remote
@@ -415,10 +421,13 @@ but not what it inherits from the base, and the report names it.
 ### Overview
 
 A new package, `internal/mirror`, owns the layout, state file, check,
-restore, refresh, probe and log, behind one entry point, `EnsureHealthy`,
-which the create and apply pipeline and the SessionStart hook call. A new
-waiting lock in `internal/workspace` serializes work on each mirror. Until
-the reference-clone work lands no instance borrows, so `EnsureHealthy` finds
+restore, refresh, probe and log. Its entry point, `EnsureHealthy`, is called
+by the create and apply pipeline, `niwa worktree create` and the
+SessionStart hook. A second one, `Seed`, builds a repo's first mirror under
+the same lock and fixed config, with nothing to salvage; this feature owns
+it, and the borrowing create calls it. A new waiting lock in
+`internal/workspace` serializes work on each mirror. Until the
+reference-clone work lands no instance borrows, so `EnsureHealthy` finds
 nothing to do; the functional scenarios exercise it with borrowers they
 build.
 
@@ -453,13 +462,16 @@ skipped with a warning.
   reads its instance clone's objects.
 
 **Reporting.** Results go to the command's `Reporter` as warnings on stderr.
+Every string the remote chose (ref names, file names) is cut to printable
+ASCII, capped at 256 bytes and escaped the same way for those lines as for
+the log, so a hostile file name can't write escape sequences to a terminal.
 Claude Code discards the SessionStart hook's stderr, so from-hook carries the
 results out of `provisionInstance` and puts each result's notice in the
 `additionalContext` JSON it prints on stdout. On the paths that print
 nothing today, it prints that JSON only when there's a notice. The notice is
-a fixed template (mirror, fault, result, a count of unrecoverable refs, at
-most five names cut to printable ASCII and 80 characters, quoted and labelled
-as repository data); full detail goes to the log. The hook waits 10 seconds
+a fixed template (mirror, fault, result, a count of unrecoverable refs and
+the mirror log's path) with no name the remote chose; full detail goes to
+the log. The hook waits 10 seconds
 for a lock, then reports `busy`.
 
 **Mirror log.** niwa has no log file today. This design adds one: JSON lines
@@ -474,7 +486,8 @@ A write failure is a warning.
 
 ```
 ~/.niwa/
-  locks/m-<sha256(key + "/" + repo-id)[:32]>.lock   0600
+  locks/m-<sha256(workspace key + "/" + repo-id)[:32]>.lock   0600
+  empty-hooks/                                      core.hooksPath for mirror git calls, 0700
   w-<sha256(CanonicalPath(workspace root))[:32]>/   the workspace key, 0700
     mirrors/
       <repo-id>        symlink -> .store/<repo-id>-<UTC stamp>-<rand>
@@ -489,8 +502,9 @@ Modes are set explicitly, not through the umask, and tightened at each check
 if they've widened. The repo id is the repo's name as the workspace config
 keys it and must match `[A-Za-z0-9][A-Za-z0-9._-]{0,99}`; a repo whose name
 doesn't clones in full. No id starts with a dot, so none can take niwa's own
-names (`.meta`, `.store`, `.tmp`, `.link-*`). The lock name hashes
-the key and repo id rather than the canonical stable path, because
+names (`.meta`, `.store`, `.tmp`, `.link-*`). The lock name hashes the
+workspace key (the `w-<hash>` directory name) and repo id rather than the
+canonical stable path, because
 `CanonicalPath` resolves symlinks and would give each store its own lock. A
 borrower's alternates line is `<stable path>/objects`.
 
@@ -507,7 +521,7 @@ type Options struct {
 	Refresh  bool          // fetch a healthy mirror (create and apply)
 	LockWait time.Duration // default 5 minutes; 10 seconds in the hook
 }
-type Fault string   // "", missing, objects-empty, pack-missing, pack-changed, repo-unreadable
+type Fault string   // "", missing, objects-empty, pack-missing, pack-changed, repo-unreadable, url-changed
 type Outcome string // healthy, restored, restore-failed, busy
 type Result struct {
 	RepoID, StablePath string
@@ -518,20 +532,25 @@ type Result struct {
 	Unrecoverable      []LostRef
 }
 func (r Result) Usable() bool   // healthy or restored
-func (r Result) Notice() string // fixed template, capped names; "" when healthy
+func (r Result) Notice() string // fixed template, counts and log path only; "" when healthy
 type LostRef struct {
 	Instance, Repo, Ref, MissingCommit string
 	RemoteTracking                     bool
 	OwnCommits, LostFiles              []string
 }
 
-// Mirrored keeps candidates with a state file, a link, or a borrower.
+// Mirrored keeps candidates with a state file, a link, a .store/<repo-id>-*
+// directory, or a borrower whose alternates name the stable path.
 func Mirrored(home, workspaceRoot string, candidates []Repo) []Repo
-// Recorded returns the repos with a state file under the workspace key.
+// Recorded returns the repos with a state file, a link or a store under the
+// workspace key, so a mirror whose state file is lost is still found.
 func Recorded(home, workspaceRoot string) []Repo
 // EnsureHealthy checks each mirror and restores any that's broken. Nothing
 // it returns should fail the caller's command.
 func EnsureHealthy(ctx context.Context, opts Options, repos []Repo) []Result
+// Seed builds the first mirror for a repo that has none, under the same
+// lock and fixed config, and returns what EnsureHealthy would.
+func Seed(ctx context.Context, opts Options, repo Repo) Result
 ```
 
 ```go
@@ -554,12 +573,17 @@ The state file, written to a temporary name and renamed into place
 ```
 
 A restore clones from the workspace config's URL; the state file's `url` is
-a cross-check, and a mismatch is reported and logged, never followed. A repo
-the config no longer names isn't restored. Userinfo is stripped before a URL
-is written, and `store` is validated like the link's target.
+a cross-check, never followed. Userinfo, query string and fragment are
+stripped before a URL is written, and the comparison uses the same stripped
+form. A mismatch is fault `url-changed`: niwa reports it and rebuilds the
+mirror from the config's URL with no salvage and no relink, rather than
+fetching the new remote into the old store, and the probe then reports
+what the new remote doesn't serve. A workspace recreated at the same path
+gets the same key and the same treatment, repo by repo. A repo the config
+no longer names isn't restored. `store` is validated like the link's target.
 
 A log line; `event` is `check`, `restore`, `refresh` or `unrecoverable`, and
-`result` is `healthy`, `restored`, `failed` or `busy`:
+`result` is `healthy`, `restored`, `restore-failed` or `busy`:
 
 ```json
 {"time":"2026-11-16T10:15:02Z","command":"apply","mirror":"niwa","event":"restore","fault":"pack-changed","result":"restored","check_ms":6,"took_ms":4210}
@@ -568,8 +592,9 @@ A log line; `event` is `check`, `restore`, `refresh` or `unrecoverable`, and
 ### Data Flow
 
 1. **Find.** `Mirrored` keeps the call site's repos that have a state file,
-   a link, or a borrower (one stat and short read of each instance clone's
-   alternates file). On today's hosts nothing is kept and the call returns.
+   a link, a store, or a borrower (one stat and short read of each instance
+   clone's alternates file). On today's hosts nothing is kept and the call
+   returns.
 2. **Check.** Lock-free, per mirror, as Decision 1 describes; a moved ctime
    triggers `verify-pack` on that pack only, and packs the manifest doesn't
    list are ignored. A lost state file counts as fault (1). The duration
@@ -579,15 +604,17 @@ A log line; `event` is `check`, `restore`, `refresh` or `unrecoverable`, and
    last is a day old, a new manifest. Failure is a warning.
 4. **Restore,** when broken. `WaitFileLock` with `LockWait`; a timeout is
    `busy` and touches nothing. Under the lock: check again; clear leftover
-   `.tmp/<repo-id>-<rand>` directories by exact name, never through a link;
-   if only the link is gone and the recorded store passes validation and the
-   check, relink with no network; otherwise clone, write the config, salvage,
-   and pin the old store's readable refs the new clone lacks as
-   `refs/niwa/kept/<sha>` (full-length ids the new store holds), write the
-   manifest, rename the store into place, swap the link (made as
-   `.link-<rand>` exclusively, renamed over, directory synced), write the
-   state file, remove the old store if its name is valid. A real directory
-   at the stable path is moved into `.store/` and salvaged, never deleted.
+   `.tmp/` directories by exact name, never through a link; if only the link
+   is gone and the recorded store passes validation and the check, relink
+   with no network. Otherwise check free space against the old store's pack
+   sizes (a 1 GiB floor when none are known) and report `restore-failed`
+   without cloning if it's short, then run Decision 1's sequence, salvaging
+   from every `.store/<repo-id>-*` directory and pinning the old store's
+   readable refs the new clone lacks as `refs/niwa/kept/<sha>`. The link is
+   made as `.link-<rand>` exclusively, renamed over, directory synced. Old
+   stores are removed by exact name, never one the link or the new state
+   file names. A real directory at the stable path is moved into `.store/`
+   and salvaged, never deleted.
 5. **Probe and recover,** still under the lock, as Decision 3 describes.
 6. **Report.** Log first, then a `Reporter` warning naming mirror, fault and
    result, or a line in the hook's context. A create that would borrow does
@@ -603,6 +630,9 @@ What the reference-clone work can rely on, as R15 asks:
   restores and is a symlink to the current store.
 - **The call.** `mirror.EnsureHealthy`; `Result.Usable()` says whether a
   create may borrow.
+- **First build.** `mirror.Seed` builds a repo's first mirror under the same
+  lock and fixed config, with nothing to salvage. This feature owns it; the
+  borrowing create calls it for a repo that has no mirror yet.
 - **The guarantees.** A broken mirror is restored before the command depends
   on it, with no prompt and no re-clone (R3). Afterwards every ref in every
   borrower reads to the root and `git fsck` is clean, except refs niwa
@@ -644,24 +674,13 @@ a pull request ref; for the limit it also expires its reflogs and runs `gc
 --prune=now`, or stock git would still serve the commit. CI runs the feature
 in its `make test-functional` job on Ubuntu and macOS under the sentinels.
 
-| Acceptance criterion | Scenario or step |
-|----------------------|------------------|
-| Mirror deleted, command run, repair reported, both borrowers clean | `A deleted mirror is restored by <command>` |
-| Once for each R1 command | that outline's four examples |
-| Faults (2) to (5) by file operation | `A damaged mirror is restored by an ordinary command` |
-| Borrowers unchanged but for alternates | each repair scenario: `the borrowers' refs, index and own objects are unchanged` |
-| Branch on deleted pushed commits, stated outcome | the two Proof C scenarios |
-| Log names mirror, fault, result | each repair scenario: `the mirror log records a "<fault>" restore that "<result>"` |
-| Mirror under the sandbox `~/.niwa/`, nothing elsewhere | every scenario: `nothing mirror-related exists outside the mirror directory` |
-| Borrowers name the mirror, hold none of its objects | the Background |
-| Refresh keeps dropped commits | `The refresh keeps commits the remote deleted` |
-| Two commands, one sound mirror | `Two commands restore one broken mirror once` |
-| Unreachable remote: command succeeds, later restore | `A failed restore changes nothing and the next command retries` |
-| Unpushed commit survives | every scenario: `the unpushed commit in each borrower is still reachable` |
-| CI on Linux and macOS under sentinels | the existing functional job |
-| Healthy check, no network, under 100 ms | `A healthy check needs no network and stays under 100 ms` |
-| Design names scenarios and command | this subsection |
-| Design carries the R15 contract | the subsection above |
+Every PRD acceptance criterion maps to a named scenario in the feature file,
+or to a step every scenario runs (borrowers unchanged but for alternates,
+the unpushed commit still reachable, nothing mirror-related outside the
+sandbox `~/.niwa/`). Beyond the three proofs above, the scenarios are: `The
+refresh keeps commits the remote deleted`; `Two commands restore one broken
+mirror once`; `A failed restore changes nothing and the next command
+retries`; `A healthy check needs no network and stays under 100 ms`.
 
 ## Implementation Approach
 
@@ -675,7 +694,7 @@ plugin store; the borrowing create is the reference-clone work.
    write, and the JSON-lines log with rotation.
 3. **Check.** `Mirrored`, `Recorded` and the fault checks, with unit tests
    for each of the five faults and one timing the healthy path.
-4. **Restore and refresh,** with tests that fail each step and find the old
+4. **Restore, seed and refresh,** with tests that fail each step and find the old
    link and store intact, and that plant a symlink, a hostile config and an
    outside link target and see none followed.
 5. **Probe and recovery.** Probe, bounded fetch by id, pins, `LostRef`.
@@ -703,34 +722,53 @@ content has the same trust as a fresh clone.
   Verification checks each file's own checksums and object hashes; it isn't
   a full `fsck`, so a well-formed but malformed object in an old pack is
   carried over as it was, with the trust it had before the damage.
-- **Git invocation.** Every call sets `core.fsmonitor=false`,
-  `core.hooksPath` to an empty directory, `protocol.ext.allow=never` and
+- **Git invocation.** Every call starts from the parent's environment with
+  every inherited `GIT_*` variable removed (`GIT_DIR`, `GIT_EXEC_PATH` and
+  `GIT_ALTERNATE_OBJECT_DIRECTORIES` among them), then adds only the ones
+  niwa sets. Every call sets `core.fsmonitor=false`, `core.hooksPath` to
+  `~/.niwa/empty-hooks/` (a 0700 directory niwa owns and checks is empty,
+  never a shared temp directory), `protocol.ext.allow=never` and
   `GIT_TERMINAL_PROMPT=0`. Local reads also set `GIT_CONFIG_NOSYSTEM=1`,
   `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_OPTIONAL_LOCKS=0` and empty credential
   and ssh helpers. Network calls keep the user's own config for credentials,
   as today's clones do, and run only after niwa rewrote the mirror's config
   from its fixed set, so no key a tampered store set survives.
 - **Remote input.** The URL comes from the workspace config, never the state
-  file, and is stored without the userinfo part. A token placed in a URL's
-  query string isn't recognised and is stored as written, so the workspace
-  config shouldn't carry one there. Fetch by id sends only validated
-  ids, only to the repo's own remote. `fsckObjects` refuses malformed objects.
-- **Agent context.** The SessionStart notice is a fixed template with capped,
-  quoted names marked as data, since the names come from the remote and the
-  context goes to the model provider. Capping bounds the text, it doesn't
-  remove it: up to five names of 80 characters each still carry a few
-  hundred characters the remote chose into the agent's context.
-- **Lock waits.** A command waits for another's restore (five minutes, ten
-  seconds in the hook) rather than racing it. A stuck holder costs that
-  wait, then the command reports the mirror busy and carries on; it's an
-  availability trade made for R5's one-restore-at-a-time rule.
+  file, and is stored with its userinfo, query string and fragment
+  stripped, so a token in any of them never reaches disk. A changed URL
+  rebuilds the mirror rather than mixing two remotes in one store. Fetch by
+  id sends only validated ids, only to the repo's own remote.
+  `fsckObjects` refuses malformed objects, including during the restore's
+  clone, which gets it with `-c` because the new store has no config yet.
+- **Terminal and agent context.** Remote-chosen text (ref and file names)
+  reaches the terminal only cut to printable ASCII, capped and escaped, as
+  in the log. The SessionStart notice carries no such text at all: counts
+  and the log's path, so nothing the remote chose reaches the model's
+  context through it.
+- **Lock waits and disk.** A command waits for another's restore (five
+  minutes, ten seconds in the hook) rather than racing it. A stuck holder
+  costs that wait, then the command reports the mirror busy and carries on;
+  it's an availability trade made for R5's one-restore-at-a-time rule. A
+  restore checks free space before cloning and reports instead of filling
+  the disk.
 
 The mirror never prunes, so it keeps every commit it fetched until the mirror
 directory is deleted, including one the remote later removed because it held
 a secret. A person purges it by deleting the repo's stable path and its
 `.store/<repo-id>-*` directories, or all of `~/.niwa/w-<key>/mirrors/`; with
 no old store to salvage, the next command rebuilds from what the remote
-still serves, and refs still on removed commits are reported unrecoverable.
+still serves. After a purge, a removed commit can come back: if the remote
+still serves it by id and a borrower's ref still reaches it, the recovery
+by id fetches and pins it again. To keep it out, purge the mirror and ask
+the forge to drop the commit; refs on commits the remote no longer serves
+are reported unrecoverable.
+
+**Residual risk for the owner.** The mirror keeps commits a remote removed,
+secrets included, until someone deletes it by hand; nothing in niwa expires
+them, because R8 forbids it. The workspace owner accepts that as a standing
+property of the host with this design. Whether a repo can opt out of
+mirroring is left to the reference-clone work's setting that turns borrowing
+off.
 
 ## Consequences
 
@@ -747,29 +785,30 @@ still serves, and refs still on removed commits are reported unrecoverable.
 ### Negative
 
 - Detection runs only when niwa runs; a mirror deleted between commands
-  leaves borrowers broken until the next one.
+  leaves borrowers broken until the next one. Mitigation: that's the window
+  the workspace owner accepted in ruling out a daemon, and every command R1
+  names closes it.
 - Fetching by id commits no ref reaches is best effort on hosted forges, and
   a branch on commits the remote destroyed is lost with the mirror.
+  Mitigation: the fetch is bounded and degrades to the plain limit, reported
+  by name; each `unrecoverable` log line is the cue to revisit localizing.
 - The ctime check doesn't see silent bit rot; only the daily deep verify
-  does, so a rotted pack can go unnoticed for up to a day.
+  does, so a rotted pack can go unnoticed for up to a day. Mitigation: a
+  pack the daily verify finds bad is restored and salvaged like any fault.
 - Refs for deleted branches and `refs/niwa/kept/` pins accumulate in the
-  mirror and are never cleaned.
+  mirror and are never cleaned. Mitigation: refs stay packed, so reads stay
+  cheap; trimming them would give up R8.
 - The post-restore probe's cost scales with the number of borrowers, and the
-  restore holds the lock through it and the fetch budget.
+  restore holds the lock through it and the fetch budget. Mitigation: the
+  probe walks only what the mirror lacks, only after a restore, and a waiter
+  gives up after its `LockWait` and carries on, touching nothing.
 - A restore inside the SessionStart hook delays the session by a clone.
+  Mitigation: the hook waits at most 10 seconds for a busy lock, and a
+  healthy mirror costs it only the offline check.
 - Every commit the mirror fetched, a since-removed secret included, stays
-  until a person deletes the mirror. A remote failing git's fsck can't be
-  mirrored, and a restore needs disk for a second store.
-
-### Mitigations
-
-- The window is what the workspace owner accepted in ruling out a daemon,
-  and every command R1 names closes it.
-- The fetch by id is bounded and degrades to the plain limit, reported by
-  name; each `unrecoverable` log line is the cue to revisit localizing.
-- A pack the daily verify finds bad is restored and salvaged like any fault.
-- Refs stay packed, so reads stay cheap; trimming them would give up R8.
-- The probe walks only what the mirror lacks, only after a restore.
-- A waiter gives up after its `LockWait` and carries on, touching nothing.
-- A person can purge a mirror as Security Considerations says; one that
-  can't be built leaves `Usable()` false, so a create clones in full.
+  until a person deletes the mirror, and the recovery by id can bring one
+  back while the remote serves it. Mitigation: the purge and forge request
+  Security Considerations describes.
+- A remote failing git's fsck can't be mirrored, and a restore needs disk
+  for a second store. Mitigation: either case leaves `Usable()` false, so a
+  create clones in full, and the free-space check reports before cloning.
