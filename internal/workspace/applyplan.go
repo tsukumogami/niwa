@@ -198,9 +198,36 @@ func checkPlanEntry(e agentplan.Entry) error {
 
 // writePlanFile is OpWriteFile: create the parent directory, then write the
 // content at the entry's mode.
+//
+// os.WriteFile (and OpenFile) apply the process umask to a newly created
+// file, so a plan Mode of 0644 can land as 0600. chmod after create so the
+// declared mode is what is on disk. The chmod is create-only: append,
+// section replace, and a rewrite of an existing file go through this
+// helper too, and os.WriteFile leaves an existing file's mode alone.
+// Chmod would not — it would reset a developer-authored 0600 up to 0644
+// on every apply, and it follows symlinks. See snapshotwriter.go for the
+// same "do not quietly widen" rule.
 func writePlanFile(path string, content []byte, mode fs.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating directory for %s: %w", path, err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err == nil {
+		_, werr := f.Write(content)
+		cerr := f.Close()
+		if werr != nil {
+			return fmt.Errorf("writing %s: %w", path, werr)
+		}
+		if cerr != nil {
+			return fmt.Errorf("writing %s: %w", path, cerr)
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			return fmt.Errorf("setting mode on %s: %w", path, err)
+		}
+		return nil
+	}
+	if !os.IsExist(err) {
+		return fmt.Errorf("creating %s: %w", path, err)
 	}
 	if err := os.WriteFile(path, content, mode); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)

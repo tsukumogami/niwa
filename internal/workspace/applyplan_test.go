@@ -23,6 +23,53 @@ func newPlanEntry(op agentplan.Op, path string, content string) agentplan.Entry 
 	}
 }
 
+func TestWritePlanFileDoesNotWidenExistingMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret.env")
+	if err := os.WriteFile(path, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writePlanFile(path, []byte("new\n"), 0o644); err != nil {
+		t.Fatalf("writePlanFile: %v", err)
+	}
+	if got := readFileString(t, path); got != "new\n" {
+		t.Errorf("content = %q, want new", got)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("existing file mode = %04o, want 0600 (chmod on rewrite would widen it)", got)
+	}
+}
+
+func TestAppendPlanLineDoesNotWidenExistingMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "imports.md")
+	if err := os.WriteFile(path, []byte("@/abs/one.md\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := appendPlanLine(path, []byte("@/abs/two.md"), 0o644); err != nil {
+		t.Fatalf("appendPlanLine: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("existing file mode = %04o, want 0600 after append", got)
+	}
+}
+
 func TestApplyPlanWriteFileCreatesParentsAndHonorsMode(t *testing.T) {
 	dir := t.TempDir()
 	nested := filepath.Join(dir, "a", "b", "settings.json")

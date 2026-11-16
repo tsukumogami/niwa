@@ -85,6 +85,11 @@ func TestLoadProviderAuth_WrongPermissions(t *testing.T) {
 	if err := os.WriteFile(path, []byte("[[providers]]\nkind = \"infisical\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// WriteFile is umask-masked; chmod so the file is actually 0644 even
+	// under umask 077, which would otherwise leave 0600 and skip the check.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	_, err := LoadProviderAuth(dir)
 	if err == nil {
