@@ -68,6 +68,11 @@ type Applier struct {
 	// delivers what a session needs.
 	DeveloperHome string
 
+	// mirrorsChecked holds the stable paths of the host mirrors this Applier
+	// has already checked, so a root-level apply that runs the pipeline once
+	// per instance checks and logs each mirror once per command.
+	mirrorsChecked map[string]bool
+
 	// Harness is a probe result the caller already holds, so a command that
 	// writes several settings documents (the workspace root and each
 	// instance) makes one hook-or-deny choice for all of them. nil means the
@@ -3203,8 +3208,9 @@ func repoAlreadyCloned(dir string) bool {
 //
 // The mirrors live under the developer's home, so an Applier without
 // DeveloperHome (the unit suites) skips the check rather than reach the real
-// one. A root-level apply reaches this once per instance; the first restores,
-// and the later checks find the mirror healthy and say nothing.
+// one. A root-level apply reaches this once per instance with the same
+// Applier; each mirror is checked on the first pass only, so the command
+// logs one check line per mirror, and the later passes skip it.
 func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig, classified []ClassifiedRepo, instanceRoot, command string) {
 	if a.DeveloperHome == "" || len(classified) == 0 {
 		return
@@ -3217,9 +3223,16 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 		instances = append(instances, instanceRoot)
 	}
 
+	if a.mirrorsChecked == nil {
+		a.mirrorsChecked = map[string]bool{}
+	}
 	repos := make([]mirror.Repo, 0, len(classified))
 	var clones []string
 	for _, cr := range classified {
+		stable := mirror.StablePath(a.DeveloperHome, workspaceRoot, cr.Repo.Name)
+		if a.mirrorsChecked[stable] {
+			continue
+		}
 		repos = append(repos, mirror.Repo{
 			ID:  cr.Repo.Name,
 			URL: RepoCloneURL(cfg, cr.Repo.Name, cr.Repo.SSHURL, cr.Repo.CloneURL),
@@ -3231,6 +3244,7 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 
 	opts := mirror.Options{Home: a.DeveloperHome, WorkspaceRoot: workspaceRoot, Instances: clones, Command: command}
 	for _, res := range mirror.EnsureHealthy(ctx, opts, repos) {
+		a.mirrorsChecked[res.StablePath] = true
 		if res.Outcome == mirror.OutcomeHealthy {
 			continue
 		}

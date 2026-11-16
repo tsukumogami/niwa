@@ -125,7 +125,9 @@ func manifest(store string) ([]packEntry, error) {
 	}
 	packs := []packEntry{}
 	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".pack") {
+		// Only names git gives packs: the check refuses any other name
+		// in a manifest, so listing one would fail every later check.
+		if !validPackName(e.Name()) {
 			continue
 		}
 		p, err := describePack(filepath.Join(dir, e.Name()))
