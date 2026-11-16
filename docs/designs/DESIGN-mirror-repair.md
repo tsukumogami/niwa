@@ -670,6 +670,21 @@ What the reference-clone work can rely on, as R15 asks:
 - **Not here.** Replacing a mirror by generation, finding every borrower
   before an old generation is removed, the make-independent command and the
   setting that turns borrowing off stay with the reference-clone work.
+- **Follow-ups the reference-clone work carries.** The retention decision
+  (`docs/decisions/DECISION-mirror-retention-residual-risk-2026-11-16.md`)
+  is accepted on two conditions that land with that work:
+  - [ ] The setting that turns borrowing off works per repo as well as for
+    the workspace, and a repo with it set gets a full clone, no alternates
+    entry and no mirror under `~/.niwa/`.
+  - [ ] A user guide section says where a workspace's mirrors live
+    (`~/.niwa/w-<key>/mirrors/`) and gives the purge steps for a commit that
+    must not stay on the host, in the order Security Considerations sets out:
+    rotate the secret; in each borrowing instance, rewrite or delete any local
+    branch that reaches the commit and run `git fetch --prune`; delete the
+    repo's stable path and its `.store/<repo-id>-*` directories; ask the
+    forge to drop the commit. It says why the order matters: a borrower ref
+    that still reaches the commit lets the next restore fetch it back by id
+    while the remote serves it.
 
 ### Proofs and how a reviewer runs them
 
@@ -786,15 +801,14 @@ delete any local branch that reaches the commit and run `git fetch
 directories; ask the forge to drop the commit. Refs on commits the remote
 no longer serves are reported unrecoverable.
 
-**Residual risk for the owner.** The mirror keeps commits a remote removed,
+**Residual risk accepted.** The mirror keeps commits a remote removed,
 secrets included, until someone deletes it by hand; nothing in niwa expires
-them, because R8 forbids it. Whether the workspace owner accepts that as a
-standing property of the host is still open: it's a residual risk put to
-the owner in
-`docs/decisions/DECISION-mirror-retention-residual-risk-2026-11-16.md`,
-which is Proposed. Whether a repo can opt out of
-mirroring is left to the reference-clone work's setting that turns borrowing
-off.
+them, because R8 forbids it. That is accepted as a standing property of the
+host in
+`docs/decisions/DECISION-mirror-retention-residual-risk-2026-11-16.md`, on
+two conditions the reference-clone work delivers: a user guide with the
+purge steps in the order above, and a setting that turns borrowing off per
+repo. Both are listed as follow-ups under Contract for reference clones.
 
 ## Consequences
 

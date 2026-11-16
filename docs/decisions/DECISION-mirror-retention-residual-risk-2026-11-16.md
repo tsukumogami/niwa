@@ -1,14 +1,13 @@
 ---
-status: Proposed
+status: Accepted
 decision: |
-  Recommended for the workspace owner to settle: accept the residual risk
-  that the host mirror keeps commits a remote removed, a leaked secret
-  included, until a person deletes it, and that recovery by id can fetch and
-  pin such a commit again after a purge. Keep retention and recovery by id as
-  the mirror-repair design states them, on two conditions that land with the
-  reference-clone work: a user guide carries the purge steps in the order
-  that keeps the commit out, and the setting that turns borrowing off can be
-  set per repo.
+  Accept the residual risk that the host mirror keeps commits a remote
+  removed, a leaked secret included, until a person deletes it, and that
+  recovery by id can fetch and pin such a commit again after a purge.
+  Retention and recovery by id stay as the mirror-repair design states them,
+  on two conditions that land with the reference-clone work: a user guide
+  carries the purge steps in the order that keeps the commit out, and the
+  setting that turns borrowing off can be set per repo.
 rationale: |
   Retention is the requirement the rest of the repair guarantee stands on,
   and every option that narrows it either gives up commits borrowers need or
@@ -24,7 +23,7 @@ rationale: |
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context
 
@@ -67,11 +66,11 @@ and that recovery by id can bring such a commit back after a purge while a
 borrower still reaches it and the remote still serves it, or should the
 design change before the reference-clone work builds on it?
 
-## Recommendation
+## Decision
 
-Accept the risk, and keep retention and recovery by id as designed, on two
-conditions that cost the design nothing and fall in work already planned.
-First, the purge steps ship in a user guide with the reference-clone work,
+The risk is accepted, and retention and recovery by id stay as designed, on
+two conditions that cost the design nothing and fall in work already
+planned. First, the purge steps ship in a user guide with the reference-clone work,
 in the order that actually keeps the commit out: rotate the secret; in each
 instance that borrows from the mirror, rewrite or delete any local branch
 that reaches the commit and run `git fetch --prune`; delete the mirror's
@@ -111,7 +110,7 @@ re-pin, clearing borrower refs before deleting the mirror, never reaches the
 people who need it. Accepting the risk without fixing that leaves the one
 real trap undocumented for users.
 
-### Accept with a documented purge procedure (recommended)
+### Accept with a documented purge procedure (chosen)
 
 As above: accept, with the ordered purge steps in a user guide and a
 per-repo off setting, both delivered with the reference-clone work. It costs
@@ -171,22 +170,22 @@ than in the reference-clone work. It costs the guarantee nothing, since an
 opted-out repo keeps a full clone and isn't a borrower. But this feature
 builds no borrowing create, so the setting would have nothing to switch
 until reference clones exist, and it would split one setting across two
-features. The recommendation gets the same protection by asking that the
+features. The decision gets the same protection by asking that the
 reference-clone work's off setting be per repo.
 
 ## Consequences
 
-If the owner accepts, the design's Security Considerations stand as written,
-and the reference-clone work picks up two items: a per-repo off setting and
-a user guide section with the ordered purge steps. Nothing in the
-mirror-repair implementation changes. A secret that reaches the mirror stays
-on the host until a person follows those steps, and the guide is the only
-thing that tells them to.
+The design's Security Considerations stand as written, and the
+reference-clone work picks up two items: a per-repo off setting and a user
+guide section with the ordered purge steps. Nothing in the mirror-repair
+implementation changes. A secret that reaches the mirror stays on the host
+until a person follows those steps, and the guide is the only thing that
+tells them to.
 
-If the owner declines, the purge command is the change that keeps the
-guarantee whole. Expiry or narrower recovery by id would each move borrowers
-from surviving a restore into the unrecoverable limit, and expiry would need
-the requirements reopened first.
+If the guide proves not to be enough, the purge command described above is
+the follow-up that keeps the guarantee whole. Expiry or narrower recovery by
+id would each move borrowers from surviving a restore into the
+unrecoverable limit, and expiry would need the requirements reopened first.
 
 ## References
 
