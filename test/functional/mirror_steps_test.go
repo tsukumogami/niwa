@@ -73,6 +73,7 @@ func registerMirrorSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the mirror link of "([^"]*)" is unchanged$`, theMirrorLinkIsUnchanged)
 	ctx.Step(`^no mirror directory exists under the sandbox home$`, noMirrorDirectoryExists)
 	registerMirrorDamageSteps(ctx)
+	registerMirrorCommandSteps(ctx)
 }
 
 // mirrorState returns the scenario's mirror state, allocating it on first use.

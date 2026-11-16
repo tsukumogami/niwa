@@ -209,8 +209,8 @@ func newLogLines(s *testState, m *mirrorScenario) ([]map[string]any, error) {
 	return lines[m.logLines:], nil
 }
 
-// requireLogLine checks one log line's fields.
-func requireLogLine(line map[string]any, repoID, event, fault, result string) error {
+// requireLogLine checks one log line's fields, command among them.
+func requireLogLine(line map[string]any, command, repoID, event, fault, result string) error {
 	for _, key := range []string{"time", "command", "mirror", "event", "fault", "result", "check_ms"} {
 		if _, ok := line[key]; !ok {
 			return fmt.Errorf("log line %v has no %q", line, key)
@@ -220,28 +220,16 @@ func requireLogLine(line map[string]any, repoID, event, fault, result string) er
 	if took != (event == "restore") {
 		return fmt.Errorf("log line %v: took_ms present = %v on a %s line", line, took, event)
 	}
-	if line["command"] != "apply" || line["mirror"] != repoID || line["event"] != event || line["fault"] != fault || line["result"] != result {
-		return fmt.Errorf("log line %v, want command apply, mirror %q, event %q, fault %q, result %q", line, repoID, event, fault, result)
+	if line["command"] != command || line["mirror"] != repoID || line["event"] != event || line["fault"] != fault || line["result"] != result {
+		return fmt.Errorf("log line %v, want command %q, mirror %q, event %q, fault %q, result %q", line, command, repoID, event, fault, result)
 	}
 	return nil
 }
 
+// theMirrorLogGainedCheckAndRestore is the log step of a scenario that runs
+// niwa apply.
 func theMirrorLogGainedCheckAndRestore(ctx context.Context, repoID, fault, result string) error {
-	s, m, err := mirrorState(ctx)
-	if err != nil {
-		return err
-	}
-	lines, err := newLogLines(s, m)
-	if err != nil {
-		return err
-	}
-	if len(lines) != 2 {
-		return fmt.Errorf("the mirror log gained %d lines, want a check and a restore line: %v", len(lines), lines)
-	}
-	if err := requireLogLine(lines[0], repoID, "check", fault, result); err != nil {
-		return err
-	}
-	return requireLogLine(lines[1], repoID, "restore", fault, result)
+	return theMirrorLogGainedCheckAndRestoreFrom(ctx, repoID, fault, result, "apply")
 }
 
 func theMirrorLogGainedOnlyAHealthyCheck(ctx context.Context, repoID string) error {
@@ -256,7 +244,7 @@ func theMirrorLogGainedOnlyAHealthyCheck(ctx context.Context, repoID string) err
 	if len(lines) != 1 {
 		return fmt.Errorf("the mirror log gained %d lines, want one healthy check line: %v", len(lines), lines)
 	}
-	return requireLogLine(lines[0], repoID, "check", "", "healthy")
+	return requireLogLine(lines[0], "apply", repoID, "check", "", "healthy")
 }
 
 // iDamageTheStore damages the linked store one way. Pack files are written
