@@ -182,6 +182,10 @@ type testState struct {
 	// authority_contract_steps_test.go.
 	gate authorityGateScenario
 
+	// mirror is what the mirror-repair scenarios remember; see
+	// mirror_steps_test.go.
+	mirror *mirrorScenario
+
 	// cleanups run in the After hook, last registered first, so a scenario
 	// that started a process or a listener stops it however the scenario
 	// ended.
@@ -627,4 +631,8 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 
 	// --- niwa onboard: individual/team setup wizard (Issue 9) ---
 	registerOnboardSteps(ctx)
+
+	// --- mirror repair: a deleted host mirror restored by an ordinary
+	// command, with borrowers the scenarios build from niwa's own clones ---
+	registerMirrorSteps(ctx)
 }
