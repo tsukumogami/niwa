@@ -14,7 +14,8 @@ goals: |
   integrity check again, the fate of pushed-then-deleted commits is stated
   and shown, and a test anyone can re-run proves all of it before reference
   clones are built.
-upstream: docs/briefs/BRIEF-mirror-repair.md
+absorbed:
+  - docs/briefs/BRIEF-mirror-repair.md
 ---
 
 # PRD: mirror-repair
@@ -22,6 +23,38 @@ upstream: docs/briefs/BRIEF-mirror-repair.md
 ## Status
 
 Accepted
+
+Absorbed [BRIEF-mirror-repair](docs/briefs/BRIEF-mirror-repair.md); carried in Absorbed Brief.
+
+## Absorbed Brief
+
+**Why this exists.** Reference clones would let niwa instances borrow git
+objects from one bare mirror per repo on the host instead of each holding a
+full copy. A borrower keeps none of what it borrows, so a deleted or damaged
+mirror breaks every borrower late and partially, and today nothing would
+notice or fix it unless a person did. The workspace owner ruled that
+reference clones aren't built until a tested design shows the mirror
+repairing itself, and that a repair the user runs by hand doesn't count.
+
+**The outcome a user should get.** The owner deletes or damages a mirror
+and the next ordinary niwa command, run by them or by an agent, notices and
+restores it with nobody acting; the borrowing instances read their history
+to the end and pass an integrity check. The owner knows ahead of time what
+happens to a local branch built on pushed commits the remote later deleted,
+and can decide to build reference clones on the evidence of a test anyone
+can run again.
+
+**Who it serves.** The owner, who runs no janitor and no scheduler; agent
+sessions in borrowing instances that have no reason to suspect the mirror; a
+developer whose local branch sits on a colleague's squash-merged work; and a
+reviewer deciding whether reference clones may go ahead.
+
+**Where it ends.** In: noticing and restoring a broken mirror during
+commands niwa already runs, keeping commits the remote dropped, the
+deleted-remote-commits case, the location of the mirror, and the test. Out:
+reference clones and the borrowing create, the plugin store, the seed,
+generation retirement, the make-independent command, and any repair a
+person runs by hand.
 
 ## Problem Statement
 
