@@ -700,6 +700,9 @@ content has the same trust as a fresh clone.
   Directories are 0700 and files 0600; locks and the log open without
   following links, and log lines are JSON-encoded and capped.
 - **Salvage** copies only regular, verified pack and loose-object files.
+  Verification checks each file's own checksums and object hashes; it isn't
+  a full `fsck`, so a well-formed but malformed object in an old pack is
+  carried over as it was, with the trust it had before the damage.
 - **Git invocation.** Every call sets `core.fsmonitor=false`,
   `core.hooksPath` to an empty directory, `protocol.ext.allow=never` and
   `GIT_TERMINAL_PROMPT=0`. Local reads also set `GIT_CONFIG_NOSYSTEM=1`,
@@ -708,11 +711,19 @@ content has the same trust as a fresh clone.
   as today's clones do, and run only after niwa rewrote the mirror's config
   from its fixed set, so no key a tampered store set survives.
 - **Remote input.** The URL comes from the workspace config, never the state
-  file, and is stored without credentials. Fetch by id sends only validated
+  file, and is stored without the userinfo part. A token placed in a URL's
+  query string isn't recognised and is stored as written, so the workspace
+  config shouldn't carry one there. Fetch by id sends only validated
   ids, only to the repo's own remote. `fsckObjects` refuses malformed objects.
 - **Agent context.** The SessionStart notice is a fixed template with capped,
   quoted names marked as data, since the names come from the remote and the
-  context goes to the model provider.
+  context goes to the model provider. Capping bounds the text, it doesn't
+  remove it: up to five names of 80 characters each still carry a few
+  hundred characters the remote chose into the agent's context.
+- **Lock waits.** A command waits for another's restore (five minutes, ten
+  seconds in the hook) rather than racing it. A stuck holder costs that
+  wait, then the command reports the mirror busy and carries on; it's an
+  availability trade made for R5's one-restore-at-a-time rule.
 
 The mirror never prunes, so it keeps every commit it fetched until the mirror
 directory is deleted, including one the remote later removed because it held
