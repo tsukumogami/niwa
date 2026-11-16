@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/guardrail"
 	"github.com/tsukumogami/niwa/internal/keyreport"
+	"github.com/tsukumogami/niwa/internal/mirror"
 	"github.com/tsukumogami/niwa/internal/pluginrecord"
 	"github.com/tsukumogami/niwa/internal/secret"
 	"github.com/tsukumogami/niwa/internal/vault"
@@ -1693,6 +1695,11 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// If a partially-written .git dir survives a cancelled niwa apply, the next
 	// apply will attempt git fetch on it via SyncRepo. Remove the affected repo
 	// directory and re-run apply to recover.
+	// Step 2.9: Restore any host mirror the workspace's clones borrow from
+	// before anything clones, fetches or reads a borrower, so a deleted mirror
+	// is back in place before a command depends on it.
+	a.ensureMirrors(ctx, effectiveCfg, classified, instanceRoot)
+
 	repoStates := map[string]RepoState{}
 	for _, cr := range classified {
 		groupDir := filepath.Join(instanceRoot, cr.Group)
@@ -3182,6 +3189,52 @@ func hasVaultRotation(oldSources, newSources []SourceEntry) bool {
 func repoAlreadyCloned(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, ".git"))
 	return err == nil
+}
+
+// ensureMirrors checks the host mirror of each classified repo that has one,
+// or that a clone in any of the workspace's instances borrows from, and
+// restores a broken one. The clone paths of every instance are passed, not
+// just this one's, because a mirror serves the whole workspace. Every result
+// that isn't a healthy mirror becomes a warning; none fails the command, which
+// carries on whatever the result.
+//
+// The mirrors live under the developer's home, so an Applier without
+// DeveloperHome (the unit suites) skips the check rather than reach the real
+// one. A root-level apply reaches this once per instance; the first restores,
+// and the later checks find the mirror healthy and say nothing.
+func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig, classified []ClassifiedRepo, instanceRoot string) {
+	if a.DeveloperHome == "" || len(classified) == 0 {
+		return
+	}
+	workspaceRoot := filepath.Dir(instanceRoot)
+	instances, _ := EnumerateInstances(workspaceRoot)
+	if !slices.Contains(instances, instanceRoot) {
+		instances = append(instances, instanceRoot)
+	}
+
+	repos := make([]mirror.Repo, 0, len(classified))
+	var clones []string
+	for _, cr := range classified {
+		repos = append(repos, mirror.Repo{
+			ID:  cr.Repo.Name,
+			URL: RepoCloneURL(cfg, cr.Repo.Name, cr.Repo.SSHURL, cr.Repo.CloneURL),
+		})
+		for _, inst := range instances {
+			clones = append(clones, filepath.Join(inst, cr.Group, cr.Repo.Name))
+		}
+	}
+
+	opts := mirror.Options{Home: a.DeveloperHome, WorkspaceRoot: workspaceRoot, Instances: clones}
+	for _, res := range mirror.EnsureHealthy(ctx, opts, repos) {
+		if res.Outcome == mirror.OutcomeHealthy {
+			continue
+		}
+		if res.Err != nil {
+			a.Reporter.Warn("mirror %s: fault %s, result %s: %v", res.RepoID, res.Fault, res.Outcome, res.Err)
+			continue
+		}
+		a.Reporter.Warn("mirror %s: fault %s, result %s", res.RepoID, res.Fault, res.Outcome)
+	}
 }
 
 // cloneWorker pulls jobs from the jobs channel until it is closed, clones or
