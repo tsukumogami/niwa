@@ -47,7 +47,7 @@ they cover.
 
 ### Step 1: A deleted mirror is restored by niwa apply and both borrowers work again
 
-**Goal**: When the mirror that a workspace's borrowers name has been deleted, `niwa apply` puts it back before it clones anything: `runPipeline` in `internal/workspace/apply.go` passes the classified repos to `mirror.EnsureHealthy`, which sees the stable path `~/.niwa/w-<key>/mirrors/<repo-id>` missing, takes that mirror's lock with `WaitFileLock`, clones the store with `--mirror` from the workspace config's URL into `.store/`, makes `.link-<rand>` and renames it over the stable path, and reports a `Reporter` warning naming the mirror, the fault and the result. It runs on the functional sandbox with a local bare remote and two instances whose clones the scenario turns into borrowers (alternates naming `<stable path>/objects`, repacked with `git repack -a -d -l`), then deletes the mirror's link and store; only the missing fault and the apply call site are in scope, with no salvage, no refresh, no probe and no manifest beyond what the restore needs, and nothing here builds reference clones or a borrowing create.
+**Goal**: When the mirror that a workspace's borrowers name has been deleted, `niwa apply` puts it back before it clones anything: `runPipeline` in `internal/workspace/apply.go` passes the classified repos and the workspace's instance clone paths (`Options.Instances`) to `mirror.EnsureHealthy`, which sees the stable path `~/.niwa/w-<key>/mirrors/<repo-id>` missing, takes that mirror's lock with `WaitFileLock` from the new leaf package `internal/filelock` (which also takes today's flock helpers and `CanonicalPath`, with thin wrappers left in `internal/workspace`; `internal/mirror` imports `internal/filelock` and never `internal/workspace`), clones the store with `--mirror` from the workspace config's URL into `.store/`, makes `.link-<rand>` and renames it over the stable path, and reports a `Reporter` warning naming the mirror, the fault and the result. It runs on the functional sandbox with a local bare remote and two instances whose clones the scenario turns into borrowers (alternates naming `<stable path>/objects`, repacked with `git repack -a -d -l`), then deletes the mirror's link and store; only the missing fault and the apply call site are in scope, with no salvage, no refresh, no probe and no manifest beyond what the restore needs, and nothing here builds reference clones or a borrowing create.
 
 **Acceptance Criteria**:
 
@@ -71,7 +71,7 @@ they cover.
 
 **Dependencies**: None
 
-**Files**: `internal/mirror/`, `internal/workspace/file_lock_unix.go`, `internal/workspace/apply.go`, `test/functional/features/mirror-repair.feature`, `test/functional/mirror_steps_test.go`, `Makefile`
+**Files**: `internal/mirror/`, `internal/filelock/`, `internal/workspace/file_lock.go`, `internal/workspace/file_lock_unix.go`, `internal/workspace/apply.go`, `test/functional/features/mirror-repair.feature`, `test/functional/mirror_steps_test.go`, `Makefile`
 
 ### Step 2: A damaged mirror is restored by an ordinary command, keeping every intact pack
 

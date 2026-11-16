@@ -425,8 +425,14 @@ restore, refresh, probe and log. Its entry point, `EnsureHealthy`, is called
 by the create and apply pipeline, `niwa worktree create` and the
 SessionStart hook. A second one, `Seed`, builds a repo's first mirror under
 the same lock and fixed config, with nothing to salvage; this feature owns
-it, and the borrowing create calls it. A new waiting lock in
-`internal/workspace` serializes work on each mirror. Until the
+it, and the borrowing create calls it. A new waiting lock serializes work
+on each mirror; it lives with today's flock helpers and `CanonicalPath` in
+a new leaf package, `internal/filelock`. The callers pass the instance clone
+paths in, so `internal/mirror` never enumerates instances itself.
+Dependencies run one way: `internal/workspace` and `internal/cli` import
+`internal/mirror`, both it and `internal/workspace` import
+`internal/filelock`, and `internal/mirror` never imports
+`internal/workspace`, so there's no import cycle. Until the
 reference-clone work lands no instance borrows, so `EnsureHealthy` finds
 nothing to do; the functional scenarios exercise it with borrowers they
 build.
@@ -437,7 +443,12 @@ build.
 checks, restore with salvage, the refresh and its daily deep verify, the
 borrower probe and recovery by id, and the log writer. It shells out to git.
 
-**`WaitFileLock`** in `internal/workspace/file_lock_unix.go` polls the same
+**`internal/filelock`**: a leaf package that imports no niwa package. It
+takes `TryFileLock`, the lock-dir and open helpers, `ErrLockHeld`,
+`ErrLockUnsupported` and `CanonicalPath` out of `internal/workspace`, which
+imports it and keeps thin wrappers so today's callers don't change.
+
+**`WaitFileLock`** in `internal/filelock/file_lock_unix.go` polls the same
 `flock` as `TryFileLock` until a caller-chosen timeout. Today's only exported
 lock, `TryFileLock`, never waits, and the waiting `acquireFileLock` is
 unexported with a fixed 30 s limit. It opens the lock file with
@@ -450,16 +461,18 @@ skipped with a warning.
   is final and just before the group directories and clone pool. `Create`
   and `Apply` both reach it, so `niwa create`, `niwa apply`, `niwa dispatch`
   and `niwa instance from-hook` provisioning a new instance all run the
-  check, with the classified repos, URLs from `RepoCloneURL` and refresh on.
+  check, with the classified repos, URLs from `RepoCloneURL`, the
+  workspace's instance clone paths and refresh on.
   A root-level apply reaches it once per instance; later checks in the same
   command find the mirror healthy.
 - `runInstanceHookStart` in `internal/cli/instance_from_hook.go`, on the paths
   that resolve a workspace root but don't provision (a resumed dispatch
   session, a session the guard declines). These check every mirror recorded
-  under the workspace key with no refresh, loading the config only for a
-  broken mirror, to get its URL.
-- `niwa worktree create`, before checkout, for its repo, since a worktree
-  reads its instance clone's objects.
+  under the workspace key with no refresh, passing the workspace's instance
+  clone paths and loading the config only for a broken mirror, to get its
+  URL.
+- `niwa worktree create`, before checkout, for its repo, passing its
+  instance clone's path, since a worktree reads that clone's objects.
 
 **Reporting.** Results go to the command's `Reporter` as warnings on stderr.
 Every string the remote chose (ref names, file names) is cut to printable
@@ -517,6 +530,7 @@ func LockPath(home, workspaceRoot, repoID string) string
 type Repo struct{ ID, URL string } // URL from the workspace config
 type Options struct {
 	Home, WorkspaceRoot string
+	Instances []string     // instance or borrower clone paths; the caller lists them
 	Command  string        // logged: create, apply, dispatch, from-hook, worktree
 	Refresh  bool          // fetch a healthy mirror (create and apply)
 	LockWait time.Duration // default 5 minutes; 10 seconds in the hook
@@ -540,11 +554,13 @@ type LostRef struct {
 }
 
 // Mirrored keeps candidates with a state file, a link, a .store/<repo-id>-*
-// directory, or a borrower whose alternates name the stable path.
-func Mirrored(home, workspaceRoot string, candidates []Repo) []Repo
+// directory, or a borrower among instances whose alternates name the
+// stable path.
+func Mirrored(home, workspaceRoot string, instances []string, candidates []Repo) []Repo
 // Recorded returns the repos with a state file, a link or a store under the
-// workspace key, so a mirror whose state file is lost is still found.
-func Recorded(home, workspaceRoot string) []Repo
+// workspace key, or a stable path one of instances names, so a mirror
+// whose state file is lost is still found.
+func Recorded(home, workspaceRoot string, instances []string) []Repo
 // EnsureHealthy checks each mirror and restores any that's broken. Nothing
 // it returns should fail the caller's command.
 func EnsureHealthy(ctx context.Context, opts Options, repos []Repo) []Result
@@ -554,7 +570,7 @@ func Seed(ctx context.Context, opts Options, repo Repo) Result
 ```
 
 ```go
-package workspace
+package filelock // imports no niwa package; workspace and mirror import it
 
 // WaitFileLock polls until the lock is free, ctx is done or timeout passes;
 // on timeout it returns ErrLockHeld wrapped with the holder line.
@@ -592,8 +608,8 @@ A log line; `event` is `check`, `restore`, `refresh` or `unrecoverable`, and
 ### Data Flow
 
 1. **Find.** `Mirrored` keeps the call site's repos that have a state file,
-   a link, a store, or a borrower (one stat and short read of each instance
-   clone's alternates file). On today's hosts nothing is kept and the call
+   a link, a store, or a borrower (one stat and short read of the
+   alternates file of each instance clone the caller passed). On today's hosts nothing is kept and the call
    returns.
 2. **Check.** Lock-free, per mirror, as Decision 1 describes; a moved ctime
    triggers `verify-pack` on that pack only, and packs the manifest doesn't
@@ -628,8 +644,9 @@ What the reference-clone work can rely on, as R15 asks:
 - **Where.** `~/.niwa/w-<first 32 hex of sha256 of the workspace root's
   canonical path>/mirrors/<repo-id>`, a path that stays the same across
   restores and is a symlink to the current store.
-- **The call.** `mirror.EnsureHealthy`; `Result.Usable()` says whether a
-  create may borrow.
+- **The call.** `mirror.EnsureHealthy`, with the borrower clone paths in
+  `Options.Instances`; `Result.Usable()` says whether a create may borrow.
+  The waiting lock is `filelock.WaitFileLock` in `internal/filelock`.
 - **First build.** `mirror.Seed` builds a repo's first mirror under the same
   lock and fixed config, with nothing to salvage. This feature owns it; the
   borrowing create calls it for a repo that has no mirror yet.
@@ -687,7 +704,9 @@ retries`; `A healthy check needs no network and stays under 100 ms`.
 Each phase is one commit. Nothing here builds reference clones or the shared
 plugin store; the borrowing create is the reference-clone work.
 
-1. **Waiting lock.** `WaitFileLock`, its non-unix stub, unit tests.
+1. **Waiting lock.** The leaf package `internal/filelock` with the flock
+   helpers and `CanonicalPath` moved out of `internal/workspace`, which
+   keeps thin wrappers; `WaitFileLock`, its non-unix stub, unit tests.
 2. **Layout, state and log.** `internal/mirror` with the path helpers, repo
    id and link target validation, the 0700 and 0600 modes, the fixed git
    environment every later phase calls git through, the state file's atomic
@@ -698,7 +717,8 @@ plugin store; the borrowing create is the reference-clone work.
    link and store intact, and that plant a symlink, a hostile config and an
    outside link target and see none followed.
 5. **Probe and recovery.** Probe, bounded fetch by id, pins, `LostRef`.
-6. **Call sites.** `runPipeline`, `niwa worktree create`, `Reporter` warnings.
+6. **Call sites.** `runPipeline`, `niwa worktree create`, each passing its
+   instance clone paths, `Reporter` warnings.
 7. **Hook notice.** Results into `additionalContext` through the fixed
    template, and the check on the hook's non-provisioning paths.
 8. **Proof.** The feature file, `mirror_steps_test.go` and the
@@ -759,14 +779,20 @@ a secret. A person purges it by deleting the repo's stable path and its
 no old store to salvage, the next command rebuilds from what the remote
 still serves. After a purge, a removed commit can come back: if the remote
 still serves it by id and a borrower's ref still reaches it, the recovery
-by id fetches and pins it again. To keep it out, purge the mirror and ask
-the forge to drop the commit; refs on commits the remote no longer serves
-are reported unrecoverable.
+by id fetches and pins it again. To keep it out, follow this order: rotate
+the secret; in each instance that borrows from the mirror, rewrite or
+delete any local branch that reaches the commit and run `git fetch
+--prune`; delete the repo's stable path and its `.store/<repo-id>-*`
+directories; ask the forge to drop the commit. Refs on commits the remote
+no longer serves are reported unrecoverable.
 
 **Residual risk for the owner.** The mirror keeps commits a remote removed,
 secrets included, until someone deletes it by hand; nothing in niwa expires
-them, because R8 forbids it. The workspace owner accepts that as a standing
-property of the host with this design. Whether a repo can opt out of
+them, because R8 forbids it. Whether the workspace owner accepts that as a
+standing property of the host is still open: it's a residual risk put to
+the owner in
+`docs/decisions/DECISION-mirror-retention-residual-risk-2026-11-16.md`,
+which is Proposed. Whether a repo can opt out of
 mirroring is left to the reference-clone work's setting that turns borrowing
 off.
 

@@ -231,7 +231,8 @@ ones it serves:
       the design says the branch survives, `git log` on it reads to the
       root and `git fsck` is clean. If the design names a stated limit, the
       scenario asserts niwa's output names that branch as unrecoverable and
-      every other ref in the borrower still reads clean. (R8, R9; Proof C)
+      its remote-tracking ref as a stale ref, and every ref in the borrower
+      niwa doesn't report still reads clean. (R8, R9; Proof C)
 - [ ] After each repair scenario, niwa's log holds an entry naming the
       mirror, the fault found and whether the restore worked. (R7)
 - [ ] In each scenario the mirror is under the sandbox home's `~/.niwa/`

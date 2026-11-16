@@ -39,8 +39,8 @@ mirror ever fetched stays reachable. When a mirror is lost or damaged, the
 restore pins two kinds of commit under `refs/niwa/kept/<sha>`: those it
 salvages from the old store, and those it fetches back from the remote by id
 because a borrower's ref still needs them. The design's Security
-Considerations already describe a manual purge, name the result as a risk the
-owner accepts, and leave a per-repo opt-out to the reference-clone work's
+Considerations already describe a manual purge, name the result as a residual
+risk put to the owner here, and leave a per-repo opt-out to the reference-clone work's
 setting that turns borrowing off.
 
 ## Problem
@@ -56,8 +56,8 @@ borrowers, and if a borrower's branch or remote-tracking ref still reaches
 the removed commit and the remote still serves it by id (forges often do for
 a while, from a hidden ref or an object not yet collected), niwa fetches it
 back and pins it again. Someone who deleted the mirror to be rid of a secret
-can find it back on disk after the next niwa command, and the design's purge
-text doesn't warn about that order of steps.
+can find it back on disk after the next niwa command unless they clear the
+borrower refs first, an order of steps the purge text has to spell out.
 
 ## Question
 
@@ -106,10 +106,10 @@ one stated exception of commits the remote has truly destroyed.
 The owner signs off on the Security Considerations text unchanged. It's the
 least work, and the design already names the purge and the forge request.
 It costs the guarantee nothing. It falls short because the purge steps live
-only in a design document few users will read, and they don't say to clear
-borrower refs before deleting the mirror, which is the step that stops the
-re-pin. Accepting the risk without fixing that leaves the one real trap
-undocumented.
+only in a design document few users will read, so the step that stops the
+re-pin, clearing borrower refs before deleting the mirror, never reaches the
+people who need it. Accepting the risk without fixing that leaves the one
+real trap undocumented for users.
 
 ### Accept with a documented purge procedure (recommended)
 
