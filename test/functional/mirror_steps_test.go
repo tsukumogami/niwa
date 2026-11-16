@@ -34,6 +34,11 @@ type mirrorScenario struct {
 	snapshots   map[string]borrowerSnapshot // clone path -> state before the fault
 	unpushed    struct{ clone, commit, status string }
 	link        string // a remembered link target
+
+	// What the damage scenarios remember: the mirror log's line count and
+	// the state file's bytes before a command.
+	logLines  int
+	stateFile []byte
 }
 
 // borrowerSnapshot is what must survive a restore untouched in a borrower.
@@ -67,6 +72,7 @@ func registerMirrorSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^I remember the mirror link of "([^"]*)"$`, iRememberTheMirrorLink)
 	ctx.Step(`^the mirror link of "([^"]*)" is unchanged$`, theMirrorLinkIsUnchanged)
 	ctx.Step(`^no mirror directory exists under the sandbox home$`, noMirrorDirectoryExists)
+	registerMirrorDamageSteps(ctx)
 }
 
 // mirrorState returns the scenario's mirror state, allocating it on first use.
