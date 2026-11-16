@@ -2,6 +2,7 @@ package mirror
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -300,6 +301,125 @@ func TestEnsureHealthy_LeavesANonLinkAtTheStablePath(t *testing.T) {
 		t.Fatalf("the directory at the stable path was changed: %q (%v)", data, err)
 	}
 	emptyDir(t, filepath.Join(f.mdir(), ".store"))
+}
+
+func TestResultNotice(t *testing.T) {
+	stable := "/h/.niwa/w-0123/mirrors/app"
+	log := "/h/.niwa/w-0123/mirrors/.meta/mirror.log"
+	cases := []struct {
+		res  Result
+		want string
+	}{
+		{Result{RepoID: "app", StablePath: stable, Outcome: OutcomeHealthy}, ""},
+		{
+			Result{RepoID: "app", StablePath: stable, Fault: FaultMissing, Outcome: OutcomeRestored},
+			"niwa mirror app: fault missing, result restored. It was rebuilt from the remote, and the clones that borrow from it read normally. Mirror log: " + log,
+		},
+		{
+			Result{RepoID: "app", StablePath: stable, Fault: FaultPackChanged, Outcome: OutcomeRestoreFailed},
+			"niwa mirror app: fault pack-changed, result restore-failed. It could not be rebuilt, so clones that borrow from it may fail to read objects until a later niwa command restores it. Mirror log: " + log,
+		},
+		{
+			Result{RepoID: "app", StablePath: stable, Fault: FaultMissing, Outcome: OutcomeBusy},
+			"niwa mirror app: fault missing, result busy. Another niwa command held it for the whole wait, so nothing was changed; the next niwa command checks it again. Mirror log: " + log,
+		},
+	}
+	for _, c := range cases {
+		if got := c.res.Notice(); got != c.want {
+			t.Errorf("Notice() for %s =\n%q\nwant\n%q", c.res.Outcome, got, c.want)
+		}
+	}
+
+	forged := Result{
+		RepoID: "app", StablePath: stable, Fault: FaultMissing, Outcome: OutcomeRestoreFailed,
+		Err: errors.New("\x1b[31mx\nforged line"),
+	}
+	got := forged.Notice()
+	if strings.ContainsAny(got, "\x1b\n\r") || strings.Contains(got, "forged") || strings.Contains(got, "[31m") {
+		t.Fatalf("Notice() carries the error's text: %q", got)
+	}
+	want := "niwa mirror app: fault missing, result restore-failed. It could not be rebuilt, so clones that borrow from it may fail to read objects until a later niwa command restores it. Mirror log: " + log
+	if got != want {
+		t.Fatalf("Notice() with an error =\n%q\nwant\n%q", got, want)
+	}
+
+	hostile := Result{RepoID: "app", StablePath: "/h\n\x1b[2Jx/.niwa/w-0123/mirrors/app", Fault: FaultMissing, Outcome: OutcomeRestored}
+	if got := hostile.Notice(); strings.ContainsAny(got, "\x1b\n") {
+		t.Fatalf("Notice() kept a control character from the home path: %q", got)
+	}
+}
+
+func TestRecorded_FindsEachSourceAlone(t *testing.T) {
+	stamp := "-20261116T101500Z-3f9a0b1c"
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, f fixture)
+		want  []string
+	}{
+		{"state file", func(t *testing.T, f fixture) {
+			writeFile(t, filepath.Join(f.mdir(), ".meta", "app.json"), "{}")
+		}, []string{"app"}},
+		{"link", func(t *testing.T, f fixture) {
+			mkdir(t, f.mdir())
+			if err := os.Symlink(".store/app"+stamp, filepath.Join(f.mdir(), "app")); err != nil {
+				t.Fatal(err)
+			}
+		}, []string{"app"}},
+		{"store directory", func(t *testing.T, f fixture) {
+			mkdir(t, filepath.Join(f.mdir(), ".store", "app"+stamp))
+		}, []string{"app"}},
+		{"borrower", func(t *testing.T, f fixture) {
+			f.borrow(t)
+		}, []string{"app"}},
+		{"store of a longer id", func(t *testing.T, f fixture) {
+			mkdir(t, filepath.Join(f.mdir(), ".store", "app-extra"+stamp))
+		}, []string{"app-extra"}},
+		{"niwa's own entries and invalid names", func(t *testing.T, f fixture) {
+			writeFile(t, filepath.Join(f.mdir(), ".meta", "mirror.log"), "{}\n")
+			writeFile(t, filepath.Join(f.mdir(), ".meta", ".app.json-3f9a0b1c"), "{}")
+			writeFile(t, filepath.Join(f.mdir(), ".meta", "-bad.json"), "{}")
+			mkdir(t, filepath.Join(f.mdir(), ".tmp", "app-3f9a0b1c"))
+			mkdir(t, filepath.Join(f.mdir(), ".store", "-bad"+stamp))
+			mkdir(t, filepath.Join(f.mdir(), ".store", "app-not-a-store"))
+			if err := os.Symlink(".store/app"+stamp, filepath.Join(f.mdir(), ".link-3f9a0b1c")); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(f.clone, ".git", "objects", "info", "alternates"), "/elsewhere/app/objects\n")
+		}, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t)
+			c.setup(t, f)
+			got := Recorded(f.home, f.root, []string{f.clone})
+			if strings.Join(got, ",") != strings.Join(c.want, ",") {
+				t.Fatalf("Recorded = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestRecorded_NoKeyDirectoryReturnsAndWritesNothing(t *testing.T) {
+	f := newFixture(t)
+	if got := Recorded(f.home, f.root, []string{f.clone}); len(got) != 0 {
+		t.Fatalf("Recorded = %v, want none", got)
+	}
+	emptyDir(t, f.home)
+}
+
+func mkdir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFile(t *testing.T, path, body string) {
+	t.Helper()
+	mkdir(t, filepath.Dir(path))
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestEnsureHealthy_ReplacesALinkPointingOutside(t *testing.T) {

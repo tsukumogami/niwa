@@ -10,12 +10,14 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/fallbacknotice"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/keyreport"
+	"github.com/tsukumogami/niwa/internal/mirror"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -116,6 +118,47 @@ type provisionResult struct {
 	// before the store existed. Nil when the run failed before
 	// Create; a nil collector renders nothing.
 	Notices *fallbacknotice.Collector
+
+	// Mirrors are the host mirrors the run found broken, with what it did
+	// about each; healthy ones aren't listed. Like Keys they come back on
+	// success and on a Create failure. The run has already warned about each
+	// on stderr; the hook also puts their notices into the injected context,
+	// the only place a session sees them.
+	Mirrors []mirror.Result
+}
+
+// The names the mirror log gives the commands that provision through
+// provisionInstance, and the lock wait the hook uses. A session waits on its
+// SessionStart hook, so the hook waits 10 seconds for another command's
+// restore rather than mirror.DefaultLockWait, and reports the mirror busy.
+const (
+	mirrorCommandHook     = "from-hook"
+	mirrorCommandDispatch = "dispatch"
+	mirrorCommandWorktree = "worktree"
+	hookMirrorLockWait    = 10 * time.Second
+)
+
+// provisionMirrorKey is the context key withProvisionMirror stores under.
+type provisionMirrorKey struct{}
+
+// provisionMirror is the mirror log name and lock wait a provisioning
+// caller asks for.
+type provisionMirror struct {
+	command  string
+	lockWait time.Duration
+}
+
+// withProvisionMirror tells provisionInstance which command its mirror check
+// logs as and how long a restore waits for the mirror's lock (zero keeps the
+// default). A caller that sets nothing, `niwa watch` and `niwa resume`, logs
+// as create, the pipeline's own name. It rides the context rather than a
+// parameter so provisionInstanceFunc keeps the signature every test fake
+// substitutes, the way WithDisposableGit reaches the same call.
+func withProvisionMirror(ctx context.Context, command string, lockWait time.Duration) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, provisionMirrorKey{}, provisionMirror{command: command, lockWait: lockWait})
 }
 
 // provisionInstanceFunc provisions an ephemeral instance for the given session
@@ -202,12 +245,16 @@ func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsD
 	// only once it has captured the session id, so a hook racing that write
 	// for the same id can still slip past; the ordinary case is a resume, long
 	// after.
+	//
+	// Neither this path nor a declined guard provisions, so neither runs the
+	// mirror check a provision would; each checks the workspace's recorded
+	// mirrors itself and reports only a mirror that wasn't healthy.
 	if m, err := workspace.ReadSessionMapping(workspaceRoot, payload.SessionID); err == nil && m.Origin == workspace.MappingOriginDispatch {
-		return nil
+		return writeHookMirrorNotices(cmd, workspaceRoot)
 	}
 
 	if !sessionStartGuardPasses(workspaceRoot, payload.Cwd, payload.SessionID, jobsDir) {
-		return nil
+		return writeHookMirrorNotices(cmd, workspaceRoot)
 	}
 
 	namePrefix := payload.SessionID[:sessionNamePrefixLen]
@@ -217,7 +264,9 @@ func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsD
 	// cloneWorkers is 0 here: the hook path takes the [global] clone_workers
 	// config or the built-in default, the same as before this call gained the
 	// parameter.
-	res, err := provisionInstanceFunc(cmd.Context(), workspaceRoot, payload.Cwd, namePrefix, "-", 0)
+	ctx := withProvisionMirror(cmd.Context(), mirrorCommandHook, hookMirrorLockWait)
+	res, err := provisionInstanceFunc(ctx, workspaceRoot, payload.Cwd, namePrefix, "-", 0)
+	mirrorNotices := mirrorResultNotices(res.Mirrors)
 	if errors.Is(err, workspace.ErrStrictSecrets) {
 		// A strict refusal is the workspace working as configured, and the
 		// guarantee it buys -- no instance materializes holding a shortfall --
@@ -231,7 +280,7 @@ func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsD
 		// the report as context, exit 0. No mapping is written, because there
 		// is no instance to map to. Every other provisioning failure is still
 		// a failure and still exits non-zero.
-		out, buildErr := buildStrictFailureInjection(res.Keys, res.Notices)
+		out, buildErr := buildStrictFailureInjection(res.Keys, res.Notices, mirrorNotices...)
 		if buildErr != nil {
 			renderNotices(cmd.ErrOrStderr(), res.Notices)
 			return fmt.Errorf("niwa: error: assembling session context: %w", buildErr)
@@ -279,7 +328,7 @@ func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsD
 		mcpServers = st.ApprovedMCPServers
 	}
 
-	out, err := buildSessionStartInjection(res.Path, res.Keys, res.Notices, mcpServers)
+	out, err := buildSessionStartInjection(res.Path, res.Keys, res.Notices, mcpServers, mirrorNotices...)
 	if err != nil {
 		renderNotices(cmd.ErrOrStderr(), res.Notices)
 		return fmt.Errorf("niwa: error: assembling session context: %w", err)
@@ -407,7 +456,12 @@ type sessionStartInjection struct {
 // non-empty, ephemeralMCPNotice follows the fallback notices, since it too
 // describes what this session has to work with. An empty list adds nothing,
 // so a workspace with no MCP servers gets exactly the payload it got before.
-func buildSessionStartInjection(instancePath string, keys []keyreport.Entry, notices *fallbacknotice.Collector, mcpServers []string) ([]byte, error) {
+//
+// mirrorNotices are the Notice lines of the host mirrors the provisioning run
+// found broken. They follow the fallback notices, one per line, since the
+// hook's stderr, where the run also warned about them, reaches nobody. None
+// adds nothing.
+func buildSessionStartInjection(instancePath string, keys []keyreport.Entry, notices *fallbacknotice.Collector, mcpServers []string, mirrorNotices ...string) ([]byte, error) {
 	claudeMD := ""
 	if data, err := os.ReadFile(filepath.Join(instancePath, "CLAUDE.md")); err == nil {
 		claudeMD = string(data)
@@ -424,6 +478,10 @@ func buildSessionStartInjection(instancePath string, keys []keyreport.Entry, not
 		b = append(b, '\n')
 	}
 	if text := notices.RenderContext(); text != "" {
+		b = append(b, text...)
+		b = append(b, '\n')
+	}
+	if text := mirrorNoticeText(mirrorNotices); text != "" {
 		b = append(b, text...)
 		b = append(b, '\n')
 	}
@@ -498,8 +556,9 @@ func ephemeralMCPNotice(names []string) string {
 //
 // The fallback notices follow the report: a refusal can follow a run that
 // served some keys from the store and had nothing stored for others, and the
-// agent needs both to explain it.
-func buildStrictFailureInjection(keys []keyreport.Entry, notices *fallbacknotice.Collector) ([]byte, error) {
+// agent needs both to explain it. The mirror notices come last, for the same
+// reason as on buildSessionStartInjection.
+func buildStrictFailureInjection(keys []keyreport.Entry, notices *fallbacknotice.Collector, mirrorNotices ...string) ([]byte, error) {
 	const lead = "No niwa instance was provisioned for this session. The workspace runs with strict " +
 		"secret resolution, which refuses to create an instance missing any environment key it declares. " +
 		"You are working at the launch directory with no instance: report this and stop, rather than " +
@@ -513,6 +572,10 @@ func buildStrictFailureInjection(keys []keyreport.Entry, notices *fallbacknotice
 		b = append(b, '\n')
 	}
 	if text := notices.RenderContext(); text != "" {
+		b = append(b, '\n')
+		b = append(b, text...)
+	}
+	if text := mirrorNoticeText(mirrorNotices); text != "" {
 		b = append(b, '\n')
 		b = append(b, text...)
 	}
@@ -592,6 +655,15 @@ func provisionInstance(ctx context.Context, workspaceRoot, cwd string, cloneWork
 	applier.Keys = keys
 	notices := fallbacknotice.New(nil)
 	applier.Notices = notices
+	var mirrors []mirror.Result
+	applier.MirrorResults = &mirrors
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if pm, ok := ctx.Value(provisionMirrorKey{}).(provisionMirror); ok {
+		applier.MirrorCommand = pm.command
+		applier.MirrorLockWait = pm.lockWait
+	}
 
 	// Reconcile before the config drives materialization (issue #227). Every
 	// dispatched session's instance comes up through here, once, with no apply
@@ -652,10 +724,150 @@ func provisionInstance(ctx context.Context, workspaceRoot, cwd string, cloneWork
 		// The keys collected before the failure travel with it. A strict
 		// refusal is the one failure whose explanation is the report, and the
 		// hook caller cannot read it off disk: Create removed the instance.
-		return provisionResult{Keys: keys.Report(), Notices: notices}, err
+		return provisionResult{Keys: keys.Report(), Notices: notices, Mirrors: mirrors}, err
 	}
 
-	return provisionResult{Name: name, Path: instancePath, Keys: keys.Report(), Notices: notices}, nil
+	return provisionResult{Name: name, Path: instancePath, Keys: keys.Report(), Notices: notices, Mirrors: mirrors}, nil
+}
+
+// mirrorResultNotices returns the Notice line of each result that has one.
+func mirrorResultNotices(results []mirror.Result) []string {
+	var notices []string
+	for _, res := range results {
+		if n := res.Notice(); n != "" {
+			notices = append(notices, n)
+		}
+	}
+	return notices
+}
+
+// mirrorNoticeText joins mirror notices one per line for a hook's context,
+// with a trailing newline; none gives "".
+func mirrorNoticeText(notices []string) string {
+	if len(notices) == 0 {
+		return ""
+	}
+	return strings.Join(notices, "\n") + "\n"
+}
+
+// writeHookMirrorNotices is the mirror check of a SessionStart hook that
+// provisions nothing: it checks every mirror recorded for workspaceRoot (see
+// checkRecordedMirrors) and, only when one wasn't healthy, prints a
+// SessionStart payload whose whole context is the notices. A healthy
+// workspace, or one with no mirrors, prints nothing, so the session starts
+// exactly as it did before. Nothing here fails the hook.
+func writeHookMirrorNotices(cmd *cobra.Command, workspaceRoot string) error {
+	notices := mirrorResultNotices(checkRecordedMirrors(cmd.Context(), workspaceRoot))
+	if len(notices) == 0 {
+		return nil
+	}
+	var inj sessionStartInjection
+	inj.HookSpecificOutput.HookEventName = hookEventSessionStart
+	inj.HookSpecificOutput.AdditionalContext = strings.Join(notices, "\n")
+	encoded, err := json.Marshal(inj)
+	if err != nil {
+		return nil
+	}
+	_, _ = cmd.OutOrStdout().Write(append(encoded, '\n'))
+	return nil
+}
+
+// checkRecordedMirrors checks and restores the mirrors mirror.Recorded finds
+// for workspaceRoot, logging as the hook with the hook's lock wait. With no
+// repo list to start from, the borrowers it looks at are every directory two
+// levels under each instance (<group>/<repo>), and each repo's URL comes from
+// mirrorRepos. A home it can't resolve checks nothing.
+func checkRecordedMirrors(ctx context.Context, workspaceRoot string) []mirror.Result {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil
+	}
+	instances, _ := workspace.EnumerateInstances(workspaceRoot)
+	clones := instanceClones(instances)
+	ids := mirror.Recorded(home, workspaceRoot, clones)
+	if len(ids) == 0 {
+		return nil
+	}
+	opts := mirror.Options{
+		Home:          home,
+		WorkspaceRoot: workspaceRoot,
+		Instances:     clones,
+		LockWait:      hookMirrorLockWait,
+		Command:       mirrorCommandHook,
+	}
+	return mirror.EnsureHealthy(ctx, opts, mirrorRepos(workspaceRoot, instances, ids))
+}
+
+// instanceClones lists the directories two levels under each instance, where
+// an instance keeps its clones as <group>/<repo>. Entries starting with a dot
+// (.niwa, .claude) are skipped at both levels.
+func instanceClones(instances []string) []string {
+	var clones []string
+	for _, inst := range instances {
+		groups, err := os.ReadDir(inst)
+		if err != nil {
+			continue
+		}
+		for _, g := range groups {
+			if !g.IsDir() || strings.HasPrefix(g.Name(), ".") {
+				continue
+			}
+			repos, err := os.ReadDir(filepath.Join(inst, g.Name()))
+			if err != nil {
+				continue
+			}
+			for _, r := range repos {
+				if r.IsDir() && !strings.HasPrefix(r.Name(), ".") {
+					clones = append(clones, filepath.Join(inst, g.Name(), r.Name()))
+				}
+			}
+		}
+	}
+	return clones
+}
+
+// mirrorRepos gives each of ids the URL a restore clones it from, for a
+// caller with no classified repos to hand: the workspace config's, through
+// RepoCloneURL, or failing that the URL one of instances recorded for the
+// repo in its state. A repo neither names keeps an empty URL, which a restore
+// reports as restore-failed rather than guessing one.
+func mirrorRepos(workspaceRoot string, instances, ids []string) []mirror.Repo {
+	var cfg *config.WorkspaceConfig
+	if path, _, err := config.Discover(workspaceRoot); err == nil {
+		if res, err := config.Load(path); err == nil {
+			cfg = res.Config
+		}
+	}
+	var states []*workspace.InstanceState
+	statesLoaded := false
+	repos := make([]mirror.Repo, 0, len(ids))
+	for _, id := range ids {
+		url := ""
+		if cfg != nil {
+			url = workspace.RepoCloneURL(cfg, id, "", "")
+		}
+		if url == "" {
+			if !statesLoaded {
+				for _, inst := range instances {
+					if st, err := workspace.LoadState(inst); err == nil {
+						states = append(states, st)
+					}
+				}
+				statesLoaded = true
+			}
+			for _, st := range states {
+				if rs, ok := st.Repos[id]; ok && rs.URL != "" {
+					url = rs.URL
+					break
+				}
+			}
+		}
+		repos = append(repos, mirror.Repo{ID: id, URL: url})
+	}
+	return repos
 }
 
 // realDestroyInstance is the production teardown: it force-destroys the

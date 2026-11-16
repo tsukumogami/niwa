@@ -3,11 +3,16 @@ package mirror
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // DefaultLockWait is how long a restore waits for another command's restore
@@ -35,7 +40,8 @@ type Options struct {
 	// LockWait bounds the wait for a mirror's lock; zero means
 	// DefaultLockWait.
 	LockWait time.Duration
-	// Command names the niwa command in the mirror log: create, apply.
+	// Command names the niwa command in the mirror log: create, apply,
+	// dispatch, from-hook (the SessionStart hook) or worktree.
 	Command string
 }
 
@@ -87,6 +93,97 @@ type Result struct {
 // Usable reports whether borrowers can read the mirror after the call.
 func (r Result) Usable() bool {
 	return r.Outcome == OutcomeHealthy || r.Outcome == OutcomeRestored
+}
+
+// noticeEffects says, per outcome, what a notice tells the reader the result
+// means for the clones that borrow from the mirror.
+var noticeEffects = map[Outcome]string{
+	OutcomeRestored:      "It was rebuilt from the remote, and the clones that borrow from it read normally.",
+	OutcomeRestoreFailed: "It could not be rebuilt, so clones that borrow from it may fail to read objects until a later niwa command restores it.",
+	OutcomeBusy:          "Another niwa command held it for the whole wait, so nothing was changed; the next niwa command checks it again.",
+}
+
+// Notice is the one line a command shows a reader who can't see its stderr,
+// such as a session that gets the SessionStart hook's context: the repo id,
+// the fault, the outcome and where the mirror log is. It's "" for a healthy
+// mirror. It's built from those four values and fixed text only, never from
+// Err, which can carry text git or the remote produced, and any control
+// character in it is dropped, so a hostile home path can't break the line.
+func (r Result) Notice() string {
+	if r.Outcome == OutcomeHealthy || r.Outcome == "" {
+		return ""
+	}
+	line := fmt.Sprintf("niwa mirror %s: fault %s, result %s.", r.RepoID, r.Fault, r.Outcome)
+	if effect := noticeEffects[r.Outcome]; effect != "" {
+		line += " " + effect
+	}
+	if r.StablePath != "" {
+		line += " Mirror log: " + logPath(filepath.Dir(r.StablePath))
+	}
+	return strings.Map(func(c rune) rune {
+		if unicode.IsControl(c) {
+			return -1
+		}
+		return c
+	}, line)
+}
+
+// storeIDPattern takes the repo id out of a store directory's name. The id is
+// matched greedily, so "app-extra-<stamp>-<rand>" gives "app-extra".
+var storeIDPattern = regexp.MustCompile(`^(.+)-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$`)
+
+// Recorded lists the repo ids that have a mirror or should, found from what's
+// on disk alone, for a caller that has no repo list of its own: a state file
+// in .meta/, an entry at a stable path, a store directory in .store/, or a
+// stable path that the alternates of one of clones names. Only ids
+// ValidRepoID accepts are returned, sorted. It only reads: a workspace with no
+// mirror directory gets nothing returned and nothing written.
+func Recorded(home, workspaceRoot string, clones []string) []string {
+	mdir := mirrorsDir(home, workspaceRoot)
+	found := map[string]bool{}
+	add := func(id string) {
+		if ValidRepoID(id) {
+			found[id] = true
+		}
+	}
+
+	if entries, err := os.ReadDir(metaDir(mdir)); err == nil {
+		for _, e := range entries {
+			// A leftover temporary state file is ".<id>.json-<rand>", which
+			// has no ".json" suffix and starts with a dot ValidRepoID rejects.
+			if id, ok := strings.CutSuffix(e.Name(), ".json"); ok {
+				add(id)
+			}
+		}
+	}
+	if entries, err := os.ReadDir(mdir); err == nil {
+		// niwa's own entries (.meta, .store, .tmp, .link-*) start with a dot,
+		// which no repo id does.
+		for _, e := range entries {
+			add(e.Name())
+		}
+	}
+	if entries, err := os.ReadDir(filepath.Join(mdir, ".store")); err == nil {
+		for _, e := range entries {
+			if m := storeIDPattern.FindStringSubmatch(e.Name()); m != nil {
+				add(m[1])
+			}
+		}
+	}
+	for _, clone := range clones {
+		for _, line := range alternatesLines(filepath.Join(clone, ".git", "objects", "info", "alternates")) {
+			if filepath.Base(line) == "objects" && filepath.Dir(filepath.Dir(line)) == mdir {
+				add(filepath.Base(filepath.Dir(line)))
+			}
+		}
+	}
+
+	ids := make([]string, 0, len(found))
+	for id := range found {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // Mirrored keeps the candidates that have a mirror or should: a state file, a
@@ -147,19 +244,25 @@ func hasBorrower(clones []string, stable string) bool {
 // alternatesName reports whether the alternates file at path has a line equal
 // to want once cleaned. A missing or unreadable file names nothing.
 func alternatesName(path, want string) bool {
+	return slices.Contains(alternatesLines(path), want)
+}
+
+// alternatesLines returns the non-empty lines of the alternates file at path,
+// each cleaned. A missing or unreadable file has none.
+func alternatesLines(path string) []string {
 	f, err := os.Open(path)
 	if err != nil {
-		return false
+		return nil
 	}
 	defer f.Close()
+	var lines []string
 	sc := bufio.NewScanner(io.LimitReader(f, alternatesMax))
 	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line != "" && filepath.Clean(line) == want {
-			return true
+		if line := strings.TrimSpace(sc.Text()); line != "" {
+			lines = append(lines, filepath.Clean(line))
 		}
 	}
-	return false
+	return lines
 }
 
 // EnsureHealthy checks each of repos that has a mirror (see Mirrored) and

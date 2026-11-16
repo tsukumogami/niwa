@@ -76,6 +76,22 @@ type Applier struct {
 	// lock, since the pipeline runs one instance at a time.
 	mirrorsChecked map[string]bool
 
+	// MirrorCommand names the command in the mirror log when set, in place of
+	// the pipeline's own create or apply: a SessionStart hook or a dispatch
+	// provisions through Create but logs as itself.
+	MirrorCommand string
+
+	// MirrorLockWait bounds how long a mirror restore waits for another
+	// command's; zero keeps mirror.DefaultLockWait. The SessionStart hook
+	// sets a short one, since a session waits on it.
+	MirrorLockWait time.Duration
+
+	// MirrorResults collects every mirror result other than healthy, for a
+	// caller that reports them somewhere other than Reporter. Like Keys it is
+	// caller-supplied, so the results survive a failed Create. nil collects
+	// nothing; the warnings go to Reporter either way.
+	MirrorResults *[]mirror.Result
+
 	// Harness is a probe result the caller already holds, so a command that
 	// writes several settings documents (the workspace root and each
 	// instance) makes one hook-or-deny choice for all of them. nil means the
@@ -3214,6 +3230,10 @@ func repoAlreadyCloned(dir string) bool {
 // one. A root-level apply reaches this once per instance with the same
 // Applier; each mirror is checked on the first pass only, so the command
 // logs one check line per mirror, and the later passes skip it.
+//
+// command is the pipeline's own name for the log; MirrorCommand replaces it
+// when set, and MirrorLockWait and MirrorResults pass through as described on
+// the Applier.
 func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig, classified []ClassifiedRepo, instanceRoot, command string) {
 	if a.DeveloperHome == "" || len(classified) == 0 {
 		return
@@ -3245,17 +3265,39 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 		}
 	}
 
-	opts := mirror.Options{Home: a.DeveloperHome, WorkspaceRoot: workspaceRoot, Instances: clones, Command: command}
+	if a.MirrorCommand != "" {
+		command = a.MirrorCommand
+	}
+	opts := mirror.Options{
+		Home:          a.DeveloperHome,
+		WorkspaceRoot: workspaceRoot,
+		Instances:     clones,
+		LockWait:      a.MirrorLockWait,
+		Command:       command,
+	}
 	for _, res := range mirror.EnsureHealthy(ctx, opts, repos) {
 		a.mirrorsChecked[res.StablePath] = true
 		if res.Outcome == mirror.OutcomeHealthy {
 			continue
 		}
-		if res.Err != nil {
-			a.Reporter.Warn("mirror %s: fault %s, result %s: %v", res.RepoID, res.Fault, res.Outcome, res.Err)
-			continue
+		if a.MirrorResults != nil {
+			*a.MirrorResults = append(*a.MirrorResults, res)
 		}
-		a.Reporter.Warn("mirror %s: fault %s, result %s", res.RepoID, res.Fault, res.Outcome)
+		ReportMirrorResult(a.Reporter, res)
+	}
+}
+
+// ReportMirrorResult warns about a mirror that isn't healthy, in the one form
+// every command that checks mirrors prints:
+// "warning: mirror <id>: fault <fault>, result <result>", with the error
+// after it when there is one. A healthy mirror prints nothing.
+func ReportMirrorResult(r *Reporter, res mirror.Result) {
+	switch {
+	case res.Outcome == mirror.OutcomeHealthy:
+	case res.Err != nil:
+		r.Warn("mirror %s: fault %s, result %s: %v", res.RepoID, res.Fault, res.Outcome, res.Err)
+	default:
+		r.Warn("mirror %s: fault %s, result %s", res.RepoID, res.Fault, res.Outcome)
 	}
 }
 

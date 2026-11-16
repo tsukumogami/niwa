@@ -596,8 +596,11 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	reapOpportunistically(workspaceRoot)
 
 	// (6) Create the instance through the existing provision path, passing
-	// --parallel straight through as this call's clone concurrency.
-	res, err := provisionInstanceFunc(workspace.WithDisposableGit(prepCtx), workspaceRoot, cwd, namePrefix, sep, dispatchParallel)
+	// --parallel straight through as this call's clone concurrency. Its mirror
+	// check logs as dispatch and waits the default time for another command's
+	// restore; the warnings it prints reach this command's stderr.
+	provCtx := workspace.WithDisposableGit(withProvisionMirror(prepCtx, mirrorCommandDispatch, 0))
+	res, err := provisionInstanceFunc(provCtx, workspaceRoot, cwd, namePrefix, sep, dispatchParallel)
 	// Dispatch has a terminal, unlike the hook that shares this provisioner, so
 	// the report goes to stderr here rather than into the worker's context.
 	// Rendered before the error is returned, not after the success path begins:
