@@ -39,6 +39,14 @@ type mirrorScenario struct {
 	// the state file's bytes before a command.
 	logLines  int
 	stateFile []byte
+
+	// What the race and failure scenarios remember: each racing command's
+	// exit code and stderr, and the linked store's files before a command.
+	race       []raceRun
+	storeFiles map[string]string
+	// Each borrower's files as bytes on disk, for a check git can't make
+	// while the mirror it borrows from is damaged.
+	rawBorrowers map[string]map[string]string
 }
 
 // borrowerSnapshot is what must survive a restore untouched in a borrower.
@@ -74,6 +82,7 @@ func registerMirrorSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^no mirror directory exists under the sandbox home$`, noMirrorDirectoryExists)
 	registerMirrorDamageSteps(ctx)
 	registerMirrorCommandSteps(ctx)
+	registerMirrorRaceSteps(ctx)
 }
 
 // mirrorState returns the scenario's mirror state, allocating it on first use.
@@ -634,6 +643,15 @@ func noRestoreLeftoversRemain(ctx context.Context) error {
 		if len(left) != 0 {
 			return fmt.Errorf("restore leftovers remain: %v", left)
 		}
+	}
+	// A state file a restore wrote under its temporary name and never
+	// renamed into place.
+	stateTmps, err := filepath.Glob(filepath.Join(dir, ".meta", ".*.json-*"))
+	if err != nil {
+		return err
+	}
+	if len(stateTmps) != 0 {
+		return fmt.Errorf("temporary state files remain: %v", stateTmps)
 	}
 	return nil
 }

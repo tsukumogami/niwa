@@ -138,3 +138,107 @@ Feature: niwa restores a deleted or damaged host mirror by itself
       | deleting its pack           | pack-missing    |
       | truncating its pack to half | pack-changed    |
       | deleting its HEAD           | repo-unreadable |
+
+  # The lock is held the way another niwa command's restore would hold it, so
+  # both applies find the mirror missing and wait; once it's released one
+  # restores and the other finds the mirror healthy under the lock. The second
+  # apply starts a second after the first, past the config snapshot refresh
+  # every apply makes at the root.
+  Scenario: Two commands restore one broken mirror once
+    When I run "niwa create myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is 0
+    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    When I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the mirror of "app" is a link into its store
+    When I repack the borrowers of "app" against the mirror
+    Then each borrower of "app" holds none of the mirror's objects
+    Given the borrower of "app" in instance "myws" has an unpushed commit and an uncommitted edit
+    And I snapshot the borrowers of "app"
+    And I count the mirror log lines
+    When I delete the mirror of "app" and its store
+    And I hold the mirror lock of "app" while "niwa apply" runs in instances "myws" and "myws-2" for 2 seconds
+    Then both racing commands exited 0
+    And exactly one racing command printed the mirror warning "mirror app: fault missing, result restored" and the other printed none
+    And the mirror log gained one restore of "app" and a healthy check from the other command
+    And the mirror of "app" is a link into its store
+    And the state file of "app" records the linked store and its packs
+    And only the linked store of "app" remains
+    And no restore leftovers remain under the mirrors
+    And every ref of each borrower of "app" reads to the root and fsck is clean
+    And the borrowers of "app" match their snapshot
+    And the unpushed commit and uncommitted edit are intact
+
+  # The source repo is moved away so the clone the restore needs fails. The
+  # hook that provisions nothing runs the restore; nothing it touched may
+  # change. git can't read a borrower while the pack it borrows is truncated,
+  # so the borrowers are compared byte for byte on disk until the next
+  # ordinary command, with the source back, restores.
+  Scenario: A failed restore changes nothing and the next command retries
+    When I run "niwa create myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is 0
+    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    When I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the mirror of "app" is a link into its store
+    When I repack the borrowers of "app" against the mirror
+    Then each borrower of "app" holds none of the mirror's objects
+    Given the borrower of "app" in instance "myws" has an unpushed commit and an uncommitted edit
+    And I snapshot the borrowers of "app"
+    And I record the borrowers of "app" on disk
+    When I damage the store of "app" by truncating its pack to half
+    And I remember the mirror link of "app"
+    And I remember the state file of "app"
+    And I remember the files of the store of "app"
+    And I count the mirror log lines
+    And I move the source repo "app" away
+    And I pipe a SessionStart hook for session "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" that is not a background worker
+    Then the exit code is 0
+    And the hook's context carries the notice for "app" with fault "pack-changed" and result "restore-failed"
+    And the mirror log gained a check line and a restore line for "app" with fault "pack-changed" and result "restore-failed" from command "from-hook"
+    And the mirror link of "app" is unchanged
+    And the state file of "app" is unchanged
+    And the store of "app" holds the same files
+    And only the linked store of "app" remains
+    And no restore leftovers remain under the mirrors
+    And the borrowers of "app" are unchanged on disk
+    When I put the source repo "app" back
+    And I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the error output carries exactly the mirror warning "mirror app: fault pack-changed, result restored"
+    And the mirror link of "app" moved to a new store
+    And the mirror of "app" is a link into its store
+    And only the linked store of "app" remains
+    And every ref of each borrower of "app" reads to the root and fsck is clean
+    And the borrowers of "app" match their snapshot
+    And the unpushed commit and uncommitted edit are intact
+
+  # Only the link is deleted and the source repo is moved away: the restore
+  # can't clone, and needs not to, since the recorded store is intact.
+  Scenario: A mirror whose link alone is gone is relinked with no network
+    When I run "niwa create myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is 0
+    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    When I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the mirror of "app" is a link into its store
+    When I repack the borrowers of "app" against the mirror
+    Then each borrower of "app" holds none of the mirror's objects
+    When I remember the mirror link of "app"
+    And I count the mirror log lines
+    And I delete only the stable link of "app"
+    And I move the source repo "app" away
+    And I pipe a SessionStart hook for session "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" that is not a background worker
+    Then the exit code is 0
+    And the hook's context carries the notice for "app" with fault "missing" and result "restored"
+    And the mirror log gained a check line and a restore line for "app" with fault "missing" and result "restored" from command "from-hook"
+    And the mirror link of "app" is unchanged
+    And only the linked store of "app" remains
+    And no restore leftovers remain under the mirrors
+    And every ref of each borrower of "app" reads to the root and fsck is clean
