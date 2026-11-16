@@ -1065,3 +1065,40 @@ func TestSessionStart_ProvisioningCarriesTheMirrorNotice(t *testing.T) {
 		t.Fatalf("context lost the instance's cd line:\n%s", ctxText)
 	}
 }
+
+// TestSessionStart_HookURLAgreesWithApplys: the workspace config names no URL
+// for app, so apply clones it from the URL discovery gives and records that
+// URL in the instance's state, and the mirror is built from it. The hook,
+// with no repo list, takes the URL from that state: the same remote, so the
+// mirror is healthy and never url-changed.
+func TestSessionStart_HookURLAgreesWithApplys(t *testing.T) {
+	for _, p := range hookPathSetups {
+		t.Run(p.name, func(t *testing.T) {
+			h := setupHookMirror(t, true)
+			p.setup(t, h.root)
+			stubProvision(t, "guidance")
+			stable := mirror.StablePath(h.home, h.root, "app")
+			target, err := os.Readlink(stable)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := len(h.logLines(t))
+
+			out, _, err := runStart(t, instanceHookPayload{
+				HookEventName: hookEventSessionStart,
+				SessionID:     testSessionID,
+				Cwd:           h.root,
+			}, t.TempDir())
+			if err != nil || out != "" {
+				t.Fatalf("runInstanceHookStart = %q, %v; want no output and no error", out, err)
+			}
+			added := h.logLines(t)[before:]
+			if len(added) != 1 || added[0]["event"] != "check" || added[0]["result"] != "healthy" || added[0]["fault"] != "" {
+				t.Fatalf("log lines added = %v, want one healthy check with no fault", added)
+			}
+			if after, err := os.Readlink(stable); err != nil || after != target {
+				t.Fatalf("the link moved from %q to %q (%v)", target, after, err)
+			}
+		})
+	}
+}

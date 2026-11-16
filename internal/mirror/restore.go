@@ -4,17 +4,49 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/filelock"
 )
 
-// restore rebuilds a broken mirror from r.URL and swaps it in. It runs under
-// the mirror's lock and checks again once it holds it, so a second command
-// that found the same fault while the first was restoring finds the mirror
-// healthy and does nothing.
+// The steps of a restore that can fail, named for stageHook.
+const (
+	stageClone  = "clone"  // cloning into .tmp/
+	stageState  = "state"  // writing the state file under its temporary name
+	stageStore  = "store"  // renaming the clone into .store/
+	stageLink   = "link"   // making the .link-<rand> link
+	stageSwap   = "swap"   // renaming that link over the stable path
+	stageRecord = "record" // renaming the state file into place, after the swap
+)
+
+// stageHook, when a test sets it, runs before each step of a restore named
+// above, and an error it returns fails that step as a real failure there
+// would. The tests use it to prove each failure leaves the mirror as it was;
+// it's nil outside them.
+var stageHook func(stage string) error
+
+// atStage runs stageHook for stage, when one is set.
+func atStage(stage string) error {
+	if stageHook == nil {
+		return nil
+	}
+	return stageHook(stage)
+}
+
+// restore rebuilds a broken mirror and swaps it in. It runs under the
+// mirror's lock and, once it holds it, clears what a crashed restore of the
+// same repo left behind and checks again, so a second command that found the
+// same fault while the first was restoring finds the mirror healthy and does
+// nothing.
+//
+// When only the link is gone and the state file records a store that passes
+// every check a linked store gets, cloned from the URL the config gives now,
+// a new link to that store is all the restore makes: no network is needed.
+// Otherwise it clones r.URL, provided the file system has room for it.
 //
 // The order is what keeps a failure harmless: the clone lands in .tmp/, takes
 // in what the old stores still hold intact, is renamed into .store/, and only
@@ -26,7 +58,12 @@ import (
 // rename, sees the mismatch as missing and rebuilds, salvaging from the
 // linked store. The old stores go last, by exact name, once nothing
 // links to them. A failure before the swap removes what this restore made and
-// leaves whatever sat at the stable path as it was.
+// leaves the link, its store and the state file as they were.
+//
+// A real directory the user owns at the stable path, such as a mirror
+// someone copied there by hand, is salvaged from where it stands and then
+// moved into .store/ under a ".moved" name just before the swap, never
+// removed. Anything else there is left in place and reported.
 func restore(ctx context.Context, opts Options, r Repo) (Outcome, error) {
 	if r.URL == "" {
 		return OutcomeRestoreFailed, errors.New("the workspace config gives no URL to restore from")
@@ -50,56 +87,154 @@ func restore(ctx context.Context, opts Options, r Repo) (Outcome, error) {
 	defer release()
 
 	mdir := mirrorsDir(opts.Home, opts.WorkspaceRoot)
-	if check(ctx, mdir, r.ID) == FaultNone {
+	// Under the lock no other restore of this repo is running, so anything
+	// of its own in .tmp/ or .meta/ was left by one that crashed.
+	clearLeftovers(mdir, r.ID)
+	fault := check(ctx, mdir, r)
+	if fault == FaultNone {
 		return OutcomeHealthy, nil
 	}
+
 	stable := filepath.Join(mdir, r.ID)
-	if info, err := os.Lstat(stable); err == nil && info.Mode()&os.ModeSymlink == 0 {
-		// Something niwa didn't make sits where the link goes. A rename over
-		// it would fail for a directory and destroy a file; leave it alone.
+	moveAside := false
+	info, err := os.Lstat(stable)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		relinked, err := relink(ctx, mdir, r)
+		if err != nil {
+			return OutcomeRestoreFailed, err
+		}
+		if relinked {
+			return OutcomeRestored, nil
+		}
+	case err != nil:
+		return OutcomeRestoreFailed, fmt.Errorf("inspecting %s: %w", stable, err)
+	case info.Mode()&os.ModeSymlink != 0:
+	case info.IsDir() && ownedByUser(info):
+		moveAside = true
+	default:
+		// A file, a fifo or a directory another user owns: a rename over it
+		// would destroy it or fail, and moving it isn't niwa's call.
 		return OutcomeRestoreFailed, fmt.Errorf("%s is not a link; left in place", stable)
 	}
 
+	if err := checkFreeSpace(mdir, r.ID); err != nil {
+		return OutcomeRestoreFailed, err
+	}
+
 	// The old stores are listed before the new one exists, so the list can
-	// never name it.
+	// never name it. A store cloned from another remote than the config's
+	// holds nothing the new one should keep, so nothing is salvaged from it.
 	olds := oldStores(mdir, r.ID)
-	store, stateTmp, err := buildStore(ctx, mdir, r, olds)
+	var srcs []string
+	if !fromOtherRemote(mdir, r, fault) {
+		for _, name := range olds {
+			srcs = append(srcs, filepath.Join(mdir, ".store", name))
+		}
+		if moveAside {
+			srcs = append(srcs, stable)
+		}
+	}
+	store, stateTmp, err := buildStore(ctx, mdir, r, srcs)
 	if err != nil {
 		return OutcomeRestoreFailed, err
 	}
-	if err := swapLink(mdir, r.ID, store); err != nil {
+	discard := func() {
 		// Nothing links to the new store yet, so it goes, by its exact name.
 		_ = os.RemoveAll(filepath.Join(mdir, ".store", store))
 		_ = os.Remove(stateTmp)
+	}
+
+	moved := ""
+	if moveAside {
+		name, err := newStoreName(r.ID, time.Now())
+		if err != nil {
+			discard()
+			return OutcomeRestoreFailed, err
+		}
+		moved = filepath.Join(mdir, ".store", name+".moved")
+		if err := os.Rename(stable, moved); err != nil {
+			discard()
+			return OutcomeRestoreFailed, fmt.Errorf("moving the directory at %s aside: %w", stable, err)
+		}
+	}
+	if err := swapLink(mdir, r.ID, store); err != nil {
+		discard()
+		if moved != "" {
+			_ = os.Rename(moved, stable)
+		}
 		return OutcomeRestoreFailed, err
 	}
-	if err := os.Rename(stateTmp, statePath(mdir, r.ID)); err != nil {
+	if err := recordState(mdir, r.ID, stateTmp); err != nil {
 		// The new store is linked and borrowers read it; only its record is
 		// missing, so the next check finds no matching state file and
 		// rebuilds, salvaging from this store. The old stores stay until then.
 		_ = os.Remove(stateTmp)
 		return OutcomeRestored, fmt.Errorf("recording the new store: %w", err)
 	}
-	_ = syncDir(metaDir(mdir))
 	removeOldStores(mdir, r.ID, olds)
 	return OutcomeRestored, nil
 }
 
+// relink points a new link at the store the state file records, when that
+// store passes every check a linked store gets (checkStore, which also
+// refuses a store cloned from another remote than r.URL). It reports whether
+// it did; false with no error means the store can't be vouched for and
+// nothing changed.
+func relink(ctx context.Context, mdir string, r Repo) (bool, error) {
+	rec, err := readState(mdir, r.ID)
+	if err != nil || checkStore(ctx, mdir, r, rec) != FaultNone {
+		return false, nil
+	}
+	if err := swapLink(mdir, r.ID, filepath.Base(rec.Store)); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// fromOtherRemote reports whether the mirror's stores were cloned from
+// another remote than r.URL: the check said so, or the state file records
+// another URL behind a fault found first. A state file that can't be read
+// says nothing either way.
+func fromOtherRemote(mdir string, r Repo, fault Fault) bool {
+	if fault == FaultURLChanged {
+		return true
+	}
+	rec, err := readState(mdir, r.ID)
+	return err == nil && urlChanged(r, rec)
+}
+
+// recordState renames the state file written under its temporary name into
+// place and syncs .meta/ so the rename survives a crash.
+func recordState(mdir, repoID, stateTmp string) error {
+	if err := atStage(stageRecord); err != nil {
+		return err
+	}
+	if err := os.Rename(stateTmp, statePath(mdir, repoID)); err != nil {
+		return err
+	}
+	_ = syncDir(metaDir(mdir))
+	return nil
+}
+
 // buildStore clones r into a temporary directory, salvages into it from the
-// old stores, writes its state file under a temporary name, and renames it
-// into .store/. It returns the store's name and the state file's temporary
-// path. On failure nothing it made is left behind.
-func buildStore(ctx context.Context, mdir string, r Repo, olds []string) (string, string, error) {
+// old stores at srcs, writes its state file under a temporary name, and
+// renames it into .store/. It returns the store's name and the state file's
+// temporary path. On failure nothing it made is left behind.
+func buildStore(ctx context.Context, mdir string, r Repo, srcs []string) (string, string, error) {
 	suffix, err := randHex()
 	if err != nil {
 		return "", "", err
 	}
 	tmp := filepath.Join(mdir, ".tmp", r.ID+"-"+suffix)
+	if err := atStage(stageClone); err != nil {
+		return "", "", fmt.Errorf("cloning the mirror: %w", err)
+	}
 	if err := cloneMirror(ctx, r.URL, tmp); err != nil {
 		_ = os.RemoveAll(tmp)
 		return "", "", fmt.Errorf("cloning the mirror: %w", err)
 	}
-	salvage(ctx, mdir, olds, tmp)
+	salvage(ctx, srcs, tmp)
 
 	name, err := newStoreName(r.ID, time.Now())
 	if err != nil {
@@ -113,6 +248,10 @@ func buildStore(ctx context.Context, mdir string, r Repo, olds []string) (string
 		_ = os.RemoveAll(tmp)
 		return "", "", fmt.Errorf("listing the new store's packs: %w", err)
 	}
+	if err := atStage(stageState); err != nil {
+		_ = os.RemoveAll(tmp)
+		return "", "", fmt.Errorf("writing the state file: %w", err)
+	}
 	stateTmp, err := writeStateTemp(mdir, state{
 		Schema: stateSchema,
 		RepoID: r.ID,
@@ -124,7 +263,11 @@ func buildStore(ctx context.Context, mdir string, r Repo, olds []string) (string
 		_ = os.RemoveAll(tmp)
 		return "", "", err
 	}
-	if err := os.Rename(tmp, filepath.Join(mdir, ".store", name)); err != nil {
+	err = atStage(stageStore)
+	if err == nil {
+		err = os.Rename(tmp, filepath.Join(mdir, ".store", name))
+	}
+	if err != nil {
 		_ = os.RemoveAll(tmp)
 		_ = os.Remove(stateTmp)
 		return "", "", fmt.Errorf("moving the new store into place: %w", err)
@@ -157,13 +300,88 @@ func swapLink(mdir, repoID, store string) error {
 		return err
 	}
 	tmpLink := filepath.Join(mdir, ".link-"+suffix)
-	if err := os.Symlink(filepath.Join(".store", store), tmpLink); err != nil {
+	err = atStage(stageLink)
+	if err == nil {
+		err = os.Symlink(filepath.Join(".store", store), tmpLink)
+	}
+	if err != nil {
 		return fmt.Errorf("making the new link: %w", err)
 	}
-	if err := os.Rename(tmpLink, filepath.Join(mdir, repoID)); err != nil {
+	err = atStage(stageSwap)
+	if err == nil {
+		err = os.Rename(tmpLink, filepath.Join(mdir, repoID))
+	}
+	if err != nil {
 		_ = os.Remove(tmpLink)
 		return fmt.Errorf("swapping the new link into place: %w", err)
 	}
 	_ = syncDir(mdir)
 	return nil
+}
+
+// leftoverPatterns match, for one repo id, what a restore makes under a
+// temporary name and a crash can leave behind: its clone, .tmp/<id>-<8 hex>,
+// and its state file, .meta/.<id>.json-<8 hex>. Neither matches an entry of a
+// repo whose id only starts with this one.
+func leftoverPatterns(repoID string) (tmp, stateTmp *regexp.Regexp) {
+	id := regexp.QuoteMeta(repoID)
+	return regexp.MustCompile(`^` + id + `-[0-9a-f]{8}$`),
+		regexp.MustCompile(`^\.` + id + `\.json-[0-9a-f]{8}$`)
+}
+
+// leftovers lists the paths of repoID's leftovers in .tmp/ and .meta/.
+func leftovers(mdir, repoID string) []string {
+	tmpRe, stateRe := leftoverPatterns(repoID)
+	var paths []string
+	for dir, re := range map[string]*regexp.Regexp{
+		filepath.Join(mdir, ".tmp"): tmpRe,
+		metaDir(mdir):               stateRe,
+	} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if re.MatchString(e.Name()) {
+				paths = append(paths, filepath.Join(dir, e.Name()))
+			}
+		}
+	}
+	return paths
+}
+
+// clearLeftovers removes repoID's leftovers by exact name. Each is looked at
+// with Lstat, so a link is removed itself and what it names is never touched.
+// The caller holds the mirror's lock: a restore in progress holds it too, so
+// nothing removed here belongs to one that's still running.
+func clearLeftovers(mdir, repoID string) {
+	for _, path := range leftovers(mdir, repoID) {
+		info, err := os.Lstat(path)
+		if err != nil {
+			continue
+		}
+		if info.IsDir() {
+			_ = os.RemoveAll(path)
+		} else {
+			_ = os.Remove(path)
+		}
+	}
+}
+
+// clearLeftoversIfIdle clears repoID's leftovers after a healthy check. A
+// crash before the swap leaves the mirror healthy, so no restore would ever
+// run to clear what it left. The lock is only tried: when another command
+// holds it, the leftovers may be its restore at work, and they're left for a
+// later check.
+func clearLeftoversIfIdle(opts Options, mdir, repoID string) {
+	if len(leftovers(mdir, repoID)) == 0 {
+		return
+	}
+	holder := fmt.Sprintf("niwa pid %d clearing mirror %s leftovers", os.Getpid(), repoID)
+	release, err := filelock.TryFileLock(LockPath(opts.Home, opts.WorkspaceRoot, repoID), holder)
+	if err != nil {
+		return
+	}
+	defer release()
+	clearLeftovers(mdir, repoID)
 }

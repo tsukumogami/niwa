@@ -115,7 +115,7 @@ func TestCheck_FaultsAndTheirRestore(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 			before := f.linkTarget(t)
 			tc.damage(t, f)
-			if got := check(context.Background(), f.mdir(), "app"); got != tc.want {
+			if got := check(context.Background(), f.mdir(), f.repo()); got != tc.want {
 				t.Fatalf("check = %q, want %q", got, tc.want)
 			}
 			res := EnsureHealthy(context.Background(), f.applyOpts(), []Repo{f.repo()})
@@ -125,7 +125,7 @@ func TestCheck_FaultsAndTheirRestore(t *testing.T) {
 			if f.linkTarget(t) == before {
 				t.Fatal("the restore left the link on the damaged store")
 			}
-			if got := check(context.Background(), f.mdir(), "app"); got != FaultNone {
+			if got := check(context.Background(), f.mdir(), f.repo()); got != FaultNone {
 				t.Fatalf("check after the restore = %q", got)
 			}
 			st, err := readState(f.mdir(), "app")
@@ -176,7 +176,7 @@ func TestCheck_MovedCtimeAndUnlistedPackAreNoFault(t *testing.T) {
 		}
 	}
 
-	if got := check(context.Background(), f.mdir(), "app"); got != FaultNone {
+	if got := check(context.Background(), f.mdir(), f.repo()); got != FaultNone {
 		t.Fatalf("check = %q, want no fault", got)
 	}
 	res := EnsureHealthy(context.Background(), f.applyOpts(), []Repo{f.repo()})
@@ -206,7 +206,7 @@ func oldStoreFixture(t *testing.T, f fixture) (store string, keep, drop []string
 		testGit(t, work, "add", name)
 		testGit(t, work, "commit", "--quiet", "-m", name)
 		testGit(t, work, "repack", "-d", "-q")
-		all, _ := filepath.Glob(filepath.Join(work, ".git", "objects", "pack", "*.pack"))
+		all, _ := filepath.Glob(filepath.Join(work, ".git", "objects", "pack", "pack-*.pack"))
 		for _, p := range all {
 			seen := false
 			for _, q := range packs {
@@ -323,6 +323,7 @@ func testGitStdin(t *testing.T, dir, input string, args ...string) string {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	cmd.Env = append(cmd.Env, noMaintenanceEnv...)
 	cmd.Stdin = strings.NewReader(input)
 	out, err := cmd.Output()
 	if err != nil {

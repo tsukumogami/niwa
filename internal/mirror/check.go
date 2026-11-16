@@ -25,30 +25,54 @@ var (
 //
 // The faults are checked in this order, so each damage names what's wrong
 // rather than a symptom of it: the link and the state file first (missing),
-// then whether the store holds any object at all (objects-empty), then each
-// pack the manifest lists (pack-missing, pack-changed), and last whether the
-// store is a repository git can read (repo-unreadable).
-func check(ctx context.Context, mdir, repoID string) Fault {
-	stable := filepath.Join(mdir, repoID)
+// then whether the store was cloned from the URL the config gives now
+// (url-changed), then whether the store holds any object at all
+// (objects-empty), then each pack the manifest lists (pack-missing,
+// pack-changed), and last whether the store is a repository git can read
+// (repo-unreadable).
+func check(ctx context.Context, mdir string, r Repo) Fault {
+	stable := filepath.Join(mdir, r.ID)
 	info, err := os.Lstat(stable)
 	if err != nil || info.Mode()&os.ModeSymlink == 0 {
 		return FaultMissing
 	}
 	target, err := os.Readlink(stable)
-	if err != nil || !validLinkTarget(repoID, target) {
-		return FaultMissing
-	}
-	store := filepath.Join(mdir, target)
-	st, err := os.Lstat(store)
-	if err != nil || !st.IsDir() || !ownedByUser(st) {
+	if err != nil {
 		return FaultMissing
 	}
 	// A store with no state file, or one recording another store, is one
 	// niwa can't vouch for: it may be a store a restore never finished
 	// recording, so it's rebuilt.
-	rec, err := readState(mdir, repoID)
+	rec, err := readState(mdir, r.ID)
 	if err != nil || rec.Store != target {
 		return FaultMissing
+	}
+	return checkStore(ctx, mdir, r, rec)
+}
+
+// urlChanged reports whether the config's URL for r is another remote than
+// the one rec was cloned from. Both sides go through recordURL, so a URL that
+// differs only in userinfo, query or fragment is the same remote. A repo with
+// no URL (a caller that found none to give) is never compared.
+func urlChanged(r Repo, rec state) bool {
+	return r.URL != "" && recordURL(r.URL) != rec.URL
+}
+
+// checkStore checks the store rec records, as though the stable link named
+// it: everything check looks at past the link itself. A restore also runs it
+// on a recorded store that lost its link, to tell whether relinking it is
+// enough.
+func checkStore(ctx context.Context, mdir string, r Repo, rec state) Fault {
+	if !validLinkTarget(r.ID, rec.Store) {
+		return FaultMissing
+	}
+	store := filepath.Join(mdir, rec.Store)
+	st, err := os.Lstat(store)
+	if err != nil || !st.IsDir() || !ownedByUser(st) {
+		return FaultMissing
+	}
+	if urlChanged(r, rec) {
+		return FaultURLChanged
 	}
 
 	if !holdsObjects(store) {

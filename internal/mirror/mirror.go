@@ -66,6 +66,9 @@ const (
 	// FaultRepoUnreadable: the store's HEAD or config is gone, or HEAD
 	// doesn't resolve to a commit git can read.
 	FaultRepoUnreadable Fault = "repo-unreadable"
+	// FaultURLChanged: the workspace config now names another remote than
+	// the one the state file records the store was cloned from.
+	FaultURLChanged Fault = "url-changed"
 )
 
 // Outcome is what EnsureHealthy did about a mirror.
@@ -281,13 +284,15 @@ func EnsureHealthy(ctx context.Context, opts Options, repos []Repo) []Result {
 // logs a check line and, after a restore, a restore line. Both lines carry
 // the final result, so the check line of a mirror that was restored says
 // "restored", and each line's time is when its event started. Both are
-// written once the restore is over. A failed log write is dropped: it never
-// changes the Result.
+// written once the restore is over. A restore that found, once it held the
+// lock, that another command had already fixed the mirror restored nothing
+// and logs no restore line: its check line says the fault it saw and
+// "healthy". A failed log write is dropped: it never changes the Result.
 func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 	mdir := mirrorsDir(opts.Home, opts.WorkspaceRoot)
 	res := Result{RepoID: r.ID, StablePath: filepath.Join(mdir, r.ID)}
 	start := time.Now()
-	res.Fault = check(ctx, mdir, r.ID)
+	res.Fault = check(ctx, mdir, r)
 	res.CheckDuration = time.Since(start)
 	checkLine := logLine{
 		Time:    logTime(start),
@@ -301,12 +306,17 @@ func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 		res.Outcome = OutcomeHealthy
 		checkLine.Result = res.Outcome
 		_ = appendLog(mdir, checkLine)
+		clearLeftoversIfIdle(opts, mdir, r.ID)
 		return res
 	}
 	restoreStart := time.Now()
 	res.Outcome, res.Err = restore(ctx, opts, r)
 	took := time.Since(restoreStart).Milliseconds()
 	checkLine.Result = res.Outcome
+	if res.Outcome == OutcomeHealthy {
+		_ = appendLog(mdir, checkLine)
+		return res
+	}
 	restoreLine := checkLine
 	restoreLine.Time = logTime(restoreStart)
 	restoreLine.Event = eventRestore

@@ -37,19 +37,19 @@ func oldStores(mdir, repoID string) []string {
 }
 
 // salvage copies into the new store at dst every object of the old stores
-// that is still good: a pack with its .idx when git verify-pack passes, and
-// a loose object whose content hashes to its name. The fresh clone holds
-// what the remote serves; salvage keeps what only the old store held, such
-// as commits the remote has since deleted.
+// at srcs (each a store directory's path) that is still good: a pack with its
+// .idx when git verify-pack passes, and a loose object whose content hashes
+// to its name. The fresh clone holds what the remote serves; salvage keeps
+// what only the old store held, such as commits the remote has since deleted.
 //
 // Only regular files are read, each found by Lstat: no link is followed, and
 // nothing but objects is copied, so a config, hook, alternates file or ref
 // planted in an old store never reaches the new one. An object already in
 // the new store is left as the clone wrote it. A file that can't be copied
 // is skipped, never fatal: the clone alone is a usable mirror.
-func salvage(ctx context.Context, mdir string, olds []string, dst string) {
-	for _, name := range olds {
-		src := filepath.Join(mdir, ".store", name, "objects")
+func salvage(ctx context.Context, srcs []string, dst string) {
+	for _, store := range srcs {
+		src := filepath.Join(store, "objects")
 		if fi, err := os.Lstat(src); err != nil || !fi.IsDir() {
 			continue
 		}

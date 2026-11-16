@@ -177,3 +177,111 @@ func TestEnsureMirrors_MirrorResultsHoldsOnlyWhatWasntHealthy(t *testing.T) {
 		t.Fatalf("the last log line is %v, want a healthy check", last)
 	}
 }
+
+// twoInstances makes the fixture's workspace hold two instances, inst and
+// inst-2, as a root-level apply finds them, each with a clone of app that
+// borrows from the mirror, and returns their roots.
+func (f mirrorFixture) twoInstances(t *testing.T) []string {
+	t.Helper()
+	second := filepath.Join(f.root, "inst-2")
+	info := filepath.Join(second, "tools", "app", ".git", "objects", "info")
+	if err := os.MkdirAll(info, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alternates := mirror.StablePath(f.home, f.root, "app") + "/objects\n"
+	if err := os.WriteFile(filepath.Join(info, "alternates"), []byte(alternates), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	roots := []string{f.instance, second}
+	for _, root := range roots {
+		if err := SaveState(root, &InstanceState{
+			SchemaVersion: SchemaVersion,
+			InstanceName:  filepath.Base(root),
+			Root:          root,
+			Repos:         map[string]RepoState{},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return roots
+}
+
+// appLines are the mirror log's lines for app, or none when there's no log.
+func (f mirrorFixture) appLines(t *testing.T) []map[string]any {
+	t.Helper()
+	path := filepath.Join(filepath.Dir(mirror.StablePath(f.home, f.root, "app")), ".meta", "mirror.log")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	}
+	var app []map[string]any
+	for _, line := range f.logLines(t) {
+		if line["mirror"] == "app" {
+			app = append(app, line)
+		}
+	}
+	return app
+}
+
+func TestEnsureMirrors_OneCommandTriesAFailingMirrorOnce(t *testing.T) {
+	f := newMirrorFixture(t)
+	roots := f.twoInstances(t)
+	// A URL that names no remote: the restore fails at the clone.
+	f.classified[0].Repo.CloneURL = "file://" + filepath.Join(t.TempDir(), "absent.git")
+
+	var results []mirror.Result
+	var stderr bytes.Buffer
+	a := f.applier(&stderr)
+	a.MirrorResults = &results
+	for _, root := range roots {
+		a.ensureMirrors(context.Background(), &config.WorkspaceConfig{}, f.classified, root, "apply")
+	}
+
+	lines := f.appLines(t)
+	if len(lines) != 2 || lines[0]["event"] != "check" || lines[1]["event"] != "restore" {
+		t.Fatalf("log lines for app = %v, want one check and one restore line", lines)
+	}
+	for _, line := range lines {
+		if line["result"] != "restore-failed" {
+			t.Fatalf("log line %v, want result restore-failed", line)
+		}
+	}
+	if len(results) != 1 || results[0].Outcome != mirror.OutcomeRestoreFailed {
+		t.Fatalf("MirrorResults = %+v, want one restore-failed result", results)
+	}
+	if n := strings.Count(stderr.String(), "warning: mirror app:"); n != 1 {
+		t.Fatalf("stderr carries %d mirror warnings, want 1: %q", n, stderr.String())
+	}
+
+	// The next command is a fresh Applier: it checks the mirror again.
+	b := f.applier(&stderr)
+	b.ensureMirrors(context.Background(), &config.WorkspaceConfig{}, f.classified, roots[0], "apply")
+	if after := f.appLines(t); len(after) <= len(lines) || after[len(lines)]["event"] != "check" {
+		t.Fatalf("the next command logged %v after %d lines, want a new check line", after, len(lines))
+	}
+}
+
+func TestEnsureMirrors_OneCommandWaitsOnABusyMirrorOnce(t *testing.T) {
+	f := newMirrorFixture(t)
+	roots := f.twoInstances(t)
+	release, err := filelock.TryFileLock(mirror.LockPath(f.home, f.root, "app"), "test holder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	var results []mirror.Result
+	var stderr bytes.Buffer
+	a := f.applier(&stderr)
+	a.MirrorLockWait = time.Second
+	a.MirrorResults = &results
+	start := time.Now()
+	for _, root := range roots {
+		a.ensureMirrors(context.Background(), &config.WorkspaceConfig{}, f.classified, root, "apply")
+	}
+	if took := time.Since(start); took >= 1800*time.Millisecond {
+		t.Fatalf("two passes took %s, want under 1.8s: the second pass waited again", took)
+	}
+	if len(results) != 1 || results[0].Outcome != mirror.OutcomeBusy {
+		t.Fatalf("MirrorResults = %+v, want one busy result", results)
+	}
+}

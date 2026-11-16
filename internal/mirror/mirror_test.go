@@ -14,6 +14,17 @@ import (
 	"github.com/tsukumogami/niwa/internal/filelock"
 )
 
+// noMaintenanceEnv turns off automatic maintenance and gc for a fixture git
+// command. Without it each fixture commit can start a detached
+// "git maintenance run --auto" that repacks a fixture repo behind the test,
+// which newer git does with its geometric strategy. It goes after
+// os.Environ() so a developer's own GIT_CONFIG_COUNT can't replace it.
+var noMaintenanceEnv = []string{
+	"GIT_CONFIG_COUNT=2",
+	"GIT_CONFIG_KEY_0=maintenance.auto", "GIT_CONFIG_VALUE_0=false",
+	"GIT_CONFIG_KEY_1=gc.auto", "GIT_CONFIG_VALUE_1=0",
+}
+
 // testGit runs a fixture git command with the developer's config shut out.
 func testGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
@@ -25,6 +36,7 @@ func testGit(t *testing.T, dir string, args ...string) string {
 		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
 		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
 	)
+	cmd.Env = append(cmd.Env, noMaintenanceEnv...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
@@ -286,19 +298,20 @@ func TestEnsureHealthy_FailedCloneLeavesNothing(t *testing.T) {
 func TestEnsureHealthy_LeavesANonLinkAtTheStablePath(t *testing.T) {
 	f := newFixture(t)
 	stable := StablePath(f.home, f.root, "app")
-	if err := os.MkdirAll(stable, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(stable), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	keep := filepath.Join(stable, "keep")
-	if err := os.WriteFile(keep, []byte("mine"), 0o600); err != nil {
+	// A regular file: a real directory the user owns is moved aside and kept
+	// (TestRestore_MovesARealDirectoryAsideAndKeepsIt), anything else stays.
+	if err := os.WriteFile(stable, []byte("mine"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	res := EnsureHealthy(context.Background(), f.opts(), []Repo{f.repo()})
 	if len(res) != 1 || res[0].Fault != FaultMissing || res[0].Outcome != OutcomeRestoreFailed {
 		t.Fatalf("result = %+v, want missing/restore-failed", res)
 	}
-	if data, err := os.ReadFile(keep); err != nil || string(data) != "mine" {
-		t.Fatalf("the directory at the stable path was changed: %q (%v)", data, err)
+	if data, err := os.ReadFile(stable); err != nil || string(data) != "mine" {
+		t.Fatalf("the file at the stable path was changed: %q (%v)", data, err)
 	}
 	emptyDir(t, filepath.Join(f.mdir(), ".store"))
 }

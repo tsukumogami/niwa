@@ -10,10 +10,15 @@ import (
 )
 
 // gitBaseConfig is set on every git call in a mirror, whatever the store's
-// own config says: a store's config isn't trusted after a fault.
+// own config says: a store's config isn't trusted after a fault. Automatic
+// maintenance and gc are off so no git run here starts a detached
+// "git maintenance run --auto" that repacks a store behind niwa's back, after
+// the manifest recorded its packs or while a restore reads them.
 var gitBaseConfig = []string{
 	"core.fsmonitor=false",
 	"protocol.ext.allow=never",
+	"maintenance.auto=false",
+	"gc.auto=0",
 }
 
 // gitEnv is the environment every git call here runs with: the parent's, with
