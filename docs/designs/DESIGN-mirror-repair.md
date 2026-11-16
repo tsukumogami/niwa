@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 problem: |
   niwa will let instances borrow git objects from one bare mirror per repo
   on the host. A borrower keeps none of what it borrows, so a deleted or
@@ -31,7 +31,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
