@@ -9,14 +9,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
 )
-
-// looseNamePattern matches a loose object's file name inside its fan-out
-// directory: the rest of a SHA-1 in hex.
-var looseNamePattern = regexp.MustCompile(`^[0-9a-f]{38}$`)
 
 // oldStores returns the names of the store directories of repoID under
 // .store/: real directories only, by Lstat, so a link named like a store is

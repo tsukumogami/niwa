@@ -177,7 +177,9 @@ func EnsureHealthy(ctx context.Context, opts Options, repos []Repo) []Result {
 // ensureOne checks one mirror, restores it when the check finds a fault, and
 // logs a check line and, after a restore, a restore line. Both lines carry
 // the final result, so the check line of a mirror that was restored says
-// "restored". A failed log write is dropped: it never changes the Result.
+// "restored", and each line's time is when its event started. Both are
+// written once the restore is over. A failed log write is dropped: it never
+// changes the Result.
 func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 	mdir := mirrorsDir(opts.Home, opts.WorkspaceRoot)
 	res := Result{RepoID: r.ID, StablePath: filepath.Join(mdir, r.ID)}
@@ -203,7 +205,7 @@ func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 	took := time.Since(restoreStart).Milliseconds()
 	checkLine.Result = res.Outcome
 	restoreLine := checkLine
-	restoreLine.Time = logTime(time.Now())
+	restoreLine.Time = logTime(restoreStart)
 	restoreLine.Event = eventRestore
 	restoreLine.TookMs = &took
 	_ = appendLog(mdir, checkLine, restoreLine)

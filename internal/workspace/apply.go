@@ -70,7 +70,10 @@ type Applier struct {
 
 	// mirrorsChecked holds the stable paths of the host mirrors this Applier
 	// has already checked, so a root-level apply that runs the pipeline once
-	// per instance checks and logs each mirror once per command.
+	// per instance checks and logs each mirror once per command. A mirror
+	// whose restore failed or was busy is not retried by a later instance in
+	// the same command: the next command tries again. It is written without a
+	// lock, since the pipeline runs one instance at a time.
 	mirrorsChecked map[string]bool
 
 	// Harness is a probe result the caller already holds, so a command that

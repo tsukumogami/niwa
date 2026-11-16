@@ -21,7 +21,10 @@ import (
 // then is a new link renamed over the stable path, the one atomic way to
 // replace what borrowers read. The state file is written under a temporary
 // name before the swap and renamed into place after it, so it never names a
-// store the link doesn't. The old stores go last, by exact name, once nothing
+// store borrowers can't reach. Between the swap and that rename the state
+// file still names the old store; a check that lands there, or after a failed
+// rename, sees the mismatch as missing and rebuilds, salvaging from the
+// linked store. The old stores go last, by exact name, once nothing
 // links to them. A failure before the swap removes what this restore made and
 // leaves whatever sat at the stable path as it was.
 func restore(ctx context.Context, opts Options, r Repo) (Outcome, error) {

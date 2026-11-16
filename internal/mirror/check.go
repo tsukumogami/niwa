@@ -10,8 +10,13 @@ import (
 	"strings"
 )
 
-// looseDirPattern matches the fan-out directories that hold loose objects.
-var looseDirPattern = regexp.MustCompile(`^[0-9a-f]{2}$`)
+// looseDirPattern matches the fan-out directories that hold loose objects,
+// and looseNamePattern a loose object's file name inside one: the rest of a
+// SHA-1 in hex. The check and salvage both read them.
+var (
+	looseDirPattern  = regexp.MustCompile(`^[0-9a-f]{2}$`)
+	looseNamePattern = regexp.MustCompile(`^[0-9a-f]{38}$`)
+)
 
 // check runs the offline check of one mirror and returns the first fault it
 // finds. It reads local files only: the link, the state file, the store's
@@ -115,7 +120,9 @@ func checkPacks(ctx context.Context, store string, packs []packEntry) Fault {
 	dir := filepath.Join(store, "objects", "pack")
 	for _, want := range packs {
 		if !validPackName(want.Name) {
-			return FaultPackMissing
+			// niwa never writes such a name, so the state file itself
+			// can't be vouched for, as when it names another store.
+			return FaultMissing
 		}
 		pack := filepath.Join(dir, want.Name)
 		idx := strings.TrimSuffix(pack, ".pack") + ".idx"
@@ -136,8 +143,9 @@ func checkPacks(ctx context.Context, store string, packs []packEntry) Fault {
 	return FaultNone
 }
 
-// packNamePattern is the name git gives a pack: pack-<hex>.pack.
-var packNamePattern = regexp.MustCompile(`^pack-[0-9a-f]{40,64}\.pack$`)
+// packNamePattern is the name git gives a pack in a SHA-1 repository, the
+// only kind of store here (see packTrailerLen and looseNamePattern).
+var packNamePattern = regexp.MustCompile(`^pack-[0-9a-f]{40}\.pack$`)
 
 // validPackName reports whether name is one a manifest may list. A name with
 // a path separator in it would reach outside objects/pack/.
