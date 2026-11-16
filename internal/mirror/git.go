@@ -53,6 +53,19 @@ func runGit(ctx context.Context, config []string, args ...string) error {
 	return nil
 }
 
+// verifyPack runs git verify-pack on a pack's .idx, which checks the index
+// and every object in the pack it names against their checksums. It reads
+// local files only.
+func verifyPack(ctx context.Context, idx string) error {
+	return runGit(ctx, nil, "verify-pack", "--", idx)
+}
+
+// headCommitReadable reports whether the bare repo at store resolves HEAD to
+// a commit it can read.
+func headCommitReadable(ctx context.Context, store string) error {
+	return runGit(ctx, nil, "--git-dir="+store, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+}
+
 // cloneMirror clones url as a bare mirror into dir. The clone runs with no
 // template, so the new store has no hooks, and with fsckObjects and unpack
 // limits of 1 set for the process itself, since the new store has no config

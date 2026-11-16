@@ -5,7 +5,8 @@
 //
 //	~/.niwa/w-<workspace key>/mirrors/<repo-id>
 //
-// a symlink to a store directory beside it under .store/. Borrowers name the
+// a symlink to a store directory beside it under .store/, recorded with its
+// pack manifest in .meta/<repo-id>.json. Borrowers name the
 // stable path, never the store, so a restore that builds a new store and
 // renames a new link over the old one replaces the mirror atomically without
 // touching any borrower.
@@ -152,6 +153,7 @@ func ensureLayout(home, workspaceRoot string) error {
 	for _, dir := range []string{
 		keyDir(home, workspaceRoot),
 		mdir,
+		metaDir(mdir),
 		filepath.Join(mdir, ".store"),
 		filepath.Join(mdir, ".tmp"),
 	} {

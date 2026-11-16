@@ -396,6 +396,7 @@ type cloneResult struct {
 
 // pipelineOpts configures shared pipeline behavior for Create vs Apply.
 type pipelineOpts struct {
+	command              string // "create" or "apply"; names the command in the mirror log
 	existingState        *InstanceState
 	skipGlobal           bool
 	overlayURL           string   // from InstanceState.OverlayURL (empty = no overlay URL in state)
@@ -605,6 +606,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	}
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
+		command:              "create",
 		existingState:        nil,
 		overlayURL:           initOverlayURL,
 		noOverlay:            initNoOverlay,
@@ -788,6 +790,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	}
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
+		command:              "apply",
 		existingState:        existingState,
 		skipGlobal:           existingState.SkipGlobal,
 		overlayURL:           existingState.OverlayURL,
@@ -1686,7 +1689,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// Step 2.9: Restore any host mirror the workspace's clones borrow from
 	// before anything clones, fetches or reads a borrower, so a deleted mirror
 	// is back in place before a command depends on it.
-	a.ensureMirrors(ctx, effectiveCfg, classified, instanceRoot)
+	a.ensureMirrors(ctx, effectiveCfg, classified, instanceRoot, opts.command)
 
 	// Step 3: Create group directories and clone repos concurrently.
 	//
@@ -3202,7 +3205,7 @@ func repoAlreadyCloned(dir string) bool {
 // DeveloperHome (the unit suites) skips the check rather than reach the real
 // one. A root-level apply reaches this once per instance; the first restores,
 // and the later checks find the mirror healthy and say nothing.
-func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig, classified []ClassifiedRepo, instanceRoot string) {
+func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig, classified []ClassifiedRepo, instanceRoot, command string) {
 	if a.DeveloperHome == "" || len(classified) == 0 {
 		return
 	}
@@ -3226,7 +3229,7 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 		}
 	}
 
-	opts := mirror.Options{Home: a.DeveloperHome, WorkspaceRoot: workspaceRoot, Instances: clones}
+	opts := mirror.Options{Home: a.DeveloperHome, WorkspaceRoot: workspaceRoot, Instances: clones, Command: command}
 	for _, res := range mirror.EnsureHealthy(ctx, opts, repos) {
 		if res.Outcome == mirror.OutcomeHealthy {
 			continue

@@ -35,6 +35,8 @@ type Options struct {
 	// LockWait bounds the wait for a mirror's lock; zero means
 	// DefaultLockWait.
 	LockWait time.Duration
+	// Command names the niwa command in the mirror log: create, apply.
+	Command string
 }
 
 // Fault is what the check found wrong with a mirror; empty when nothing.
@@ -43,9 +45,21 @@ type Fault string
 // The faults this package reports.
 const (
 	FaultNone Fault = ""
-	// FaultMissing: no usable link at the stable path, or a link whose target
-	// isn't a store directory niwa made.
+	// FaultMissing: no usable link at the stable path, a link whose target
+	// isn't a store directory niwa made, or no state file recording that
+	// store.
 	FaultMissing Fault = "missing"
+	// FaultObjectsEmpty: the store's objects/ is gone or holds neither a file
+	// under objects/pack/ nor a loose object.
+	FaultObjectsEmpty Fault = "objects-empty"
+	// FaultPackMissing: a pack the manifest lists, or its .idx, is gone.
+	FaultPackMissing Fault = "pack-missing"
+	// FaultPackChanged: a pack the manifest lists has another size or
+	// trailing checksum, or its ctime moved and git verify-pack fails on it.
+	FaultPackChanged Fault = "pack-changed"
+	// FaultRepoUnreadable: the store's HEAD or config is gone, or HEAD
+	// doesn't resolve to a commit git can read.
+	FaultRepoUnreadable Fault = "repo-unreadable"
 )
 
 // Outcome is what EnsureHealthy did about a mirror.
@@ -75,24 +89,32 @@ func (r Result) Usable() bool {
 	return r.Outcome == OutcomeHealthy || r.Outcome == OutcomeRestored
 }
 
-// Mirrored keeps the candidates that have a mirror or should: a link or any
-// entry at the stable path, a store directory of the repo, or a borrower among
-// instances whose alternates name the stable path. It only reads; a workspace
-// with no borrowers gets nothing written and nothing kept.
+// Mirrored keeps the candidates that have a mirror or should: a state file, a
+// link or any entry at the stable path, a store directory of the repo, or a
+// borrower among instances whose alternates name the stable path. It only
+// reads; a workspace with no borrowers gets nothing written and nothing kept.
 func Mirrored(home, workspaceRoot string, instances []string, candidates []Repo) []Repo {
 	var kept []Repo
+	mdir := mirrorsDir(home, workspaceRoot)
 	for _, r := range candidates {
 		if !ValidRepoID(r.ID) {
 			continue
 		}
 		stable := StablePath(home, workspaceRoot, r.ID)
 		if _, err := os.Lstat(stable); err == nil ||
-			hasStore(mirrorsDir(home, workspaceRoot), r.ID) ||
+			hasStateFile(mdir, r.ID) ||
+			hasStore(mdir, r.ID) ||
 			hasBorrower(instances, stable) {
 			kept = append(kept, r)
 		}
 	}
 	return kept
+}
+
+// hasStateFile reports whether .meta/ has an entry for repoID's state file.
+func hasStateFile(mdir, repoID string) bool {
+	_, err := os.Lstat(statePath(mdir, repoID))
+	return err == nil
 }
 
 // hasStore reports whether .store/ holds a store directory of repoID.
@@ -152,34 +174,38 @@ func EnsureHealthy(ctx context.Context, opts Options, repos []Repo) []Result {
 	return results
 }
 
+// ensureOne checks one mirror, restores it when the check finds a fault, and
+// logs a check line and, after a restore, a restore line. Both lines carry
+// the final result, so the check line of a mirror that was restored says
+// "restored". A failed log write is dropped: it never changes the Result.
 func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 	mdir := mirrorsDir(opts.Home, opts.WorkspaceRoot)
 	res := Result{RepoID: r.ID, StablePath: filepath.Join(mdir, r.ID)}
 	start := time.Now()
-	res.Fault = check(mdir, r.ID)
+	res.Fault = check(ctx, mdir, r.ID)
 	res.CheckDuration = time.Since(start)
+	checkLine := logLine{
+		Time:    logTime(start),
+		Command: opts.Command,
+		Mirror:  r.ID,
+		Event:   eventCheck,
+		Fault:   res.Fault,
+		CheckMs: res.CheckDuration.Milliseconds(),
+	}
 	if res.Fault == FaultNone {
 		res.Outcome = OutcomeHealthy
+		checkLine.Result = res.Outcome
+		_ = appendLog(mdir, checkLine)
 		return res
 	}
+	restoreStart := time.Now()
 	res.Outcome, res.Err = restore(ctx, opts, r)
+	took := time.Since(restoreStart).Milliseconds()
+	checkLine.Result = res.Outcome
+	restoreLine := checkLine
+	restoreLine.Time = logTime(time.Now())
+	restoreLine.Event = eventRestore
+	restoreLine.TookMs = &took
+	_ = appendLog(mdir, checkLine, restoreLine)
 	return res
-}
-
-// check runs the offline check of one mirror. It reads local files only.
-func check(mdir, repoID string) Fault {
-	stable := filepath.Join(mdir, repoID)
-	info, err := os.Lstat(stable)
-	if err != nil || info.Mode()&os.ModeSymlink == 0 {
-		return FaultMissing
-	}
-	target, err := os.Readlink(stable)
-	if err != nil || !validLinkTarget(repoID, target) {
-		return FaultMissing
-	}
-	st, err := os.Lstat(filepath.Join(mdir, target))
-	if err != nil || !st.IsDir() || !ownedByUser(st) {
-		return FaultMissing
-	}
-	return FaultNone
 }
