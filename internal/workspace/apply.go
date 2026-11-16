@@ -1683,6 +1683,11 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 	}
 
+	// Step 2.9: Restore any host mirror the workspace's clones borrow from
+	// before anything clones, fetches or reads a borrower, so a deleted mirror
+	// is back in place before a command depends on it.
+	a.ensureMirrors(ctx, effectiveCfg, classified, instanceRoot)
+
 	// Step 3: Create group directories and clone repos concurrently.
 	//
 	// Group directory creation runs sequentially (fast local I/O; repos in the
@@ -1695,11 +1700,6 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// If a partially-written .git dir survives a cancelled niwa apply, the next
 	// apply will attempt git fetch on it via SyncRepo. Remove the affected repo
 	// directory and re-run apply to recover.
-	// Step 2.9: Restore any host mirror the workspace's clones borrow from
-	// before anything clones, fetches or reads a borrower, so a deleted mirror
-	// is back in place before a command depends on it.
-	a.ensureMirrors(ctx, effectiveCfg, classified, instanceRoot)
-
 	repoStates := map[string]RepoState{}
 	for _, cr := range classified {
 		groupDir := filepath.Join(instanceRoot, cr.Group)
@@ -3207,6 +3207,8 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 		return
 	}
 	workspaceRoot := filepath.Dir(instanceRoot)
+	// A root that can't be listed still has this instance; its clones are
+	// enough to find a borrower here, and the next command lists the rest.
 	instances, _ := EnumerateInstances(workspaceRoot)
 	if !slices.Contains(instances, instanceRoot) {
 		instances = append(instances, instanceRoot)

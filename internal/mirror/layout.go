@@ -107,7 +107,9 @@ func randHex() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// ownedByUser reports whether info belongs to the current user.
+// ownedByUser reports whether info belongs to the current user. It reads the
+// unix owner, so the package builds for unix only, like the flock it relies on
+// and every platform niwa releases for.
 func ownedByUser(info os.FileInfo) bool {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	return ok && int(st.Uid) == os.Getuid()

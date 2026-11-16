@@ -29,8 +29,12 @@ const (
 // the guarded work in the timeout error, which reads "waiting for another niwa
 // apply to finish <what>".
 //
-// It is the waiting variant for short critical sections inside apply. TryFileLock
-// and the general waiting lock, filelock.WaitFileLock, live in internal/filelock.
+// It is the waiting variant for short critical sections inside apply, and it
+// stays here because only apply uses it: it skips the directory and owner
+// checks TryFileLock makes, its fixed 30 s bound and its timeout message speak
+// of apply, and moving it would change those callers for no gain. TryFileLock
+// and the general waiting lock, filelock.WaitFileLock, live in
+// internal/filelock.
 func acquireFileLock(lockPath, what string) (func(), error) {
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {

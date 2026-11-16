@@ -58,6 +58,12 @@ func runGit(ctx context.Context, config []string, args ...string) error {
 // limits of 1 set for the process itself, since the new store has no config
 // to hold them yet: a malformed object from the remote is refused before any
 // borrower can read it, and everything lands as a pack.
+//
+// url is the workspace config's, as given, and git records it as the store's
+// remote.origin.url just as an ordinary clone of the same URL records it in an
+// instance today. Rewriting the store's config from the fixed retention set
+// with the URL's userinfo, query and fragment stripped belongs to the refresh
+// and hostile-input work that follows this restore, not to it.
 func cloneMirror(ctx context.Context, url, dir string) error {
 	return runGit(ctx,
 		[]string{
