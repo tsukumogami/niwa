@@ -53,11 +53,24 @@ func Discover(startDir string) (configPath string, configDir string, err error) 
 // this directory is the workspace, and walking on could bind an enclosing
 // workspace instead or report none. The one failure that isn't is a refresh
 // finishing its own swap first, which leaves .niwa in place.
+//
+// A refresh in another process looks exactly like a dead one between its two
+// renames, so the restore takes the workspace's snapshot lock first and looks
+// again under it. A refresh that finished while we waited has put .niwa back,
+// and there's nothing to restore.
 func restoreWorkspaceConfigDir(dir string) (bool, error) {
 	if _, err := os.Stat(filepath.Join(dir, ConfigDir+PrevSuffix, ConfigFile)); err != nil {
 		return false, nil
 	}
 	configDir := filepath.Join(dir, ConfigDir)
+	release, err := AcquireSnapshotLock(configDir)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	if _, err := os.Stat(filepath.Join(configDir, ConfigFile)); err == nil {
+		return true, nil
+	}
 	restored, err := RestoreInterruptedSwap(configDir)
 	if restored {
 		ReportRestoredSwap(configDir)
