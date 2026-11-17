@@ -385,6 +385,36 @@ func TestRefresh_KeepsWhatTheRemoteDeleted(t *testing.T) {
 	}
 }
 
+// TestRefresh_WritesTheURLNowhereButTheConfig: git writes a fetch's command
+// line into each reflog line it adds and the URL into FETCH_HEAD, and the
+// store keeps its reflogs forever, so a credential in the config's URL would
+// stay on disk. The refresh names the URL on the command line only.
+func TestRefresh_WritesTheURLNowhereButTheConfig(t *testing.T) {
+	f := built(t)
+	pushCommit(t, f, "topic", "topic")
+	pushCommit(t, f, "main", "main-tip")
+	if res := EnsureHealthy(context.Background(), f.refreshOpts(), []Repo{f.repo()}); res[0].Outcome != OutcomeHealthy || res[0].Err != nil {
+		t.Fatalf("refresh = %+v, want healthy", res)
+	}
+
+	store := f.store(t)
+	if _, err := os.Lstat(filepath.Join(store, "FETCH_HEAD")); !os.IsNotExist(err) {
+		t.Fatalf("the refresh wrote FETCH_HEAD (%v)", err)
+	}
+	reflog, err := os.ReadFile(filepath.Join(store, "logs", "refs", "heads", "main"))
+	if err != nil {
+		t.Fatalf("the refresh logged no update of main: %v", err)
+	}
+	if !strings.Contains(string(reflog), fetchReflogAction[len("GIT_REFLOG_ACTION="):]) {
+		t.Fatalf("main's reflog doesn't carry the fixed message:\n%s", reflog)
+	}
+	for rel, body := range treeFiles(t, store) {
+		if rel != "config" && strings.Contains(body, f.remote) {
+			t.Errorf("%s in the store names the remote's URL", rel)
+		}
+	}
+}
+
 func TestRefresh_OffFetchesNothing(t *testing.T) {
 	f := built(t)
 	before := f.storeRef(t, "refs/heads/main")

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -70,10 +71,10 @@ var commitIDPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 // pinKept pins in the new store at dst, as refs/niwa/kept/<sha>, each commit
 // that a ref of an old store at srcs names, that dst holds once salvage has
 // run, and that no ref of dst reaches. An old store git can't open (its HEAD
-// gone, say) gives no pins, and a git call that fails pins nothing more:
-// a pin keeps a commit the remote dropped, but the store is usable without
-// one, so the restore goes on either way. A ref naming anything but a commit
-// is left out.
+// gone, say) gives no pins, and a commit whose history can't be walked isn't
+// pinned: a pin keeps a commit the remote dropped, but the store is usable
+// without one, so the restore goes on either way. A ref naming anything but a
+// commit is left out.
 func pinKept(ctx context.Context, srcs []string, dst string) {
 	seen := map[string]bool{}
 	var named []string
@@ -110,15 +111,19 @@ func pinKept(ctx context.Context, srcs []string, dst string) {
 	}
 
 	// rev-list prints each commit reachable from held and from no ref of dst,
-	// so a held commit it prints is one nothing in dst reaches.
-	out, err = gitOutput(ctx, nil, strings.Join(held, "\n")+"\n",
-		"--git-dir="+dst, "rev-list", "--stdin", "--not", "--all")
-	if err != nil {
-		return
-	}
+	// so a held commit it prints is one nothing in dst reaches. One commit
+	// whose history salvage couldn't bring fails the whole walk, so on a
+	// failure each commit is walked alone, and only the ones that can't be
+	// walked go unpinned.
 	unreached := map[string]bool{}
-	for _, id := range strings.Fields(out) {
-		unreached[id] = true
+	if out, err := unreachedFrom(ctx, dst, held); err == nil {
+		maps.Copy(unreached, out)
+	} else {
+		for _, id := range held {
+			if out, err := unreachedFrom(ctx, dst, []string{id}); err == nil {
+				maps.Copy(unreached, out)
+			}
+		}
 	}
 	var cmds strings.Builder
 	for _, id := range held {
@@ -130,6 +135,27 @@ func pinKept(ctx context.Context, srcs []string, dst string) {
 		return
 	}
 	_, _ = gitOutput(ctx, nil, cmds.String(), "--git-dir="+dst, "update-ref", "--stdin")
+}
+
+// unreachedFrom returns the commits of ids that no ref of the store at dst
+// reaches.
+func unreachedFrom(ctx context.Context, dst string, ids []string) (map[string]bool, error) {
+	out, err := gitOutput(ctx, nil, strings.Join(ids, "\n")+"\n",
+		"--git-dir="+dst, "rev-list", "--stdin", "--not", "--all")
+	if err != nil {
+		return nil, err
+	}
+	printed := map[string]bool{}
+	for _, id := range strings.Fields(out) {
+		printed[id] = true
+	}
+	unreached := map[string]bool{}
+	for _, id := range ids {
+		if printed[id] {
+			unreached[id] = true
+		}
+	}
+	return unreached, nil
 }
 
 // salvagePacks copies each pack in srcDir whose .idx is beside it and passes

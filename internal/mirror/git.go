@@ -48,13 +48,19 @@ func runGit(ctx context.Context, config []string, args ...string) error {
 // gitOutput runs git as runGit does, with stdin as its input, and returns
 // what it printed on stdout.
 func gitOutput(ctx context.Context, config []string, stdin string, args ...string) (string, error) {
+	return gitExec(ctx, nil, config, stdin, args...)
+}
+
+// gitExec runs git as gitOutput does, with env added to the cleaned
+// environment.
+func gitExec(ctx context.Context, env, config []string, stdin string, args ...string) (string, error) {
 	full := make([]string, 0, 2*(len(gitBaseConfig)+len(config))+len(args))
 	for _, kv := range append(append([]string{}, gitBaseConfig...), config...) {
 		full = append(full, "-c", kv)
 	}
 	full = append(full, args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
-	cmd.Env = gitEnv()
+	cmd.Env = append(gitEnv(), env...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -206,13 +212,21 @@ func writeStoreConfig(store, url string) error {
 	return nil
 }
 
+// fetchReflogAction is the reflog message a refresh's ref updates carry. git
+// otherwise writes its own command line there, the URL included, and the
+// store keeps its reflogs forever.
+const fetchReflogAction = "GIT_REFLOG_ACTION=niwa mirror refresh"
+
 // fetchMirror brings every ref of url into store and prunes none: a ref the
 // remote deleted stays, and a ref the remote moved is forced to its new value
 // with the old one kept in the store's reflog. url is the config's, as given,
 // on the command line only, so a credential it carries works but is never
-// written to the store.
+// written to the store: the reflog message is fixed, and no FETCH_HEAD, which
+// would name the URL, is written.
 func fetchMirror(ctx context.Context, store, url string) error {
-	return runGit(ctx, nil, "--git-dir="+store, "fetch", "--no-prune", "--quiet", "--", url, "+refs/*:refs/*")
+	_, err := gitExec(ctx, []string{fetchReflogAction}, nil, "",
+		"--git-dir="+store, "fetch", "--no-prune", "--no-write-fetch-head", "--quiet", "--", url, "+refs/*:refs/*")
+	return err
 }
 
 // verifyPack runs git verify-pack on a pack's .idx, which checks the index

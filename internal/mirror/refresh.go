@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -147,9 +148,11 @@ func deepVerifyDue(rec state, now time.Time) bool {
 }
 
 // verifyEveryPack runs git verify-pack on each pack in store, by its .idx.
-// It reports bad with the first refusal; an error with bad false means the
-// packs couldn't be listed, which says nothing about them. A store with no
-// pack directory holds only loose objects and has nothing to verify.
+// It reports bad with the first refusal git itself makes. An error with bad
+// false says nothing about the packs: they couldn't be listed, git couldn't
+// be run, or the command was cancelled, and none of those is a reason to
+// rebuild. A store with no pack directory holds only loose objects and has
+// nothing to verify.
 func verifyEveryPack(ctx context.Context, store string) (bad bool, err error) {
 	dir := filepath.Join(store, "objects", "pack")
 	entries, err := os.ReadDir(dir)
@@ -165,7 +168,9 @@ func verifyEveryPack(ctx context.Context, store string) (bad bool, err error) {
 		}
 		idx := filepath.Join(dir, strings.TrimSuffix(e.Name(), ".pack")+".idx")
 		if err := verifyPack(ctx, idx); err != nil {
-			return true, fmt.Errorf("deep verify of %s: %w", e.Name(), err)
+			var exit *exec.ExitError
+			refused := errors.As(err, &exit) && ctx.Err() == nil
+			return refused, fmt.Errorf("deep verify of %s: %w", e.Name(), err)
 		}
 	}
 	return false, nil

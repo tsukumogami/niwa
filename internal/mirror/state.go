@@ -41,13 +41,16 @@ type state struct {
 	// remote: by a refresh's fetch, or by the clone a restore made. UTC,
 	// RFC 3339. A state file written before refreshes existed has none.
 	LastRefresh string `json:"last_refresh,omitempty"`
-	// LastDeepVerify is when every pack in the store last passed git
-	// verify-pack: a restore's build, whose clone ran under fsckObjects and
-	// whose salvaged packs each passed it, or a refresh's daily deep verify.
+	// LastDeepVerify is when the store's objects were last all checked: a
+	// restore's build, whose clone ran under fsckObjects and whose salvaged
+	// packs each passed git verify-pack, or a refresh's daily deep verify,
+	// which runs verify-pack on every pack before the fetch (the packs that
+	// fetch brings arrive under fsckObjects).
 	LastDeepVerify string `json:"last_deep_verify,omitempty"`
 }
 
-// stateTime formats a time for the state file's timestamps.
+// stateTime formats a time for the state file's timestamps, in whole
+// seconds.
 func stateTime(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
 // packEntry is one pack in a store's manifest.
