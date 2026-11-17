@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 problem: |
   Every create fetches each github plugin marketplace's tarball into the new
   instance's .niwa/marketplaces/, a tree of about 58 MiB that is identical in
@@ -36,7 +36,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
