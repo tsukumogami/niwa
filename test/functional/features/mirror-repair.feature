@@ -418,3 +418,43 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     And the state file of "app" is unchanged
     And every ref of each borrower of "app" reads to the root and fsck is clean
     And nothing mirror-related exists outside the sandbox home
+
+  # A reference-transaction hook planted in the store runs on every ref
+  # update git makes there unless core.hooksPath points elsewhere, and a
+  # store config naming a hook directory and an fsmonitor script would run
+  # both. Each writes a marker if it ever runs. Every git call niwa makes
+  # names the empty ~/.niwa/empty-hooks as core.hooksPath and turns fsmonitor
+  # off, and the refresh rewrites the config whole before it fetches.
+  Scenario: A hook planted in a mirror never runs and a hostile mirror config is rewritten
+    When I run "niwa create myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is 0
+    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    When I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the mirror of "app" is a link into its store
+    When I plant a reference-transaction hook that writes a marker in the store of "app"
+    And I add a branch "topic" with one commit and one commit on main to source repo "app"
+    And I count the mirror log lines
+    And I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the error output carries no mirror warning
+    And the mirror log gained a healthy check line and a refresh line for "app" from "apply"
+    And the mirror of "app" holds the commits added to source repo "app"
+    And no hook marker exists
+    When I remember the mirror link of "app"
+    And I write core.hooksPath naming the marker hook's directory and core.fsmonitor naming a marker script into the store config of "app"
+    And I add one commit on main to source repo "app"
+    And I count the mirror log lines
+    And I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the error output carries no mirror warning
+    And the mirror log gained a healthy check line and a refresh line for "app" from "apply"
+    And the mirror of "app" holds the commit added on main
+    And the mirror link of "app" is unchanged
+    And the store of "app" holds the fixed retention config
+    And no hook marker exists
+    And the sandbox home's empty-hooks directory is empty with mode 0700
+    And every ref of each borrower of "app" reads to the root and fsck is clean
+    And nothing mirror-related exists outside the sandbox home
