@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: In Progress
 problem: |
   Every niwa create downloads each plugin marketplace's release and unpacks a
   full copy of it inside the new instance, even when another instance of the
@@ -27,7 +27,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+In Progress
 
 ## Problem Statement
 
