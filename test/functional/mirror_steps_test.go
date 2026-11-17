@@ -51,6 +51,10 @@ type mirrorScenario struct {
 	// What the refresh scenario added to a source repo: the branch's commit,
 	// main's new commit and the commit main pointed at before it.
 	added struct{ branch, topic, tip, parent string }
+
+	// What the lost-commit scenarios made in a borrower: a local branch with
+	// one unpushed commit on the added topic commit, and that commit's blob.
+	lost struct{ clone, branch, commit, blob string }
 }
 
 // borrowerSnapshot is what must survive a restore untouched in a borrower.
@@ -88,6 +92,7 @@ func registerMirrorSteps(ctx *godog.ScenarioContext) {
 	registerMirrorCommandSteps(ctx)
 	registerMirrorRaceSteps(ctx)
 	registerMirrorRefreshSteps(ctx)
+	registerMirrorLostSteps(ctx)
 }
 
 // mirrorState returns the scenario's mirror state, allocating it on first use.

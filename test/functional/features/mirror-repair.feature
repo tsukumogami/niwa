@@ -296,3 +296,91 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     And every ref of each borrower of "app" reads to the root and fsck is clean
     And the branch "keep" in the borrower of "app" in instance "myws" still names the added topic commit
     And the unpushed commit and uncommitted edit are intact
+
+  # A branch "keep" in myws holds one unpushed commit on a pushed commit that
+  # the source repo then deletes, keeping it only under a pull-request ref it
+  # hides, the way a forge does. The mirror that held it is lost, and the
+  # SessionStart hook of a session that isn't a background worker restores it.
+  # That hook syncs no clone, so the borrowers are held to their bytes on disk.
+  Scenario: A branch on deleted remote commits survives while the remote serves them
+    When I run "niwa create myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is 0
+    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    When I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the mirror of "app" is a link into its store
+    When I add a branch "topic" with one commit to source repo "app"
+    And I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the error output carries no mirror warning
+    And each borrower of "app" has the remote-tracking branch "origin/topic" at the added topic commit
+    When I repack the borrowers of "app" against the mirror
+    Then each borrower of "app" holds none of the mirror's objects
+    Given the borrower of "app" in instance "myws" has a local branch "keep" with one unpushed commit on the added topic commit
+    And the borrower of "app" in instance "myws" has an unpushed commit and an uncommitted edit
+    When source repo "app" keeps the added topic commit only under a hidden ref and deletes the added branch
+    Then a fresh clone of source repo "app" lacks the added topic commit
+    Given I snapshot the borrowers of "app"
+    And I record the borrowers of "app" on disk
+    And I count the mirror log lines
+    When I delete the mirror of "app" and its store
+    And I pipe a SessionStart hook for session "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" that is not a background worker
+    Then the exit code is 0
+    And the hook's context carries the notice for "app" with fault "missing" and result "restored"
+    And the mirror log gained a check line and a restore line for "app" with fault "missing" and result "restored" from command "from-hook"
+    And the mirror of "app" pins the added topic commit and has no branch for it
+    And the borrowers of "app" are unchanged on disk
+    And every ref of each borrower of "app" reads to the root and fsck is clean
+    And the unpushed commit on the branch and its own file still read in the borrower of "app" in instance "myws"
+    And the unpushed commit and uncommitted edit are intact
+    When I count the mirror log lines
+    And I pipe a SessionStart hook for session "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" that is not a background worker
+    Then the exit code is 0
+    And the hook printed nothing
+    And the mirror log gained only a healthy check line for "app" from "from-hook"
+
+  # The same, except that the source repo destroys the commit outright: no
+  # ref keeps it, and the prune drops it. The restore can't get it back, so
+  # it names the lost branch and the stale remote-tracking refs in the mirror
+  # log and counts them in the hook's notice, and changes nothing in either
+  # borrower. The next hook finds the mirror healthy and reports nothing.
+  Scenario: A branch on commits the remote destroyed is reported unrecoverable
+    When I run "niwa create myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is 0
+    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    When I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the mirror of "app" is a link into its store
+    When I add a branch "topic" with one commit to source repo "app"
+    And I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the error output carries no mirror warning
+    And each borrower of "app" has the remote-tracking branch "origin/topic" at the added topic commit
+    When I repack the borrowers of "app" against the mirror
+    Then each borrower of "app" holds none of the mirror's objects
+    Given the borrower of "app" in instance "myws" has a local branch "keep" with one unpushed commit on the added topic commit
+    And the borrower of "app" in instance "myws" has an unpushed commit and an uncommitted edit
+    When source repo "app" deletes the added branch and prunes its commit
+    Then a fresh clone of source repo "app" lacks the added topic commit
+    Given I snapshot the borrowers of "app"
+    And I record the borrowers of "app" on disk
+    And I count the mirror log lines
+    When I delete the mirror of "app" and its store
+    And I pipe a SessionStart hook for session "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" that is not a background worker
+    Then the exit code is 0
+    And the hook's context carries the notice for "app" with fault "missing", result "restored" and 3 unrecoverable refs, naming none
+    And the mirror log then gained the unrecoverable lines for "app" from command "from-hook"
+    And the mirror of "app" pins nothing
+    And the borrowers of "app" are unchanged on disk
+    And every other ref of each borrower of "app" reads to the root
+    And the unpushed commit on the branch and its own file still read in the borrower of "app" in instance "myws"
+    And the unpushed commit and uncommitted edit are intact
+    When I count the mirror log lines
+    And I pipe a SessionStart hook for session "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" that is not a background worker
+    Then the exit code is 0
+    And the hook printed nothing
+    And the mirror log gained only a healthy check line for "app" from "from-hook"
