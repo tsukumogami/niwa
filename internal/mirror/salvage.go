@@ -94,18 +94,7 @@ func pinKept(ctx context.Context, srcs []string, dst string) {
 		return
 	}
 
-	// Which of them dst holds as commits.
-	out, err := gitOutput(ctx, nil, strings.Join(named, "\n")+"\n",
-		"--git-dir="+dst, "cat-file", "--batch-check=%(objectname) %(objecttype)")
-	if err != nil {
-		return
-	}
-	var held []string
-	for _, line := range strings.Split(out, "\n") {
-		if id, kind, ok := strings.Cut(line, " "); ok && kind == "commit" && seen[id] {
-			held = append(held, id)
-		}
-	}
+	held := heldCommits(ctx, dst, named)
 	if len(held) == 0 {
 		return
 	}
@@ -125,16 +114,64 @@ func pinKept(ctx context.Context, srcs []string, dst string) {
 			}
 		}
 	}
-	var cmds strings.Builder
+	var pins []string
 	for _, id := range held {
 		if unreached[id] {
+			pins = append(pins, id)
+		}
+	}
+	_ = writePins(ctx, dst, pins)
+}
+
+// heldCommits returns those of ids, each a full-length commit id, that the
+// store at dst holds as commits, in the order given.
+func heldCommits(ctx context.Context, dst string, ids []string) []string {
+	want := map[string]bool{}
+	var valid []string
+	for _, id := range ids {
+		if commitIDPattern.MatchString(id) && !want[id] {
+			want[id] = true
+			valid = append(valid, id)
+		}
+	}
+	if len(valid) == 0 {
+		return nil
+	}
+	out, err := gitOutput(ctx, nil, strings.Join(valid, "\n")+"\n",
+		"--git-dir="+dst, "cat-file", "--batch-check=%(objectname) %(objecttype)")
+	if err != nil {
+		return nil
+	}
+	isCommit := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		if id, kind, ok := strings.Cut(line, " "); ok && kind == "commit" && want[id] {
+			isCommit[id] = true
+		}
+	}
+	var held []string
+	for _, id := range valid {
+		if isCommit[id] {
+			held = append(held, id)
+		}
+	}
+	return held
+}
+
+// writePins pins each of ids in the store at dst as refs/niwa/kept/<sha>, in
+// one update-ref --stdin, so a commit nothing else names stays reachable.
+// Each id must be a full-length commit id the store holds.
+func writePins(ctx context.Context, dst string, ids []string) error {
+	var cmds strings.Builder
+	for _, id := range ids {
+		if commitIDPattern.MatchString(id) {
 			cmds.WriteString("update " + keptRefPrefix + id + " " + id + "\n")
 		}
 	}
 	if cmds.Len() == 0 {
-		return
+		return nil
 	}
-	_, _ = gitOutput(ctx, nil, cmds.String(), "--git-dir="+dst, "update-ref", "--stdin")
+	_, err := gitOutput(ctx, nil, cmds.String(), "--git-dir="+dst, "update-ref", "--stdin")
+	return err
 }
 
 // unreachedFrom returns the commits of ids that no ref of the store at dst

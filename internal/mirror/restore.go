@@ -64,12 +64,15 @@ func atStage(stage string) error {
 // someone copied there by hand, is salvaged from where it stands and then
 // moved into .store/ under a ".moved" name just before the swap, never
 // removed. Anything else there is left in place and reported.
-func restore(ctx context.Context, opts Options, r Repo) (Outcome, error) {
+//
+// Once a store is in place, the borrowers are probed for refs it can't serve
+// (see rebuild), and the refs still lost come back with the outcome.
+func restore(ctx context.Context, opts Options, r Repo) (Outcome, []LostRef, error) {
 	if r.URL == "" {
-		return OutcomeRestoreFailed, errors.New("the workspace config gives no URL to restore from")
+		return OutcomeRestoreFailed, nil, errors.New("the workspace config gives no URL to restore from")
 	}
 	if err := ensureLayout(opts.Home, opts.WorkspaceRoot); err != nil {
-		return OutcomeRestoreFailed, err
+		return OutcomeRestoreFailed, nil, err
 	}
 
 	wait := opts.LockWait
@@ -79,10 +82,10 @@ func restore(ctx context.Context, opts Options, r Repo) (Outcome, error) {
 	holder := fmt.Sprintf("niwa pid %d restoring mirror %s", os.Getpid(), r.ID)
 	release, err := filelock.WaitFileLock(ctx, LockPath(opts.Home, opts.WorkspaceRoot, r.ID), holder, wait)
 	if errors.Is(err, filelock.ErrLockHeld) {
-		return OutcomeBusy, err
+		return OutcomeBusy, nil, err
 	}
 	if err != nil {
-		return OutcomeRestoreFailed, err
+		return OutcomeRestoreFailed, nil, err
 	}
 	defer release()
 
@@ -92,16 +95,23 @@ func restore(ctx context.Context, opts Options, r Repo) (Outcome, error) {
 	clearLeftovers(mdir, r.ID)
 	fault := check(ctx, mdir, r)
 	if fault == FaultNone {
-		return OutcomeHealthy, nil
+		return OutcomeHealthy, nil, nil
 	}
-	return rebuild(ctx, mdir, r, fault)
+	return rebuild(ctx, mdir, r, fault, borrowersOf(opts.Instances, filepath.Join(mdir, r.ID)))
 }
 
 // rebuild is a restore's work once it holds the mirror's lock and knows the
 // fault: relink the recorded store or build a new one, and swap it in. The
 // caller holds the lock. It doesn't check again, so a refresh whose deep
 // verify found a bad pack the check can't see rebuilds through it too.
-func rebuild(ctx context.Context, mdir string, r Repo, fault Fault) (Outcome, error) {
+//
+// Once the swap has put a store in place, and for a new store once the state
+// file records it, rebuild probes the borrowers against it, still under the
+// caller's lock, and recovers what it can (recoverBorrowers); the refs still
+// lost come back with the outcome. A rebuild that fails before the swap, or
+// whose new store went unrecorded, probes nothing. A lost ref is the stated
+// limit of a restore, not a failure: the outcome stays restored.
+func rebuild(ctx context.Context, mdir string, r Repo, fault Fault, borrowers []string) (Outcome, []LostRef, error) {
 	stable := filepath.Join(mdir, r.ID)
 	moveAside := false
 	info, err := os.Lstat(stable)
@@ -109,24 +119,24 @@ func rebuild(ctx context.Context, mdir string, r Repo, fault Fault) (Outcome, er
 	case errors.Is(err, fs.ErrNotExist):
 		relinked, err := relink(ctx, mdir, r)
 		if err != nil {
-			return OutcomeRestoreFailed, err
+			return OutcomeRestoreFailed, nil, err
 		}
 		if relinked {
-			return OutcomeRestored, nil
+			return OutcomeRestored, recoverBorrowers(ctx, mdir, r, borrowers), nil
 		}
 	case err != nil:
-		return OutcomeRestoreFailed, fmt.Errorf("inspecting %s: %w", stable, err)
+		return OutcomeRestoreFailed, nil, fmt.Errorf("inspecting %s: %w", stable, err)
 	case info.Mode()&os.ModeSymlink != 0:
 	case info.IsDir() && ownedByUser(info):
 		moveAside = true
 	default:
 		// A file, a fifo or a directory another user owns: a rename over it
 		// would destroy it or fail, and moving it isn't niwa's call.
-		return OutcomeRestoreFailed, fmt.Errorf("%s is not a link; left in place", stable)
+		return OutcomeRestoreFailed, nil, fmt.Errorf("%s is not a link; left in place", stable)
 	}
 
 	if err := checkFreeSpace(mdir, r.ID); err != nil {
-		return OutcomeRestoreFailed, err
+		return OutcomeRestoreFailed, nil, err
 	}
 
 	// The old stores are listed before the new one exists, so the list can
@@ -144,7 +154,7 @@ func rebuild(ctx context.Context, mdir string, r Repo, fault Fault) (Outcome, er
 	}
 	store, stateTmp, err := buildStore(ctx, mdir, r, srcs)
 	if err != nil {
-		return OutcomeRestoreFailed, err
+		return OutcomeRestoreFailed, nil, err
 	}
 	discard := func() {
 		// Nothing links to the new store yet, so it goes, by its exact name.
@@ -157,12 +167,12 @@ func rebuild(ctx context.Context, mdir string, r Repo, fault Fault) (Outcome, er
 		name, err := newStoreName(r.ID, time.Now())
 		if err != nil {
 			discard()
-			return OutcomeRestoreFailed, err
+			return OutcomeRestoreFailed, nil, err
 		}
 		moved = filepath.Join(mdir, ".store", name+".moved")
 		if err := os.Rename(stable, moved); err != nil {
 			discard()
-			return OutcomeRestoreFailed, fmt.Errorf("moving the directory at %s aside: %w", stable, err)
+			return OutcomeRestoreFailed, nil, fmt.Errorf("moving the directory at %s aside: %w", stable, err)
 		}
 	}
 	if err := swapLink(mdir, r.ID, store); err != nil {
@@ -170,17 +180,17 @@ func rebuild(ctx context.Context, mdir string, r Repo, fault Fault) (Outcome, er
 		if moved != "" {
 			_ = os.Rename(moved, stable)
 		}
-		return OutcomeRestoreFailed, err
+		return OutcomeRestoreFailed, nil, err
 	}
 	if err := recordState(mdir, r.ID, stateTmp); err != nil {
 		// The new store is linked and borrowers read it; only its record is
 		// missing, so the next check finds no matching state file and
 		// rebuilds, salvaging from this store. The old stores stay until then.
 		_ = os.Remove(stateTmp)
-		return OutcomeRestored, fmt.Errorf("recording the new store: %w", err)
+		return OutcomeRestored, nil, fmt.Errorf("recording the new store: %w", err)
 	}
 	removeOldStores(mdir, r.ID, olds)
-	return OutcomeRestored, nil
+	return OutcomeRestored, recoverBorrowers(ctx, mdir, r, borrowers), nil
 }
 
 // relink points a new link at the store the state file records, when that

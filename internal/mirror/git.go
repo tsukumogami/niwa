@@ -229,6 +229,33 @@ func fetchMirror(ctx context.Context, store, url string) error {
 	return err
 }
 
+// fetchByID fetches the commits ids, and what they reach that the store
+// lacks, into store from url, the config's URL as given, on the command line
+// only. It runs with protocol version 2, whose fetch serves a commit by id
+// even when no advertised ref names it, and fetches to no destination, so it
+// writes no ref, no tag and no FETCH_HEAD, and the URL reaches no reflog.
+// The store's own config holds fsckObjects and unpack limits of 1, so what
+// arrives is checked and lands as a pack. Nothing names the fetched commits
+// afterwards; the caller pins them.
+//
+// Every id must be a full-length commit id; anything else is refused before
+// git runs, so nothing a remote or a borrower chose can reach the command
+// line as an option. The ids follow "--" and the URL.
+func fetchByID(ctx context.Context, store, url string, ids []string) error {
+	if len(ids) == 0 {
+		return fmt.Errorf("no commit ids to fetch")
+	}
+	for _, id := range ids {
+		if !commitIDPattern.MatchString(id) {
+			return fmt.Errorf("refusing to fetch %q: not a full-length commit id", id)
+		}
+	}
+	args := append([]string{"--git-dir=" + store,
+		"fetch", "--no-write-fetch-head", "--no-tags", "--quiet", "--", url}, ids...)
+	_, err := gitExec(ctx, []string{fetchReflogAction}, []string{"protocol.version=2"}, "", args...)
+	return err
+}
+
 // verifyPack runs git verify-pack on a pack's .idx, which checks the index
 // and every object in the pack it names against their checksums. It reads
 // local files only.

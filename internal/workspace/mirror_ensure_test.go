@@ -415,3 +415,50 @@ func TestReportMirrorResult_SilentForAHealthyMirror(t *testing.T) {
 		t.Fatalf("a healthy result printed %q", stderr.String())
 	}
 }
+
+func TestReportMirrorResult_NamesEachUnrecoverableRef(t *testing.T) {
+	missing := strings.Repeat("a", 40)
+	own := strings.Repeat("b", 40)
+	res := mirror.Result{
+		RepoID: "app", Fault: mirror.FaultMissing, Outcome: mirror.OutcomeRestored,
+		Unrecoverable: []mirror.LostRef{
+			{Instance: "/ws/myws/tools/app", Repo: "app", Ref: "refs/remotes/origin/topic", MissingCommit: missing, RemoteTracking: true,
+				OwnCommits: []string{}, LostFiles: []mirror.LostFile{}},
+			{Instance: "/ws/myws/tools/app", Repo: "app", Ref: "refs/heads/keep", MissingCommit: missing,
+				OwnCommits: []string{own}, LostFiles: []mirror.LostFile{{Path: "added-topic.txt"}}},
+		},
+	}
+	var stderr bytes.Buffer
+	ReportMirrorResult(NewReporterWithTTY(&stderr, false), res)
+	lines := strings.Split(strings.TrimSuffix(stderr.String(), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("printed %d lines, want 3:\n%s", len(lines), stderr.String())
+	}
+	if lines[0] != "warning: mirror app: fault missing, result restored" {
+		t.Fatalf("line 1 = %q", lines[0])
+	}
+	for _, want := range []string{
+		"warning: mirror app:", "/ws/myws/tools/app", "refs/heads/keep", missing,
+		"pushed and later deleted from the remote", "no longer serves it",
+		"unpushed commits are intact: " + own, "added-topic.txt (not in the working tree)",
+	} {
+		if !strings.Contains(lines[1], want) {
+			t.Fatalf("line 2 = %q, want it to carry %q", lines[1], want)
+		}
+	}
+	if strings.HasPrefix(lines[2], "warning:") {
+		t.Fatalf("line 3 = %q, want no warning prefix", lines[2])
+	}
+	for _, want := range []string{"/ws/myws/tools/app", "refs/remotes/origin/topic", missing, "git fetch --prune"} {
+		if !strings.Contains(lines[2], want) {
+			t.Fatalf("line 3 = %q, want it to carry %q", lines[2], want)
+		}
+	}
+
+	stderr.Reset()
+	res.Unrecoverable = nil
+	ReportMirrorResult(NewReporterWithTTY(&stderr, false), res)
+	if got := stderr.String(); got != "warning: mirror app: fault missing, result restored\n" {
+		t.Fatalf("a restore with nothing lost printed %q", got)
+	}
+}

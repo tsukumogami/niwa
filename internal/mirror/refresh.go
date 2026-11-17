@@ -34,7 +34,9 @@ const deepVerifyEvery = 24 * time.Hour
 // its size, trailer and ctime unchanged is caught before the fetch reads it.
 // Such a pack makes the refresh, still holding the lock, rebuild the mirror
 // with fault pack-changed and log a restore line in place of the refresh
-// line; the Result then carries that fault and the restore's outcome.
+// line; the Result then carries that fault and the restore's outcome, and
+// the refs the rebuild's probe of the borrowers left lost, each logged on an
+// unrecoverable line after the restore line.
 //
 // Any other failure leaves the link, the store's packs and the state file as
 // they were, logs nothing, and returns the healthy Result with Err set: the
@@ -78,13 +80,14 @@ func refresh(ctx context.Context, opts Options, mdir string, r Repo, res Result)
 	rotten, err := refreshStore(ctx, mdir, r, rec, start)
 	if rotten {
 		res.Fault = FaultPackChanged
-		res.Outcome, res.Err = rebuild(ctx, mdir, r, FaultPackChanged)
+		res.Outcome, res.Unrecoverable, res.Err = rebuild(ctx, mdir, r, FaultPackChanged,
+			borrowersOf(opts.Instances, filepath.Join(mdir, r.ID)))
 		line.Event = eventRestore
 		line.Fault = res.Fault
 		line.Result = res.Outcome
 		took := time.Since(start).Milliseconds()
 		line.TookMs = &took
-		_ = appendLog(mdir, line)
+		_ = appendLog(mdir, append([]any{line}, unrecoverableLines(line, res.Unrecoverable)...)...)
 		return res
 	}
 	if err != nil {

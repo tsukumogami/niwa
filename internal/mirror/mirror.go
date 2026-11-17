@@ -96,6 +96,12 @@ type Result struct {
 	Outcome            Outcome
 	Err                error
 	CheckDuration      time.Duration
+	// Unrecoverable are the borrower refs a restore left unreadable: built
+	// on commits the remote deleted after they were pushed, which the lost
+	// mirror held and the remote no longer serves. They don't make the
+	// restore a failure, and the next command finds the mirror healthy and
+	// doesn't report them again.
+	Unrecoverable []LostRef
 }
 
 // Usable reports whether borrowers can read the mirror after the call.
@@ -113,10 +119,13 @@ var noticeEffects = map[Outcome]string{
 
 // Notice is the one line a command shows a reader who can't see its stderr,
 // such as a session that gets the SessionStart hook's context: the repo id,
-// the fault, the outcome and where the mirror log is. It's "" for a healthy
-// mirror. It's built from those four values and fixed text only, never from
-// Err, which can carry text git or the remote produced, and any control
-// character in it is dropped, so a hostile home path can't break the line.
+// the fault, the outcome, how many borrower refs the restore left
+// unrecoverable when there are any, and where the mirror log is. It's "" for
+// a healthy mirror. It's built from those values and fixed text only, never
+// from Err, which can carry text git or the remote produced, nor from a lost
+// ref's names, which a remote or a person chose: the count says the mirror
+// log names them. Any control character in it is dropped, so a hostile home
+// path can't break the line.
 func (r Result) Notice() string {
 	if r.Outcome == OutcomeHealthy || r.Outcome == "" {
 		return ""
@@ -124,6 +133,12 @@ func (r Result) Notice() string {
 	line := fmt.Sprintf("niwa mirror %s: fault %s, result %s.", r.RepoID, r.Fault, r.Outcome)
 	if effect := noticeEffects[r.Outcome]; effect != "" {
 		line += " " + effect
+	}
+	switch n := len(r.Unrecoverable); {
+	case n == 1:
+		line += " Except 1 ref in those clones, which is unrecoverable: it was built on commits the remote no longer serves. The mirror log names it."
+	case n > 1:
+		line += fmt.Sprintf(" Except %d refs in those clones, which are unrecoverable: they were built on commits the remote no longer serves. The mirror log names them.", n)
 	}
 	if r.StablePath != "" {
 		line += " Mirror log: " + logPath(filepath.Dir(r.StablePath))
@@ -292,7 +307,9 @@ func EnsureHealthy(ctx context.Context, opts Options, repos []Repo) []Result {
 // written once the restore is over. A restore that found, once it held the
 // lock, that another command had already fixed the mirror restored nothing
 // and logs no restore line: its check line says the fault it saw and
-// "healthy". A failed log write is dropped: it never changes the Result.
+// "healthy". Each borrower ref the restore left unrecoverable gets an
+// unrecoverable line after the restore line. A failed log write is dropped:
+// it never changes the Result.
 //
 // A mirror the check finds healthy is refreshed when opts.Refresh is set,
 // once its check line is written (see refresh). A mirror this call restored
@@ -322,7 +339,7 @@ func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 		return res
 	}
 	restoreStart := time.Now()
-	res.Outcome, res.Err = restore(ctx, opts, r)
+	res.Outcome, res.Unrecoverable, res.Err = restore(ctx, opts, r)
 	took := time.Since(restoreStart).Milliseconds()
 	checkLine.Result = res.Outcome
 	if res.Outcome == OutcomeHealthy {
@@ -333,6 +350,7 @@ func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 	restoreLine.Time = logTime(restoreStart)
 	restoreLine.Event = eventRestore
 	restoreLine.TookMs = &took
-	_ = appendLog(mdir, checkLine, restoreLine)
+	lines := []any{checkLine, restoreLine}
+	_ = appendLog(mdir, append(lines, unrecoverableLines(restoreLine, res.Unrecoverable)...)...)
 	return res
 }

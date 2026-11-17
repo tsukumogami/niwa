@@ -3299,6 +3299,11 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 // after it when there is one. A healthy mirror whose refresh failed prints
 // "warning: mirror <id>: refresh failed: <err>"; any other healthy mirror
 // prints nothing.
+//
+// After a restore's warning come the borrower refs it left unrecoverable
+// (Result.Unrecoverable): a warning for each lost local branch, tag or
+// detached HEAD, then, at lower severity through Log, a line for each stale
+// remote-tracking ref. Their names were cleaned when the LostRef was built.
 func ReportMirrorResult(r *Reporter, res mirror.Result) {
 	switch {
 	case res.Outcome == mirror.OutcomeHealthy && res.Err != nil:
@@ -3309,6 +3314,42 @@ func ReportMirrorResult(r *Reporter, res mirror.Result) {
 	default:
 		r.Warn("mirror %s: fault %s, result %s", res.RepoID, res.Fault, res.Outcome)
 	}
+	for _, l := range res.Unrecoverable {
+		if !l.RemoteTracking {
+			r.Warn("%s", lostRefWarning(res.RepoID, l))
+		}
+	}
+	for _, l := range res.Unrecoverable {
+		if l.RemoteTracking {
+			r.Log("mirror %s: %s in %s is stale: commit %s is gone from the remote and the mirror that kept it was lost; git fetch --prune in that clone clears it",
+				res.RepoID, l.Ref, l.Instance, l.MissingCommit)
+		}
+	}
+}
+
+// lostRefWarning is the warning for a lost local branch, tag or detached
+// HEAD, without the "warning: " prefix: the clone, the ref, the missing
+// commit and why it's gone, then for a branch its unpushed commits, which
+// are intact, and its lost files with whether the working tree holds each.
+func lostRefWarning(repoID string, l mirror.LostRef) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "mirror %s: %s in %s is unrecoverable: it is built on commit %s, which was pushed and later deleted from the remote; the mirror that kept it was lost and the remote no longer serves it",
+		repoID, l.Ref, l.Instance, l.MissingCommit)
+	if len(l.OwnCommits) > 0 {
+		fmt.Fprintf(&b, "; its unpushed commits are intact: %s", strings.Join(l.OwnCommits, ", "))
+	}
+	if len(l.LostFiles) > 0 {
+		files := make([]string, 0, len(l.LostFiles))
+		for _, f := range l.LostFiles {
+			where := "not in the working tree"
+			if f.InWorkingTree {
+				where = "in the working tree"
+			}
+			files = append(files, fmt.Sprintf("%s (%s)", f.Path, where))
+		}
+		fmt.Fprintf(&b, "; lost files: %s", strings.Join(files, ", "))
+	}
+	return b.String()
 }
 
 // cloneWorker pulls jobs from the jobs channel until it is closed, clones or
