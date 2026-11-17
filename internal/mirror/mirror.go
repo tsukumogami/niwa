@@ -3,6 +3,7 @@ package mirror
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -324,6 +325,50 @@ func EnsureHealthy(ctx context.Context, opts Options, repos []Repo) []Result {
 		results = append(results, ensureOne(ctx, opts, r))
 	}
 	return results
+}
+
+// Seed builds repo's first mirror, before any clone borrows from it, and
+// returns the same kind of Result a check gives: a caller clones through the
+// mirror only when Usable() is true, and in full otherwise.
+//
+// A repo whose id ValidRepoID rejects, or whose URL is empty, can't take a
+// mirror. Seed refuses it before it touches the disk: the Result has fault
+// missing, outcome restore-failed and Err set, StablePath is empty for a
+// rejected id, and nothing is made under ~/.niwa/.
+//
+// Otherwise Seed does what EnsureHealthy does for one repo, without the
+// Mirrored filter that keeps EnsureHealthy from building a mirror no clone
+// borrows yet. A first build is a restore of a mirror that's missing: it runs
+// under the mirror's lock, clones into .tmp/ with the fixed config and records
+// the state file before the link is swapped in, so a Seed that fails leaves
+// nothing behind and the next Seed or EnsureHealthy tries again, and a second
+// Seed racing the first finds the mirror healthy and builds nothing. It
+// doesn't refresh what it just cloned, even with opts.Refresh set. On a repo
+// that already has a mirror, Seed returns what EnsureHealthy returns for it.
+//
+// Seed writes nothing in any clone, alternates included: pointing a new clone
+// at StablePath(...) + "/objects" is the caller's job, never
+// git clone --reference, which records the store's resolved path and breaks
+// once a restore replaces that store.
+func Seed(ctx context.Context, opts Options, repo Repo) Result {
+	if !ValidRepoID(repo.ID) {
+		return Result{
+			RepoID:  repo.ID,
+			Fault:   FaultMissing,
+			Outcome: OutcomeRestoreFailed,
+			Err:     fmt.Errorf("repo id %q can't name a mirror", repo.ID),
+		}
+	}
+	if repo.URL == "" {
+		return Result{
+			RepoID:     repo.ID,
+			StablePath: StablePath(opts.Home, opts.WorkspaceRoot, repo.ID),
+			Fault:      FaultMissing,
+			Outcome:    OutcomeRestoreFailed,
+			Err:        errors.New("the workspace config gives no URL to build the mirror from"),
+		}
+	}
+	return ensureOne(ctx, opts, repo)
 }
 
 // ensureOne checks one mirror, restores it when the check finds a fault, and
