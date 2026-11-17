@@ -26,6 +26,25 @@ type lineageTreeState struct {
 	order      []string
 	remembered map[string][]byte
 	held       *heldDispatch
+	// heldRefresh is the dispatch parked mid-swap by the snapshot race
+	// scenario; bg holds the commands started while it is parked.
+	heldRefresh *bgRun
+	bg          []*bgRun
+}
+
+// bgRun is a niwa command running in the background. marker is the hold path
+// whose ".held" file shows where the command stopped. Its result is kept once
+// read so a later step still sees it.
+type bgRun struct {
+	name     string
+	cmd      *exec.Cmd
+	stdout   bytes.Buffer
+	stderr   bytes.Buffer
+	marker   string
+	done     chan error
+	ended    bool
+	exitCode int
+	runErr   error
 }
 
 // keptDispatch is one dispatch a scenario named: its instance, the dispatch
@@ -71,7 +90,16 @@ func registerLineageTreeSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the workspace root has no lineage store$`, theWorkspaceRootHasNoLineageStore)
 	ctx.Step(`^the lineage store is gone$`, theLineageStoreIsGone)
 	ctx.Step(`^the proxy variables point at a closed local port$`, theProxyVariablesPointAtAClosedPort)
-	ctx.Step(`^a dispatch from the workspace root holds its refresh between copy and swap$`, aDispatchHoldsItsRefresh)
+	ctx.Step(`^a dispatch from the workspace root holds its refresh between the two renames$`, aDispatchHoldsItsRefreshBetweenTheRenames)
+	ctx.Step(`^a second dispatch starts from the workspace root while the refresh is held$`, aSecondDispatchStartsWhileTheRefreshIsHeld)
+	ctx.Step(`^niwa apply starts in the created instance while the refresh is held$`, niwaApplyStartsWhileTheRefreshIsHeld)
+	ctx.Step(`^each started command is waiting for the config lock or has ended$`, eachStartedCommandIsWaitingOrHasEnded)
+	ctx.Step(`^the held refresh is let go$`, theHeldRefreshIsLetGo)
+	ctx.Step(`^the held dispatch, the second dispatch and the apply all exit 0$`, theHeldAndStartedCommandsAllExitZero)
+	ctx.Step(`^each started command waited for the config lock$`, eachStartedCommandWaitedForTheConfigLock)
+	ctx.Step(`^both dispatches have an instance, a session mapping and a lineage entry$`, bothDispatchesHaveAnInstanceMappingAndLineageEntry)
+	ctx.Step(`^the apply reported no missing workspace config$`, theApplyReportedNoMissingWorkspaceConfig)
+	ctx.Step(`^the workspace root has no \.niwa\.next or \.niwa\.prev left$`, theWorkspaceRootHasNoSwapLeftovers)
 	ctx.Step(`^the held dispatch is released and ends$`, theHeldDispatchIsReleased)
 }
 
@@ -557,39 +585,350 @@ func theProxyVariablesPointAtAClosedPort(ctx context.Context) (context.Context, 
 	return ctx, nil
 }
 
-// aDispatchHoldsItsRefresh starts a dispatch in the background with the
-// testfault hold at snapshot-swap, the point after the new configuration copy
-// is built and before it replaces the old one, and waits until it is there.
-func aDispatchHoldsItsRefresh(ctx context.Context) (context.Context, error) {
+// startBgRun starts niwa with args in dir, with NIWA_TEST_FAULT set to fault,
+// and registers a cleanup that kills it if the scenario ends first.
+func startBgRun(s *testState, name, dir, marker, fault string, args ...string) (*bgRun, error) {
+	b := &bgRun{name: name, marker: marker, done: make(chan error, 1)}
+	b.cmd = exec.Command(s.binPath, args...)
+	b.cmd.Dir = dir
+	b.cmd.Env = append(s.buildEnv(), "NIWA_TEST_FAULT="+fault)
+	b.cmd.Stdout = &b.stdout
+	b.cmd.Stderr = &b.stderr
+	if err := b.cmd.Start(); err != nil {
+		return nil, fmt.Errorf("starting %s: %w", name, err)
+	}
+	go func() { b.done <- b.cmd.Wait() }()
+	s.cleanups = append(s.cleanups, func() {
+		if !b.ended {
+			_ = b.cmd.Process.Kill()
+		}
+	})
+	return b, nil
+}
+
+// record keeps the result of a finished command.
+func (b *bgRun) record(err error) {
+	b.ended = true
+	b.runErr = err
+	b.exitCode = 0
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		b.exitCode = exitErr.ExitCode()
+		b.runErr = nil
+	} else if err != nil {
+		b.exitCode = -1
+	}
+}
+
+// poll reports whether the command has ended, without blocking.
+func (b *bgRun) poll() bool {
+	if b.ended {
+		return true
+	}
+	select {
+	case err := <-b.done:
+		b.record(err)
+	default:
+	}
+	return b.ended
+}
+
+// wait blocks until the command ends. guard only stops a hung command; it is
+// not something the scenario asserts on.
+func (b *bgRun) wait(guard time.Duration) error {
+	if b.ended {
+		return nil
+	}
+	select {
+	case err := <-b.done:
+		b.record(err)
+		return nil
+	case <-time.After(guard):
+	}
+	_ = b.cmd.Process.Kill()
+	select {
+	case err := <-b.done:
+		b.record(err)
+	case <-time.After(10 * time.Second):
+	}
+	return fmt.Errorf("%s didn't finish and was killed:\n%s", b.name, b.output())
+}
+
+// waiting reports whether the command recorded a stop at its marker.
+func (b *bgRun) waiting() bool {
+	_, err := os.Stat(b.marker + ".held")
+	return err == nil
+}
+
+// output is the command's stdout and stderr, for failure messages.
+func (b *bgRun) output() string {
+	return fmt.Sprintf("--- %s stdout ---\n%s--- %s stderr ---\n%s", b.name, b.stdout.String(), b.name, b.stderr.String())
+}
+
+// aDispatchHoldsItsRefreshBetweenTheRenames starts a dispatch in the
+// background with the testfault hold at snapshot-swap-mid and waits until it
+// is there. The dispatch's first swap is the workspace-root refresh, so it
+// parks with .niwa renamed to .niwa.prev and its new copy in .niwa.next.
+func aDispatchHoldsItsRefreshBetweenTheRenames(ctx context.Context) (context.Context, error) {
 	s := getState(ctx)
 	if s == nil {
 		return ctx, fmt.Errorf("no test state")
 	}
 	t := treeState(s)
-	h := &heldDispatch{release: filepath.Join(s.sandbox, "release-held-refresh"), done: make(chan error, 1)}
-	h.cmd = exec.Command(s.binPath, "dispatch", "held-task", "--detach")
-	h.cmd.Dir = s.workspaceRoot
-	h.cmd.Env = append(s.buildEnv(), "NIWA_TEST_FAULT=hold:"+h.release+"@snapshot-swap")
-	h.cmd.Stdout = &h.stdout
-	h.cmd.Stderr = &h.stderr
-	if err := h.cmd.Start(); err != nil {
+	release := filepath.Join(s.sandbox, "release-held-refresh")
+	b, err := startBgRun(s, "the held dispatch", s.workspaceRoot, release,
+		"hold:"+release+"@snapshot-swap-mid", "dispatch", "held-task", "--detach")
+	if err != nil {
 		return ctx, err
 	}
-	go func() { h.done <- h.cmd.Wait() }()
-	t.held = h
-	deadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(h.release + ".held"); err == nil {
-			return ctx, nil
+	t.heldRefresh = b
+	guard := time.After(60 * time.Second)
+	for !b.waiting() {
+		if b.poll() {
+			return ctx, fmt.Errorf("the held dispatch ended with exit code %d before reaching the hold (%v):\n%s", b.exitCode, b.runErr, b.output())
 		}
 		select {
-		case err := <-h.done:
-			return ctx, fmt.Errorf("the held dispatch ended before reaching the hold (%v):\n%s%s", err, h.stdout.String(), h.stderr.String())
+		case <-guard:
+			_ = b.cmd.Process.Kill()
+			return ctx, fmt.Errorf("the dispatch never reached the hold")
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	_ = h.cmd.Process.Kill()
-	return ctx, fmt.Errorf("the dispatch never reached the hold:\n%s%s", h.stdout.String(), h.stderr.String())
+	return ctx, nil
+}
+
+// startWhileHeld starts a command that must wait for the config lock. Its
+// marker is created first, so at snapshot-lock-wait it writes marker.held and
+// goes on polling the lock rather than parking in the hold.
+func startWhileHeld(s *testState, name, dir, markerName string, args ...string) error {
+	t := treeState(s)
+	if t.heldRefresh == nil {
+		return fmt.Errorf("no refresh is held")
+	}
+	marker := filepath.Join(s.sandbox, markerName)
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		return err
+	}
+	b, err := startBgRun(s, name, dir, marker, "hold:"+marker+"@snapshot-lock-wait", args...)
+	if err != nil {
+		return err
+	}
+	t.bg = append(t.bg, b)
+	return nil
+}
+
+func aSecondDispatchStartsWhileTheRefreshIsHeld(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	return ctx, startWhileHeld(s, "the second dispatch", s.workspaceRoot, "lock-wait-dispatch",
+		"dispatch", "second-task", "--detach")
+}
+
+// niwaApplyStartsWhileTheRefreshIsHeld runs niwa apply in the one instance
+// the scenario created by hand (not a dispatch instance).
+func niwaApplyStartsWhileTheRefreshIsHeld(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	entries, err := os.ReadDir(s.workspaceRoot)
+	if err != nil {
+		return ctx, err
+	}
+	var found []string
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || strings.HasPrefix(name, ".") || dispatchInstanceNameRe.MatchString(name) {
+			continue
+		}
+		path := filepath.Join(s.workspaceRoot, name)
+		if _, err := os.Stat(filepath.Join(path, ".niwa", "instance.json")); err == nil {
+			found = append(found, path)
+		}
+	}
+	if len(found) != 1 {
+		return ctx, fmt.Errorf("want one created instance, found %v", found)
+	}
+	return ctx, startWhileHeld(s, "the apply", found[0], "lock-wait-apply", "apply")
+}
+
+// eachStartedCommandIsWaitingOrHasEnded waits until every started command
+// has written its marker.held or has ended.
+func eachStartedCommandIsWaitingOrHasEnded(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	t := treeState(s)
+	if len(t.bg) == 0 {
+		return ctx, fmt.Errorf("no command was started")
+	}
+	guard := time.After(3 * time.Minute)
+	for {
+		settled := true
+		for _, b := range t.bg {
+			if !b.waiting() && !b.poll() {
+				settled = false
+			}
+		}
+		if settled {
+			return ctx, nil
+		}
+		select {
+		case <-guard:
+			var out strings.Builder
+			for _, b := range t.bg {
+				out.WriteString(b.output())
+			}
+			return ctx, fmt.Errorf("a started command neither waited for the config lock nor ended:\n%s", out.String())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+func theHeldRefreshIsLetGo(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	h := treeState(s).heldRefresh
+	if h == nil {
+		return ctx, fmt.Errorf("no refresh is held")
+	}
+	return ctx, os.WriteFile(h.marker, nil, 0o600)
+}
+
+// theHeldAndStartedCommandsAllExitZero waits for the held dispatch and every
+// started command, then reports each one that failed with its own output.
+func theHeldAndStartedCommandsAllExitZero(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	t := treeState(s)
+	if t.heldRefresh == nil {
+		return ctx, fmt.Errorf("no refresh is held")
+	}
+	var failures []string
+	for _, b := range append([]*bgRun{t.heldRefresh}, t.bg...) {
+		if err := b.wait(3 * time.Minute); err != nil {
+			failures = append(failures, err.Error())
+			continue
+		}
+		if b.runErr != nil {
+			failures = append(failures, fmt.Sprintf("%s didn't run: %v\n%s", b.name, b.runErr, b.output()))
+		} else if b.exitCode != 0 {
+			failures = append(failures, fmt.Sprintf("%s exited %d:\n%s", b.name, b.exitCode, b.output()))
+		}
+	}
+	if len(failures) > 0 {
+		return ctx, fmt.Errorf("not every command exited 0:\n%s", strings.Join(failures, "\n"))
+	}
+	return ctx, nil
+}
+
+// eachStartedCommandWaitedForTheConfigLock proves the commands contended for
+// the lock, so a pass isn't an accident of scheduling.
+func eachStartedCommandWaitedForTheConfigLock(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	for _, b := range treeState(s).bg {
+		if !b.waiting() {
+			return ctx, fmt.Errorf("%s never waited for the config lock (no %s.held)", b.name, b.marker)
+		}
+	}
+	return ctx, nil
+}
+
+func bothDispatchesHaveAnInstanceMappingAndLineageEntry(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	entries, err := os.ReadDir(s.workspaceRoot)
+	if err != nil {
+		return ctx, err
+	}
+	var found []string
+	for _, e := range entries {
+		path := filepath.Join(s.workspaceRoot, e.Name())
+		if !e.IsDir() || !dispatchInstanceNameRe.MatchString(e.Name()) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(path, ".niwa", "authority.json")); err == nil {
+			found = append(found, path)
+		}
+	}
+	if len(found) != 2 {
+		return ctx, fmt.Errorf("want two dispatch instances with a record, found %v", found)
+	}
+	for _, inst := range found {
+		data, err := os.ReadFile(filepath.Join(inst, ".niwa", "authority.json"))
+		if err != nil {
+			return ctx, err
+		}
+		var rec struct {
+			DispatchID string `json:"dispatch_id"`
+		}
+		if err := json.Unmarshal(data, &rec); err != nil || rec.DispatchID == "" {
+			return ctx, fmt.Errorf("no dispatch id in %s (%v)", inst, err)
+		}
+		if _, err := mappingFor(s, inst); err != nil {
+			return ctx, err
+		}
+		entry := filepath.Join(s.workspaceRoot, ".niwa-lineage", rec.DispatchID+".json")
+		if _, err := os.Stat(entry); err != nil {
+			return ctx, fmt.Errorf("no lineage entry for %s: %w", inst, err)
+		}
+	}
+	return ctx, nil
+}
+
+func theApplyReportedNoMissingWorkspaceConfig(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	var apply *bgRun
+	for _, b := range treeState(s).bg {
+		if b.name == "the apply" {
+			apply = b
+		}
+	}
+	if apply == nil {
+		return ctx, fmt.Errorf("no apply was started")
+	}
+	out := apply.stdout.String() + apply.stderr.String()
+	for _, bad := range []string{
+		"reading config:",
+		"workspace.toml found",
+		"could not locate workspace configuration",
+		"no such file or directory",
+	} {
+		if strings.Contains(out, bad) {
+			return ctx, fmt.Errorf("the apply reported %q:\n%s", bad, apply.output())
+		}
+	}
+	return ctx, nil
+}
+
+func theWorkspaceRootHasNoSwapLeftovers(ctx context.Context) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	for _, name := range []string{".niwa.next", ".niwa.prev"} {
+		path := filepath.Join(s.workspaceRoot, name)
+		if _, err := os.Lstat(path); err == nil {
+			return ctx, fmt.Errorf("%s was left behind", path)
+		} else if !os.IsNotExist(err) {
+			return ctx, err
+		}
+	}
+	return ctx, nil
 }
 
 func theHeldDispatchIsReleased(ctx context.Context) (context.Context, error) {
