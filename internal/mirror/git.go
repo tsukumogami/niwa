@@ -3,6 +3,7 @@ package mirror
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,10 +24,10 @@ var gitBaseConfig = []string{
 	"gc.auto=0",
 }
 
-// gitEnv is the environment every git call here runs with: the parent's, with
-// every inherited GIT_* variable removed (GIT_DIR, GIT_EXEC_PATH and
+// gitEnv is the environment every git call here starts from: the parent's,
+// with every inherited GIT_* variable removed (GIT_DIR, GIT_EXEC_PATH and
 // GIT_ALTERNATE_OBJECT_DIRECTORIES among them, any of which would point git
-// somewhere else), and no terminal prompt, since nobody is there to answer.
+// somewhere else). gitRun adds what niwa sets after it.
 func gitEnv() []string {
 	var env []string
 	for _, kv := range os.Environ() {
@@ -35,12 +36,47 @@ func gitEnv() []string {
 		}
 		env = append(env, kv)
 	}
-	return append(env, "GIT_TERMINAL_PROMPT=0")
+	return env
+}
+
+// localReadEnv is added, after gitEnv's scrub, to every git call that doesn't
+// reach the remote: no system or global config is read, so nothing the
+// user's or the system's config names (a trace2 target, a helper, a pager)
+// runs for a read of local files, and git takes no optional lock, so a check
+// that runs beside another command never blocks it.
+var localReadEnv = []string{
+	"GIT_CONFIG_NOSYSTEM=1",
+	"GIT_CONFIG_GLOBAL=/dev/null",
+	"GIT_OPTIONAL_LOCKS=0",
+}
+
+// localReadConfig is set by -c on every git call that doesn't reach the
+// remote, so no credential helper or ssh command a store's config names can
+// run. The three calls that reach the remote keep the user's own, which they
+// need for credentials.
+var localReadConfig = []string{
+	"credential.helper=",
+	"core.sshCommand=",
+}
+
+// emptyHooksKey keys the empty hooks directory's path on a context.
+type emptyHooksKey struct{}
+
+// withEmptyHooks returns ctx carrying dir, the empty hooks directory every git
+// call made under it passes as core.hooksPath.
+func withEmptyHooks(ctx context.Context, dir string) context.Context {
+	return context.WithValue(ctx, emptyHooksKey{}, dir)
+}
+
+// emptyHooksFrom returns the empty hooks directory ctx carries, if any.
+func emptyHooksFrom(ctx context.Context) (string, bool) {
+	dir, ok := ctx.Value(emptyHooksKey{}).(string)
+	return dir, ok && dir != ""
 }
 
 // runGit runs a git subcommand with the base config plus config (each
-// "key=value", passed as -c), in the cleaned environment. The error carries
-// git's stderr.
+// "key=value", passed as -c), in the cleaned environment, as a call that
+// reads local files only. The error carries git's stderr.
 func runGit(ctx context.Context, config []string, args ...string) error {
 	_, err := gitOutput(ctx, config, "", args...)
 	return err
@@ -54,25 +90,80 @@ func gitOutput(ctx context.Context, config []string, stdin string, args ...strin
 
 // gitHook, when a test sets it, is called with the arguments of every git
 // process the package starts, those after the -c pairs, just before the
-// process starts. gitExec is the package's one place a process starts, so a
+// process starts. gitRun is the package's one place a process starts, so a
 // test that sets it sees every git run a call makes, as probeHook and
 // stageHook let tests see the probe and a restore's stages. It's nil outside
 // the tests.
 var gitHook func(args []string)
 
+// gitProc is what gitProcHook sees of one git process: every -c pair it
+// carries, the environment niwa added after gitEnv's scrub, and its
+// arguments after the -c pairs.
+type gitProc struct{ Config, Env, Args []string }
+
+// gitProcHook, when a test sets it, is called beside gitHook for every git
+// process the package starts. It's nil outside the tests.
+var gitProcHook func(gitProc)
+
 // gitExec runs git as gitOutput does, with env added to the cleaned
-// environment.
+// environment, as a call that reads local files only (see gitRun).
 func gitExec(ctx context.Context, env, config []string, stdin string, args ...string) (string, error) {
-	full := make([]string, 0, 2*(len(gitBaseConfig)+len(config))+len(args))
-	for _, kv := range append(append([]string{}, gitBaseConfig...), config...) {
+	return gitRun(ctx, false, env, config, stdin, args...)
+}
+
+// gitExecNetwork runs git as gitExec does, for one of the three calls that
+// reach the remote (cloneMirror, fetchMirror and fetchByID): it keeps the
+// user's system and global config, and their credential helper and ssh
+// command, since the remote may need them.
+func gitExecNetwork(ctx context.Context, env, config []string, stdin string, args ...string) (string, error) {
+	return gitRun(ctx, true, env, config, stdin, args...)
+}
+
+// gitRun is the one place the package starts a git process. It refuses to
+// start one, before gitHook is called, unless ctx carries the empty hooks
+// directory (withEmptyHooks) and that directory is a real, empty directory
+// the user owns with mode 0700 (checkEmptyHooks): a hook planted there, or a
+// link put in its place, would run inside every git call.
+//
+// Every process carries gitBaseConfig and core.hooksPath naming that
+// directory, so no hook in a store, and no core.hooksPath its config sets,
+// runs. A call that isn't network also carries localReadConfig and, after
+// gitEnv's scrub, localReadEnv. GIT_TERMINAL_PROMPT=0 rides every call,
+// since nobody is there to answer. config and env, the caller's, come last.
+func gitRun(ctx context.Context, network bool, env, config []string, stdin string, args ...string) (string, error) {
+	hooks, ok := emptyHooksFrom(ctx)
+	if !ok {
+		return "", errors.New("refusing to run git: no empty-hooks directory was set up for it")
+	}
+	if err := checkEmptyHooks(hooks); err != nil {
+		return "", fmt.Errorf("refusing to run git: %w", err)
+	}
+	pairs := make([]string, 0, len(gitBaseConfig)+1+len(localReadConfig)+len(config))
+	pairs = append(pairs, gitBaseConfig...)
+	pairs = append(pairs, "core.hooksPath="+hooks)
+	if !network {
+		pairs = append(pairs, localReadConfig...)
+	}
+	pairs = append(pairs, config...)
+	added := []string{"GIT_TERMINAL_PROMPT=0"}
+	if !network {
+		added = append(added, localReadEnv...)
+	}
+	added = append(added, env...)
+
+	full := make([]string, 0, 2*len(pairs)+len(args))
+	for _, kv := range pairs {
 		full = append(full, "-c", kv)
 	}
 	full = append(full, args...)
 	if gitHook != nil {
 		gitHook(slices.Clone(args))
 	}
+	if gitProcHook != nil {
+		gitProcHook(gitProc{Config: slices.Clone(pairs), Env: slices.Clone(added), Args: slices.Clone(args)})
+	}
 	cmd := exec.CommandContext(ctx, "git", full...)
-	cmd.Env = append(gitEnv(), env...)
+	cmd.Env = append(gitEnv(), added...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -192,7 +283,8 @@ func configValue(v string) (string, error) {
 
 // writeStoreConfig replaces store's config with the fixed one for url. It's
 // written under a temporary name in the store and renamed over config, so a
-// check that reads it without the lock never sees half a file.
+// check that reads it without the lock never sees half a file. The file is
+// 0600, set explicitly rather than left to the umask.
 func writeStoreConfig(store, url string) error {
 	text, err := renderConfig(storeConfigEntries(url))
 	if err != nil {
@@ -203,11 +295,14 @@ func writeStoreConfig(store, url string) error {
 		return err
 	}
 	tmp := filepath.Join(store, ".niwa-config-"+suffix)
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("writing the store's config: %w", err)
 	}
-	_, werr := f.WriteString(text)
+	werr := f.Chmod(0o600)
+	if werr == nil {
+		_, werr = f.WriteString(text)
+	}
 	if werr == nil {
 		werr = f.Sync()
 	}
@@ -236,7 +331,7 @@ const fetchReflogAction = "GIT_REFLOG_ACTION=niwa mirror refresh"
 // written to the store: the reflog message is fixed, and no FETCH_HEAD, which
 // would name the URL, is written.
 func fetchMirror(ctx context.Context, store, url string) error {
-	_, err := gitExec(ctx, []string{fetchReflogAction}, nil, "",
+	_, err := gitExecNetwork(ctx, []string{fetchReflogAction}, nil, "",
 		"--git-dir="+store, "fetch", "--no-prune", "--no-write-fetch-head", "--quiet", "--", url, "+refs/*:refs/*")
 	return err
 }
@@ -264,7 +359,7 @@ func fetchByID(ctx context.Context, store, url string, ids []string) error {
 	}
 	args := append([]string{"--git-dir=" + store,
 		"fetch", "--no-write-fetch-head", "--no-tags", "--quiet", "--", url}, ids...)
-	_, err := gitExec(ctx, []string{fetchReflogAction}, []string{"protocol.version=2"}, "", args...)
+	_, err := gitExecNetwork(ctx, []string{fetchReflogAction}, []string{"protocol.version=2"}, "", args...)
 	return err
 }
 
@@ -291,12 +386,13 @@ func headCommitReadable(ctx context.Context, store string) error {
 // config, which the restore then replaces whole with the fixed one
 // (writeStoreConfig) before anything else reads the store.
 func cloneMirror(ctx context.Context, url, dir string) error {
-	return runGit(ctx,
+	_, err := gitExecNetwork(ctx, nil,
 		[]string{
 			"transfer.fsckObjects=true",
 			"fetch.fsckObjects=true",
 			"transfer.unpackLimit=1",
 			"fetch.unpackLimit=1",
 		},
-		"clone", "--mirror", "--template=", "--quiet", "--", url, dir)
+		"", "clone", "--mirror", "--template=", "--quiet", "--", url, dir)
+	return err
 }

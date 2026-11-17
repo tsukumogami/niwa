@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/filelock"
@@ -21,6 +22,8 @@ const (
 	stageLink   = "link"   // making the .link-<rand> link
 	stageSwap   = "swap"   // renaming that link over the stable path
 	stageRecord = "record" // renaming the state file into place, after the swap
+
+	stageRelinkConfig = "relink-config" // rewriting a recorded store's config before a relink
 )
 
 // stageHook, when a test sets it, runs before each step of a restore named
@@ -45,8 +48,9 @@ func atStage(stage string) error {
 //
 // When only the link is gone and the state file records a store that passes
 // every check a linked store gets, cloned from the URL the config gives now,
-// a new link to that store is all the restore makes: no network is needed.
-// Otherwise it clones r.URL, provided the file system has room for it.
+// a new link to that store, after its config is rewritten from the fixed
+// set, is all the restore makes: no network is needed. Otherwise it clones
+// r.URL, provided the file system has room for it.
 //
 // The order is what keeps a failure harmless: the clone lands in .tmp/, takes
 // in what the old stores still hold intact, is renamed into .store/, and only
@@ -114,15 +118,21 @@ func restore(ctx context.Context, opts Options, r Repo) (Outcome, []LostRef, err
 func rebuild(ctx context.Context, mdir string, r Repo, fault Fault, borrowers []string) (Outcome, []LostRef, error) {
 	stable := filepath.Join(mdir, r.ID)
 	moveAside := false
+	// noGit lists old stores git mustn't run in: a recorded store whose
+	// config couldn't be rewritten still holds the config it was found with.
+	var noGit []string
 	info, err := os.Lstat(stable)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		relinked, err := relink(ctx, mdir, r)
+		relinked, distrusted, err := relink(ctx, mdir, r)
 		if err != nil {
 			return OutcomeRestoreFailed, nil, err
 		}
 		if relinked {
 			return OutcomeRestored, recoverBorrowers(ctx, mdir, r, borrowers), nil
+		}
+		if distrusted != "" {
+			noGit = append(noGit, distrusted)
 		}
 	case err != nil:
 		return OutcomeRestoreFailed, nil, fmt.Errorf("inspecting %s: %w", stable, err)
@@ -152,7 +162,7 @@ func rebuild(ctx context.Context, mdir string, r Repo, fault Fault, borrowers []
 			srcs = append(srcs, stable)
 		}
 	}
-	store, stateTmp, err := buildStore(ctx, mdir, r, srcs)
+	store, stateTmp, err := buildStore(ctx, mdir, r, srcs, noGit)
 	if err != nil {
 		return OutcomeRestoreFailed, nil, err
 	}
@@ -195,18 +205,33 @@ func rebuild(ctx context.Context, mdir string, r Repo, fault Fault, borrowers []
 
 // relink points a new link at the store the state file records, when that
 // store passes every check a linked store gets (checkStore, which also
-// refuses a store cloned from another remote than r.URL). It reports whether
-// it did; false with no error means the store can't be vouched for and
-// nothing changed.
-func relink(ctx context.Context, mdir string, r Repo) (bool, error) {
+// refuses a store cloned from another remote than r.URL). The check is
+// lock-free and read-only and leaves the store's config as it found it, so
+// before the swap, under the caller's lock, the config is rewritten whole
+// from the fixed set (writeStoreConfig): no key planted in it reaches the
+// fetch by id the probe may run next.
+//
+// It reports whether it relinked; false with no error means nothing changed
+// and the caller builds a new store. When the config couldn't be rewritten,
+// distrusted is the recorded store's path: it still holds the config it was
+// found with, so the caller runs no git in it.
+func relink(ctx context.Context, mdir string, r Repo) (relinked bool, distrusted string, err error) {
 	rec, err := readState(mdir, r.ID)
 	if err != nil || checkStore(ctx, mdir, r, rec) != FaultNone {
-		return false, nil
+		return false, "", nil
+	}
+	store := filepath.Join(mdir, rec.Store)
+	err = atStage(stageRelinkConfig)
+	if err == nil {
+		err = writeStoreConfig(store, r.URL)
+	}
+	if err != nil {
+		return false, store, nil
 	}
 	if err := swapLink(mdir, r.ID, filepath.Base(rec.Store)); err != nil {
-		return false, err
+		return false, "", err
 	}
-	return true, nil
+	return true, "", nil
 }
 
 // fromOtherRemote reports whether the mirror's stores were cloned from
@@ -239,7 +264,10 @@ func recordState(mdir, repoID, stateTmp string) error {
 // hold that the clone doesn't reach, writes its state file under a temporary
 // name, and renames it into .store/. It returns the store's name and the
 // state file's temporary path. On failure nothing it made is left behind.
-func buildStore(ctx context.Context, mdir string, r Repo, srcs []string) (string, string, error) {
+//
+// Salvage reads object files only, so it reads every store in srcs; the pins
+// need git in each old store, so the stores in noGit give none.
+func buildStore(ctx context.Context, mdir string, r Repo, srcs, noGit []string) (string, string, error) {
 	suffix, err := randHex()
 	if err != nil {
 		return "", "", err
@@ -257,7 +285,13 @@ func buildStore(ctx context.Context, mdir string, r Repo, srcs []string) (string
 		return "", "", err
 	}
 	salvage(ctx, srcs, tmp)
-	pinKept(ctx, srcs, tmp)
+	var pinFrom []string
+	for _, src := range srcs {
+		if !slices.Contains(noGit, src) {
+			pinFrom = append(pinFrom, src)
+		}
+	}
+	pinKept(ctx, pinFrom, tmp)
 
 	// The clone ran under fsckObjects and every salvaged pack passed git
 	// verify-pack, so the build is both a refresh and a deep verify.
@@ -357,7 +391,9 @@ func leftoverPatterns(repoID string) (tmp, stateTmp *regexp.Regexp) {
 		regexp.MustCompile(`^\.` + id + `\.json-[0-9a-f]{8}$`)
 }
 
-// leftovers lists the paths of repoID's leftovers in .tmp/ and .meta/.
+// leftovers lists the paths of repoID's leftovers in .tmp/ and .meta/. A
+// .tmp/ or .meta/ that isn't a real directory the user owns, a link to
+// somewhere else say, isn't read, so nothing is ever removed through it.
 func leftovers(mdir, repoID string) []string {
 	tmpRe, stateRe := leftoverPatterns(repoID)
 	var paths []string
@@ -365,6 +401,9 @@ func leftovers(mdir, repoID string) []string {
 		filepath.Join(mdir, ".tmp"): tmpRe,
 		metaDir(mdir):               stateRe,
 	} {
+		if !realOwnedDir(dir) {
+			continue
+		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue

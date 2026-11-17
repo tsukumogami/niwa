@@ -163,7 +163,7 @@ func TestHealthyCheck_NeverReadsAPackPastItsTrailer(t *testing.T) {
 			}
 		}
 	})
-	if verifyPack(context.Background(), idxOf(pack)) == nil {
+	if verifyPack(p.gitCtx(t), idxOf(pack)) == nil {
 		t.Fatal("verify-pack passes the zeroed pack; the case proves nothing")
 	}
 

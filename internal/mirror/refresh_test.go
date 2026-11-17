@@ -584,10 +584,10 @@ func rotPack(t *testing.T, f fixture) (rotten, intact string) {
 			}
 		}
 	})
-	if got := check(context.Background(), f.mdir(), f.repo()); got != FaultNone {
+	if got := check(f.gitCtx(t), f.mdir(), f.repo()); got != FaultNone {
 		t.Fatalf("check of the rotten pack = %q, want no fault: the case needs the check to pass", got)
 	}
-	if verifyPack(context.Background(), idxOf(pack)) == nil {
+	if verifyPack(f.gitCtx(t), idxOf(pack)) == nil {
 		t.Fatal("verify-pack passes the rotten pack; the case proves nothing")
 	}
 	return rotten, intact
@@ -618,7 +618,7 @@ func TestRefresh_DeepVerifyFindsRotTheCheckCantSee(t *testing.T) {
 		t.Fatalf("the new store lacks the intact pack: %v", err)
 	}
 	for _, p := range f.packs(t) {
-		if err := verifyPack(context.Background(), idxOf(p)); err != nil {
+		if err := verifyPack(f.gitCtx(t), idxOf(p)); err != nil {
 			t.Fatalf("the new store's %s fails verify-pack: %v", filepath.Base(p), err)
 		}
 	}

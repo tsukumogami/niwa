@@ -19,7 +19,9 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -162,6 +164,142 @@ func ensureLayout(home, workspaceRoot string) error {
 		}
 	}
 	return nil
+}
+
+// emptyHooksDir is the directory every git call names as core.hooksPath,
+// ~/.niwa/empty-hooks: real, empty, the user's own and 0700, so no hook runs.
+func emptyHooksDir(home string) string {
+	return filepath.Join(home, ".niwa", "empty-hooks")
+}
+
+// realOwnedDir reports whether path is, by Lstat, a directory the user owns.
+// A link to a directory isn't one.
+func realOwnedDir(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.IsDir() && ownedByUser(info)
+}
+
+// tighten sets path's mode to perm when it's a directory (wantDir) or a
+// regular file the user owns and has another mode. It opens path without
+// following a link and without blocking on a fifo, then reads the type and
+// owner from the open file and changes the mode through it, so nothing is
+// ever changed through a link and a fifo, a socket or a device is left
+// alone. Only the last path component is guarded: the caller checks the
+// directories above it. It creates nothing, and a failure changes nothing.
+func tighten(path string, perm os.FileMode, wantDir bool) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !ownedByUser(info) {
+		return
+	}
+	if wantDir && !info.IsDir() || !wantDir && !info.Mode().IsRegular() {
+		return
+	}
+	if info.Mode().Perm() != perm {
+		_ = f.Chmod(perm)
+	}
+}
+
+// checkEmptyHooks returns an error naming dir unless it's a real directory
+// the user owns, with mode exactly 0700 and no entry in it. It opens dir
+// without following a link and only reads: nothing in it is removed,
+// followed or moved.
+func checkEmptyHooks(dir string) error {
+	f, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("the empty hooks directory %s is not a real directory: %w", dir, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	switch {
+	case err != nil:
+		return fmt.Errorf("inspecting the empty hooks directory %s: %w", dir, err)
+	case !info.IsDir():
+		return fmt.Errorf("the empty hooks directory %s is not a directory", dir)
+	case !ownedByUser(info):
+		return fmt.Errorf("the empty hooks directory %s is not owned by the current user", dir)
+	case info.Mode().Perm() != 0o700:
+		return fmt.Errorf("the empty hooks directory %s has mode %04o, want 0700", dir, info.Mode().Perm())
+	}
+	if _, err := f.Readdirnames(1); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("the empty hooks directory %s is not empty", dir)
+		}
+		return fmt.Errorf("reading the empty hooks directory %s: %w", dir, err)
+	}
+	return nil
+}
+
+// prepareEmptyHooks makes ~/.niwa/empty-hooks a real directory the user owns
+// with mode 0700, creating it when missing and tightening a wider mode, and
+// then checks it's empty (checkEmptyHooks). It never removes, renames or
+// follows anything: a link, a file or a planted entry there is left as it is
+// and reported, and gitRun then refuses every git call.
+func prepareEmptyHooks(home string) error {
+	niwa := filepath.Join(home, ".niwa")
+	if err := os.MkdirAll(niwa, 0o700); err != nil {
+		return fmt.Errorf("creating %s: %w", niwa, err)
+	}
+	dir := emptyHooksDir(home)
+	if err := os.Mkdir(dir, 0o700); err != nil && !os.IsExist(err) {
+		return fmt.Errorf("creating %s: %w", dir, err)
+	}
+	tighten(dir, 0o700, true)
+	return checkEmptyHooks(dir)
+}
+
+// layoutIsReal reports whether the workspace key directory, mirrors/, .meta/
+// and .store/ are each a real directory the user owns. When one isn't, the
+// check reports the mirror missing and the restore's ensureLayout refuses
+// it, so nothing is read or written through a link there.
+func layoutIsReal(mdir string) bool {
+	for _, dir := range []string{filepath.Dir(mdir), mdir, metaDir(mdir), filepath.Join(mdir, ".store")} {
+		if !realOwnedDir(dir) {
+			return false
+		}
+	}
+	return true
+}
+
+// tightenModes puts the modes of niwa's own entries for one mirror back:
+// the workspace key directory, mirrors/, .meta/, .store/, .tmp/,
+// ~/.niwa/locks/ and ~/.niwa/empty-hooks/ to 0700, and the state file, the
+// mirror log, mirror.log.1 and the mirror's lock file to 0600 (see tighten).
+// It creates nothing. Each entry is tightened only when every directory
+// above it, up to ~/.niwa, is real, since tighten guards only the last path
+// component: through a linked .meta/ it would change a file elsewhere.
+func tightenModes(home, workspaceRoot, repoID string) {
+	key := keyDir(home, workspaceRoot)
+	if realOwnedDir(key) {
+		tighten(key, 0o700, true)
+		mdir := mirrorsDir(home, workspaceRoot)
+		if realOwnedDir(mdir) {
+			tighten(mdir, 0o700, true)
+			for _, dir := range []string{metaDir(mdir), filepath.Join(mdir, ".store"), filepath.Join(mdir, ".tmp")} {
+				if realOwnedDir(dir) {
+					tighten(dir, 0o700, true)
+				}
+			}
+			if realOwnedDir(metaDir(mdir)) {
+				log := logPath(mdir)
+				for _, file := range []string{statePath(mdir, repoID), log, log + ".1"} {
+					tighten(file, 0o600, false)
+				}
+			}
+		}
+	}
+	lock := LockPath(home, workspaceRoot, repoID)
+	if realOwnedDir(filepath.Dir(lock)) {
+		tighten(filepath.Dir(lock), 0o700, true)
+		tighten(lock, 0o600, false)
+	}
+	if hooks := emptyHooksDir(home); realOwnedDir(hooks) {
+		tighten(hooks, 0o700, true)
+	}
 }
 
 // syncDir flushes a directory's entries, so a rename in it survives a crash.

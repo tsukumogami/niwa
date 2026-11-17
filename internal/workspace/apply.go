@@ -3309,29 +3309,35 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 // Last, when the mirror log couldn't be written (Result.LogErr), healthy
 // mirrors included, comes "warning: mirror <id>: writing the mirror log
 // failed: <err>".
+//
+// The repo id and the text of Err and LogErr are printed through
+// mirror.CleanText: git, the system or a remote can put any byte in an
+// error, and a config can give a repo any name, so each comes out as one
+// bounded run of printable ASCII and can't forge or break a line.
 func ReportMirrorResult(r *Reporter, res mirror.Result) {
+	id := mirror.CleanText(res.RepoID)
 	switch {
 	case res.Outcome == mirror.OutcomeHealthy && res.Err != nil:
-		r.Warn("mirror %s: refresh failed: %v", res.RepoID, res.Err)
+		r.Warn("mirror %s: refresh failed: %s", id, mirror.CleanText(res.Err.Error()))
 	case res.Outcome == mirror.OutcomeHealthy:
 	case res.Err != nil:
-		r.Warn("mirror %s: fault %s, result %s: %v", res.RepoID, res.Fault, res.Outcome, res.Err)
+		r.Warn("mirror %s: fault %s, result %s: %s", id, res.Fault, res.Outcome, mirror.CleanText(res.Err.Error()))
 	default:
-		r.Warn("mirror %s: fault %s, result %s", res.RepoID, res.Fault, res.Outcome)
+		r.Warn("mirror %s: fault %s, result %s", id, res.Fault, res.Outcome)
 	}
 	for _, l := range res.Unrecoverable {
 		if !l.RemoteTracking {
-			r.Warn("%s", lostRefWarning(res.RepoID, l))
+			r.Warn("%s", lostRefWarning(id, l))
 		}
 	}
 	for _, l := range res.Unrecoverable {
 		if l.RemoteTracking {
 			r.Log("mirror %s: %s in %s is stale: commit %s is gone from the remote and the mirror that kept it was lost; git fetch --prune in that clone clears it",
-				res.RepoID, l.Ref, l.Instance, l.MissingCommit)
+				id, l.Ref, l.Instance, l.MissingCommit)
 		}
 	}
 	if res.LogErr != nil {
-		r.Warn("mirror %s: writing the mirror log failed: %v", res.RepoID, res.LogErr)
+		r.Warn("mirror %s: writing the mirror log failed: %s", id, mirror.CleanText(res.LogErr.Error()))
 	}
 }
 

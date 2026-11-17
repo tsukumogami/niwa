@@ -550,3 +550,82 @@ func TestReportMirrorResult_NamesEachUnrecoverableRef(t *testing.T) {
 		t.Fatalf("a restore with nothing lost printed %q", got)
 	}
 }
+
+// requirePrintable fails unless s holds only bytes from 0x20 to 0x7e.
+func requirePrintable(t *testing.T, what, s string) {
+	t.Helper()
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			t.Fatalf("%s holds byte 0x%02x at %d: %q", what, s[i], i, s)
+		}
+	}
+}
+
+func TestReportMirrorResult_EscapesHostileText(t *testing.T) {
+	text := "fatal: \x1b[31mred\x1b[0m\nwarning: mirror app: fault missing, result restored\\" + strings.Repeat("x", 300)
+	clean := mirror.CleanText(text)
+	for _, want := range []string{`\x1b`, `\x0a`, `\x5c`} {
+		if !strings.Contains(clean, want) {
+			t.Fatalf("CleanText of the error = %q, want it to hold %s", clean, want)
+		}
+	}
+	if len(clean) > 256 {
+		t.Fatalf("CleanText of the error is %d bytes, want at most 256", len(clean))
+	}
+	requirePrintable(t, "CleanText of the error", clean)
+
+	hostileID := "\x1b]0;x\x07"
+	for _, c := range []struct {
+		name string
+		res  mirror.Result
+		want string
+	}{
+		{"restore failed", mirror.Result{RepoID: "app", Fault: mirror.FaultMissing, Outcome: mirror.OutcomeRestoreFailed, Err: errors.New(text)},
+			"warning: mirror app: fault missing, result restore-failed: " + clean},
+		{"refresh failed", mirror.Result{RepoID: "app", Outcome: mirror.OutcomeHealthy, Err: errors.New(text)},
+			"warning: mirror app: refresh failed: " + clean},
+		{"log failed", mirror.Result{RepoID: "app", Outcome: mirror.OutcomeHealthy, LogErr: errors.New(text)},
+			"warning: mirror app: writing the mirror log failed: " + clean},
+		{"hostile repo id", mirror.Result{RepoID: hostileID, Fault: mirror.FaultMissing, Outcome: mirror.OutcomeRestoreFailed, Err: errors.New(text)},
+			"warning: mirror " + mirror.CleanText(hostileID) + ": fault missing, result restore-failed: " + clean},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			ReportMirrorResult(NewReporterWithTTY(&stderr, false), c.res)
+			got := stderr.String()
+			if strings.Count(got, "\n") != 1 || !strings.HasSuffix(got, "\n") {
+				t.Fatalf("printed %q, want exactly one line", got)
+			}
+			line := strings.TrimSuffix(got, "\n")
+			if line != c.want {
+				t.Fatalf("printed\n%q\nwant\n%q", line, c.want)
+			}
+			requirePrintable(t, "the warning", line)
+		})
+	}
+	if got := mirror.CleanText(hostileID); got != `\x1b]0;x\x07` {
+		t.Fatalf("CleanText of the repo id = %q", got)
+	}
+}
+
+func TestEnsureMirrors_AHostileURLPrintsOneCleanLine(t *testing.T) {
+	f := newMirrorFixture(t)
+	// A URL that names no remote, as in
+	// TestEnsureMirrors_OneCommandTriesAFailingMirrorOnce, whose name holds an
+	// escape sequence and a newline.
+	f.classified[0].Repo.CloneURL = "file://" + filepath.Join(t.TempDir(), "absent\x1b[31m\nrepo.git")
+
+	var stderr bytes.Buffer
+	a := f.applier(&stderr)
+	a.ensureMirrors(context.Background(), &config.WorkspaceConfig{}, f.classified, f.instance, "apply")
+
+	got := stderr.String()
+	if strings.Count(got, "\n") != 1 || !strings.HasSuffix(got, "\n") {
+		t.Fatalf("printed %q, want exactly one line", got)
+	}
+	line := strings.TrimSuffix(got, "\n")
+	if !strings.HasPrefix(line, "warning: mirror app: fault missing, result restore-failed: ") {
+		t.Fatalf("printed %q, want the restore-failed warning", line)
+	}
+	requirePrintable(t, "the warning", line)
+}

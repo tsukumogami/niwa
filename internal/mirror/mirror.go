@@ -69,8 +69,10 @@ const (
 	// FaultPackChanged: a pack the manifest lists has another size or
 	// trailing checksum, or its ctime moved and git verify-pack fails on it.
 	FaultPackChanged Fault = "pack-changed"
-	// FaultRepoUnreadable: the store's HEAD or config is gone, or HEAD
-	// doesn't resolve to a commit git can read.
+	// FaultRepoUnreadable: the store's HEAD or config is gone or isn't a
+	// regular file, its packed-refs isn't a regular file, or HEAD doesn't
+	// resolve to a commit git can read (git refuses to run, or refuses the
+	// store's repository format version).
 	FaultRepoUnreadable Fault = "repo-unreadable"
 	// FaultURLChanged: the workspace config now names another remote than
 	// the one the state file records the store was cloned from.
@@ -139,9 +141,10 @@ var noticeEffects = map[Outcome]string{
 // It's "" for a healthy mirror whose log was written. It's built from those
 // values and fixed text only, never from Err or LogErr, which can carry text
 // git, the system or the remote produced, nor from a lost ref's names, which
-// a remote or a person chose: the count says the mirror log names them. Any
-// control character in it is dropped, so a hostile home path can't break
-// the line.
+// a remote or a person chose: the count says the mirror log names them, and
+// when the log couldn't be written it says only the count, since the log
+// names nothing. Any control character in it is dropped, so a hostile home
+// path can't break the line.
 func (r Result) Notice() string {
 	healthy := r.Outcome == OutcomeHealthy || r.Outcome == ""
 	if healthy && r.LogErr == nil {
@@ -158,9 +161,15 @@ func (r Result) Notice() string {
 	}
 	switch n := len(r.Unrecoverable); {
 	case n == 1:
-		line += " Except 1 ref in those clones, which is unrecoverable: it was built on commits the remote no longer serves. The mirror log names it."
+		line += " Except 1 ref in those clones, which is unrecoverable: it was built on commits the remote no longer serves."
+		if r.LogErr == nil {
+			line += " The mirror log names it."
+		}
 	case n > 1:
-		line += fmt.Sprintf(" Except %d refs in those clones, which are unrecoverable: they were built on commits the remote no longer serves. The mirror log names them.", n)
+		line += fmt.Sprintf(" Except %d refs in those clones, which are unrecoverable: they were built on commits the remote no longer serves.", n)
+		if r.LogErr == nil {
+			line += " The mirror log names them."
+		}
 	}
 	if r.StablePath != "" {
 		log := logPath(filepath.Dir(r.StablePath))
@@ -332,19 +341,25 @@ func EnsureHealthy(ctx context.Context, opts Options, repos []Repo) []Result {
 // mirror only when Usable() is true, and in full otherwise.
 //
 // A repo whose id ValidRepoID rejects, or whose URL is empty, can't take a
-// mirror. Seed refuses it before it touches the disk: the Result has fault
-// missing, outcome restore-failed and Err set, StablePath is empty for a
-// rejected id, and nothing is made under ~/.niwa/.
+// mirror. Seed refuses it before it touches the disk and before any check:
+// the Result has fault missing, outcome restore-failed and Err set,
+// StablePath is empty for a rejected id, and nothing is made under ~/.niwa/.
+// So a repo that already has a mirror but whose URL is empty gets
+// restore-failed without its mirror being looked at.
 //
 // Otherwise Seed does what EnsureHealthy does for one repo, without the
 // Mirrored filter that keeps EnsureHealthy from building a mirror no clone
 // borrows yet. A first build is a restore of a mirror that's missing: it runs
-// under the mirror's lock, clones into .tmp/ with the fixed config and records
-// the state file before the link is swapped in, so a Seed that fails leaves
-// nothing behind and the next Seed or EnsureHealthy tries again, and a second
-// Seed racing the first finds the mirror healthy and builds nothing. It
-// doesn't refresh what it just cloned, even with opts.Refresh set. On a repo
-// that already has a mirror, Seed returns what EnsureHealthy returns for it.
+// under the mirror's lock, clones into .tmp/ with the fixed config and writes
+// the state file under a temporary name before the link is swapped in, so a
+// Seed that fails before the swap leaves nothing behind and the next Seed or
+// EnsureHealthy tries again, and a second Seed racing the first finds the
+// mirror healthy and builds nothing. A failure after the swap, at recording
+// the state file, returns restored with Err set and leaves the new link in
+// place: the next check finds no state file naming the linked store,
+// rebuilds, and records what it builds. Seed doesn't refresh what it just
+// cloned, even with opts.Refresh set. On a repo that already has a mirror
+// and a URL, Seed returns what EnsureHealthy returns for it.
 //
 // Seed writes nothing in any clone, alternates included: pointing a new clone
 // at StablePath(...) + "/objects" is the caller's job, never
@@ -389,7 +404,17 @@ func Seed(ctx context.Context, opts Options, repo Repo) Result {
 // check_ms times the check alone, read from elapsedNow just before and just
 // after it; a restore's took_ms is read the same way around the restore,
 // its probe of the borrowers included.
+//
+// Before the check it prepares ~/.niwa/empty-hooks (prepareEmptyHooks) and
+// puts its path on the context every git call of this mirror runs under,
+// then tightens the modes of niwa's own entries for the mirror
+// (tightenModes). An empty-hooks directory that can't be made safe isn't an
+// error here: gitRun checks it again on every call and refuses to run git,
+// so the check finds the store unreadable and the restore can't clone.
 func ensureOne(ctx context.Context, opts Options, r Repo) Result {
+	_ = prepareEmptyHooks(opts.Home)
+	ctx = withEmptyHooks(ctx, emptyHooksDir(opts.Home))
+	tightenModes(opts.Home, opts.WorkspaceRoot, r.ID)
 	mdir := mirrorsDir(opts.Home, opts.WorkspaceRoot)
 	res := Result{RepoID: r.ID, StablePath: filepath.Join(mdir, r.ID)}
 	logged := func(err error) {

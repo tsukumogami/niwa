@@ -486,10 +486,10 @@ func TestCheck_URLChanged(t *testing.T) {
 	onlyOld := extraPack(t, filepath.Join(f.store(t), "objects", "pack"), "only the old store")
 	rewriteStateURL(t, f)
 
-	if got := check(context.Background(), f.mdir(), f.repo()); got != FaultURLChanged {
+	if got := check(f.gitCtx(t), f.mdir(), f.repo()); got != FaultURLChanged {
 		t.Fatalf("check = %q, want url-changed", got)
 	}
-	if got := check(context.Background(), f.mdir(), Repo{ID: "app"}); got != FaultNone {
+	if got := check(f.gitCtx(t), f.mdir(), Repo{ID: "app"}); got != FaultNone {
 		t.Fatalf("check with no URL = %q, want no fault", got)
 	}
 
@@ -517,7 +517,7 @@ func TestCheck_URLChanged(t *testing.T) {
 
 func TestCheck_URLDifferingOnlyInSecretsIsNoFault(t *testing.T) {
 	f := built(t)
-	if got := check(context.Background(), f.mdir(), Repo{ID: "app", URL: f.repo().URL + "?x=1#f"}); got != FaultNone {
+	if got := check(f.gitCtx(t), f.mdir(), Repo{ID: "app", URL: f.repo().URL + "?x=1#f"}); got != FaultNone {
 		t.Fatalf("check with a query and fragment = %q, want no fault", got)
 	}
 	rec := state{URL: "https://host/o/r.git"}
@@ -589,7 +589,7 @@ func TestRestore_MovesARealDirectoryAsideAndKeepsIt(t *testing.T) {
 	if !validLinkTarget("app", f.linkTarget(t)) {
 		t.Fatalf("link = %q, want a store", f.linkTarget(t))
 	}
-	if err := verifyPack(context.Background(), idxOf(filepath.Join(f.store(t), "objects", "pack", only))); err != nil {
+	if err := verifyPack(f.gitCtx(t), idxOf(filepath.Join(f.store(t), "objects", "pack", only))); err != nil {
 		t.Fatalf("the new store lacks the pack only the directory held: %v", err)
 	}
 	moved, _ := filepath.Glob(filepath.Join(f.mdir(), ".store", "app-*.moved"))

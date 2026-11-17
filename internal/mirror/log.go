@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -135,6 +136,11 @@ func encodeLogLine(line any) ([]byte, error) {
 // rotateLog). The file is created 0600. A failure is returned; the caller
 // keeps it as the Result's LogErr, and it never changes what a check or
 // restore did.
+//
+// Nothing is written unless the workspace key directory and mirrors/ are
+// real directories the user owns and .meta/ is one too (ensurePrivateDir
+// makes it when missing), so no line is ever written through a link to
+// somewhere else.
 func appendLog(mdir string, lines ...any) error {
 	encoded := make([][]byte, 0, len(lines))
 	for _, line := range lines {
@@ -143,6 +149,11 @@ func appendLog(mdir string, lines ...any) error {
 			return err
 		}
 		encoded = append(encoded, data)
+	}
+	for _, dir := range []string{filepath.Dir(mdir), mdir} {
+		if !realOwnedDir(dir) {
+			return fmt.Errorf("mirror log: %s is not a directory the user owns", dir)
+		}
 	}
 	if err := ensurePrivateDir(metaDir(mdir)); err != nil {
 		return err
@@ -175,11 +186,23 @@ func appendLog(mdir string, lines ...any) error {
 	return firstErr
 }
 
-// openLog opens the mirror log at path for appending, creating it 0600.
+// openLog opens the mirror log at path for appending, creating it 0600. It
+// never follows a link at path and never waits on a fifo there, and it
+// refuses anything that, once open, isn't a regular file the user owns, so
+// nothing is written through a link, a fifo or another user's file.
 func openLog(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("opening the mirror log: %w", err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("inspecting the mirror log: %w", err)
+	}
+	if !info.Mode().IsRegular() || !ownedByUser(info) {
+		f.Close()
+		return nil, fmt.Errorf("the mirror log %s is not a regular file the user owns", path)
 	}
 	return f, nil
 }
@@ -222,7 +245,8 @@ func rotateLog(f *os.File, path string) (*os.File, error) {
 
 // rotateLocked is rotateLog's work once it holds the full file's lock: info
 // is that file's. It renames path over path.1 when path still names that
-// file, then opens path.
+// file, then opens path. path.1 is never opened: the rename replaces
+// whatever is there, a link included, rather than following it.
 func rotateLocked(info os.FileInfo, path string) (*os.File, error) {
 	named, err := os.Lstat(path)
 	switch {

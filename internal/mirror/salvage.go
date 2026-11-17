@@ -48,7 +48,8 @@ func oldStores(mdir, repoID string) []string {
 // nothing but objects is copied, so a config, hook, alternates file or ref
 // planted in an old store never reaches the new one. An object already in
 // the new store is left as the clone wrote it. A file that can't be copied
-// is skipped, never fatal: the clone alone is a usable mirror.
+// is skipped, never fatal: the clone alone is a usable mirror. A directory
+// it makes in the new store is 0700 (mkdirPrivate).
 func salvage(ctx context.Context, srcs []string, dst string) {
 	for _, store := range srcs {
 		src := filepath.Join(store, "objects")
@@ -74,11 +75,16 @@ var commitIDPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 // gone, say) gives no pins, and a commit whose history can't be walked isn't
 // pinned: a pin keeps a commit the remote dropped, but the store is usable
 // without one, so the restore goes on either way. A ref naming anything but a
-// commit is left out.
+// commit is left out. No git runs in an old store whose HEAD, config or
+// packed-refs isn't a regular file or whose objects/ isn't a real directory
+// (storeSafeForGit): git would follow a link there.
 func pinKept(ctx context.Context, srcs []string, dst string) {
 	seen := map[string]bool{}
 	var named []string
 	for _, src := range srcs {
+		if !storeSafeForGit(src) {
+			continue
+		}
 		out, err := gitOutput(ctx, nil, "", "--git-dir="+src, "for-each-ref", "--format=%(objectname)")
 		if err != nil {
 			continue
@@ -221,7 +227,7 @@ func salvagePacks(ctx context.Context, srcDir, dstDir string) {
 		if verifyPack(ctx, idx) != nil {
 			continue
 		}
-		if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		if err := mkdirPrivate(dstDir); err != nil {
 			return
 		}
 		dstIdx, dstPack := filepath.Join(dstDir, idxName), filepath.Join(dstDir, e.Name())
@@ -262,12 +268,47 @@ func salvageLoose(srcObjects, dstObjects string) {
 			if !looseObjectIntact(src, d.Name()+f.Name()) {
 				continue
 			}
-			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			if err := mkdirPrivate(filepath.Dir(dst)); err != nil {
 				continue
 			}
 			_ = copyRegular(src, dst)
 		}
 	}
+}
+
+// mkdirPrivate makes dir, whose parent exists, with mode 0700 set explicitly
+// rather than left to the umask. A directory already there is left as it is;
+// anything else there is an error.
+func mkdirPrivate(dir string) error {
+	err := os.Mkdir(dir, 0o700)
+	if err == nil {
+		return os.Chmod(dir, 0o700)
+	}
+	if !os.IsExist(err) {
+		return err
+	}
+	if fi, lerr := os.Lstat(dir); lerr != nil || !fi.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	return nil
+}
+
+// storeSafeForGit reports whether git may run in the store directory: its HEAD
+// and config are regular files by Lstat, its packed-refs is absent or a
+// regular file, and its objects/ is a real directory. git would follow a
+// link at any of them to whatever it names.
+func storeSafeForGit(store string) bool {
+	for _, name := range []string{"HEAD", "config"} {
+		if fi, err := os.Lstat(filepath.Join(store, name)); err != nil || !fi.Mode().IsRegular() {
+			return false
+		}
+	}
+	if fi, err := os.Lstat(filepath.Join(store, "packed-refs")); err == nil && !fi.Mode().IsRegular() ||
+		err != nil && !os.IsNotExist(err) {
+		return false
+	}
+	fi, err := os.Lstat(filepath.Join(store, "objects"))
+	return err == nil && fi.IsDir()
 }
 
 // looseObjectIntact reports whether the loose object at path inflates to
@@ -291,9 +332,11 @@ func looseObjectIntact(path, id string) bool {
 }
 
 // openRegular opens path for reading only if it is a regular file, checking
-// the opened file so a link swapped in after an Lstat isn't followed.
+// the opened file so a link swapped in after an Lstat isn't followed. It
+// opens without blocking, so a fifo at path is refused rather than waited
+// on.
 func openRegular(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}

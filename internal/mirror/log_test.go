@@ -398,7 +398,6 @@ func TestResultNotice_ALogThatCantBeWritten(t *testing.T) {
 		{RepoID: "app", StablePath: stable, Fault: FaultMissing, Outcome: OutcomeRestored},
 		{RepoID: "app", StablePath: stable, Fault: FaultPackChanged, Outcome: OutcomeRestoreFailed},
 		{RepoID: "app", StablePath: stable, Fault: FaultMissing, Outcome: OutcomeBusy},
-		{RepoID: "app", StablePath: stable, Fault: FaultMissing, Outcome: OutcomeRestored, Unrecoverable: lost},
 	}
 	for _, c := range cases {
 		working := c.Notice()
@@ -424,6 +423,20 @@ func TestResultNotice_ALogThatCantBeWritten(t *testing.T) {
 			if strings.Contains(got, bad) {
 				t.Errorf("Notice() for %s carries %q: %q", c.Outcome, bad, got)
 			}
+		}
+	}
+
+	// With refs lost and the log not written, the notice counts them and
+	// doesn't say the log names them.
+	withLost := Result{RepoID: "app", StablePath: stable, Fault: FaultMissing, Outcome: OutcomeRestored, Unrecoverable: lost, LogErr: logErr}
+	got := withLost.Notice()
+	want := "niwa mirror app: fault missing, result restored. It was rebuilt from the remote, and the clones that borrow from it read normally. Except 3 refs in those clones, which are unrecoverable: they were built on commits the remote no longer serves." + failed
+	if got != want {
+		t.Errorf("Notice() for three lost refs with LogErr =\n%q\nwant\n%q", got, want)
+	}
+	for _, bad := range []string{"forged", "open /x", "\x1b", "\n"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("Notice() for three lost refs carries %q: %q", bad, got)
 		}
 	}
 }

@@ -30,7 +30,14 @@ var (
 // (objects-empty), then each pack the manifest lists (pack-missing,
 // pack-changed), and last whether the store is a repository git can read
 // (repo-unreadable).
+//
+// Before anything else, the workspace key directory, mirrors/, .meta/ and
+// .store/ must each be a real directory the user owns (layoutIsReal); a link
+// at any of them is missing, and nothing is read through it.
 func check(ctx context.Context, mdir string, r Repo) Fault {
+	if !layoutIsReal(mdir) {
+		return FaultMissing
+	}
 	stable := filepath.Join(mdir, r.ID)
 	info, err := os.Lstat(stable)
 	if err != nil || info.Mode()&os.ModeSymlink == 0 {
@@ -85,6 +92,12 @@ func checkStore(ctx context.Context, mdir string, r Repo, rec state) Fault {
 		if fi, err := os.Lstat(filepath.Join(store, name)); err != nil || !fi.Mode().IsRegular() {
 			return FaultRepoUnreadable
 		}
+	}
+	// packed-refs may be absent, but one that's there must be a regular file:
+	// git would follow a link there to whatever it names.
+	if fi, err := os.Lstat(filepath.Join(store, "packed-refs")); err == nil && !fi.Mode().IsRegular() ||
+		err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return FaultRepoUnreadable
 	}
 	if headCommitReadable(ctx, store) != nil {
 		return FaultRepoUnreadable

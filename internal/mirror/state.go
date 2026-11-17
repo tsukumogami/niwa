@@ -70,18 +70,13 @@ func statePath(mdir, repoID string) string {
 }
 
 // readState reads and decodes repoID's state file. Anything but a regular
-// file is refused.
+// file is refused: it's opened without following a link and checked as the
+// open file (openRegular), so a link swapped in after a look is never read
+// through.
 func readState(mdir, repoID string) (state, error) {
 	var st state
 	path := statePath(mdir, repoID)
-	info, err := os.Lstat(path)
-	if err != nil {
-		return st, err
-	}
-	if !info.Mode().IsRegular() {
-		return st, fmt.Errorf("%s is not a regular file", path)
-	}
-	f, err := os.Open(path)
+	f, err := openRegular(path)
 	if err != nil {
 		return st, err
 	}

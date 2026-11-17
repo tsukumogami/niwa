@@ -115,7 +115,7 @@ func TestCheck_FaultsAndTheirRestore(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 			before := f.linkTarget(t)
 			tc.damage(t, f)
-			if got := check(context.Background(), f.mdir(), f.repo()); got != tc.want {
+			if got := check(f.gitCtx(t), f.mdir(), f.repo()); got != tc.want {
 				t.Fatalf("check = %q, want %q", got, tc.want)
 			}
 			res := EnsureHealthy(context.Background(), f.applyOpts(), []Repo{f.repo()})
@@ -125,7 +125,7 @@ func TestCheck_FaultsAndTheirRestore(t *testing.T) {
 			if f.linkTarget(t) == before {
 				t.Fatal("the restore left the link on the damaged store")
 			}
-			if got := check(context.Background(), f.mdir(), f.repo()); got != FaultNone {
+			if got := check(f.gitCtx(t), f.mdir(), f.repo()); got != FaultNone {
 				t.Fatalf("check after the restore = %q", got)
 			}
 			st, err := readState(f.mdir(), "app")
@@ -176,7 +176,7 @@ func TestCheck_MovedCtimeAndUnlistedPackAreNoFault(t *testing.T) {
 		}
 	}
 
-	if got := check(context.Background(), f.mdir(), f.repo()); got != FaultNone {
+	if got := check(f.gitCtx(t), f.mdir(), f.repo()); got != FaultNone {
 		t.Fatalf("check = %q, want no fault", got)
 	}
 	res := EnsureHealthy(context.Background(), f.applyOpts(), []Repo{f.repo()})
@@ -358,7 +358,7 @@ func TestRestore_SalvagesOnlyIntactObjects(t *testing.T) {
 	}
 	for _, rel := range keep {
 		if strings.HasSuffix(rel, ".pack") {
-			if err := verifyPack(context.Background(), idxOf(filepath.Join(store, rel))); err != nil {
+			if err := verifyPack(f.gitCtx(t), idxOf(filepath.Join(store, rel))); err != nil {
 				t.Errorf("the salvaged pack fails verify-pack: %v", err)
 			}
 		}

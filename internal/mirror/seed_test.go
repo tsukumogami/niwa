@@ -254,7 +254,6 @@ func TestSeed_OnASeededMirrorReturnsWhatACheckDoes(t *testing.T) {
 		logged := len(f.logLines(t))
 		calls := recordGit(t)
 		res := Seed(context.Background(), f.seedOpts(), f.repo())
-		gitHook = nil
 		if res.Fault != FaultNone || res.Outcome != OutcomeHealthy || res.Err != nil {
 			t.Fatalf("Seed = %+v, want healthy", res)
 		}
@@ -375,7 +374,6 @@ func TestSeed_TwoRacingSeedsBuildOnce(t *testing.T) {
 		}
 		close(begin)
 		wg.Wait()
-		gitHook = nil
 
 		outcomes := map[Outcome]int{}
 		for _, r := range results {
@@ -447,7 +445,6 @@ func TestSeed_AFailureLeavesNothingAndTheNextSeedBuilds(t *testing.T) {
 		reportFree(t, minFreeUnknown-1, nil)
 		calls := recordGit(t)
 		res := Seed(context.Background(), f.seedOpts(), f.repo())
-		gitHook = nil
 		if res.Outcome != OutcomeRestoreFailed || res.Err == nil || res.Usable() || !strings.Contains(res.Err.Error(), "free space") {
 			t.Fatalf("Seed = %+v, want restore-failed naming free space", res)
 		}

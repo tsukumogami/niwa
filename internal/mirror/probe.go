@@ -102,6 +102,13 @@ func cleanName(s string) string {
 	return b.String()
 }
 
+// CleanText is s cut as the mirror log's strings and a LostRef's names are
+// (cleanName): printable ASCII, with every other byte and the backslash
+// escaped as \xNN, at most 256 bytes. A caller prints a Result's repo id and
+// the text of its Err and LogErr through it, since git, the system or a
+// remote can put anything in them.
+func CleanText(s string) string { return cleanName(s) }
+
 // borrowersOf returns the clones among instances whose alternates name the
 // stable path's objects directory, in order and each once.
 func borrowersOf(instances []string, stable string) []string {
