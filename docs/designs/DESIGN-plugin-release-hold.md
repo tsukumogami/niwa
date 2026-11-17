@@ -11,11 +11,13 @@ problem: |
 decision: |
   Each release is resolved to a commit and held once per workspace at
   ~/.niwa/w-<key>/plugins/github.com/<owner>/<repo>/<commit>/, beside PR
-  #511's mirrors/ and under the same workspace key. An instance holds only a
-  symlink to it. A per-release flock serializes placement and linking. Every
-  provisioning command scans each instance's links, refetches a release that
-  is absent or unmarked, and sweeps one no instance on disk links to unless
-  it is the newest of its source. [workspace] share_plugin_releases = false
+  #511's mirrors/ and under the same workspace key, its tree made read-only
+  and sealed. An instance holds only a symlink to it. A per-release flock
+  serializes placement and linking. Every provisioning command scans the
+  links of every instance on disk, kept ones included, refetches a release
+  that is absent, unmarked or no longer matches its seal, and sweeps one no
+  instance links to unless it is the newest of its source by commit time.
+  [workspace] share_plugin_releases = false
   turns placement off, and an unusable store falls back to today's fetch
   with a notice naming the path and condition.
 rationale: |
@@ -173,16 +175,28 @@ directory
 
 ```
 ~/.niwa/w-<key>/plugins/github.com/<owner>/<repo>/<commit>/
-  tree/        the extracted marketplace
-  held.json    the completion mark
+  tree/        the extracted marketplace, read-only
+  held.json    the completion mark and seal, read-only
 ```
 
 Owner and repo are lowercased (GitHub names are case-insensitive) and must
 match GitHub's name rules; the commit is 40 lowercase hex. `held.json`
-records the schema version, the source, the ref asked for, the tag when there
-is one, the commit, when it was placed and the niwa version, so messages can
-say "acme/skills v1.4.0" rather than a hash. The `github.com` segment leaves
-room for another forge without a migration.
+records the schema version, the source, the ref asked for and the tag when
+there is one (each kept only if it matches a strict ref pattern, otherwise
+left empty), the commit, the commit's time, when it was placed, the niwa
+version, and a seal: the tree's entry count, total size and the newest
+inode change time (ctime) among its entries once it was made read-only.
+Messages say "acme/skills v1.4.0" when a clean tag is recorded and the short
+commit otherwise. The commit time is the modification time GitHub's archive
+gives every entry (git archive stamps entries with the committer date), so a
+refetch of the same commit reproduces it exactly. The `github.com` segment
+leaves room for another forge without a migration.
+
+After extraction and before the mark is written, niwa strips every write bit
+from the tree: directories become 0555, files 0444, or 0555 where the
+archive marked them executable. Agents read skills through the links; none
+of them is meant to write there, and a plain write through a link from any
+instance now fails instead of reaching every instance.
 
 The instance's `<instance>/.niwa/marketplaces/<name>` becomes a symlink whose
 absolute target is `.../<commit>/tree`. `ResolvePluginTrees` keeps returning
@@ -245,30 +259,59 @@ directory that exists without a valid mark (renamed into `.trash/` first,
 then removed), downloads the tarball at the commit into
 `.tmp/<release hash>-<rand>/`, extracts it into `tree/` with
 `github.ExtractSubpath`, checks that the wrapper names the commit and that
-the manifest exists, writes `held.json` to a temporary name, syncs and
-renames it, syncs the directory, and renames the staging directory to
-`<commit>`. The instance is linked under the same lock: a temporary link is
-made and renamed over `<instance>/.niwa/marketplaces/<name>`. Any failure
-before the final rename removes only the staging directory, so a release is
-either absent or complete and marked.
+the manifest exists, strips the tree's write bits, takes the seal, writes
+`held.json` (0444) to a temporary name, syncs and renames it, syncs the
+directory, and renames the staging directory to `<commit>`. The instance is
+linked under the same lock: a temporary link is made and renamed over
+`<instance>/.niwa/marketplaces/<name>`, where the instance is the one the
+command runs for and `.niwa/marketplaces` is checked with `Lstat` to be a
+real directory. Any failure before the final rename removes only the staging
+directory, so a release is either absent or complete, sealed and marked.
 
 **Held, offline.** A release is held when `held.json` parses, names this
 commit and source, and `tree/.claude-plugin/marketplace.json` exists. That
-is three stats and a short read; it never reads the tree.
+is three stats and a short read; it never reads the tree. Repair and the
+sweep use this check.
+
+**Verified, on use.** Whenever a command links an instance to a release, and
+once per command for each release Repair finds in use, niwa also walks the
+tree with `Lstat` and compares it with the seal: the same entry count and
+total size, no write bit on any entry, and no ctime newer than the sealed
+one. ctime can't be set back from user space, so any write, chmod, rename or
+added file inside the tree moves it. A release that fails the walk is
+treated as missing: under its lock it is renamed into `.trash/` and fetched
+again at its commit, and the restore is reported as a tampered release. The
+walk reads metadata only, never file contents; at a few thousand entries per
+release it is an estimate of milliseconds, not a measured figure.
 
 **Repair.** Once per provisioning command per workspace, before the current
-instance's own placement, `Repair` lists every instance directory (Decision
-3's scan), reads each entry of `<instance>/.niwa/marketplaces/`, and keeps
-the symlinks whose target parses as a release link. For each distinct
-release it checks held offline; a missing one goes through the same locked
-placement, fetched at its commit. A link whose target names another home or
-workspace key (an instance moved here) is relinked to this store's path for
-the same release once that release is held. Each restore is reported with
-the release and the instances it served; a failed one is a warning naming
-the release, nothing it wrote is marked held, and the next provisioning
-command tries again. Repair fetches only releases whose `owner/repo` is a
-github marketplace source the effective workspace config declares; a link to
-anything else is reported and left alone.
+instance's own placement, `Repair` lists every instance on disk, kept ones
+included (Decision 3's scan), reads each entry of
+`<instance>/.niwa/marketplaces/`, and keeps the symlinks whose target parses
+as a release link. For each distinct release it checks held offline and
+verifies the seal; a missing or tampered one goes through the same locked
+placement, fetched at its commit. Repair writes only inside the store: it
+never creates, renames or removes anything inside an instance. A link whose
+target names another home or workspace key (an instance moved here) gets
+its release held here, and is relinked to this store's path by that
+instance's own next provisioning command, which is the only writer of its
+links. Each restore is reported with the release and the instances it
+served; a failed one is a warning naming the release, nothing it wrote is
+marked held, and the next provisioning command tries again.
+
+Repair is pinned to the source a link names. It fetches only releases whose
+`owner/repo` is a github marketplace source the effective workspace config
+declares, and before fetching a commit it didn't just resolve from the
+config, it checks that the commit belongs to that repository's own history:
+the commit must equal a tag or branch tip that `git ls-remote` of the source
+lists, or the compare endpoint (the one `APIClient.CompareCommits` already
+calls) must report it `identical` to or `behind` one of those refs, trying
+the default branch and then stable tags, newest first, at most 20 calls. This
+matters because GitHub serves a tarball for a commit that exists only in a
+fork of the repository, since forks share storage; a commit only a fork
+holds is never behind a ref of the source, so it is refused and reported,
+and nothing from it reaches the store under the source's name. A link to an
+undeclared source is reported and left alone.
 
 #### Alternatives Considered
 
@@ -282,9 +325,10 @@ would download, which fails R17.
 create on a newer release would leave an older instance broken, the case the
 PRD's decision on refetch scope was written against.
 
-**Check every file of a held release on each command.** Rejected because it
-reads the whole store each time; the PRD defines missing as absent or
-unmarked and names damage in place as a limit.
+**Hash every file of a held release on each use.** Rejected because it reads
+about 58 MiB per release per command. The metadata walk against the seal
+catches every write made through the normal file calls for the cost of
+`Lstat`s; what it misses is in Security Considerations.
 
 **A background checker.** Rejected by R4 and R6.
 
@@ -297,47 +341,70 @@ release some instance still links to, and that instance loses its skills
 until the next refetch. Never deleting is safe but lets the store grow with
 every release and, for a marketplace tracked at `main`, with every commit,
 with no way back but a person deleting by hand. R11 fixes the boundary: never
-delete a held release that any instance directory on disk under the workspace
-root points at, whatever that instance's state, kept ones included. The
-damage from a wrong delete is recoverable (a refetch at the commit restores
-the same bytes), but it costs a download and a window without skills.
+delete a held release that any instance on disk points at, whatever that
+instance's state, kept ones included. The damage from a wrong delete is
+recoverable (a refetch at the commit restores the same bytes), but it costs
+a download and a window without skills.
+
+Instances live in two places. Live ones, and kept ones the instance
+retention design leaves in place, are immediate children of the workspace
+root. Separate teardown work keeps a finished instance outside the root, at
+`~/.niwa/w-<key>/kept/<instance>/`, under the same location rule and the same
+workspace key this design computes. Both places hold instances whose links
+must count.
 
 Key assumptions:
-- Every instance of a workspace, kept ones included, is an immediate child
-  directory of the workspace root, as the instance lifecycle design lays out
-  and the instance retention design keeps (kept instances stay where they
-  are). A later feature that keeps instances anywhere else adds that place to
-  the scan.
+- Every instance of a workspace on disk is either an immediate child
+  directory of the workspace root or an entry of `~/.niwa/w-<key>/kept/`. A
+  later feature that keeps instances anywhere else adds that place to
+  `hostdir.InstanceDirs`, and until it does, its instances don't protect
+  their releases.
 - An instance points into the store only from
   `<instance>/.niwa/marketplaces/<name>` (Decision 1).
 - Links are made only under the release's lock (Decision 2).
 
-#### Chosen: a scan-based sweep that keeps the newest release of each source
+#### Chosen: a scan-based sweep over the root and the kept directory, keeping the newest release of each source
 
 The sweep runs once per provisioning command per workspace, after Repair and
 after the current instance is linked. Its candidates are held releases that
-are not the newest held release of their source (by `held.json`'s placed
-time), plus leftover staging and trash entries. For each candidate release
-it takes that release's lock, scans, and deletes only if nothing links to it.
+are not the newest held release of their source, plus leftover staging and
+trash entries. Newest means the latest commit time recorded in `held.json`,
+ties broken by commit hash. The commit time comes from the archive itself,
+so a refetch reproduces it: a restored old release stays old, and a newer
+unused one does not become a candidate because an older one was restored.
+For each candidate release the sweep takes that release's lock, scans, and
+deletes only if nothing links to it.
 
-The scan lists every immediate child directory of the workspace root, follows
-a child that is a symlink to a directory, skips `.niwa`, and does not require
-`.niwa/instance.json`, so an instance half-created or half-destroyed still
-counts. For each child it reads the entries of `<child>/.niwa/marketplaces/`
-and counts any symlink whose target parses as that release, through this
-store's path or another home's, as a use. If any child that has a `.niwa`
-directory can't be read, the sweep stops for that command and deletes
-nothing. A release with no use is renamed into `.trash/` (so a reader sees
-the whole release or nothing) and removed; empty owner and repo directories
-go with it.
+The scan (`hostdir.InstanceDirs`) reads two directories: the workspace root
+and, when it exists, `~/.niwa/w-<key>/kept/`. In each it lists entries with
+`Lstat` semantics, as `EnumerateInstances` does: a real directory is a
+candidate instance, and a symlink or any other entry type is skipped, never
+followed, so nothing outside those two directories is read or written
+through the scan. It skips `.niwa` at the root and does not require
+`.niwa/instance.json`, so an instance half-created, half-destroyed or
+half-moved into `kept/` still counts. For each instance it reads the entries
+of `<instance>/.niwa/marketplaces/` (itself checked with `Lstat` to be a real
+directory) and counts any symlink whose target parses as that release,
+through this store's path or another home's, as a use. If the root or an
+existing `kept/` directory can't be listed, or any instance there that has a
+`.niwa` directory can't be read, the sweep stops for that command and
+deletes nothing. A release with no use has write bits restored on its own
+entries only, is renamed into `.trash/` (so a reader sees the whole release
+or nothing) and removed; empty owner and repo directories go with it.
 
 `niwa destroy` deletes nothing from the store; the next provisioning command
 sweeps what it freed. When niwa removes a whole workspace
 (`DestroyWorkspace`, reached by `niwa destroy --force` at the root and by
-`niwa destroy` at an empty root), it removes `~/.niwa/w-<key>/plugins/` after
-the workspace root is gone, and `~/.niwa/w-<key>/` only if that leaves it
-empty, so a sibling such as the mirrors directory is left to its own
-feature. A workspace root removed by hand leaves its store behind.
+`niwa destroy` at an empty root), it computes the store path from the
+workspace root before removing anything, since `CanonicalPath` of a root
+that is gone could resolve differently. After the root is removed, it
+removes `~/.niwa/w-<key>/plugins/` only when `~/.niwa/w-<key>/kept/` is
+absent or empty; with kept instances still there, it leaves the store in
+place and prints its path, because those instances link into it and nothing
+would repair them once the workspace is gone. It removes `~/.niwa/w-<key>/`
+only if that leaves it empty, so a sibling such as the mirrors directory is
+left to its own feature. A workspace root removed by hand leaves its store
+behind.
 
 #### Alternatives Considered
 
@@ -358,6 +425,10 @@ adds nothing but delay.
 
 **Keep the last N releases per source**, as the managed copy keeps two.
 Rejected because it deletes a kept instance's old release.
+
+**Order "newest" by when a release was placed.** Rejected because a restore
+places an old release again and would make it look newest, leaving a newer
+unused release open to deletion; the commit time survives a refetch.
 
 **Delete at `niwa destroy` when the destroyed instance was the last user.**
 Rejected as the trigger because it misses instances removed any other way and
@@ -417,6 +488,14 @@ store's path (home shown as `~`) and the condition, for example:
 niwa: plugin store ~/.niwa/w-3f9a.../plugins is unwritable; fetched acme/skills v1.4.0 into this instance instead
 ```
 
+A notice carries only fields niwa validated: the lowercased owner and repo,
+the short commit, the condition from the fixed list, the store path niwa
+built, and a tag only when it matches `v?[0-9]+\.[0-9]+\.[0-9]+` (otherwise
+the short commit stands in). A ref or tag string the remote chose never
+reaches the terminal, dispatch's output or the SessionStart hook's context
+unchecked; anywhere else one is shown (a verbatim `track` echoed back, say),
+it is cut to printable ASCII and 100 bytes first.
+
 A source that can't be reached is not a store condition: a create needing a
 release that isn't held reports the marketplace it couldn't fetch, delivers
 none of its skills and marks nothing held, as today (R15). With no workspace
@@ -447,20 +526,24 @@ ref with one small request, finds
 held, and makes `<instance>/.niwa/marketplaces/<name>` a symlink to its
 `tree/`; nothing is downloaded and the instance holds only links. When the
 release isn't held, the create takes that release's lock, downloads at the
-commit into a staging directory, writes the completion mark inside it and
-renames it into place, then links, all under the lock, so a burst of creates
-downloads once and the waiters find the release complete. The key directory
-is PR #511's, so the plugins directory sits beside the mirrors directory, and
-the lock is #511's waiting flock under its naming scheme with a `p-` prefix.
+commit into a staging directory, makes the tree read-only, seals it, writes
+the completion mark inside it and renames it into place, then links, all
+under the lock, so a burst of creates downloads once and the waiters find
+the release complete. The key directory is PR #511's, so the plugins
+directory sits beside the mirrors directory, and the lock is #511's waiting
+flock under its naming scheme with a `p-` prefix.
 
-Every provisioning command also reads every instance's marketplace links once,
-offline, and restores any release that is absent or unmarked by fetching it at
-its commit, so an instance created before the loss gets back exactly its
-release. The same scan decides deletion: a release no instance directory
-under the workspace root links to, kept ones included, and that isn't the
-newest of its source, is deleted under its lock after a fresh scan; an
-unreadable instance stops deletion for that command. Removing the workspace
-through niwa removes its plugins directory. `[workspace]
+Every provisioning command also reads the marketplace links of every instance
+on disk once, both under the workspace root and under the kept directory,
+and restores any release that is absent, unmarked or no longer matching its
+seal by fetching it at its commit, after checking that the commit belongs to
+the declared source's own history. An instance created before the loss gets
+back exactly its release, and repair writes nothing outside the store. The
+same scan decides deletion: a release no instance links to, and that isn't
+the newest of its source by commit time, is deleted under its lock after a
+fresh scan; an unreadable instance or kept directory stops deletion for that
+command. Removing the workspace through niwa removes its plugins directory
+unless kept instances still link into it. `[workspace]
 share_plugin_releases = false` sends new creates back to a per-instance copy
 without touching instances already linked, and a store that is unreadable,
 unwritable, can't be created, or can't take a release falls back to the same
@@ -473,8 +556,9 @@ refetch and the deletion check, so no record has to agree with the disk. The
 lock that serializes placement is the same one that guards linking and
 deletion, which closes the race between a create linking a release and a
 sweep deleting it. Repair and the sweep share one pass over the instances, so
-the price of keeping the store honest is a few hundred `readlink` calls per
-command on a large host and no network unless something is missing.
+the price of keeping the store honest is a few hundred `readlink` calls and
+one metadata walk per release in use per command on a large host, and no
+network unless something is missing.
 
 ## Solution Architecture
 
@@ -495,13 +579,27 @@ workspace root, the fetch functions and the declared sources.
 first 32 hex digits of the sha256 of `filelock.CanonicalPath(root)`, the
 definition PR #511 gives in `internal/mirror`; `WorkspaceDir(home, root)`;
 `EnsurePrivateDir(dir)` (0700, owned by the user, a symlink refused); and
-`InstanceDirs(root)`, the conservative scan of Decision 3. Whichever of the
-two features lands second moves #511's `WorkspaceKey` and `ensurePrivateDir`
-here unchanged and has `internal/mirror` import them, so there is one
-definition of the key.
+`InstanceDirs(home, root)`, the scan of Decision 3 over the root's children
+and the entries of `~/.niwa/w-<key>/kept/`, real directories only. Whichever
+of the two features lands second moves #511's `WorkspaceKey` and
+`ensurePrivateDir` here unchanged and has `internal/mirror` import them, so
+there is one definition of the key.
+
+PR #511 is a draft, and this design follows whatever it merges rather than
+what it says today. If its key, its lock primitive, its lock-name scheme or
+its notice channel change before it lands, this design takes the merged
+form: the feature that lands second adopts the first one's `internal/filelock`
+and `internal/hostdir` as they are, or changes both call sites in the same
+commit. A unit test resolves the key directory through both stores' path
+helpers for the same root and fails if they differ, so a divergent key is a
+test failure rather than a silent second layout. If #511 never lands, this
+work's first phase carries the key, `CanonicalPath`, `WaitFileLock` and the
+lock-name scheme itself, as #511 drafts them.
 
 **`internal/pluginstore`**: the store. It never runs git and never follows a
-link it read from an instance; it only parses link targets.
+link it read from an instance; it only parses link targets. The only write it
+makes outside the store is the one link `Ensure` places for the instance the
+command runs for.
 
 **`internal/config`**: `WorkspaceMeta.SharePluginReleases` and its accessor.
 
@@ -509,7 +607,9 @@ link it read from an instance; it only parses link targets.
 taken when `workspaceRootHoldsState(filepath.Dir(instanceRoot))` and the
 setting is on; `runPipeline` calls `Repair` and `Sweep` once per command per
 workspace key (a set on the `Applier`, so a root-level apply over many
-instances runs them once); `DestroyWorkspace` removes the plugins directory.
+instances runs them once); `DestroyWorkspace` computes the store path first
+and removes the plugins directory once the root is gone and no kept instance
+remains.
 
 **`internal/fallbacknotice`**: a plugin-store note kind (marketplace, store
 path, condition, or a restored or restore-failed event), so the existing
@@ -522,10 +622,11 @@ rendering reaches every provisioning surface.
   locks/p-<sha256(workspace key + "/" + release id)[:32]>.lock    0600
   w-<sha256(CanonicalPath(workspace root))[:32]>/                  0700, the workspace key
     mirrors/                                      PR #511's, untouched here
+    kept/<instance>/                              the teardown work's, only read here
     plugins/                                      0700
       github.com/<owner>/<repo>/<commit>/         a held release, 0700
-        tree/                                     the marketplace, modes as extracted
-        held.json                                 the completion mark, 0600
+        tree/                                     the marketplace: dirs 0555, files 0444 or 0555
+        held.json                                 the completion mark and seal, 0444
       .tmp/<release hash>-<rand>/                 a placement in progress
       .trash/<release hash>-<rand>/               a release being removed
 
@@ -539,8 +640,14 @@ instance as today. Nothing niwa creates under `plugins/` other than
 
 ```json
 {"schema": 1, "source": "acme/skills", "ref": "v1.4.0", "tag": "v1.4.0",
- "commit": "3f9a2c1e...", "placed_at": "2026-11-17T10:15:02Z", "niwa": "0.60.0"}
+ "commit": "3f9a2c1e...", "commit_time": "2026-11-02T08:41:10Z",
+ "placed_at": "2026-11-17T10:15:02Z", "niwa": "0.60.0",
+ "seal": {"entries": 2841, "bytes": 60817408, "max_ctime_ns": 1763374502000000000}}
 ```
+
+`ref` and `tag` are stored only when they match
+`[A-Za-z0-9][A-Za-z0-9._/-]{0,99}` with no `..`; otherwise they are empty.
+`placed_at` is informational and ordering never reads it.
 
 ```go
 package pluginstore
@@ -568,9 +675,19 @@ func Dir(home, workspaceRoot string) string // ~/.niwa/w-<key>/plugins
 // Held reports whether r is complete and marked, reading no tree file.
 func (s Store) Held(r Release) (bool, Condition)
 
-// Ensure places r if it is missing and points link at its tree, both under
-// r's lock. A non-empty Condition means the caller falls back.
+// Verify walks r's tree with Lstat and compares it with the seal; false
+// means r is treated as missing.
+func (s Store) Verify(r Release) (bool, error)
+
+// Ensure places r if it is missing or fails Verify, and points link at its
+// tree, both under r's lock. link must sit in a real .niwa/marketplaces
+// directory of the instance the command runs for. A non-empty Condition
+// means the caller falls back.
 func (s Store) Ensure(ctx context.Context, r Release, link string) (restored bool, cond Condition, err error)
+
+// Reachable reports whether commit is a tag or branch tip of owner/repo, or
+// an ancestor of one by the compare endpoint; Repair fetches nothing else.
+type Reachable func(ctx context.Context, owner, repo, commit string) (bool, error)
 
 // ParseLink reads a link target as a release link, whatever home or key
 // prefixes it, by its github.com/<owner>/<repo>/<commit>/tree tail.
@@ -583,12 +700,13 @@ type RepairResult struct {
 	Err       error
 }
 
-// Repair restores every missing release that an instance in instances links
-// to and whose source is in declared, and relinks moved instances.
-func (s Store) Repair(ctx context.Context, instances []string, declared map[string]bool) []RepairResult
+// Repair restores every missing or tampered release that an instance in
+// instances links to, whose source is in declared and whose commit passes
+// reachable. It writes only inside the store.
+func (s Store) Repair(ctx context.Context, instances []string, declared map[string]bool, reachable Reachable) []RepairResult
 
 // Sweep deletes held releases nothing links to, keeping the newest of each
-// source; any scan error deletes nothing.
+// source by commit time; any scan error deletes nothing.
 func (s Store) Sweep(ctx context.Context, scan func() ([]string, error)) (removed []Release, err error)
 ```
 
@@ -608,33 +726,40 @@ A provisioning command for instance *I* of a workspace with root *W*:
 
 1. **Gate.** If *W* has no `.niwa/workspace.toml`, skip everything below;
    today's path runs (R14).
-2. **Repair, once per command.** `hostdir.InstanceDirs(W)`; read each
-   `<child>/.niwa/marketplaces/` entry; `ParseLink` each symlink; check each
-   distinct release with `Held`; restore missing ones through `Ensure`
-   (fetch at the commit); relink moved instances. Report restores and
-   failures through the notice collector. No network unless something is
-   missing.
+2. **Repair, once per command.** `hostdir.InstanceDirs(home, W)` over the
+   root and `kept/`; read each `<instance>/.niwa/marketplaces/` entry;
+   `ParseLink` each symlink; check each distinct release with `Held` and
+   `Verify`; restore missing or tampered ones into the store at their commit
+   once `Reachable` passes. Nothing in any instance is written. Report
+   restores, refusals and failures through the notice collector. No network
+   unless something is missing.
 3. **Place for *I* (Step 6.2).** For each github marketplace: pick the ref as
    today, resolve it with `HeadCommit`. If `<I>/.niwa/marketplaces/<name>` is
    already a real directory with a manifest (an instance from before this
    change, or one made with the store off), keep it. If it is a link that
-   parses, keep the release it names (R13), restoring it if Repair could not.
-   Otherwise, with the setting on, `Ensure` the resolved release and link it;
-   with it off, fetch into the instance as today.
+   parses, keep the release it names (R13): `Ensure` it, which restores it if
+   Repair could not and rewrites the link to this store's path if it named
+   another. Otherwise, with the setting on, `Ensure` the resolved release and
+   link it; with it off, fetch into the instance as today.
 4. **Fall back.** A non-empty condition from step 3 means a per-instance
    fetch at the same commit into a real directory, and a notice. An existing
    dangling link for *I* whose release can't be restored because the store is
    unusable is replaced by a per-instance copy at the commit it named, so *I*
    stays on its release.
-5. **Sweep, once per command, after Step 6.2b.** Candidates, then for each:
-   lock, rescan, delete if unused. Leftover `.tmp/` entries are cleared under
-   their release's lock; `.trash/` entries are removed.
+5. **Sweep, once per command, after Step 6.2b.** Candidates (not the newest
+   of their source by commit time), then for each: lock, rescan the root and
+   `kept/`, delete if unused. Leftover `.tmp/` entries are cleared under
+   their release's lock; `.trash/` entries get their write bits back and are
+   removed.
 6. **Report.** Notices render on every surface `internal/fallbacknotice`
    already reaches: the terminal for create, apply, init and reset;
    dispatch's and watch's stderr; the SessionStart hook's injected context.
 
-`niwa destroy --force` at the root (`DestroyWorkspace`): after the workspace
-root is removed, remove `Dir(home, root)`, then the key directory if empty.
+`niwa destroy --force` at the root (`DestroyWorkspace`): compute
+`Dir(home, root)` and the kept directory while the root still exists; after
+the root is removed, remove the plugins directory if `kept/` is absent or
+empty (otherwise print its path and leave it), then the key directory if
+empty.
 
 ### What the git-history store can rely on
 
@@ -647,7 +772,9 @@ rule. From this design it can rely on:
   `mirrors/`. Each store takes its own subdirectory (`plugins/`,
   `mirrors/`); nothing lives under the workspace root's `.niwa/` or inside an
   instance. The same root reached through a symlink gets the same key, and
-  two roots get two directories.
+  two roots get two directories. This follows whatever key PR #511 merges,
+  and a unit test fails if the two stores ever resolve different key
+  directories for one root.
 - **Lock discipline.** One lock per item, in `~/.niwa/locks/`, named by
   hashing the workspace key and the item's id with a per-store prefix (`p-`
   here, `m-` in #511), taken with `filelock.WaitFileLock` and a bounded wait.
@@ -655,13 +782,15 @@ rule. From this design it can rely on:
   whatever deletes the item rechecks for pointers under the same lock.
 - **Missing-item detection and refetch with nobody acting.** A cheap offline
   check runs inside every provisioning command, through `runPipeline`, for
-  every item any instance on disk points at, and a missing item is fetched
-  again under its lock with the result reported. There is no repair command,
-  no flag and no daemon.
+  every item any instance on disk points at, kept ones included, and a
+  missing item is fetched again under its lock, into the store only, with the
+  result reported. There is no repair command, no flag and no daemon.
 - **The in-use check over every instance on disk.** `hostdir.InstanceDirs`
-  lists every immediate child directory of the workspace root, kept and
-  half-made instances included, and a scan error deletes nothing. The
-  pointer is read from the instance side, so no record can drift from disk.
+  lists the real directories among the workspace root's children and among
+  the entries of `~/.niwa/w-<key>/kept/`, half-made and half-moved instances
+  included, symlinked entries skipped. An unreadable root, kept directory or
+  instance deletes nothing. The pointer is read from the instance side, so
+  no record can drift from disk.
 - **The off-setting pattern.** A `[workspace]` boolean named
   `share_<what>`, absent meaning on, that governs new placements only and
   leaves already-linked instances working and repaired; a store that is per
@@ -688,9 +817,12 @@ host's instances or stores; every figure above comes from the PRD's survey.
 
 `internal/hostdir` with `WorkspaceKey`, `WorkspaceDir`, `EnsurePrivateDir` and
 `InstanceDirs`, unit tests for the symlinked root, the trailing slash, a
-half-created instance and an unreadable child. This phase depends on PR
-#511's first phase (`internal/filelock` with `WaitFileLock`); if this work
-starts first, it lands that phase as #511 specifies it, unchanged.
+half-created instance, a kept instance and a half-kept one under `kept/`, a
+symlinked child skipped, an unreadable child and an unreadable `kept/`, and
+the test that both stores resolve one key directory. This phase depends on
+PR #511's first phase (`internal/filelock` with `WaitFileLock`) as it merges;
+if this work starts first, it lands that phase as #511 then specifies it,
+and if #511 never lands, this phase carries that code itself.
 
 Deliverables:
 - `internal/hostdir/hostdir.go`, `hostdir_test.go`
@@ -705,11 +837,13 @@ Deliverables:
 
 ### Phase 3: Store core
 
-`internal/pluginstore`: layout, name validation, `held.json`, `Held`,
-`Ensure` with staged placement under the lock, `ParseLink`. Unit tests: a
-killed placement leaves nothing held, a wrapper naming another commit is
-refused, ten concurrent `Ensure` calls fetch once, a mark-less directory is
-replaced, each of the four conditions is returned for its cause.
+`internal/pluginstore`: layout, name validation, `held.json` with its seal
+and commit time, read-only modes, `Held`, `Verify`, `Ensure` with staged
+placement under the lock, `ParseLink`. Unit tests: a killed placement leaves
+nothing held, a wrapper naming another commit is refused, ten concurrent
+`Ensure` calls fetch once, a mark-less directory is replaced, a tree with an
+edited, added or chmodded file fails `Verify`, a hostile tag is stored empty,
+each of the four conditions is returned for its cause.
 
 Deliverables:
 - `internal/pluginstore/{layout,place,link}.go` and tests
@@ -725,8 +859,10 @@ Deliverables:
 
 ### Phase 5: Repair, sweep and workspace removal
 
-`Repair` and `Sweep`, their once-per-command calls in `runPipeline`, and the
-plugins directory removal in `DestroyWorkspace`.
+`Repair` with the `Reachable` check (ls-remote match, then bounded compare
+calls), `Sweep` ordered by commit time, their once-per-command calls in
+`runPipeline`, and the plugins directory removal in `DestroyWorkspace` with
+the key computed first and the kept-instance guard.
 
 Deliverables:
 - `internal/pluginstore/{repair,sweep}.go`, `internal/workspace/apply.go`,
@@ -769,7 +905,8 @@ suite's local git server with `url.<base>.insteadOf`, so `git ls-remote
 acme/skills is published" pushes the tag there and registers its tarball and
 commit with the fake. Interruption, overlap and a failed placement use the
 existing `NIWA_TEST_FAULT` seam with two new labels, `plugin-store-download`
-(`hold:`, `truncate-after:`) and `plugin-store-place` (`error:`). Skills are
+(`hold:`, `truncate-after:`) and `plugin-store-place` (`error:`). The fake
+gains a compare endpoint answer per commit, for the fork scenario. Skills are
 checked by resolving the delivered links at the instance root, in a repo and
 in a session worktree, the same assertion the root-skill and Codex features
 use.
@@ -779,7 +916,7 @@ The three Evidence scenarios map to scenarios this way:
 | Evidence | Scenarios |
 |----------|-----------|
 | A second create downloads nothing | `A second instance downloads no held release` (outline over `niwa create`, `niwa dispatch` with the fake `claude`, and the SessionStart hook step): one tarball request per release across both creates; the second instance's `.niwa/marketplaces/*` are symlinks into the store with no regular file, and its plugin content is under 1 MiB; skills resolve at root, repo and worktree. Also `Three overlapping creates download each release once`, `An interrupted create leaves its release unheld`, and `A moving ref holds the same files with the store on and off` (`diff -r`). |
-| A deleted release is refetched while the older instance still loads skills, with no repair | `A deleted release is restored by <command>` (outline over `niwa apply`, `niwa dispatch`, the hook, and `niwa create` of an instance on a newer release): one new tarball request at the old commit, output names the restored release, the first instance's links resolve with nothing run inside it. Also `A deleted completion mark counts as missing`, `A failed refetch names the release and the next apply restores it` (fake 503, then `truncate-after`), `An instance stays on its release after a newer tag`, `A kept instance's release survives every command` (create, apply, dispatch, hook, reset, destroy, each followed by a check that the release is held and the kept instance's links resolve), and `No command repairs the store` (walks `niwa --help` and every listed subcommand's help). |
+| A deleted release is refetched while the older instance still loads skills, with no repair | `A deleted release is restored by <command>` (outline over `niwa apply`, `niwa dispatch`, the hook, and `niwa create` of an instance on a newer release): one new tarball request at the old commit, output names the restored release, the first instance's links resolve with nothing run inside it. Also `A deleted completion mark counts as missing`, `A failed refetch names the release and the next apply restores it` (fake 503, then `truncate-after`), `An instance stays on its release after a newer tag`, `A kept instance's release survives every command` (outline over a kept instance left in place under the root and one moved into `~/.niwa/w-<key>/kept/`; create, apply, dispatch, hook, reset, destroy, each followed by a check that the release is held and the kept instance's links resolve), `A release only a kept instance uses is restored` (the instance under `kept/`), `An unreadable kept directory deletes nothing`, `A symlinked child of the root is neither read nor written`, `A tampered held release is fetched again` (a file edited after `chmod u+w`), `A commit only a fork holds is refused` (the fake serves the tarball, the compare call says diverged, nothing is placed), `A newer unused release survives the restore of an older one`, and `No command repairs the store` (walks `niwa --help` and every listed subcommand's help). |
 | Store off, or unreachable, falls back | `With the store off a create holds its own copy` (and the other workspace still links, and the first workspace's older instance still loads skills), `An unusable store falls back and says so` (outline: mode 000 for `unreadable`, mode 555 with an unheld release for `unwritable`, absent with an unwritable parent for `can't be created`, the `plugin-store-place` fault for `release not placed`), `A dispatch shows the fallback notice`, `Three creates on an unwritable store each fall back`, `An unheld release with its source down is reported and nothing is held`, `A single-instance layout writes nothing under ~/.niwa`, and the location scenarios (two roots get two directories; a symlinked root gets the same one). |
 
 How a reviewer reruns them. From the repo root, after `make build-test`:
@@ -810,7 +947,11 @@ reviewer's own (`export HOME=$(mktemp -d)`, with a GitHub token exported):
   `niwa apply` in either instance, read the "restored" line, and run the
   skill in the first instance without touching it. Repeat with `niwa
   dispatch`, the hook, and a `niwa create` after pushing a new tag to the
-  fork; then delete only `held.json` and run `niwa apply` again.
+  fork; then delete only `held.json` and run `niwa apply` again. For a kept
+  instance, move the first instance into `~/.niwa/w-*/kept/`, push a new tag,
+  create and destroy instances on the newer release, and check after each
+  command that the old release is still held and the kept instance's links
+  resolve.
 - **Off and unreachable.** Add `share_plugin_releases = false` under
   `[workspace]` in one workspace, create, and find a real tree in the new
   instance while a second workspace still links. Turn it back on, then
@@ -824,11 +965,25 @@ The chmod scenarios assume a non-root user, as CI runs.
 ## Security Considerations
 
 The store turns a per-instance cache into content every instance of a
-workspace reads, and adds a path that deletes directories. The design defends
-against a malformed or hostile tarball, a planted or stale link in an
-instance, and a damaged store; it does not defend against another process
-running as the same user, which can already edit any instance's trees.
+workspace reads, and the skills in it are instructions and scripts agents
+act on. It also adds a path that deletes directories and a repair that
+fetches on the strength of a link found on disk. The design defends against
+a malformed or hostile tarball, a write through one instance's link reaching
+every instance, a planted or stale link, a symlink planted among the
+workspace's instances, a commit that exists only in a fork, and hostile ref
+names reaching an agent's context.
 
+- **One instance's write reaching every instance.** Before this design a
+  write into a plugin tree stayed in one instance; now every instance of the
+  workspace links to the same tree, so an agent session in any of them,
+  including a prompt-injected one in a session worktree, could change skills
+  for all of them. The held tree is made read-only before it is marked
+  (directories 0555, files 0444 or 0555), so a plain write through a link
+  fails. A process that changes the modes first and then writes moves the
+  ctime of what it touched, which can't be set back from user space; the
+  seal check that runs whenever a command links a release and in every
+  repair pass then treats the release as missing, moves it aside and fetches
+  it again at its commit, and the output says the release was tampered with.
 - **Downloaded content.** Tarballs come from the GitHub API exactly as
   today, with the user's token, now fetched by commit rather than by ref. The
   extractor is `github.ExtractSubpath`, which already rejects path traversal
@@ -837,22 +992,49 @@ running as the same user, which can already edit any instance's trees.
   directory must name the commit asked for, and the manifest must exist
   before the mark is written. Pinning by commit means a tag moved upstream
   never changes what an existing instance runs.
-- **Paths niwa writes and deletes.** Every directory the store makes is
-  created with `EnsurePrivateDir` (0700, owned by the user, a symlink at the
-  path refused), `held.json` is 0600, and locks open with `O_NOFOLLOW` as
+- **Commits from a fork.** GitHub serves a tarball for a commit that exists
+  only in a fork of a repository, because forks share storage, and the
+  wrapper check would pass. A create only fetches commits it resolved from a
+  ref of the declared source, so it is not exposed. Repair, which starts
+  from a commit found in a link, fetches it only after the commit is shown
+  to belong to the source's own history: it equals a tag or branch tip that
+  `git ls-remote` of the source lists, or the compare endpoint reports it
+  identical to or behind one of them. A fork-only commit is never behind a
+  ref of the source, so it is refused and reported. A moving-ref release
+  whose commit was later force-pushed off every branch is refused the same
+  way; that instance keeps reporting the release until it is reset.
+- **The scan and repair stay inside their bounds.** `InstanceDirs` lists the
+  workspace root and the kept directory with `Lstat` semantics and skips any
+  symlinked entry, so a symlink planted among the instances is neither read
+  nor written through. Repair writes only inside the store. The one write
+  outside it is the link `Ensure` makes for the instance the command runs
+  for, at a path whose `.niwa/marketplaces` directory is checked with
+  `Lstat` to be a real directory.
+- **Paths niwa writes and deletes.** Every directory the store makes at its
+  own levels is created with `EnsurePrivateDir` (0700, owned by the user, a
+  symlink at the path refused), and locks open with `O_NOFOLLOW` as
   `WaitFileLock` does. Owner, repo and commit are validated against fixed
   patterns before they become path components. Deletion only ever renames a
   directory the store's own walk found at `github.com/<owner>/<repo>/<commit>`
-  (by `Lstat`, never through a link) into `.trash/` and removes it there.
-- **Links read from instances.** A link target is parsed, never followed for
-  writing or deleting. A planted link can make Repair fetch a release only
-  for a source the workspace config already declares, at a commit of that
-  source, into the store; anything else is reported and left alone. A
-  planted link pointing anywhere else gains nothing an instance's owner
-  couldn't already do by writing that link.
-- **Deletion fails closed.** Any error scanning an instance stops the sweep
-  for that command, and the recheck under the release's lock means a
-  concurrent create can't link to a release mid-delete.
+  (by `Lstat`, never through a link) into `.trash/`, restores write bits on
+  the entries inside it, and removes it there.
+- **Strings the remote chose.** Tag and ref names come from the remote.
+  `held.json` keeps them only when they match a strict ref pattern, notices
+  name a tag only when it is a clean `vX.Y.Z`, and any other ref shown
+  anywhere is cut to printable ASCII and 100 bytes. The SessionStart hook's
+  context receives only validated owner and repo, a short commit, a fixed
+  condition word and the store path niwa built.
+- **Deletion fails closed.** Any error listing the root or the kept
+  directory, or reading an instance there, stops the sweep for that command,
+  and the recheck under the release's lock means a concurrent create can't
+  link to a release mid-delete. Which release is kept as newest depends on a
+  commit time a tampered `held.json` could change, but that choice only
+  decides among releases nothing links to; protection of releases in use
+  never reads `held.json`.
+- **Workspace removal.** `DestroyWorkspace` computes the store path before
+  it removes the root, so a root that no longer exists can't resolve to
+  another workspace's key or to nothing, and it leaves the store in place
+  while kept instances still link into it.
 - **Data exposure.** A private marketplace's tree moves from inside the
   instance to `~/.niwa/w-<key>/plugins/`, readable only by the user. Stores
   are per workspace key, so one workspace never links another's releases.
@@ -860,10 +1042,14 @@ running as the same user, which can already edit any instance's trees.
   token. Removing the workspace through niwa removes its releases; a root
   removed by hand leaves them, which the guide says.
 
-Residual risk accepted: a held release edited or damaged in place keeps its
-mark, so niwa doesn't refetch it and every instance linked to it sees the
-change. That is the PRD's stated limit for damage in place, and the same
-user could edit a per-instance tree today.
+Residual risk accepted: a process running as the user that rewrites the tree
+and then rewrites `held.json` with a new seal defeats the check, and its
+change reaches every instance linked to the release until the release is
+deleted. That takes deliberate work against niwa's own files rather than a
+write through a link, and the same process could already rewrite every
+instance's per-instance tree one at a time. Damage that keeps every entry's
+size, count and ctime (bit rot below the filesystem) is the PRD's stated
+limit for damage in place.
 
 ## Consequences
 
@@ -871,8 +1057,11 @@ user could edit a per-instance tree today.
 
 - From the second instance on, a create downloads and writes no release the
   workspace already holds, and a burst downloads each release once.
-- A missing or unmarked release, and a moved instance's dangling link, are
-  restored by the next provisioning command with nobody acting.
+- A missing, unmarked or tampered release is restored by the next
+  provisioning command with nobody acting, for live and kept instances
+  alike, and a moved instance is relinked by its own next command.
+- A write through one instance's link can't change another instance's
+  skills: the tree is read-only and sealed.
 - Moving refs are held like tags, and an instance stays on exactly its
   commit for life.
 - The host gets one layout for niwa-owned state, shared with the mirror
@@ -884,14 +1073,19 @@ user could edit a per-instance tree today.
   when everything is held, and an offline create can't use held releases
   because it can't learn the current commit.
 - Every provisioning command scans each instance's marketplace links, a few
-  hundred `readlink` calls on a large host.
+  hundred `readlink` calls on a large host, and walks the metadata of each
+  release in use, an unmeasured cost estimated in milliseconds.
 - Between a release going missing and the next provisioning command,
   instances linked to it lack that marketplace's skills.
 - A stuck lock holder costs a create two minutes before it falls back.
-- An instance moved out of the workspace root stops counting as a user, so
-  its release can be swept.
-- A workspace root removed by hand leaves its store under `~/.niwa/`.
-- Damage in place to a marked release is not detected.
+- An instance moved anywhere other than the root or the kept directory
+  stops counting as a user, so its release can be swept.
+- A moving-ref release whose commit was force-pushed off every branch can't
+  be restored by repair.
+- A workspace removed while kept instances remain leaves its store behind,
+  as does a workspace root removed by hand.
+- A tree rewritten together with its seal, or damaged without changing any
+  entry's size, count or ctime, is not detected.
 
 ### Mitigations
 
@@ -899,14 +1093,19 @@ user could edit a per-instance tree today.
   behaviour is today's (R15), and a later change could fall back to the
   newest held release of the source.
 - The scan reads only `.niwa/marketplaces/` entries and runs once per command,
-  not per instance.
+  not per instance; the walk reads no file contents.
+- The refused restore names the release and the source, and `niwa reset`
+  gives that instance a fresh release.
+- A later feature that keeps instances somewhere new adds that place to
+  `hostdir.InstanceDirs`, which the git-history contract states.
 - The missing window is the one the PRD accepted in ruling out a background
   checker; every provisioning command closes it.
 - The two-minute wait ends in the ordinary fallback, with a notice, so the
   create still succeeds.
 - A moved-back instance's link is repaired by refetch, because the link
   names the release by commit.
-- `niwa destroy --force` at the root removes the store; the guide names the
-  directory for a root removed by hand.
+- `niwa destroy --force` at the root removes the store once no kept instance
+  remains and prints its path when one does; the guide names the directory
+  for a root removed by hand.
 - Deleting a damaged release directory, or only its `held.json`, puts it back
   under automatic repair, and the guide says so.
