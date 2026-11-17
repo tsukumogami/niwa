@@ -65,7 +65,8 @@ func restoreWorkspaceConfigDir(dir string) (bool, error) {
 	configDir := filepath.Join(dir, ConfigDir)
 	release, err := AcquireSnapshotLock(configDir)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("%s is missing and %s%s, left by an interrupted config refresh, could not be put back: %w",
+			configDir, configDir, PrevSuffix, err)
 	}
 	defer release()
 	if _, err := os.Stat(filepath.Join(configDir, ConfigFile)); err == nil {
