@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -40,6 +41,13 @@ func gitEnv() []string {
 // "key=value", passed as -c), in the cleaned environment. The error carries
 // git's stderr.
 func runGit(ctx context.Context, config []string, args ...string) error {
+	_, err := gitOutput(ctx, config, "", args...)
+	return err
+}
+
+// gitOutput runs git as runGit does, with stdin as its input, and returns
+// what it printed on stdout.
+func gitOutput(ctx context.Context, config []string, stdin string, args ...string) (string, error) {
 	full := make([]string, 0, 2*(len(gitBaseConfig)+len(config))+len(args))
 	for _, kv := range append(append([]string{}, gitBaseConfig...), config...) {
 		full = append(full, "-c", kv)
@@ -47,15 +55,164 @@ func runGit(ctx context.Context, config []string, args ...string) error {
 	full = append(full, args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Env = gitEnv()
-	var stderr bytes.Buffer
+	cmd.Stdin = strings.NewReader(stdin)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			return fmt.Errorf("git %s: %w: %s", args[0], err, msg)
+		// The first argument that isn't an option names the subcommand.
+		sub := args[0]
+		for _, a := range args {
+			if !strings.HasPrefix(a, "-") {
+				sub = a
+				break
+			}
 		}
-		return fmt.Errorf("git %s: %w", args[0], err)
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return "", fmt.Errorf("git %s: %w: %s", sub, err, msg)
+		}
+		return "", fmt.Errorf("git %s: %w", sub, err)
+	}
+	return stdout.String(), nil
+}
+
+// configEntry is one key of a store's config, "section.name" or
+// "section.subsection.name", and its value.
+type configEntry struct{ key, value string }
+
+// retentionConfig is the fixed set every store's config holds, so nothing a
+// mirror ever fetched is dropped: no fetch prunes a ref, no gc or maintenance
+// runs on its own, nothing unreachable or in a reflog expires, every ref
+// update is logged, and every object a fetch brings is checked and lands in a
+// pack. The store is written from this set whole, so no other key survives.
+var retentionConfig = []configEntry{
+	{"fetch.prune", "false"},
+	{"gc.auto", "0"},
+	{"maintenance.auto", "false"},
+	{"gc.pruneExpire", "never"},
+	{"core.logAllRefUpdates", "always"},
+	{"gc.reflogExpire", "never"},
+	{"gc.reflogExpireUnreachable", "never"},
+	{"transfer.fsckObjects", "true"},
+	{"fetch.fsckObjects", "true"},
+	{"transfer.unpackLimit", "1"},
+	{"fetch.unpackLimit", "1"},
+}
+
+// storeConfigEntries is the whole config of a store cloned from url: the
+// repository's own two keys, the fixed retention set, and the remote, whose
+// URL is the recorded form so no credential the config's URL carries reaches
+// disk.
+func storeConfigEntries(url string) []configEntry {
+	entries := []configEntry{
+		{"core.repositoryformatversion", "0"},
+		{"core.bare", "true"},
+	}
+	entries = append(entries, retentionConfig...)
+	return append(entries,
+		configEntry{"remote.origin.url", recordURL(url)},
+		configEntry{"remote.origin.fetch", "+refs/*:refs/*"},
+	)
+}
+
+// renderConfig writes entries in git's config file format, one section per
+// distinct section in the order each first appears. A value with a character
+// git would read specially is quoted; one with a control character is
+// refused, since it would end the line.
+func renderConfig(entries []configEntry) (string, error) {
+	type section struct {
+		header string
+		lines  []string
+	}
+	var order []string
+	sections := map[string]*section{}
+	for _, e := range entries {
+		dot := strings.LastIndex(e.key, ".")
+		if dot <= 0 || dot == len(e.key)-1 {
+			return "", fmt.Errorf("config key %q has no section and name", e.key)
+		}
+		sec, name := e.key[:dot], e.key[dot+1:]
+		value, err := configValue(e.value)
+		if err != nil {
+			return "", fmt.Errorf("config key %s: %w", e.key, err)
+		}
+		s, ok := sections[sec]
+		if !ok {
+			header := "[" + sec + "]"
+			if first, sub, found := strings.Cut(sec, "."); found {
+				header = fmt.Sprintf("[%s %q]", first, sub)
+			}
+			s = &section{header: header}
+			sections[sec] = s
+			order = append(order, sec)
+		}
+		s.lines = append(s.lines, "\t"+name+" = "+value)
+	}
+	var b strings.Builder
+	for _, sec := range order {
+		b.WriteString(sections[sec].header + "\n")
+		for _, line := range sections[sec].lines {
+			b.WriteString(line + "\n")
+		}
+	}
+	return b.String(), nil
+}
+
+// configValue is v as a config file value: as it is when git reads it back
+// unchanged, otherwise in double quotes with backslashes and quotes escaped.
+func configValue(v string) (string, error) {
+	for _, c := range v {
+		if c < 0x20 || c == 0x7f {
+			return "", fmt.Errorf("value holds a control character")
+		}
+	}
+	if !strings.ContainsAny(v, "\"\\;#") && strings.TrimSpace(v) == v {
+		return v, nil
+	}
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(v) + `"`, nil
+}
+
+// writeStoreConfig replaces store's config with the fixed one for url. It's
+// written under a temporary name in the store and renamed over config, so a
+// check that reads it without the lock never sees half a file.
+func writeStoreConfig(store, url string) error {
+	text, err := renderConfig(storeConfigEntries(url))
+	if err != nil {
+		return err
+	}
+	suffix, err := randHex()
+	if err != nil {
+		return err
+	}
+	tmp := filepath.Join(store, ".niwa-config-"+suffix)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return fmt.Errorf("writing the store's config: %w", err)
+	}
+	_, werr := f.WriteString(text)
+	if werr == nil {
+		werr = f.Sync()
+	}
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Rename(tmp, filepath.Join(store, "config"))
+	}
+	if werr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("writing the store's config: %w", werr)
 	}
 	return nil
+}
+
+// fetchMirror brings every ref of url into store and prunes none: a ref the
+// remote deleted stays, and a ref the remote moved is forced to its new value
+// with the old one kept in the store's reflog. url is the config's, as given,
+// on the command line only, so a credential it carries works but is never
+// written to the store.
+func fetchMirror(ctx context.Context, store, url string) error {
+	return runGit(ctx, nil, "--git-dir="+store, "fetch", "--no-prune", "--quiet", "--", url, "+refs/*:refs/*")
 }
 
 // verifyPack runs git verify-pack on a pack's .idx, which checks the index
@@ -77,11 +234,9 @@ func headCommitReadable(ctx context.Context, store string) error {
 // to hold them yet: a malformed object from the remote is refused before any
 // borrower can read it, and everything lands as a pack.
 //
-// url is the workspace config's, as given, and git records it as the store's
-// remote.origin.url just as an ordinary clone of the same URL records it in an
-// instance today. Rewriting the store's config from the fixed retention set
-// with the URL's userinfo, query and fragment stripped belongs to the refresh
-// and hostile-input work that follows this restore, not to it.
+// url is the workspace config's, as given. git records it in the new store's
+// config, which the restore then replaces whole with the fixed one
+// (writeStoreConfig) before anything else reads the store.
 func cloneMirror(ctx context.Context, url, dir string) error {
 	return runGit(ctx,
 		[]string{

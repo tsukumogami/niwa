@@ -172,9 +172,10 @@ func TestEnsureMirrors_MirrorResultsHoldsOnlyWhatWasntHealthy(t *testing.T) {
 	if len(healthy) != 0 {
 		t.Fatalf("MirrorResults for a healthy mirror = %+v, want none", healthy)
 	}
+	// The healthy check is followed by the refresh every apply makes.
 	lines := f.logLines(t)
-	if last := lines[len(lines)-1]; last["result"] != "healthy" || last["event"] != "check" {
-		t.Fatalf("the last log line is %v, want a healthy check", last)
+	if check := lines[len(lines)-2]; check["result"] != "healthy" || check["event"] != "check" {
+		t.Fatalf("the log ends %v, want a healthy check before the refresh", lines[len(lines)-2:])
 	}
 }
 
@@ -283,5 +284,134 @@ func TestEnsureMirrors_OneCommandWaitsOnABusyMirrorOnce(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].Outcome != mirror.OutcomeBusy {
 		t.Fatalf("MirrorResults = %+v, want one busy result", results)
+	}
+}
+
+// build restores the fixture's mirror with a throwaway Applier, as the first
+// command after the borrowers appear would.
+func (f mirrorFixture) build(t *testing.T) {
+	t.Helper()
+	var stderr bytes.Buffer
+	f.applier(&stderr).ensureMirrors(context.Background(), &config.WorkspaceConfig{}, f.classified, f.instance, "apply")
+	if lines := f.appLines(t); len(lines) != 2 || lines[1]["result"] != "restored" {
+		t.Fatalf("building the mirror logged %v", lines)
+	}
+}
+
+// pushCommit adds a commit to main on the fixture's remote and returns it.
+func (f mirrorFixture) pushCommit(t *testing.T, content string) string {
+	t.Helper()
+	work := filepath.Join(t.TempDir(), "work")
+	mirrorGit(t, filepath.Dir(work), "clone", "--quiet", f.remote, work)
+	if err := os.WriteFile(filepath.Join(work, content+".txt"), []byte(content+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mirrorGit(t, work, "add", content+".txt")
+	mirrorGit(t, work, "commit", "--quiet", "-m", content)
+	mirrorGit(t, work, "push", "--quiet", "origin", "HEAD:refs/heads/main")
+	out, err := exec.Command("git", "-C", work, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// mirrorMain is what main names in the mirror's store.
+func (f mirrorFixture) mirrorMain(t *testing.T) string {
+	t.Helper()
+	stable := mirror.StablePath(f.home, f.root, "app")
+	out, err := exec.Command("git", "--git-dir", stable, "rev-parse", "refs/heads/main").Output()
+	if err != nil {
+		t.Fatalf("reading main in the mirror: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func TestEnsureMirrors_RefreshesAHealthyMirrorUnderItsCommand(t *testing.T) {
+	for _, c := range []struct{ mirrorCommand, want string }{
+		{"", "apply"},
+		{"dispatch", "dispatch"},
+		{"from-hook", "from-hook"},
+	} {
+		t.Run(c.want, func(t *testing.T) {
+			f := newMirrorFixture(t)
+			f.build(t)
+			tip := f.pushCommit(t, "new")
+			logged := len(f.appLines(t))
+
+			var stderr bytes.Buffer
+			a := f.applier(&stderr)
+			a.MirrorCommand = c.mirrorCommand
+			a.ensureMirrors(context.Background(), &config.WorkspaceConfig{}, f.classified, f.instance, "apply")
+
+			if got := f.mirrorMain(t); got != tip {
+				t.Fatalf("main in the mirror = %s, want the fetched %s", got, tip)
+			}
+			lines := f.appLines(t)[logged:]
+			if len(lines) != 2 || lines[0]["event"] != "check" || lines[1]["event"] != "refresh" {
+				t.Fatalf("log gained %v, want a check and a refresh line", lines)
+			}
+			for _, line := range lines {
+				if line["command"] != c.want || line["result"] != "healthy" || line["fault"] != "" {
+					t.Fatalf("log line %v, want command %q, no fault, result healthy", line, c.want)
+				}
+			}
+			if strings.Contains(stderr.String(), "mirror") {
+				t.Fatalf("stderr = %q, want no mirror warning", stderr.String())
+			}
+		})
+	}
+}
+
+func TestEnsureMirrors_OneCommandRefreshesAMirrorOnce(t *testing.T) {
+	f := newMirrorFixture(t)
+	roots := f.twoInstances(t)
+	f.build(t)
+	f.pushCommit(t, "new")
+	logged := len(f.appLines(t))
+
+	var stderr bytes.Buffer
+	a := f.applier(&stderr)
+	for _, root := range roots {
+		a.ensureMirrors(context.Background(), &config.WorkspaceConfig{}, f.classified, root, "apply")
+	}
+	lines := f.appLines(t)[logged:]
+	if len(lines) != 2 || lines[0]["event"] != "check" || lines[1]["event"] != "refresh" {
+		t.Fatalf("two instance passes logged %v, want one check and one refresh line", lines)
+	}
+}
+
+func TestEnsureMirrors_AFailedRefreshWarnsAndIsNotCollected(t *testing.T) {
+	f := newMirrorFixture(t)
+	f.build(t)
+	if err := os.Rename(f.remote, f.remote+".gone"); err != nil {
+		t.Fatal(err)
+	}
+
+	var results []mirror.Result
+	var stderr bytes.Buffer
+	a := f.applier(&stderr)
+	a.MirrorResults = &results
+	a.ensureMirrors(context.Background(), &config.WorkspaceConfig{}, f.classified, f.instance, "apply")
+
+	var warnings []string
+	for _, line := range strings.Split(strings.TrimSpace(stderr.String()), "\n") {
+		if strings.Contains(line, "mirror") {
+			warnings = append(warnings, line)
+		}
+	}
+	if len(warnings) != 1 || !strings.HasPrefix(warnings[0], "warning: mirror app: refresh failed:") {
+		t.Fatalf("stderr mirror lines = %q, want one starting %q", warnings, "warning: mirror app: refresh failed:")
+	}
+	if len(results) != 0 {
+		t.Fatalf("MirrorResults = %+v, want nothing for a healthy mirror", results)
+	}
+}
+
+func TestReportMirrorResult_SilentForAHealthyMirror(t *testing.T) {
+	var stderr bytes.Buffer
+	ReportMirrorResult(NewReporterWithTTY(&stderr, false), mirror.Result{RepoID: "app", Outcome: mirror.OutcomeHealthy})
+	if stderr.Len() != 0 {
+		t.Fatalf("a healthy result printed %q", stderr.String())
 	}
 }

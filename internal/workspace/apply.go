@@ -3219,8 +3219,10 @@ func repoAlreadyCloned(dir string) bool {
 }
 
 // ensureMirrors checks the host mirror of each classified repo that has one,
-// or that a clone in any of the workspace's instances borrows from, and
-// restores a broken one. The clone paths of every instance are passed, not
+// or that a clone in any of the workspace's instances borrows from, restores
+// a broken one and refreshes a healthy one from its remote, pruning nothing
+// (every command that reaches here builds instances, so each brings its
+// mirrors up to date once). The clone paths of every instance are passed, not
 // just this one's, because a mirror serves the whole workspace. Every result
 // that isn't a healthy mirror becomes a warning; none fails the command, which
 // carries on whatever the result.
@@ -3274,10 +3276,14 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 		Instances:     clones,
 		LockWait:      a.MirrorLockWait,
 		Command:       command,
+		Refresh:       true,
 	}
 	for _, res := range mirror.EnsureHealthy(ctx, opts, repos) {
 		a.mirrorsChecked[res.StablePath] = true
 		if res.Outcome == mirror.OutcomeHealthy {
+			// A healthy mirror whose refresh failed is still usable: it's
+			// reported, never collected.
+			ReportMirrorResult(a.Reporter, res)
 			continue
 		}
 		if a.MirrorResults != nil {
@@ -3290,9 +3296,13 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 // ReportMirrorResult warns about a mirror that isn't healthy, in the one form
 // every command that checks mirrors prints:
 // "warning: mirror <id>: fault <fault>, result <result>", with the error
-// after it when there is one. A healthy mirror prints nothing.
+// after it when there is one. A healthy mirror whose refresh failed prints
+// "warning: mirror <id>: refresh failed: <err>"; any other healthy mirror
+// prints nothing.
 func ReportMirrorResult(r *Reporter, res mirror.Result) {
 	switch {
+	case res.Outcome == mirror.OutcomeHealthy && res.Err != nil:
+		r.Warn("mirror %s: refresh failed: %v", res.RepoID, res.Err)
 	case res.Outcome == mirror.OutcomeHealthy:
 	case res.Err != nil:
 		r.Warn("mirror %s: fault %s, result %s: %v", res.RepoID, res.Fault, res.Outcome, res.Err)

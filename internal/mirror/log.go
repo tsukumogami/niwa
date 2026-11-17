@@ -12,10 +12,11 @@ import (
 const (
 	eventCheck   = "check"
 	eventRestore = "restore"
+	eventRefresh = "refresh"
 )
 
-// logLine is one line of .meta/mirror.log. TookMs is set on a restore line
-// only.
+// logLine is one line of .meta/mirror.log. TookMs is set on a restore or
+// refresh line only.
 type logLine struct {
 	Time    string  `json:"time"`
 	Command string  `json:"command"`

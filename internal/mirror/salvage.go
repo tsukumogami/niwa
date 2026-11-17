@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 )
@@ -56,6 +57,79 @@ func salvage(ctx context.Context, srcs []string, dst string) {
 		salvagePacks(ctx, filepath.Join(src, "pack"), filepath.Join(dst, "objects", "pack"))
 		salvageLoose(src, filepath.Join(dst, "objects"))
 	}
+}
+
+// keptRefPrefix names the refs a restore pins salvaged commits under, so a
+// commit only an old store's ref named stays reachable in the new store.
+const keptRefPrefix = "refs/niwa/kept/"
+
+// commitIDPattern is a full-length SHA-1 in hex, the only form a pin's name
+// takes.
+var commitIDPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// pinKept pins in the new store at dst, as refs/niwa/kept/<sha>, each commit
+// that a ref of an old store at srcs names, that dst holds once salvage has
+// run, and that no ref of dst reaches. An old store git can't open (its HEAD
+// gone, say) gives no pins, and a git call that fails pins nothing more:
+// a pin keeps a commit the remote dropped, but the store is usable without
+// one, so the restore goes on either way. A ref naming anything but a commit
+// is left out.
+func pinKept(ctx context.Context, srcs []string, dst string) {
+	seen := map[string]bool{}
+	var named []string
+	for _, src := range srcs {
+		out, err := gitOutput(ctx, nil, "", "--git-dir="+src, "for-each-ref", "--format=%(objectname)")
+		if err != nil {
+			continue
+		}
+		for _, id := range strings.Fields(out) {
+			if commitIDPattern.MatchString(id) && !seen[id] {
+				seen[id] = true
+				named = append(named, id)
+			}
+		}
+	}
+	if len(named) == 0 {
+		return
+	}
+
+	// Which of them dst holds as commits.
+	out, err := gitOutput(ctx, nil, strings.Join(named, "\n")+"\n",
+		"--git-dir="+dst, "cat-file", "--batch-check=%(objectname) %(objecttype)")
+	if err != nil {
+		return
+	}
+	var held []string
+	for _, line := range strings.Split(out, "\n") {
+		if id, kind, ok := strings.Cut(line, " "); ok && kind == "commit" && seen[id] {
+			held = append(held, id)
+		}
+	}
+	if len(held) == 0 {
+		return
+	}
+
+	// rev-list prints each commit reachable from held and from no ref of dst,
+	// so a held commit it prints is one nothing in dst reaches.
+	out, err = gitOutput(ctx, nil, strings.Join(held, "\n")+"\n",
+		"--git-dir="+dst, "rev-list", "--stdin", "--not", "--all")
+	if err != nil {
+		return
+	}
+	unreached := map[string]bool{}
+	for _, id := range strings.Fields(out) {
+		unreached[id] = true
+	}
+	var cmds strings.Builder
+	for _, id := range held {
+		if unreached[id] {
+			cmds.WriteString("update " + keptRefPrefix + id + " " + id + "\n")
+		}
+	}
+	if cmds.Len() == 0 {
+		return
+	}
+	_, _ = gitOutput(ctx, nil, cmds.String(), "--git-dir="+dst, "update-ref", "--stdin")
 }
 
 // salvagePacks copies each pack in srcDir whose .idx is beside it and passes

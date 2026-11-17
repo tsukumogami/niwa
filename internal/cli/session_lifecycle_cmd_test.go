@@ -411,6 +411,25 @@ func TestCheckWorktreeMirror_RestoresADeletedMirror(t *testing.T) {
 	}
 }
 
+// TestCheckWorktreeMirror_NeverFetches: `niwa worktree create` only checks a
+// healthy mirror; it never brings it up to date from the remote.
+func TestCheckWorktreeMirror_NeverFetches(t *testing.T) {
+	h := setupHookMirror(t, true)
+	refs := h.mirrorRefs(t)
+	h.pushCommit(t)
+	before := len(h.logLines(t))
+
+	var stderr bytes.Buffer
+	checkWorktreeMirror(context.Background(), filepath.Join(h.root, "inst"), "app", &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want nothing", stderr.String())
+	}
+	if got := h.mirrorRefs(t); got != refs {
+		t.Fatalf("the check fetched: refs\n%s\nwere\n%s", got, refs)
+	}
+	h.requireOnlyAHealthyCheck(t, before, "worktree")
+}
+
 // TestCheckWorktreeMirror_NoMirrorWritesNothing: a repo nobody borrows for
 // gets no check, no log and no mirror directory.
 func TestCheckWorktreeMirror_NoMirrorWritesNothing(t *testing.T) {

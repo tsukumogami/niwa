@@ -94,7 +94,14 @@ func restore(ctx context.Context, opts Options, r Repo) (Outcome, error) {
 	if fault == FaultNone {
 		return OutcomeHealthy, nil
 	}
+	return rebuild(ctx, mdir, r, fault)
+}
 
+// rebuild is a restore's work once it holds the mirror's lock and knows the
+// fault: relink the recorded store or build a new one, and swap it in. The
+// caller holds the lock. It doesn't check again, so a refresh whose deep
+// verify found a bad pack the check can't see rebuilds through it too.
+func rebuild(ctx context.Context, mdir string, r Repo, fault Fault) (Outcome, error) {
 	stable := filepath.Join(mdir, r.ID)
 	moveAside := false
 	info, err := os.Lstat(stable)
@@ -217,10 +224,11 @@ func recordState(mdir, repoID, stateTmp string) error {
 	return nil
 }
 
-// buildStore clones r into a temporary directory, salvages into it from the
-// old stores at srcs, writes its state file under a temporary name, and
-// renames it into .store/. It returns the store's name and the state file's
-// temporary path. On failure nothing it made is left behind.
+// buildStore clones r into a temporary directory, writes the fixed config
+// into it, salvages into it from the old stores at srcs and pins what they
+// hold that the clone doesn't reach, writes its state file under a temporary
+// name, and renames it into .store/. It returns the store's name and the
+// state file's temporary path. On failure nothing it made is left behind.
 func buildStore(ctx context.Context, mdir string, r Repo, srcs []string) (string, string, error) {
 	suffix, err := randHex()
 	if err != nil {
@@ -234,9 +242,17 @@ func buildStore(ctx context.Context, mdir string, r Repo, srcs []string) (string
 		_ = os.RemoveAll(tmp)
 		return "", "", fmt.Errorf("cloning the mirror: %w", err)
 	}
+	if err := writeStoreConfig(tmp, r.URL); err != nil {
+		_ = os.RemoveAll(tmp)
+		return "", "", err
+	}
 	salvage(ctx, srcs, tmp)
+	pinKept(ctx, srcs, tmp)
 
-	name, err := newStoreName(r.ID, time.Now())
+	// The clone ran under fsckObjects and every salvaged pack passed git
+	// verify-pack, so the build is both a refresh and a deep verify.
+	built := time.Now()
+	name, err := newStoreName(r.ID, built)
 	if err != nil {
 		_ = os.RemoveAll(tmp)
 		return "", "", err
@@ -253,11 +269,13 @@ func buildStore(ctx context.Context, mdir string, r Repo, srcs []string) (string
 		return "", "", fmt.Errorf("writing the state file: %w", err)
 	}
 	stateTmp, err := writeStateTemp(mdir, state{
-		Schema: stateSchema,
-		RepoID: r.ID,
-		URL:    recordURL(r.URL),
-		Store:  filepath.Join(".store", name),
-		Packs:  packs,
+		Schema:         stateSchema,
+		RepoID:         r.ID,
+		URL:            recordURL(r.URL),
+		Store:          filepath.Join(".store", name),
+		Packs:          packs,
+		LastRefresh:    stateTime(built),
+		LastDeepVerify: stateTime(built),
 	})
 	if err != nil {
 		_ = os.RemoveAll(tmp)

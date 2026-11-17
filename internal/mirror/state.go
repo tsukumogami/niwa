@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -36,7 +37,18 @@ type state struct {
 	// Store is the link target the build swapped in, ".store/<name>".
 	Store string      `json:"store"`
 	Packs []packEntry `json:"packs"`
+	// LastRefresh is when the store was last brought up to date from the
+	// remote: by a refresh's fetch, or by the clone a restore made. UTC,
+	// RFC 3339. A state file written before refreshes existed has none.
+	LastRefresh string `json:"last_refresh,omitempty"`
+	// LastDeepVerify is when every pack in the store last passed git
+	// verify-pack: a restore's build, whose clone ran under fsckObjects and
+	// whose salvaged packs each passed it, or a refresh's daily deep verify.
+	LastDeepVerify string `json:"last_deep_verify,omitempty"`
 }
+
+// stateTime formats a time for the state file's timestamps.
+func stateTime(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
 // packEntry is one pack in a store's manifest.
 type packEntry struct {

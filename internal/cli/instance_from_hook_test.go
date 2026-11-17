@@ -908,6 +908,65 @@ func TestSessionStart_NonProvisioningPathsCheckAHealthyMirror(t *testing.T) {
 	}
 }
 
+// pushCommit adds a commit to main on the hook mirror's remote, so a fetch
+// would move the mirror's main.
+func (h hookMirror) pushCommit(t *testing.T) {
+	t.Helper()
+	work := filepath.Join(t.TempDir(), "work")
+	hookMirrorGit(t, filepath.Dir(work), "clone", "--quiet", h.remote, work)
+	if err := os.WriteFile(filepath.Join(work, "b.txt"), []byte("b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hookMirrorGit(t, work, "add", "b.txt")
+	hookMirrorGit(t, work, "commit", "--quiet", "-m", "second")
+	hookMirrorGit(t, work, "push", "--quiet", "origin", "HEAD:refs/heads/main")
+}
+
+// mirrorRefs lists every ref in the mirror's store with its value.
+func (h hookMirror) mirrorRefs(t *testing.T) string {
+	t.Helper()
+	out, err := exec.Command("git", "--git-dir", mirror.StablePath(h.home, h.root, "app"), "for-each-ref", "--format=%(refname) %(objectname)").Output()
+	if err != nil {
+		t.Fatalf("listing the mirror's refs: %v", err)
+	}
+	return string(out)
+}
+
+// requireOnlyAHealthyCheck fails unless the log lines added since before are
+// one healthy check from command and no refresh line.
+func (h hookMirror) requireOnlyAHealthyCheck(t *testing.T, before int, command string) {
+	t.Helper()
+	added := h.logLines(t)[before:]
+	if len(added) != 1 || added[0]["command"] != command || added[0]["event"] != "check" || added[0]["result"] != "healthy" {
+		t.Fatalf("log lines added = %v, want one healthy %s check and no refresh", added, command)
+	}
+}
+
+func TestSessionStart_NonProvisioningPathsNeverFetch(t *testing.T) {
+	for _, p := range hookPathSetups {
+		t.Run(p.name, func(t *testing.T) {
+			h := setupHookMirror(t, true)
+			p.setup(t, h.root)
+			stubProvision(t, "guidance")
+			refs := h.mirrorRefs(t)
+			h.pushCommit(t)
+			before := len(h.logLines(t))
+
+			if _, _, err := runStart(t, instanceHookPayload{
+				HookEventName: hookEventSessionStart,
+				SessionID:     testSessionID,
+				Cwd:           h.root,
+			}, t.TempDir()); err != nil {
+				t.Fatalf("runInstanceHookStart: %v", err)
+			}
+			if got := h.mirrorRefs(t); got != refs {
+				t.Fatalf("the hook fetched: refs\n%s\nwere\n%s", got, refs)
+			}
+			h.requireOnlyAHealthyCheck(t, before, "from-hook")
+		})
+	}
+}
+
 func TestSessionStart_NonProvisioningPathsWithNoMirrorWriteNothing(t *testing.T) {
 	for _, p := range hookPathSetups {
 		t.Run(p.name, func(t *testing.T) {

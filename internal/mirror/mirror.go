@@ -43,6 +43,11 @@ type Options struct {
 	// Command names the niwa command in the mirror log: create, apply,
 	// dispatch, from-hook (the SessionStart hook) or worktree.
 	Command string
+	// Refresh brings a mirror the check finds healthy up to date from the
+	// remote, pruning nothing. The commands that build instances set it; the
+	// ones that only check, such as the hook that provisions nothing and
+	// niwa worktree create, never fetch.
+	Refresh bool
 }
 
 // Fault is what the check found wrong with a mirror; empty when nothing.
@@ -288,6 +293,10 @@ func EnsureHealthy(ctx context.Context, opts Options, repos []Repo) []Result {
 // lock, that another command had already fixed the mirror restored nothing
 // and logs no restore line: its check line says the fault it saw and
 // "healthy". A failed log write is dropped: it never changes the Result.
+//
+// A mirror the check finds healthy is refreshed when opts.Refresh is set,
+// once its check line is written (see refresh). A mirror this call restored
+// isn't: the restore's clone has just fetched.
 func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 	mdir := mirrorsDir(opts.Home, opts.WorkspaceRoot)
 	res := Result{RepoID: r.ID, StablePath: filepath.Join(mdir, r.ID)}
@@ -307,6 +316,9 @@ func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 		checkLine.Result = res.Outcome
 		_ = appendLog(mdir, checkLine)
 		clearLeftoversIfIdle(opts, mdir, r.ID)
+		if opts.Refresh {
+			return refresh(ctx, opts, mdir, r, res)
+		}
 		return res
 	}
 	restoreStart := time.Now()
