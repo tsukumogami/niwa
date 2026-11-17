@@ -37,7 +37,7 @@ func (f fixture) applyOpts() Options {
 }
 
 // built returns a fixture whose mirror one EnsureHealthy has built.
-func built(t *testing.T) fixture {
+func built(t testing.TB) fixture {
 	t.Helper()
 	f := newFixture(t)
 	f.borrow(t)
@@ -49,7 +49,7 @@ func built(t *testing.T) fixture {
 }
 
 // linkTarget reads the stable link.
-func (f fixture) linkTarget(t *testing.T) string {
+func (f fixture) linkTarget(t testing.TB) string {
 	t.Helper()
 	target, err := os.Readlink(StablePath(f.home, f.root, "app"))
 	if err != nil {
@@ -59,7 +59,7 @@ func (f fixture) linkTarget(t *testing.T) string {
 }
 
 // store is the directory the stable link names.
-func (f fixture) store(t *testing.T) string {
+func (f fixture) store(t testing.TB) string {
 	t.Helper()
 	return filepath.Join(f.mdir(), f.linkTarget(t))
 }
@@ -142,10 +142,26 @@ func TestBuild_WritesTheStateFileAndManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if e.Name() != "app.json" && e.Name() != "mirror.log" {
+		if !metaEntryAllowed(e.Name()) {
 			t.Fatalf(".meta holds %q", e.Name())
 		}
 	}
+	for _, name := range []string{"mirror.log.1", "app.json"} {
+		if !metaEntryAllowed(name) {
+			t.Fatalf("the .meta listing refuses %q", name)
+		}
+	}
+	for _, name := range []string{"mirror.log.2", "mirror.log.1.bak", ".app.json-1234abcd", "other.json", "notes.txt"} {
+		if metaEntryAllowed(name) {
+			t.Fatalf("the .meta listing accepts %q", name)
+		}
+	}
+}
+
+// metaEntryAllowed reports whether name may sit in the fixture's .meta/: its
+// one repo's state file, the mirror log or the log's one older generation.
+func metaEntryAllowed(name string) bool {
+	return name == "app.json" || name == "mirror.log" || name == "mirror.log.1"
 }
 
 func TestLog_OneCheckLinePerCallAndOneRestoreLinePerRestore(t *testing.T) {
@@ -214,6 +230,23 @@ func TestLog_AFailedWriteLeavesTheResult(t *testing.T) {
 	res := EnsureHealthy(context.Background(), f.opts(), []Repo{f.repo()})
 	if len(res) != 1 || res[0].Outcome != OutcomeRestored || res[0].Err != nil {
 		t.Fatalf("result = %+v, want restored with no error", res)
+	}
+	if res[0].LogErr == nil {
+		t.Fatal("a log that can't be written left no LogErr on the result")
+	}
+	if info, err := os.Lstat(logPath(f.mdir())); err != nil || !info.IsDir() {
+		t.Fatalf("the directory at the log's path was moved or removed: %v (%v)", info, err)
+	}
+
+	// A healthy mirror, with and without the refresh, keeps the failure too.
+	for _, opts := range []Options{f.opts(), func() Options { o := f.opts(); o.Refresh = true; return o }()} {
+		res := EnsureHealthy(context.Background(), opts, []Repo{f.repo()})
+		if len(res) != 1 || res[0].Outcome != OutcomeHealthy || res[0].Err != nil || res[0].LogErr == nil {
+			t.Fatalf("healthy result with Refresh %v = %+v, want healthy, no Err, LogErr set", opts.Refresh, res)
+		}
+	}
+	if info, err := os.Lstat(logPath(f.mdir())); err != nil || !info.IsDir() {
+		t.Fatalf("the directory at the log's path was moved or removed: %v (%v)", info, err)
 	}
 }
 

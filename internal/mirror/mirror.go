@@ -102,7 +102,19 @@ type Result struct {
 	// restore a failure, and the next command finds the mirror healthy and
 	// doesn't report them again.
 	Unrecoverable []LostRef
+	// LogErr is the first error writing this mirror's lines to the mirror
+	// log, healthy results included. Every other field is what it would be
+	// with a working log: a log that can't be written is reported, never a
+	// reason to change what the check or restore did.
+	LogErr error
 }
+
+// elapsedNow is the clock the durations a Result and the log carry are read
+// from: check_ms, a restore's took_ms and a refresh's took_ms. Nothing else
+// reads it; the log's time field, store names and the state file's
+// timestamps read time.Now. The tests replace it with a fake clock to get
+// exact figures without timing anything.
+var elapsedNow = time.Now
 
 // Usable reports whether borrowers can read the mirror after the call.
 func (r Result) Usable() bool {
@@ -120,17 +132,26 @@ var noticeEffects = map[Outcome]string{
 // Notice is the one line a command shows a reader who can't see its stderr,
 // such as a session that gets the SessionStart hook's context: the repo id,
 // the fault, the outcome, how many borrower refs the restore left
-// unrecoverable when there are any, and where the mirror log is. It's "" for
-// a healthy mirror. It's built from those values and fixed text only, never
-// from Err, which can carry text git or the remote produced, nor from a lost
-// ref's names, which a remote or a person chose: the count says the mirror
-// log names them. Any control character in it is dropped, so a hostile home
-// path can't break the line.
+// unrecoverable when there are any, and where the mirror log is. When the
+// log couldn't be written (LogErr), the line says so in place of naming the
+// log, so a failed write reaches that reader as a warning does on stderr.
+// It's "" for a healthy mirror whose log was written. It's built from those
+// values and fixed text only, never from Err or LogErr, which can carry text
+// git, the system or the remote produced, nor from a lost ref's names, which
+// a remote or a person chose: the count says the mirror log names them. Any
+// control character in it is dropped, so a hostile home path can't break
+// the line.
 func (r Result) Notice() string {
-	if r.Outcome == OutcomeHealthy || r.Outcome == "" {
+	healthy := r.Outcome == OutcomeHealthy || r.Outcome == ""
+	if healthy && r.LogErr == nil {
 		return ""
 	}
-	line := fmt.Sprintf("niwa mirror %s: fault %s, result %s.", r.RepoID, r.Fault, r.Outcome)
+	var line string
+	if healthy {
+		line = fmt.Sprintf("niwa mirror %s: result healthy.", r.RepoID)
+	} else {
+		line = fmt.Sprintf("niwa mirror %s: fault %s, result %s.", r.RepoID, r.Fault, r.Outcome)
+	}
 	if effect := noticeEffects[r.Outcome]; effect != "" {
 		line += " " + effect
 	}
@@ -141,7 +162,12 @@ func (r Result) Notice() string {
 		line += fmt.Sprintf(" Except %d refs in those clones, which are unrecoverable: they were built on commits the remote no longer serves. The mirror log names them.", n)
 	}
 	if r.StablePath != "" {
-		line += " Mirror log: " + logPath(filepath.Dir(r.StablePath))
+		log := logPath(filepath.Dir(r.StablePath))
+		if r.LogErr != nil {
+			line += " The mirror log at " + log + " could not be written."
+		} else {
+			line += " Mirror log: " + log
+		}
 	}
 	return strings.Map(func(c rune) rune {
 		if unicode.IsControl(c) {
@@ -308,18 +334,28 @@ func EnsureHealthy(ctx context.Context, opts Options, repos []Repo) []Result {
 // lock, that another command had already fixed the mirror restored nothing
 // and logs no restore line: its check line says the fault it saw and
 // "healthy". Each borrower ref the restore left unrecoverable gets an
-// unrecoverable line after the restore line. A failed log write is dropped:
-// it never changes the Result.
+// unrecoverable line after the restore line. A failed log write is kept as
+// the Result's LogErr and changes nothing else in it.
 //
 // A mirror the check finds healthy is refreshed when opts.Refresh is set,
 // once its check line is written (see refresh). A mirror this call restored
 // isn't: the restore's clone has just fetched.
+//
+// check_ms times the check alone, read from elapsedNow just before and just
+// after it; a restore's took_ms is read the same way around the restore,
+// its probe of the borrowers included.
 func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 	mdir := mirrorsDir(opts.Home, opts.WorkspaceRoot)
 	res := Result{RepoID: r.ID, StablePath: filepath.Join(mdir, r.ID)}
+	logged := func(err error) {
+		if err != nil && res.LogErr == nil {
+			res.LogErr = err
+		}
+	}
 	start := time.Now()
+	checkStart := elapsedNow()
 	res.Fault = check(ctx, mdir, r)
-	res.CheckDuration = time.Since(start)
+	res.CheckDuration = elapsedNow().Sub(checkStart)
 	checkLine := logLine{
 		Time:    logTime(start),
 		Command: opts.Command,
@@ -331,7 +367,7 @@ func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 	if res.Fault == FaultNone {
 		res.Outcome = OutcomeHealthy
 		checkLine.Result = res.Outcome
-		_ = appendLog(mdir, checkLine)
+		logged(appendLog(mdir, checkLine))
 		clearLeftoversIfIdle(opts, mdir, r.ID)
 		if opts.Refresh {
 			return refresh(ctx, opts, mdir, r, res)
@@ -339,11 +375,12 @@ func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 		return res
 	}
 	restoreStart := time.Now()
+	tookStart := elapsedNow()
 	res.Outcome, res.Unrecoverable, res.Err = restore(ctx, opts, r)
-	took := time.Since(restoreStart).Milliseconds()
+	took := elapsedNow().Sub(tookStart).Milliseconds()
 	checkLine.Result = res.Outcome
 	if res.Outcome == OutcomeHealthy {
-		_ = appendLog(mdir, checkLine)
+		logged(appendLog(mdir, checkLine))
 		return res
 	}
 	restoreLine := checkLine
@@ -351,6 +388,6 @@ func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 	restoreLine.Event = eventRestore
 	restoreLine.TookMs = &took
 	lines := []any{checkLine, restoreLine}
-	_ = appendLog(mdir, append(lines, unrecoverableLines(restoreLine, res.Unrecoverable)...)...)
+	logged(appendLog(mdir, append(lines, unrecoverableLines(restoreLine, res.Unrecoverable)...)...))
 	return res
 }

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -405,6 +406,93 @@ func TestEnsureMirrors_AFailedRefreshWarnsAndIsNotCollected(t *testing.T) {
 	}
 	if len(results) != 0 {
 		t.Fatalf("MirrorResults = %+v, want nothing for a healthy mirror", results)
+	}
+}
+
+// replaceLogWithADirectory makes every write to the fixture's mirror log
+// fail, as a log the user can't write would.
+func (f mirrorFixture) replaceLogWithADirectory(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(filepath.Dir(mirror.StablePath(f.home, f.root, "app")), ".meta", "mirror.log")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// mirrorLines are the lines of stderr that mention a mirror.
+func mirrorLines(stderr string) []string {
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(stderr), "\n") {
+		if strings.Contains(line, "mirror") {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func TestReportMirrorResult_ALogThatCantBeWritten(t *testing.T) {
+	logErr := errors.New("open /x/mirror.log: is a directory")
+	const failed = "warning: mirror app: writing the mirror log failed: open /x/mirror.log: is a directory\n"
+	for _, c := range []struct {
+		name string
+		res  mirror.Result
+		want string
+	}{
+		{"healthy", mirror.Result{RepoID: "app", Outcome: mirror.OutcomeHealthy, LogErr: logErr}, failed},
+		{"restored", mirror.Result{RepoID: "app", Fault: mirror.FaultMissing, Outcome: mirror.OutcomeRestored, LogErr: logErr},
+			"warning: mirror app: fault missing, result restored\n" + failed},
+		{"restored with a working log", mirror.Result{RepoID: "app", Fault: mirror.FaultMissing, Outcome: mirror.OutcomeRestored},
+			"warning: mirror app: fault missing, result restored\n"},
+		{"healthy with a working log", mirror.Result{RepoID: "app", Outcome: mirror.OutcomeHealthy}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			ReportMirrorResult(NewReporterWithTTY(&stderr, false), c.res)
+			if got := stderr.String(); got != c.want {
+				t.Fatalf("printed %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestEnsureMirrors_ALogThatCantBeWrittenIsWarnedAndCollectedOnce(t *testing.T) {
+	f := newMirrorFixture(t)
+	f.build(t)
+	path := f.replaceLogWithADirectory(t)
+
+	var results []mirror.Result
+	var stderr bytes.Buffer
+	a := f.applier(&stderr)
+	a.MirrorResults = &results
+	a.ensureMirrors(context.Background(), &config.WorkspaceConfig{}, f.classified, f.instance, "apply")
+
+	lines := mirrorLines(stderr.String())
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "warning: mirror app: writing the mirror log failed:") {
+		t.Fatalf("stderr mirror lines = %q, want one log-failed warning", lines)
+	}
+	if len(results) != 1 || results[0].Outcome != mirror.OutcomeHealthy || results[0].LogErr == nil {
+		t.Fatalf("MirrorResults = %+v, want the healthy result with LogErr once", results)
+	}
+	if info, err := os.Lstat(path); err != nil || !info.IsDir() {
+		t.Fatalf("the directory at the log's path was moved or removed: %v (%v)", info, err)
+	}
+
+	// With the log writable again, a healthy mirror is neither warned about
+	// nor collected.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	var healthy []mirror.Result
+	stderr.Reset()
+	b := f.applier(&stderr)
+	b.MirrorResults = &healthy
+	b.ensureMirrors(context.Background(), &config.WorkspaceConfig{}, f.classified, f.instance, "apply")
+	if lines := mirrorLines(stderr.String()); len(lines) != 0 || len(healthy) != 0 {
+		t.Fatalf("a healthy mirror with a working log printed %q and collected %+v", lines, healthy)
 	}
 }
 

@@ -120,10 +120,12 @@ type provisionResult struct {
 	Notices *fallbacknotice.Collector
 
 	// Mirrors are the host mirrors the run found broken, with what it did
-	// about each; healthy ones aren't listed. Like Keys they come back on
-	// success and on a Create failure. The run has already warned about each
-	// on stderr; the hook also puts their notices into the injected context,
-	// the only place a session sees them.
+	// about each, and the healthy ones whose mirror log couldn't be written;
+	// a healthy mirror with a working log isn't listed (see
+	// Applier.MirrorResults). Like Keys they come back on success and on a
+	// Create failure. The run has already warned about each on stderr; the
+	// hook also puts their notices into the injected context, the only place
+	// a session sees them.
 	Mirrors []mirror.Result
 }
 
@@ -752,10 +754,12 @@ func mirrorNoticeText(notices []string) string {
 
 // writeHookMirrorNotices is the mirror check of a SessionStart hook that
 // provisions nothing: it checks every mirror recorded for workspaceRoot (see
-// checkRecordedMirrors) and, only when one wasn't healthy, prints a
-// SessionStart payload whose whole context is the notices. A healthy
-// workspace, or one with no mirrors, prints nothing, so the session starts
-// exactly as it did before. Nothing here fails the hook.
+// checkRecordedMirrors) and, only when one has a notice (it wasn't healthy,
+// or its mirror log couldn't be written), prints a SessionStart payload whose
+// whole context is the notices. Claude Code discards the hook's stderr, so
+// this is the only place the session learns of either. A healthy workspace
+// whose log was written, or one with no mirrors, prints nothing, so the
+// session starts exactly as it did before. Nothing here fails the hook.
 func writeHookMirrorNotices(cmd *cobra.Command, workspaceRoot string) error {
 	notices := mirrorResultNotices(checkRecordedMirrors(cmd.Context(), workspaceRoot))
 	if len(notices) == 0 {
@@ -776,7 +780,9 @@ func writeHookMirrorNotices(cmd *cobra.Command, workspaceRoot string) error {
 // for workspaceRoot, logging as the hook with the hook's lock wait. With no
 // repo list to start from, the borrowers it looks at are every directory two
 // levels under each instance (<group>/<repo>), and each repo's URL comes from
-// mirrorRepos. A home it can't resolve checks nothing.
+// mirrorRepos. Every result comes back, healthy ones included, so the caller
+// sees a healthy mirror whose log write failed. A home it can't resolve
+// checks nothing.
 func checkRecordedMirrors(ctx context.Context, workspaceRoot string) []mirror.Result {
 	if ctx == nil {
 		ctx = context.Background()

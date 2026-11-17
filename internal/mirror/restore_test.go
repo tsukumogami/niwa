@@ -146,7 +146,7 @@ func truncatePack(t *testing.T, store string) {
 
 // hideRemote moves the fixture's remote away, so its URL names no remote,
 // and returns a func that puts it back.
-func hideRemote(t *testing.T, f fixture) func() {
+func hideRemote(t testing.TB, f fixture) func() {
 	t.Helper()
 	gone := f.remote + ".gone"
 	if err := os.Rename(f.remote, gone); err != nil {

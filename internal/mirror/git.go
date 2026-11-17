@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -51,6 +52,14 @@ func gitOutput(ctx context.Context, config []string, stdin string, args ...strin
 	return gitExec(ctx, nil, config, stdin, args...)
 }
 
+// gitHook, when a test sets it, is called with the arguments of every git
+// process the package starts, those after the -c pairs, just before the
+// process starts. gitExec is the package's one place a process starts, so a
+// test that sets it sees every git run a call makes, as probeHook and
+// stageHook let tests see the probe and a restore's stages. It's nil outside
+// the tests.
+var gitHook func(args []string)
+
 // gitExec runs git as gitOutput does, with env added to the cleaned
 // environment.
 func gitExec(ctx context.Context, env, config []string, stdin string, args ...string) (string, error) {
@@ -59,6 +68,9 @@ func gitExec(ctx context.Context, env, config []string, stdin string, args ...st
 		full = append(full, "-c", kv)
 	}
 	full = append(full, args...)
+	if gitHook != nil {
+		gitHook(slices.Clone(args))
+	}
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Env = append(gitEnv(), env...)
 	cmd.Stdin = strings.NewReader(stdin)

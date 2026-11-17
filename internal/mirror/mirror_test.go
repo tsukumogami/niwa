@@ -26,7 +26,9 @@ var noMaintenanceEnv = []string{
 }
 
 // testGit runs a fixture git command with the developer's config shut out.
-func testGit(t *testing.T, dir string, args ...string) string {
+// It and the fixture helpers take testing.TB so a benchmark can build the
+// same fixtures.
+func testGit(t testing.TB, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
@@ -49,7 +51,7 @@ type fixture struct {
 	home, root, remote, clone string
 }
 
-func newFixture(t *testing.T) fixture {
+func newFixture(t testing.TB) fixture {
 	t.Helper()
 	base := t.TempDir()
 	f := fixture{
@@ -79,7 +81,7 @@ func newFixture(t *testing.T) fixture {
 	return f
 }
 
-func (f fixture) borrow(t *testing.T) {
+func (f fixture) borrow(t testing.TB) {
 	t.Helper()
 	line := StablePath(f.home, f.root, "app") + "/objects\n"
 	if err := os.WriteFile(filepath.Join(f.clone, ".git", "objects", "info", "alternates"), []byte(line), 0o644); err != nil {

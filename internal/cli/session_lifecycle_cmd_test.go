@@ -443,3 +443,30 @@ func TestCheckWorktreeMirror_NoMirrorWritesNothing(t *testing.T) {
 		t.Fatalf("a repo with no mirror got %v", found)
 	}
 }
+
+// TestCheckWorktreeMirror_WarnsWhenTheLogCantBeWritten: a healthy mirror
+// whose log can't be written gets one warning on stderr; with a working log
+// the check prints nothing.
+func TestCheckWorktreeMirror_WarnsWhenTheLogCantBeWritten(t *testing.T) {
+	h := setupHookMirror(t, true)
+	path := h.replaceLogWithADirectory(t)
+
+	var stderr bytes.Buffer
+	checkWorktreeMirror(context.Background(), filepath.Join(h.root, "inst"), "app", &stderr)
+	got := strings.TrimSpace(stderr.String())
+	if strings.Count(got, "\n") != 0 || !strings.HasPrefix(got, "warning: mirror app: writing the mirror log failed:") {
+		t.Fatalf("stderr = %q, want one log-failed warning", got)
+	}
+	if info, err := os.Lstat(path); err != nil || !info.IsDir() {
+		t.Fatalf("the directory at the log's path was moved or removed: %v (%v)", info, err)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	stderr.Reset()
+	checkWorktreeMirror(context.Background(), filepath.Join(h.root, "inst"), "app", &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr with a working log = %q, want nothing", stderr.String())
+	}
+}

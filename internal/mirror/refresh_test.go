@@ -60,7 +60,7 @@ func (f fixture) storeHas(t *testing.T, id string) bool {
 
 // pushCommit commits a new file to branch of the fixture's remote, starting
 // from main, and returns the commit.
-func pushCommit(t *testing.T, f fixture, branch, content string) string {
+func pushCommit(t testing.TB, f fixture, branch, content string) string {
 	t.Helper()
 	work := filepath.Join(t.TempDir(), "work")
 	testGit(t, filepath.Dir(work), "clone", "--quiet", f.remote, work)

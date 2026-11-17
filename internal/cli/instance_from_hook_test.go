@@ -858,6 +858,20 @@ func (h hookMirror) logLines(t *testing.T) []map[string]any {
 	return lines
 }
 
+// replaceLogWithADirectory puts a directory where the mirror log goes, so
+// every write to it fails, and returns the log's path.
+func (h hookMirror) replaceLogWithADirectory(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(filepath.Dir(mirror.StablePath(h.home, h.root, "app")), ".meta", "mirror.log")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // hookPathSetups are the hook's two paths that provision nothing: a session
 // niwa dispatched (its mapping already exists) and a session the guard
 // declines (no background job state).
@@ -905,6 +919,100 @@ func TestSessionStart_NonProvisioningPathsCheckAHealthyMirror(t *testing.T) {
 				t.Fatalf("log lines added = %v, want one healthy from-hook check", added)
 			}
 		})
+	}
+}
+
+// TestSessionStart_NonProvisioningPathsReportALogThatCantBeWritten: Claude
+// Code discards the hook's stderr, so a healthy mirror whose log can't be
+// written is reported in the hook's context, by its notice alone.
+func TestSessionStart_NonProvisioningPathsReportALogThatCantBeWritten(t *testing.T) {
+	for _, p := range hookPathSetups {
+		t.Run(p.name, func(t *testing.T) {
+			h := setupHookMirror(t, true)
+			p.setup(t, h.root)
+			rec := stubProvision(t, "guidance")
+			path := h.replaceLogWithADirectory(t)
+
+			out, _, err := runStart(t, instanceHookPayload{
+				HookEventName: hookEventSessionStart,
+				SessionID:     testSessionID,
+				Cwd:           h.root,
+			}, t.TempDir())
+			if err != nil {
+				t.Fatalf("runInstanceHookStart: %v", err)
+			}
+			if rec.called {
+				t.Fatal("the hook provisioned on a path that must not")
+			}
+			if strings.Count(out, "\n") != 1 {
+				t.Fatalf("stdout = %q, want one line", out)
+			}
+			var inj sessionStartInjection
+			if err := json.Unmarshal([]byte(out), &inj); err != nil {
+				t.Fatalf("stdout %q is not a SessionStart payload: %v", out, err)
+			}
+			if inj.HookSpecificOutput.HookEventName != hookEventSessionStart {
+				t.Fatalf("hookEventName = %q", inj.HookSpecificOutput.HookEventName)
+			}
+			stable := mirror.StablePath(h.home, h.root, "app")
+			want := mirror.Result{RepoID: "app", StablePath: stable, Outcome: mirror.OutcomeHealthy, LogErr: errors.New("x")}.Notice()
+			got := inj.HookSpecificOutput.AdditionalContext
+			if got != want {
+				t.Fatalf("context = %q, want the healthy notice %q", got, want)
+			}
+			if !strings.Contains(got, path) || !strings.Contains(got, "could not be written") || strings.Contains(got, "is a directory") {
+				t.Fatalf("context = %q, want the log path and that it could not be written, with no error text", got)
+			}
+			if info, err := os.Lstat(path); err != nil || !info.IsDir() {
+				t.Fatalf("the directory at the log's path was moved or removed: %v (%v)", info, err)
+			}
+		})
+	}
+}
+
+// TestSessionStart_ProvisioningCarriesALogThatCantBeWritten: on the
+// provisioning path a healthy result whose log failed comes back in the
+// provision's mirrors, and its notice goes into the context once, beside the
+// instance's cd line.
+func TestSessionStart_ProvisioningCarriesALogThatCantBeWritten(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	writeJobState(t, jobsDir, testSessionID[:8], testSessionID, "bg")
+	res := mirror.Result{RepoID: "app", StablePath: "/h/.niwa/w-0/mirrors/app", Outcome: mirror.OutcomeHealthy,
+		LogErr: errors.New("open /h/.niwa/w-0/mirrors/.meta/mirror.log: is a directory")}
+
+	prev := provisionInstanceFunc
+	provisionInstanceFunc = func(_ context.Context, workspaceRoot, _, namePrefix, sep string, _ int) (provisionResult, error) {
+		dir := filepath.Join(workspaceRoot, "test-ws"+sep+namePrefix)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return provisionResult{}, err
+		}
+		return provisionResult{Name: filepath.Base(dir), Path: dir, Mirrors: []mirror.Result{res}}, nil
+	}
+	t.Cleanup(func() { provisionInstanceFunc = prev })
+
+	out, _, err := runStart(t, instanceHookPayload{
+		HookEventName: hookEventSessionStart,
+		SessionID:     testSessionID,
+		Cwd:           root,
+	}, jobsDir)
+	if err != nil {
+		t.Fatalf("runInstanceHookStart: %v", err)
+	}
+	var inj sessionStartInjection
+	if err := json.Unmarshal([]byte(out), &inj); err != nil {
+		t.Fatalf("stdout %q: %v", out, err)
+	}
+	ctxText := inj.HookSpecificOutput.AdditionalContext
+	notice := res.Notice()
+	if notice == "" || strings.Count(ctxText, notice) != 1 {
+		t.Fatalf("context carries the notice %q %d times, want once:\n%s", notice, strings.Count(ctxText, notice), ctxText)
+	}
+	if !strings.Contains(ctxText, "cd ") {
+		t.Fatalf("context lost the instance's cd line:\n%s", ctxText)
+	}
+	if strings.Contains(ctxText, "is a directory") {
+		t.Fatalf("context carries the error's text:\n%s", ctxText)
 	}
 }
 

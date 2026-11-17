@@ -41,6 +41,10 @@ const deepVerifyEvery = 24 * time.Hour
 // Any other failure leaves the link, the store's packs and the state file as
 // they were, logs nothing, and returns the healthy Result with Err set: the
 // mirror is still usable, only not up to date.
+//
+// Its line carries the check's check_ms, and took_ms read from elapsedNow at
+// the refresh's start and end. A failed log write is kept in LogErr unless
+// the check line's already failed.
 func refresh(ctx context.Context, opts Options, mdir string, r Repo, res Result) Result {
 	if r.URL == "" {
 		res.Err = errors.New("the workspace config gives no URL to refresh from")
@@ -71,11 +75,17 @@ func refresh(ctx context.Context, opts Options, mdir string, r Repo, res Result)
 	}
 
 	start := time.Now()
+	tookStart := elapsedNow()
 	line := logLine{
 		Time:    logTime(start),
 		Command: opts.Command,
 		Mirror:  r.ID,
 		CheckMs: res.CheckDuration.Milliseconds(),
+	}
+	logged := func(err error) {
+		if err != nil && res.LogErr == nil {
+			res.LogErr = err
+		}
 	}
 	rotten, err := refreshStore(ctx, mdir, r, rec, start)
 	if rotten {
@@ -85,9 +95,9 @@ func refresh(ctx context.Context, opts Options, mdir string, r Repo, res Result)
 		line.Event = eventRestore
 		line.Fault = res.Fault
 		line.Result = res.Outcome
-		took := time.Since(start).Milliseconds()
+		took := elapsedNow().Sub(tookStart).Milliseconds()
 		line.TookMs = &took
-		_ = appendLog(mdir, append([]any{line}, unrecoverableLines(line, res.Unrecoverable)...)...)
+		logged(appendLog(mdir, append([]any{line}, unrecoverableLines(line, res.Unrecoverable)...)...))
 		return res
 	}
 	if err != nil {
@@ -96,9 +106,9 @@ func refresh(ctx context.Context, opts Options, mdir string, r Repo, res Result)
 	}
 	line.Event = eventRefresh
 	line.Result = OutcomeHealthy
-	took := time.Since(start).Milliseconds()
+	took := elapsedNow().Sub(tookStart).Milliseconds()
 	line.TookMs = &took
-	_ = appendLog(mdir, line)
+	logged(appendLog(mdir, line))
 	return res
 }
 

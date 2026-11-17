@@ -86,10 +86,13 @@ type Applier struct {
 	// sets a short one, since a session waits on it.
 	MirrorLockWait time.Duration
 
-	// MirrorResults collects every mirror result other than healthy, for a
-	// caller that reports them somewhere other than Reporter. Like Keys it is
-	// caller-supplied, so the results survive a failed Create. nil collects
-	// nothing; the warnings go to Reporter either way.
+	// MirrorResults collects every mirror result other than healthy, and a
+	// healthy one whose mirror log couldn't be written (LogErr), for a caller
+	// that reports them somewhere other than Reporter, such as the
+	// SessionStart hook's context. A healthy result with a working log is
+	// never collected. Like Keys it is caller-supplied, so the results
+	// survive a failed Create. nil collects nothing; the warnings go to
+	// Reporter either way.
 	MirrorResults *[]mirror.Result
 
 	// Harness is a probe result the caller already holds, so a command that
@@ -3224,8 +3227,9 @@ func repoAlreadyCloned(dir string) bool {
 // (every command that reaches here builds instances, so each brings its
 // mirrors up to date once). The clone paths of every instance are passed, not
 // just this one's, because a mirror serves the whole workspace. Every result
-// that isn't a healthy mirror becomes a warning; none fails the command, which
-// carries on whatever the result.
+// that isn't a healthy mirror, and a healthy one whose refresh or mirror log
+// write failed, becomes a warning (ReportMirrorResult); none fails the
+// command, which carries on whatever the result.
 //
 // The mirrors live under the developer's home, so an Applier without
 // DeveloperHome (the unit suites) skips the check rather than reach the real
@@ -3280,13 +3284,10 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 	}
 	for _, res := range mirror.EnsureHealthy(ctx, opts, repos) {
 		a.mirrorsChecked[res.StablePath] = true
-		if res.Outcome == mirror.OutcomeHealthy {
-			// A healthy mirror whose refresh failed is still usable: it's
-			// reported, never collected.
-			ReportMirrorResult(a.Reporter, res)
-			continue
-		}
-		if a.MirrorResults != nil {
+		// A healthy mirror is collected only when its log couldn't be
+		// written, so the hook's context carries that warning too. One whose
+		// refresh failed is still usable: it's reported, never collected.
+		if a.MirrorResults != nil && (res.Outcome != mirror.OutcomeHealthy || res.LogErr != nil) {
 			*a.MirrorResults = append(*a.MirrorResults, res)
 		}
 		ReportMirrorResult(a.Reporter, res)
@@ -3304,6 +3305,10 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 // (Result.Unrecoverable): a warning for each lost local branch, tag or
 // detached HEAD, then, at lower severity through Log, a line for each stale
 // remote-tracking ref. Their names were cleaned when the LostRef was built.
+//
+// Last, when the mirror log couldn't be written (Result.LogErr), healthy
+// mirrors included, comes "warning: mirror <id>: writing the mirror log
+// failed: <err>".
 func ReportMirrorResult(r *Reporter, res mirror.Result) {
 	switch {
 	case res.Outcome == mirror.OutcomeHealthy && res.Err != nil:
@@ -3324,6 +3329,9 @@ func ReportMirrorResult(r *Reporter, res mirror.Result) {
 			r.Log("mirror %s: %s in %s is stale: commit %s is gone from the remote and the mirror that kept it was lost; git fetch --prune in that clone clears it",
 				res.RepoID, l.Ref, l.Instance, l.MissingCommit)
 		}
+	}
+	if res.LogErr != nil {
+		r.Warn("mirror %s: writing the mirror log failed: %v", res.RepoID, res.LogErr)
 	}
 }
 

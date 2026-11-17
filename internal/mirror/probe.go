@@ -33,10 +33,11 @@ type LostRef struct {
 	RemoteTracking bool `json:"remote_tracking"`
 	// OwnCommits, for a local branch only, are the commits read on the way
 	// from the tip to MissingCommit: the branch's unpushed work, intact in
-	// the borrower.
+	// the borrower. At most ownCommitsMax, the first the walk read.
 	OwnCommits []string `json:"own_commits"`
 	// LostFiles, for a local branch only, are the paths in the tip's tree
-	// whose blob or subtree neither the borrower nor the mirror can read.
+	// whose blob or subtree neither the borrower nor the mirror can read. At
+	// most lostFilesMax.
 	LostFiles []LostFile `json:"lost_files"`
 }
 
@@ -50,8 +51,13 @@ type LostFile struct {
 // nameMax caps every name a LostRef carries, in bytes, after escaping.
 const nameMax = 256
 
-// lostFilesMax caps how many lost paths one LostRef lists.
-const lostFilesMax = 100
+// lostFilesMax caps how many lost paths one LostRef lists, and ownCommitsMax
+// how many of its own commits. With every name capped at nameMax too, they
+// bound the size of a LostRef and so of its unrecoverable log line.
+const (
+	lostFilesMax  = 100
+	ownCommitsMax = 100
+)
 
 // parentWalkMax caps how many objects one ref's parent walk reads.
 const parentWalkMax = 10000
@@ -421,7 +427,8 @@ func parentWalk(ctx context.Context, store, gitDir, tip string) (missing string,
 }
 
 // report builds the LostRef for l, with its names cleaned. A local branch
-// gets its own commits and lost files; any other ref gets neither.
+// gets its own commits, the first ownCommitsMax the walk read, and its lost
+// files; any other ref gets neither.
 func (l lostRef) report(ctx context.Context, store, repoID string) LostRef {
 	out := LostRef{
 		Instance:       cleanName(l.clone),
@@ -433,7 +440,7 @@ func (l lostRef) report(ctx context.Context, store, repoID string) LostRef {
 		LostFiles:      []LostFile{},
 	}
 	if strings.HasPrefix(l.ref.name, "refs/heads/") {
-		out.OwnCommits = append(out.OwnCommits, l.own...)
+		out.OwnCommits = append(out.OwnCommits, l.own[:min(len(l.own), ownCommitsMax)]...)
 		out.LostFiles = lostFiles(ctx, store, l.clone, l.ref.id)
 	}
 	return out

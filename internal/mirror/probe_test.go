@@ -817,6 +817,98 @@ func TestRecover_HostileNamesAreCutToPrintableASCII(t *testing.T) {
 	f.logLines(t) // each line is one JSON object
 }
 
+// TestRecover_OwnCommitsAndLostFilesAreCappedAt100: a branch "many" in
+// borrower a holds 150 commits of its own on a pushed commit "wide" that
+// added 150 files; the remote then destroys wide. Its LostRef lists the first
+// 100 commits the walk read, tip first, and 100 lost files, and its
+// unrecoverable line carries the same 100 commits.
+func TestRecover_OwnCommitsAndLostFilesAreCappedAt100(t *testing.T) {
+	f := newLostFixture(t, lostSetup{})
+	work := filepath.Join(t.TempDir(), "wide")
+	testGit(t, filepath.Dir(work), "clone", "--quiet", f.remote, work)
+	testGit(t, work, "checkout", "--quiet", "-B", "wide", "origin/main")
+	for i := 0; i < 150; i++ {
+		if err := os.WriteFile(filepath.Join(work, fmt.Sprintf("wide-%03d.txt", i)), []byte(fmt.Sprintf("wide %d\n", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testGit(t, work, "add", ".")
+	testGit(t, work, "commit", "--quiet", "-m", "wide")
+	testGit(t, work, "push", "--quiet", "origin", "HEAD:refs/heads/wide")
+	wide := testGit(t, work, "rev-parse", "HEAD")
+	if res := f.ensure(t, f.refreshOpts()); res.Outcome != OutcomeHealthy || res.Err != nil {
+		t.Fatalf("refreshing wide into the mirror: %+v", res)
+	}
+	testGit(t, f.a, "fetch", "--quiet", "origin")
+	testGit(t, f.a, "repack", "-a", "-d", "-l", "-q")
+
+	// 150 commits of the borrower's own on wide, each on the one before,
+	// sharing one tree the borrower holds: wide's files, whose blobs only the
+	// mirror holds, plus a file of its own.
+	blob := testGitStdin(t, f.a, "mine\n", "hash-object", "-w", "--stdin")
+	entries := testGit(t, f.a, "ls-tree", "-z", wide)
+	tree := testGitStdin(t, f.a, entries+"100644 blob "+blob+"\tmine.txt\x00", "mktree", "-z")
+	parent := wide
+	var own []string
+	for i := 0; i < 150; i++ {
+		parent = testGit(t, f.a, "commit-tree", tree, "-p", parent, "-m", fmt.Sprintf("own %d", i))
+		own = append(own, parent)
+	}
+	testGit(t, f.a, "update-ref", "refs/heads/many", parent)
+
+	testGit(t, f.remote, "update-ref", "-d", "refs/heads/wide")
+	f.dropTopic(t, f.remote, false)
+	if _, err := gitTry(f.remote, "cat-file", "-e", wide); err == nil {
+		t.Fatal("the remote still holds wide; the case proves nothing")
+	}
+	f.deleteMirror(t)
+	logged := len(f.logLines(t))
+
+	res := f.ensure(t, f.opts())
+	if res.Outcome != OutcomeRestored || res.LogErr != nil {
+		t.Fatalf("result = %+v, want restored", res)
+	}
+	var many *LostRef
+	for i := range res.Unrecoverable {
+		if res.Unrecoverable[i].Ref == "refs/heads/many" {
+			many = &res.Unrecoverable[i]
+		}
+	}
+	if many == nil || many.MissingCommit != wide {
+		t.Fatalf("unrecoverable = %+v, want refs/heads/many missing %s", res.Unrecoverable, wide)
+	}
+	walked := slices.Clone(own)
+	slices.Reverse(walked)
+	if !slices.Equal(many.OwnCommits, walked[:100]) {
+		t.Fatalf("own commits = %d ids, want the first 100 the walk read, tip first", len(many.OwnCommits))
+	}
+	if len(many.LostFiles) != 100 {
+		t.Fatalf("lost files = %d, want 100", len(many.LostFiles))
+	}
+
+	var line map[string]any
+	for _, l := range newLines(t, f.fixture, logged) {
+		if l["event"] == "unrecoverable" && l["ref"] == "refs/heads/many" {
+			line = l
+		}
+	}
+	if line == nil {
+		t.Fatal("no unrecoverable line for refs/heads/many")
+	}
+	logged100, _ := line["own_commits"].([]any)
+	if len(logged100) != 100 {
+		t.Fatalf("the line lists %d own commits, want 100", len(logged100))
+	}
+	for i, id := range logged100 {
+		if id != many.OwnCommits[i] {
+			t.Fatalf("own_commits[%d] = %v, want %s", i, id, many.OwnCommits[i])
+		}
+	}
+	if files, _ := line["lost_files"].([]any); len(files) != 100 {
+		t.Fatalf("the line lists %d lost files, want 100", len(files))
+	}
+}
+
 func TestCleanName(t *testing.T) {
 	cases := map[string]string{
 		"refs/heads/plain":       "refs/heads/plain",
