@@ -110,27 +110,20 @@ func resolveDestroyScope() (destroyScope, error) {
 // loadMappingsForDestroy makes the resolver's one read of the session mapping
 // store.
 //
-// The read is unlocked, as every reader of this store is today. That matters
-// for what it can get wrong: a read taken while the workspace root's config
-// directory is being swapped sees the directory missing (ListSessionMappings
-// returns no mappings) or a subset of its files, because each mapping is read
-// whole and a malformed one is skipped. It cannot invent a mapping, and it
-// cannot name an instance no mapping named -- checkSessionInstance returns the
-// enumerated directory rather than the recorded string, so containment does not
-// rest on this read at all.
+// The read holds the session store lock (workspace.LockSessionStore), the
+// workspace root's config snapshot lock. Unlocked, a read taken while the
+// root's config directory was being swapped could see the directory missing
+// or a subset of its files. A subset only removes candidates for matching, but
+// the newest-mapping rung runs NewestMappingPerInstance over this same read,
+// so missing the *newer* mapping for an instance would let a superseded
+// session through the check that exists to stop it. Under the lock no refresh
+// is mid-swap and no mapping write is half done, so the read sees the whole
+// store. Containment never rested on this read: checkSessionInstance returns
+// the enumerated directory rather than the recorded string.
 //
-// For matching, a subset only removes candidates: the resolver can report "no
-// match" where a match existed, and can miss an ambiguity it would otherwise
-// have refused. Both fail toward doing nothing.
-//
-// The newest-mapping rung is the exception, and it fails the other way. It runs
-// NewestMappingPerInstance over this same snapshot, so if the file a mid-swap
-// read misses is the *newer* mapping for an instance, a superseded session
-// passes a check that exists to stop exactly that. It still acts on an instance
-// that its own mapping genuinely named, and the merged-branch, dirty-tree and
-// attach guards all still run, so this weakens a guard rather than breaking
-// containment. Issue #297's locked read closes it; until then it is recorded as
-// a known limitation rather than papered over.
+// The lock is released before anything is destroyed. Nothing on the destroy
+// path takes it again while it's held, and the read is the only part that
+// needs it.
 //
 // Two filters run here rather than at the match site. Entries whose session_id
 // is not a UUID are dropped, so the single-instance layout's lifecycle records
@@ -150,7 +143,15 @@ func loadMappingsForDestroy(workspaceRoot string) ([]workspace.SessionMapping, e
 	if workspaceRoot == "" {
 		return nil, nil
 	}
+	if _, err := os.Lstat(workspaceRoot); os.IsNotExist(err) {
+		return nil, nil
+	}
+	release, err := workspace.LockSessionStore(workspaceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("niwa: error: reading session mappings: %w", err)
+	}
 	all, err := workspace.ListSessionMappings(workspaceRoot)
+	release()
 	if err != nil {
 		return nil, fmt.Errorf("niwa: error: reading session mappings: %w", err)
 	}
