@@ -70,6 +70,16 @@ type stateFile struct {
 	} `json:"packs"`
 }
 
+// repoStateFilePattern is a state file's name: a repo id, as the design
+// allows one, then ".json".
+var repoStateFilePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.json$`)
+
+// metaEntryAllowed reports whether name may sit in .meta/: a repo's state
+// file, the mirror log, or the one older generation the log rotates to.
+func metaEntryAllowed(name string) bool {
+	return name == "mirror.log" || name == "mirror.log.1" || repoStateFilePattern.MatchString(name)
+}
+
 // requireMode fails unless path is the kind of entry want says with exactly
 // perm.
 func requireMode(path string, dir bool, perm os.FileMode) error {
@@ -104,8 +114,8 @@ func theStateFileRecordsTheLinkedStore(ctx context.Context, repoID string) error
 		return err
 	}
 	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") && e.Name() != "mirror.log" {
-			return fmt.Errorf(".meta holds %q, want only <repo-id>.json files and mirror.log", e.Name())
+		if !metaEntryAllowed(e.Name()) {
+			return fmt.Errorf(".meta holds %q, want only <repo-id>.json files, mirror.log and mirror.log.1", e.Name())
 		}
 	}
 

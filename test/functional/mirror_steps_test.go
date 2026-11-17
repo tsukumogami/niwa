@@ -93,6 +93,7 @@ func registerMirrorSteps(ctx *godog.ScenarioContext) {
 	registerMirrorRaceSteps(ctx)
 	registerMirrorRefreshSteps(ctx)
 	registerMirrorLostSteps(ctx)
+	registerMirrorHealthySteps(ctx)
 }
 
 // mirrorState returns the scenario's mirror state, allocating it on first use.

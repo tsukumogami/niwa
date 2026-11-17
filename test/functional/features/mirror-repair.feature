@@ -384,3 +384,37 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     Then the exit code is 0
     And the hook printed nothing
     And the mirror log gained only a healthy check line for "app" from "from-hook"
+
+  # The two commands that check a healthy mirror without refreshing it run
+  # with the source repo moved away, so a command that reached for the remote
+  # would fail or warn. The design names the scenario for its 100 ms budget;
+  # the unit tests show the check cheap by counting the one local git process
+  # it starts, and this scenario asserts no time, only that each check line
+  # records one.
+  Scenario: A healthy check needs no network and stays under 100 ms
+    When I run "niwa create myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is 0
+    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    When I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the mirror of "app" is a link into its store
+    When I repack the borrowers of "app" against the mirror
+    Then each borrower of "app" holds none of the mirror's objects
+    When I remember the mirror link of "app"
+    And I remember the state file of "app"
+    And I count the mirror log lines
+    And I move the source repo "app" away
+    And I run "niwa worktree create app" in instance "myws"
+    Then the exit code is 0
+    And the error output carries no mirror warning
+    When I pipe a SessionStart hook for session "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" that is not a background worker
+    Then the exit code is 0
+    And the hook printed nothing
+    And the mirror log gained only healthy check lines for "app" from "worktree" and "from-hook"
+    And every check line the mirror log gained carries check_ms as a whole number of 0 or more
+    And the mirror link of "app" is unchanged
+    And the state file of "app" is unchanged
+    And every ref of each borrower of "app" reads to the root and fsck is clean
+    And nothing mirror-related exists outside the sandbox home
