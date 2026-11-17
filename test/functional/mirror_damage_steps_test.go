@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -28,12 +29,13 @@ func registerMirrorDamageSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^I damage the store of "([^"]*)" by (emptying its object store|deleting its pack|truncating its pack to half|deleting its HEAD)$`, iDamageTheStore)
 	ctx.Step(`^the error output carries exactly the mirror warning "([^"]*)"$`, theErrorOutputCarriesExactlyTheMirrorWarning)
 	ctx.Step(`^the mirror log gained a check line and a restore line for "([^"]*)" with fault "([^"]*)" and result "([^"]*)"$`, theMirrorLogGainedCheckAndRestore)
-	ctx.Step(`^the mirror log gained only a healthy check line for "([^"]*)"$`, theMirrorLogGainedOnlyAHealthyCheck)
+	ctx.Step(`^the mirror log gained a healthy check line and a refresh line for "([^"]*)" from "([^"]*)"$`, theMirrorLogGainedAHealthyCheckAndARefresh)
 	ctx.Step(`^the mirror link of "([^"]*)" moved to a new store$`, theMirrorLinkMoved)
 	ctx.Step(`^every ref of each borrower of "([^"]*)" reads to the root and fsck is clean$`, everyRefReadsToTheRoot)
 	ctx.Step(`^only the linked store of "([^"]*)" remains$`, onlyTheLinkedStoreRemains)
 	ctx.Step(`^I remember the state file of "([^"]*)"$`, iRememberTheStateFile)
 	ctx.Step(`^the state file of "([^"]*)" is unchanged$`, theStateFileIsUnchanged)
+	ctx.Step(`^the state file of "([^"]*)" is unchanged apart from last_refresh$`, theStateFileIsUnchangedApartFromLastRefresh)
 }
 
 // mirrorStatePath is the mirror's state file, .meta/<id>.json.
@@ -217,7 +219,7 @@ func requireLogLine(line map[string]any, command, repoID, event, fault, result s
 		}
 	}
 	_, took := line["took_ms"]
-	if took != (event == "restore") {
+	if took != (event == "restore" || event == "refresh") {
 		return fmt.Errorf("log line %v: took_ms present = %v on a %s line", line, took, event)
 	}
 	if line["command"] != command || line["mirror"] != repoID || line["event"] != event || line["fault"] != fault || line["result"] != result {
@@ -232,7 +234,10 @@ func theMirrorLogGainedCheckAndRestore(ctx context.Context, repoID, fault, resul
 	return theMirrorLogGainedCheckAndRestoreFrom(ctx, repoID, fault, result, "apply")
 }
 
-func theMirrorLogGainedOnlyAHealthyCheck(ctx context.Context, repoID string) error {
+// theMirrorLogGainedAHealthyCheckAndARefresh is what a command that builds
+// instances logs for a healthy mirror: its check line, then the refresh that
+// brought the mirror up to date.
+func theMirrorLogGainedAHealthyCheckAndARefresh(ctx context.Context, repoID, command string) error {
 	s, m, err := mirrorState(ctx)
 	if err != nil {
 		return err
@@ -241,10 +246,13 @@ func theMirrorLogGainedOnlyAHealthyCheck(ctx context.Context, repoID string) err
 	if err != nil {
 		return err
 	}
-	if len(lines) != 1 {
-		return fmt.Errorf("the mirror log gained %d lines, want one healthy check line: %v", len(lines), lines)
+	if len(lines) != 2 {
+		return fmt.Errorf("the mirror log gained %d lines, want a healthy check line and a refresh line: %v", len(lines), lines)
 	}
-	return requireLogLine(lines[0], "apply", repoID, "check", "", "healthy")
+	if err := requireLogLine(lines[0], command, repoID, "check", "", "healthy"); err != nil {
+		return err
+	}
+	return requireLogLine(lines[1], command, repoID, "refresh", "", "healthy")
 }
 
 // iDamageTheStore damages the linked store one way. Pack files are written
@@ -451,6 +459,39 @@ func theStateFileIsUnchanged(ctx context.Context, repoID string) error {
 	}
 	if !bytes.Equal(got, m.stateFile) {
 		return fmt.Errorf("the state file changed:\nbefore: %s\nafter:  %s", m.stateFile, got)
+	}
+	return nil
+}
+
+// theStateFileIsUnchangedApartFromLastRefresh compares every field of the
+// state file with the remembered one but last_refresh, which a refresh moves.
+func theStateFileIsUnchangedApartFromLastRefresh(ctx context.Context, repoID string) error {
+	s, m, err := mirrorState(ctx)
+	if err != nil {
+		return err
+	}
+	path, err := mirrorStatePath(s, repoID)
+	if err != nil {
+		return err
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var before, after map[string]any
+	if err := json.Unmarshal(m.stateFile, &before); err != nil {
+		return fmt.Errorf("decoding the remembered state file: %w", err)
+	}
+	if err := json.Unmarshal(got, &after); err != nil {
+		return fmt.Errorf("decoding the state file: %w", err)
+	}
+	if _, ok := after["last_refresh"]; !ok {
+		return fmt.Errorf("the state file has no last_refresh: %s", got)
+	}
+	delete(before, "last_refresh")
+	delete(after, "last_refresh")
+	if !reflect.DeepEqual(before, after) {
+		return fmt.Errorf("the state file changed apart from last_refresh:\nbefore: %s\nafter:  %s", m.stateFile, got)
 	}
 	return nil
 }

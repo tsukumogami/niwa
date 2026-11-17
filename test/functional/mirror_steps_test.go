@@ -47,6 +47,10 @@ type mirrorScenario struct {
 	// Each borrower's files as bytes on disk, for a check git can't make
 	// while the mirror it borrows from is damaged.
 	rawBorrowers map[string]map[string]string
+
+	// What the refresh scenario added to a source repo: the branch's commit,
+	// main's new commit and the commit main pointed at before it.
+	added struct{ branch, topic, tip, parent string }
 }
 
 // borrowerSnapshot is what must survive a restore untouched in a borrower.
@@ -83,6 +87,7 @@ func registerMirrorSteps(ctx *godog.ScenarioContext) {
 	registerMirrorDamageSteps(ctx)
 	registerMirrorCommandSteps(ctx)
 	registerMirrorRaceSteps(ctx)
+	registerMirrorRefreshSteps(ctx)
 }
 
 // mirrorState returns the scenario's mirror state, allocating it on first use.

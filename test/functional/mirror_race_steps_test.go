@@ -146,8 +146,9 @@ func theBorrowersAreUnchangedOnDisk(ctx context.Context, repoID string) error {
 // re-materializes the workspace's config snapshot at the root, and with the
 // sandbox's file:// config source it always swaps the directory, so two
 // applies started in the same instant can read the root config mid-swap.
-// That race is the config snapshot's, not the mirror's; by the time the
-// second starts, the first is past it and waiting on the mirror lock.
+// That race is the config snapshot's, not the mirror's, and is still open as
+// niwa#297; by the time the second starts, the first is past it and waiting
+// on the mirror lock.
 func iHoldTheMirrorLockWhileTwoCommandsRun(ctx context.Context, repoID, command, inst1, inst2 string, seconds int) (context.Context, error) {
 	s, m, err := mirrorState(ctx)
 	if err != nil {

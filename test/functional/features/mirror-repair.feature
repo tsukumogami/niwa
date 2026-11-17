@@ -63,7 +63,7 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     And I run "niwa apply" from workspace root
     Then the exit code is 0
     And the error output carries no mirror warning
-    And the mirror log gained only a healthy check line for "app"
+    And the mirror log gained a healthy check line and a refresh line for "app" from "apply"
     And the mirror link of "app" is unchanged
 
     Examples:
@@ -128,9 +128,9 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     And I run "niwa apply" from workspace root
     Then the exit code is 0
     And the error output carries no mirror warning
-    And the mirror log gained only a healthy check line for "app"
+    And the mirror log gained a healthy check line and a refresh line for "app" from "apply"
     And the mirror link of "app" is unchanged
-    And the state file of "app" is unchanged
+    And the state file of "app" is unchanged apart from last_refresh
 
     Examples:
       | damage                      | fault           |
@@ -143,7 +143,9 @@ Feature: niwa restores a deleted or damaged host mirror by itself
   # both applies find the mirror missing and wait; once it's released one
   # restores and the other finds the mirror healthy under the lock. The second
   # apply starts a second after the first, past the config snapshot refresh
-  # every apply makes at the root.
+  # every apply makes at the root: two commands that re-materialize the root's
+  # config snapshot in the same instant still race, and that open race is
+  # tracked as niwa#297.
   Scenario: Two commands restore one broken mirror once
     When I run "niwa create myws"
     Then the exit code is 0
@@ -242,3 +244,55 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     And only the linked store of "app" remains
     And no restore leftovers remain under the mirrors
     And every ref of each borrower of "app" reads to the root and fsck is clean
+
+  # The source repo gains a branch and a commit, then deletes the branch,
+  # resets main past the commit and prunes both, as a branch deletion and a
+  # force push on a real remote would. niwa worktree create and the hook that
+  # provisions nothing only check the mirror; apply refreshes it. The
+  # borrowers aren't compared with a snapshot, since apply's own sync of each
+  # clone moves its remote-tracking refs when the remote changes.
+  Scenario: The refresh keeps commits the remote deleted
+    When I run "niwa create myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is 0
+    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    When I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the mirror of "app" is a link into its store
+    When I add a branch "topic" with one commit and one commit on main to source repo "app"
+    And I count the mirror log lines
+    And I run "niwa worktree create app" in instance "myws"
+    Then the exit code is 0
+    And the error output carries no mirror warning
+    When I pipe a SessionStart hook for session "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" that is not a background worker
+    Then the exit code is 0
+    And the hook printed nothing
+    And the error output carries no mirror warning
+    And the mirror log gained only healthy check lines for "app" from "worktree" and "from-hook"
+    And the mirror of "app" has no branch "topic"
+    When I count the mirror log lines
+    And I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the error output carries no mirror warning
+    And the mirror log gained a healthy check line and a refresh line for "app" from "apply"
+    And the mirror of "app" holds the commits added to source repo "app"
+    When I repack the borrowers of "app" against the mirror
+    Then each borrower of "app" holds none of the mirror's objects
+    Given the borrower of "app" in instance "myws" has a local branch "keep" at the added topic commit
+    And the borrower of "app" in instance "myws" has an unpushed commit and an uncommitted edit
+    When source repo "app" deletes the added branch, resets main back one commit and prunes both commits
+    Then a fresh clone of source repo "app" holds neither added commit
+    When I remember the mirror link of "app"
+    And I count the mirror log lines
+    And I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the error output carries no mirror warning
+    And the mirror log gained a healthy check line and a refresh line for "app" from "apply"
+    And the mirror link of "app" is unchanged
+    And the mirror of "app" keeps the commits source repo "app" dropped
+    And the store of "app" holds the fixed retention config
+    And the state file of "app" records the linked store and its packs
+    And every ref of each borrower of "app" reads to the root and fsck is clean
+    And the branch "keep" in the borrower of "app" in instance "myws" still names the added topic commit
+    And the unpushed commit and uncommitted edit are intact
