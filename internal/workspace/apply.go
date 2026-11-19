@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/guardrail"
 	"github.com/tsukumogami/niwa/internal/keyreport"
+	"github.com/tsukumogami/niwa/internal/mirror"
 	"github.com/tsukumogami/niwa/internal/pluginrecord"
 	"github.com/tsukumogami/niwa/internal/secret"
 	"github.com/tsukumogami/niwa/internal/vault"
@@ -65,6 +67,33 @@ type Applier struct {
 	// sets it (see cli.configureDeveloperHome), so a real create or apply
 	// delivers what a session needs.
 	DeveloperHome string
+
+	// mirrorsChecked holds the stable paths of the host mirrors this Applier
+	// has already checked, so a root-level apply that runs the pipeline once
+	// per instance checks and logs each mirror once per command. A mirror
+	// whose restore failed or was busy is not retried by a later instance in
+	// the same command: the next command tries again. It is written without a
+	// lock, since the pipeline runs one instance at a time.
+	mirrorsChecked map[string]bool
+
+	// MirrorCommand names the command in the mirror log when set, in place of
+	// the pipeline's own create or apply: a SessionStart hook or a dispatch
+	// provisions through Create but logs as itself.
+	MirrorCommand string
+
+	// MirrorLockWait bounds how long a mirror restore waits for another
+	// command's; zero keeps mirror.DefaultLockWait. The SessionStart hook
+	// sets a short one, since a session waits on it.
+	MirrorLockWait time.Duration
+
+	// MirrorResults collects every mirror result other than healthy, and a
+	// healthy one whose mirror log couldn't be written (LogErr), for a caller
+	// that reports them somewhere other than Reporter, such as the
+	// SessionStart hook's context. A healthy result with a working log is
+	// never collected. Like Keys it is caller-supplied, so the results
+	// survive a failed Create. nil collects nothing; the warnings go to
+	// Reporter either way.
+	MirrorResults *[]mirror.Result
 
 	// Harness is a probe result the caller already holds, so a command that
 	// writes several settings documents (the workspace root and each
@@ -394,6 +423,7 @@ type cloneResult struct {
 
 // pipelineOpts configures shared pipeline behavior for Create vs Apply.
 type pipelineOpts struct {
+	command              string // "create" or "apply"; names the command in the mirror log
 	existingState        *InstanceState
 	skipGlobal           bool
 	overlayURL           string   // from InstanceState.OverlayURL (empty = no overlay URL in state)
@@ -603,6 +633,7 @@ func (a *Applier) Create(ctx context.Context, cfg *config.WorkspaceConfig, confi
 	}
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
+		command:              "create",
 		existingState:        nil,
 		overlayURL:           initOverlayURL,
 		noOverlay:            initNoOverlay,
@@ -786,6 +817,7 @@ func (a *Applier) Apply(ctx context.Context, cfg *config.WorkspaceConfig, config
 	}
 
 	result, err := a.runPipeline(ctx, cfg, configDir, instanceRoot, now, &pipelineOpts{
+		command:              "apply",
 		existingState:        existingState,
 		skipGlobal:           existingState.SkipGlobal,
 		overlayURL:           existingState.OverlayURL,
@@ -1680,6 +1712,11 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			return nil, err
 		}
 	}
+
+	// Step 2.9: Restore any host mirror the workspace's clones borrow from
+	// before anything clones, fetches or reads a borrower, so a deleted mirror
+	// is back in place before a command depends on it.
+	a.ensureMirrors(ctx, effectiveCfg, classified, instanceRoot, opts.command)
 
 	// Step 3: Create group directories and clone repos concurrently.
 	//
@@ -3182,6 +3219,151 @@ func hasVaultRotation(oldSources, newSources []SourceEntry) bool {
 func repoAlreadyCloned(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, ".git"))
 	return err == nil
+}
+
+// ensureMirrors checks the host mirror of each classified repo that has one,
+// or that a clone in any of the workspace's instances borrows from, restores
+// a broken one and refreshes a healthy one from its remote, pruning nothing
+// (every command that reaches here builds instances, so each brings its
+// mirrors up to date once). The clone paths of every instance are passed, not
+// just this one's, because a mirror serves the whole workspace. Every result
+// that isn't a healthy mirror, and a healthy one whose refresh or mirror log
+// write failed, becomes a warning (ReportMirrorResult); none fails the
+// command, which carries on whatever the result.
+//
+// The mirrors live under the developer's home, so an Applier without
+// DeveloperHome (the unit suites) skips the check rather than reach the real
+// one. A root-level apply reaches this once per instance with the same
+// Applier; each mirror is checked on the first pass only, so the command
+// logs one check line per mirror, and the later passes skip it.
+//
+// command is the pipeline's own name for the log; MirrorCommand replaces it
+// when set, and MirrorLockWait and MirrorResults pass through as described on
+// the Applier.
+func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig, classified []ClassifiedRepo, instanceRoot, command string) {
+	if a.DeveloperHome == "" || len(classified) == 0 {
+		return
+	}
+	workspaceRoot := filepath.Dir(instanceRoot)
+	// A root that can't be listed still has this instance; its clones are
+	// enough to find a borrower here, and the next command lists the rest.
+	instances, _ := EnumerateInstances(workspaceRoot)
+	if !slices.Contains(instances, instanceRoot) {
+		instances = append(instances, instanceRoot)
+	}
+
+	if a.mirrorsChecked == nil {
+		a.mirrorsChecked = map[string]bool{}
+	}
+	repos := make([]mirror.Repo, 0, len(classified))
+	var clones []string
+	for _, cr := range classified {
+		stable := mirror.StablePath(a.DeveloperHome, workspaceRoot, cr.Repo.Name)
+		if a.mirrorsChecked[stable] {
+			continue
+		}
+		repos = append(repos, mirror.Repo{
+			ID:  cr.Repo.Name,
+			URL: RepoCloneURL(cfg, cr.Repo.Name, cr.Repo.SSHURL, cr.Repo.CloneURL),
+		})
+		for _, inst := range instances {
+			clones = append(clones, filepath.Join(inst, cr.Group, cr.Repo.Name))
+		}
+	}
+
+	if a.MirrorCommand != "" {
+		command = a.MirrorCommand
+	}
+	opts := mirror.Options{
+		Home:          a.DeveloperHome,
+		WorkspaceRoot: workspaceRoot,
+		Instances:     clones,
+		LockWait:      a.MirrorLockWait,
+		Command:       command,
+		Refresh:       true,
+	}
+	for _, res := range mirror.EnsureHealthy(ctx, opts, repos) {
+		a.mirrorsChecked[res.StablePath] = true
+		// A healthy mirror is collected only when its log couldn't be
+		// written, so the hook's context carries that warning too. One whose
+		// refresh failed is still usable: it's reported, never collected.
+		if a.MirrorResults != nil && (res.Outcome != mirror.OutcomeHealthy || res.LogErr != nil) {
+			*a.MirrorResults = append(*a.MirrorResults, res)
+		}
+		ReportMirrorResult(a.Reporter, res)
+	}
+}
+
+// ReportMirrorResult warns about a mirror that isn't healthy, in the one form
+// every command that checks mirrors prints:
+// "warning: mirror <id>: fault <fault>, result <result>", with the error
+// after it when there is one. A healthy mirror whose refresh failed prints
+// "warning: mirror <id>: refresh failed: <err>"; any other healthy mirror
+// prints nothing.
+//
+// After a restore's warning come the borrower refs it left unrecoverable
+// (Result.Unrecoverable): a warning for each lost local branch, tag or
+// detached HEAD, then, at lower severity through Log, a line for each stale
+// remote-tracking ref. Their names were cleaned when the LostRef was built.
+//
+// Last, when the mirror log couldn't be written (Result.LogErr), healthy
+// mirrors included, comes "warning: mirror <id>: writing the mirror log
+// failed: <err>".
+//
+// The repo id and the text of Err and LogErr are printed through
+// mirror.CleanText: git, the system or a remote can put any byte in an
+// error, and a config can give a repo any name, so each comes out as one
+// bounded run of printable ASCII and can't forge or break a line.
+func ReportMirrorResult(r *Reporter, res mirror.Result) {
+	id := mirror.CleanText(res.RepoID)
+	switch {
+	case res.Outcome == mirror.OutcomeHealthy && res.Err != nil:
+		r.Warn("mirror %s: refresh failed: %s", id, mirror.CleanText(res.Err.Error()))
+	case res.Outcome == mirror.OutcomeHealthy:
+	case res.Err != nil:
+		r.Warn("mirror %s: fault %s, result %s: %s", id, res.Fault, res.Outcome, mirror.CleanText(res.Err.Error()))
+	default:
+		r.Warn("mirror %s: fault %s, result %s", id, res.Fault, res.Outcome)
+	}
+	for _, l := range res.Unrecoverable {
+		if !l.RemoteTracking {
+			r.Warn("%s", lostRefWarning(id, l))
+		}
+	}
+	for _, l := range res.Unrecoverable {
+		if l.RemoteTracking {
+			r.Log("mirror %s: %s in %s is stale: commit %s is gone from the remote and the mirror that kept it was lost; git fetch --prune in that clone clears it",
+				id, l.Ref, l.Instance, l.MissingCommit)
+		}
+	}
+	if res.LogErr != nil {
+		r.Warn("mirror %s: writing the mirror log failed: %s", id, mirror.CleanText(res.LogErr.Error()))
+	}
+}
+
+// lostRefWarning is the warning for a lost local branch, tag or detached
+// HEAD, without the "warning: " prefix: the clone, the ref, the missing
+// commit and why it's gone, then for a branch its unpushed commits, which
+// are intact, and its lost files with whether the working tree holds each.
+func lostRefWarning(repoID string, l mirror.LostRef) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "mirror %s: %s in %s is unrecoverable: it is built on commit %s, which was pushed and later deleted from the remote; the mirror that kept it was lost and the remote no longer serves it",
+		repoID, l.Ref, l.Instance, l.MissingCommit)
+	if len(l.OwnCommits) > 0 {
+		fmt.Fprintf(&b, "; its unpushed commits are intact: %s", strings.Join(l.OwnCommits, ", "))
+	}
+	if len(l.LostFiles) > 0 {
+		files := make([]string, 0, len(l.LostFiles))
+		for _, f := range l.LostFiles {
+			where := "not in the working tree"
+			if f.InWorkingTree {
+				where = "in the working tree"
+			}
+			files = append(files, fmt.Sprintf("%s (%s)", f.Path, where))
+		}
+		fmt.Fprintf(&b, "; lost files: %s", strings.Join(files, ", "))
+	}
+	return b.String()
 }
 
 // cloneWorker pulls jobs from the jobs channel until it is closed, clones or

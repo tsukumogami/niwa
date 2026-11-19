@@ -7,12 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/filelock"
 	"github.com/tsukumogami/niwa/internal/keyreport"
+	"github.com/tsukumogami/niwa/internal/mirror"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -761,5 +765,507 @@ func TestSessionStart_OtherFailure_StillFails(t *testing.T) {
 	}
 	if out != "" {
 		t.Errorf("a failing hook must emit nothing on stdout, got: %q", out)
+	}
+}
+
+// --- Host mirrors on the hook's paths ---
+
+// hookMirror is a hook workspace whose instance "inst" has a clone of "app"
+// borrowing from the mirror at its stable path, under a home of the test's
+// own. The workspace config names no URL for app; the instance's state does,
+// so the URL comes from the state fallback.
+type hookMirror struct {
+	home, root, clone, remote string
+}
+
+func hookMirrorGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+	}
+}
+
+// setupHookMirror builds the workspace and, when built is true, the mirror
+// itself, healthy, through the same check the commands run.
+func setupHookMirror(t *testing.T, built bool) hookMirror {
+	t.Helper()
+	h := hookMirror{root: setupHookWorkspace(t, true), home: t.TempDir()}
+	t.Setenv("HOME", h.home)
+	base := t.TempDir()
+	h.remote = filepath.Join(base, "remote.git")
+	work := filepath.Join(base, "work")
+	hookMirrorGit(t, base, "init", "--quiet", "--bare", h.remote)
+	hookMirrorGit(t, base, "init", "--quiet", work)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hookMirrorGit(t, work, "add", "a.txt")
+	hookMirrorGit(t, work, "commit", "--quiet", "-m", "first")
+	hookMirrorGit(t, work, "push", "--quiet", h.remote, "HEAD:refs/heads/main")
+	hookMirrorGit(t, h.remote, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	inst := filepath.Join(h.root, "inst")
+	if err := workspace.SaveState(inst, &workspace.InstanceState{
+		SchemaVersion: workspace.SchemaVersion,
+		InstanceName:  "inst",
+		Root:          inst,
+		Repos:         map[string]workspace.RepoState{"app": {URL: "file://" + h.remote, Cloned: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.clone = filepath.Join(inst, "tools", "app")
+	info := filepath.Join(h.clone, ".git", "objects", "info")
+	if err := os.MkdirAll(info, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !built {
+		return h
+	}
+	line := mirror.StablePath(h.home, h.root, "app") + "/objects\n"
+	if err := os.WriteFile(filepath.Join(info, "alternates"), []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := mirror.Options{Home: h.home, WorkspaceRoot: h.root, Instances: []string{h.clone}, Command: "setup"}
+	res := mirror.EnsureHealthy(context.Background(), opts, []mirror.Repo{{ID: "app", URL: "file://" + h.remote}})
+	if len(res) != 1 || res[0].Outcome != mirror.OutcomeRestored {
+		t.Fatalf("building the mirror: %+v", res)
+	}
+	return h
+}
+
+func (h hookMirror) logLines(t *testing.T) []map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(mirror.StablePath(h.home, h.root, "app")), ".meta", "mirror.log"))
+	if err != nil {
+		t.Fatalf("reading the mirror log: %v", err)
+	}
+	var lines []map[string]any
+	for _, raw := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var line map[string]any
+		if err := json.Unmarshal([]byte(raw), &line); err != nil {
+			t.Fatalf("log line %q: %v", raw, err)
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// replaceLogWithADirectory puts a directory where the mirror log goes, so
+// every write to it fails, and returns the log's path.
+func (h hookMirror) replaceLogWithADirectory(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(filepath.Dir(mirror.StablePath(h.home, h.root, "app")), ".meta", "mirror.log")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// hookPathSetups are the hook's two paths that provision nothing: a session
+// niwa dispatched (its mapping already exists) and a session the guard
+// declines (no background job state).
+var hookPathSetups = []struct {
+	name  string
+	setup func(t *testing.T, root string)
+}{
+	{"dispatch-origin mapping", func(t *testing.T, root string) {
+		if err := workspace.WriteSessionMapping(root, workspace.SessionMapping{
+			SessionID:    testSessionID,
+			InstanceName: "inst",
+			InstancePath: filepath.Join(root, "inst"),
+			Origin:       workspace.MappingOriginDispatch,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}},
+	{"guard declines", func(*testing.T, string) {}},
+}
+
+func TestSessionStart_NonProvisioningPathsCheckAHealthyMirror(t *testing.T) {
+	for _, p := range hookPathSetups {
+		t.Run(p.name, func(t *testing.T) {
+			h := setupHookMirror(t, true)
+			p.setup(t, h.root)
+			rec := stubProvision(t, "guidance")
+			before := len(h.logLines(t))
+
+			out, _, err := runStart(t, instanceHookPayload{
+				HookEventName: hookEventSessionStart,
+				SessionID:     testSessionID,
+				Cwd:           h.root,
+			}, t.TempDir())
+			if err != nil {
+				t.Fatalf("runInstanceHookStart: %v", err)
+			}
+			if rec.called {
+				t.Fatal("the hook provisioned on a path that must not")
+			}
+			if out != "" {
+				t.Fatalf("stdout = %q, want empty for a healthy mirror", out)
+			}
+			added := h.logLines(t)[before:]
+			if len(added) != 1 || added[0]["command"] != "from-hook" || added[0]["event"] != "check" || added[0]["result"] != "healthy" {
+				t.Fatalf("log lines added = %v, want one healthy from-hook check", added)
+			}
+		})
+	}
+}
+
+// TestSessionStart_NonProvisioningPathsReportALogThatCantBeWritten: Claude
+// Code discards the hook's stderr, so a healthy mirror whose log can't be
+// written is reported in the hook's context, by its notice alone.
+func TestSessionStart_NonProvisioningPathsReportALogThatCantBeWritten(t *testing.T) {
+	for _, p := range hookPathSetups {
+		t.Run(p.name, func(t *testing.T) {
+			h := setupHookMirror(t, true)
+			p.setup(t, h.root)
+			rec := stubProvision(t, "guidance")
+			path := h.replaceLogWithADirectory(t)
+
+			out, _, err := runStart(t, instanceHookPayload{
+				HookEventName: hookEventSessionStart,
+				SessionID:     testSessionID,
+				Cwd:           h.root,
+			}, t.TempDir())
+			if err != nil {
+				t.Fatalf("runInstanceHookStart: %v", err)
+			}
+			if rec.called {
+				t.Fatal("the hook provisioned on a path that must not")
+			}
+			if strings.Count(out, "\n") != 1 {
+				t.Fatalf("stdout = %q, want one line", out)
+			}
+			var inj sessionStartInjection
+			if err := json.Unmarshal([]byte(out), &inj); err != nil {
+				t.Fatalf("stdout %q is not a SessionStart payload: %v", out, err)
+			}
+			if inj.HookSpecificOutput.HookEventName != hookEventSessionStart {
+				t.Fatalf("hookEventName = %q", inj.HookSpecificOutput.HookEventName)
+			}
+			stable := mirror.StablePath(h.home, h.root, "app")
+			want := mirror.Result{RepoID: "app", StablePath: stable, Outcome: mirror.OutcomeHealthy, LogErr: errors.New("x")}.Notice()
+			got := inj.HookSpecificOutput.AdditionalContext
+			if got != want {
+				t.Fatalf("context = %q, want the healthy notice %q", got, want)
+			}
+			if !strings.Contains(got, path) || !strings.Contains(got, "could not be written") || strings.Contains(got, "is a directory") {
+				t.Fatalf("context = %q, want the log path and that it could not be written, with no error text", got)
+			}
+			if info, err := os.Lstat(path); err != nil || !info.IsDir() {
+				t.Fatalf("the directory at the log's path was moved or removed: %v (%v)", info, err)
+			}
+		})
+	}
+}
+
+// TestSessionStart_ProvisioningCarriesALogThatCantBeWritten: on the
+// provisioning path a healthy result whose log failed comes back in the
+// provision's mirrors, and its notice goes into the context once, beside the
+// instance's cd line.
+func TestSessionStart_ProvisioningCarriesALogThatCantBeWritten(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	writeJobState(t, jobsDir, testSessionID[:8], testSessionID, "bg")
+	res := mirror.Result{RepoID: "app", StablePath: "/h/.niwa/w-0/mirrors/app", Outcome: mirror.OutcomeHealthy,
+		LogErr: errors.New("open /h/.niwa/w-0/mirrors/.meta/mirror.log: is a directory")}
+
+	prev := provisionInstanceFunc
+	provisionInstanceFunc = func(_ context.Context, workspaceRoot, _, namePrefix, sep string, _ int) (provisionResult, error) {
+		dir := filepath.Join(workspaceRoot, "test-ws"+sep+namePrefix)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return provisionResult{}, err
+		}
+		return provisionResult{Name: filepath.Base(dir), Path: dir, Mirrors: []mirror.Result{res}}, nil
+	}
+	t.Cleanup(func() { provisionInstanceFunc = prev })
+
+	out, _, err := runStart(t, instanceHookPayload{
+		HookEventName: hookEventSessionStart,
+		SessionID:     testSessionID,
+		Cwd:           root,
+	}, jobsDir)
+	if err != nil {
+		t.Fatalf("runInstanceHookStart: %v", err)
+	}
+	var inj sessionStartInjection
+	if err := json.Unmarshal([]byte(out), &inj); err != nil {
+		t.Fatalf("stdout %q: %v", out, err)
+	}
+	ctxText := inj.HookSpecificOutput.AdditionalContext
+	notice := res.Notice()
+	if notice == "" || strings.Count(ctxText, notice) != 1 {
+		t.Fatalf("context carries the notice %q %d times, want once:\n%s", notice, strings.Count(ctxText, notice), ctxText)
+	}
+	if !strings.Contains(ctxText, "cd ") {
+		t.Fatalf("context lost the instance's cd line:\n%s", ctxText)
+	}
+	if strings.Contains(ctxText, "is a directory") {
+		t.Fatalf("context carries the error's text:\n%s", ctxText)
+	}
+}
+
+// pushCommit adds a commit to main on the hook mirror's remote, so a fetch
+// would move the mirror's main.
+func (h hookMirror) pushCommit(t *testing.T) {
+	t.Helper()
+	work := filepath.Join(t.TempDir(), "work")
+	hookMirrorGit(t, filepath.Dir(work), "clone", "--quiet", h.remote, work)
+	if err := os.WriteFile(filepath.Join(work, "b.txt"), []byte("b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hookMirrorGit(t, work, "add", "b.txt")
+	hookMirrorGit(t, work, "commit", "--quiet", "-m", "second")
+	hookMirrorGit(t, work, "push", "--quiet", "origin", "HEAD:refs/heads/main")
+}
+
+// mirrorRefs lists every ref in the mirror's store with its value.
+func (h hookMirror) mirrorRefs(t *testing.T) string {
+	t.Helper()
+	out, err := exec.Command("git", "--git-dir", mirror.StablePath(h.home, h.root, "app"), "for-each-ref", "--format=%(refname) %(objectname)").Output()
+	if err != nil {
+		t.Fatalf("listing the mirror's refs: %v", err)
+	}
+	return string(out)
+}
+
+// requireOnlyAHealthyCheck fails unless the log lines added since before are
+// one healthy check from command and no refresh line.
+func (h hookMirror) requireOnlyAHealthyCheck(t *testing.T, before int, command string) {
+	t.Helper()
+	added := h.logLines(t)[before:]
+	if len(added) != 1 || added[0]["command"] != command || added[0]["event"] != "check" || added[0]["result"] != "healthy" {
+		t.Fatalf("log lines added = %v, want one healthy %s check and no refresh", added, command)
+	}
+}
+
+func TestSessionStart_NonProvisioningPathsNeverFetch(t *testing.T) {
+	for _, p := range hookPathSetups {
+		t.Run(p.name, func(t *testing.T) {
+			h := setupHookMirror(t, true)
+			p.setup(t, h.root)
+			stubProvision(t, "guidance")
+			refs := h.mirrorRefs(t)
+			h.pushCommit(t)
+			before := len(h.logLines(t))
+
+			if _, _, err := runStart(t, instanceHookPayload{
+				HookEventName: hookEventSessionStart,
+				SessionID:     testSessionID,
+				Cwd:           h.root,
+			}, t.TempDir()); err != nil {
+				t.Fatalf("runInstanceHookStart: %v", err)
+			}
+			if got := h.mirrorRefs(t); got != refs {
+				t.Fatalf("the hook fetched: refs\n%s\nwere\n%s", got, refs)
+			}
+			h.requireOnlyAHealthyCheck(t, before, "from-hook")
+		})
+	}
+}
+
+func TestSessionStart_NonProvisioningPathsWithNoMirrorWriteNothing(t *testing.T) {
+	for _, p := range hookPathSetups {
+		t.Run(p.name, func(t *testing.T) {
+			h := setupHookMirror(t, false)
+			p.setup(t, h.root)
+			stubProvision(t, "guidance")
+
+			out, _, err := runStart(t, instanceHookPayload{
+				HookEventName: hookEventSessionStart,
+				SessionID:     testSessionID,
+				Cwd:           h.root,
+			}, t.TempDir())
+			if err != nil {
+				t.Fatalf("runInstanceHookStart: %v", err)
+			}
+			if out != "" {
+				t.Fatalf("stdout = %q, want empty", out)
+			}
+			if found, _ := filepath.Glob(filepath.Join(h.home, ".niwa", "w-*")); len(found) != 0 {
+				t.Fatalf("a workspace with no mirror got %v", found)
+			}
+		})
+	}
+}
+
+func TestSessionStart_NoWorkspaceRootWritesNoMirrorLog(t *testing.T) {
+	h := setupHookMirror(t, true)
+	stubProvision(t, "guidance")
+	before := len(h.logLines(t))
+
+	out, _, err := runStart(t, instanceHookPayload{
+		HookEventName: hookEventSessionStart,
+		SessionID:     testSessionID,
+		Cwd:           t.TempDir(),
+	}, t.TempDir())
+	if err != nil || out != "" {
+		t.Fatalf("runInstanceHookStart = %q, %v; want no output and no error", out, err)
+	}
+	if after := len(h.logLines(t)); after != before {
+		t.Fatalf("the mirror log went from %d to %d lines for a cwd outside any workspace", before, after)
+	}
+}
+
+func TestSessionStart_HeldLockReportsBusyAfterTheHookWait(t *testing.T) {
+	h := setupHookMirror(t, true)
+	stubProvision(t, "guidance")
+	stable := mirror.StablePath(h.home, h.root, "app")
+	target, err := os.Readlink(stable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(stable); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(filepath.Dir(stable), target)); err != nil {
+		t.Fatal(err)
+	}
+	release, err := filelock.TryFileLock(mirror.LockPath(h.home, h.root, "app"), "test holder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	before := len(h.logLines(t))
+
+	start := time.Now()
+	out, _, err := runStart(t, instanceHookPayload{
+		HookEventName: hookEventSessionStart,
+		SessionID:     testSessionID,
+		Cwd:           h.root,
+	}, t.TempDir())
+	took := time.Since(start)
+	if err != nil {
+		t.Fatalf("runInstanceHookStart: %v", err)
+	}
+	if took < 10*time.Second || took >= 20*time.Second {
+		t.Fatalf("the hook took %s, want at least 10s and under 20s", took)
+	}
+
+	var inj sessionStartInjection
+	if err := json.Unmarshal([]byte(out), &inj); err != nil {
+		t.Fatalf("stdout %q is not a SessionStart payload: %v", out, err)
+	}
+	if inj.HookSpecificOutput.HookEventName != hookEventSessionStart {
+		t.Fatalf("hookEventName = %q", inj.HookSpecificOutput.HookEventName)
+	}
+	want := mirror.Result{RepoID: "app", StablePath: stable, Fault: mirror.FaultMissing, Outcome: mirror.OutcomeBusy}.Notice()
+	if got := inj.HookSpecificOutput.AdditionalContext; got != want {
+		t.Fatalf("context = %q, want the busy notice %q", got, want)
+	}
+	added := h.logLines(t)[before:]
+	if len(added) == 0 {
+		t.Fatal("the busy check logged nothing")
+	}
+	for _, line := range added {
+		if line["mirror"] != "app" || line["result"] != "busy" || line["command"] != "from-hook" {
+			t.Fatalf("log line %v, want a busy from-hook line for app", line)
+		}
+	}
+
+	mdir := filepath.Dir(stable)
+	if _, err := os.Lstat(stable); !os.IsNotExist(err) {
+		t.Fatalf("a busy check made the stable path (%v)", err)
+	}
+	for _, dir := range []string{".store", ".tmp"} {
+		if entries, _ := os.ReadDir(filepath.Join(mdir, dir)); len(entries) != 0 {
+			t.Fatalf("a busy check left %d entries in %s", len(entries), dir)
+		}
+	}
+	if links, _ := filepath.Glob(filepath.Join(mdir, ".link-*")); len(links) != 0 {
+		t.Fatalf("a busy check left %v", links)
+	}
+}
+
+// TestSessionStart_ProvisioningCarriesTheMirrorNotice: the provisioning path
+// asks for the hook's mirror name and wait, and the notices of what the
+// provision found go into the context beside the instance's cd line.
+func TestSessionStart_ProvisioningCarriesTheMirrorNotice(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	jobsDir := t.TempDir()
+	writeJobState(t, jobsDir, testSessionID[:8], testSessionID, "bg")
+	res := mirror.Result{RepoID: "app", StablePath: "/h/.niwa/w-0/mirrors/app", Fault: mirror.FaultMissing, Outcome: mirror.OutcomeRestored}
+
+	var got provisionMirror
+	prev := provisionInstanceFunc
+	provisionInstanceFunc = func(ctx context.Context, workspaceRoot, _, namePrefix, sep string, _ int) (provisionResult, error) {
+		got, _ = ctx.Value(provisionMirrorKey{}).(provisionMirror)
+		dir := filepath.Join(workspaceRoot, "test-ws"+sep+namePrefix)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return provisionResult{}, err
+		}
+		return provisionResult{Name: filepath.Base(dir), Path: dir, Mirrors: []mirror.Result{res}}, nil
+	}
+	t.Cleanup(func() { provisionInstanceFunc = prev })
+
+	out, _, err := runStart(t, instanceHookPayload{
+		HookEventName: hookEventSessionStart,
+		SessionID:     testSessionID,
+		Cwd:           root,
+	}, jobsDir)
+	if err != nil {
+		t.Fatalf("runInstanceHookStart: %v", err)
+	}
+	if got.command != mirrorCommandHook || got.lockWait != hookMirrorLockWait {
+		t.Fatalf("provision asked for %+v, want from-hook with the hook's wait", got)
+	}
+	var inj sessionStartInjection
+	if err := json.Unmarshal([]byte(out), &inj); err != nil {
+		t.Fatalf("stdout %q: %v", out, err)
+	}
+	ctxText := inj.HookSpecificOutput.AdditionalContext
+	if strings.Count(ctxText, res.Notice()) != 1 {
+		t.Fatalf("context carries the notice %d times, want once:\n%s", strings.Count(ctxText, res.Notice()), ctxText)
+	}
+	if !strings.Contains(ctxText, "cd ") {
+		t.Fatalf("context lost the instance's cd line:\n%s", ctxText)
+	}
+}
+
+// TestSessionStart_HookURLAgreesWithApplys: the workspace config names no URL
+// for app, so apply clones it from the URL discovery gives and records that
+// URL in the instance's state, and the mirror is built from it. The hook,
+// with no repo list, takes the URL from that state: the same remote, so the
+// mirror is healthy and never url-changed.
+func TestSessionStart_HookURLAgreesWithApplys(t *testing.T) {
+	for _, p := range hookPathSetups {
+		t.Run(p.name, func(t *testing.T) {
+			h := setupHookMirror(t, true)
+			p.setup(t, h.root)
+			stubProvision(t, "guidance")
+			stable := mirror.StablePath(h.home, h.root, "app")
+			target, err := os.Readlink(stable)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := len(h.logLines(t))
+
+			out, _, err := runStart(t, instanceHookPayload{
+				HookEventName: hookEventSessionStart,
+				SessionID:     testSessionID,
+				Cwd:           h.root,
+			}, t.TempDir())
+			if err != nil || out != "" {
+				t.Fatalf("runInstanceHookStart = %q, %v; want no output and no error", out, err)
+			}
+			added := h.logLines(t)[before:]
+			if len(added) != 1 || added[0]["event"] != "check" || added[0]["result"] != "healthy" || added[0]["fault"] != "" {
+				t.Fatalf("log lines added = %v, want one healthy check with no fault", added)
+			}
+			if after, err := os.Readlink(stable); err != nil || after != target {
+				t.Fatalf("the link moved from %q to %q (%v)", target, after, err)
+			}
+		})
 	}
 }

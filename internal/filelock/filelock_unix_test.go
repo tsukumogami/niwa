@@ -1,12 +1,12 @@
 //go:build unix
 
-package workspace
+package filelock
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -359,57 +359,112 @@ func TestTryFileLock_CloseOnExec(t *testing.T) {
 	}
 }
 
-func TestInstanceLockPath(t *testing.T) {
-	home := t.TempDir()
-	ws := t.TempDir()
-	inst := filepath.Join(ws, "inst")
-	for _, d := range []string{inst, filepath.Join(ws, "sub"), filepath.Join(ws, "inst-2")} {
-		if err := os.Mkdir(d, 0o700); err != nil {
-			t.Fatal(err)
-		}
+func TestWaitFileLock_TakesAFreeLock(t *testing.T) {
+	path := lockFixture(t)
+	release, err := WaitFileLock(context.Background(), path, "waiter", time.Second)
+	if err != nil {
+		t.Fatalf("WaitFileLock on a free lock: %v", err)
 	}
-	link := filepath.Join(t.TempDir(), "wslink")
-	if err := os.Symlink(ws, link); err != nil {
+	data, err := os.ReadFile(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	got := InstanceLockPath(home, inst)
-	if filepath.Dir(got) != filepath.Join(home, ".niwa", "locks") {
-		t.Fatalf("lock %q is not directly in ~/.niwa/locks", got)
+	if string(data) != "waiter\n" {
+		t.Fatalf("lock file while held = %q, want %q", data, "waiter\n")
 	}
+	release()
+	release() // a second call is a no-op
+	mustTryLock(t, path, "next")()
+}
 
-	for _, variant := range []string{inst + "/", ws + "/./inst", ws + "/sub/../inst", filepath.Join(link, "inst")} {
-		if v := InstanceLockPath(home, variant); v != got {
-			t.Errorf("InstanceLockPath(%q) = %q, want %q", variant, v, got)
-		}
-	}
-	if other := InstanceLockPath(home, filepath.Join(ws, "inst-2")); other == got {
-		t.Error("inst-2 shares inst's lock")
-	}
+func TestWaitFileLock_WaitsForTheHolder(t *testing.T) {
+	path := lockFixture(t)
+	release := mustTryLock(t, path, "first")
+	time.AfterFunc(200*time.Millisecond, release)
 
-	viaLink := InstanceLockPath(home, filepath.Join(link, "inst"))
-	if err := os.Remove(inst); err != nil {
+	start := time.Now()
+	second, err := WaitFileLock(context.Background(), path, "second", 10*time.Second)
+	if err != nil {
+		t.Fatalf("WaitFileLock while the holder releases: %v", err)
+	}
+	defer second()
+	if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
+		t.Fatalf("WaitFileLock returned after %s, before the holder released", elapsed)
+	}
+}
+
+func TestWaitFileLock_TimeoutNamesTheHolder(t *testing.T) {
+	path := lockFixture(t)
+	release := mustTryLock(t, path, "restorer")
+	defer release()
+
+	start := time.Now()
+	got, err := WaitFileLock(context.Background(), path, "loser", 150*time.Millisecond)
+	if got != nil {
+		t.Fatal("a timed-out WaitFileLock returned a release")
+	}
+	if !errors.Is(err, ErrLockHeld) {
+		t.Fatalf("timeout error = %v, want ErrLockHeld", err)
+	}
+	if !strings.Contains(err.Error(), "restorer") {
+		t.Fatalf("timeout error %q does not name the holder", err)
+	}
+	if elapsed := time.Since(start); elapsed < 150*time.Millisecond || elapsed > 5*time.Second {
+		t.Fatalf("WaitFileLock gave up after %s, want about 150ms", elapsed)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "restorer\n" {
+		t.Fatalf("the loser changed the holder line: %q (%v)", data, err)
+	}
+}
+
+func TestWaitFileLock_ContextEndsTheWait(t *testing.T) {
+	path := lockFixture(t)
+	release := mustTryLock(t, path, "holder")
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	_, err := WaitFileLock(ctx, path, "loser", time.Minute)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error after cancel = %v, want context.Canceled", err)
+	}
+}
+
+func TestWaitFileLock_RefusesUnsafeLockFile(t *testing.T) {
+	path := lockFixture(t)
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if after := InstanceLockPath(home, inst); after != got {
-		t.Errorf("after removal InstanceLockPath = %q, want %q", after, got)
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
 	}
-	if after := InstanceLockPath(home, filepath.Join(link, "inst")); after != viaLink {
-		t.Errorf("after removal, through the symlinked root = %q, want %q", after, viaLink)
+	if release, err := WaitFileLock(context.Background(), path, "h", time.Second); err == nil {
+		release()
+		t.Fatal("WaitFileLock followed a symlink at the lock path")
 	}
+	if data, err := os.ReadFile(target); err != nil || string(data) != "keep" {
+		t.Fatalf("symlink target = %q (%v), want %q", data, err, "keep")
+	}
+}
 
-	name := filepath.Base(got)
-	if !regexp.MustCompile(`^i-[0-9a-f]{32}\.lock$`).MatchString(name) {
-		t.Errorf("lock name %q is not derived from a hash alone", name)
+func TestCanonicalPath(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
 	}
-	// A component made only of hex digits (a temp directory's "001") can turn
-	// up inside any hash by chance; every other component must not appear.
-	for _, comp := range strings.Split(inst, string(os.PathSeparator)) {
-		if comp != "" && strings.Trim(comp, "0123456789abcdef") != "" && strings.Contains(name, comp) {
-			t.Errorf("lock name %q carries path component %q", name, comp)
+	want, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{real, real + "/", link, link + "/./"} {
+		if got := CanonicalPath(p); got != want {
+			t.Errorf("CanonicalPath(%q) = %q, want %q", p, got, want)
 		}
 	}
-	if strings.HasPrefix(got, inst+string(os.PathSeparator)) || strings.HasPrefix(got, filepath.Join(ws, ".niwa")+string(os.PathSeparator)) {
-		t.Errorf("lock %q lives under the instance or the workspace's .niwa", got)
+	if got := CanonicalPath(filepath.Join(link, "gone", "deeper")); got != filepath.Join(want, "gone", "deeper") {
+		t.Errorf("CanonicalPath of a missing path = %q, want it under %q", got, want)
 	}
 }
