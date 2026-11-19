@@ -27,7 +27,7 @@ Accepted
 
 ## Context
 
-The mirror-repair design (`docs/designs/DESIGN-mirror-repair.md`) gives each
+The mirror-repair design (`docs/designs/current/DESIGN-mirror-repair.md`) gives each
 repo one bare mirror on the host, under `~/.niwa/`, that instances borrow
 objects from through git's alternates file. A borrower keeps none of what it
 borrows, so the requirements say the mirror never discards a commit just
@@ -189,6 +189,6 @@ unrecoverable limit, and expiry would need the requirements reopened first.
 
 ## References
 
-- `docs/designs/DESIGN-mirror-repair.md`: Decision 2 (retention), Decision 3
+- `docs/designs/current/DESIGN-mirror-repair.md`: Decision 2 (retention), Decision 3
   (pushed commits the remote deleted), Security Considerations, Consequences
 - `docs/prds/PRD-mirror-repair.md`

@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: In Progress
+status: Done
 problem: |
   niwa plans to save disk by letting instances borrow git objects from one
   bare mirror per repo on the host. A borrower holds no copy of what it
@@ -22,7 +22,7 @@ absorbed:
 
 ## Status
 
-In Progress
+Done
 
 Absorbed [BRIEF-mirror-repair](docs/briefs/BRIEF-mirror-repair.md); carried in Absorbed Brief.
 
