@@ -147,7 +147,13 @@ by `niwa dispatch` (with the suite's fake `claude`) or by the SessionStart
 hook's `niwa instance from-hook`, not only by `niwa create`. Overlapping creates
 of one workspace download a missing release once and wait for it under its
 lock, and a create killed during the download leaves that release unheld, with
-nothing linked to the partial copy.
+nothing linked to the partial copy. Step 1 left the store in
+`internal/pluginstore` (`Store.Ensure`, `place`, `download`) reached from
+`internal/workspace/pluginskills.go` through `pluginStoreFor`, and the
+`A second instance downloads no held release` outline with a `niwa create ws`
+row only; this step adds the other two rows, the overlap and interrupt
+scenarios, and a `plugin-store-download` fault label at the start of
+`Store.download` that uses `internal/testfault`'s existing `hold:` spec.
 
 **Acceptance Criteria**:
 
@@ -169,20 +175,25 @@ nothing linked to the partial copy.
   finishes.
 - [ ] A tarball whose wrapper directory names another commit, or one with no
   `.claude-plugin/marketplace.json`, leaves no held release behind: a unit test
-  of `Ensure` returns an error and finds nothing at the release path.
+  of `Ensure` returns an error and finds nothing at the release path (no
+  `<commit>` directory, not only `Held` false). Step 1's
+  `TestEnsureRefusesAWrapperNamingAnotherCommit` covers the first case's error
+  and `Held`; the release-path check and the missing-manifest case are new.
 - [ ] Ten concurrent `Ensure` calls on one unheld release in a unit test record
   one fetch, and all ten see the release held and their links pointing at it.
+  Step 1's `TestConcurrentEnsureFetchesOnce` checks the one fetch with no link;
+  each call now passes its own link and the test checks every link's target.
 
-**Check**: Run `make test-functional-plugin-release-hold`. The `niwa dispatch`
-and SessionStart hook rows of `A second instance downloads no held release`,
-`Three overlapping creates download each release once` and `An interrupted
-create leaves its release unheld` pass, and the overlap scenario's
-request-count step reports 1 for each release. Then `go test -race
+**Check**: Run `make build-test`, then `make test-functional-plugin-release-hold`.
+The `niwa dispatch` and SessionStart hook rows of `A second instance downloads
+no held release`, `Three overlapping creates download each release once` and
+`An interrupted create leaves its release unheld` pass, and the overlap
+scenario's request-count step reports 1 for each release. Then `go test -race
 ./internal/pluginstore/...` exits 0.
 
 **Dependencies**: Step 1
 
-**Files**: `internal/pluginstore/place.go`, `internal/pluginstore/place_test.go`, `internal/testfault/*`, `test/functional/features/plugin-release-hold.feature`, `test/functional/pluginstore_steps_test.go`
+**Files**: `internal/pluginstore/place.go`, `internal/pluginstore/place_test.go`, `test/functional/features/plugin-release-hold.feature`, `test/functional/pluginstore_steps_test.go`
 
 ### Step 3: a deleted or unmarked release is fetched back by the next provisioning command with nobody acting
 
