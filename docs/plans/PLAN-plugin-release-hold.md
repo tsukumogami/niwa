@@ -197,7 +197,78 @@ scenario's request-count step reports 1 for each release. Then `go test -race
 
 ### Step 3: a deleted or unmarked release is fetched back by the next provisioning command with nobody acting
 
-Any provisioning command (`niwa apply`, `niwa dispatch`, the SessionStart hook, a `niwa create` on a newer release) restores a release missing from the store or missing its `held.json` and says so, refuses a commit only a fork holds, names and retries a failed refetch, and the older instance loads its skills with nothing run inside it, while no command or guide offers a repair.
+**Goal**: Every provisioning command (`niwa apply`, `niwa create`, `niwa
+dispatch` and the SessionStart hook's `niwa instance from-hook`) restores, once
+per command per workspace and before the current instance's own placement, any
+release that an instance on disk links to and that is missing: its
+`<commit>` directory is absent, or present without a valid `held.json`. The
+restore writes only inside the store, runs nothing inside any instance, and is
+reported with the release and the instances it served. A link whose commit only
+a fork holds is refused and reported, a link to an undeclared source is
+reported and left alone, and a failed refetch is a warning naming the release,
+leaves nothing marked held, and is tried again by the next command. No command,
+flag or hint offers a manual repair. Steps 1 and 2 left the restore inside
+`Store.Ensure` (`internal/pluginstore/place.go`: `Held`, `trashUnmarked`,
+`place`), reached only for the instance being applied, through
+`keepMarketplaceLink` in `internal/workspace/pluginskills.go`, with `restored`
+discarded and failures turned into a `MissingPluginRoot` warning that says to
+re-run `niwa apply`. `create`, `dispatch` and the hook make a new instance and
+never look at an older instance's links. This step adds the store's `Repair`
+pass over every instance's links (the scan through `internal/hostdir`'s
+instance listing, so `InstanceDirs` gains its first non-test caller), calls it
+from `runPipeline` before plugin placement, reports through
+`internal/fallbacknotice`, and removes the manual-repair wording.
+
+**Acceptance Criteria**:
+
+- [ ] With two instances linked to the same held release, deleting that
+  release's `<commit>` directory and then running `niwa apply` in the second
+  instance makes exactly one tarball request for it, puts back a marked,
+  read-only release at the same path, and a skill from that marketplace
+  resolves in the first instance at its root, in a repo and in a session
+  worktree, with no command run inside the first instance.
+- [ ] Deleting only that release's `held.json` counts as missing: the next
+  `niwa apply` makes one tarball request for it and the release is marked again.
+- [ ] The same restore (one tarball request, the older instance's skill
+  resolving) happens when the next command is `niwa dispatch`, the SessionStart
+  hook, or a `niwa create` whose marketplace track now resolves to a newer
+  release, each run with no command inside the older instance.
+- [ ] Each restore prints one line naming the release
+  (`github.com/<owner>/<repo>@<commit>`) and the instances it served, in the
+  terminal for `apply` and `create`, in `niwa dispatch` output and in the
+  hook's context.
+- [ ] A link whose commit is in no ref of its declared source and behind none
+  of them (a fork-only commit) is refused: nothing is fetched or held for it,
+  its link is left as it is, and the output names the release and says it was
+  refused. A missing release whose commit is behind a ref of its source but at
+  no tip is restored, which needs the tarball fake to answer GitHub's compare
+  endpoint (today it has none, so every non-tip commit is refused as unchecked).
+  A link to a source the workspace no longer declares is reported and left
+  alone.
+- [ ] With the `fetch-tarball` fault set to `error:` for the missing release,
+  the command exits 0, warns with the release's name, leaves no `held.json` and
+  no `<commit>` directory for it, and the next command with the fault cleared
+  restores it with one tarball request.
+- [ ] Repair runs once per command per workspace: with three instances linked
+  to one missing release, one command makes one tarball request for it.
+- [ ] A unit test of `Repair` on a store with one held, one missing and one
+  unmarked release, linked from instances on disk, fetches only the two that
+  aren't held and returns a result naming each restored release and its
+  instances.
+- [ ] No output, hint or help text names a repair command or tells the user to
+  re-run a command to fix a release: the `MissingPluginRoot` hint and the
+  `reachable.go` comment that names a `Repair` match the code.
+
+**Check**: Run `make build-test`, then `make test-functional-plugin-release-hold`:
+the new scenarios for a deleted release (apply, dispatch, the hook and a create
+on a newer release), a deleted `held.json`, a fork-only commit, a failed
+refetch then a clean retry, and three instances on one missing release pass,
+and the request-count steps report the counts above. Then `go test -race
+./internal/pluginstore/... ./internal/workspace/...` exits 0.
+
+**Dependencies**: Step 2
+
+**Files**: `internal/pluginstore/repair.go`, `internal/pluginstore/repair_test.go`, `internal/pluginstore/place.go`, `internal/pluginstore/reachable.go`, `internal/hostdir/hostdir.go`, `internal/workspace/apply.go`, `internal/workspace/pluginskills.go`, `internal/fallbacknotice/`, `test/functional/tarball_fake_server.go`, `test/functional/features/plugin-release-hold.feature`, `test/functional/pluginstore_steps_test.go`
 
 ### Step 4: a held release changed after placement is fetched again and reported as tampered
 
