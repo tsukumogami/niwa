@@ -1008,11 +1008,18 @@ func TestHostile_LoosenedModesAreTightened(t *testing.T) {
 			mdir := f.mdir()
 			one := logPath(mdir) + ".1"
 			writeFile(t, one, "old\n")
+			// The workspace key directory is loosened too but isn't in dirs:
+			// it's shared with the plugin store, so the mirror leaves its
+			// mode as it is.
+			key := keyDir(f.home, f.root)
 			dirs := []string{
-				keyDir(f.home, f.root), mdir, metaDir(mdir), filepath.Join(mdir, ".store"), filepath.Join(mdir, ".tmp"),
+				mdir, metaDir(mdir), filepath.Join(mdir, ".store"), filepath.Join(mdir, ".tmp"),
 				filepath.Join(f.home, ".niwa", "locks"), emptyHooksDir(f.home),
 			}
 			files := []string{statePath(mdir, "app"), logPath(mdir), one, LockPath(f.home, f.root, "app")}
+			if err := os.Chmod(key, 0o755); err != nil {
+				t.Fatal(err)
+			}
 			for _, d := range dirs {
 				if err := os.Chmod(d, 0o755); err != nil {
 					t.Fatal(err)
@@ -1026,6 +1033,7 @@ func TestHostile_LoosenedModesAreTightened(t *testing.T) {
 
 			calls := recordGit(t)
 			requireOutcome(t, r.call(t, f, r.opts(f)), FaultNone, OutcomeHealthy)
+			requireMode(t, key, 0o755, true)
 			for _, d := range dirs {
 				requireMode(t, d, 0o700, true)
 			}
