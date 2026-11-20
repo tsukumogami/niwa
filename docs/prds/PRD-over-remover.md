@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Accepted
+status: In Progress
 problem: |
   niwa removes a stopped unit of work only when its session is deleted or a
   person runs destroy, and it never asks whether the unit's work is finished.
@@ -34,7 +34,7 @@ absorbed:
 
 ## Status
 
-Accepted
+In Progress
 
 The requirements depend on an earlier workspace-level remover, built first in
 one workspace, whose command contract and retire-mark format this work follows
