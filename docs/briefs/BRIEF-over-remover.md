@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   niwa removes a stopped unit only when its session is deleted or a person runs
   destroy, and never asks whether the unit's work is finished; reap runs no loss
@@ -24,7 +24,7 @@ motivating_context: |
 
 ## Status
 
-Draft
+Accepted
 
 The framing depends on a workspace-level remover built first in one workspace,
 whose command contract and retire-mark format this feature adopts as written.
