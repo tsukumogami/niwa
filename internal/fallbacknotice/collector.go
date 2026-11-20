@@ -1,7 +1,11 @@
 // Package fallbacknotice collects what a provisioning run's store fallback
 // did that the operator has to hear about: values served from the store of
 // last-resolved values, identities with nothing stored to fall back on, and
-// store writes that could not happen.
+// store writes that could not happen. It also carries what the host plugin
+// store's repair pass did about the releases instances link to, since that
+// pass is the other store a provisioning run restores with nobody asking,
+// and it has to reach the same surfaces: the terminal, dispatch's stderr and
+// the SessionStart hook's context.
 //
 // It is a stdlib-only leaf. Its Identity is its own struct rather than
 // vault.Identity, so the CLI can hold a collector without importing the
@@ -98,6 +102,7 @@ type Collector struct {
 	inWorkTree    bool
 	unwritableDir string
 	unwritable    bool
+	releases      []ReleaseNote
 }
 
 // New returns an empty collector. now is the clock ages are measured
@@ -259,7 +264,62 @@ func (c *Collector) Empty() bool {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return len(c.served) == 0 && len(c.misses) == 0 && len(c.lockTimeouts) == 0 && !c.inWorkTree && !c.unwritable
+	return len(c.served) == 0 && len(c.misses) == 0 && len(c.lockTimeouts) == 0 && !c.inWorkTree && !c.unwritable && len(c.releases) == 0
+}
+
+// ReleaseOutcome is what the plugin store's repair pass did about one
+// release an instance on disk links to.
+type ReleaseOutcome int
+
+const (
+	// ReleaseRestored: the release was missing or unmarked and is held again.
+	ReleaseRestored ReleaseOutcome = iota + 1
+	// ReleaseRefused: its commit is not shown to be in its source's own
+	// history, so nothing was fetched and its links were left as they are.
+	ReleaseRefused
+	// ReleaseUndeclared: its source is no longer declared by the workspace,
+	// so it was left alone.
+	ReleaseUndeclared
+	// ReleaseNotRestored: the restore failed this time; nothing was marked
+	// held for it.
+	ReleaseNotRestored
+)
+
+// ReleaseNote is one plugin release the repair pass reports.
+type ReleaseNote struct {
+	Outcome ReleaseOutcome
+	// Release is "github.com/<owner>/<repo>@<commit>".
+	Release string
+	// Instances are the instance directories whose links name it.
+	Instances []string
+	// Reason is why it was refused or not restored; empty otherwise.
+	Reason string
+}
+
+// PluginRelease records what the plugin store's repair pass did about one
+// release. The release name and instance paths are niwa's own, and the
+// reason is an error message; none carries a secret.
+func (c *Collector) PluginRelease(n ReleaseNote) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n.Instances = append([]string(nil), n.Instances...)
+	c.releases = append(c.releases, n)
+}
+
+// ReleaseNotes returns the plugin release records in the order they were
+// recorded.
+func (c *Collector) ReleaseNotes() []ReleaseNote {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]ReleaseNote, len(c.releases))
+	copy(out, c.releases)
+	return out
 }
 
 func sortedIdentities(set map[Identity]bool) []Identity {

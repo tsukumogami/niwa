@@ -50,6 +50,26 @@ const (
 
 	// maxFieldRunes caps each identity field and directory in a rendering.
 	maxFieldRunes = 200
+
+	// notePrefix starts a terminal line that reports something niwa did
+	// rather than something that went wrong.
+	notePrefix = "note: "
+
+	// The plugin store's repair records. Each format takes the release
+	// ("github.com/<owner>/<repo>@<commit>") and the instances that link it,
+	// then the reason where there is one. None names a command to run: the
+	// next provisioning command restores a missing release by itself.
+	releaseRestoredFormat    = "restored plugin release %s for instances: %s."
+	releaseRefusedFormat     = "refused to restore plugin release %s, linked from instances: %s: %s; nothing was fetched and the links were left as they are."
+	releaseUndeclaredFormat  = "plugin release %s, linked from instances: %s, is from a marketplace source this workspace no longer declares; it was not restored and the links were left as they are."
+	releaseNotRestoredFormat = "could not restore plugin release %s, linked from instances: %s: %s; nothing was marked held for it."
+
+	// releaseContextLead opens the plugin store's part of the agent-context
+	// rendering.
+	releaseContextLead = "While provisioning, niwa's host plugin store reported the following about releases that instances of this workspace link to:"
+
+	// maxListedInstances caps the instances one release line names.
+	maxListedInstances = 10
 )
 
 // notice is one rendered message: its sentence, and whether it concerns a
@@ -97,7 +117,8 @@ func (c *Collector) notices() []notice {
 	return out
 }
 
-// RenderText renders the notices for a terminal, one "warning: " line each.
+// RenderText renders the notices for a terminal, one "warning: " line each,
+// the plugin store's records after them ("note: " for a restored release).
 // It returns the empty string when nothing was recorded, including on a nil
 // collector, so a caller can print it unconditionally.
 func (c *Collector) RenderText() string {
@@ -107,32 +128,101 @@ func (c *Collector) RenderText() string {
 		sb.WriteString(n.text)
 		sb.WriteString("\n")
 	}
+	for _, n := range c.releaseNotices() {
+		if n.restored {
+			sb.WriteString(notePrefix)
+		} else {
+			sb.WriteString(textPrefix)
+		}
+		sb.WriteString(n.text)
+		sb.WriteString("\n")
+	}
 	return sb.String()
 }
 
 // RenderContext renders the notices for an agent's context window, which is
 // where the SessionStart hook delivers them. Each notice carries the same
 // sentence as its terminal line, and each one about a provider login tells
-// the agent to leave the login to the operator. It returns the empty string
-// when nothing was recorded.
+// the agent to leave the login to the operator. The plugin store's records
+// follow under a lead of their own. It returns the empty string when nothing
+// was recorded.
 func (c *Collector) RenderContext() string {
-	ns := c.notices()
-	if len(ns) == 0 {
-		return ""
-	}
 	var sb strings.Builder
-	sb.WriteString(contextLead)
-	sb.WriteString("\n\n")
-	for _, n := range ns {
-		sb.WriteString("  - ")
-		sb.WriteString(n.text)
-		if n.needsLogin {
-			sb.WriteString(" ")
-			sb.WriteString(contextLogin)
+	if ns := c.notices(); len(ns) > 0 {
+		sb.WriteString(contextLead)
+		sb.WriteString("\n\n")
+		for _, n := range ns {
+			sb.WriteString("  - ")
+			sb.WriteString(n.text)
+			if n.needsLogin {
+				sb.WriteString(" ")
+				sb.WriteString(contextLogin)
+			}
+			sb.WriteString("\n")
 		}
-		sb.WriteString("\n")
+	}
+	if rs := c.releaseNotices(); len(rs) > 0 {
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(releaseContextLead)
+		sb.WriteString("\n\n")
+		for _, n := range rs {
+			sb.WriteString("  - ")
+			sb.WriteString(n.text)
+			sb.WriteString("\n")
+		}
 	}
 	return sb.String()
+}
+
+// releaseNotice is one rendered plugin release record.
+type releaseNotice struct {
+	text     string
+	restored bool
+}
+
+// releaseNotices renders the plugin store's repair records in the order they
+// were recorded. They follow the secret-store notices and have a lead of
+// their own in the agent context, so nothing about a plugin release reads as
+// a secret-store message.
+func (c *Collector) releaseNotices() []releaseNotice {
+	var out []releaseNotice
+	for _, n := range c.ReleaseNotes() {
+		name, served := clean(n.Release), instanceList(n.Instances)
+		switch n.Outcome {
+		case ReleaseRestored:
+			out = append(out, releaseNotice{text: fmt.Sprintf(releaseRestoredFormat, name, served), restored: true})
+		case ReleaseRefused:
+			out = append(out, releaseNotice{text: fmt.Sprintf(releaseRefusedFormat, name, served, clean(n.Reason))})
+		case ReleaseUndeclared:
+			out = append(out, releaseNotice{text: fmt.Sprintf(releaseUndeclaredFormat, name, served)})
+		case ReleaseNotRestored:
+			out = append(out, releaseNotice{text: fmt.Sprintf(releaseNotRestoredFormat, name, served, clean(n.Reason))})
+		}
+	}
+	return out
+}
+
+// instanceList joins the cleaned instance paths, at most maxListedInstances
+// of them, and says how many more there are.
+func instanceList(instances []string) string {
+	if len(instances) == 0 {
+		return "none"
+	}
+	shown := instances
+	if len(shown) > maxListedInstances {
+		shown = shown[:maxListedInstances]
+	}
+	parts := make([]string, len(shown))
+	for i, p := range shown {
+		parts[i] = clean(p)
+	}
+	list := strings.Join(parts, ", ")
+	if extra := len(instances) - len(shown); extra > 0 {
+		list += fmt.Sprintf(" and %d more", extra)
+	}
+	return list
 }
 
 // reasonClause completes "the provider ..." for a reason.

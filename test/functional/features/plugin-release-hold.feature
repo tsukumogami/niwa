@@ -215,3 +215,163 @@ Feature: niwa holds each plugin marketplace release once per host
     And the marketplace "skills" of the workspace root is a real directory holding its manifest
     And the marketplace "tools" of the workspace root is a real directory holding its manifest
     And nothing for plugins exists under the sandbox home's .niwa
+
+  # A release an instance links to that goes missing from the store comes
+  # back with the next provisioning command, whichever instance it runs for,
+  # with nothing run inside the instance that links it. The restore is one
+  # tarball request and one line naming the release and its instances.
+  @critical
+  Scenario: An apply in another instance restores a deleted release
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the release "v1.0.0" of "acme/skills" is deleted from the plugin store of workspace root "."
+    When the GitHub fake log is cleared
+    And I run "niwa apply" in instance "ws-2"
+    Then the exit code is 0
+    And the GitHub fake served 1 tarball request for the release "v1.0.0" of "acme/skills"
+    And the GitHub fake served 1 tarball request in all
+    And the release "v1.0.0" of "acme/skills" is held again in the plugin store of workspace root "."
+    And the output reports the release "v1.0.0" of "acme/skills" restored for instances "ws,ws-2"
+    And instance "ws" links "acme/skills" to its release "v1.0.0"
+    And every marketplace's skill resolves in instance "ws" at its root, in repo "app" and in a session worktree
+
+  # The same restore runs when the next command makes a new instance: a
+  # create, a dispatch or the SessionStart hook. Its line reaches the
+  # terminal, dispatch's output or the hook's context.
+  @critical
+  Scenario Outline: A command that makes an instance restores a deleted release
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the release "v1.0.0" of "acme/skills" is deleted from the plugin store of workspace root "."
+    When the GitHub fake log is cleared
+    And I make the second instance with <second>
+    Then the exit code is 0
+    And the GitHub fake served 1 tarball request for the release "v1.0.0" of "acme/skills"
+    And the GitHub fake served 1 tarball request in all
+    And the release "v1.0.0" of "acme/skills" is held again in the plugin store of workspace root "."
+    And the output reports the release "v1.0.0" of "acme/skills" restored for instance "ws"
+    And every marketplace's skill resolves in instance "ws" at its root, in repo "app" and in a session worktree
+    And every marketplace's skill resolves in the second instance at its root, in repo "app" and in a session worktree
+
+    Examples:
+      | second                |
+      | niwa create ws        |
+      | niwa dispatch         |
+      | the SessionStart hook |
+
+  # A create whose track now resolves to a newer release still restores the
+  # older release another instance links to: one request for each.
+  @critical
+  Scenario: A create on a newer release restores the older instance's release
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the release "v1.0.0" of "acme/skills" is deleted from the plugin store of workspace root "."
+    And the GitHub marketplace "acme/skills" publishes release "v1.1.0"
+    When the GitHub fake log is cleared
+    And I run "niwa create ws"
+    Then the exit code is 0
+    And the GitHub fake served 1 tarball request for the release "v1.0.0" of "acme/skills"
+    And the GitHub fake served 1 tarball request for the release "v1.1.0" of "acme/skills"
+    And the GitHub fake served 2 tarball requests in all
+    And the release "v1.0.0" of "acme/skills" is held again in the plugin store of workspace root "."
+    And the output reports the release "v1.0.0" of "acme/skills" restored for instance "ws"
+    And instance "ws" links "acme/skills" to its release "v1.0.0"
+    And instance "ws-2" links "acme/skills" to its release "v1.1.0"
+    And every marketplace's skill resolves in instance "ws" at its root, in repo "app" and in a session worktree
+
+  # A release directory without its held.json is not held: the next command
+  # fetches it again and marks it.
+  @critical
+  Scenario: A release whose held.json is gone is fetched again and marked
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the held.json of the release "v1.0.0" of "acme/skills" is deleted from the plugin store of workspace root "."
+    When the GitHub fake log is cleared
+    And I run "niwa apply" in instance "ws"
+    Then the exit code is 0
+    And the GitHub fake served 1 tarball request for the release "v1.0.0" of "acme/skills"
+    And the GitHub fake served 1 tarball request in all
+    And the release "v1.0.0" of "acme/skills" is held again in the plugin store of workspace root "."
+    And the output reports the release "v1.0.0" of "acme/skills" restored for instance "ws"
+
+  # A link names a commit; the store fetches it back only when the commit is
+  # in the source's own history. One only a fork holds is refused and its
+  # link left alone; one behind a tag but at no tip is restored, which the
+  # compare endpoint answers.
+  @critical
+  Scenario: A fork-only commit is refused and a commit behind a tag is restored
+    Given the GitHub marketplace "acme/skills" gains an untagged commit
+    And the GitHub marketplace "acme/skills" publishes release "v1.1.0"
+    And a fork of "acme/skills" holds a commit
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given instance "ws" links "acme/skills" to the fork commit
+    And instance "ws-2" links "acme/skills" to the untagged commit
+    When the GitHub fake log is cleared
+    And I run "niwa apply" in instance "ws-2"
+    Then the exit code is 0
+    And the GitHub fake served 0 tarball requests for the fork commit of "acme/skills"
+    And the GitHub fake served 1 tarball request for the untagged commit of "acme/skills"
+    And the GitHub fake served 1 tarball request in all
+    And the plugin store of workspace root "." holds nothing for the fork commit of "acme/skills"
+    And instance "ws" still links "acme/skills" to the fork commit
+    And the output reports the fork commit of "acme/skills" refused for instance "ws"
+    And the untagged commit of "acme/skills" is held again in the plugin store of workspace root "."
+    And the output reports the untagged commit of "acme/skills" restored for instance "ws-2"
+    And every marketplace's skill resolves in instance "ws-2" at its root, in repo "app" and in a session worktree
+
+  # A refetch that fails is a warning naming the release, not a failed
+  # command, and leaves nothing marked held. The next command, with the
+  # network back, restores it.
+  @critical
+  Scenario: A failed refetch warns and the next command restores the release
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the release "v1.0.0" of "acme/skills" is deleted from the plugin store of workspace root "."
+    When I run "niwa apply" in instance "ws" with every tarball fetch failing
+    Then the exit code is 0
+    And the output reports the release "v1.0.0" of "acme/skills" not restored for instance "ws"
+    And the plugin store of workspace root "." holds nothing for the release "v1.0.0" of "acme/skills"
+    When the GitHub fake log is cleared
+    And I run "niwa apply" in instance "ws"
+    Then the exit code is 0
+    And the GitHub fake served 1 tarball request for the release "v1.0.0" of "acme/skills"
+    And the GitHub fake served 1 tarball request in all
+    And the release "v1.0.0" of "acme/skills" is held again in the plugin store of workspace root "."
+    And the output reports the release "v1.0.0" of "acme/skills" restored for instance "ws"
+
+  # The repair runs once per command per workspace: an apply across three
+  # instances that all link one missing release fetches it once.
+  @critical
+  Scenario: Three instances on one missing release make one tarball request
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the release "v1.0.0" of "acme/skills" is deleted from the plugin store of workspace root "."
+    When the GitHub fake log is cleared
+    And I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the GitHub fake served 1 tarball request for the release "v1.0.0" of "acme/skills"
+    And the GitHub fake served 1 tarball request in all
+    And the output reports the release "v1.0.0" of "acme/skills" restored for instances "ws,ws-2,ws-3"

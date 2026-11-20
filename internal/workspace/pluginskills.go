@@ -14,6 +14,7 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/fallbacknotice"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/pluginstore"
 )
@@ -76,7 +77,7 @@ type MissingPluginRoot struct {
 // through its own plugin system is unaffected. Overstating this would tell a
 // Claude-only workspace its skills are missing when they are not.
 func (m MissingPluginRoot) String() string {
-	return fmt.Sprintf("plugin %q: no skills tree delivered -- expected it at %s (%s); an agent that reads skills from a delivered tree gets none of this plugin's until that is fixed and `niwa apply` re-runs", m.Plugin, m.Path, m.Reason)
+	return fmt.Sprintf("plugin %q: no skills tree delivered -- expected it at %s (%s); an agent that reads skills from a delivered tree gets none of this plugin's for now", m.Plugin, m.Path, m.Reason)
 }
 
 // PluginSkillsInputs is what resolving the configured plugins to deliverable
@@ -109,6 +110,12 @@ type PluginSkillsInputs struct {
 	// (the unit suites) keeps every marketplace in the instance, as does an
 	// instance whose parent is not a workspace root.
 	Home string
+
+	// Unrestored maps a release id the store's repair pass refused or could
+	// not restore in this command to the reason. A link of this instance to
+	// one is reported with that reason rather than tried a second time in
+	// the same command; the next command's repair tries again.
+	Unrestored map[string]string
 }
 
 // ResolvePluginTrees resolves every configured plugin to the tree its skills are
@@ -307,6 +314,9 @@ func keepMarketplaceLink(ctx context.Context, in PluginSkillsInputs, name, dest 
 	if store, ok := pluginStoreFor(in); ok && in.Fetcher != nil {
 		if target, err := os.Readlink(dest); err == nil {
 			if release, ok := pluginstore.ParseLink(target); ok {
+				if reason, failed := in.Unrestored[release.ID()]; failed {
+					return "", fmt.Errorf("marketplace %q: release %s was not restored: %s", name, release.Label(), reason)
+				}
 				_, cond, err := store.Ensure(ctx, release, dest, declaredMarketplaceSources(in.Marketplaces), marketplaceReachable(in.Fetcher))
 				switch {
 				case err != nil && cond == pluginstore.CondNone:
@@ -805,4 +815,57 @@ func lsRemoteTips(ctx context.Context, owner, repo string) (map[string]string, e
 		}
 	}
 	return tips, nil
+}
+
+// repairPluginStore runs the host plugin store's repair pass for the
+// workspace this instance belongs to, once per command per workspace, and
+// reports what it did through the run's notices: the terminal for apply and
+// create, dispatch's stderr, and the SessionStart hook's context. It restores
+// every release an instance on disk links to that is missing or unmarked, so
+// a deleted release comes back with nobody acting and no command run inside
+// the instances it serves. It writes only inside the store.
+//
+// A run that does no fetching, or a layout with no store, has nothing to
+// repair.
+func (a *Applier) repairPluginStore(ctx context.Context, in PluginSkillsInputs, notices *fallbacknotice.Collector) {
+	if in.Fetcher == nil {
+		return
+	}
+	store, ok := pluginStoreFor(in)
+	if !ok {
+		return
+	}
+	dir := pluginstore.Dir(store.Home, store.WorkspaceRoot)
+	if a.pluginStoresRepaired[dir] {
+		return
+	}
+	if a.pluginStoresRepaired == nil {
+		a.pluginStoresRepaired = map[string]bool{}
+	}
+	if a.pluginUnrestored == nil {
+		a.pluginUnrestored = map[string]string{}
+	}
+	a.pluginStoresRepaired[dir] = true
+
+	res := store.Repair(ctx, declaredMarketplaceSources(in.Marketplaces), marketplaceReachable(in.Fetcher))
+	record := func(outcome fallbacknotice.ReleaseOutcome, entries []pluginstore.RepairEntry, unrestored bool) {
+		for _, e := range entries {
+			notices.PluginRelease(fallbacknotice.ReleaseNote{
+				Outcome:   outcome,
+				Release:   e.Release.Name(),
+				Instances: e.Instances,
+				Reason:    e.Reason,
+			})
+			if unrestored {
+				a.pluginUnrestored[e.Release.ID()] = e.Reason
+			}
+		}
+	}
+	record(fallbacknotice.ReleaseRestored, res.Restored, false)
+	record(fallbacknotice.ReleaseRefused, res.Refused, true)
+	record(fallbacknotice.ReleaseUndeclared, res.Undeclared, false)
+	record(fallbacknotice.ReleaseNotRestored, res.Failed, true)
+	if res.ScanErr != nil && a.Reporter != nil {
+		a.Reporter.Warn("plugin store: not every instance could be listed for its release links: %v", res.ScanErr)
+	}
 }

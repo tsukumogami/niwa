@@ -76,6 +76,17 @@ type Applier struct {
 	// lock, since the pipeline runs one instance at a time.
 	mirrorsChecked map[string]bool
 
+	// pluginStoresRepaired holds the plugin store directories this Applier
+	// has already run the repair pass over, so a root-level apply that runs
+	// the pipeline once per instance repairs each workspace's store once per
+	// command. pluginUnrestored holds, by release id, the releases that pass
+	// refused or could not restore, with the reason: an instance that links
+	// one is told why instead of trying again in the same command. The next
+	// command tries again. Like mirrorsChecked, both are written without a
+	// lock, since the pipeline runs one instance at a time.
+	pluginStoresRepaired map[string]bool
+	pluginUnrestored     map[string]string
+
 	// MirrorCommand names the command in the mirror log when set, in place of
 	// the pipeline's own create or apply: a SessionStart hook or a dispatch
 	// provisions through Create but logs as itself.
@@ -1996,15 +2007,23 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// marketplace's content into this instance, neither of which belongs on a
 	// per-repository path -- and the resolved set is then delivered for every
 	// agent whose declaration says its skills arrive that way.
+	//
+	// Before this instance's own placement, the host plugin store's repair
+	// pass restores any release an instance on disk links to that has gone
+	// missing or lost its mark, once per command per workspace, so an older
+	// instance's skills come back with no command run inside it.
 	fetcher, _ := a.GitHubClient.(FetchClient)
-	pluginTrees, missingPlugins := ResolvePluginTrees(ctx, PluginSkillsInputs{
+	pluginInputs := PluginSkillsInputs{
 		InstanceRoot: instanceRoot,
 		Plugins:      MergeInstanceOverrides(effectiveCfg).Plugins,
 		Marketplaces: effectiveCfg.Claude.Marketplaces,
 		RepoIndex:    marketplaceIndex,
 		Fetcher:      fetcher,
 		Home:         a.DeveloperHome,
-	})
+	}
+	a.repairPluginStore(ctx, pluginInputs, notices)
+	pluginInputs.Unrestored = a.pluginUnrestored
+	pluginTrees, missingPlugins := ResolvePluginTrees(ctx, pluginInputs)
 	for _, m := range missingPlugins {
 		allWarnings = append(allWarnings, m.String())
 	}

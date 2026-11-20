@@ -41,6 +41,9 @@ type pluginMarketplace struct {
 	bare        string // the bare repo on the local git server
 	work        string // a clone the releases are committed in
 	releases    []pluginRelease
+	history     []string      // every commit pushed to main, oldest first
+	untagged    pluginRelease // a commit on main no tag names, when one was made
+	fork        pluginRelease // a commit only a fork holds, when one was made
 }
 
 // pluginStoreScenario is what the plugin-release-hold scenarios remember.
@@ -107,6 +110,7 @@ func registerPluginStoreSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^no marketplace has a release directory or a held\.json in the plugin store of workspace root "([^"]*)"$`, noMarketplaceReleaseDirectory)
 	ctx.Step(`^the config of workspace root "([^"]*)" no longer tracks its source$`, theConfigNoLongerTracksItsSource)
 	ctx.Step(`^the plugin store of workspace root "([^"]*)" holds no staging entry for any marketplace$`, noStagingEntryForAnyMarketplace)
+	registerPluginRepairSteps(ctx)
 }
 
 // pluginRootDir is the workspace root a scenario names: "." for the suite's own
@@ -193,6 +197,10 @@ func theGitHubMarketplacePublishesRelease(ctx context.Context, slug, tag string)
 		return ctx, fmt.Errorf("git rev-parse: %w\n%s", err, out)
 	}
 	commit := strings.TrimSpace(string(out))
+	// Every earlier commit on main is behind this one at the compare
+	// endpoint, so a commit no tag names still passes the reachability check.
+	s.githubFake.SetBehind(owner, repo, commit, mk.history)
+	mk.history = append(mk.history, commit)
 
 	// Each release is a second apart, so the newest by commit time is the
 	// newest published.
