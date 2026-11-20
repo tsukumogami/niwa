@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -249,6 +250,109 @@ func TestRepairReportsAFailedFetchAndLeavesNothingHeld(t *testing.T) {
 	}
 
 	// The next pass, with the fetch working again, restores it.
+	f.fetchErr = nil
+	f.resetFetches()
+	res = s.Repair(context.Background(), declaredAcme(), everythingReachable)
+	if len(res.Restored) != 1 || len(f.fetched()) != 1 {
+		t.Fatalf("retry restored %+v with fetches %v", res.Restored, f.fetched())
+	}
+}
+
+// tamper gives a file of r's tree its write bit back and appends to it.
+func (f *repairFixture) tamper(s Store, r Release) {
+	f.t.Helper()
+	file := filepath.Join(TreePath(s.Home, s.WorkspaceRoot, r), ".claude-plugin", "marketplace.json")
+	if err := os.Chmod(file, 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+	fh, err := os.OpenFile(file, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer fh.Close()
+	if _, err := fh.WriteString("\n"); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// TestRepairRefetchesATamperedRelease changes the tree of one held release
+// linked from two instances and leaves another held one intact: Repair
+// fetches only the changed one, once, and reports it tampered with both
+// instances.
+func TestRepairRefetchesATamperedRelease(t *testing.T) {
+	f := newRepairFixture(t)
+	s := f.store()
+	changed := repairRelease(t, "missing", missingCommit)
+	intact := repairRelease(t, "held", heldCommit)
+	for _, r := range []Release{changed, intact} {
+		if _, cond, err := s.Ensure(context.Background(), r, "", nil, nil); err != nil || cond != CondNone {
+			t.Fatalf("placing %s: %q %v", r.ID(), cond, err)
+		}
+	}
+	one, two := f.instance("one"), f.instance("two")
+	f.linkTo(one, "missing", changed)
+	f.linkTo(two, "missing", changed)
+	f.linkTo(two, "held", intact)
+	f.tamper(s, changed)
+	f.resetFetches()
+
+	res := s.Repair(context.Background(), declaredAcme(), everythingReachable)
+
+	if got, want := f.fetched(), []string{"acme/missing@" + missingCommit}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("fetches = %v, want %v", got, want)
+	}
+	if want := []RepairEntry{{Release: changed, Instances: []string{one, two}}}; !sameEntries(res.Tampered, want) {
+		t.Fatalf("Tampered = %+v, want %+v", res.Tampered, want)
+	}
+	if len(res.Restored)+len(res.Refused)+len(res.Undeclared)+len(res.Failed) != 0 {
+		t.Fatalf("unexpected result %+v", res)
+	}
+	for _, r := range []Release{changed, intact} {
+		if ok, err := s.Verify(r); !ok {
+			t.Fatalf("%s fails Verify after Repair: %v", r.ID(), err)
+		}
+	}
+
+	// The current instance's own Ensure in the same command fetches nothing.
+	if restored, _, err := s.Ensure(context.Background(), changed, "", declaredAcme(), everythingReachable); err != nil || restored {
+		t.Fatalf("Ensure after Repair = %v, %v", restored, err)
+	}
+	f.resetFetches()
+	res = s.Repair(context.Background(), declaredAcme(), everythingReachable)
+	if len(f.fetched()) != 0 || len(res.Tampered)+len(res.Restored) != 0 {
+		t.Fatalf("second Repair fetched %v, result %+v", f.fetched(), res)
+	}
+}
+
+// A tampered release whose refetch fails is reported failed, saying it was
+// changed, with nothing held and nothing left at its release path; the next
+// pass with the fetch working restores it.
+func TestRepairReportsAFailedRefetchOfATamperedRelease(t *testing.T) {
+	f := newRepairFixture(t)
+	s := f.store()
+	r := repairRelease(t, "missing", missingCommit)
+	if _, cond, err := s.Ensure(context.Background(), r, "", nil, nil); err != nil || cond != CondNone {
+		t.Fatalf("placing: %q %v", cond, err)
+	}
+	f.linkTo(f.instance("one"), "missing", r)
+	f.tamper(s, r)
+	f.fetchErr = errors.New("connection reset")
+
+	res := s.Repair(context.Background(), declaredAcme(), everythingReachable)
+
+	if len(res.Failed) != 1 || res.Failed[0].Release.ID() != r.ID() || !strings.Contains(res.Failed[0].Reason, "changed after it was placed") || !strings.Contains(res.Failed[0].Reason, "connection reset") {
+		t.Fatalf("Failed = %+v", res.Failed)
+	}
+	if len(res.Tampered) != 0 {
+		t.Fatalf("Tampered = %+v after a failed refetch", res.Tampered)
+	}
+	if held, _ := s.Held(r); held {
+		t.Fatal("held after a failed refetch")
+	}
+	if _, err := os.Lstat(releaseDir(s.pluginsDir(), r)); !os.IsNotExist(err) {
+		t.Fatalf("the tampered release is still at its path (%v)", err)
+	}
+
 	f.fetchErr = nil
 	f.resetFetches()
 	res = s.Repair(context.Background(), declaredAcme(), everythingReachable)

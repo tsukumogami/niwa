@@ -25,6 +25,8 @@ func TestRenderTextReleaseGolden(t *testing.T) {
 			"warning: plugin release " + testReleaseName + ", linked from instances: /ws/one, /ws/two, is from a marketplace source this workspace no longer declares; it was not restored and the links were left as they are.\n"},
 		{"not restored", ReleaseNote{Outcome: ReleaseNotRestored, Release: testReleaseName, Instances: instances, Reason: "fetching acme/skills 3f9a2c1e0b1d: boom"},
 			"warning: could not restore plugin release " + testReleaseName + ", linked from instances: /ws/one, /ws/two: fetching acme/skills 3f9a2c1e0b1d: boom; nothing was marked held for it.\n"},
+		{"tampered", ReleaseNote{Outcome: ReleaseTampered, Release: testReleaseName, Instances: instances},
+			"warning: plugin release " + testReleaseName + " was changed after it was placed (tampered with); fetched it again for instances: /ws/one, /ws/two.\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -44,7 +46,7 @@ func TestRenderTextReleaseGolden(t *testing.T) {
 // provisioning command restores a release by itself.
 func TestReleaseLinesNameNoCommand(t *testing.T) {
 	c := New(clock())
-	for _, o := range []ReleaseOutcome{ReleaseRestored, ReleaseRefused, ReleaseUndeclared, ReleaseNotRestored} {
+	for _, o := range []ReleaseOutcome{ReleaseRestored, ReleaseRefused, ReleaseUndeclared, ReleaseNotRestored, ReleaseTampered} {
 		c.PluginRelease(ReleaseNote{Outcome: o, Release: testReleaseName, Instances: []string{"/ws/one"}, Reason: "x"})
 	}
 	for _, text := range []string{c.RenderText(), c.RenderContext()} {
@@ -74,6 +76,17 @@ func TestRenderContextKeepsReleaseNotesApart(t *testing.T) {
 	only.PluginRelease(ReleaseNote{Outcome: ReleaseRestored, Release: testReleaseName, Instances: []string{"/ws/one"}})
 	if text := only.RenderContext(); strings.Contains(text, "secret") || !strings.HasPrefix(text, releaseContextLead) {
 		t.Errorf("a plugin-only rendering reads as a secret-store one:\n%s", text)
+	}
+}
+
+// A tampered release renders under the plugin store's lead in the agent
+// context, with the same sentence as its terminal line.
+func TestRenderContextTamperedRelease(t *testing.T) {
+	c := New(clock())
+	c.PluginRelease(ReleaseNote{Outcome: ReleaseTampered, Release: testReleaseName, Instances: []string{"/ws/one", "/ws/two"}})
+	want := releaseContextLead + "\n\n  - plugin release " + testReleaseName + " was changed after it was placed (tampered with); fetched it again for instances: /ws/one, /ws/two.\n"
+	if got := c.RenderContext(); got != want {
+		t.Errorf("RenderContext:\n got %q\nwant %q", got, want)
 	}
 }
 

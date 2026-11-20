@@ -821,9 +821,10 @@ func lsRemoteTips(ctx context.Context, owner, repo string) (map[string]string, e
 // workspace this instance belongs to, once per command per workspace, and
 // reports what it did through the run's notices: the terminal for apply and
 // create, dispatch's stderr, and the SessionStart hook's context. It restores
-// every release an instance on disk links to that is missing or unmarked, so
-// a deleted release comes back with nobody acting and no command run inside
-// the instances it serves. It writes only inside the store.
+// every release an instance on disk links to that is missing, unmarked, or
+// changed after it was placed, so a deleted or tampered release comes back
+// with nobody acting and no command run inside the instances it serves. It
+// writes only inside the store.
 //
 // A run that does no fetching, or a layout with no store, has nothing to
 // repair.
@@ -862,6 +863,7 @@ func (a *Applier) repairPluginStore(ctx context.Context, in PluginSkillsInputs, 
 		}
 	}
 	record(fallbacknotice.ReleaseRestored, res.Restored, false)
+	record(fallbacknotice.ReleaseTampered, res.Tampered, false)
 	record(fallbacknotice.ReleaseRefused, res.Refused, true)
 	record(fallbacknotice.ReleaseUndeclared, res.Undeclared, false)
 	record(fallbacknotice.ReleaseNotRestored, res.Failed, true)

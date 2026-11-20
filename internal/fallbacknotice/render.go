@@ -63,6 +63,7 @@ const (
 	releaseRefusedFormat     = "refused to restore plugin release %s, linked from instances: %s: %s; nothing was fetched and the links were left as they are."
 	releaseUndeclaredFormat  = "plugin release %s, linked from instances: %s, is from a marketplace source this workspace no longer declares; it was not restored and the links were left as they are."
 	releaseNotRestoredFormat = "could not restore plugin release %s, linked from instances: %s: %s; nothing was marked held for it."
+	releaseTamperedFormat    = "plugin release %s was changed after it was placed (tampered with); fetched it again for instances: %s."
 
 	// releaseContextLead opens the plugin store's part of the agent-context
 	// rendering.
@@ -199,6 +200,8 @@ func (c *Collector) releaseNotices() []releaseNotice {
 			out = append(out, releaseNotice{text: fmt.Sprintf(releaseUndeclaredFormat, name, served)})
 		case ReleaseNotRestored:
 			out = append(out, releaseNotice{text: fmt.Sprintf(releaseNotRestoredFormat, name, served, clean(n.Reason))})
+		case ReleaseTampered:
+			out = append(out, releaseNotice{text: fmt.Sprintf(releaseTamperedFormat, name, served)})
 		}
 	}
 	return out

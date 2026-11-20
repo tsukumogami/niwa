@@ -27,7 +27,7 @@ type RepairEntry struct {
 	Release   Release
 	Instances []string
 	// Reason says why the release was refused or not restored. Empty for a
-	// restored or undeclared one.
+	// restored, tampered or undeclared one.
 	Reason string
 }
 
@@ -36,6 +36,9 @@ type RepairEntry struct {
 type RepairResult struct {
 	// Restored were missing or unmarked, and are now held.
 	Restored []RepairEntry
+	// Tampered were held but their tree failed Verify, changed after it was
+	// placed; they were fetched again and are now held.
+	Tampered []RepairEntry
 	// Refused belong to a declared source but their commit is not shown to be
 	// in its own history; nothing was fetched or held, and no link changed.
 	Refused []RepairEntry
@@ -113,10 +116,14 @@ func (s Store) Linked() ([]Linked, error) {
 
 // Repair restores every release an instance on disk links to that is not
 // held: its <commit> directory is absent, or present without a valid
-// held.json. It is the one pass that puts back a release nobody asked for by
-// name, so no command, flag or hint has to.
+// held.json. It also walks each distinct held release once with Verify, and
+// one whose tree no longer matches its seal is moved aside and fetched again
+// like a missing one, then reported as tampered. It is the one pass that puts
+// back a release nobody asked for by name, so no command, flag or hint has
+// to.
 //
-// A held release is left as it is. A release of a source not in declared is
+// A held release that passes Verify is left as it is. A release of a source
+// not in declared is
 // reported and left alone. Any other is placed through Ensure with no link,
 // so it is fetched only when reachable shows its commit belongs to the
 // source's own history, under the release's lock, and with the same
@@ -136,8 +143,12 @@ func (s Store) Repair(ctx context.Context, declared map[string]bool, reachable R
 			res.Failed = append(res.Failed, entry)
 			continue
 		}
+		tampered := false
 		if held {
-			continue
+			if intact, _ := s.Verify(r); intact {
+				continue
+			}
+			tampered = true
 		}
 		if !declared[r.Source()] {
 			res.Undeclared = append(res.Undeclared, entry)
@@ -149,20 +160,31 @@ func (s Store) Repair(ctx context.Context, declared map[string]bool, reachable R
 			res.Refused = append(res.Refused, entry)
 			continue
 		}
+		// Ensure verifies again under the lock, so a release another command
+		// already put back comes back not restored and is not reported.
 		restored, cond, err := s.Ensure(ctx, r, "", declared, reachable)
+		// A tampered release whose refetch failed says it was tampered with.
+		failed := func(reason string) {
+			if tampered {
+				reason = "it was changed after it was placed; " + reason
+			}
+			entry.Reason = reason
+			res.Failed = append(res.Failed, entry)
+		}
 		switch {
 		case errors.Is(err, ErrRefused):
 			entry.Reason = err.Error()
 			res.Refused = append(res.Refused, entry)
 		case cond != CondNone:
-			entry.Reason = fmt.Sprintf("the plugin store at %s is %s", s.pluginsDir(), cond)
+			reason := fmt.Sprintf("the plugin store at %s is %s", s.pluginsDir(), cond)
 			if err != nil {
-				entry.Reason += ": " + err.Error()
+				reason += ": " + err.Error()
 			}
-			res.Failed = append(res.Failed, entry)
+			failed(reason)
 		case err != nil:
-			entry.Reason = err.Error()
-			res.Failed = append(res.Failed, entry)
+			failed(err.Error())
+		case restored && tampered:
+			res.Tampered = append(res.Tampered, entry)
 		case restored:
 			res.Restored = append(res.Restored, entry)
 		}

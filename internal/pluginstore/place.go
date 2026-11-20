@@ -111,9 +111,11 @@ func (s Store) ReadMark(r Release) (Mark, error) {
 
 // Held reports whether r is complete and marked: held.json parses and names
 // this source and commit, and tree/.claude-plugin/marketplace.json exists.
-// It makes a few stats and one short read and never reads the tree. A mark
-// that can't be read for a reason other than its absence is the unreadable
-// condition.
+// It makes a few stats and one short read and never reads the tree. It does
+// not read the seal either, so a tree changed after it was placed still
+// counts as held; Verify is the check that walks the tree against the seal.
+// A mark that can't be read for a reason other than its absence is the
+// unreadable condition.
 func (s Store) Held(r Release) (bool, Condition) {
 	m, err := s.ReadMark(r)
 	if err != nil {
@@ -137,8 +139,10 @@ func (s Store) Held(r Release) (bool, Condition) {
 	return true, CondNone
 }
 
-// Ensure places r if it is missing, and points link at its tree, both under
-// r's lock. link must sit in a real .niwa/marketplaces directory of the
+// Ensure places r if it is missing, or held but failing Verify, and points
+// link at its tree, both under r's lock. A held release that fails Verify was
+// changed after it was placed: it is moved into .trash/ and placed again at
+// its commit exactly as a missing one is, and restored is true. link must sit in a real .niwa/marketplaces directory of the
 // instance the command runs for; an empty link places without linking.
 //
 // When r was resolved from a declared ref just now, reachable is nil. When r
@@ -168,7 +172,12 @@ func (s Store) Ensure(ctx context.Context, r Release, link string, declared map[
 	if cond != CondNone {
 		return false, cond, fmt.Errorf("reading the mark of release %s", r.Label())
 	}
-	if !held {
+	intact := held
+	if held {
+		// A walk that fails, or a mark gone since Held, is not intact either.
+		intact, _ = s.Verify(r)
+	}
+	if !intact {
 		if reachable != nil {
 			if !declared[r.Source()] {
 				return false, CondNone, fmt.Errorf("%w: %s is not a marketplace source this workspace declares", ErrRefused, r.Source())
@@ -254,7 +263,7 @@ func (s Store) place(ctx context.Context, r Release) (Condition, error) {
 		}
 	}
 	clearStaging(filepath.Join(pdir, tmpDirName), r)
-	if err := s.trashUnmarked(r); err != nil {
+	if err := s.trashRelease(r); err != nil {
 		return CondNotPlaced, err
 	}
 
@@ -461,7 +470,23 @@ func makeReadOnly(tree string) error {
 // TakeSeal measures the tree with Lstat: its entry count, total size and the
 // newest inode change time among its entries.
 func TakeSeal(tree string) (Seal, error) {
-	var seal Seal
+	m, err := measure(tree)
+	return m.seal, err
+}
+
+// measurement is what one Lstat walk of a tree found: the seal's figures,
+// and whether any directory or regular file carries a write bit.
+type measurement struct {
+	seal     Seal
+	writable bool
+}
+
+// measure walks tree with Lstat and never follows a link. The tree root
+// counts as one entry and only regular files add to the size. A symlink is
+// passed over for the write-bit check, since Lstat reports every link as
+// 0777.
+func measure(tree string) (measurement, error) {
+	var m measurement
 	err := filepath.WalkDir(tree, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -470,18 +495,49 @@ func TakeSeal(tree string) (Seal, error) {
 		if err != nil {
 			return err
 		}
-		seal.Entries++
-		if info.Mode().IsRegular() {
-			seal.Bytes += info.Size()
+		m.seal.Entries++
+		mode := info.Mode()
+		if mode.IsRegular() {
+			m.seal.Bytes += info.Size()
+		}
+		if (mode.IsRegular() || mode.IsDir()) && mode.Perm()&0o222 != 0 {
+			m.writable = true
 		}
 		if st, ok := info.Sys().(*syscall.Stat_t); ok {
-			if ns := ctimeNS(st); ns > seal.MaxCtimeNS {
-				seal.MaxCtimeNS = ns
+			if ns := ctimeNS(st); ns > m.seal.MaxCtimeNS {
+				m.seal.MaxCtimeNS = ns
 			}
 		}
 		return nil
 	})
-	return seal, err
+	return m, err
+}
+
+// Verify walks r's tree with Lstat and compares it with the seal in its
+// held.json. It reports false when the entry count or the total size of the
+// regular files differs, when any directory or regular file carries a write
+// bit, or when any entry's inode change time is newer than the sealed one,
+// so an edit, an added or removed entry, or a chmod (even one put back) each
+// fail it. It reads metadata only, never file contents. The error says why
+// when the mark can't be read or the walk fails inside the tree (an entry
+// gone part way, an unreadable directory); the release is not intact then
+// either.
+//
+// The walk does not catch a tree rewritten together with its held.json, or a
+// change that keeps the entry count, the size and the newest ctime.
+func (s Store) Verify(r Release) (bool, error) {
+	mark, err := s.ReadMark(r)
+	if err != nil {
+		return false, fmt.Errorf("reading the mark of release %s: %w", r.Label(), err)
+	}
+	m, err := measure(TreePath(s.Home, s.WorkspaceRoot, r))
+	if err != nil {
+		return false, fmt.Errorf("walking release %s: %w", r.Label(), err)
+	}
+	return m.seal.Entries == mark.Seal.Entries &&
+		m.seal.Bytes == mark.Seal.Bytes &&
+		m.seal.MaxCtimeNS <= mark.Seal.MaxCtimeNS &&
+		!m.writable, nil
 }
 
 // writeMark writes held.json into the staging directory: a temporary name,
@@ -526,10 +582,13 @@ func clearStaging(tmpDir string, r Release) {
 	}
 }
 
-// trashUnmarked moves a release directory that exists without a valid mark
+// trashRelease moves a release directory that is about to be placed again
 // into .trash/ and removes it there, so a reader sees the whole release or
-// nothing. Only a real directory found by Lstat is moved.
-func (s Store) trashUnmarked(r Release) error {
+// nothing: one without a valid mark, or a marked one whose tree failed
+// Verify. Only a real directory found by Lstat is moved. It runs before the
+// download, so a placement that fails after it leaves nothing at the
+// release path and no held.json.
+func (s Store) trashRelease(r Release) error {
 	dir := releaseDir(s.pluginsDir(), r)
 	info, err := os.Lstat(dir)
 	if os.IsNotExist(err) {

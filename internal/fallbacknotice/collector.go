@@ -283,6 +283,9 @@ const (
 	// ReleaseNotRestored: the restore failed this time; nothing was marked
 	// held for it.
 	ReleaseNotRestored
+	// ReleaseTampered: the release was held but its tree was changed after
+	// it was placed, so it was fetched again and is held again.
+	ReleaseTampered
 )
 
 // ReleaseNote is one plugin release the repair pass reports.

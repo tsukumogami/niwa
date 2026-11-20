@@ -1,9 +1,15 @@
 package functional
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -37,8 +43,149 @@ func registerPluginRepairSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the GitHub fake served (\d+) tarball requests? in all$`, nTarballRequestsInAll)
 	ctx.Step(`^the `+pluginTarget+` of "([^"]*)" is held again in the plugin store of workspace root "([^"]*)"$`, theReleaseIsHeldAgain)
 	ctx.Step(`^the plugin store of workspace root "([^"]*)" holds nothing for the `+pluginTarget+` of "([^"]*)"$`, theStoreHoldsNothingFor)
-	ctx.Step(`^the output reports the `+pluginTarget+` of "([^"]*)" (restored|refused|not restored) for instances? "([^"]*)"$`, theOutputReportsTheRelease)
+	ctx.Step(`^the output reports the `+pluginTarget+` of "([^"]*)" (restored|tampered|refused|not restored|not restored after tampering) for instances? "([^"]*)"$`, theOutputReportsTheRelease)
 	ctx.Step(`^I run "([^"]*)" in instance "([^"]*)" with every tarball fetch failing$`, iRunInInstanceWithTarballsFailing)
+	ctx.Step(`^the `+pluginTarget+` of "([^"]*)" is tampered with in the plugin store of workspace root "([^"]*)" by (editing a file|adding a file|removing a file|a chmod alone)$`, theReleaseIsTamperedWith)
+	ctx.Step(`^the `+pluginTarget+` of "([^"]*)" in the plugin store of workspace root "([^"]*)" matches its tarball$`, theReleaseMatchesItsTarball)
+}
+
+// theReleaseIsTamperedWith changes a held release's tree the way someone
+// with the owner's rights could: a file given its write bit back and
+// appended to, a file added after its directory was given its write bit, a
+// file removed the same way, or a chmod u+w with no content change. Each
+// directory given its write bit for the change has it taken away after.
+func theReleaseIsTamperedWith(ctx context.Context, target, slug, root, how string) (context.Context, error) {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	mk, rel, err := commitTarget(ps, target, slug)
+	if err != nil {
+		return ctx, err
+	}
+	rdir, err := storeReleaseDir(s, root, mk, rel.commit)
+	if err != nil {
+		return ctx, err
+	}
+	if _, err := os.Lstat(filepath.Join(rdir, "held.json")); err != nil {
+		return ctx, fmt.Errorf("%s is not held before the change: %w", rdir, err)
+	}
+	skillDir := filepath.Join(rdir, "tree", "plugins", "kit", "skills", mk.repo+"-skill")
+	skill := filepath.Join(skillDir, "SKILL.md")
+	inDir := func(dir string, fn func() error) error {
+		if err := os.Chmod(dir, 0o755); err != nil {
+			return err
+		}
+		ferr := fn()
+		if err := os.Chmod(dir, 0o555); err != nil {
+			return err
+		}
+		return ferr
+	}
+	switch how {
+	case "editing a file":
+		if err := os.Chmod(skill, 0o644); err != nil {
+			return ctx, err
+		}
+		f, err := os.OpenFile(skill, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			return ctx, err
+		}
+		_, werr := f.WriteString("tampered\n")
+		if err := errors.Join(werr, f.Close()); err != nil {
+			return ctx, err
+		}
+	case "adding a file":
+		err = inDir(skillDir, func() error {
+			return os.WriteFile(filepath.Join(skillDir, "added.md"), []byte("added\n"), 0o444)
+		})
+	case "removing a file":
+		scripts := filepath.Join(rdir, "tree", "plugins", "kit", "scripts")
+		err = inDir(scripts, func() error { return os.Remove(filepath.Join(scripts, "run.sh")) })
+	case "a chmod alone":
+		err = os.Chmod(skill, 0o644)
+	}
+	return ctx, err
+}
+
+// theReleaseMatchesItsTarball checks a held release is read-only and marked
+// and that its tree holds exactly the regular files of the tarball the fake
+// serves at its commit, with the same content. The tarball is read from the
+// fake directly, so the check adds nothing to the request log.
+func theReleaseMatchesItsTarball(ctx context.Context, target, slug, root string) error {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	mk, rel, err := commitTarget(ps, target, slug)
+	if err != nil {
+		return err
+	}
+	rdir, err := storeReleaseDir(s, root, mk, rel.commit)
+	if err != nil {
+		return err
+	}
+	restored := rel
+	restored.tag = ""
+	if err := checkHeldRelease(rdir, mk, restored); err != nil {
+		return err
+	}
+	archive := s.githubFake.tarballFor(mk.owner, mk.repo, rel.commit)
+	if archive == nil {
+		return fmt.Errorf("the fake serves no tarball for %s at %s", slug, rel.commit)
+	}
+	want := map[string]string{}
+	gz, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		return err
+	}
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		body, err := io.ReadAll(tr)
+		if err != nil {
+			return err
+		}
+		parts := strings.SplitN(hdr.Name, "/", 2)
+		if len(parts) == 2 {
+			want[parts[1]] = string(body)
+		}
+	}
+	tree := filepath.Join(rdir, "tree")
+	got := map[string]string{}
+	err = filepath.WalkDir(tree, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return err
+		}
+		body, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(tree, p)
+		got[filepath.ToSlash(rel)] = string(body)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if len(got) != len(want) {
+		return fmt.Errorf("%s holds %d files, the tarball %d", tree, len(got), len(want))
+	}
+	for name, body := range want {
+		if got[name] != body {
+			return fmt.Errorf("%s/%s = %q, the tarball holds %q", tree, name, got[name], body)
+		}
+	}
+	return nil
 }
 
 // commitTarget resolves a step's name for one commit of slug.
@@ -355,10 +502,14 @@ func theOutputReportsTheRelease(ctx context.Context, target, slug, outcome, inst
 	}
 	name := "github.com/" + mk.owner + "/" + mk.repo + "@" + rel.commit
 	lead := map[string]string{
-		"restored":     "restored plugin release " + name + " for instances: ",
-		"refused":      "refused to restore plugin release " + name + ",",
-		"not restored": "could not restore plugin release " + name + ",",
+		"restored":                     "restored plugin release " + name + " for instances: ",
+		"tampered":                     "plugin release " + name + " was changed after it was placed (tampered with); fetched it again for instances: ",
+		"refused":                      "refused to restore plugin release " + name + ",",
+		"not restored":                 "could not restore plugin release " + name + ",",
+		"not restored after tampering": "could not restore plugin release " + name + ",",
 	}[outcome]
+	// A restore of a tampered release says so; a plain restore does not.
+	saysTampered := outcome == "tampered" || outcome == "not restored after tampering"
 	out := commandOutput(s)
 	var lines []string
 	for _, line := range strings.Split(out, "\n") {
@@ -368,6 +519,9 @@ func theOutputReportsTheRelease(ctx context.Context, target, slug, outcome, inst
 	}
 	if len(lines) != 1 {
 		return fmt.Errorf("%d lines report %s %s, want 1:\n%s", len(lines), name, outcome, out)
+	}
+	if strings.Contains(lines[0], "changed after it was placed") != saysTampered {
+		return fmt.Errorf("the line about %s, %s, says it was tampered with: %v:\n%s", name, outcome, !saysTampered, lines[0])
 	}
 	for _, inst := range strings.Split(instances, ",") {
 		path := filepath.Join(s.workspaceRoot, strings.TrimSpace(inst))

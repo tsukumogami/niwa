@@ -375,3 +375,135 @@ Feature: niwa holds each plugin marketplace release once per host
     And the GitHub fake served 1 tarball request for the release "v1.0.0" of "acme/skills"
     And the GitHub fake served 1 tarball request in all
     And the output reports the release "v1.0.0" of "acme/skills" restored for instances "ws,ws-2,ws-3"
+
+  # A held release whose tree no longer matches the seal in its held.json was
+  # changed after it was placed. The next command moves it aside, fetches it
+  # again at its commit and says it was tampered with, whichever instance it
+  # runs for, with nothing run inside the instance that links it.
+  @critical
+  Scenario: An apply in another instance refetches an edited release
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the release "v1.0.0" of "acme/skills" is tampered with in the plugin store of workspace root "." by editing a file
+    When the GitHub fake log is cleared
+    And I run "niwa apply" in instance "ws-2"
+    Then the exit code is 0
+    And the GitHub fake served 1 tarball request for the release "v1.0.0" of "acme/skills"
+    And the GitHub fake served 1 tarball request in all
+    And the release "v1.0.0" of "acme/skills" in the plugin store of workspace root "." matches its tarball
+    And the output reports the release "v1.0.0" of "acme/skills" tampered for instances "ws,ws-2"
+    And instance "ws" links "acme/skills" to its release "v1.0.0"
+    And every marketplace's skill resolves in instance "ws" at its root, in repo "app" and in a session worktree
+
+  # An added file, a removed one and a chmod with no content change each
+  # count as tampering.
+  @critical
+  Scenario Outline: A release changed by <change> is fetched again
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the release "v1.0.0" of "acme/skills" is tampered with in the plugin store of workspace root "." by <change>
+    When the GitHub fake log is cleared
+    And I run "niwa apply" in instance "ws"
+    Then the exit code is 0
+    And the GitHub fake served 1 tarball request for the release "v1.0.0" of "acme/skills"
+    And the GitHub fake served 1 tarball request in all
+    And the release "v1.0.0" of "acme/skills" in the plugin store of workspace root "." matches its tarball
+    And the output reports the release "v1.0.0" of "acme/skills" tampered for instance "ws"
+
+    Examples:
+      | change          |
+      | adding a file   |
+      | removing a file |
+      | a chmod alone   |
+
+  # An unchanged release passes the walk, whether it was placed by this
+  # command or an earlier one, and costs no request.
+  @critical
+  Scenario: An unchanged held release costs no tarball request
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When the GitHub fake log is cleared
+    And I run "niwa apply" in instance "ws"
+    Then the exit code is 0
+    And the GitHub fake served 0 tarball requests in all
+    When I run "niwa apply" in instance "ws"
+    Then the exit code is 0
+    And the GitHub fake served 0 tarball requests in all
+    And the output does not contain "tampered"
+    And the error output does not contain "tampered"
+
+  # The tampered line reaches the terminal for a create, dispatch's output
+  # and the hook's context, as the other repair lines do.
+  @critical
+  Scenario Outline: A command that makes an instance refetches a tampered release
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the release "v1.0.0" of "acme/skills" is tampered with in the plugin store of workspace root "." by editing a file
+    When the GitHub fake log is cleared
+    And I make the second instance with <second>
+    Then the exit code is 0
+    And the GitHub fake served 1 tarball request for the release "v1.0.0" of "acme/skills"
+    And the GitHub fake served 1 tarball request in all
+    And the release "v1.0.0" of "acme/skills" in the plugin store of workspace root "." matches its tarball
+    And the output reports the release "v1.0.0" of "acme/skills" tampered for instance "ws"
+    And every marketplace's skill resolves in instance "ws" at its root, in repo "app" and in a session worktree
+    And every marketplace's skill resolves in the second instance at its root, in repo "app" and in a session worktree
+
+    Examples:
+      | second                |
+      | niwa create ws        |
+      | niwa dispatch         |
+      | the SessionStart hook |
+
+  # A tampered release whose refetch fails is a warning that says it was
+  # tampered with, not a failed command. The changed tree is gone from the
+  # release path and nothing is marked held; the next command restores it.
+  @critical
+  Scenario: A failed refetch of a tampered release warns and the next command restores it
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the release "v1.0.0" of "acme/skills" is tampered with in the plugin store of workspace root "." by editing a file
+    When I run "niwa apply" in instance "ws" with every tarball fetch failing
+    Then the exit code is 0
+    And the output reports the release "v1.0.0" of "acme/skills" not restored after tampering for instance "ws"
+    And the plugin store of workspace root "." holds nothing for the release "v1.0.0" of "acme/skills"
+    When the GitHub fake log is cleared
+    And I run "niwa apply" in instance "ws"
+    Then the exit code is 0
+    And the GitHub fake served 1 tarball request for the release "v1.0.0" of "acme/skills"
+    And the GitHub fake served 1 tarball request in all
+    And the release "v1.0.0" of "acme/skills" in the plugin store of workspace root "." matches its tarball
+    And the output reports the release "v1.0.0" of "acme/skills" restored for instance "ws"
+
+  # Three instances on one tampered release, and the current instance's own
+  # placement after the repair pass, make one request in one command.
+  @critical
+  Scenario: Three instances on one tampered release make one tarball request
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the release "v1.0.0" of "acme/skills" is tampered with in the plugin store of workspace root "." by adding a file
+    When the GitHub fake log is cleared
+    And I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the GitHub fake served 1 tarball request for the release "v1.0.0" of "acme/skills"
+    And the GitHub fake served 1 tarball request in all
+    And the release "v1.0.0" of "acme/skills" in the plugin store of workspace root "." matches its tarball
+    And the output reports the release "v1.0.0" of "acme/skills" tampered for instances "ws,ws-2,ws-3"
