@@ -17,6 +17,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/firstread"
 	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/promptcapture"
 	"github.com/tsukumogami/niwa/internal/testfault"
@@ -26,6 +27,7 @@ import (
 func init() {
 	dispatchCmd.Flags().StringVar(&dispatchLabel, "label", "", "optional human-friendly alias recorded on the session mapping")
 	dispatchCmd.Flags().StringVar(&dispatchBrief, "brief", "", "the file holding the worker's brief, inside the workspace. Its content digest, never its path, is recorded as the dispatch's brief identity on the worker's telemetry; without it, the prompt's digest is")
+	dispatchCmd.Flags().IntVar(&dispatchFirstRead, "first-read", 0, "with --brief: the worker reads lines 1-N of the brief, on their own, before it reads any more of it. A guard in the worker's session refuses any other read of the brief until that read has run, and names the command that satisfies it")
 	dispatchCmd.Flags().StringVar(&dispatchSkill, "skill", "", "the skill the brief asks the worker to run, as <plugin>:<name>, recorded as the dispatch's requested skill on the worker's telemetry; without it none is recorded")
 	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session, sanitized into a slug. The session name is the slug plus the instance's random suffix (<slug>-<id>), and the instance is <config>+<slug>-<id>; with no name the instance is <config>+-<id> and no session name is forwarded -- '+' always marks the end of the config name. An agent with no display-name flag gets no session name, though the slug still names the instance")
 	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", dispatchModelFlagHelp())
@@ -70,6 +72,10 @@ var (
 	// digest identifies the brief, and the skill the brief asks for.
 	dispatchBrief string
 	dispatchSkill string
+	// dispatchFirstRead is --first-read: the number of opening lines of the
+	// brief the worker reads before anything else, 0 for no first read (see
+	// internal/firstread).
+	dispatchFirstRead int
 	// dispatchKeepAlive holds the tri-state --keep-alive value: nil when the
 	// flag was not given, otherwise a pointer to the explicit true/false (see
 	// triBoolValue in dispatch_keepalive.go).
@@ -522,12 +528,20 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("niwa: error: %w", err)
 	}
 	briefID := briefDigest([]byte(prompt))
+	var briefContent []byte
 	if dispatchBrief != "" {
 		content, err := readBriefFile(dispatchBrief, workspaceRoot)
 		if err != nil {
 			return fmt.Errorf("niwa: error: %w", err)
 		}
 		briefID = briefDigest(content)
+		briefContent = content
+	}
+	// --first-read is checked here too, so a declaration the worker could
+	// never be held to refuses the dispatch before anything is created.
+	firstRead, err := resolveFirstRead(dispatchFirstRead, dispatchBrief, briefContent, dispatchedAgent, spec.Flags.Settings != "")
+	if err != nil {
+		return fmt.Errorf("niwa: error: %w", err)
 	}
 
 	// (4) Mint one random 8-hex token for this dispatch and derive both names
@@ -652,6 +666,14 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// never lands. A write failure rolls back via the deferred destroy above.
 	if err := writeDispatchMarker(instancePath); err != nil {
 		return fmt.Errorf("niwa: error: writing dispatch pending-marker: %w", err)
+	}
+	// (8-first-read) The brief's first read, recorded in the instance before
+	// anything can launch there, so the guard the launch carries (9c) finds
+	// it on the worker's first call. A write failure rolls back.
+	if firstRead != nil {
+		if err := firstread.Write(instancePath, *firstRead); err != nil {
+			return fmt.Errorf("niwa: error: recording the brief's first read: %w", err)
+		}
 	}
 
 	// (8a) Re-check the authority against what the instance was built from,
@@ -936,6 +958,16 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 				launchSettings[config.EnabledMcpjsonServersKey] = mcpApprovalList{names: kept}
 			}
 		}
+	}
+	// The first-read guard is the fifth contributor. resolveFirstRead already
+	// refused a --first-read this agent can't carry, so the settings flag is
+	// there whenever firstRead is set.
+	if firstRead != nil && spec.Flags.Settings != "" {
+		niwaPath, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("niwa: error: locating niwa for the first-read guard: %w", err)
+		}
+		launchSettings[launchHooksKey] = firstReadGuardHooks(niwaPath)
 	}
 	// Two discrete argv elements, and none at all when no contributor added a
 	// key. An agent with no settings flag has nowhere for the document to go,

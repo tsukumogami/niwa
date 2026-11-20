@@ -9,8 +9,8 @@ import (
 
 func TestAllIsTheClosedSet(t *testing.T) {
 	all := All()
-	if len(all) != 26 {
-		t.Fatalf("All() returned %d capabilities, want the matrix's 26", len(all))
+	if len(all) != 27 {
+		t.Fatalf("All() returned %d capabilities, want the matrix's 27", len(all))
 	}
 	seen := map[Capability]bool{}
 	for _, c := range all {
@@ -190,7 +190,7 @@ var codexDelivered = []Capability{
 // per-row check by moving a name from one list to the other -- still has to
 // face a number somebody wrote down on purpose.
 func TestCodexColumnTotals(t *testing.T) {
-	const wantImplemented, wantUnavailable = 15, 11
+	const wantImplemented, wantUnavailable = 15, 12
 
 	implemented, unavailable := 0, 0
 	for _, c := range All() {
@@ -219,7 +219,8 @@ func TestCodexColumnTotals(t *testing.T) {
 //
 // The pending branch below is what a new row with a route and no delivery goes
 // through: it must declare niwa's own debt rather than borrow an inherent
-// reason. Row 26, dispatch resource attributes, is the one row in it today.
+// reason. Rows 26 and 27, dispatch resource attributes and the dispatch
+// first-read guard, are the rows in it today.
 func TestCodexColumnStatesWhatIsDelivered(t *testing.T) {
 	for _, c := range All() {
 		d, err := Lookup(c, agent.AgentCodex)

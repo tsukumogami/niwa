@@ -396,6 +396,18 @@ var declarations = []Declaration{
 		Kind:   ReasonNotBuilt,
 		Reason: "A Codex launch has no settings document to carry the attributes, and whether its telemetry reads them from the launch environment is unverified.",
 	},
+
+	// Row 27: a dispatched worker held to its brief's declared first read.
+	// The delivery is a PreToolUse hook in the launch settings document niwa
+	// dispatch already builds, so it exists only where niwa launches the
+	// worker, which is the edge to row 22.
+	{Capability: DispatchFirstReadGuard, Agent: agent.AgentClaude, State: StateImplemented, Requires: []Capability{DispatchLaunch}},
+	{
+		Capability: DispatchFirstReadGuard, Agent: agent.AgentCodex,
+		State:  StateUnavailable,
+		Kind:   ReasonNotBuilt,
+		Reason: "A Codex launch has no settings document to carry the guard's hook.",
+	},
 }
 
 // Lookup returns the declaration for one (capability, agent) pair.
