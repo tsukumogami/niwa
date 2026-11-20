@@ -416,3 +416,50 @@ func TestDiscover_DoesNotRestoreOverLiveSwap(t *testing.T) {
 		t.Errorf(".niwa.prev was moved or changed: %q, %v", data, err)
 	}
 }
+
+// A refresh can finish its swap and remove its .prev between Discover's look
+// for .niwa and its look for .niwa.prev, so neither is found. The workspace is
+// still this directory, and Discover must not walk up past it.
+func TestDiscover_SwapFinishedBetweenLooks(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, ConfigDir)
+	prevDir := configDir + PrevSuffix
+	// The refresh is between its two renames: .niwa is .niwa.prev now, and
+	// the refresh holds the lock.
+	writeConfigFile(t, prevDir, "old")
+	releaseHolder := holdSnapshotLock(t, configDir)
+
+	p := filepath.Join(t.TempDir(), "prev-check")
+	releaseHoldOnCleanup(t, p)
+	t.Setenv("NIWA_TEST_FAULT", "hold:"+p+"@"+discoverPrevCheckMark)
+
+	type found struct {
+		path, dir string
+	}
+	got := make(chan found, 1)
+	done := make(chan error, 1)
+	go func() {
+		path, dir, err := Discover(root)
+		got <- found{path, dir}
+		done <- err
+	}()
+	// Discover has missed .niwa and not yet looked for .niwa.prev.
+	waitForHeld(t, p, done)
+
+	// The refresh renames its new snapshot in, removes .niwa.prev and lets go.
+	writeConfigFile(t, configDir, "new")
+	if err := os.RemoveAll(prevDir); err != nil {
+		t.Fatal(err)
+	}
+	releaseHolder()
+	if err := os.WriteFile(p, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := joinWaiter(t, done); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	f := <-got
+	if f.dir != configDir || f.path != filepath.Join(configDir, ConfigFile) {
+		t.Errorf("Discover found %q in %q, want %q", f.path, f.dir, configDir)
+	}
+}
