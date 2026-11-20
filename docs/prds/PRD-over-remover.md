@@ -42,8 +42,14 @@ once that remover settles them. It hasn't landed. Every point this PRD takes
 from it is listed under "Open dependencies on the earlier stage" and stays open
 until it lands; this PRD doesn't settle any of them. Names used here (the retire
 mark, the retire command, the settings) are placeholders until the design picks
-them. What the design settles, and the one decision that is the owner's, are
-listed under Decisions and Trade-offs.
+them. What the design settles, and the job-scratch and idle-setting defaults
+the project owner chose, are listed under Decisions and Trade-offs.
+
+Amended after acceptance: the project owner chose the default for job scratch
+in a unit with no handoff brief, the default of the idle-time setting, and how
+the verdict-only mode shows job scratch. R1, R4, R11, R24, R28, R29 and R35,
+the newer-scratch and verdict-only scenarios, Out of Scope, Known Limitations
+and Decisions and Trade-offs carry the choice. The PRD stays Accepted.
 
 Absorbed [BRIEF-over-remover](docs/briefs/BRIEF-over-remover.md); carried in Absorbed Brief.
 
@@ -86,7 +92,9 @@ workspace's hook denial of `niwa reap`, and any daemon or timer; those are this
 document's Out of Scope. It named the six kinds of unit a shipped over command
 never marks, which R24 keeps listed until a person retires them, and the points
 it left to the requirements and the design, which Decisions and Trade-offs and
-the open dependencies carry.
+the open dependencies carry. One of those points, the job-scratch default for a
+unit with no handoff brief, the project owner has since chosen, along with the
+default of the idle-time setting; Decisions and Trade-offs records both.
 
 ## Problem Statement
 
@@ -229,8 +237,11 @@ the cross-cutting checks at the end of the acceptance criteria.
 configuration can name one over command, configured the same way as the
 existing session commands (a command, a timeout, and the names of environment
 variables passed through). Leaving it out turns marking off: no unit gets a
-retire mark except from a person. Serves the three-answers and no-command
-scenarios.
+retire mark except from a person. The idle-time setting, which belongs to later
+work and ships off, is the only other route to a mark, and only for a workspace
+that turns it on. A workspace that names an over command for shirabe's
+workflows should also set job scratch unique (R28) in the same configuration.
+Serves the three-answers and no-command scenarios.
 
 **R2. niwa asks only about stopped units with no mark and no hold.** In each
 pass niwa runs the over command once for each unit that is stopped, carries no
@@ -253,8 +264,12 @@ request's state, a unit's age or how long it has sat idle, and the pass makes
 no koto or forge call to decide whether a unit is over. The only routes to a
 retire mark are an over answer of yes and a person's retire. A person deleting
 a unit's session counts as that person retiring what remains, as it does today,
-and the removal rule still decides what goes (R15). Serves the three-answers
-and no-command scenarios.
+and the removal rule still decides what goes (R15). The idle-time setting the
+project owner chose belongs to later work and ships off; nothing in this
+feature ships it. A workspace that turns it on makes that choice itself: the
+setting marks a unit stopped longer than the setting that no over command
+answers, counted from its last stop or restore, and never marks one the
+command answered not over. Serves the three-answers and no-command scenarios.
 
 **R5. The design names the takeover key.** The design names the key an over
 command reads to learn that a successor's takeover has landed, meaning the
@@ -314,9 +329,11 @@ live refs hold or that equals merged work by content; a build tree; a file niwa
 or Claude Code generates and can generate again (instance configuration,
 context files, plugin and marketplace trees, a job's `state.json` and
 `timeline.jsonl`); a clean, fully pushed clone wherever it sits, worktrees
-included; an empty directory; or a path matching a declared-disposable pattern
-(R13). Everything else is unique: untracked files, stashes, local-only refs,
-loose files outside a repository, and any other regular file in job scratch.
+included; an empty directory; a path matching a declared-disposable pattern
+(R13); or, in a unit with no handoff brief and unless a workspace setting says
+otherwise, a regular file in job scratch (R28). Everything else is unique:
+untracked files, stashes, local-only refs, loose files outside a repository,
+and job scratch where R28 counts it as unique.
 A unique path resolves in exactly three ways: it is handed forward (its bytes
 are inside a handoff brief or moved to the kept set), it is declared
 disposable, or it keeps the unit. Every repository in the instance is found by
@@ -335,8 +352,8 @@ means the first in this order that keeps it:
 4. Each repository found in the instance, in path order: a git error or an
    unreachable remote; commits no remote ref holds, and local-only refs;
    stashes; modified tracked files; untracked files.
-5. Paths outside every repository: loose files, job scratch, and files newer
-   than a handoff brief (R28).
+5. Paths outside every repository: loose files, job scratch that counts as
+   unique (R28), and files newer than a handoff brief (R28).
 6. A file a keep record names that is missing or whose hash doesn't match
    (R26).
 
@@ -446,7 +463,9 @@ line points at the listing. Serves the no-command and keep-record scenarios.
 **R24. A unit the command doesn't call over stays listed until a person
 retires it.** A unit answered not over or unknown stays in the listing, with
 its reason, size and time stopped, for as long as it sits. No date expires it
-and nothing in this feature removes it unasked. This covers the six kinds of
+and nothing in this feature removes it unasked. The idle-time setting, later
+work that ships off, could mark a unit answered unknown for a workspace that
+turns it on, and never one answered not over. This covers the six kinds of
 unit a shipped over command will never mark: a unit whose pull request merged
 while its workflow run is still live; a unit whose run ended blocked, waiting
 on a person; a unit whose pull request was abandoned but is still open; a unit
@@ -455,7 +474,7 @@ took it over; a top session, started by a person rather than dispatched, with
 no parent session to hand back to; and a plain chat, a session started with no
 workflow run at all. niwa doesn't tell these kinds apart: each reaches it as a
 unit answered not over or unknown, which is how the acceptance check stands in
-for them. Each goes only when a person retires it. Serves the three-answers
+for them. In this feature each goes only when a person retires it. Serves the three-answers
 scenario.
 
 #### The keep record and the kept set
@@ -495,21 +514,31 @@ newer.** When a unit has a handoff brief, niwa reads its file list and the time
 it was written. A file the brief names is handed forward: when the brief holds
 its bytes it goes with the brief, and when the brief names it only by path it
 moves to the kept set as a keep record's named file does (R26). Job-scratch
-files and
-loose root files that existed when the brief was written and that it didn't
-name are disposable. A file created or changed after the brief was written, by
-its modification time or its inode change time, whichever is later, is unique
-and keeps the unit, and the keep reason names that file as newer than the
-brief. Without a brief, job scratch counts as R11 says, pending the owner's
-decision on the job-scratch default (Decisions and Trade-offs). Serves the
-newer-scratch scenario.
+files and loose root files that existed when the brief was written and that it
+didn't name are disposable. A file created or changed after the brief was
+written, by its modification time or its inode change time, whichever is
+later, is unique and keeps the unit, and the keep reason names that file as
+newer than the brief. Without a brief, job-scratch files are disposable by
+default, and a workspace setting, shaped like the ignored-files setting (R12),
+makes them unique, so they keep the unit and are named; loose root files stay
+unique as R11 says. Where a brief exists, the rule above applies whatever that
+setting says: a file the brief names is handed forward, a file older than the
+brief is answered for, and a file newer than the brief keeps the unit. A
+workspace that names an over command for shirabe's workflows should set job
+scratch unique in the same configuration. The project owner chose this default
+(Decisions and Trade-offs). Serves the newer-scratch and verdict-only
+scenarios.
 
 #### The verdict-only mode
 
 **R29. A verdict-only mode reports every verdict and changes nothing.** A
 verdict-only mode prints, for each unit, the verdict it would get, every check
 that would keep it in the order R11 sets, and the class of every path in it:
-tracked, pushed, build tree, generated, disposable or unique. It asks the over
+tracked, pushed, build tree, generated, disposable or unique. A job-scratch
+file that is disposable only because the unit has no handoff brief is listed as
+disposable and marked as job scratch, as a notice, in the same way R12 marks a
+git-ignored path, so a person can see what a retire would let go before
+setting job scratch unique. It asks the over
 command where the pass would, reports the answer and the mark it would write,
 and writes no mark. It runs for every unit or for one unit a person names, and
 has a machine-readable form that carries the same fields. It removes nothing,
@@ -577,15 +606,15 @@ retire command or by deleting its session (R4). The only removal nobody asks
 for is the trim of idle build trees (R30), which removes no unique work. Serves
 the no-command scenario.
 
-That doesn't make the default no stricter than today everywhere, and two
-differences are deliberate or open. Reap becomes stricter on purpose: it keeps
-an instance holding unique work that it removes today (R15). And a retire is
-stricter than today's unforced destroy about job scratch. An unforced destroy
-removes a session and its job directory without checking the job's scratch,
-while under R11 every regular file in job scratch is unique, and a user of niwa
-alone has no handoff brief to name or release it, so for that user a retire
-will mostly answer kept. Which default job scratch gets is the owner's
-decision, recorded under Decisions and Trade-offs.
+That doesn't make the default no stricter than today everywhere. Reap becomes
+stricter on purpose: it keeps an instance holding unique work that it removes
+today (R15). A retire is no stricter than today's unforced destroy about job
+scratch: an unforced destroy removes a session and its job directory without
+checking the job's scratch, and where a unit has no handoff brief its scratch
+is disposable by default (R28), so a user of niwa alone gets a retire that
+removes a clean finished unit. A workspace that wants scratch checked sets it
+unique. The project owner chose this default; Decisions and Trade-offs records
+why.
 
 **R36. The listing stays local.** `niwa list` reads the answer, time stopped
 and size from local state. It makes no network call and doesn't run the over
@@ -797,6 +826,13 @@ changing `draft.md` and retire again.
       holds `plan.md`'s bytes rather than naming it only by path, the retire
       reports the unit removed, the kept set gains no copy of `plan.md`, and
       the bytes the brief holds have the SHA-256 recorded at setup. (R28)
+- [ ] Repeating the setup with no handoff brief, the retire reports the unit
+      removed, and the kept set gains nothing. (R11, R28)
+- [ ] Repeating that with the workspace setting that makes job scratch unique,
+      the retire reports the unit kept and names `plan.md` and `draft.md`.
+      (R28)
+- [ ] With that setting and the brief, each check above gives the same result
+      as without it. (R28)
 
 ### The verdict-only scenario
 
@@ -807,7 +843,8 @@ it and keeps it for that branch. The third is unmarked and clean, and the
 sample command answers yes for it. The fourth is answered not over and holds a
 cargo `target/` directory with `CACHEDIR.TAG`, whose files are set back past
 the idle grace with `touch -t`. Add a git-ignored `.env` and a `.DS_Store` to
-the first unit's clone. Record a listing of every file in every instance and
+the first unit's clone, and a file `scratch.md` to the first unit's job
+scratch, with no handoff brief. Record a listing of every file in every instance and
 job directory, with size, modification time and SHA-256.
 
 Action: run the verdict-only mode, then record the same listing again. Then
@@ -825,8 +862,9 @@ from the start.
       agree. (R10, R29)
 - [ ] For each unit the output gives the class of every path: tracked, pushed,
       build tree, generated, disposable or unique. The `.env` is listed as
-      disposable and marked as git-ignored, and `.DS_Store` as disposable with
-      no such mark. (R11, R12, R13, R29)
+      disposable and marked as git-ignored, `.DS_Store` as disposable with
+      no such mark, and `scratch.md` as disposable and marked as job scratch.
+      (R11, R12, R13, R28, R29)
 - [ ] A unit given both an untracked file and an unpushed commit, then
       verdict-only run for it, lists the unpushed-commits check before the
       untracked-file check, each with its path. (R11, R29)
@@ -834,6 +872,8 @@ from the start.
       carries no mark. (R29)
 - [ ] With the workspace setting that makes ignored files unique, the first unit's
       verdict becomes keep, naming `.env`. (R12)
+- [ ] With the workspace setting that makes job scratch unique, the first
+      unit's verdict becomes keep, naming `scratch.md`. (R28, R29)
 - [ ] With the first unit's remote made unreachable, its verdict becomes keep
       and the output carries the git error as evidence. (R14)
 
@@ -1027,17 +1067,25 @@ resume` on the second unit.
 ## Out of Scope
 
 - **Shipping an over command.** niwa defines the seam and never infers over. A
-  workflow plugin such as shirabe ships its own command later.
+  workflow plugin such as shirabe ships its own command later. A workspace
+  that configures that command for shirabe's workflows should set job scratch
+  unique (R28) in the same configuration.
 - **Expiring transcripts.** Removing a reaped unit's transcript, launch record
   and dispatch brief when its window ends is later work. This feature leaves
   transcripts where Claude Code keeps them; a restore past the window is
   refused even when the transcript is still on disk.
 - **A setting that retires a unit after it has sat idle for some time.** It
-  depends on reap's loss scan landing here first, and it reverses niwa's
-  recorded delete-only decision for every user, so it's separate work.
+  belongs to a later milestone, which depends on reap's loss scan landing here
+  first. The project owner chose its shape: it ships off, and a workspace that
+  turns it on gets a mark on any unit stopped longer than the setting that no
+  over command answers, counted from its last stop or restore, and never on a
+  unit answered not over. Left off, it changes niwa's recorded delete-only
+  decision for nobody.
 - **The earlier remover's interim scratch copy.** The copy that remover keeps
   for units that stopped without a handoff brief stays with the workspace that
-  built it and isn't carried into niwa.
+  built it and isn't carried into niwa. In niwa a unit with no handoff brief
+  lets its job scratch go by default; a workspace that wants it kept sets job
+  scratch unique (R28).
 - **Writing the handoff brief.** This feature reads a brief's file list and
   time; the brief itself comes from separate work.
 - **Lifting a workspace hook's denial of `niwa reap`.** A workspace that blocks
@@ -1143,7 +1191,8 @@ key. R5 requires the design to name it.
 
 - A restore doesn't bring back what the rule let go: the worktree, git-ignored
   files outside build trees, the build tree, loose files that were declared
-  disposable, and the job entry. It's rebuilt from the transcript in a fresh
+  disposable, job scratch let go because the unit had no handoff brief, and
+  the job entry. It's rebuilt from the transcript in a fresh
   clone.
 - A file a worker wrote by hand into a build tree goes with the trim. That's
   an accepted loss of treating build trees as regenerable.
@@ -1164,7 +1213,8 @@ key. R5 requires the design to name it.
 **niwa reads an exit status, and nothing else decides over.** The alternative
 was for niwa to infer over from koto and the forge. That would tie niwa to
 both and put workflow knowledge inside niwa, which the seam exists to avoid. A
-workspace with no command gets no marking at all, which is the safe default.
+workspace with no command gets no marking at all unless it turns on the later
+idle-time setting, which ships off, so the safe default holds.
 
 **A marked unit is tested again every pass, and an unmarked one is never
 reaped on its own.** A mark is a statement that the work is over, not
@@ -1182,44 +1232,66 @@ never a unit, and it's the one thing a user of niwa alone gets with no
 configuration. The setting that turns it off keeps the choice with the
 workspace.
 
-**Units the command doesn't call over have no expiry.** An age-based removal
-would take exactly the units whose state is unclear. They stay listed with a
-reason until a person retires them, and the dispatch line keeps them in view.
+**Units the command doesn't call over have no expiry by default.** An
+age-based removal would take exactly the units whose state is unclear. They
+stay listed with a reason until a person retires them, and the dispatch line
+keeps them in view. The later idle-time setting is off for that reason: a
+workspace that turns it on accepts that a unit no command answers is marked
+once it has been stopped longer than the setting, and even then a unit
+answered not over is never marked, and the removal rule still decides what
+goes.
 
 **The PRD states the strictness tension instead of claiming the default is no
 stricter than today.** Reap gets stricter on purpose. A retire's treatment of
-job scratch is stricter than an unforced destroy, and whether to change that is
-the owner's decision, below. Writing the default as no stricter everywhere
-would hide that decision.
+job scratch was stricter than an unforced destroy until the project owner
+chose the default below, which brings it level with destroy where no handoff
+brief exists.
 
-**The job-scratch default for a user of niwa alone is the owner's decision,
-and it isn't made yet.** Under R11 every regular file in job scratch is unique,
-and a user of niwa alone has no handoff brief, so a retire will mostly answer
-kept. That's stricter than today's unforced destroy (R35). The owner chooses
-among four alternatives, which can be combined:
+**Job scratch in a unit with no handoff brief is disposable by default, and
+the idle-time setting ships off.** The project owner chose this, as three
+parts shipped together. Before the choice, R11 counted every regular file in
+job scratch as unique, and a user of niwa alone has no handoff brief, so a
+retire would mostly have answered kept, which is stricter than today's
+unforced destroy (R35) and would push that user back to deleting the session,
+the route that checks nothing.
 
-1. Leave it as it is: job scratch stays unique, and a retire keeps the unit and
-   names the scratch files.
-2. Treat job scratch as disposable where no handoff brief exists, with a
-   setting that makes it unique. This keeps the default no stricter than today,
-   and gives up the scratch check for the user least likely to know scratch
-   exists.
-3. Ship an idle-time retirement setting on by default, with a long grace. This
-   reverses niwa's recorded delete-only decision for every user.
-4. Keep any idle-time retirement setting opt-in, as later work.
+1. Where a unit has no handoff brief, its job-scratch files are disposable by
+   default, and a workspace setting, shaped like the ignored-files setting
+   (R12), makes them unique. A workspace that configures an over command for
+   shirabe's workflows should set job scratch unique in the same
+   configuration, so a worker in those workflows that has no brief is still
+   protected. Where a brief exists, R28 applies whatever the setting says: a
+   file the brief names is handed forward, a file older than the brief is
+   answered for, and a file newer than the brief keeps the unit.
+2. The idle-time setting ships off. A workspace that turns it on gets a mark
+   on any unit stopped longer than the setting that no over command answers,
+   counted from the unit's last stop or restore, and the mark then goes
+   through the same removal rule. It never overrides a "not over". Left off,
+   it changes niwa's recorded delete-only decision for nobody. The setting
+   itself belongs to a later milestone.
+3. The verdict-only mode lists job-scratch paths it counts as disposable as a
+   notice, with a job-scratch mark, as it marks git-ignored files (R29), so a
+   user who wants to see what a retire would let go can.
 
-The lean is the second with the fourth, plus the dispatch line (R23). The owner
-should decide it together with a launch record for sessions the SessionStart
-hook provisions. Without one, such a unit can't be restored, so R18 keeps it
-from a reap on a mark, and that user's only route is deleting the session.
-Until the owner decides, R11 and R28 stand as written, which is the first
-alternative.
+The cost is that the user least likely to know scratch exists gives up the
+scratch check on a retire unless they set it unique; the verdict-only notice
+keeps that visible. The alternatives not chosen were leaving job scratch
+unique, which keeps a retire stricter than destroy; shipping the idle-time
+setting on by default with a long grace, which reverses the delete-only
+decision for every user before reap's loss scan and restore have run outside
+one workspace; keeping the idle-time setting opt-in with scratch still unique,
+which would mostly mark units and then keep them; and letting scratch go only
+on a retire by hand, which adds a second scratch rule.
+
+A launch record for sessions the SessionStart hook provisions is still needed
+beside this default. Without one, such a unit can't be restored, so R18 keeps
+it from a reap on a mark, and that user's only route is deleting the session.
 
 **The design settles these, and the requirements hold whatever it picks.**
 
 | Item | Where it's used |
 |------|-----------------|
-| Names: the retire mark, the retire command, the over setting, the trim and idle-grace settings, the ignored-files setting, the restore-window setting | Throughout |
+| Names: the retire mark, the retire command, the over setting, the trim and idle-grace settings, the ignored-files setting, the job-scratch setting, the restore-window setting | Throughout |
 | The kept set's path under the rule for host-level state | R26 |
 | The dispatch line's wording | R23 |
 | The pass's time budget figure, beside today's 30-second cap per pass on the removal gate's command | R34 |
