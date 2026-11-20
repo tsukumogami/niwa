@@ -19,6 +19,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/filelock"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/hostdir"
+	"github.com/tsukumogami/niwa/internal/testfault"
 )
 
 // DefaultLockWait bounds how long Ensure waits for another command placing the
@@ -331,7 +332,14 @@ func (s Store) place(ctx context.Context, r Release) (Condition, error) {
 }
 
 // download streams r's tarball at its commit into path.
+//
+// The plugin-store-download fault label sits before the fetch, under r's lock
+// and with the staging directory made, so a test can hold one command here
+// while others queue on the lock, or kill it with nothing yet placed.
 func (s Store) download(ctx context.Context, r Release, path string) error {
+	if err := testfault.Maybe("plugin-store-download"); err != nil {
+		return fmt.Errorf("fetching %s: %w", r.Label(), err)
+	}
 	body, err := s.Fetch(ctx, r.Owner, r.Repo, r.Commit)
 	if err != nil {
 		return fmt.Errorf("fetching %s: %w", r.Label(), err)

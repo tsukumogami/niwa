@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -242,6 +243,65 @@ func TestEnsureRefusesAWrapperNamingAnotherCommit(t *testing.T) {
 	if _, err := os.Lstat(f.link()); !os.IsNotExist(err) {
 		t.Fatalf("link placed for an unheld release: %v", err)
 	}
+	requireNoReleaseDir(t, f, r)
+}
+
+// requireNoReleaseDir fails when anything exists at r's release path: a
+// refused placement leaves no <commit> directory, not only an unheld one.
+func requireNoReleaseDir(t *testing.T, f *fixture, r Release) {
+	t.Helper()
+	dir := releaseDir(Dir(f.home, f.root), r)
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		t.Fatalf("%s exists after a refused placement (%v)", dir, err)
+	}
+}
+
+// archiveWithoutManifest is archiveFor's tarball for commit with no
+// .claude-plugin/marketplace.json in it.
+func archiveWithoutManifest(t *testing.T, commit string) []byte {
+	t.Helper()
+	wrapper := "Acme-skills-" + commit[:7]
+	var raw bytes.Buffer
+	gz := gzip.NewWriter(&raw)
+	tw := tar.NewWriter(gz)
+	body := "---\nname: greet\n---\n"
+	for _, hdr := range []*tar.Header{
+		{Name: wrapper + "/", Mode: 0o755, ModTime: testCommitTime, Typeflag: tar.TypeDir},
+		{Name: wrapper + "/plugins/demo/skills/greet/SKILL.md", Mode: 0o644, ModTime: testCommitTime, Typeflag: tar.TypeReg, Size: int64(len(body))},
+	} {
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		if hdr.Typeflag == tar.TypeReg {
+			if _, err := tw.Write([]byte(body)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return raw.Bytes()
+}
+
+func TestEnsureRefusesAnArchiveWithNoManifest(t *testing.T) {
+	f := newFixture(t)
+	f.archive = archiveWithoutManifest(t, testCommit)
+	r := testRelease(t)
+	_, cond, err := f.store().Ensure(context.Background(), r, f.link(), nil, nil)
+	if err == nil || cond != CondNotPlaced {
+		t.Fatalf("Ensure = %q, %v; want a refusal", cond, err)
+	}
+	if held, _ := f.store().Held(r); held {
+		t.Fatal("an archive with no manifest was held")
+	}
+	if _, err := os.Lstat(f.link()); !os.IsNotExist(err) {
+		t.Fatalf("link placed for an unheld release: %v", err)
+	}
+	requireNoReleaseDir(t, f, r)
 }
 
 func TestEnsureReportsAFailedDownloadWithoutACondition(t *testing.T) {
@@ -343,19 +403,29 @@ func TestEnsureNeverReplacesARealDirectoryAtTheLink(t *testing.T) {
 	}
 }
 
+// Ten callers, each linking its own instance, race on one unheld release:
+// one fetch, and every link points at the one held tree.
 func TestConcurrentEnsureFetchesOnce(t *testing.T) {
 	f := newFixture(t)
 	r := testRelease(t)
+	links := make([]string, 10)
+	for i := range links {
+		dir := filepath.Join(f.root, fmt.Sprintf("inst-%d", i), ".niwa", "marketplaces")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		links[i] = filepath.Join(dir, "skills")
+	}
 	var wg sync.WaitGroup
 	errs := make(chan error, 10)
-	for i := 0; i < 10; i++ {
+	for _, link := range links {
 		wg.Add(1)
-		go func() {
+		go func(link string) {
 			defer wg.Done()
-			if _, _, err := f.store().Ensure(context.Background(), r, "", nil, nil); err != nil {
+			if _, _, err := f.store().Ensure(context.Background(), r, link, nil, nil); err != nil {
 				errs <- err
 			}
-		}()
+		}(link)
 	}
 	wg.Wait()
 	close(errs)
@@ -364,6 +434,15 @@ func TestConcurrentEnsureFetchesOnce(t *testing.T) {
 	}
 	if len(f.fetches) != 1 {
 		t.Fatalf("fetches = %d, want 1", len(f.fetches))
+	}
+	if held, cond := f.store().Held(r); !held || cond != CondNone {
+		t.Fatalf("Held = %v, %q after the race", held, cond)
+	}
+	want := TreePath(f.home, f.root, r)
+	for _, link := range links {
+		if target, err := os.Readlink(link); err != nil || target != want {
+			t.Fatalf("%s -> %q (%v), want %s", link, target, err, want)
+		}
 	}
 }
 

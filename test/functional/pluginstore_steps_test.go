@@ -1,6 +1,7 @@
 package functional
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/cucumber/godog"
@@ -46,6 +48,9 @@ type pluginStoreScenario struct {
 	marketplaces map[string]*pluginMarketplace // "owner/repo"
 	order        []string
 	snapshots    map[string]string // path -> tree digest
+	second       string            // the instance "the second instance" names
+	started      []*startedCreate  // creates started in the background
+	holdPath     string            // the hold: fault's release path
 }
 
 func pluginState(ctx context.Context) (*testState, *pluginStoreScenario, error) {
@@ -90,6 +95,18 @@ func registerPluginStoreSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the marketplace "([^"]*)" of instance "([^"]*)" is the same real directory$`, theMarketplaceIsTheSameRealDirectory)
 	ctx.Step(`^the marketplace "([^"]*)" of the workspace root is a real directory holding its manifest$`, theRootMarketplaceIsARealDirectory)
 	ctx.Step(`^nothing for plugins exists under the sandbox home's \.niwa$`, nothingForPluginsUnderHome)
+	ctx.Step(`^I make the second instance with (niwa create ws|niwa dispatch|the SessionStart hook)$`, iMakeTheSecondInstanceWith)
+	ctx.Step(`^the marketplaces of the (second|newest) instance are only links into the plugin store of workspace root "([^"]*)"$`, marketplacesOfNamedInstanceAreOnlyLinks)
+	ctx.Step(`^every marketplace's skill resolves in the (second|newest) instance at its root, in repo "([^"]*)" and in a session worktree$`, everySkillResolvesInNamedInstance)
+	ctx.Step(`^I start (\d+) "([^"]*)" process(?:es)?, the first plugin store download held$`, iStartHeldCreates)
+	ctx.Step(`^the held plugin store download is let go$`, theHeldDownloadIsLetGo)
+	ctx.Step(`^the held create is killed$`, theHeldCreateIsKilled)
+	ctx.Step(`^every started create exits 0$`, everyStartedCreateExitsZero)
+	ctx.Step(`^the GitHub fake served (\d+) tarball requests? for each marketplace, at the commit of its newest release$`, nTarballRequestsPerMarketplace)
+	ctx.Step(`^every instance of workspace root "([^"]*)" links each marketplace to the same release tree$`, everyInstanceLinksTheSameTree)
+	ctx.Step(`^no marketplace has a release directory or a held\.json in the plugin store of workspace root "([^"]*)"$`, noMarketplaceReleaseDirectory)
+	ctx.Step(`^the config of workspace root "([^"]*)" no longer tracks its source$`, theConfigNoLongerTracksItsSource)
+	ctx.Step(`^the plugin store of workspace root "([^"]*)" holds no staging entry for any marketplace$`, noStagingEntryForAnyMarketplace)
 }
 
 // pluginRootDir is the workspace root a scenario names: "." for the suite's own
@@ -383,6 +400,13 @@ func instanceLinksMarketplaceToRelease(ctx context.Context, instance, slug, tag 
 // links: at the instance root, in the repo, and in a session worktree made for
 // the check. A link that leads nowhere fails the read.
 func everySkillResolves(ctx context.Context, instance, repoName string) (context.Context, error) {
+	return skillsResolveIn(ctx, instance, repoName, "skills-"+instance)
+}
+
+// skillsResolveIn is everySkillResolves with the session worktree's purpose
+// given, for an instance whose name is no valid purpose (a dispatched
+// instance's name carries a "+").
+func skillsResolveIn(ctx context.Context, instance, repoName, purpose string) (context.Context, error) {
 	s, ps, err := pluginState(ctx)
 	if err != nil {
 		return ctx, err
@@ -392,7 +416,7 @@ func everySkillResolves(ctx context.Context, instance, repoName string) (context
 	if len(repoDirs) != 1 {
 		return ctx, fmt.Errorf("repo %q in %s: found %v", repoName, instRoot, repoDirs)
 	}
-	ctx, err = iCallCreateWorktree(ctx, repoName, "skills-"+instance, instance)
+	ctx, err = iCallCreateWorktree(ctx, repoName, purpose, instance)
 	if err != nil {
 		return ctx, err
 	}
@@ -694,4 +718,433 @@ func nothingForPluginsUnderHome(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// The session ids the second-instance rows use.
+const (
+	pluginDispatchSessionID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	pluginHookSessionID     = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+)
+
+// instanceNames lists the instances under the workspace root: the
+// directories holding a .niwa/instance.json.
+func instanceNames(s *testState) (map[string]time.Time, error) {
+	found, err := filepath.Glob(filepath.Join(s.workspaceRoot, "*", ".niwa", "instance.json"))
+	if err != nil {
+		return nil, err
+	}
+	names := map[string]time.Time{}
+	for _, f := range found {
+		info, err := os.Stat(f)
+		if err != nil {
+			return nil, err
+		}
+		names[filepath.Base(filepath.Dir(filepath.Dir(f)))] = info.ModTime()
+	}
+	return names, nil
+}
+
+// installPluginDispatchFakeClaude puts one claude on PATH that answers both
+// what a dispatch launches (the dispatch suite's fake) and the plugin
+// pre-warm's `claude plugin` calls (the pre-warm fake), so a dispatched
+// instance pre-warms the way a created one does.
+func installPluginDispatchFakeClaude(s *testState, sessionID string) error {
+	binDir := filepath.Join(s.homeDir, "fake-claude-bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return err
+	}
+	scripts := map[string]string{
+		"claude-dispatch": dispatchFakeClaudeScript("ok"),
+		"claude-prewarm":  prewarmFakeClaudeScript(),
+		"claude": `#!/bin/sh
+dir=$(dirname "$0")
+if [ "$1" = "plugin" ]; then
+  exec "$dir/claude-prewarm" "$@"
+fi
+exec "$dir/claude-dispatch" "$@"
+`,
+	}
+	for name, body := range scripts {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(body), 0o755); err != nil {
+			return err
+		}
+	}
+	s.pathPrefix = binDir
+	s.envOverrides["FAKE_CLAUDE_SESSION_ID"] = sessionID
+	return nil
+}
+
+// iMakeTheSecondInstanceWith makes one more instance of the workspace by the
+// row's path and remembers which one it is: the instance that wasn't there
+// before.
+func iMakeTheSecondInstanceWith(ctx context.Context, how string) (context.Context, error) {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	before, err := instanceNames(s)
+	if err != nil {
+		return ctx, err
+	}
+	switch how {
+	case "niwa create ws":
+		err = runNiwa(s, s.homeDir, "niwa create ws")
+	case "niwa dispatch":
+		if err = installPluginDispatchFakeClaude(s, pluginDispatchSessionID); err == nil {
+			err = runNiwa(s, s.workspaceRoot, "niwa dispatch plugin-task --detach")
+		}
+	case "the SessionStart hook":
+		if ctx, err = aBackgroundJobStateForSession(ctx, pluginHookSessionID); err == nil {
+			ctx, err = iPipeASessionStartHookForSession(ctx, pluginHookSessionID)
+		}
+	default:
+		err = fmt.Errorf("unknown way to make an instance %q", how)
+	}
+	if err != nil {
+		return ctx, err
+	}
+	if s.exitCode != 0 {
+		return ctx, fmt.Errorf("%s exit=%d\nstdout:\n%s\nstderr:\n%s", how, s.exitCode, s.stdout, s.stderr)
+	}
+	after, err := instanceNames(s)
+	if err != nil {
+		return ctx, err
+	}
+	var made []string
+	for name := range after {
+		if _, ok := before[name]; !ok {
+			made = append(made, name)
+		}
+	}
+	if len(made) != 1 {
+		return ctx, fmt.Errorf("%s made instances %v, want exactly one", how, made)
+	}
+	ps.second = made[0]
+	return ctx, nil
+}
+
+// namedInstance resolves "second" to the instance the second-instance step
+// made, and "newest" to the instance whose instance.json was written last.
+func namedInstance(s *testState, ps *pluginStoreScenario, which string) (string, error) {
+	if which == "second" {
+		if ps.second == "" {
+			return "", fmt.Errorf("no second instance was made")
+		}
+		return ps.second, nil
+	}
+	names, err := instanceNames(s)
+	if err != nil {
+		return "", err
+	}
+	newest, at := "", time.Time{}
+	for name, t := range names {
+		if newest == "" || t.After(at) {
+			newest, at = name, t
+		}
+	}
+	if newest == "" {
+		return "", fmt.Errorf("no instance under %s", s.workspaceRoot)
+	}
+	return newest, nil
+}
+
+func marketplacesOfNamedInstanceAreOnlyLinks(ctx context.Context, which, root string) error {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	instance, err := namedInstance(s, ps, which)
+	if err != nil {
+		return err
+	}
+	return marketplacesAreOnlyLinks(ctx, instance, root)
+}
+
+func everySkillResolvesInNamedInstance(ctx context.Context, which, repoName string) (context.Context, error) {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	instance, err := namedInstance(s, ps, which)
+	if err != nil {
+		return ctx, err
+	}
+	return skillsResolveIn(ctx, instance, repoName, "skills-"+which)
+}
+
+// startedCreate is a create running in the background.
+type startedCreate struct {
+	cmd            *exec.Cmd
+	stdout, stderr bytes.Buffer
+	done           chan error
+}
+
+// iStartHeldCreates starts n creates as separate processes, each with the
+// plugin-store-download fault set to hold: the first to reach a download
+// writes <hold>.held and waits there until <hold> exists, holding that
+// release's lock, so the others queue on it. It returns once a download is
+// held and every process has had a moment to reach the lock.
+func iStartHeldCreates(ctx context.Context, n int, command string) (context.Context, error) {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	ps.holdPath = filepath.Join(s.sandbox, "plugin-store-download-hold")
+	s.envOverrides["NIWA_TEST_FAULT"] = "hold:" + ps.holdPath + "@plugin-store-download"
+	env := s.buildEnv()
+	delete(s.envOverrides, "NIWA_TEST_FAULT")
+	// A create left running by a failing step would outlive the scenario.
+	s.cleanups = append(s.cleanups, func() {
+		_ = os.WriteFile(ps.holdPath, nil, 0o600)
+		for _, c := range ps.started {
+			_ = c.cmd.Process.Kill()
+		}
+	})
+
+	args := strings.Fields(command)
+	if len(args) == 0 || args[0] != "niwa" {
+		return ctx, fmt.Errorf("not a niwa command: %q", command)
+	}
+	for i := 0; i < n; i++ {
+		c := &startedCreate{done: make(chan error, 1)}
+		c.cmd = exec.Command(s.binPath, args[1:]...)
+		c.cmd.Dir = s.homeDir
+		c.cmd.Env = env
+		c.cmd.Stdout, c.cmd.Stderr = &c.stdout, &c.stderr
+		if err := c.cmd.Start(); err != nil {
+			return ctx, fmt.Errorf("starting %s: %w", command, err)
+		}
+		go func() { c.done <- c.cmd.Wait() }()
+		ps.started = append(ps.started, c)
+	}
+
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		if _, err := os.Stat(ps.holdPath + ".held"); err == nil {
+			break
+		}
+		for i, c := range ps.started {
+			select {
+			case err := <-c.done:
+				c.done <- err
+				return ctx, fmt.Errorf("create %d ended (%v) before any download was held\nstderr:\n%s", i+1, err, c.stderr.String())
+			default:
+			}
+		}
+		if time.Now().After(deadline) {
+			return ctx, fmt.Errorf("no plugin store download was held within 60s")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// The held process holds the release's lock; give the others time to
+	// come up against it.
+	time.Sleep(time.Second)
+	for i, c := range ps.started {
+		select {
+		case err := <-c.done:
+			c.done <- err
+			return ctx, fmt.Errorf("create %d ended (%v) while a download was held\nstderr:\n%s", i+1, err, c.stderr.String())
+		default:
+		}
+	}
+	return ctx, nil
+}
+
+func theHeldDownloadIsLetGo(ctx context.Context) error {
+	_, ps, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(ps.holdPath, nil, 0o600)
+}
+
+// theHeldCreateIsKilled kills the one started create with SIGKILL while its
+// download is held, so nothing of niwa's own runs after it.
+func theHeldCreateIsKilled(ctx context.Context) error {
+	_, ps, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	if len(ps.started) != 1 {
+		return fmt.Errorf("%d creates started, want one to kill", len(ps.started))
+	}
+	c := ps.started[0]
+	if err := c.cmd.Process.Signal(syscall.SIGKILL); err != nil {
+		return err
+	}
+	err = <-c.done
+	c.done <- err
+	return nil
+}
+
+func everyStartedCreateExitsZero(ctx context.Context) error {
+	_, ps, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	for i, c := range ps.started {
+		select {
+		case err := <-c.done:
+			c.done <- err
+			if err != nil {
+				return fmt.Errorf("create %d: %v\nstdout:\n%s\nstderr:\n%s", i+1, err, c.stdout.String(), c.stderr.String())
+			}
+		case <-time.After(3 * time.Minute):
+			return fmt.Errorf("create %d did not finish within 3 minutes", i+1)
+		}
+	}
+	return nil
+}
+
+// nTarballRequestsPerMarketplace counts each marketplace's tarball requests
+// in the fake's log and reports them; every one must be at the commit of the
+// newest release.
+func nTarballRequestsPerMarketplace(ctx context.Context, want int) error {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	var report []string
+	for _, slug := range ps.order {
+		mk := ps.marketplaces[slug]
+		newest := mk.releases[len(mk.releases)-1]
+		at := "/repos/" + mk.owner + "/" + mk.repo + "/tarball/" + newest.commit
+		count := 0
+		for _, r := range requestsFor(s, mk.owner, mk.repo) {
+			if !strings.Contains(r.Path, "/tarball/") {
+				continue
+			}
+			if r.Path != at {
+				return fmt.Errorf("%s: tarball request %s, want only %s", slug, r.Path, at)
+			}
+			count++
+		}
+		report = append(report, fmt.Sprintf("%s: %d", slug, count))
+		if count != want {
+			return fmt.Errorf("%s: %d tarball requests, want %d", slug, count, want)
+		}
+	}
+	fmt.Printf("tarball requests per release: %s\n", strings.Join(report, ", "))
+	return nil
+}
+
+// everyInstanceLinksTheSameTree checks that every instance under the root
+// links each marketplace to the newest release's tree in one store, and that
+// the tree it links holds the manifest.
+func everyInstanceLinksTheSameTree(ctx context.Context, root string) error {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	dirs, err := filepath.Glob(filepath.Join(pluginRootDir(s, root), "*", ".niwa", "instance.json"))
+	if err != nil {
+		return err
+	}
+	if len(dirs) < 2 {
+		return fmt.Errorf("found %d instances under %s, want several", len(dirs), pluginRootDir(s, root))
+	}
+	for _, slug := range ps.order {
+		mk := ps.marketplaces[slug]
+		newest := mk.releases[len(mk.releases)-1]
+		want := ""
+		for _, f := range dirs {
+			instance := filepath.Dir(filepath.Dir(f))
+			link := filepath.Join(instance, ".niwa", "marketplaces", mk.repo)
+			target, err := os.Readlink(link)
+			if err != nil {
+				return fmt.Errorf("%s: %w", link, err)
+			}
+			if m := releaseLinkPattern.FindStringSubmatch(target); m == nil || m[5] != newest.commit {
+				return fmt.Errorf("%s -> %s, want the tree of %s at %s", link, target, slug, newest.commit)
+			}
+			if want == "" {
+				want = target
+			} else if target != want {
+				return fmt.Errorf("%s -> %s, another instance links %s", link, target, want)
+			}
+		}
+		if info, err := os.Lstat(filepath.Join(want, ".claude-plugin", "marketplace.json")); err != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("%s holds no manifest (%v)", want, err)
+		}
+	}
+	return nil
+}
+
+// pluginStoreDirOf is the plugins directory of the root's store.
+func pluginStoreDirOf(s *testState, root string) (string, error) {
+	key, err := workspaceKeyOf(pluginRootDir(s, root))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(s.homeDir, ".niwa", key, "plugins"), nil
+}
+
+// noMarketplaceReleaseDirectory checks that no published release of any
+// marketplace has a <commit> directory or a held.json in the store.
+func noMarketplaceReleaseDirectory(ctx context.Context, root string) error {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	store, err := pluginStoreDirOf(s, root)
+	if err != nil {
+		return err
+	}
+	for _, slug := range ps.order {
+		mk := ps.marketplaces[slug]
+		for _, rel := range mk.releases {
+			dir := filepath.Join(store, "github.com", mk.owner, mk.repo, rel.commit)
+			for _, p := range []string{dir, filepath.Join(dir, "held.json")} {
+				if _, err := os.Lstat(p); !os.IsNotExist(err) {
+					return fmt.Errorf("%s exists after the create was killed (%v)", p, err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// noStagingEntryForAnyMarketplace checks the store's .tmp/ for an entry of any
+// published release, named by the first 32 hex of sha256 of its id.
+func noStagingEntryForAnyMarketplace(ctx context.Context, root string) error {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	store, err := pluginStoreDirOf(s, root)
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(filepath.Join(store, ".tmp"))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for _, slug := range ps.order {
+		mk := ps.marketplaces[slug]
+		for _, rel := range mk.releases {
+			sum := sha256.Sum256([]byte("github.com/" + mk.owner + "/" + mk.repo + "/" + rel.commit))
+			prefix := hex.EncodeToString(sum[:])[:32] + "-"
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), prefix) {
+					return fmt.Errorf("staging entry %s of %s %s is left in %s/.tmp", e.Name(), slug, rel.tag, store)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// theConfigNoLongerTracksItsSource removes the config snapshot's provenance
+// marker, so no command re-materializes the config from its source: what a
+// workspace scaffolded in place holds.
+func theConfigNoLongerTracksItsSource(ctx context.Context, root string) (context.Context, error) {
+	s, _, err := pluginState(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	marker := filepath.Join(pluginRootDir(s, root), ".niwa", ".niwa-snapshot.toml")
+	if err := os.Remove(marker); err != nil {
+		return ctx, fmt.Errorf("removing %s: %w", marker, err)
+	}
+	return ctx, nil
 }
