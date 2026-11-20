@@ -23,12 +23,16 @@ import (
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
+// retaskInterruptFlag is the flag that lets retask stop a worker mid-turn.
+const retaskInterruptFlag = "interrupt"
+
 func init() {
+	retaskCmd.Flags().Bool(retaskInterruptFlag, false, "stop a worker that is in the middle of a turn and wake it in place, instead of refusing it as busy")
 	rootCmd.AddCommand(retaskCmd)
 }
 
 var retaskCmd = &cobra.Command{
-	Use:   "retask <target> <prompt>",
+	Use:   "retask [--interrupt] <target> <prompt>",
 	Short: "Hand a dispatched worker its next task in the same session",
 	Long: `Hand a worker niwa dispatch launched its next task, in the same session:
 same session id, same job entry, same short id, and the context of its
@@ -44,8 +48,11 @@ waits until Claude Code shows the stop settled, and wakes the session with
 "claude --bg --resume <session id> -- <prompt>" from the instance, with no
 other argument, so Claude Code re-applies the options it saved with the job.
 It then checks from Claude Code's listing that the same session is running,
-removes a copy the wake started instead, and writes nothing: the session
-mapping, the launch record and the short id stay as they were.
+removes a copy the wake started instead, checks the options Claude Code saved
+for the woken session against the launch record again (the model included),
+and writes nothing: the session mapping, the launch record and the short id
+stay as they were. A wake whose saved options differ afterwards is stopped
+and refused.
 
 A worker whose job entry or instance is gone is niwa resume's: retask refuses
 it and names niwa resume. Retask also refuses, before it stops anything, a
@@ -54,6 +61,12 @@ for an answer, a Claude Code build older than 2.1.314, saved options that
 differ from the launch record, a current permission policy stricter than the
 recorded mode, another session rooted in the instance, and another niwa
 command acting on the instance. Every refusal names one stable state word.
+
+--interrupt is for a worker whose turn is stuck, a tool call that never
+returns for example: retask stops the turn instead of refusing the worker as
+busy, then settles, wakes and checks it exactly as it does an idle worker.
+Whatever the stopped turn was doing is cut off. A worker waiting for an
+answer is still refused.
 
 The prompt appears in the process table and in Claude Code's transcripts, so
 it must not carry secrets.`,
@@ -87,6 +100,11 @@ const (
 	retaskCopyStarted      = "copy-started"
 	retaskCopyLeft         = "copy-left"
 	retaskWakeUnconfirmed  = "wake-unconfirmed"
+	// retaskWokeWithDrift is a wake that continued the same session but left
+	// saved options that differ from the launch record, the model above all:
+	// Claude Code writes the model a session resolved at startup into its own
+	// saved options, so a wake can come back on a model nobody launched it on.
+	retaskWokeWithDrift = "woke-with-drift"
 )
 
 // retaskStateWords is the table of state words, in the order the guide lists
@@ -113,6 +131,7 @@ var retaskStateWords = []string{
 	retaskCopyStarted,
 	retaskCopyLeft,
 	retaskWakeUnconfirmed,
+	retaskWokeWithDrift,
 }
 
 // The settle and verify bounds. Settling polls the listing until the stopped
@@ -206,7 +225,14 @@ const (
 	// stoppedWithEntry is a stopped worker whose job entry Claude Code still
 	// lists: it is woken as it is.
 	stoppedWithEntry
+	// liveBusy is a worker in the middle of a turn, taken only when the CLI
+	// caller passed --interrupt: its turn is stopped, left to settle, then
+	// woken, exactly as a live idle worker is.
+	liveBusy
 )
+
+// stopsFirst reports whether the core stops the worker before the wake.
+func (s workerState) stopsFirst() bool { return s == liveIdle || s == liveBusy }
 
 func (s workerState) String() string {
 	switch s {
@@ -214,6 +240,8 @@ func (s workerState) String() string {
 		return "live idle"
 	case stoppedWithEntry:
 		return "stopped"
+	case liveBusy:
+		return "live busy"
 	}
 	return "unclassified"
 }
@@ -236,6 +264,10 @@ type retaskCaller struct {
 	// Target is what the caller named the worker by, for messages. Empty
 	// names it by its session id.
 	Target string
+	// Interrupt lets a CLI caller retask a worker in the middle of a turn:
+	// the turn is stopped and the worker woken in place. Without it a busy
+	// worker refuses. Watch never sets it.
+	Interrupt bool
 	// PreStop runs after classification and before the stop, in place of
 	// the CLI's saved-options and policy checks.
 	PreStop func(ctx context.Context, s workerSnapshot) error
@@ -295,7 +327,9 @@ func runRetask(cmd *cobra.Command, args []string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if _, err := retaskCore(ctx, v, retaskCaller{Kind: retaskCallerCLI, Prompt: prompt, Target: target}); err != nil {
+	// A command without the flag (a test's bare cobra.Command) reads false.
+	interrupt, _ := cmd.Flags().GetBool(retaskInterruptFlag)
+	if _, err := retaskCore(ctx, v, retaskCaller{Kind: retaskCallerCLI, Prompt: prompt, Target: target, Interrupt: interrupt}); err != nil {
 		return err
 	}
 	out := cmd.OutOrStdout()
@@ -460,8 +494,9 @@ func retaskCore(ctx context.Context, v workerView, c retaskCaller) (retaskResult
 		}
 	}
 
-	// (5) Stop a live worker and wait for the stop to settle.
-	if snap.State == liveIdle {
+	// (5) Stop a live worker, idle or (under --interrupt) mid-turn, and wait
+	// for the stop to settle: a wake before then starts a copy.
+	if snap.State.stopsFirst() {
 		if row, ok := findSessionRow(rows, v.SessionID); !ok || row.SessionID != v.SessionID || row.ID != v.ShortID {
 			return r.refuse(retaskStateUnknown, "the listing no longer matches session %s to short id %s", v.SessionID, v.ShortID)
 		}
@@ -636,25 +671,36 @@ func (r *retaskRun) classify(rows []claudeSessionRow) (workerSnapshot, retaskRes
 		return fail(retaskAwaitingInput, "session %s is waiting for an answer; attach to it with claude attach %s", v.SessionID, v.ShortID)
 	}
 	// The row's own status counts on its own: a worker Claude Code reports
-	// busy is refused even when its job state reads idle.
-	if row.Status == "busy" {
-		return fail(retaskBusy, "session %s is in the middle of a turn; retask hands a worker its next task once it is idle and doesn't queue one", v.SessionID)
-	}
-	if row.Status != "" && row.Status != "idle" {
+	// busy is busy even when its job state reads idle.
+	busy := false
+	switch {
+	case row.Status == "busy":
+		busy = true
+	case row.Status != "" && row.Status != "idle":
 		return fail(retaskStateUnknown, "Claude Code reports session %s as %s, which retask doesn't act on", v.SessionID, strconv.Quote(sanitizeRemovalGateText(row.Status, 40)))
-	}
-	switch watch.ClassifySessionActivity(act) {
-	case watch.ActivityDetachedIdle:
-	case watch.ActivityAttached:
-		return fail(retaskAwaitingInput, "session %s is waiting for an answer; attach to it with claude attach %s", v.SessionID, v.ShortID)
-	case watch.ActivityBusy:
-		return fail(retaskBusy, "session %s is in the middle of a turn; retask hands a worker its next task once it is idle and doesn't queue one", v.SessionID)
 	default:
-		return fail(retaskStateUnknown, "the job state of session %s doesn't read as idle", v.SessionID)
+		switch watch.ClassifySessionActivity(act) {
+		case watch.ActivityDetachedIdle:
+		case watch.ActivityAttached:
+			return fail(retaskAwaitingInput, "session %s is waiting for an answer; attach to it with claude attach %s", v.SessionID, v.ShortID)
+		case watch.ActivityBusy:
+			busy = true
+		default:
+			return fail(retaskStateUnknown, "the job state of session %s doesn't read as idle", v.SessionID)
+		}
 	}
-	snap.State = stoppedWithEntry
-	if row.running() {
+	switch {
+	case busy && !r.c.Interrupt:
+		return fail(retaskBusy, "session %s is in the middle of a turn; retask hands a worker its next task once it is idle and doesn't queue one. If the turn is stuck, niwa retask --interrupt %s <prompt> stops it and wakes the session in place", v.SessionID, shellToken(r.target))
+	case busy && !row.running():
+		// Only a live process has a turn to stop.
+		return fail(retaskStateUnknown, "session %s reads as busy but Claude Code shows no live process for it", v.SessionID)
+	case busy:
+		snap.State = liveBusy
+	case row.running():
 		snap.State = liveIdle
+	default:
+		snap.State = stoppedWithEntry
 	}
 
 	if strays := sessionsRootedAtInstance(rows, v.InstancePath, v.SessionID); len(strays) > 0 {
@@ -764,6 +810,9 @@ func (r *retaskRun) settleOutcome(before map[string]bool, deliverErr error) (ret
 	state, copies := r.verify(before)
 	switch state {
 	case "":
+		if res, err := r.checkAfterWake(); err != nil {
+			return res, err
+		}
 		r.res.Outcome = retaskDelivered
 		r.res.State = ""
 		return r.res, nil
@@ -777,6 +826,40 @@ func (r *retaskRun) settleOutcome(before map[string]bool, deliverErr error) (ret
 		}
 		return r.refuse(retaskWakeUnconfirmed, "retask woke session %s but couldn't confirm the same session took the task (%s). %s", v.SessionID, why, r.actedNote())
 	}
+}
+
+// checkAfterWake reads the options Claude Code saved for the woken session
+// and compares them with the launch record, as step 4 does before the stop.
+// A wake that continues the session in place is meant to re-apply the saved
+// options, but Claude Code writes the model a session resolves at startup
+// into those options, so a session can come back on a model it wasn't
+// launched with. A mismatch stops the woken session, so it isn't left running
+// on options niwa didn't launch, and refuses naming the flag, never its
+// value. Watch callers, which check no launch record, are not checked here.
+func (r *retaskRun) checkAfterWake() (retaskResult, error) {
+	v := r.v
+	if r.c.Kind != retaskCallerCLI || v.Record == nil {
+		return r.res, nil
+	}
+	flag, why := "", ""
+	opts, err := readSavedOptionsFunc(r.jobsDir, v.SessionID)
+	if err != nil {
+		flag, why = "its saved options", fmt.Sprintf("they can't be read after the wake (%v)", err)
+	} else {
+		flag, why = savedOptionsDrift(opts, *v.Record)
+	}
+	if flag == "" {
+		return r.res, nil
+	}
+	r.res.Outcome = retaskUnconfirmed
+	stopped := "retask stopped it again"
+	if err := stopSessionFunc(r.ctx, v.ShortID); err != nil {
+		stopped = fmt.Sprintf("retask could not stop it (%v); stop it yourself with claude stop %s", err, v.ShortID)
+	} else if r.waitStopped(v.SessionID, v.ShortID) == waitTimedOut {
+		stopped = fmt.Sprintf("retask stopped it, but the stop didn't settle in time; check claude agents for short id %s", v.ShortID)
+	}
+	return r.refuse(retaskWokeWithDrift, "the wake continued session %s, but the options Claude Code saved for it afterwards differ from its launch record at %s (%s), so %s. Dispatch the work again. %s",
+		v.SessionID, flag, why, stopped, r.actedNote())
 }
 
 // handleCopies removes the copies the wake started and ends the run:
