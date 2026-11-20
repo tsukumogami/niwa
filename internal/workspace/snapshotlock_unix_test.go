@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/config"
 )
 
 // faultFileExists reports whether path names an existing file system entry.
@@ -152,5 +154,37 @@ func TestEnsureConfigSnapshot_MappingWrittenDuringHeldRefreshSurvives(t *testing
 
 	if !faultFileExists(lockWait + ".held") {
 		t.Errorf("the mapping write never waited for the config lock (no %s.held)", lockWait)
+	}
+}
+
+// TestEnsureConfigSnapshot_AbsentDirUnderUnwritableParentIsNotLocked covers a
+// config dir that doesn't exist yet, such as the personal global config dir
+// before any global config is registered, under a parent the user can't write
+// to. There is no snapshot to refresh and no .prev to restore, so the call
+// must succeed without creating <configDir>.lock, as it did before the lock
+// existed.
+func TestEnsureConfigSnapshot_AbsentDirUnderUnwritableParentIsNotLocked(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions don't bind root")
+	}
+	parent := filepath.Join(t.TempDir(), "niwa")
+	if err := os.Mkdir(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+	configDir := filepath.Join(parent, "global")
+
+	converted, rank, err := EnsureConfigSnapshotWithStatus(context.Background(), configDir, config.MarkerSet{}, nil, nil)
+	if err != nil {
+		t.Fatalf("absent config dir under an unwritable parent: %v", err)
+	}
+	if converted || rank != 0 {
+		t.Errorf("nothing to maintain, got converted=%v rank=%d", converted, rank)
+	}
+	if faultFileExists(configDir + ".lock") {
+		t.Errorf("%s.lock was created for a config dir with nothing to maintain", configDir)
 	}
 }

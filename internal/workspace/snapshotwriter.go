@@ -89,12 +89,19 @@ func EnsureConfigSnapshot(ctx context.Context, configDir string, fetcher FetchCl
 // not just the swap: the restore of an interrupted swap and the in-place
 // provenance update would race another process's swap too. A configDir whose
 // parent doesn't exist has nothing to maintain and returns without locking,
-// so no parent directory is created for it.
+// so no parent directory is created for it. Neither does a configDir that is
+// absent with no <configDir>.prev beside it: there is no snapshot to refresh
+// and no interrupted swap to restore, so the call returns without creating
+// <configDir>.lock, and a parent directory the user can't write to stays
+// usable, as it was before the lock existed.
 func EnsureConfigSnapshotWithStatus(ctx context.Context, configDir string, markers config.MarkerSet, fetcher FetchClient, reporter *Reporter) (converted bool, rank int, err error) {
 	if configDir == "" {
 		return false, 0, errors.New("EnsureConfigSnapshot: configDir is empty")
 	}
 	if _, statErr := os.Stat(filepath.Dir(configDir)); statErr != nil {
+		return false, 0, nil
+	}
+	if !pathExists(configDir) && !pathExists(configDir+config.PrevSuffix) {
 		return false, 0, nil
 	}
 	release, err := config.AcquireSnapshotLock(configDir)
@@ -133,6 +140,14 @@ func ensureConfigSnapshotLocked(ctx context.Context, configDir string, markers c
 		// Case 3: nothing to maintain.
 		return false, 0, nil
 	}
+}
+
+// pathExists reports whether p names a file system entry, without following
+// a final symlink. Any error other than "does not exist" counts as present,
+// so a path that can't be checked still goes through the snapshot lock.
+func pathExists(p string) bool {
+	_, err := os.Lstat(p)
+	return !os.IsNotExist(err)
 }
 
 func provenanceMarkerExists(dir string) bool {
