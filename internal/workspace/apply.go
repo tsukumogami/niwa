@@ -2003,6 +2003,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		Marketplaces: effectiveCfg.Claude.Marketplaces,
 		RepoIndex:    marketplaceIndex,
 		Fetcher:      fetcher,
+		Home:         a.DeveloperHome,
 	})
 	for _, m := range missingPlugins {
 		allWarnings = append(allWarnings, m.String())

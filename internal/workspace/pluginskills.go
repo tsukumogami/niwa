@@ -4,14 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/pluginstore"
 )
 
 // This file resolves the workspace's configured plugins to the installed trees
@@ -100,6 +104,11 @@ type PluginSkillsInputs struct {
 	// for exactly that reason -- it re-delivers from what the instance apply
 	// already fetched.
 	Fetcher FetchClient
+
+	// Home is the developer's home, where the host plugin store lives. Empty
+	// (the unit suites) keeps every marketplace in the instance, as does an
+	// instance whose parent is not a workspace root.
+	Home string
 }
 
 // ResolvePluginTrees resolves every configured plugin to the tree its skills are
@@ -201,24 +210,50 @@ func marketplaceRoots(ctx context.Context, in PluginSkillsInputs) (map[string]st
 }
 
 // ensureMarketplaceContent makes a github-sourced marketplace's content
-// available inside the instance and returns its root.
+// available inside the instance and returns its root, the path
+// <instance>/.niwa/marketplaces/<name>.
 //
-// A marketplace already on disk is used as it is. Re-fetching on every apply
-// would put a network round trip in front of every preparation and would swap
-// the tree under a running session for no benefit: the content is pinned by the
-// configured track, and removing the directory is how a workspace asks for it
-// again.
+// The entry at that path is classified with Lstat before anything is resolved
+// or fetched, and an existing one is kept: an instance stays on the release it
+// was created with. A real directory holding a manifest (an instance from
+// before the host store, or one that fell back to its own copy) is used as it
+// is. A link into the host plugin store is kept on the release it names,
+// which Ensure checks is still held. Only when there is no entry is the ref
+// picked and, with the store in use, resolved to a commit and held once on the
+// host, the instance getting a link to it; otherwise the content is fetched
+// into the instance as before the store existed.
+//
+// Re-fetching on every apply would put a network round trip in front of every
+// preparation and would swap the tree under a running session for no benefit:
+// the content is pinned by the configured track, and removing the entry is how
+// a workspace asks for it again.
 func ensureMarketplaceContent(ctx context.Context, in PluginSkillsInputs, name string, mc config.MarketplaceConfig) (string, error) {
 	if in.InstanceRoot == "" {
 		return "", fmt.Errorf("no instance to fetch marketplace %q into", name)
 	}
 
-	dest := filepath.Join(marketplaceContentRoot(in.InstanceRoot), name)
-	if err := checkContainment(dest, marketplaceContentRoot(in.InstanceRoot)); err != nil {
+	contentRoot := marketplaceContentRoot(in.InstanceRoot)
+	dest := filepath.Join(contentRoot, name)
+	// The containment check is on the entry's own path, never on a link's
+	// target: a healthy link into the host store points outside the instance
+	// by design.
+	if name == "." || name == ".." || filepath.Dir(dest) != filepath.Clean(contentRoot) {
 		return "", fmt.Errorf("marketplace %q: name escapes the instance content directory", name)
 	}
-	if _, err := os.Stat(marketplaceManifestPath(dest)); err == nil {
-		return dest, nil
+
+	info, lerr := os.Lstat(dest)
+	switch {
+	case lerr == nil && info.Mode()&os.ModeSymlink != 0:
+		return keepMarketplaceLink(ctx, in, name, dest)
+	case lerr == nil && info.IsDir():
+		if err := checkContainment(dest, contentRoot); err != nil {
+			return "", fmt.Errorf("marketplace %q: name escapes the instance content directory", name)
+		}
+		if _, err := os.Stat(marketplaceManifestPath(dest)); err == nil {
+			return dest, nil
+		}
+	case lerr != nil && !os.IsNotExist(lerr):
+		return "", fmt.Errorf("marketplace %q: inspecting %s: %w", name, dest, lerr)
 	}
 
 	if in.Fetcher == nil {
@@ -231,15 +266,90 @@ func ensureMarketplaceContent(ctx context.Context, in PluginSkillsInputs, name s
 	}
 
 	ref := marketplaceContentRef(mc)
-	body, _, status, _, err := in.Fetcher.FetchTarball(ctx, owner, repo, ref, "")
+	if store, ok := pluginStoreFor(in); ok {
+		commit, err := resolveMarketplaceCommit(ctx, in.Fetcher, owner, repo, ref)
+		if err != nil {
+			return "", fmt.Errorf("resolving marketplace %q at %s: %w", mc.Source, ref, err)
+		}
+		release, valid := pluginstore.NewRelease(owner, repo, commit, ref, releaseTag(ref))
+		if valid {
+			if err := clearStaleMarketplaceDir(dest); err != nil {
+				return "", fmt.Errorf("replacing marketplace %q: %w", name, err)
+			}
+			if err := os.MkdirAll(contentRoot, 0o755); err != nil {
+				return "", fmt.Errorf("creating %s: %w", contentRoot, err)
+			}
+			_, cond, err := store.Ensure(ctx, release, dest, nil, nil)
+			if cond == pluginstore.CondNone {
+				if err != nil {
+					return "", fmt.Errorf("holding marketplace %q at %s: %w", mc.Source, ref, err)
+				}
+				return dest, nil
+			}
+			// The store can't be used: fall back to a copy in this instance,
+			// at the same commit, so the instance holds what the store would
+			// have.
+			ref = commit
+		}
+	}
+
+	return fetchMarketplaceIntoInstance(ctx, in.Fetcher, mc.Source, owner, repo, ref, name, dest)
+}
+
+// keepMarketplaceLink keeps an instance's existing link at dest on the release
+// it names. A link into a host plugin store is Ensured: a held release is
+// relinked to this store's path if the link names another, and a missing one
+// is fetched back only for a declared source whose commit belongs to the
+// source's own history. A link that isn't a release link, and any link on a
+// run that does no fetching, is used only if the manifest resolves through
+// it.
+func keepMarketplaceLink(ctx context.Context, in PluginSkillsInputs, name, dest string) (string, error) {
+	if store, ok := pluginStoreFor(in); ok && in.Fetcher != nil {
+		if target, err := os.Readlink(dest); err == nil {
+			if release, ok := pluginstore.ParseLink(target); ok {
+				_, cond, err := store.Ensure(ctx, release, dest, declaredMarketplaceSources(in.Marketplaces), marketplaceReachable(in.Fetcher))
+				switch {
+				case err != nil && cond == pluginstore.CondNone:
+					return "", fmt.Errorf("marketplace %q: keeping release %s: %w", name, release.Label(), err)
+				case cond != pluginstore.CondNone:
+					return "", fmt.Errorf("marketplace %q: the plugin store at %s is %s: %v", name, pluginstore.Dir(store.Home, store.WorkspaceRoot), cond, err)
+				}
+				return dest, nil
+			}
+		}
+	}
+	if _, err := os.Stat(marketplaceManifestPath(dest)); err == nil {
+		return dest, nil
+	}
+	return "", fmt.Errorf("marketplace %q: the link at %s does not lead to a marketplace", name, dest)
+}
+
+// clearStaleMarketplaceDir removes a real directory at dest that holds no
+// manifest, what a fetch interrupted before the host store existed could
+// leave, so a link can take its place. Anything else at dest is left alone.
+func clearStaleMarketplaceDir(dest string) error {
+	info, err := os.Lstat(dest)
+	if err != nil || !info.IsDir() {
+		return nil
+	}
+	if _, err := os.Stat(marketplaceManifestPath(dest)); err == nil {
+		return nil
+	}
+	return os.RemoveAll(dest)
+}
+
+// fetchMarketplaceIntoInstance fetches the marketplace's tarball at ref into
+// a real directory at dest, the per-instance copy the host store replaces.
+func fetchMarketplaceIntoInstance(ctx context.Context, fetcher FetchClient, source, owner, repo, ref, name, dest string) (string, error) {
+	body, _, status, _, err := fetcher.FetchTarball(ctx, owner, repo, ref, "")
 	if body != nil {
 		defer body.Close()
 	}
 	if err != nil {
-		return "", fmt.Errorf("fetching marketplace %q at %s: %w", mc.Source, ref, err)
+		return "", fmt.Errorf("fetching marketplace %q at %s: %w", source, ref, err)
 	}
 	if status != 200 {
-		return "", fmt.Errorf("fetching marketplace %q at %s: GitHub returned %d", mc.Source, ref, status)
+		return "", fmt.Errorf("fetching marketplace %q at %s: GitHub returned %d", source, ref, status)
 	}
 
 	// Extract into a staging directory and promote it only on success, so a
@@ -251,11 +361,11 @@ func ensureMarketplaceContent(ctx context.Context, in PluginSkillsInputs, name s
 	}
 	if err := github.ExtractSubpath(body, "", staging); err != nil {
 		os.RemoveAll(staging)
-		return "", fmt.Errorf("extracting marketplace %q: %w", mc.Source, err)
+		return "", fmt.Errorf("extracting marketplace %q: %w", source, err)
 	}
 	if _, err := os.Stat(marketplaceManifestPath(staging)); err != nil {
 		os.RemoveAll(staging)
-		return "", fmt.Errorf("marketplace %q carries no .claude-plugin/marketplace.json", mc.Source)
+		return "", fmt.Errorf("marketplace %q carries no .claude-plugin/marketplace.json", source)
 	}
 	if err := os.RemoveAll(dest); err != nil {
 		os.RemoveAll(staging)
@@ -563,4 +673,136 @@ func reconcileSkillsDir(spec agentplan.SkillsReconcileSpec) ([]string, error) {
 	}
 
 	return warnings, nil
+}
+
+// pluginStoreFor returns the host plugin store this resolution places into,
+// and whether there is one. There is one when the developer's home is known
+// and the instance's parent is a workspace root that holds its config: a
+// single-instance layout keeps its marketplaces in the instance and writes
+// nothing under ~/.niwa for them.
+func pluginStoreFor(in PluginSkillsInputs) (pluginstore.Store, bool) {
+	if in.Home == "" || in.InstanceRoot == "" {
+		return pluginstore.Store{}, false
+	}
+	workspaceRoot := filepath.Dir(in.InstanceRoot)
+	if !workspaceRootHoldsState(workspaceRoot) {
+		return pluginstore.Store{}, false
+	}
+	fetcher := in.Fetcher
+	return pluginstore.Store{
+		Home:          in.Home,
+		WorkspaceRoot: workspaceRoot,
+		Fetch: func(ctx context.Context, owner, repo, commit string) (io.ReadCloser, error) {
+			if fetcher == nil {
+				return nil, fmt.Errorf("this run does no fetching")
+			}
+			body, _, status, _, err := fetcher.FetchTarball(ctx, owner, repo, commit, "")
+			if err != nil {
+				if body != nil {
+					body.Close()
+				}
+				return nil, err
+			}
+			if status != 200 || body == nil {
+				if body != nil {
+					body.Close()
+				}
+				return nil, fmt.Errorf("GitHub returned %d", status)
+			}
+			return body, nil
+		},
+	}, true
+}
+
+// commitPattern is a full commit id as the commits endpoint returns it.
+var commitPattern = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
+
+// resolveMarketplaceCommit takes the ref to the commit it names, with one
+// small request, so the release is keyed and fetched by the commit and the
+// content matches its key even if the ref moves meanwhile.
+func resolveMarketplaceCommit(ctx context.Context, fetcher FetchClient, owner, repo, ref string) (string, error) {
+	oid, _, status, err := fetcher.HeadCommit(ctx, owner, repo, ref, "")
+	if err != nil {
+		return "", err
+	}
+	if status != 200 {
+		return "", fmt.Errorf("GitHub returned %d", status)
+	}
+	if !commitPattern.MatchString(oid) {
+		return "", fmt.Errorf("GitHub answered with something that is not a commit id")
+	}
+	return strings.ToLower(oid), nil
+}
+
+// releaseTag is ref when it is a stable release tag, the one shape a message
+// names, and "" otherwise.
+func releaseTag(ref string) string {
+	if _, ok := parseStableSemver(ref); ok {
+		return ref
+	}
+	return ""
+}
+
+// declaredMarketplaceSources is the set of github marketplace sources the
+// effective config declares, lowercased "owner/repo". A release a link names
+// is fetched back only for one of them.
+func declaredMarketplaceSources(mcs config.MarketplaceConfigs) map[string]bool {
+	declared := map[string]bool{}
+	for _, mc := range mcs {
+		if strings.HasPrefix(mc.Source, repoRefPrefix) {
+			continue
+		}
+		if owner, repo, ok := splitGitHubSource(mc.Source); ok {
+			declared[strings.ToLower(owner)+"/"+strings.ToLower(repo)] = true
+		}
+	}
+	return declared
+}
+
+// commitComparer is the part of the GitHub client the reachability check
+// uses beyond FetchClient.
+type commitComparer interface {
+	CompareCommits(ctx context.Context, owner, repo, base, head string) (github.Ancestry, error)
+}
+
+// marketplaceReachable is the check a commit taken from a link must pass
+// before it is fetched: a tag or branch tip `git ls-remote` of the source
+// lists, or an ancestor of one by the compare endpoint.
+func marketplaceReachable(fetcher FetchClient) pluginstore.Reachable {
+	var behind pluginstore.Behind
+	if cmp, ok := fetcher.(commitComparer); ok {
+		behind = func(ctx context.Context, owner, repo, base, commit string) (bool, error) {
+			a, err := cmp.CompareCommits(ctx, owner, repo, base, commit)
+			if err != nil {
+				return false, err
+			}
+			return a == github.AncestryAncestor, nil
+		}
+	}
+	return pluginstore.NewReachable(lsRemoteTips, behind)
+}
+
+// lsRemoteTips lists the source's refs with `git ls-remote`, annotated tags
+// peeled, so a tag names the commit it points at.
+func lsRemoteTips(ctx context.Context, owner, repo string) (map[string]string, error) {
+	out, err := exec.CommandContext(ctx, "git", "ls-remote", "https://github.com/"+owner+"/"+repo).Output()
+	if err != nil {
+		return nil, fmt.Errorf("listing the refs of %s/%s: %w", owner, repo, err)
+	}
+	tips := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || !commitPattern.MatchString(fields[0]) {
+			continue
+		}
+		name, commit := fields[1], strings.ToLower(fields[0])
+		if peeled, ok := strings.CutSuffix(name, "^{}"); ok {
+			tips[peeled] = commit
+			continue
+		}
+		if _, seen := tips[name]; !seen {
+			tips[name] = commit
+		}
+	}
+	return tips, nil
 }

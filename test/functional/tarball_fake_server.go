@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"time"
 )
 
 // tarballFakeServer is the test counterpart of the GitHub REST API
@@ -92,6 +93,15 @@ func (s *tarballFakeServer) SetTarball(owner, repo, ref string, entries map[stri
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tarballs[key(owner, repo, ref)] = buildGzippedTarball(entries)
+}
+
+// SetTarballAt is SetTarball with every entry stamped with modTime, as git
+// archive stamps each entry with the committer date. Entries whose path is in
+// executables get mode 0755.
+func (s *tarballFakeServer) SetTarballAt(owner, repo, ref string, entries map[string]string, modTime time.Time, executables map[string]bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tarballs[key(owner, repo, ref)] = buildGzippedTarballAt(entries, modTime, executables)
 }
 
 // SetCommit configures the oid returned for the commits SHA endpoint.
@@ -268,6 +278,10 @@ func key(owner, repo, ref string) string {
 }
 
 func buildGzippedTarball(entries map[string]string) []byte {
+	return buildGzippedTarballAt(entries, time.Time{}, nil)
+}
+
+func buildGzippedTarballAt(entries map[string]string, modTime time.Time, executables map[string]bool) []byte {
 	var raw bytes.Buffer
 	gz := gzip.NewWriter(&raw)
 	tw := tar.NewWriter(gz)
@@ -276,14 +290,18 @@ func buildGzippedTarball(entries map[string]string) []byte {
 		if !strings.HasSuffix(name, "/") {
 			continue
 		}
-		_ = tw.WriteHeader(&tar.Header{Name: name, Mode: 0o755, Typeflag: tar.TypeDir})
+		_ = tw.WriteHeader(&tar.Header{Name: name, Mode: 0o755, Typeflag: tar.TypeDir, ModTime: modTime})
 	}
 	// Files.
 	for name, body := range entries {
 		if strings.HasSuffix(name, "/") {
 			continue
 		}
-		_ = tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg})
+		mode := int64(0o644)
+		if executables[name] {
+			mode = 0o755
+		}
+		_ = tw.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: int64(len(body)), Typeflag: tar.TypeReg, ModTime: modTime})
 		_, _ = tw.Write([]byte(body))
 	}
 	_ = tw.Close()
