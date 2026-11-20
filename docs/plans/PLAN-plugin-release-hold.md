@@ -352,7 +352,109 @@ test -race ./internal/pluginstore/... ./internal/workspace/...
 
 ### Step 5: unused older releases are swept while any release an instance on disk links to survives
 
-Each provisioning command deletes held releases no instance links to except the newest of each source by commit time, never one a live or kept instance (under the root or in `~/.niwa/w-<key>/kept/`) links to through create, apply, dispatch, the hook, reset or destroy, deletes nothing when a scan fails, and `niwa destroy --force` at the root removes the store unless kept instances remain.
+**Goal**: Each provisioning command deletes the held releases that no
+instance on disk links to, except the newest held release of each source, and
+never deletes one that a live or kept instance links to. Steps 1 to 4 left
+everything the sweep needs except the sweep itself. `place` records
+`Mark.CommitTime` in `held.json` from the archive's entry times, so a refetch
+reproduces it. `hostdir.InstanceDirs` lists the root's real child directories
+and the entries of `~/.niwa/w-<key>/kept/`, and returns an error when either
+listing fails. `Store.Linked` in `internal/pluginstore/repair.go` turns that
+list into the releases each instance's `.niwa/marketplaces/` symlinks name.
+`LockPath` gives each release's lock, and `trashRelease` moves a release into
+`.trash/` and removes it there. But nothing deletes a held release, so a
+marketplace tracked at a moving ref grows the store by a full tree per commit.
+And `Linked` skips an instance whose `.niwa/marketplaces/` can't be read,
+which is safe for repair but not for deletion.
+
+This step adds `Store.Sweep`. It runs once per provisioning command per
+workspace, after `repairPluginStore` and after the current instance is
+linked: in `runPipeline` after Step 6.2b, and on the same once-per-store
+guard repair uses. Its candidates are the held releases under
+`plugins/github.com/<owner>/<repo>/` that are not the newest of their source.
+Newest means the latest `CommitTime` in `held.json`, with ties broken by the
+greater commit hash. A release whose mark can't be read is never a candidate
+and never counts as newest. For each candidate, the sweep takes that
+release's lock (a short wait, and skipping the candidate when the lock is
+busy), scans every instance again, and deletes the release only if nothing
+links to it. A deleted release has the write bits of its own entries
+restored, is renamed into `.trash/`, and is removed there, so a reader sees
+the whole release or nothing. Owner and repo directories it leaves empty are
+removed with it, and so are the `.tmp/` and `.trash/` entries matching that
+release's `stagingPattern`.
+
+The scan the sweep relies on is strict. If the root or an existing `kept/`
+can't be listed, or an instance that has a `.niwa` directory has a
+`.niwa/marketplaces/` that exists but can't be read, the sweep deletes
+nothing for that command. It reports that it was skipped, and why, through
+`internal/fallbacknotice`. Either `Linked` gains this strict mode, or the
+sweep gets a sibling scan; repair keeps its lenient one. A symlink whose
+target names the release through another home's or another key's path
+counts as a use.
+
+`niwa destroy` of one instance deletes nothing from the store; the next
+provisioning command sweeps what it freed. `DestroyWorkspace` (reached by
+`niwa destroy --force` at the root, and by `niwa destroy` at an empty root)
+computes the store's path from the root before it removes anything. After
+the root is gone, it removes `~/.niwa/w-<key>/plugins/` only when
+`~/.niwa/w-<key>/kept/` is absent or empty. With kept instances still there,
+it leaves the store in place and prints its path. It removes
+`~/.niwa/w-<key>/` only if that leaves it empty, so the mirrors directory
+beside it is left alone.
+
+**Acceptance Criteria**:
+
+- [ ] A source with three held releases at increasing commit times, where no
+  instance links the oldest two, keeps only the newest after the next
+  `niwa apply`. The two older `<commit>` directories are gone, and so are the
+  `.tmp/` and `.trash/` entries for them. The run makes no tarball request.
+- [ ] The newest held release of a source survives the sweep even when no
+  instance links to it. A release restored by repair at an old commit keeps
+  its old `CommitTime`, so it doesn't push a newer unused release out as a
+  candidate.
+- [ ] An older release linked only by an instance under
+  `~/.niwa/w-<key>/kept/<name>/` survives `niwa create`, `niwa apply`,
+  `niwa dispatch`, the SessionStart hook, `niwa reset` and `niwa destroy` of
+  another instance. A skill from that marketplace still resolves in the kept
+  instance afterwards. The same holds for an older release linked only by a
+  live instance under the root, and for an instance with no
+  `.niwa/instance.json`.
+- [ ] When the root can't be listed, an existing `kept/` can't be listed, or
+  one instance's `.niwa/marketplaces/` can't be read (mode 000), the command
+  exits 0 and deletes no release. It prints one line saying the sweep was
+  skipped, naming the path it couldn't read. The next command, with the mode
+  restored, sweeps as usual.
+- [ ] `niwa destroy` of an instance leaves every held release in place, and
+  the next provisioning command deletes the older ones it freed.
+- [ ] `niwa destroy --force` at the root removes `~/.niwa/w-<key>/plugins/`
+  when no kept instance remains, and removes `~/.niwa/w-<key>/` only when
+  nothing else is left in it. With a kept instance present, it leaves the
+  store in place, prints the store's path, and a skill still resolves in the
+  kept instance.
+- [ ] Unit tests of `Sweep` cover: the newest-by-commit-time choice and its
+  tie break on the commit hash; a candidate skipped while another holder
+  owns its lock; a candidate a link appears to between the first scan and
+  the locked rescan, which is kept; no deletion on each of the three scan
+  failures; a release with an unreadable mark kept; and a deleted release
+  leaving no empty owner or repo directory.
+- [ ] `Sweep`'s doc comment states the rule it keeps: it never deletes a
+  release an instance on disk links to, and it deletes nothing when the
+  scan can't see every instance. It also names `hostdir.InstanceDirs` as the
+  one place a new instance location must be added.
+
+**Check**: Run `make build-test`, then `make test-functional-plugin-release-hold`.
+The new scenarios must pass: three releases of one source swept down to the
+newest; a kept instance (created by the scenario under the sandbox home's
+`kept/`) keeping an old release through each command; a mode-000
+marketplaces directory skipping the sweep and then a clean sweep;
+`niwa destroy` of an instance followed by a sweep; and `niwa destroy --force`
+with and without a kept instance. Then
+`go test -race ./internal/pluginstore/... ./internal/hostdir/...
+./internal/workspace/... ./internal/fallbacknotice/...` must exit 0.
+
+**Dependencies**: Step 4
+
+**Files**: `internal/pluginstore/sweep.go`, `internal/pluginstore/sweep_test.go`, `internal/pluginstore/repair.go`, `internal/pluginstore/place.go`, `internal/hostdir/hostdir.go`, `internal/workspace/pluginskills.go`, `internal/workspace/apply.go`, `internal/workspace/destroy_workspace.go`, `internal/fallbacknotice/`, `test/functional/features/plugin-release-hold.feature`, `test/functional/pluginstore_sweep_steps_test.go`, `test/functional/pluginstore_steps_test.go`
 
 ### Step 6: share_plugin_releases = false gives a workspace's new instances their own full copy
 
