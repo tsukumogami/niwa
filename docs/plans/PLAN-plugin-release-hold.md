@@ -272,7 +272,83 @@ and the request-count steps report the counts above. Then `go test -race
 
 ### Step 4: a held release changed after placement is fetched again and reported as tampered
 
-A held tree whose entry count, total size, write bits or newest ctime no longer match its seal is moved aside and fetched again at its commit by the next command that links or repairs it, and the output says the release was tampered with.
+**Goal**: A held release whose tree no longer matches the seal in its
+`held.json` is treated as missing. The next command that links an instance to
+it, or the repair pass that finds it in use, moves it aside under its lock,
+fetches it again at its commit, and reports that the release was tampered
+with. Steps 1 to 3 left the seal written but never read: `place` in
+`internal/pluginstore/place.go` takes it with `TakeSeal` (entry count, total
+size of regular files, newest ctime, all by `Lstat`) after `makeReadOnly` and
+stores it in `Mark.Seal`. But `Held` checks only that the mark parses, names
+the source and commit, and that `tree/.claude-plugin/marketplace.json` exists,
+and `Ensure` and `Repair` (`internal/pluginstore/repair.go`) restore only a
+release `Held` reports missing. A tree edited after `chmod u+w`, or with a
+file added or removed, is linked and served as if it were intact. This step
+adds `Store.Verify(r Release) (bool, error)`, which walks the tree with
+`Lstat` and fails when the entry count or total size differs from the seal,
+any entry has a write bit, or any entry's ctime is newer than the sealed
+`MaxCtimeNS`. `Held` stays the offline check it is (a few stats and one short
+read, as the sweep in step 5 needs). `Ensure` runs `Verify` on a held release
+before it links it. A release that fails is moved into `.trash/` and placed
+again at its commit through the same locked path a missing one takes, with
+the same declared-source and reachability checks when it came from a link.
+`trashUnmarked` handles a directory without a valid mark today, so either
+generalize it or add a sibling for a marked tree that failed the walk.
+`Repair` verifies each distinct release it finds in use, once per command,
+and reports a tampered restore as its own outcome through
+`internal/fallbacknotice`, next to the restored, refused, undeclared and
+failed ones step 3 added.
+
+**Acceptance Criteria**:
+
+- [ ] With two instances linked to the same held release, giving one file of
+  its tree back its write bit, appending to it, and then running `niwa apply`
+  in the second instance makes exactly one tarball request for it. It puts
+  back a marked, read-only release at the same path whose file content
+  matches the tarball, and a skill from that marketplace resolves in the
+  first instance with no command run inside it.
+- [ ] A file added to the tree (after `chmod u+w` on its directory), a file
+  removed from it, and a `chmod u+w` alone with no content change each count
+  as tampered: the next `niwa apply` makes one tarball request for that
+  release and it is held again.
+- [ ] An unchanged held release costs no tarball request: a second `niwa
+  apply` with nothing changed makes zero requests for it, so `Verify` passes
+  on a tree just placed and on one placed by an earlier command.
+- [ ] The restore prints one line naming the release
+  (`github.com/<owner>/<repo>@<commit>`), saying it was tampered with, and
+  naming the instances it served. The line appears in the terminal for
+  `apply` and `create`, in `niwa dispatch` output and in the hook's context,
+  in the same lead the step 3 repair lines use.
+- [ ] A tampered release whose refetch fails (the `fetch-tarball` fault set
+  to `error:`) leaves the command exiting 0 with a warning naming the
+  release, nothing marked held for it, and the tampered tree no longer at the
+  release path. The next command with the fault cleared restores it with one
+  tarball request.
+- [ ] A tampered release that is linked by several instances, or found both
+  by `Repair` and by the current instance's own `Ensure` in one command, is
+  fetched once in that command.
+- [ ] Unit tests of `Verify` on a freshly placed tree pass, and each of these
+  fails it: a changed size, an added entry, a removed entry, a write bit on a
+  file, a write bit on a directory, and a ctime newer than the seal (from a
+  `chmod` and back). A unit test of `Ensure` on a tampered held release
+  fetches it once and returns it restored, and one of `Repair` returns it as
+  a tampered entry with its instances.
+- [ ] `Held`'s doc comment says it does not read the seal and names `Verify`
+  as the check that does, and `Verify`'s says what the walk does not catch: a
+  tree rewritten together with its `held.json`, or a change that keeps the
+  count, the size and the ctime.
+
+**Check**: Run `make build-test`, then `make test-functional-plugin-release-hold`:
+the new scenarios for a tampered release (a file edited after `chmod u+w`, a
+file added, a file removed, a `chmod` alone), an unchanged release making no
+request, the report line on each surface, and a failed refetch then a clean
+retry pass, and the request-count steps report the counts above. Then `go
+test -race ./internal/pluginstore/... ./internal/workspace/...
+./internal/fallbacknotice/...` exits 0.
+
+**Dependencies**: Step 3
+
+**Files**: `internal/pluginstore/place.go`, `internal/pluginstore/place_test.go`, `internal/pluginstore/repair.go`, `internal/pluginstore/repair_test.go`, `internal/pluginstore/ctime_linux.go`, `internal/pluginstore/ctime_darwin.go`, `internal/workspace/pluginskills.go`, `internal/fallbacknotice/`, `test/functional/features/plugin-release-hold.feature`, `test/functional/pluginstore_repair_steps_test.go`, `test/functional/pluginstore_steps_test.go`
 
 ### Step 5: unused older releases are swept while any release an instance on disk links to survives
 
