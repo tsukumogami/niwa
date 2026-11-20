@@ -17,7 +17,6 @@ goals: |
   A workspace that names no command loses nothing it didn't ask to lose: its
   stopped units are listed with their answer, age and size, one command retires
   a unit under the same rule, and idle build trees are trimmed.
-upstream: docs/briefs/BRIEF-over-remover.md
 motivating_context: |
   niwa keeps a finished session's instance until the session is deleted, by a
   recorded decision made after an earlier version reaped instances the moment a
@@ -27,6 +26,8 @@ motivating_context: |
   mark format. This PRD states what niwa must do to carry that remover for every
   workspace, and treats every point of the earlier remover's contract as an open
   dependency until that work lands.
+absorbed:
+  - docs/briefs/BRIEF-over-remover.md
 ---
 
 # PRD: niwa removes a finished unit that a workspace command says is over
@@ -43,6 +44,49 @@ until it lands; this PRD doesn't settle any of them. Names used here (the retire
 mark, the retire command, the settings) are placeholders until the design picks
 them. What the design settles, and the one decision that is the owner's, are
 listed under Decisions and Trade-offs.
+
+Absorbed [BRIEF-over-remover](docs/briefs/BRIEF-over-remover.md); carried in Absorbed Brief.
+
+## Absorbed Brief
+
+The feature exists because nothing in niwa knows when a unit's work is done.
+niwa removes a stopped instance only after its session is deleted or when a
+person names it to destroy, reap runs no loss scan, and destroy can pass every
+check and still leave a session behind when the instance holds a worktree. So
+finished instances, clones, build trees, transcripts and dispatch briefs stay
+on the host, `niwa list` can't tell anyone which of them are done or what they
+cost, and the only safe way to clear them is a person choosing each one. This
+document's Problem Statement states that in full. The framing came out of a
+recorded decision to keep a finished session's instance until the session is
+deleted, made after an earlier version reaped instances the moment a worker
+went idle, and out of a workspace-level remover built first outside niwa,
+whose command contract and retire-mark format this feature adopts as they
+settle.
+
+The outcome asked for is a user who names one command that says whether a unit
+is over and from then on sees finished units go at the next niwa command with
+nobody acting, nothing unique lost and a window to restore; and a user who
+names nothing, who loses nothing unasked, sees every stopped unit with its
+answer, age and size and a count at each dispatch, retires one unit under the
+same test, and has idle build trees trimmed. That's this document's Goals.
+
+The seven reviewer journeys (a command that answers over, not over and fails;
+a workspace with no command; a keep record naming one file; a scratch file
+newer than the handoff brief; a verdict-only run; an idle build tree in a unit
+that isn't over; a restore inside and past the window) are the User Stories,
+and each is worked out step by step as an acceptance scenario. The plugin
+author's story is added beside them.
+
+The boundary held the feature to the seam, the mark, one removal rule, the
+listing and dispatch line, the retire command, keep records and the kept set,
+the trim, the verdict-only mode and restore. It left out shipping any over
+command, transcript expiry, an idle-time retirement setting, the earlier
+remover's interim scratch copy, writing the handoff brief, lifting a
+workspace's hook denial of `niwa reap`, and any daemon or timer; those are this
+document's Out of Scope. It named the six kinds of unit a shipped over command
+never marks, which R24 keeps listed until a person retires them, and the points
+it left to the requirements and the design, which Decisions and Trade-offs and
+the open dependencies carry.
 
 ## Problem Statement
 
