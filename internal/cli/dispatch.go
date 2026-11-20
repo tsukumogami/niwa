@@ -538,7 +538,12 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		briefContent = content
 	}
 	// --first-read is checked here too, so a declaration the worker could
-	// never be held to refuses the dispatch before anything is created.
+	// never be held to refuses the dispatch before anything is created. The
+	// flag's zero value means "not given", so an explicit 0 is refused here,
+	// where cobra can still tell the two apart.
+	if cmd.Flags().Changed("first-read") && dispatchFirstRead == 0 {
+		return fmt.Errorf("niwa: error: --first-read 0: the count of lines must be 1 or more")
+	}
 	firstRead, err := resolveFirstRead(dispatchFirstRead, dispatchBrief, briefContent, dispatchedAgent, spec.Flags.Settings != "")
 	if err != nil {
 		return fmt.Errorf("niwa: error: %w", err)

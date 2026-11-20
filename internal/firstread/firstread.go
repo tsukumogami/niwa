@@ -135,11 +135,11 @@ func Decide(p Payload, d Declaration, resolve PathResolver) Decision {
 		if err := json.Unmarshal(p.ToolInput, &in); err != nil || !isBrief(in.FilePath, p.Cwd, d, resolve) {
 			return allow
 		}
-		start := 1
-		if in.Offset != nil && *in.Offset > 1 {
-			start = *in.Offset
-		}
-		if in.Limit != nil && *in.Limit > 0 && start+*in.Limit-1 <= d.Lines {
+		// The first read covers the opening lines, so it has to start at
+		// line 1: a read that skips them would mark the brief read without
+		// the worker ever seeing what it opens with.
+		fromTop := in.Offset == nil || *in.Offset <= 1
+		if fromTop && in.Limit != nil && *in.Limit > 0 && *in.Limit <= d.Lines {
 			return Decision{Allow: true, Satisfies: true}
 		}
 		return Decision{Reason: Refusal(d)}
@@ -204,7 +204,8 @@ func singleCommand(line string) bool {
 
 var sedRange = regexp.MustCompile(`^([0-9]+),([0-9]+)p$`)
 
-// boundedSed matches `sed -n A,Bp` with 1 <= A <= B <= n.
+// boundedSed matches `sed -n 1,Bp` with 1 <= B <= n. The range has to start
+// at line 1 for the same reason a Read can't carry an offset.
 func boundedSed(args []string, n int) bool {
 	if len(args) != 3 || filepath.Base(args[0]) != "sed" || args[1] != "-n" {
 		return false
@@ -215,7 +216,7 @@ func boundedSed(args []string, n int) bool {
 	}
 	a, _ := strconv.Atoi(m[1])
 	b, _ := strconv.Atoi(m[2])
-	return a >= 1 && a <= b && b <= n
+	return a == 1 && b >= 1 && b <= n
 }
 
 // boundedHead matches `head -n K`, `head -nK` and `head -K` with 1 <= K <= n.

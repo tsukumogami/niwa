@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/firstread"
 )
@@ -203,6 +204,34 @@ func TestDispatch_FirstRead_RefusalsLeaveNothingBehind(t *testing.T) {
 				t.Errorf("a refusal must come before anything is created: provisioned %d, launched %d", f.provisionCalled, f.launchCalled)
 			}
 		})
+	}
+}
+
+// TestDispatch_FirstRead_ExplicitZeroIsRefused parses a real --first-read=0:
+// the flag's zero value also means "not given", so only the parsed flag can
+// tell a typed 0 apart, and a typed 0 is a count below 1.
+func TestDispatch_FirstRead_ExplicitZeroIsRefused(t *testing.T) {
+	root := setupDispatchWorkspace(t)
+	chdir(t, root)
+	f := installDispatchFakes(t, root)
+	dispatchBrief = writeBrief(t, root, 10)
+
+	cmd := &cobra.Command{}
+	cmd.Flags().IntVar(&dispatchFirstRead, "first-read", 0, "")
+	if err := cmd.Flags().Parse([]string{"--first-read=0"}); err != nil {
+		t.Fatal(err)
+	}
+	var outBuf, errBuf bytes.Buffer
+	cmd.SetOut(&outBuf)
+	cmd.SetErr(&errBuf)
+	cmd.SetContext(context.Background())
+
+	err := runDispatch(cmd, []string{"do a thing"})
+	if err == nil || !strings.Contains(err.Error(), "--first-read 0") {
+		t.Fatalf("an explicit --first-read 0 must be refused, got %v", err)
+	}
+	if f.provisionCalled != 0 || f.launchCalled != 0 {
+		t.Errorf("a refusal must come before anything is created: provisioned %d, launched %d", f.provisionCalled, f.launchCalled)
 	}
 }
 

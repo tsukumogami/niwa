@@ -55,12 +55,17 @@ brief:
 
 | Call | Before the first read |
 |------|-----------------------|
-| `sed -n A,Bp <brief>` with 1 <= A <= B <= N, alone | allowed, and counts as the first read |
+| `sed -n 1,Bp <brief>` with 1 <= B <= N, alone | allowed, and counts as the first read |
 | `head -n K <brief>` (or `-nK`, `-K`) with K <= N, alone | allowed, and counts as the first read |
-| Read with a `limit` that ends at or before line N | allowed, and counts as the first read |
+| Read with a `limit` of at most N and no `offset` past line 1 | allowed, and counts as the first read |
 | `sha256sum <brief>` or `shasum -a 256 <brief>`, alone | allowed, and doesn't count |
 | anything else naming the brief, any of the above chained, piped or redirected included | refused |
 | a call that doesn't name the brief | allowed |
+
+A bounded read has to start at line 1. A range that begins later, such as
+`sed -n 3,3p` or a Read with an `offset` of 3, is refused: it would mark the
+brief read while skipping the opening lines the declaration exists to put
+first.
 
 A refused call shows the worker the command that satisfies the rule, for
 example:
@@ -81,10 +86,12 @@ brief is still up to the brief's own text.
 ## Limits
 
 The guard steers a worker; it isn't a security boundary. It recognizes the
-brief by file name in a Bash command and by resolved path in a Read or Grep,
-and it reads simple commands only, so a brief reached through a variable, a
-glob or a nested shell isn't recognized. A Bash call that names another file
-with the same name as the brief is refused until the first read has run.
+brief by resolved path in a Read or Grep. In a Bash command it first looks
+for the brief's file name anywhere in the command text, and it reads simple
+commands only, so a brief reached through a variable, a glob or a nested
+shell isn't recognized. Because that first check is a plain text match, a Bash
+call whose text contains the brief's file name, as part of another path or
+inside a longer word, is refused until the first read has run.
 
 It fails open. A payload it can't parse, an instance with no declaration, or
 a declaration it can't read lets the call through.
