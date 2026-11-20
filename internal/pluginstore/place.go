@@ -142,8 +142,9 @@ func (s Store) Held(r Release) (bool, Condition) {
 // Ensure places r if it is missing, or held but failing Verify, and points
 // link at its tree, both under r's lock. A held release that fails Verify was
 // changed after it was placed: it is moved into .trash/ and placed again at
-// its commit exactly as a missing one is, and restored is true. link must sit in a real .niwa/marketplaces directory of the
-// instance the command runs for; an empty link places without linking.
+// its commit exactly as a missing one is, and restored is true. link must sit
+// in a real .niwa/marketplaces directory of the instance the command runs
+// for; an empty link places without linking.
 //
 // When r was resolved from a declared ref just now, reachable is nil. When r
 // came from a link, the caller passes declared and reachable, and Ensure

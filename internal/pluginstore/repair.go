@@ -123,9 +123,9 @@ func (s Store) Linked() ([]Linked, error) {
 // to.
 //
 // A held release that passes Verify is left as it is. A release of a source
-// not in declared is
-// reported and left alone. Any other is placed through Ensure with no link,
-// so it is fetched only when reachable shows its commit belongs to the
+// not in declared is reported and left alone. Any other is placed through
+// Ensure with no link, so it is fetched only when reachable shows its commit
+// belongs to the
 // source's own history, under the release's lock, and with the same
 // all-or-nothing placement: a failed fetch leaves no held.json and no
 // <commit> directory. Repair writes only inside the store and runs nothing
