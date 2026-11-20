@@ -144,16 +144,56 @@ func ensurePrivateDir(dir string) error {
 	return nil
 }
 
+// createPrivateDir makes dir a real directory the user owns, creating it with
+// mode exactly 0700 when missing and leaving an existing directory's mode as
+// it is. The mode of a new directory is set explicitly, never left to the
+// umask. A symlink or anything else at dir is refused, never followed.
+//
+// It's for a level the mirror shares, the workspace key directory: the plugin
+// store keeps its plugins/ there too and reads a narrowed mode on it as the
+// store being unusable, so the mirror never changes that mode.
+func createPrivateDir(dir string) error {
+	created := true
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		if !os.IsExist(err) {
+			return fmt.Errorf("creating %s: %w", dir, err)
+		}
+		created = false
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("inspecting %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory (mode %s)", dir, info.Mode().Type())
+	}
+	if !ownedByUser(info) {
+		return fmt.Errorf("%s is not owned by the current user", dir)
+	}
+	if created && info.Mode().Perm() != 0o700 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("setting the mode of %s: %w", dir, err)
+		}
+	}
+	return nil
+}
+
 // ensureLayout creates the workspace key directory and the mirrors/ entries a
-// restore writes into, each 0700. ~/.niwa itself is created if missing but
-// otherwise left as it is: other niwa state lives there too.
+// restore writes into. The mirrors/ entries are the mirror's alone and are
+// each made 0700 (ensurePrivateDir). The key directory is shared, so it's
+// created 0700 when missing and otherwise keeps its mode (createPrivateDir):
+// one narrowed so far that a missing mirrors/ can't be made fails here, and
+// the restore reports it. ~/.niwa itself is created if missing but otherwise
+// left as it is: other niwa state lives there too.
 func ensureLayout(home, workspaceRoot string) error {
 	if err := os.MkdirAll(filepath.Join(home, ".niwa"), 0o700); err != nil {
 		return fmt.Errorf("creating %s: %w", filepath.Join(home, ".niwa"), err)
 	}
+	if err := createPrivateDir(keyDir(home, workspaceRoot)); err != nil {
+		return err
+	}
 	mdir := mirrorsDir(home, workspaceRoot)
 	for _, dir := range []string{
-		keyDir(home, workspaceRoot),
 		mdir,
 		metaDir(mdir),
 		filepath.Join(mdir, ".store"),
@@ -266,16 +306,17 @@ func layoutIsReal(mdir string) bool {
 }
 
 // tightenModes puts the modes of niwa's own entries for one mirror back:
-// the workspace key directory, mirrors/, .meta/, .store/, .tmp/,
-// ~/.niwa/locks/ and ~/.niwa/empty-hooks/ to 0700, and the state file, the
-// mirror log, mirror.log.1 and the mirror's lock file to 0600 (see tighten).
-// It creates nothing. Each entry is tightened only when every directory
-// above it, up to ~/.niwa, is real, since tighten guards only the last path
-// component: through a linked .meta/ it would change a file elsewhere.
+// mirrors/, .meta/, .store/, .tmp/, ~/.niwa/locks/ and ~/.niwa/empty-hooks/
+// to 0700, and the state file, the mirror log, mirror.log.1 and the mirror's
+// lock file to 0600 (see tighten). The workspace key directory above
+// mirrors/ is shared with the plugin store, so its mode is left as it is
+// (see createPrivateDir). It creates nothing. Each entry is tightened only
+// when every directory above it, up to ~/.niwa, is real, since tighten
+// guards only the last path component: through a linked .meta/ it would
+// change a file elsewhere.
 func tightenModes(home, workspaceRoot, repoID string) {
 	key := keyDir(home, workspaceRoot)
 	if realOwnedDir(key) {
-		tighten(key, 0o700, true)
 		mdir := mirrorsDir(home, workspaceRoot)
 		if realOwnedDir(mdir) {
 			tighten(mdir, 0o700, true)
