@@ -55,11 +55,14 @@ func watchDefer(state, format string, args ...any) error {
 
 // watchHaltStates are the core outcomes after the wake ran: the prompt may
 // already have been acted on, so the record stays halted and the pass fails
-// rather than deferring.
+// rather than deferring. watch never reaches the check after the wake that
+// gives woke-with-drift (it runs for the CLI only), but the word is listed
+// here because it shares the meaning: the wake ran.
 var watchHaltStates = map[string]bool{
 	retaskCopyStarted:     true,
 	retaskCopyLeft:        true,
 	retaskWakeUnconfirmed: true,
+	retaskWokeWithDrift:   true,
 }
 
 // watchCoreDeferReasons is watch's own text for each core refusal it defers
@@ -246,6 +249,8 @@ func (wc *watchContinuation) haltText(state string, res retaskResult) string {
 			b.WriteString(" (short id " + res.CopyID + ")")
 		}
 		b.WriteString("; check claude agents for a second session rooted at " + wc.inst + " and remove it")
+	case retaskWokeWithDrift:
+		b.WriteString("the wake continued the review session for " + wc.prName() + ", but the options saved with it afterwards differ from its launch record, so it was stopped again")
 	default:
 		b.WriteString("the wake ran, but the review session for " + wc.prName() + " wasn't seen running; check claude agents for a second session rooted at " + wc.inst)
 	}

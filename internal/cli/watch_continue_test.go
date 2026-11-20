@@ -646,7 +646,7 @@ func TestWatchDeferReasonsCoverCoreStates(t *testing.T) {
 			t.Errorf("defer reason for %s, which is no core state word", w)
 		}
 	}
-	for _, w := range []string{retaskCopyStarted, retaskCopyLeft, retaskWakeUnconfirmed} {
+	for _, w := range []string{retaskCopyStarted, retaskCopyLeft, retaskWakeUnconfirmed, retaskWokeWithDrift} {
 		if !watchHaltStates[w] {
 			t.Errorf("%s is not a halt word", w)
 		}
