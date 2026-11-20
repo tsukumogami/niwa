@@ -26,8 +26,8 @@ rationale: |
   link is its only pointer into the store, so reading links on disk answers
   both what is missing and what is in use with no record to drift. A lock per
   release lets a burst download once without serializing unrelated
-  releases. Reusing #511's key, lock primitive and notice channel gives the
-  git-history store one host layout instead of two.
+  releases. Reusing #511's key, lock primitive and lock-name scheme gives
+  the git-history store one host layout instead of two.
 upstream: docs/prds/PRD-plugin-release-hold.md
 decision_provenance: inline-resolved
 ---
@@ -106,7 +106,7 @@ Out of scope: the managed `repo:` copies at the workspace root, Claude Code's
 own plugin directory under `~/.claude/plugins` (Claude registers github
 marketplaces with its own clone; this design changes only niwa's tree),
 single-instance layouts with no workspace root (R14), and the git-history
-store. PR #511 (the mirror-repair design, still a draft) settles where the
+store. PR #511 (mirror-repair, merged as 0957d4a) settles where the
 git mirror lives, how it is locked and how it is repaired; this design reuses
 its workspace key and lock primitive and does not redefine either.
 
@@ -476,9 +476,18 @@ The fallback is decided by what failed:
 | Condition (as printed) | When |
 |------------------------|------|
 | `unreadable` | the plugins directory, or a held release's mark, can't be read (permission or I/O error) |
-| `unwritable` | the release isn't held and its staging directory can't be created |
+| `unwritable` | the release isn't held and a write probe of the plugins directory itself fails |
 | `can't be created` | the plugins directory is absent and creating it fails |
 | `release not placed` | the download succeeded but extraction, the mark or the rename failed (a full disk, say), or the lock wait ran out, or locking is unsupported |
+
+The store creates a missing `w-<key>/` or `plugins/` and never changes the
+mode of an existing one: a narrowed mode there is the `unreadable` or
+`unwritable` condition, reported and left as it is. It doesn't reuse #511's
+`ensurePrivateDir` for these levels, because that resets an existing
+directory to 0700 and would heal the very modes that make a store unusable,
+hiding the fallback. The write probe is made in `plugins/` itself, so a
+`plugins/` at 0555 trips `unwritable` whatever the modes of the levels
+below it.
 
 Each falls back to today's per-instance fetch into a real directory at the
 instance path and records a plugin-store notice with the marketplace, the
@@ -578,23 +587,21 @@ workspace root, the fetch functions and the declared sources.
 **`internal/hostdir`** (a leaf): `WorkspaceKey(root)` returns `w-` and the
 first 32 hex digits of the sha256 of `filelock.CanonicalPath(root)`, the
 definition PR #511 gives in `internal/mirror`; `WorkspaceDir(home, root)`;
-`EnsurePrivateDir(dir)` (0700, owned by the user, a symlink refused); and
-`InstanceDirs(home, root)`, the scan of Decision 3 over the root's children
-and the entries of `~/.niwa/w-<key>/kept/`, real directories only. Whichever
-of the two features lands second moves #511's `WorkspaceKey` and
+`EnsurePrivateDir(dir)` (0700, owned by the user, a symlink refused, an
+existing directory reset to 0700), which the mirror keeps using;
+`CreatePrivateDir(dir)`, the same checks for a missing directory with an
+existing one's mode left alone, which the store uses (Decision 4 says why);
+and `InstanceDirs(home, root)`, the scan of Decision 3 over the root's
+children and the entries of `~/.niwa/w-<key>/kept/`, real directories only.
+This work lands second, so it moves #511's `WorkspaceKey` and
 `ensurePrivateDir` here unchanged and has `internal/mirror` import them, so
 there is one definition of the key.
 
-PR #511 is a draft, and this design follows whatever it merges rather than
-what it says today. If its key, its lock primitive, its lock-name scheme or
-its notice channel change before it lands, this design takes the merged
-form: the feature that lands second adopts the first one's `internal/filelock`
-and `internal/hostdir` as they are, or changes both call sites in the same
-commit. A unit test resolves the key directory through both stores' path
-helpers for the same root and fails if they differ, so a divergent key is a
-test failure rather than a silent second layout. If #511 never lands, this
-work's first phase carries the key, `CanonicalPath`, `WaitFileLock` and the
-lock-name scheme itself, as #511 drafts them.
+PR #511 merged as 0957d4a, and this design takes its key, `CanonicalPath`,
+`WaitFileLock` and lock-name scheme as they merged. A unit test resolves the
+key directory through both stores' path helpers for the same root and fails
+if they differ, so a divergent key is a test failure rather than a silent
+second layout.
 
 **`internal/pluginstore`**: the store. It never runs git and never follows a
 link it read from an instance; it only parses link targets. The only write it
@@ -681,12 +688,17 @@ func (s Store) Verify(r Release) (bool, error)
 
 // Ensure places r if it is missing or fails Verify, and points link at its
 // tree, both under r's lock. link must sit in a real .niwa/marketplaces
-// directory of the instance the command runs for. A non-empty Condition
-// means the caller falls back.
-func (s Store) Ensure(ctx context.Context, r Release, link string) (restored bool, cond Condition, err error)
+// directory of the instance the command runs for. When r was resolved from
+// a declared ref just now, reachable is nil. When r came from a link, the
+// caller passes declared and reachable, and Ensure fetches r only if its
+// source is in declared and reachable passes; otherwise it fetches nothing,
+// leaves link as it is and returns ErrRefused. A non-empty Condition means
+// the caller falls back.
+func (s Store) Ensure(ctx context.Context, r Release, link string, declared map[string]bool, reachable Reachable) (restored bool, cond Condition, err error)
 
 // Reachable reports whether commit is a tag or branch tip of owner/repo, or
-// an ancestor of one by the compare endpoint; Repair fetches nothing else.
+// an ancestor of one by the compare endpoint. Neither Repair nor Ensure
+// fetches a commit taken from a link unless it passes.
 type Reachable func(ctx context.Context, owner, repo, commit string) (bool, error)
 
 // ParseLink reads a link target as a release link, whatever home or key
@@ -733,19 +745,30 @@ A provisioning command for instance *I* of a workspace with root *W*:
    once `Reachable` passes. Nothing in any instance is written. Report
    restores, refusals and failures through the notice collector. No network
    unless something is missing.
-3. **Place for *I* (Step 6.2).** For each github marketplace: pick the ref as
-   today, resolve it with `HeadCommit`. If `<I>/.niwa/marketplaces/<name>` is
-   already a real directory with a manifest (an instance from before this
-   change, or one made with the store off), keep it. If it is a link that
-   parses, keep the release it names (R13): `Ensure` it, which restores it if
-   Repair could not and rewrites the link to this store's path if it named
-   another. Otherwise, with the setting on, `Ensure` the resolved release and
-   link it; with it off, fetch into the instance as today.
+3. **Place for *I* (Step 6.2).** For each github marketplace, first classify
+   `<I>/.niwa/marketplaces/<name>` with `Lstat`, before any resolve or fetch.
+   The containment check applies to that path itself, never to a link's
+   target, so a healthy link into the store passes it. If the entry is a
+   real directory with a manifest (an instance from before this change, or
+   one made with the store off), keep it. If it is a link that `ParseLink`
+   accepts, keep the release it names (R13): `Ensure` it with the declared
+   sources and `Reachable`, which restores it if Repair could not and
+   rewrites the link to this store's path if it named another. When the
+   release needs a restore and its source isn't declared, or its commit
+   `Reachable` refuses, it is reported and the link left as it is, with
+   nothing fetched. Neither case needs `HeadCommit`.
+   Only when there is no entry does niwa pick the ref as today and resolve it
+   with `HeadCommit`; then, with the setting on, it `Ensure`s the resolved
+   release and links it, and with it off, fetches into the instance as today.
+   When the fetcher is nil (the session-worktree path), this step only reads
+   an existing entry and never resolves, places or restores.
 4. **Fall back.** A non-empty condition from step 3 means a per-instance
    fetch at the same commit into a real directory, and a notice. An existing
    dangling link for *I* whose release can't be restored because the store is
    unusable is replaced by a per-instance copy at the commit it named, so *I*
-   stays on its release.
+   stays on its release; that copy is fetched only after the same
+   declared-source and `Reachable` checks pass, and a refused commit is
+   reported with the link left as it is.
 5. **Sweep, once per command, after Step 6.2b.** Candidates (not the newest
    of their source by commit time), then for each: lock, rescan the root and
    `kept/`, delete if unused. Leftover `.tmp/` entries are cleared under
@@ -772,9 +795,9 @@ rule. From this design it can rely on:
   `mirrors/`. Each store takes its own subdirectory (`plugins/`,
   `mirrors/`); nothing lives under the workspace root's `.niwa/` or inside an
   instance. The same root reached through a symlink gets the same key, and
-  two roots get two directories. This follows whatever key PR #511 merges,
-  and a unit test fails if the two stores ever resolve different key
-  directories for one root.
+  two roots get two directories. This is the key PR #511 merged, and a unit
+  test fails if the two stores ever resolve different key directories for
+  one root.
 - **Lock discipline.** One lock per item, in `~/.niwa/locks/`, named by
   hashing the workspace key and the item's id with a per-store prefix (`p-`
   here, `m-` in #511), taken with `filelock.WaitFileLock` and a bounded wait.
@@ -815,17 +838,18 @@ host's instances or stores; every figure above comes from the PRD's survey.
 
 ### Phase 1: Host directory leaf
 
-`internal/hostdir` with `WorkspaceKey`, `WorkspaceDir`, `EnsurePrivateDir` and
-`InstanceDirs`, unit tests for the symlinked root, the trailing slash, a
-half-created instance, a kept instance and a half-kept one under `kept/`, a
-symlinked child skipped, an unreadable child and an unreadable `kept/`, and
-the test that both stores resolve one key directory. This phase depends on
-PR #511's first phase (`internal/filelock` with `WaitFileLock`) as it merges;
-if this work starts first, it lands that phase as #511 then specifies it,
-and if #511 never lands, this phase carries that code itself.
+`internal/hostdir` with `WorkspaceKey`, `WorkspaceDir`, `EnsurePrivateDir`,
+`CreatePrivateDir` and `InstanceDirs`, unit tests for the symlinked root, the
+trailing slash, a half-created instance, a kept instance and a half-kept one
+under `kept/`, a symlinked child skipped, an unreadable child and an
+unreadable `kept/`, an existing directory's mode left alone by
+`CreatePrivateDir`, and the test that both stores resolve one key directory.
+This phase builds on PR #511's `internal/filelock` (`WaitFileLock`,
+`CanonicalPath`) as merged in 0957d4a, and moves #511's `WorkspaceKey` and
+`ensurePrivateDir` here with `internal/mirror` importing them.
 
 Deliverables:
-- `internal/hostdir/hostdir.go`, `hostdir_test.go`
+- `internal/hostdir/hostdir.go`, `hostdir_test.go`, `internal/mirror/layout.go`
 
 ### Phase 2: The setting
 
@@ -850,17 +874,22 @@ Deliverables:
 
 ### Phase 4: Placement wiring and fallback
 
-`ensureMarketplaceContent` resolves the commit, calls `Ensure`, links, and
-falls back with a notice; the plugin-store note kind in
+`ensureMarketplaceContent` classifies an existing entry with `Lstat` before
+anything else, checks containment on the link path rather than its target,
+resolves the commit only when there is no entry, calls `Ensure` (with the
+declared sources and `Reachable` for a release a link names), links, and
+falls back with a notice; with a nil fetcher it only reads. `Reachable` is
+built here (ls-remote match, then bounded compare calls), so placement and
+Repair share one check. Also the plugin-store note kind in
 `internal/fallbacknotice` and its rendering on every surface.
 
 Deliverables:
-- `internal/workspace/pluginskills.go`, `internal/fallbacknotice/*`
+- `internal/workspace/pluginskills.go`, `internal/pluginstore/reachable.go`,
+  `internal/fallbacknotice/*`
 
 ### Phase 5: Repair, sweep and workspace removal
 
-`Repair` with the `Reachable` check (ls-remote match, then bounded compare
-calls), `Sweep` ordered by commit time, their once-per-command calls in
+`Repair` with Phase 4's `Reachable` check, `Sweep` ordered by commit time, their once-per-command calls in
 `runPipeline`, and the plugins directory removal in `DestroyWorkspace` with
 the key computed first and the kept-instance guard.
 
@@ -994,10 +1023,11 @@ names reaching an agent's context.
   never changes what an existing instance runs.
 - **Commits from a fork.** GitHub serves a tarball for a commit that exists
   only in a fork of a repository, because forks share storage, and the
-  wrapper check would pass. A create only fetches commits it resolved from a
-  ref of the declared source, so it is not exposed. Repair, which starts
-  from a commit found in a link, fetches it only after the commit is shown
-  to belong to the source's own history: it equals a tag or branch tip that
+  wrapper check would pass. A create fetches a commit it resolved from a ref
+  of the declared source without further checks. Repair, and the current
+  instance's own placement when it restores a release its link names, start
+  from a commit found in a link, and fetch it only for a declared source and
+  after the commit is shown to belong to the source's own history: it equals a tag or branch tip that
   `git ls-remote` of the source lists, or the compare endpoint reports it
   identical to or behind one of them. A fork-only commit is never behind a
   ref of the source, so it is refused and reported. A moving-ref release
@@ -1011,8 +1041,10 @@ names reaching an agent's context.
   for, at a path whose `.niwa/marketplaces` directory is checked with
   `Lstat` to be a real directory.
 - **Paths niwa writes and deletes.** Every directory the store makes at its
-  own levels is created with `EnsurePrivateDir` (0700, owned by the user, a
-  symlink at the path refused), and locks open with `O_NOFOLLOW` as
+  own levels is created with `CreatePrivateDir` (0700, owned by the user, a
+  symlink at the path refused); an existing level's mode is never changed,
+  so a narrowed mode stays a fallback condition rather than being loosened.
+  Locks open with `O_NOFOLLOW` as
   `WaitFileLock` does. Owner, repo and commit are validated against fixed
   patterns before they become path components. Deletion only ever renames a
   directory the store's own walk found at `github.com/<owner>/<repo>/<commit>`

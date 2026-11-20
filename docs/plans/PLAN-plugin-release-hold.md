@@ -30,8 +30,7 @@ be created or can't take a release falls back to today's per-instance fetch
 with a notice naming the store's path and the condition.
 
 The work reuses the workspace key, the waiting file lock and the lock-name
-scheme that PR #511 drafts for the git mirror, following whatever that pull
-request merges, or carrying those pieces itself if it never lands.
+scheme that PR #511 merged for the git mirror in 0957d4a.
 
 This plan builds nothing. It describes the work for a later implementation
 run, and no test is run against a real host's instances or stores until the
@@ -117,13 +116,18 @@ suite's own `$HOME`.
   holding a manifest (made before this change) keeps that directory unchanged
   through `niwa apply`, with no tarball request; and after a newer tag is
   published, `niwa apply` in the first instance makes no tarball request and
-  its links still name the commit it was created with.
+  its links still name the commit it was created with, and after that apply a
+  skill from each marketplace still resolves in the first instance at its
+  root and in a session worktree.
+- [ ] A unit test of `Ensure` with a release taken from a link whose source
+  isn't declared, or whose commit `Reachable` refuses, records no fetch,
+  returns `ErrRefused` and leaves the link unchanged.
 - [ ] A single-instance layout with no workspace root holds its own real tree
   under its `.niwa/marketplaces/`, and nothing is created under
   `$HOME/.niwa/` for plugins.
-- [ ] When PR #511's mirror store is on main, a unit test resolving the key
-  directory through both stores' path helpers for the same root passes, and
-  fails when the two definitions differ.
+- [ ] A unit test resolving the key directory through both stores' path
+  helpers (this store's and PR #511's mirror store) for the same root passes,
+  and fails when the two definitions differ.
 
 **Check**: Run `make build-test`, then `make test-functional-plugin-release-hold`.
 The `niwa create` row of `A second instance downloads no held release` passes,
@@ -134,7 +138,7 @@ exits 0.
 
 **Dependencies**: None
 
-**Files**: `internal/hostdir/hostdir.go`, `internal/hostdir/hostdir_test.go`, `internal/pluginstore/layout.go`, `internal/pluginstore/place.go`, `internal/pluginstore/link.go`, `internal/workspace/pluginskills.go`, `test/functional/features/plugin-release-hold.feature`, `test/functional/pluginstore_steps_test.go`, `test/functional/tarball_fake_server.go`, `Makefile`
+**Files**: `internal/hostdir/hostdir.go`, `internal/hostdir/hostdir_test.go`, `internal/mirror/layout.go`, `internal/pluginstore/layout.go`, `internal/pluginstore/place.go`, `internal/pluginstore/link.go`, `internal/pluginstore/reachable.go`, `internal/workspace/pluginskills.go`, `test/functional/features/plugin-release-hold.feature`, `test/functional/pluginstore_steps_test.go`, `test/functional/tarball_fake_server.go`, `Makefile`
 
 ### Step 2: every create path shares one held copy, and a burst or a killed create never links a half-placed release
 
@@ -198,7 +202,7 @@ With `share_plugin_releases = false` under `[workspace]` a create writes a full 
 
 ### Step 7: an unusable store falls back to a per-instance fetch and says so
 
-An unreadable, unwritable, uncreatable or unplaceable store gives the create its own copy and a notice naming the store's path and the condition in the terminal, in `niwa dispatch` output and in the SessionStart hook's context, three creates on an unwritable store each fall back, an unheld release whose source is down is reported with nothing held, and `docs/guides/repo-marketplaces.md` describes the store, the setting, the notice and the self-restore.
+An unreadable, unwritable, uncreatable or unplaceable store gives the create its own copy and a notice naming the store's path and the condition in the terminal (a narrowed mode on an existing `plugins/` is that condition and is never reset, and `unwritable` is a write probe of `plugins/` itself), in `niwa dispatch` output and in the SessionStart hook's context, three creates on an unwritable store each fall back, an unheld release whose source is down is reported with nothing held, and `docs/guides/repo-marketplaces.md` describes the store, the setting, the notice and the self-restore.
 
 ## Implementation Sequence
 
@@ -215,12 +219,10 @@ each later step the same way, in a commit that touches only this plan.
 
 Notes to carry into execution:
 
-- Before step 1 starts, check whether PR #511 has merged. If it has, step 1
-  takes its `internal/filelock` (`WaitFileLock`, `CanonicalPath`), its
-  workspace key and its lock-name scheme as they merged, and moves the key
-  into `internal/hostdir` for both stores. If it hasn't, step 1 lands those
-  pieces as #511 drafts them, and whichever of the two lands second makes the
-  two call sites agree in the same commit.
+- PR #511 merged as 0957d4a. Step 1 takes its `internal/filelock`
+  (`WaitFileLock`, `CanonicalPath`), its workspace key and its lock-name
+  scheme as they merged, and moves the key into `internal/hostdir` for both
+  stores, with `internal/mirror` importing it.
 - Kept instances under `~/.niwa/w-<key>/kept/` come from separate teardown
   work. Step 5's scenarios create that directory themselves, so the step does
   not wait on that work.
