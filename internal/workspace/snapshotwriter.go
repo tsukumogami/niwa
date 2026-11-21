@@ -84,10 +84,39 @@ func EnsureConfigSnapshot(ctx context.Context, configDir string, fetcher FetchCl
 // rank-1 location and the rank-2 root file when src.Subpath is empty.
 // Pass config.TeamConfigMarkerSet() for the workspace's team config,
 // config.OverlayMarkerSet() for the auto-discovered overlay.
+//
+// The whole call runs under configDir's snapshot lock (config.AcquireSnapshotLock),
+// not just the swap: the restore of an interrupted swap and the in-place
+// provenance update would race another process's swap too. A configDir whose
+// parent doesn't exist has nothing to maintain and returns without locking,
+// so no parent directory is created for it. Neither does a configDir that is
+// absent with no <configDir>.prev beside it: there is no snapshot to refresh
+// and no interrupted swap to restore, so the call returns without creating
+// <configDir>.lock, and a parent directory the user can't write to stays
+// usable, as it was before the lock existed.
 func EnsureConfigSnapshotWithStatus(ctx context.Context, configDir string, markers config.MarkerSet, fetcher FetchClient, reporter *Reporter) (converted bool, rank int, err error) {
 	if configDir == "" {
 		return false, 0, errors.New("EnsureConfigSnapshot: configDir is empty")
 	}
+	if _, statErr := os.Stat(filepath.Dir(configDir)); statErr != nil {
+		return false, 0, nil
+	}
+	if !pathExists(configDir) && !pathExists(configDir+config.PrevSuffix) {
+		return false, 0, nil
+	}
+	release, err := config.AcquireSnapshotLock(configDir)
+	if err != nil {
+		return false, 0, fmt.Errorf("EnsureConfigSnapshot: %w", err)
+	}
+	defer release()
+	return ensureConfigSnapshotLocked(ctx, configDir, markers, fetcher, reporter)
+}
+
+// ensureConfigSnapshotLocked is EnsureConfigSnapshotWithStatus for a caller
+// that already holds configDir's snapshot lock. It must not take the lock
+// again: flock contends per open file description, so a second acquisition in
+// the same process would wait on itself.
+func ensureConfigSnapshotLocked(ctx context.Context, configDir string, markers config.MarkerSet, fetcher FetchClient, reporter *Reporter) (converted bool, rank int, err error) {
 	if err := restoreInterruptedSwap(configDir, reporter); err != nil {
 		return false, 0, fmt.Errorf("EnsureConfigSnapshot: %w", err)
 	}
@@ -111,6 +140,14 @@ func EnsureConfigSnapshotWithStatus(ctx context.Context, configDir string, marke
 		// Case 3: nothing to maintain.
 		return false, 0, nil
 	}
+}
+
+// pathExists reports whether p names a file system entry, without following
+// a final symlink. Any error other than "does not exist" counts as present,
+// so a path that can't be checked still goes through the snapshot lock.
+func pathExists(p string) bool {
+	_, err := os.Lstat(p)
+	return !os.IsNotExist(err)
 }
 
 func provenanceMarkerExists(dir string) bool {
@@ -318,10 +355,24 @@ func lazyConvertWorkingTree(ctx context.Context, configDir string, markers confi
 //
 // fetcher may be nil for non-GitHub sources (the fallback path only
 // needs `git`). GitHub sources require a non-nil fetcher.
+//
+// It creates configDir's parent if needed and holds configDir's snapshot lock
+// for the whole materialization.
 func MaterializeFromSource(ctx context.Context, src source.Source, sourceURL, configDir string, markers config.MarkerSet, fetcher FetchClient, reporter *Reporter) (rank int, err error) {
+	if configDir == "" {
+		return 0, errors.New("EnsureConfigSnapshot: configDir is empty")
+	}
 	if sourceURL == "" {
 		sourceURL = src.String()
 	}
+	if err := os.MkdirAll(filepath.Dir(configDir), 0o755); err != nil {
+		return 0, fmt.Errorf("EnsureConfigSnapshot: creating parent of %s: %w", configDir, err)
+	}
+	release, err := config.AcquireSnapshotLock(configDir)
+	if err != nil {
+		return 0, fmt.Errorf("EnsureConfigSnapshot: %w", err)
+	}
+	defer release()
 	return materializeAndSwap(ctx, configDir, src, sourceURL, markers, fetcher, reporter)
 }
 
@@ -329,6 +380,11 @@ func MaterializeFromSource(ctx context.Context, src source.Source, sourceURL, co
 // writes the provenance marker, and atomically swaps it into place.
 // Used by the refresh path, the lazy-conversion path, and the public
 // MaterializeFromSource entry point.
+//
+// The caller holds configDir's snapshot lock. The staging and .prev paths
+// are shared by every refresh of configDir, and the session mappings copied
+// into staging must not change before the swap, so nothing here is safe to
+// run unlocked. Nothing here takes any lock either (see config's leaf rule).
 //
 // Four entry conditions, two dispatch axes (host x subpath):
 //

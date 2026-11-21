@@ -187,20 +187,24 @@ Feature: the lineage record holds whole dispatch trees after their instances are
     Given a config repo "ws" exists with authority fixture "none"
     When I run niwa init from config repo "ws"
     Then the exit code is 0
-    Given a fake claude for dispatch that mints a new session per launch
-    When a dispatch from the workspace root holds its refresh between copy and swap
-    And I dispatch with "" from the workspace root
+    When I run "niwa create ws" from the workspace root
     Then the exit code is 0
-    Given I keep the dispatch as "second"
-    And I remember the lineage entry of "second"
-    # The held dispatch's own outcome isn't asserted: the second dispatch's
-    # refresh used the same staging directory, so the held swap can fail and
-    # roll back. Either way the second dispatch's entry must stay.
-    When the held dispatch is released and ends
-    Then the remembered lineage entry of "second" is unchanged
+    Given a fake claude for dispatch that mints a new session per launch
+    # The held dispatch parks with .niwa renamed to .niwa.prev and its staging
+    # in .niwa.next. A second dispatch and an apply then start; each must wait
+    # for the config lock rather than restore .niwa.prev or reuse .niwa.next.
+    When a dispatch from the workspace root holds its refresh between the two renames
+    And a second dispatch starts from the workspace root while the refresh is held
+    And niwa apply starts in the created instance while the refresh is held
+    And each started command is waiting for the config lock or has ended
+    And the held refresh is let go
+    Then the held dispatch, the second dispatch and the apply all exit 0
+    And each started command waited for the config lock
+    And both dispatches have an instance, a session mapping and a lineage entry
+    And the apply reported no missing workspace config
+    And the workspace root has no .niwa.next or .niwa.prev left
     When I run "niwa lineage list" from the workspace root
     Then the exit code is 0
-    And the output contains "{second.dispatch}" naming kept dispatches
 
   Scenario: niwa destroy --workspace removes the lineage store
     Given a config repo "ws" exists with authority fixture "none"

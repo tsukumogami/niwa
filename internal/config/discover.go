@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/tsukumogami/niwa/internal/testfault"
 )
 
 const (
@@ -12,6 +14,11 @@ const (
 	ConfigDir = ".niwa"
 	// ConfigFile is the workspace config filename.
 	ConfigFile = "workspace.toml"
+
+	// discoverPrevCheckMark is the testfault label checked after Discover
+	// finds no config in a directory and before it looks for .niwa.prev there,
+	// so a test can finish a swap between the two looks.
+	discoverPrevCheckMark = "discover-prev-check"
 )
 
 // Discover walks up from startDir looking for .niwa/workspace.toml.
@@ -53,11 +60,28 @@ func Discover(startDir string) (configPath string, configDir string, err error) 
 // this directory is the workspace, and walking on could bind an enclosing
 // workspace instead or report none. The one failure that isn't is a refresh
 // finishing its own swap first, which leaves .niwa in place.
+//
+// A refresh in another process looks exactly like a dead one between its two
+// renames, so the restore takes the workspace's snapshot lock first and looks
+// again under it. A refresh that finished while we waited has put .niwa back,
+// and there's nothing to restore.
 func restoreWorkspaceConfigDir(dir string) (bool, error) {
-	if _, err := os.Stat(filepath.Join(dir, ConfigDir+PrevSuffix, ConfigFile)); err != nil {
-		return false, nil
+	if err := testfault.Maybe(discoverPrevCheckMark); err != nil {
+		return false, err
 	}
 	configDir := filepath.Join(dir, ConfigDir)
+	if _, err := os.Stat(filepath.Join(dir, ConfigDir+PrevSuffix, ConfigFile)); err != nil {
+		return configAfterSnapshotSwap(configDir)
+	}
+	release, err := AcquireSnapshotLock(configDir)
+	if err != nil {
+		return false, fmt.Errorf("%s is missing and %s%s, left by an interrupted config refresh, could not be put back: %w",
+			configDir, configDir, PrevSuffix, err)
+	}
+	defer release()
+	if _, err := os.Stat(filepath.Join(configDir, ConfigFile)); err == nil {
+		return true, nil
+	}
 	restored, err := RestoreInterruptedSwap(configDir)
 	if restored {
 		ReportRestoredSwap(configDir)
@@ -71,6 +95,27 @@ func restoreWorkspaceConfigDir(dir string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("%s is missing and %s%s, left by an interrupted config refresh, could not be put back: %w",
 			configDir, configDir, PrevSuffix, err)
+	}
+	return false, nil
+}
+
+// configAfterSnapshotSwap reports whether configDir holds a workspace config
+// once any refresh holding its snapshot lock lets go. The caller found neither
+// .niwa nor .niwa.prev, and a refresh that finished its swap and removed its
+// .prev between those two looks leaves exactly that. Without a lock file
+// beside configDir no refresh has ever run there, so it reports false without
+// waiting and never creates a lock file.
+func configAfterSnapshotSwap(configDir string) (bool, error) {
+	if _, err := os.Lstat(SnapshotLockPath(configDir)); err != nil {
+		return false, nil
+	}
+	release, err := AcquireSnapshotLock(configDir)
+	if err != nil {
+		return false, fmt.Errorf("%s is missing and its config lock could not be taken to look again: %w", configDir, err)
+	}
+	release()
+	if _, err := os.Stat(filepath.Join(configDir, ConfigFile)); err == nil {
+		return true, nil
 	}
 	return false, nil
 }

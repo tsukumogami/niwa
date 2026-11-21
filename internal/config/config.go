@@ -2,7 +2,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -650,13 +652,38 @@ type RepoContentEntry struct {
 
 // Load parses a workspace.toml file at the given path and returns the config
 // along with any non-fatal warnings (e.g., unknown fields).
+//
+// A file that's missing may only be missing for a moment: a config refresh
+// renames the directory holding it out of the way before it renames the new
+// snapshot in. When the directory has a snapshot lock beside it, so a refresh
+// has run there, Load waits for the lock and reads once more. It never creates
+// a lock file, and a second miss is reported as the plain not-exist error.
 func Load(path string) (*ParseResult, error) {
 	data, err := os.ReadFile(path)
+	if err != nil && errors.Is(err, fs.ErrNotExist) {
+		data, err = readAfterSnapshotSwap(path, err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)
 	}
 
 	return Parse(data)
+}
+
+// readAfterSnapshotSwap waits for any refresh holding the snapshot lock of
+// path's directory and reads path again. Without a lock file beside the
+// directory no refresh has ever run there, so it returns missErr unchanged.
+func readAfterSnapshotSwap(path string, missErr error) ([]byte, error) {
+	dir := filepath.Dir(path)
+	if _, err := os.Lstat(SnapshotLockPath(dir)); err != nil {
+		return nil, missErr
+	}
+	release, err := AcquireSnapshotLock(dir)
+	if err != nil {
+		return nil, err
+	}
+	release()
+	return os.ReadFile(path)
 }
 
 // Parse decodes TOML bytes into a WorkspaceConfig and validates it.
