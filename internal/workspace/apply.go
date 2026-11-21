@@ -76,6 +76,29 @@ type Applier struct {
 	// lock, since the pipeline runs one instance at a time.
 	mirrorsChecked map[string]bool
 
+	// pluginStoresRepaired holds the plugin store directories this Applier
+	// has already run the repair pass over, so a root-level apply that runs
+	// the pipeline once per instance repairs each workspace's store once per
+	// command. pluginUnrestored holds, by release id, the releases that pass
+	// refused or could not restore, with the reason: an instance that links
+	// one is told why instead of trying again in the same command. The next
+	// command tries again. Like mirrorsChecked, both are written without a
+	// lock, since the pipeline runs one instance at a time.
+	pluginStoresRepaired map[string]bool
+	pluginUnrestored     map[string]string
+
+	// pluginStoresSwept holds the plugin store directories this Applier has
+	// already swept, once per command per store like the repair pass, but
+	// on a guard of its own: repair marks its store before the sweep runs in
+	// the same pipeline pass, and the sweep runs on a run that does no
+	// fetching too. pluginScanErr holds, by store directory, the instance
+	// listing error repair's scan met, so it is printed once: by the sweep
+	// when the sweep succeeds, not at all when the sweep's own notice names
+	// the failure, and by flushPluginScanWarnings when the pass ends without
+	// a sweep. Both are written without a lock, like the maps above.
+	pluginStoresSwept map[string]bool
+	pluginScanErr     map[string]error
+
 	// MirrorCommand names the command in the mirror log when set, in place of
 	// the pipeline's own create or apply: a SessionStart hook or a dispatch
 	// provisions through Create but logs as itself.
@@ -1996,14 +2019,27 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 	// marketplace's content into this instance, neither of which belongs on a
 	// per-repository path -- and the resolved set is then delivered for every
 	// agent whose declaration says its skills arrive that way.
+	//
+	// Before this instance's own placement, the host plugin store's repair
+	// pass restores any release an instance on disk links to that has gone
+	// missing or lost its mark, once per command per workspace, so an older
+	// instance's skills come back with no command run inside it.
 	fetcher, _ := a.GitHubClient.(FetchClient)
-	pluginTrees, missingPlugins := ResolvePluginTrees(ctx, PluginSkillsInputs{
+	pluginInputs := PluginSkillsInputs{
 		InstanceRoot: instanceRoot,
 		Plugins:      MergeInstanceOverrides(effectiveCfg).Plugins,
 		Marketplaces: effectiveCfg.Claude.Marketplaces,
 		RepoIndex:    marketplaceIndex,
 		Fetcher:      fetcher,
-	})
+		Home:         a.DeveloperHome,
+		SharingOff:   !effectiveCfg.Workspace.SharePluginReleasesEnabled(),
+	}
+	// Repair's scan warning is printed by the sweep below; a pass that
+	// returns before reaching it prints the warning here.
+	defer a.flushPluginScanWarnings()
+	a.repairPluginStore(ctx, pluginInputs, notices)
+	pluginInputs.Unrestored = a.pluginUnrestored
+	pluginTrees, missingPlugins := ResolvePluginTrees(ctx, pluginInputs)
 	for _, m := range missingPlugins {
 		allWarnings = append(allWarnings, m.String())
 	}
@@ -2046,6 +2082,14 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		allWarnings = append(allWarnings, rootSkills.Warnings...)
 	}
+
+	// With this instance linked, the host plugin store's sweep deletes the
+	// held releases no instance on disk links to, except the newest of each
+	// source, once per command per store. It runs with share_plugin_releases
+	// set to false as well: the setting stops new links only, and the
+	// releases that instances linked before it are kept by the sweep's own
+	// link scan.
+	a.sweepPluginStore(ctx, pluginInputs, notices)
 
 	// Step 6.3: Generate the workspace's declared MCP servers and session
 	// environment into each agent's own format. Both declarations are

@@ -1,4 +1,4 @@
-.PHONY: build test build-test test-functional test-functional-critical test-functional-claude-integration test-functional-mirror-repair test-authority test-install test-live clean
+.PHONY: build test build-test test-functional test-functional-critical test-functional-claude-integration test-functional-mirror-repair test-functional-plugin-release-hold test-authority test-install test-live clean
 
 # Build the niwa binary.
 build:
@@ -53,6 +53,13 @@ test-functional-claude-integration: build-test
 # suite runs it too; this is the reviewer's one-line check.
 test-functional-mirror-repair: build-test
 	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_PATHS=features/mirror-repair.feature \
+	go test -v -count=1 -timeout $(FUNCTIONAL_TIMEOUT) -run TestFeatures ./test/functional/... $(LOCK_HELD)
+
+# Run the plugin-release-hold feature: each github marketplace release held
+# once per workspace on the host, instances linking to it. The full suite runs
+# it too; this is the reviewer's one-line check.
+test-functional-plugin-release-hold: build-test
+	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_PATHS=features/plugin-release-hold.feature \
 	go test -v -count=1 -timeout $(FUNCTIONAL_TIMEOUT) -run TestFeatures ./test/functional/... $(LOCK_HELD)
 
 # Run the authority tests: the internal/authority package in full, the

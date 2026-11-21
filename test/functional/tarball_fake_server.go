@@ -10,10 +10,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"time"
 )
 
 // tarballFakeServer is the test counterpart of the GitHub REST API
 // endpoints internal/github/fetch.go consumes (HeadCommit + FetchTarball).
+// It also answers the compare endpoint the plugin store's reachability
+// check reads (see SetBehind).
 // It runs on httptest.Server, lets scenarios configure responses per
 // (owner, repo, ref) tuple, and records each request so tests can
 // assert "the second apply made no tarball request" or "the
@@ -32,6 +35,7 @@ type tarballFakeServer struct {
 	renames    map[string]string    // key: owner/repo → "neworg/newrepo" target
 	repoMeta   map[string]string    // key: owner/repo → JSON body for GET /repos/{owner}/{repo}
 	metaStatus map[string]int       // key: owner/repo → status code override for the bare repo metadata endpoint
+	behind     map[string]bool      // key: owner/repo@base...head → head is behind base
 	requests   []tarballFakeRequest // request log
 }
 
@@ -50,6 +54,7 @@ func newTarballFakeServer() *tarballFakeServer {
 		renames:    map[string]string{},
 		repoMeta:   map[string]string{},
 		metaStatus: map[string]int{},
+		behind:     map[string]bool{},
 	}
 	s.srv = httptest.NewServer(http.HandlerFunc(s.handle))
 	return s
@@ -94,6 +99,15 @@ func (s *tarballFakeServer) SetTarball(owner, repo, ref string, entries map[stri
 	s.tarballs[key(owner, repo, ref)] = buildGzippedTarball(entries)
 }
 
+// SetTarballAt is SetTarball with every entry stamped with modTime, as git
+// archive stamps each entry with the committer date. Entries whose path is in
+// executables get mode 0755.
+func (s *tarballFakeServer) SetTarballAt(owner, repo, ref string, entries map[string]string, modTime time.Time, executables map[string]bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tarballs[key(owner, repo, ref)] = buildGzippedTarballAt(entries, modTime, executables)
+}
+
 // SetCommit configures the oid returned for the commits SHA endpoint.
 func (s *tarballFakeServer) SetCommit(owner, repo, ref, oid string) {
 	s.mu.Lock()
@@ -123,6 +137,18 @@ func (s *tarballFakeServer) SetRename(oldOwner, oldRepo, newOwner, newRepo strin
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.renames[oldOwner+"/"+oldRepo] = newOwner + "/" + newRepo
+}
+
+// SetBehind records that each of commits is behind tip in owner/repo, so the
+// compare endpoint answers "behind" for base tip and any of them as head. The
+// same commit as base and head is "identical", and any other pair is
+// "diverged": what GitHub says for a commit only a fork holds.
+func (s *tarballFakeServer) SetBehind(owner, repo, tip string, commits []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range commits {
+		s.behind[key(owner, repo, tip+"..."+c)] = true
+	}
 }
 
 // Requests returns a snapshot of the request log.
@@ -225,6 +251,23 @@ func (s *tarballFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	switch op {
+	case "compare":
+		base, head, ok := strings.Cut(ref, "...")
+		if !ok || base == "" || head == "" {
+			http.NotFound(w, r)
+			return
+		}
+		status := "diverged"
+		s.mu.Lock()
+		switch {
+		case base == head:
+			status = "identical"
+		case s.behind[key(owner, repo, ref)]:
+			status = "behind"
+		}
+		s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": status})
 	case "commits":
 		oid := s.commitOIDFor(owner, repo, ref)
 		if oid == "" {
@@ -268,6 +311,10 @@ func key(owner, repo, ref string) string {
 }
 
 func buildGzippedTarball(entries map[string]string) []byte {
+	return buildGzippedTarballAt(entries, time.Time{}, nil)
+}
+
+func buildGzippedTarballAt(entries map[string]string, modTime time.Time, executables map[string]bool) []byte {
 	var raw bytes.Buffer
 	gz := gzip.NewWriter(&raw)
 	tw := tar.NewWriter(gz)
@@ -276,14 +323,18 @@ func buildGzippedTarball(entries map[string]string) []byte {
 		if !strings.HasSuffix(name, "/") {
 			continue
 		}
-		_ = tw.WriteHeader(&tar.Header{Name: name, Mode: 0o755, Typeflag: tar.TypeDir})
+		_ = tw.WriteHeader(&tar.Header{Name: name, Mode: 0o755, Typeflag: tar.TypeDir, ModTime: modTime})
 	}
 	// Files.
 	for name, body := range entries {
 		if strings.HasSuffix(name, "/") {
 			continue
 		}
-		_ = tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg})
+		mode := int64(0o644)
+		if executables[name] {
+			mode = 0o755
+		}
+		_ = tw.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: int64(len(body)), Typeflag: tar.TypeReg, ModTime: modTime})
 		_, _ = tw.Write([]byte(body))
 	}
 	_ = tw.Close()

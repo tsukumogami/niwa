@@ -389,9 +389,13 @@ func runDestroyEmptyWorkspace(cmd *cobra.Command, workspaceRoot string) error {
 	if err := guard(); err != nil {
 		return fmt.Errorf("nothing was destroyed: %v; run niwa destroy again once it is done", err)
 	}
+	// An unknown home leaves the plugin store alone.
+	home, _ := os.UserHomeDir()
 	if err := workspace.DestroyWorkspace(workspaceRoot, workspace.DestroyWorkspaceOpts{
 		Instances:         []string{},
 		BeforeRootRemoval: guard,
+		Home:              home,
+		StoreOut:          cmd.ErrOrStderr(),
 	}); err != nil {
 		return err
 	}
@@ -522,12 +526,15 @@ func runDestroyWorkspace(cmd *cobra.Command, workspaceRoot, confirm string) erro
 	}
 
 	// Only the locked, checked list is removed, and the root stays while
-	// anything else is in it.
+	// anything else is in it. An unknown home leaves the plugin store alone.
+	home, _ := os.UserHomeDir()
 	if err := workspace.DestroyWorkspace(workspaceRoot, workspace.DestroyWorkspaceOpts{
 		Reporter:          reporter,
 		ProgressOut:       cmd.ErrOrStderr(),
 		Instances:         instances,
 		BeforeRootRemoval: guard,
+		Home:              home,
+		StoreOut:          cmd.ErrOrStderr(),
 	}); err != nil {
 		return err
 	}

@@ -447,6 +447,23 @@ type WorkspaceMeta struct {
 	// would put it inside a table overlays do merge into, and the guarantee
 	// would then rest on a check someone could later forget.
 	StrictSecrets *bool `toml:"strict_secrets,omitempty"`
+	// SharePluginReleases controls whether the workspace's new instances link
+	// their github marketplaces to releases held once per workspace root.
+	// nil means on. With it set to false, a marketplace an instance does not
+	// hold yet is fetched into the instance at its ref, as niwa did before the
+	// shared store. It governs placement and linking of new marketplaces
+	// only: an instance that already links into the store keeps its link and
+	// keeps being repaired, and the sweep of unlinked releases still runs. It
+	// lives on [workspace], which the overlay merge never assigns, so only the
+	// workspace's own config sets it.
+	SharePluginReleases *bool `toml:"share_plugin_releases,omitempty"`
+}
+
+// SharePluginReleasesEnabled reports whether new instances link their github
+// marketplaces into the shared store: true unless share_plugin_releases is
+// set to false.
+func (w WorkspaceMeta) SharePluginReleasesEnabled() bool {
+	return w.SharePluginReleases == nil || *w.SharePluginReleases
 }
 
 // ResolveStrictSecrets decides whether a run fails on a shortfall, from the
