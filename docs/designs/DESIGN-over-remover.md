@@ -912,8 +912,10 @@ Each unit's records sit in its instance's `.niwa/` directory:
   copies; until it defines one, no `stored_at` counts and every `in_brief`
   file is unique, as the assumption above says. The location the brief work
   defines must resolve outside the instance, outside the job directory and
-  outside every path niwa removes or expires; a `stored_at` that doesn't
-  resolve there counts as nothing, so the file stays unique. niwa opens it component by component with `O_NOFOLLOW` and `O_NONBLOCK`,
+  outside every path niwa removes or expires, and must be durable: nothing
+  Claude Code's own retention or the host's temporary-directory cleaning
+  expires, and not under the Claude Code config directory; a `stored_at`
+  that doesn't resolve there counts as nothing, so the file stays unique. niwa opens it component by component with `O_NOFOLLOW` and `O_NONBLOCK`,
   `fstat`s the descriptor and requires a regular file before reading it, and
   hashes that descriptor, and only a hash equal to both the
   record's SHA-256 and the file in the instance makes the file handed forward.
@@ -1867,8 +1869,9 @@ that answers for a replaced unit reads koto's fence and
 Removal is never forced. Once the rule passes a unit and the gate allows it,
 niwa re-reads the sessions, processes and git state and keeps the unit when
 any changed, a repository configuration that now names a program included.
-The pass vets every session before its first removal step, as destroy does,
-so a failing job directory keeps the unit with nothing moved or removed.
+The pass vets every session it will pass to `claude rm`, those in the
+decoded `claude agents` listing, before its first removal step, as destroy
+does, so a failing job directory keeps the unit with nothing moved or removed.
 Otherwise it moves named and discarded files into the kept set, removes the
 worktrees inside the instance itself, each only after its status comes back
 clean, with the same descriptor-relative no-follow walk the trim uses and no
@@ -2150,7 +2153,8 @@ whose `claude rm` goes through `realRemoveClaudeSession`, the function
 `removeClaudeSessionFunc` points to, which runs the job-directory vet and
 makes the call from the checked empty directory with the filtered `PATH`.
 Before its first removal step, destroy runs that job-directory
-vet on every mapped session's job directory; on any failure it stops with
+vet on the job directory of every mapped session it will pass to
+`claude rm`, those in the decoded `claude agents` listing; on any failure it stops with
 the failing path named and removes nothing, so the instance, its worktrees
 and every session stay, the same fail-toward-keep as the pass. It
 removes each worktree with `rmtree.go`'s walk, never through git. Unforced
@@ -2520,7 +2524,12 @@ An all-unit pass, before a dispatch:
    configuration check, and, for a prunable worktree, its
    `git diff-index --cached` read from its admin directory), take
    each repository's ref snapshot, and keep with "changed during the pass"
-   when anything differs or a key is flagged. The pass vets every session
+   when anything differs or a key is flagged. niwa also re-hashes the
+   brief copy of every `in_brief` file the rule judged handed forward,
+   opening it as the rule does, before removing that file; a missing copy or a
+   hash mismatch makes the file unique, and it keeps the unit. The pass
+   vets every session it will pass to `claude rm`, those in the decoded
+   `claude agents` listing,
    before its first removal step, as destroy does: before the kept-set move
    and the worktree removal, and a failing vet keeps the unit with nothing
    moved or removed; the vet right before each `claude rm` still runs. Then
@@ -2587,15 +2596,21 @@ An all-unit pass, before a dispatch:
    once per pass as Claude Code does, from `CLAUDE_CONFIG_DIR` when the
    person sets it and `~/.claude` otherwise, and the rule's walk and the
    vet both use that one root, written `~/.claude/jobs/` here. niwa uses
-   the variable's value only when it's an absolute path, which it cleans
-   and never expands `~` in; any other value keeps the unit. niwa
+   the variable's value only when it's an absolute path that already
+   equals its cleaned form, and never expands `~` in it; any other value,
+   a relative one or one holding a `..`, a `.` or a repeated or trailing
+   separator, keeps the unit, so niwa vets exactly the path Claude Code
+   uses. niwa
    `Lstat`s `~/.claude/jobs/` and then `~/.claude/jobs/<id>`, and each must
    be a real directory, not a link, owned by the person's uid, with no
    write permission for group or others. Below the home directory, which
    may itself be a link (a home mounted elsewhere), no component may be
    one; a config directory outside the home gets the same chain check
    from its own root down. `<id>` must sit on the same device as
-   `~/.claude/jobs/`. A session whose job directory doesn't exist keeps, as doubt does.
+   `~/.claude/jobs/`. A listed session whose job directory doesn't exist
+   keeps its unit, as doubt does, with no relaxation, and the vet is never
+   skipped for any listed session. A session absent from the listing gets
+   no `claude rm` and so no vet.
    After those root checks pass, niwa walks `~/.claude/jobs/<id>` with
    `Lstat`, follows no link, and reads each directory's entries sorted by
    name, so the path named is the same on every run. It keeps the unit on
@@ -2716,17 +2731,18 @@ Deliverables:
   and `~/.config/git/config`, `~/.ssh/` with every file its `Include`
   names, any script or library those configuration files name that the
   agent could write (a credential helper's script, a `ProxyCommand` or
-  `Match exec` target, a `PKCS11Provider` library), and Claude Code's user
-  settings with the user-scope configuration that can define hooks or
-  programs `claude` runs (user-scope plugins and the user MCP
-  configuration) in the config directory resolved as Data Flow step 7
-  resolves the jobs root, all with sandbox write restrictions that also
+  `Match exec` target, a `PKCS11Provider` library), Claude Code's user
+  settings with the user-scope plugins, which can define hooks or programs
+  `claude` runs, in the config directory resolved as Data Flow step 7
+  resolves the jobs root, and Claude Code's user-scope MCP file, which can
+  name programs `claude` runs too: `.claude.json` in the home directory
+  when `CLAUDE_CONFIG_DIR` is unset, beside the default config directory
+  rather than inside it, and `.claude.json` inside the directory the
+  variable names when it's set, all with sandbox write restrictions that also
   cover Bash (Claude Code's sandbox or an operating-system equivalent)
   rather than path deny rules alone; its note that ssh follows `Include`
-  while the credential-helper read doesn't follow git's includes; its note
-  that a worker without such a sandbox has no boundary and the ledger is
-  advisory there; and its note that under such a sandbox `niwa helper`
-  can't register a helper, which then keeps its unit. Phase 6 adds only
+  while the credential-helper read doesn't follow git's includes; and its
+  note that a worker without such a sandbox has no boundary. Phase 6 adds only
   `.niwa-launch/` and its restore-window note.
 - `niwa reap --verdict-only [<instance>] [--json]` without over answers.
 - Unit tests per check and class; `@critical` functional scenarios for
@@ -2791,8 +2807,11 @@ Deliverables:
   and nothing runs from it; with `CLAUDE_CONFIG_DIR` set to another
   absolute directory, the walk reads that directory's `jobs/`, and the
   guide's deny-write list and the restore window's default (once its phase
-  lands) name that directory's settings rather than `~/.claude`, while a
-  relative value keeps the unit; a repository whose configuration names no
+  lands) name that directory's settings rather than `~/.claude`, the
+  deny-write list naming that directory's `.claude.json` rather than
+  `~/.claude.json`, while a relative value keeps the unit; a
+  `CLAUDE_CONFIG_DIR` value that is absolute but not already clean, such as
+  one containing `..`, keeps the unit; a repository whose configuration names no
   `core.excludesFile`, with a per-user ignore file planted at
   `~/.config/git/ignore` that matches an untracked `notes.txt`, keeps the
   unit with "untracked files: notes.txt", since that ignore file is never
@@ -2823,9 +2842,10 @@ Deliverables:
   `removeClaudeSessionFunc` points to, so every `claude rm` niwa makes goes
   through it: the pass, `removeOwningSessionsListed` in destroy, and
   retask's `removeCopy` (Data Flow step 7). It runs before each call on that
-  session's own job directory, and the pass vets every session before its
-  first removal step, as destroy does with every mapped session, removing
-  nothing when one fails.
+  session's own job directory, and the pass vets every session it will
+  pass to `claude rm`, those in the decoded `claude agents` listing, before
+  its first removal step, as destroy does with every mapped session the
+  listing holds, removing nothing when one fails.
 - Failed-dispatch cleanup and the watch's discard calling `removal.Evaluate`
   before `destroyInstanceFunc`; the hook worktree sweep evaluating each
   worktree's repository checks.
@@ -2886,6 +2906,10 @@ Deliverables:
   unit keeps with the failing path named, a `claude` wrapper logs no
   `claude rm` call, and the outside directory's listing, sizes and hashes
   match the recorded ones with the marker file still there.
+- Functional scenario for the vet's scope, run through a reap: a unit whose
+  session the person already deleted, absent from the `claude agents`
+  listing, reaps with no `claude rm` for it, while a listed session with no
+  job directory keeps its unit with the missing path named.
 - Security scenario for an inner link under the job directory, run through
   a reap: a clean unit with no handoff brief whose
   `~/.claude/jobs/<id>/scratch/out` is a symlink to a directory outside the
@@ -2929,7 +2953,9 @@ Deliverables:
 ### Phase 3: The over seam, the mark and the retire command
 
 Deliverables:
-- `LedgerStore` and the ledger match, first used here for the mark.
+- `LedgerStore` and the ledger match, first used here for the mark, and
+  the guide's note that the ledger is advisory for a worker without the
+  sandbox Phase 1's deny-write advice names.
 - `[session.over]`, `overSeam`, and the mark writer, reader and voiding
   rules, with the mark's ledger entry and the clean-up under the instance
   lock.
@@ -2963,7 +2989,9 @@ Deliverables:
   descriptor, stopping at any `.git` entry or git directory it meets.
 - `niwa helper` with its child-of-caller and not-a-session checks and its
   ledger entry; pid record reading in liveness; the pid record format and
-  `niwa helper` in the guide.
+  `niwa helper` in the guide, with its note that under the sandbox Phase
+  1's deny-write advice names `niwa helper` can't register a helper, which
+  then keeps its unit.
 - Functional scenarios for the no-command dispatch line, the idle build tree,
   the time budget and units not reached, the local listing with the network
   off, a pid record written by hand that doesn't release a live process, a
@@ -3583,14 +3611,19 @@ directory, with any file outside it that an `Include` in `~/.ssh/config`
 names, since ssh follows `Include` while the credential-helper read
 doesn't follow git's includes; any script or library those files name that
 the agent could write (a credential helper's script, a `ProxyCommand` or
-`Match exec` target, a `PKCS11Provider` library); and Claude Code's user
-settings with the user-scope configuration that can define hooks or
-programs `claude` runs (user-scope plugins and the user MCP
-configuration), in the config directory niwa resolves as Claude Code does
+`Match exec` target, a `PKCS11Provider` library); Claude Code's user
+settings with the user-scope plugins, which can define hooks or programs
+`claude` runs, in the config directory niwa resolves as Claude Code does
 (Data Flow step 7), which every `claude` call niwa makes reads, hooks
 included, and whose settings' `cleanupPeriodDays` sets the default
-restore window. Later hardening would pass a hooks-off flag on niwa's
-`claude` calls, once Claude Code offers one. An agent that can write the
+restore window; and Claude Code's user-scope MCP file, which can name
+programs `claude` runs too: `.claude.json` in the home directory when
+`CLAUDE_CONFIG_DIR` is unset, beside the default config directory rather
+than inside it, and `.claude.json` inside the directory the variable names
+when it's set. Later hardening would pass a hooks-off flag on niwa's
+`claude` calls, once Claude Code offers one. The implementer confirms once
+whether the `claude` subcommands niwa runs (`claude agents`, `claude rm`)
+start MCP servers. An agent that can write the
 root's `workspace.toml` chooses the hosts that count as proof and receive
 the person's credential helper, and the over command niwa runs before
 every dispatch, so that file is trusted only as far as the agent is kept
@@ -3934,12 +3967,12 @@ though no file in its result is lost.
   room for it, and a scratch directory with the wrong owner or mode keeps
   every unit that would use it until a person fixes or removes it.
 - A dotfiles setup that makes `~/.claude`, `~/.claude/jobs` or `~/.niwa` a
-  link, or a session with no job directory, keeps every unit it touches
+  link, or a listed session with no job directory, keeps every unit it touches
   until the person changes it; the evidence names the path. This design
   doesn't know which sessions get a job directory under the jobs root,
   hook-provisioned ones in particular, so the implementer confirms it; a
-  session without one keeps its unit all the same, with no relaxation, and
-  the vet is never skipped.
+  listed session without one keeps its unit all the same, with no
+  relaxation, and the vet is never skipped for any listed session.
 - A unit whose job directory holds a link, socket, named pipe or device
   keeps, and destroy stops with or without `--force`, until a person removes
   that entry. If a Claude Code release starts writing such an entry there,
