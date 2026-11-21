@@ -717,6 +717,51 @@ func TestStoreFallbackRecordsOneNoticePerStore(t *testing.T) {
 	}
 }
 
+// A marketplace falling back from an unwritable store whose own fetch then
+// fails is reported missing with that fetch's error, and the run records no
+// store fallback notice: the instance never got a copy of its own.
+func TestStoreFallbackRecordsNoNoticeWhenItsOwnFetchFails(t *testing.T) {
+	skipAsRoot(t)
+	const kitCommit = "2222222222222222222222222222222222222222"
+	noStableRelease(t)
+	root := setupWorkspace(t, nil)
+	instance := filepath.Join(root, "one")
+	home := t.TempDir()
+	storeDir := pluginstore.Dir(home, root)
+	if err := os.MkdirAll(storeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(storeDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { restoreWriteUnder(home) })
+
+	// The commit resolves, but no tarball is served, so the fallback fetch
+	// gets a 404.
+	fetcher := &sourceFetcher{commits: map[string]string{"beta/kit": kitCommit}}
+	notices := fallbacknotice.New(nil)
+	trees, missing := ResolvePluginTrees(context.Background(), PluginSkillsInputs{
+		InstanceRoot: instance,
+		Plugins:      []string{"kitplug@kit"},
+		Marketplaces: config.MarketplaceConfigs{{Source: "beta/kit"}},
+		Fetcher:      fetcher,
+		Home:         home,
+		Notices:      notices,
+	})
+	if len(trees) != 0 {
+		t.Fatalf("resolved %v, want none", trees)
+	}
+	if len(missing) != 1 || !strings.Contains(missing[0].Reason, `marketplace "kit" did not resolve`) || !strings.Contains(missing[0].Reason, "GitHub returned 404") {
+		t.Fatalf("missing = %v, want one reporting kit's failed fetch", missing)
+	}
+	if got, want := strings.Join(fetcher.fetched, ","), "beta/kit@"+kitCommit; got != want {
+		t.Fatalf("tarball requests = %s, want %s (the fallback fetch at the resolved commit)", got, want)
+	}
+	if notes := notices.StoreFallbacks(); len(notes) != 0 {
+		t.Fatalf("StoreFallbacks = %+v, want none when the fallback fetch failed", notes)
+	}
+}
+
 // An instance that already links into a store that can't be used is kept on
 // its link and reported through the missing plugin, with no store fallback
 // notice: it was not given a copy of its own.

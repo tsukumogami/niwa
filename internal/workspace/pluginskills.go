@@ -311,9 +311,13 @@ func ensureMarketplaceContent(ctx context.Context, in PluginSkillsInputs, name s
 			}
 			// The store can't be used: fall back to a copy in this instance,
 			// at the same commit, so the instance holds what the store would
-			// have, and say so.
-			in.Notices.PluginStoreFallback(pluginstore.Dir(store.Home, store.WorkspaceRoot), string(cond), name)
-			ref = commit
+			// have, and say so only once the instance really holds its own
+			// copy.
+			root, err := fetchMarketplaceIntoInstance(ctx, in.Fetcher, mc.Source, owner, repo, commit, name, dest)
+			if err == nil {
+				in.Notices.PluginStoreFallback(pluginstore.Dir(store.Home, store.WorkspaceRoot), string(cond), name)
+			}
+			return root, err
 		}
 	}
 
