@@ -290,11 +290,12 @@ The package also settles the mechanics the PRD left to the design:
   removal paths make in a repository an agent could have written is built by
   one function, `gitCommand` in `internal/removal/git.go`. That covers the
   rule's checks, the scratch fetch, the re-read, the tombstone check and
-  `git worktree remove` in the pass and in `runDestroyInstance`; the hook
-  worktree sweep's calls through `worktree.DestroySession`
-  (`git status --porcelain`, `git worktree remove` and `git branch -d`, which
-  today start plain `git` with the inherited environment through
-  `StdGitInvoker` in `internal/worktree/worktree.go`); and every call
+  the status niwa runs on each worktree right before removing it, in the
+  pass and in `runDestroyInstance`; the hook worktree sweep's calls through
+  `worktree.DestroySession` (`git status --porcelain` and `git branch -d`,
+  which today start plain `git` with the inherited environment through
+  `StdGitInvoker` in `internal/worktree/worktree.go`, as its
+  `git worktree remove --force` does); and every call
   `niwa destroy`'s scan, `workspace.ScanInstance`, makes through `gitOutput`
   in `internal/workspace/scan.go`, which today also starts plain `git`. The
   implementation changes both of those files so their calls go through
@@ -317,23 +318,28 @@ The package also settles the mechanics the PRD left to the design:
   still alive in the instance can write configuration in between, so the
   `gitCommand` invoker runs the check again on a repository, its common
   directory's configuration and its `config.worktree` included, right before
-  it starts every `git status` and every unforced `git worktree remove`
-  there: the rule's status in each repository, the re-read's, each worktree
-  removal in the pass, `DestroySession`'s status and remove in the hook
-  sweep, and destroy's scan status and unforced removal. A key found on a
+  it starts every `git status` there and right before niwa removes a
+  worktree of it: the rule's status in each repository, the re-read's, the
+  status and removal of each worktree in the pass, `DestroySession`'s status
+  and removal in the hook sweep, and destroy's scan status and the status
+  and removal of each worktree in an unforced destroy. A key found on a
   re-check keeps the unit (in the sweep, the worktree) with "changed during
   the pass: repository configuration names a program: <key>" as evidence,
-  and the call isn't started. Every `git status` niwa runs passes
-  `--ignore-submodules=all` and `--untracked-files=all`, and the fixed
-  overrides carry the same untracked setting to the status git starts
-  inside `git worktree remove`. `--ignore-submodules=all` means git never
+  and the call or removal isn't started. Every `git status` niwa runs passes
+  `--ignore-submodules=all` and `--untracked-files=all`, the status before
+  each worktree removal included. `--ignore-submodules=all` means git never
   starts a status of its own inside
   a submodule or gitlink, where it would read that repository's
-  configuration and run the drivers it names. `git worktree remove` takes no
-  such flag, so there the control is the check having run on every
-  repository under the worktree before the first call and again on the
-  worktree's own repository right before the remove; git's unforced remove also refuses a
-  worktree that contains submodules. `git worktree list`, `for-each-ref`,
+  configuration and run the drivers it names. The removal itself starts no
+  git process: niwa deletes a worktree's tree and its admin directory with
+  its own descriptor-relative walk (Data Flow step 7), so no driver can run
+  during it. A worktree that holds a submodule, or any other repository
+  below its own top-level `.git` file, isn't removed at all and keeps its
+  unit with "worktree holds a repository: <path>" as evidence. A git-ignored
+  nested repository inside a linked worktree now keeps where git's own
+  remove would have deleted it; that fails toward keeping and is intended,
+  not a regression.
+  `git worktree list`, `for-each-ref`,
   `stash list` and `branch -d` don't descend into submodules. Decision 8 gives the
   settings and the reasons. In short: no inherited environment, system and
   global configuration ignored, hooks, fsmonitor, pagers, askpass,
@@ -341,9 +347,10 @@ The package also settles the mechanics the PRD left to the design:
   and commit-graph files ignored, only `https` and `ssh` allowed, no proxy
   and certificate checks on,
   `--ignore-submodules=all` and `--untracked-files=all` on every status, and
-  `--git-dir` and `--work-tree` passed from the walk. `git worktree remove`
-  is given only a worktree path from niwa's own walk, never one read from
-  `git worktree list`. Every git output niwa parses is read in its
+  `--git-dir` and `--work-tree` passed from the walk. niwa removes only a
+  worktree its own walk found, opened from the instance's directory
+  descriptor, never one at a path read from `git worktree list` or from the
+  admin directory's `gitdir` file. Every git output niwa parses is read in its
   NUL-terminated form: `git worktree list --porcelain -z`,
   `git status --porcelain=v2 -z`, `git ls-files -v -z`,
   `git config --list -z`, and `-z` or a `%00` separator wherever else git
@@ -506,13 +513,15 @@ Failed-dispatch cleanup and the watch's discard call `removal.Evaluate` for
 their one instance before `destroyInstanceFunc`, and the hook worktree sweep
 evaluates each worktree's repository checks before `worktree.DestroySession`,
 then calls it with force off and with a git invoker built on `gitCommand`.
-With force off, `DestroySession` runs the unforced `git worktree remove`
-instead of the `--force` form it passes today even when its caller doesn't
-force, so the sweep never force-removes a worktree; git's refusal keeps the
-worktree and is named like any other disagreement. That invoker runs the
+With force off, `DestroySession` no longer runs the
+`git worktree remove --force` it runs today even when its caller doesn't
+force. Its own `git status` is the clean check: a change it reports keeps
+the worktree, named like any other disagreement, and otherwise niwa removes
+the worktree itself with the walk Data Flow step 7 describes, not through
+git, so the sweep never force-removes a worktree. That invoker runs the
 configuration check again right before `DestroySession`'s `git status` and
-its `git worktree remove`, so a key written after the sweep's first check
-keeps the worktree.
+again right before the removal, so a key written after the sweep's first
+check keeps the worktree.
 The before-remove gate, the instance lock, the re-read before removal (whose
 `git status`, like every status, the invoker precedes with a fresh
 configuration check) and the on-reap step stay as they are and wrap the
@@ -554,13 +563,15 @@ and `refs/stash`, and in a linked worktree its own `refs/worktree/*` and
 `refs/bisect/*`, a prunable entry's read from its admin directory), HEAD,
 the `stash list` and each worktree's HEAD from
 `git worktree list --porcelain -z`, all local reads through `gitCommand`. Right before
-each `git worktree remove`, niwa reads that worktree's HEAD and its
+niwa removes each worktree, it reads that worktree's HEAD and its
 per-worktree refs again through `gitCommand` and compares them with the
 snapshot; any change keeps the unit with "changed during the pass: ref
 <name>" and that worktree isn't removed. The same read runs the
-configuration check again on that worktree's repository, as the invoker
-does before every unforced remove, and a flagged key keeps the unit the
-same way, with the key named. The check on the
+configuration check again on that worktree's repository, and a flagged key
+keeps the unit the same way, with the key named. It then runs the
+worktree's `git status`, the clean check `git worktree remove` made for
+itself before deleting, now made by niwa, and any entry keeps the unit with
+"changed during the pass: <path>". The check on the
 tombstone takes the same snapshot again and compares: a ref that is new,
 has moved or is gone, a new stash entry, or a HEAD or worktree HEAD that
 points elsewhere counts as a difference, with "changed during the pass:
@@ -1449,8 +1460,9 @@ Key assumptions:
 
 `gitCommand` in `internal/removal/git.go` builds every git call niwa's
 removal makes: in the pass, in the hook worktree sweep through
-`worktree.DestroySession`, and in `niwa destroy`'s worktree removal and its
-scan, `workspace.ScanInstance` (Decision 1). The one exception is the read
+`worktree.DestroySession`, and in `niwa destroy`'s status before each
+worktree removal and its scan, `workspace.ScanInstance` (Decision 1). The
+worktree removal itself makes no git call. The one exception is the read
 of the person's credential helper, below. It starts git by absolute path,
 resolved once per pass from a filtered `PATH`: empty and relative entries
 are dropped, each remaining entry
@@ -1521,9 +1533,8 @@ git runs with no inherited environment except `HOME`, and with:
   `--no-show-signature`. The two untracked settings make every status
   report each untracked file whatever the repository's
   `status.showUntrackedFiles` says, read from the directories rather than
-  from an untracked cache the agent could have written into the index; as `-c`
-  values they also reach the status git starts inside `git worktree
-  remove`, so git's own clean check sees the same files;
+  from an untracked cache the agent could have written into the index, the
+  status niwa runs before removing a worktree included;
 - `--ignore-submodules=all` and `--untracked-files=all` on every
   `git status`. Without the first, git starts a
   status of its own inside every submodule and gitlink, and that child reads
@@ -1562,9 +1573,11 @@ under them, all found by niwa's own walk rather than by git, a submodule's
 configuration under `.git/modules/` included. It isn't only the first call.
 The invoker `gitCommand` builds runs the same read again on a repository,
 under the same 10-second context, right before it starts any `git status`
-or unforced `git worktree remove` there, because those are the calls that
-can start a filter (git's own clean check inside an unforced remove is a
-status) and seconds can pass between the first read and them. A key found
+there, because status is the call that can start a filter and seconds can
+pass between the first read and it. The status niwa runs on a worktree
+right before removing it is one of these; the removal that follows starts
+no git process, and the read runs right before it too, so a key written in
+between keeps the unit there as well. A key found
 then keeps the unit with "changed during the pass: repository configuration
 names a program: <key>" and the call isn't started. `ls-files -v`,
 `for-each-ref`, `stash list`, `worktree list`, `diff-index --cached`,
@@ -1796,7 +1809,9 @@ Removal is never forced. Once the rule passes a unit and the gate allows it,
 niwa re-reads the sessions, processes and git state and keeps the unit when
 any changed, a repository configuration that now names a program included.
 Otherwise it moves named and discarded files into the kept set, removes the
-worktrees inside the instance with an unforced `git worktree remove`, runs
+worktrees inside the instance itself, each only after its status comes back
+clean, with the same descriptor-relative no-follow walk the trim uses and no
+git call, runs
 `claude rm` on the sessions without either override flag, runs on-reap,
 removes the instance through `workspace.DestroyInstance`, and writes the
 reap time and the window's end into the launch record. A refusal from the
@@ -1832,7 +1847,9 @@ store's configuration is compared byte for byte with what niwa wrote
 before each network call; any mismatch keeps. Each
 worktree's HEAD and per-worktree refs are read again right before it's
 removed, and the tombstone check compares a ref snapshot, so a late commit
-keeps. The mark, the discard record, pid records (now
+keeps. A worktree goes by niwa's own no-follow walk from a directory
+descriptor, never by git, so a directory swapped for a link can't send that
+delete outside the instance. The mark, the discard record, pid records (now
 registered through `niwa helper`) and `unit.json` count only when they match
 a ledger niwa keeps at `~/.niwa/w-<key>/ledger/`. `niwa discard` and
 `niwa retire --override-not-over` need a person at a controlling terminal
@@ -1915,8 +1932,8 @@ again right before every status and unforced worktree removal, and
   configuration check, run on every repository the walk finds under a unit
   (submodule git directories, gitlinks and nested repositories included)
   before the first other git call in any, and run again by the invoker on a
-  repository right before every `git status` and unforced
-  `git worktree remove` there; the proof-remote match against the
+  repository right before every `git status` there and before each
+  worktree removal niwa makes; the proof-remote match against the
   workspace's clone URL and `proof_remotes`, on scheme, user, host and port
   (default ports made explicit) and whole path segments; remote
   URL validation, refusing dot segments, empty segments, percent-encoding,
@@ -1956,15 +1973,25 @@ again right before every status and unforced worktree removal, and
   component with `O_NOFOLLOW` (the file also `O_NONBLOCK`), `fstat`ing the
   descriptor before reading (a regular file, one link only)
   and hashing it, and moving named files to `files/` and discarded paths to `discarded/`.
+- `rmtree.go`: the descriptor-relative no-follow removal walk the trim and
+  every worktree removal share (Data Flow steps 7 and 8), and
+  `RemoveWorktree`, which checks from descriptors that a worktree's
+  top-level `.git` file names its admin directory, keeps a locked worktree
+  or one holding a repository, and removes the tree and then the admin
+  directory. The worktree package gets it as a `WorktreeRemover` beside its
+  `GitInvoker`, so that package stays a leaf and imports nothing from this
+  one.
 
 **`internal/cli/pass.go` (new).** `runPass` with three modes (act on every
 unit, act on one, verdict-only), the deadline, the ordering, candidate
 gathering (moved out of `selectReapTargets`, `selectStoredMappingTargets`
 and `selectBackstopTargets`), the acting steps (`actReap`, `actTrim`), the
 re-read before removal, the read of each worktree's HEAD and per-worktree
-refs right before its `git worktree remove`, the removal of trimmed trees
-by a no-follow walk from the instance's descriptor that stops, and keeps
-the rest of the tree, at any `.git` entry or git directory it meets, the tombstone rename
+refs, its configuration check and its status right before niwa removes it,
+the removal of worktrees and of trimmed trees through `rmtree.go`'s
+no-follow walk, which stops, and keeps the rest of the tree, at any `.git`
+entry or git directory it meets other than a worktree's own top-level
+`.git` file, the tombstone rename
 and check before
 `DestroyInstance` under the shared tombstone lock, the recovery of
 tombstones an interrupted pass left under that lock taken exclusively, and
@@ -1975,20 +2002,25 @@ the counts the dispatch line and reap print.
 and the program-naming configuration check on every repository it finds
 there, the worktree's own and each submodule, gitlink and nested repository
 under it, before any other git call in any of them; a flagged one keeps the
-worktree. It then calls `DestroySession` with force off and the
-`gitCommand` invoker, which runs the check again before that call's status
-and remove.
+worktree. It then calls `DestroySession` with force off, the `gitCommand`
+invoker, which runs the check again before that call's status and before
+its removal, and the `rmtree.go` remover, which does the removal.
 
 **`internal/worktree/worktree.go`.** `DestroySession` already takes a
-`GitInvoker`, so its `git status --porcelain`, `git worktree remove` and
-`git branch -d` calls run hardened once the sweep passes the `gitCommand`
-invoker instead of `StdGitInvoker`, which no removal path uses any more.
-The invoker adds `--ignore-submodules=all` and `--untracked-files=all` to
-the `git status` call, and runs the program-naming configuration check on
-the worktree's repository right before that status and before the remove,
-returning an error that names the key, which keeps the worktree, when it
-finds one. With
-force off it runs `git worktree remove` without `--force`.
+`GitInvoker`, so its `git status --porcelain` and `git branch -d` calls run
+hardened once the sweep passes the `gitCommand` invoker instead of
+`StdGitInvoker`, which no removal path uses any more. It stops calling
+`git worktree remove`: it takes a `WorktreeRemover` beside the invoker and
+removes the worktree's tree and admin directory with it, forced or not,
+before `git branch -d`, which then finds the branch checked out nowhere. A
+removal that stops comes back as an error naming the path, where today the
+result of `git worktree remove` is discarded. The invoker adds
+`--ignore-submodules=all` and `--untracked-files=all` to the `git status`
+call, and runs the program-naming configuration check on the worktree's
+repository right before that status and before the removal, returning an
+error that names the key, which keeps the worktree, when it finds one. With
+force off, a change the status reports keeps the worktree, as it does
+today; with force on, the status is skipped, as it is today.
 
 **`internal/cli/over.go` (new).** `overSeam`, built like `removalGate`:
 `load`, `active`, `ask`, `exec`, with output capture, last-line cleaning, the
@@ -2033,10 +2065,17 @@ summary, adds `--kept`, and adds the `unit` object to
 **`internal/cli/destroy.go`, `destroy_session.go`.** `runDestroyInstance`
 removes worktrees inside the instance after the scan and before
 `removeOwningSessionsListed`, whose `claude` calls run from an empty
-directory under `~/.niwa/w-<key>/scratch/`, checked like the pass's; unforced destroy uses unforced
-`git worktree remove`, and `--force` keeps its meaning and removes them with
-git's own force before the session, since the person already accepted the
-loss. Those worktree calls go through `removal.gitCommand`, and so does
+directory under `~/.niwa/w-<key>/scratch/`, checked like the pass's. It
+removes each one with `rmtree.go`'s walk, never through git. Unforced
+destroy first runs the worktree's configuration check and `git status`, a
+change refusing the destroy as the scan's findings do, and the walk keeps a
+locked worktree or one holding a repository, which refuses the same way.
+`--force` keeps its meaning: it skips that status and removes the worktrees
+with the same walk before the session, since the person already accepted
+the loss, and a worktree the walk won't remove (locked, holding a
+repository, a `.git` file that doesn't name its admin directory, a link
+where a directory should be) is left to go with the directory, as a flagged
+one is. That status goes through `removal.gitCommand`, and so does
 every git call destroy's existing scan makes: `runDestroyInstance` passes
 `workspace.ScanInstance` a `ScanOption` carrying the command builder made
 from `gitCommand`, and `gitOutput` in `internal/workspace/scan.go` starts
@@ -2052,10 +2091,10 @@ A repository it flags gets no further git call: the scan reports it as a
 can't read, so an unforced destroy refuses as for any other loss, and
 `--force` leaves the worktree holding that repository to go with the
 directory. The `gitCommand` builder runs the check again right before the
-scan's `git status` in each repository and before each unforced
-`git worktree remove`, and a key found then is reported and refused the
-same way; `--force` removal skips git's clean check, so it starts no status
-and needs no second read. What the scan checks and decides is otherwise left as it is;
+scan's `git status` in each repository and before the status that comes
+right before each unforced worktree removal, and a key found then is
+reported and refused the same way; `--force` removal skips that status, so
+it starts no git process and needs no second read. What the scan checks and decides is otherwise left as it is;
 only how it starts git changes.
 
 **`internal/cli/instance_from_hook.go`.** Writes the hook session's launch
@@ -2225,7 +2264,11 @@ args:
     -c http.proxy= -c http.sslVerify=true
   every status: --ignore-submodules=all --untracked-files=all
   every log-family call (stash list, git log): --no-show-signature
-  git worktree remove: only a worktree path from niwa's walk, never from git worktree list
+  worktree removal: no git call. Unforced, first the configuration check and git status
+    on the worktree (any entry keeps); then niwa's no-follow walk removes the tree from
+    the instance's descriptor and worktrees/<id> from the common git directory's, the
+    tree only one niwa's walk found (never a path from git worktree list or gitdir);
+    git worktree remove and git worktree prune are never run
 index flags: ls-files -v in every repository with a work tree; a lowercase tag
   (assume-unchanged) or S (skip-worktree) on any entry keeps
 first call in each repository: git config --list --show-scope --includes, 10-second context,
@@ -2381,10 +2424,11 @@ An all-unit pass, before a dispatch:
    when anything differs or a key is flagged. Then move named
    files, discarded paths and a discard patch into the kept set (regular
    files only, one link, opened component by component, hashed from the
-   descriptor, 0700 entry), remove worktrees inside the instance, each by a
-   path from niwa's own walk and only after a fresh read of its HEAD and
-   per-worktree refs matches the snapshot and a fresh configuration check
-   of its repository flags nothing (either change keeps), `claude rm` the
+   descriptor, 0700 entry), remove worktrees inside the instance, each one
+   niwa's own walk found and only after a fresh read of its HEAD and
+   per-worktree refs matches the snapshot, a fresh configuration check of
+   its repository flags nothing and its `git status` reports no entry (any
+   of these keeps), by niwa's own removal below, `claude rm` the
    sessions from the same empty directory, checked again first, run on-reap, take the tombstone lock shared, rename the instance
    to its tombstone and repeat there the process listing, the configuration
    check on every repository, git status (`--ignore-submodules=all
@@ -2398,6 +2442,33 @@ An all-unit pass, before a dispatch:
    the mapping, and write `reaped_at`, `restore_until` and `kept_entry` into
    the launch record. Any refusal is a disagreement, kept and named with its
    message scrubbed.
+
+   niwa removes a worktree itself, never through `git worktree remove`,
+   whose recursive delete goes by full path strings and so follows a
+   directory swapped for a link after git's own checks, outside the
+   instance and outside any sandbox the agent runs under. It opens the
+   worktree's directory component by component from the instance's
+   directory descriptor, and its admin directory, `worktrees/<id>` under
+   the common git directory, from that git directory's descriptor, itself
+   opened the same way from the instance's, every directory with
+   `O_DIRECTORY|O_NOFOLLOW`. From those descriptors it checks that the
+   tree's top-level `.git` file, opened `O_NOFOLLOW|O_NONBLOCK` and
+   `fstat`ed as a regular file, names that admin directory, that the admin
+   directory holds no `locked` file, and that the walk found no repository
+   below the tree's top level and no git directory in the admin directory;
+   any of these keeps, with the path named. It then removes the tree with
+   the walk step 8 describes, the tree's own `.git` file last, then the
+   admin directory the same way, then `worktrees/` itself if that leaves it
+   empty. A link the walk meets as a link is removed as one, never
+   followed; an open that fails, because a directory became a link or for
+   any other reason, stops the walk the same way a nested `.git` entry
+   does, keeps the rest and the admin directory, and keeps the unit with
+   the path named, so the worktree stays registered and a later pass
+   judges what is left. No git call follows: the worktree's HEAD, index,
+   logs and per-worktree refs live in the admin directory and go with it.
+   `git worktree prune` is no substitute and niwa never runs it, since it
+   also deletes `worktrees/<id>` by path and follows one swapped for a
+   link.
 8. For a trim: check the root apply lock, no keep record protecting build
    trees, no process with its working directory in the tree or a file under it
    open, no repository found inside the tree, the newest write older than
@@ -2409,7 +2480,12 @@ An all-unit pass, before a dispatch:
    instance. The removal walk stops at any `.git` entry or git directory
    (a `HEAD` beside `objects/` and `refs/`) it meets, keeps the rest of the
    tree and names the path, so a repository created in the tree after the
-   checks isn't removed; a partly trimmed build tree is regenerable. The
+   checks isn't removed; a partly trimmed build tree is regenerable. When
+   the walk removes a registered worktree (step 7), the one exception is
+   that worktree's own `.git` file at the top of its tree, which step 7
+   checked names its admin directory and removes last; a `.git` entry
+   anywhere below that top level, or one at the top that isn't a regular
+   file, stops the walk there as it does here. The
    instance, checkout and session stay.
 9. Write `unit.json` (0600) with the answer, time stopped, size, verdict,
    scrubbed evidence and `reached_at`, and its hash into the ledger.
@@ -2546,7 +2622,9 @@ Deliverables:
 
 Deliverables:
 - Worktrees inside the instance removed before `claude rm` in the pass and
-  in `runDestroyInstance`, through `gitCommand`.
+  in `runDestroyInstance` by niwa's own removal (Data Flow step 7), with the
+  status before each one built by `gitCommand`; `rmtree.go`'s no-follow walk
+  ships here, and the trim reuses it in Phase 4.
 - Failed-dispatch cleanup and the watch's discard calling `removal.Evaluate`
   before `destroyInstanceFunc`; the hook worktree sweep evaluating each
   worktree's repository checks.
@@ -2558,7 +2636,9 @@ Deliverables:
   configuration check run on every repository niwa's walk finds under the
   worktree or instance, submodules, gitlinks and nested repositories
   included, before the first other git call in any, and `DestroySession`
-  running the unforced `git worktree remove` when force is off.
+  removing its worktree through the `WorktreeRemover` instead of
+  `git worktree remove --force`, with its own status as the clean check when
+  force is off.
 - Security scenarios: a hook-provisioned worktree's repository and an
   instance repository with `core.fsmonitor` set to a script that writes a
   marker file, run through the hook worktree sweep (by `niwa dispatch`) and
@@ -2571,11 +2651,28 @@ Deliverables:
   verdict-only mode and the hook worktree sweep, makes an unforced destroy
   refuse with the key named, and the driver never runs (no marker file); the
   same driver planted in a worktree's repository after the first check and
-  before that worktree's `git worktree remove` in a reap, before
-  `DestroySession`'s status or remove in the hook worktree sweep, and before
-  the status or unforced removal in `niwa destroy`, keeps the unit (the
-  worktree, in the sweep; an unforced destroy refuses) with the key named,
-  and the driver never runs.
+  before that worktree's status or removal in a reap, before
+  `DestroySession`'s status or removal in the hook worktree sweep, and before
+  the scan's status or an unforced worktree removal's status in
+  `niwa destroy`, keeps the unit (the worktree, in the sweep; an unforced
+  destroy refuses) with the key named, and the driver never runs.
+- Security scenario for the worktree removal, run through a reap, the hook
+  worktree sweep (by `niwa dispatch`), `niwa destroy` and
+  `niwa destroy --force`: a clean unit whose niwa worktree holds
+  `deep/a/b/file.txt`, and a directory outside the instance holding a
+  marker file, with its listing, sizes and hashes recorded first. A test
+  hook in the removal walk, called after the walk reads an entry's type and
+  before it opens it, renames `deep/` aside and puts a symlink to the
+  outside directory in its place; in a second run the hook fires before the
+  removal opens the worktree's own directory and swaps that directory for
+  such a symlink. The hook makes the swap land on every run rather than by
+  chance. In every run nothing outside the instance is deleted: the outside
+  directory's listing, sizes and hashes match the recorded ones and the
+  marker file is still there. The unit (the worktree, in the sweep) keeps
+  with "changed during the pass" and the swapped path named, and an
+  unforced destroy refuses the same way; under `--force` the worktree is
+  left to go with the instance directory, and the outside directory is
+  still unchanged after the destroy.
 - Security scenarios for the proof-remote and tombstone checks, each
   through a reap and, where it applies, the verdict-only mode:
   with `proof_remotes = ["https://<test host>/dana/"]`, a remote
@@ -2595,7 +2692,8 @@ Deliverables:
 - Functional scenarios: a clean unit holding a niwa worktree leaves no session
   behind after a reap and after `niwa destroy`; failed-dispatch cleanup keeps
   `partial.txt`; no `claude` call a wrapper logs carries an override flag,
-  and no `git` call a wrapper logs carries `--force` outside `niwa destroy
+  no `git` call a wrapper logs is `git worktree remove` or
+  `git worktree prune`, and none carries `--force` outside `niwa destroy
   --force`; every `claude` call a wrapper logs runs from a directory outside
   the workspace; an instance whose `.claude/settings.json` and
   `settings.local.json` define every hook event with a command that writes
@@ -2634,8 +2732,8 @@ Deliverables:
 - Over answers in the verdict-only mode, with the mark each would write.
 - The trim with `trim` and `trim_after`, the root apply lock, the process
   checks for build trees, the refusal of a tree that holds a repository, and
-  removal by a no-follow walk from the instance's descriptor that stops at
-  any `.git` entry or git directory it meets.
+  removal by `rmtree.go`'s no-follow walk from Phase 2, from the instance's
+  descriptor, stopping at any `.git` entry or git directory it meets.
 - `niwa helper` with its child-of-caller and not-a-session checks and its
   ledger entry; pid record reading in liveness; the pid record format and
   `niwa helper` in the guide.
@@ -2905,8 +3003,8 @@ handed forward with no copy anywhere.
 
 Every git call niwa's removal paths make goes through `gitCommand`
 (Decision 8): the pass, the hook worktree sweep through
-`worktree.DestroySession`, and `niwa destroy`'s worktree removal and its
-scan, `workspace.ScanInstance`. The sweep and the scan start plain `git`
+`worktree.DestroySession`, and `niwa destroy`'s status before each worktree
+removal and its scan, `workspace.ScanInstance`. The sweep and the scan start plain `git`
 with the repository's own configuration today, in exactly the repositories
 an agent controls, and the sweep runs before every dispatch, so the
 implementation changes `internal/worktree/worktree.go`,
@@ -2923,9 +3021,10 @@ every repository on all of these paths, and it runs on every repository
 under a unit, each submodule, gitlink and nested repository included, found
 by niwa's own walk, before the first other git call in any of them. It
 isn't a single gate: the invoker runs it again on a repository right before
-every `git status` and every unforced `git worktree remove` there, since a
-process still alive in the instance could add a key in the seconds between
-the first check and those calls, and a key found then keeps the unit with
+every `git status` there, the status before each worktree removal included,
+and right before each worktree removal, since a process still alive in the
+instance could add a key in the seconds between the first check and those
+calls, and a key found then keeps the unit with
 "changed during the pass" and the key named. The
 walk recognizes a git directory by its structure as well as by the name
 `.git`, so a bare repository, a removed submodule's store under `modules/`
@@ -2940,12 +3039,12 @@ repository around it. That matters because a submodule's configuration is a
 file of its own, and a plain `git status` in the parent starts a status
 inside every submodule and gitlink that reads it and runs any filter it
 names; every `git status` niwa runs therefore passes
-`--ignore-submodules=all` (and `--untracked-files=all`), and
-`git worktree remove`, which takes no such
-flag, runs only after the check has cleared every repository under the
-worktree and, a moment before the remove, cleared the worktree's own
-repository again (the late-write residual under Permission scope gives the
-gap that still leaves). Each submodule's own unpushed work is judged by its own checks as
+`--ignore-submodules=all` (and `--untracked-files=all`). A worktree's
+removal starts no git process at all: niwa deletes it with its own walk,
+after a status of the worktree that carries the same flags and that the
+re-check precedes (the late-write residual under Permission scope gives the
+gap that still leaves), and a worktree holding a submodule or any other
+repository below its top level isn't removed. Each submodule's own unpushed work is judged by its own checks as
 a repository of its own. The one git call built outside
 `gitCommand` is the read of the person's own credential helper, which needs
 the person's real global configuration: it runs once per pass from an empty
@@ -3077,8 +3176,8 @@ boundary for the replay fields is the deny-write advice below.
 
 ### Permission scope
 
-The pass deletes directories, moves files between volumes, and runs
-`git worktree remove`, `claude rm` and on-reap as the person. Claude Code
+The pass deletes directories, registered worktrees among them, moves files
+between volumes, and runs `claude rm` and on-reap as the person. Claude Code
 reads project settings, hook commands included, from the project it runs
 in, and an instance's `.claude/settings.json` and `settings.local.json` are
 agent-writable, so a `claude` call started inside an instance could run a
@@ -3088,7 +3187,9 @@ outside the instance into a directory that persists (a `keep.json` naming
 `bench/link` pointing at `~/.ssh/id_ed25519`), or a restore could write
 outside the fresh instance. The walk could follow a link or a mount out of
 the instance, `os.RemoveAll` could be handed a symlinked or misplaced
-directory, and a write landing between the last check and the delete is
+directory, a recursive delete that goes by path, as `git worktree remove`'s
+does, would follow a directory swapped for a link out of the instance, and
+a write landing between the last check and the delete is
 lost unseen. A directory swapped for a link between a check and an open
 would redirect the move or a record write, and two passes overlapping could
 have one recover a tombstone the other is still deleting. `niwa discard` is
@@ -3107,7 +3208,15 @@ directory opened `O_DIRECTORY|O_NOFOLLOW`, so a directory swapped for a
 link mid-removal can't send the delete outside the instance, and the walk
 stops and keeps the rest of the tree at any `.git` entry or git directory
 it meets, so a repository created in the tree after the trim's checks
-isn't removed with it. Every `claude` call niwa makes (`claude agents`,
+isn't removed with it. Every worktree removal, in the pass, the hook
+worktree sweep and `niwa destroy` with or without `--force`, uses the same
+walk instead of `git worktree remove`: the tree from the instance's
+directory descriptor, its `worktrees/<id>` admin directory from the common
+git directory's, and only after a check from those descriptors that the
+tree's top-level `.git` file names that admin directory. That `.git` file
+is the one `.git` entry the walk removes, and it goes last; a nested one
+stops the walk as in the trim, and a worktree holding a repository below
+its top level isn't removed at all. Every `claude` call niwa makes (`claude agents`,
 `claude rm`, in the pass and in `niwa destroy`) runs from an empty
 directory outside the workspace, under `~/.niwa/w-<key>/scratch/` where the
 agent is denied writes and checked for owner and mode before each call,
@@ -3125,9 +3234,10 @@ never overwrites. Kept-set expiry removes only a direct-child directory of
 `kept-files/<instance>/` that it found by enumeration and `Lstat`ed as a
 real directory, never a path read from `entry.json`, so an edited entry
 can't point the removal anywhere else. The hook worktree sweep never forces
-a worktree's removal: with force off, `DestroySession` runs the unforced
-`git worktree remove`. Every `git worktree remove` gets a path from niwa's
-own walk, never one read from `git worktree list`, so an edited worktree
+a worktree's removal: with force off, `DestroySession` removes a worktree
+only after its own status comes back clean. Every worktree niwa removes is
+one its own walk found, opened from the instance's descriptor, never a path
+read from `git worktree list` or a `gitdir` file, so an edited worktree
 entry can't name a directory elsewhere. The walk never follows a link,
 stays on one filesystem and keeps a unit whose git directory sits outside it. `DestroyInstance` refuses a
 symlink and anything that isn't a direct child of the root. The tombstone
@@ -3140,25 +3250,26 @@ a real directory that is a direct child of the root, so a
 `.niwa-tombstone-*` symlink can't have it rename or evaluate a directory
 elsewhere. The check on the tombstone reruns the program-naming
 configuration check on every repository before its `git status`, as the
-invoker does before every other `git status` and unforced
-`git worktree remove` on every removal path (the rule's status in each
-repository, the re-read, each worktree removal, the hook sweep's
-`DestroySession` and destroy's scan), so a driver planted after the first
+invoker does before every other `git status` and every worktree removal on
+every removal path (the rule's status in each repository, the re-read,
+each worktree's status and removal, the hook sweep's `DestroySession` and
+destroy's scan), so a driver planted after the first
 check still runs nothing and keeps the unit, with "changed during the
 pass" and the key named; the residual below gives the gap that's left. The
 tombstone check also compares a ref snapshot taken with the re-read, so a commit, branch,
 tag or stash made in between, which leaves `git status` clean, renames the
 tombstone back and keeps the unit with the ref named. A worktree niwa
 removes takes its admin directory with it, so its HEAD and per-worktree
-refs are read again right before its `git worktree remove`: a detached-HEAD
+refs are read again right before niwa removes it: a detached-HEAD
 commit or a new `refs/worktree/*` or `refs/bisect/*` entry made since the
 re-read keeps the unit before that worktree goes, and the tombstone check
 lets a removed worktree's entries be missing only when they matched the
 snapshot at that read.
 Lock files in `~/.niwa/locks/` are created 0600 with `O_NOFOLLOW`, and the
 mark clean-up after an over answer runs under the instance lock. niwa uses no
-sudo, opens no listener and passes no force flag to `claude` or to git
-outside `niwa destroy --force`, which a functional test checks.
+sudo, opens no listener, passes no force flag to `claude` or to git outside
+`niwa destroy --force`, and runs neither `git worktree remove` nor
+`git worktree prune`, which a functional test checks.
 
 `niwa retire`, `niwa discard` and `--override-not-over` refuse inside an
 instance, by working directory, by `NIWA_DISPATCH_ID` and `NIWA_REAP_KEY`,
@@ -3230,15 +3341,20 @@ tree after the trim's checks is removed with the tree. Later
 hardening would record a manifest of path, size, mtime and ctime for the
 paths outside every repository and for the job directory during the
 evaluation, compare it at the tombstone, and re-check the job directory
-against it before `claude rm`. A commit made in the instant between a
-worktree's last read and git removing it is lost the same way, and git's
-own worktree removal works by path, which niwa can't make
-descriptor-relative.
+against it before `claude rm`. A commit or a file written in the instant
+between a worktree's last reads (its refs, its configuration and its
+status) and niwa removing it is lost the same way. The removal doesn't
+widen that: it works through descriptors, not paths, so a writer racing it
+can lose its own write but can't send the delete outside the instance. A
+file written into the tree while the walk runs is either removed with it
+or leaves a directory the walk can't remove, which stops the walk and keeps
+the rest.
 
 The configuration re-checks narrow the gap for a planted filter; they don't
 close it. Between niwa's `git config --list` and git's own read of the
-configuration at the start of the `git status` or `git worktree remove`
-that follows there's a sub-second gap, and a writer that watches for
+configuration at the start of the `git status` that follows (a worktree's
+removal starts no git process, so the status before it is the call left
+there) there's a sub-second gap, and a writer that watches for
 niwa's read can still win it; the tombstone check's re-run lives with the
 same race. The writers that can try are a helper registered through
 `niwa helper`, which the design lets live through the reap with its
@@ -3412,12 +3528,13 @@ without one, the ledger is advisory. And a brief written by the unit's own workf
 scratch and loose root files older than it.
 
 A reap that stops after the kept-set move, because the tombstone renames
-back or a later step (worktree removal or the configuration re-check
-before it, `claude rm`, on-reap) disagrees,
+back or a later step (worktree removal, or the configuration re-check or
+status before it, `claude rm`, on-reap) disagrees,
 leaves the unit listed with its named and discarded files already in a
 kept-set entry no launch record points at, and that entry still leaves on
 its due date. A named file tracked in a linked worktree makes that worktree
-dirty once it's moved, so git's unforced removal refuses and this happens
+dirty once it's moved, so the status niwa runs before removing it reports
+the change, the removal keeps, and this happens
 with no race at all. The loss isn't silent, since the entry is listed and
 shown due a day before it leaves, but files a person asked to keep can
 expire while their unit stays. Later hardening would move the files back,
