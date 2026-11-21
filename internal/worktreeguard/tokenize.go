@@ -10,6 +10,12 @@ import (
 // because a quote is never closed. The guard lets such a command through.
 var errUnparseable = errors.New("command could not be tokenized")
 
+// SplitSimpleCommands is splitSimpleCommands for other guards in niwa that
+// read Bash calls the same way. An unparseable line returns an error.
+func SplitSimpleCommands(line string) ([][]string, error) {
+	return splitSimpleCommands(line)
+}
+
 // splitSimpleCommands splits a shell command line into simple commands, each
 // a list of words. It handles what an agent's Bash calls commonly contain:
 // single and double quotes, backslash escapes, the separators ; & && | || and

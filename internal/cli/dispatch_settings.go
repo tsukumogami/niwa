@@ -27,7 +27,7 @@ import (
 // settings files, so anything a caller could influence here would let that
 // caller rewrite the worker's configuration.
 //
-// Two values are exceptions, and they are named here so they stay the only
+// Three values are exceptions, and they are named here so they stay the only
 // ones. The first is the launch environment contributor's "env" key, a
 // launchEnv (dispatch_env.go) that can marshal to nothing but a JSON object of
 // string values. Its keys come from three places and no others:
@@ -57,6 +57,13 @@ import (
 // Each name must match mcpServerNamePattern and at most
 // maxLaunchMCPServers are sent, so a hand-edited state file can't push a
 // key-like or instruction-like string into the document.
+//
+// The third exception is the first-read guard's hooks key
+// (firstReadGuardHooks), whose one non-constant value is the hook command's
+// fallback path: niwa's own os.Executable(), single-quoted by
+// guardedNiwaHookCommand. The brief's path and line count never enter the
+// document; the dispatch records them in the instance, where the guard reads
+// them.
 //
 // An empty or nil map returns ("", false), and the caller then appends no
 // settings flag at all. A value encoding/json can't encode panics, since only
