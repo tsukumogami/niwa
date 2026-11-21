@@ -256,7 +256,10 @@ The package also settles the mechanics the PRD left to the design:
   `refs/bisect/*` and every object it made stay in the instance and are
   deleted with it. So every entry `git worktree list --porcelain -z`
   reports for a repository the walk found counts as reached only when the
-  walk found, at that entry's path, a `.git` file naming that entry's
+  walk found its working tree. The main entry, the first one git reports,
+  counts as reached when its path is the work tree the walk found for that
+  git directory. Every other entry counts as reached only when the walk
+  found, at that entry's path, a `.git` file naming that entry's
   admin directory under the common directory's `worktrees/`. The listed
   path alone isn't enough, since it comes from the admin directory's
   `gitdir` file, which the agent can write. niwa also lists `worktrees/`
@@ -268,7 +271,21 @@ The package also settles the mechanics the PRD left to the design:
   per-worktree refs and its index against that HEAD
   (`git diff-index --cached`) with `--git-dir=<admin directory>`, through
   `gitCommand`. That HEAD and those refs count like any worktree's, and a
-  read that fails or a staged entry that differs from HEAD keeps.
+  read that fails or a staged entry that differs from HEAD keeps. A git
+  directory the walk recognized by its structure and judges with no work
+  tree has a main entry too. A bare one has no work tree to reach, and a
+  submodule's store whose configured work tree sits inside the instance or
+  the job directory (a deinitialized submodule) gets the no-work-tree
+  checks above. But one whose main work tree sits outside the instance, set
+  by `core.worktree` or by a `.git` file elsewhere pointing at it
+  (`git init --separate-git-dir`), keeps the unit with "work tree outside
+  the instance: <path>" as evidence, the same form as an unreached
+  worktree: its index and objects live in the instance and would go with it
+  unchecked. niwa tells the second case from the configuration read, since
+  a git directory that isn't bare, sits under no `modules/` directory and
+  sets no `core.worktree` has its work tree wherever a `.git` file names
+  it, and the walk found none; the path named is then the git directory's
+  own.
 - **Git runs in a fixed, hardened environment.** Every git call niwa's
   removal paths make in a repository an agent could have written is built by
   one function, `gitCommand` in `internal/removal/git.go`. That covers the
@@ -321,7 +338,8 @@ The package also settles the mechanics the PRD left to the design:
   settings and the reasons. In short: no inherited environment, system and
   global configuration ignored, hooks, fsmonitor, pagers, askpass,
   credential helpers and signature checks turned off, replace refs, grafts
-  and commit-graph files ignored, only `https` and `ssh` allowed,
+  and commit-graph files ignored, only `https` and `ssh` allowed, no proxy
+  and certificate checks on,
   `--ignore-submodules=all` and `--untracked-files=all` on every status, and
   `--git-dir` and `--work-tree` passed from the walk. `git worktree remove`
   is given only a worktree path from niwa's own walk, never one read from
@@ -368,7 +386,7 @@ The package also settles the mechanics the PRD left to the design:
   recognized: <remote name>" as evidence, and the verdict names the setting
   that would widen it. The ancestry test (`git merge-base --is-ancestor`)
   and `merge-tree` run only in a scratch object store outside the unit (a
-  temporary bare repository, created 0700 under niwa's temporary directory,
+  bare repository created 0700 under `~/.niwa/w-<key>/scratch/`, below,
   with no `objects/info/alternates` and no refs), never with the unit's
   repository as `--git-dir`. The tips they test against are the object ids
   `ls-remote` returned, never the unit's remote-tracking refs. The scratch
@@ -399,6 +417,26 @@ The package also settles the mechanics the PRD left to the design:
   mode needs. The fetch and the local pack are killed, and the unit kept,
   when the scratch store grows past 1 GiB; the store is removed on every
   exit path, and a pass removes any store an earlier, interrupted pass left.
+  The held and merged answers are only as sound as the store is untouched, so
+  it lives in a per-user directory niwa owns, `~/.niwa/w-<key>/scratch/`,
+  inside the `~/.niwa/` path the guide tells workspaces to deny the agent
+  writes to (Decision 9), and never in a shared temporary directory, which
+  sandboxes often leave writable and where mode 0700 doesn't stop a process
+  running as the person. The two empty directories niwa runs commands from,
+  the one every `claude` call runs from and the one the credential-helper
+  read runs from (Decision 8), sit there too. Each pass creates its
+  directories fresh, with mode 0700, and a directory already at a path it
+  creates fails the creation and keeps. Before each use niwa `Lstat`s the
+  directory and its parent and checks that both are real directories owned
+  by the person's uid with mode 0700. Any mismatch fails toward keeping:
+  the unit the use serves keeps, and a mismatch before a pass-wide
+  call (`claude agents`, the credential-helper read) keeps every unit that
+  call serves. A leftover from an earlier pass is removed only after the
+  same check. niwa writes the store's `config` itself, and before each
+  network call against the store it reads that file again and compares it
+  byte for byte with what it wrote; any difference keeps the unit, so a
+  `url.<base>.insteadOf` written there can't point `ls-remote` at another
+  host and make an unpushed commit read as a live tip.
   Each network call runs under a 10-second context; an error or timeout
   keeps with the git error, credentials scrubbed, as evidence. A proof
   remote whose URL isn't `https`, `ssh` or the scp-like `host:path` form, or
@@ -429,7 +467,7 @@ The package also settles the mechanics the PRD left to the design:
   whose index entry carries the assume-unchanged or skip-worktree bit, so
   an agent that sets either one with `git update-index` can hide a modified
   tracked file from the modified-files check. niwa reads
-  `git ls-files -v` in every repository the walk found, through
+  `git ls-files -v` in every repository with a work tree, through
   `gitCommand`, and any entry whose tag letter is lowercase
   (assume-unchanged) or `S` (skip-worktree) keeps the unit with "index flag
   hides changes: <flag> <path>" as evidence. niwa doesn't try to tell a
@@ -1421,9 +1459,10 @@ root is dropped too. `lsof` and `claude` are resolved once per pass from the
 same filtered `PATH` and run by absolute path, and the over command and the
 other session commands keep running under `/bin/sh` by its absolute path,
 with that filtered `PATH` in their environment. Every `claude` call niwa
-makes (`claude agents`, `claude rm`) runs from an empty temporary directory
-outside the workspace, as the credential-helper read below does, with the
-filtered `PATH`, so no instance's `.claude/settings.json` or
+makes (`claude agents`, `claude rm`) runs from an empty directory outside
+the workspace, under `~/.niwa/w-<key>/scratch/` and checked for owner and
+mode before each use (Decision 1), as the credential-helper read below
+does, with the filtered `PATH`, so no instance's `.claude/settings.json` or
 `settings.local.json`, which the agent can write, is the project Claude Code
 reads for that call; the rest of its environment is the person's, since
 `claude` needs their authentication and configuration. This filter is a narrow control: it stops a
@@ -1448,9 +1487,10 @@ git runs with no inherited environment except `HOME`, and with:
   question about an unknown host key into a failure, so a proof host not
   yet in the person's `known_hosts` reads as unreachable and keeps too; niwa
   never accepts a key on the person's behalf. ssh still reads the person's
-  own `~/.ssh/config`, so its `ProxyCommand`, `Match exec` and other
-  program-running settings run on these calls, trusted as the person's own
-  configuration;
+  own `~/.ssh/config` and every file it names with `Include`, so their
+  `ProxyCommand`, `Match exec` and other program-running settings run on
+  these calls, trusted as the person's own configuration (Decision 9 gives
+  the boundary that trust rests on);
 - `GIT_PAGER=cat`, `GIT_OPTIONAL_LOCKS=0` (status never rewrites the index,
   so nothing under the unit's `.git` changes), `GIT_NO_LAZY_FETCH=1` (a
   partial clone can't fetch missing objects from its promisor remote during
@@ -1466,7 +1506,11 @@ git runs with no inherited environment except `HOME`, and with:
   -c submodule.recurse=false -c fetch.recurseSubmodules=false
   -c core.useReplaceRefs=false -c core.commitGraph=false
   -c log.showSignature=false -c status.showUntrackedFiles=all
-  -c core.untrackedCache=false`. The commit-graph
+  -c core.untrackedCache=false -c http.proxy= -c http.sslVerify=true`.
+  The two `http` values keep a network call off any proxy and on
+  certificate checking; the only configuration file such a call reads is
+  the scratch store's, which niwa writes and checks before each call
+  (Decision 1). The commit-graph
   setting matters because git loads commit-graph files, its own and those
   of any alternate object directory, without verifying them, so a forged
   one in a clone could otherwise give a commit a parent it doesn't have.
@@ -1492,7 +1536,9 @@ The ancestry and merged-by-content checks that decide whether work is held
 elsewhere run only with the scratch store as `--git-dir`, against the tip
 ids `ls-remote` returned (Decision 1). They never read the unit's refs,
 replace refs, grafts or commit-graph files, and never its objects: the
-scratch store has no `objects/info/alternates` and no refs, so the fetch
+scratch store, created fresh under `~/.niwa/w-<key>/scratch/` where the
+agent is denied writes and checked for owner and mode before each use, has
+no `objects/info/alternates` and no refs, so the fetch
 offers the proof remote no haves and brings the tip's whole history, and
 the local side arrives as a pack built in the unit's repository by
 `pack-objects` and read in by `index-pack`. Every object the ancestry walk
@@ -1552,15 +1598,20 @@ object store, whose configuration niwa writes, with a URL niwa builds
 rather than the string the agent wrote: on a clone-URL match, the clone URL
 the workspace configuration gives; on a `proof_remotes` prefix match, a URL
 that takes its scheme, user, host and port from the prefix and only its
-path from the remote's parsed, normalized parts. The
-repository's `insteadOf`, `uploadpack`, credential and proxy settings
-therefore never apply to them. A remote the agent added is never contacted,
+path from the remote's parsed, normalized parts. The unit's repository's
+`insteadOf`, `uploadpack`, credential and proxy settings therefore never
+apply to them, and neither do any written into the store: its
+configuration is niwa's own, in a directory the agent is denied writes to
+(Decision 9), and
+niwa re-reads it before each network call and keeps the unit when it
+differs by a byte from what niwa wrote (Decision 1). A remote the agent added is never contacted,
 so it can't vouch for a commit, can't turn `ls-remote` into a request to an
 internal address of the agent's choosing, and is never offered the person's
 ssh keys. For a proof remote, niwa adds the person's own credential helpers,
 read beforehand with `git config --global --get-all credential.helper`, as
 `-c credential.helper=<value>` after the reset; no other helper runs.
-Network calls also pass `-c http.followRedirects=false`. Git's default
+Network calls also pass `-c http.followRedirects=false`, beside the fixed
+`-c http.proxy=` and `-c http.sslVerify=true`. Git's default
 (`initial`) follows a redirect on the first request of a call, which would
 let a proof host hand the call to another host whose refs would then count
 as the proof remote's. With redirects off, a proof remote that answers with
@@ -1576,7 +1627,8 @@ the person's real global configuration, which `gitCommand` sets aside with
 wrote: it runs once per pass, before any unit is evaluated, with the same
 absolute git and filtered `PATH`, `GIT_CONFIG_NOSYSTEM=1` and the rest of
 the fixed environment except the global-file setting, from an empty
-temporary directory outside the workspace with `GIT_CEILING_DIRECTORIES`
+directory outside the workspace, under `~/.niwa/w-<key>/scratch/` and
+checked for owner and mode before the read (Decision 1), with `GIT_CEILING_DIRECTORIES`
 set so no repository is discovered, and under a 10-second context. It reads
 values and runs no program. What it returns is used only as the
 `-c credential.helper=` value on network calls to proof remotes, made
@@ -1661,7 +1713,10 @@ removed. `DestroyWorkspace` removes `ledger/` with the workspace, unlike
 `kept-files/`, since a ledger has nothing to vouch for once its instances are
 gone. `niwa helper` replaces hand-written pid records, with the checks in
 Decision 4, so a pid record can only name a process its own caller started.
-The ledger is only as good as the boundary around `~/.niwa/`, so
+The ledger is only as good as the boundary around `~/.niwa/`, and so is
+the scratch directory, `~/.niwa/w-<key>/scratch/`, where the scratch
+object store and the empty directories `claude` and the credential-helper
+read run from live (Decision 1), so
 `docs/guides/ephemeral-session-instances.md` tells workspaces to deny the
 agent writes to `~/.niwa/` with sandbox write restrictions that also cover
 Bash (Claude Code's sandbox or an operating-system equivalent), and says
@@ -1674,11 +1729,16 @@ record. The same advice
 covers three places in the workspace root that also drive removal and
 restore: `<root>/.niwa/`, whose `workspace.toml` holds the clone URLs, the
 `proof_remotes` prefixes and the over command; `<root>/.niwa-launch/`; and
-the `<root>/.niwa-tombstone-*` directories. It also covers three files
+the `<root>/.niwa-tombstone-*` directories. It also covers the places
 outside the workspace whose contents niwa runs: `~/.gitconfig` and
 `~/.config/git/config`, whose `credential.helper` niwa reads and starts on
-proof-remote calls (Decision 8), and `~/.ssh/config`, whose program
-settings ssh runs on those calls. All of them sit outside the agent's
+proof-remote calls (Decision 8), and the whole `~/.ssh/` directory, whose
+`config` carries program settings ssh runs on those calls, together with
+any file outside `~/.ssh/` that an `Include` in `~/.ssh/config` names.
+ssh follows `Include`, so an included file's `ProxyCommand` or `Match exec`
+runs as surely as one in `~/.ssh/config` itself, while the credential-helper
+read doesn't follow git's includes, so the two git files are all it needs
+there. All of them sit outside the agent's
 working directory, but that says where they are, not what stops a write,
 and the guide says so rather than leaving it implied. Under such a sandbox
 `niwa helper` can't write the ledger either, since it runs in the agent's
@@ -1709,7 +1769,8 @@ niwa gets one removal rule and one pass. The rule, `removal.Evaluate` in
 sessions and processes, and its records) and returns a verdict with every
 keeping check in a fixed order and the class of every path. It runs on git
 plumbing and local files, fetches only into a scratch object store outside
-the unit, and keeps on anything it can't decide. The pass, `runPass` in
+the unit, under `~/.niwa/w-<key>/scratch/`, and keeps on anything it can't
+decide. The pass, `runPass` in
 `internal/cli/pass.go`, gathers candidates where `reapWorkspace` gathers them
 today and adds stopped units and marked units, gives every all-unit pass one
 30-second deadline shared by everything inside it, takes units oldest-reached
@@ -1763,7 +1824,12 @@ credential helper being the one named exception, and only a proof remote
 (the workspace's clone URL, or a `proof_remotes` prefix matched on whole
 path segments, a URL with dot segments, encoding or userinfo refused) can
 show a commit is pushed or merged, judged in the scratch store only from
-objects git hashed as they came in; no other remote is contacted. Each
+objects git hashed as they came in; no other remote is contacted. That
+store, and the empty directories `claude` and the credential-helper read
+run from, sit in a directory niwa owns inside the `~/.niwa/` boundary,
+created fresh 0700 and checked for owner and mode before each use, and the
+store's configuration is compared byte for byte with what niwa wrote
+before each network call; any mismatch keeps. Each
 worktree's HEAD and per-worktree refs are read again right before it's
 removed, and the tombstone check compares a ref snapshot, so a late commit
 keeps. The mark, the discard record, pid records (now
@@ -1836,7 +1902,10 @@ again right before every status and unforced worktree removal, and
   inside build trees too), path classes, build-tree detection, generated
   paths, size; it
   `Lstat`s every entry, follows no symlink, stays on one filesystem, and
-  keeps on a `.git` file whose git directory lies outside the unit.
+  keeps on a `.git` file whose git directory lies outside the unit, on a
+  worktree entry it didn't reach (the main entry reached only at the work
+  tree the walk found for that git directory) and on a git directory whose
+  work tree lies outside the instance.
 - `git.go`: `gitCommand`, the only builder of git commands, with the fixed
   environment and overrides of Decision 8, and a `GitInvoker` and a scan
   command builder made from it for the worktree and workspace packages; the
@@ -1855,7 +1924,12 @@ again right before every status and unforced worktree removal, and
   per-repository checks, held by a proof remote's live refs, merged by
   content, both run only in the scratch object store (no alternates, the
   tip's history fetched, the local side read in through `index-pack`), with
-  its 1 GiB cap and cleanup, 10-second network contexts; the ref snapshot
+  its 1 GiB cap and cleanup, 10-second network contexts; the scratch
+  directory under `~/.niwa/w-<key>/scratch/`, made fresh 0700 each pass,
+  with the owner and mode check on it and its parent before each use and
+  before a leftover is removed, the store's `config` written by niwa and
+  compared byte for byte before each network call, and the empty
+  directories `claude` and the credential-helper read run from; the ref snapshot
   the tombstone check compares. The filtered `PATH` used to resolve
   git, `lsof` and `claude`.
 - `paths.go`: `ResolveRecorded(base, path)`, the read-time check every
@@ -1959,7 +2033,7 @@ summary, adds `--kept`, and adds the `unit` object to
 **`internal/cli/destroy.go`, `destroy_session.go`.** `runDestroyInstance`
 removes worktrees inside the instance after the scan and before
 `removeOwningSessionsListed`, whose `claude` calls run from an empty
-temporary directory outside the workspace like the pass's; unforced destroy uses unforced
+directory under `~/.niwa/w-<key>/scratch/`, checked like the pass's; unforced destroy uses unforced
 `git worktree remove`, and `--force` keeps its meaning and removes them with
 git's own force before the session, since the person already accepted the
 loss. Those worktree calls go through `removal.gitCommand`, and so does
@@ -2111,6 +2185,11 @@ Host files:
     keep.json                                        paths rewritten, 0600
     entry.json                                       niwa.kept/v1: due, discarded_due, first_shown_due, files; 0600
 ~/.niwa/w-<workspace key>/ledger/<instance>.json     niwa.ledger/v1, 0600
+~/.niwa/w-<workspace key>/scratch/<pass>/            0700, made fresh each pass; owner and mode of it
+                                                     and its parent checked before each use
+    store-<n>/                                       scratch object store, bare, config written by niwa
+    claude/                                          empty; every claude call runs from it
+    helper-read/                                     empty; the credential-helper read runs from it
 <root>/.niwa-launch/<launch id>.json                 niwa.launch/v1 + origin, reaped_at,
                                                      restore_until, kept_entry
 <root>/.niwa-tombstone-<instance>-<8 hex>/           an instance between its last check and delete
@@ -2143,10 +2222,11 @@ args:
     -c credential.helper= -c submodule.recurse=false -c fetch.recurseSubmodules=false
     -c core.useReplaceRefs=false -c core.commitGraph=false
     -c log.showSignature=false -c status.showUntrackedFiles=all -c core.untrackedCache=false
+    -c http.proxy= -c http.sslVerify=true
   every status: --ignore-submodules=all --untracked-files=all
   every log-family call (stash list, git log): --no-show-signature
   git worktree remove: only a worktree path from niwa's walk, never from git worktree list
-index flags: ls-files -v in every repository the walk found; a lowercase tag
+index flags: ls-files -v in every repository with a work tree; a lowercase tag
   (assume-unchanged) or S (skip-worktree) on any entry keeps
 first call in each repository: git config --list --show-scope --includes, 10-second context,
   run on every repository the walk finds under the unit (submodules, gitlinks, nested
@@ -2159,8 +2239,12 @@ network calls (ls-remote, fetch): proof remotes only (the workspace's clone URL 
   agent-written string; no dot or empty segment, percent-encoding, backslash,
   control character, or userinfo beyond the ssh user git),
   -c credential.helper=<person's helper>, -c http.followRedirects=false (a redirect
-  fails the call, which keeps); fetch killed past 1 GiB, store removed on exit
-scratch store: bare, 0700, no objects/info/alternates, no refs; the fetch offers no haves
+  fails the call, which keeps); fetch killed past 1 GiB, store removed on exit;
+  before each one the store's config is re-read and compared byte for byte with
+  what niwa wrote, and any difference keeps
+scratch store: under ~/.niwa/w-<key>/scratch/<pass>/, bare, 0700, its directory and
+  parent Lstat'ed for owner uid and mode before each use (a mismatch keeps), config
+  written by niwa, no objects/info/alternates, no refs; the fetch offers no haves
   and brings the tip's whole history; the local side comes in as
   pack-objects --revs --stdout (in the unit) read by index-pack --stdin (in the store)
 ancestry (merge-base --is-ancestor) and merge-tree --write-tree: --git-dir=<scratch store>
@@ -2173,7 +2257,8 @@ keep without running: from any scope but command (local, worktree, any included 
   core.fsmonitor naming a hook, or any other *.program, *.command, *Command or *.helper
   key, in any repository under the unit, a submodule included
 the one call outside gitCommand: git config --global --get-all credential.helper,
-  once per pass, from an empty directory outside the workspace, 10-second context
+  once per pass, from an empty directory under ~/.niwa/w-<key>/scratch/<pass>/,
+  checked for owner and mode first, 10-second context
 ```
 
 Commands and outputs:
@@ -2234,12 +2319,15 @@ An all-unit pass, before a dispatch:
    error ends the pass with nothing removed; a `restore_window` under seven
    days fails the command before the pass.
 2. Start the 30-second deadline. Resolve git, `lsof` and `claude` to
-   absolute paths from the filtered `PATH`. Read `claude agents --json
-   --all` once, run like every `claude` call from an empty temporary
-   directory outside the workspace, then the job entries, the session mappings, the launch records,
+   absolute paths from the filtered `PATH`. Create the pass's scratch
+   directory under `~/.niwa/w-<key>/scratch/`, 0700, with its empty
+   directories. Read `claude agents --json
+   --all` once, run like every `claude` call from the empty directory there,
+   after the owner and mode check, then the job entries, the session mappings, the launch records,
    the ledgers and one process listing. Note each repository's clone URL and
    the `proof_remotes` prefixes from the configuration loaded in step 1.
-   Remove scratch stores an interrupted pass left.
+   Remove scratch stores an interrupted pass left, each only after the same
+   owner and mode check.
 3. Enumerate units: every instance, with its sessions and job directories.
    If the tombstone lock can be taken exclusively without waiting, a
    tombstone left by an interrupted pass is renamed back when its name is
@@ -2266,13 +2354,19 @@ An all-unit pass, before a dispatch:
    Every git output is read in its NUL-terminated form
    (`git worktree list --porcelain -z` among them), and a record that
    doesn't parse keeps. A worktree git lists that the walk didn't reach, by
-   a `.git` file at its path naming its admin directory, keeps with
+   a `.git` file at its path naming its admin directory (for the main
+   entry, by its path being the work tree the walk found), keeps with
    "worktree outside the instance: <path>"; a prunable one is judged by its
    HEAD, per-worktree refs and index read from its admin directory, and a
-   failed read keeps.
+   failed read keeps. A git directory found by its structure whose work
+   tree sits outside the instance keeps with "work tree outside the
+   instance: <path>".
    A commit that is itself a live tip is held; any other is judged in a
-   fresh scratch store with no alternates, into which the proof remote's
-   tip history is fetched and the local side read through `index-pack`. A
+   fresh scratch store with no alternates, under the pass's scratch
+   directory and checked for owner and mode before each use, into which the
+   proof remote's tip history is fetched and the local side read through
+   `index-pack`; before each network call the store's config is compared
+   byte for byte with what niwa wrote, and any mismatch keeps. A
    commit no proof remote holds keeps, and an `in_brief` file whose brief
    copy doesn't verify is unique.
    A unit is a reap candidate when it carries a valid
@@ -2291,7 +2385,7 @@ An all-unit pass, before a dispatch:
    path from niwa's own walk and only after a fresh read of its HEAD and
    per-worktree refs matches the snapshot and a fresh configuration check
    of its repository flags nothing (either change keeps), `claude rm` the
-   sessions from the same empty directory, run on-reap, take the tombstone lock shared, rename the instance
+   sessions from the same empty directory, checked again first, run on-reap, take the tombstone lock shared, rename the instance
    to its tombstone and repeat there the process listing, the configuration
    check on every repository, git status (`--ignore-submodules=all
    --untracked-files=all`), the
@@ -2354,20 +2448,26 @@ session was deleted but that holds unique work is now kept and listed.
 
 Deliverables:
 - `internal/removal` with `Evaluate`, the walk, path classes, build-tree
-  markers, generated paths, git checks with the scratch object store (its
-  1 GiB cap and cleanup on every exit path), patterns, and
+  markers, generated paths, git checks with the scratch object store (under
+  `~/.niwa/w-<key>/scratch/`, made fresh 0700 each pass, its directory and
+  parent checked for owner and mode before each use and before a leftover
+  is removed, its config written by niwa and compared byte for byte before
+  each network call, its 1 GiB cap and cleanup on every exit path), patterns, and
   `.niwa/dispatch-retain` as a hold for unmapped instances.
 - `gitCommand` with the hardened environment and overrides, the filtered
-  `PATH` for git, `lsof`, `claude` and the session commands, `claude` run
-  from an empty temporary directory outside the workspace, the program-naming
+  `PATH` for git, `lsof`, `claude` and the session commands, `claude` and
+  the credential-helper read run from empty directories under the same
+  scratch directory with the same check, `-c http.proxy=` and
+  `-c http.sslVerify=true` among the fixed overrides, the program-naming
   configuration check, run first and again by the invoker before every
   status and unforced worktree removal, proof remotes (the clone URL from the workspace
   configuration and `proof_remotes`, matched on the full authority, port
   included) as the only remotes contacted or
   counted, remote URL validation, and network calls against the scratch
   store with the person's helper for proof remotes only; the walk's
-  no-symlink, one-filesystem, external-git-directory and unreached-worktree
-  rules; NUL-terminated parsing of every git output;
+  no-symlink, one-filesystem, external-git-directory, unreached-worktree
+  (the main entry included) and outside-work-tree rules; NUL-terminated
+  parsing of every git output;
   `ResolveRecorded`; `ScrubEvidence` with the widened patterns and
   truncation after scrubbing; size-capped, strictly decoded record readers
   that open with `O_NOFOLLOW|O_NONBLOCK` and `fstat` for a regular file
@@ -2414,7 +2514,10 @@ Deliverables:
   through it; a `.git` file pointing outside keeps; a linked worktree added
   outside the instance (`git worktree add <temporary dir>`), with a commit
   only on its `refs/worktree/` and a file staged only in its index, keeps
-  the unit with "worktree outside the instance" and the path named; a
+  the unit with "worktree outside the instance" and the path named; a git
+  directory inside the instance whose work tree is outside it (made with
+  `git init --separate-git-dir`, or through `core.worktree`) keeps the unit
+  with "work tree outside the instance" and the path named; a
   prunable worktree whose working tree was deleted and whose
   `refs/bisect/` holds a commit no proof remote has keeps the unit; a
   worktree's `gitdir` file rewritten to a path holding a newline and a
@@ -2430,7 +2533,14 @@ Deliverables:
   carries a `refs/replace/` entry, an `info/grafts` file or a forged
   commit-graph that makes the proof remote's tip appear to descend from it,
   and the verdict-only mode leaves the clone's `.git` unchanged after a
-  merged-by-content check.
+  merged-by-content check; a scratch store planted at the path the pass
+  creates its store at, holding a pack that maps the proof remote's tip id
+  to a forged commit whose parent is the unpushed commit, keeps the unit,
+  and so does a store whose config is rewritten after niwa writes it with a
+  `url.<base>.insteadOf` pointing at a test server that advertises the
+  unpushed commit, which sees no request; a scratch directory, or its
+  parent, with the wrong owner or a mode other than 0700 keeps the unit,
+  and nothing runs from it.
 
 ### Phase 2: Worktrees before the session, and every other removal
 
@@ -2577,11 +2687,15 @@ Deliverables:
   `kept_entry` checked to sit directly under `kept-files/<instance>/`, every
   path re-validated, parents created without following links, files created
   with `O_CREAT|O_EXCL|O_NOFOLLOW`.
-- The guide's advice to deny the agent writes to `~/.niwa/`, to the root's
-  `.niwa/`, `.niwa-launch/` and `.niwa-tombstone-*`, and to `~/.gitconfig`,
-  `~/.config/git/config` and `~/.ssh/config`, with sandbox write
+- The guide's advice to deny the agent writes to `~/.niwa/` (the scratch
+  directory under `~/.niwa/w-<key>/scratch/` included), to the root's
+  `.niwa/`, `.niwa-launch/` and `.niwa-tombstone-*`, to `~/.gitconfig` and
+  `~/.config/git/config`, and to the whole `~/.ssh/` directory and any file
+  outside it that an `Include` in `~/.ssh/config` names, with sandbox write
   restrictions that also cover Bash (Claude Code's sandbox or an
   operating-system equivalent) rather than path deny rules alone; its note
+  that ssh follows `Include` while the credential-helper read doesn't
+  follow git's includes; its note
   that a worker without such a sandbox has no boundary and the ledger is
   advisory there; and its note that under such a sandbox `niwa helper`
   can't register a helper, which then keeps its unit.
@@ -2593,6 +2707,9 @@ Deliverables:
   and a fresh instance with a symlink where a kept file goes (all refuse and
   write nothing outside the instance), and for the
   three-day setting failing the configuration load.
+- A security scenario for the guide: its deny-write list names the whole
+  `~/.ssh/` directory and, as an example, a file outside it that an
+  `Include` in `~/.ssh/config` names (`Include ~/dotfiles/ssh/hosts`).
 
 ## Open Dependencies on the Earlier Stage
 
@@ -2798,7 +2915,8 @@ their calls with it. The builder means no inherited environment, system and
 global configuration ignored, hooks, fsmonitor, pagers, askpass,
 credential helpers and signature checks off, replace refs, grafts and
 commit-graph files ignored, every untracked file reported whatever the
-repository's settings, only `https` and `ssh` allowed, and `--git-dir` and
+repository's settings, only `https` and `ssh` allowed, no proxy and
+certificate checks on, and `--git-dir` and
 `--work-tree` taken from the walk. The program-naming configuration check
 is the first git call in
 every repository on all of these paths, and it runs on every repository
@@ -2811,7 +2929,9 @@ the first check and those calls, and a key found then keeps the unit with
 "changed during the pass" and the key named. The
 walk recognizes a git directory by its structure as well as by the name
 `.git`, so a bare repository, a removed submodule's store under `modules/`
-and a repository inside a build tree are all found and checked. A
+and a repository inside a build tree are all found and checked; one whose
+work tree sits outside the instance, through `core.worktree` or a `.git`
+file elsewhere, keeps the unit, since its index would go unread. A
 repository whose configuration, in any scope but the command line, names a
 filter, diff, merge, credential or signing program, an fsmonitor hook or
 any other program is kept, with its unit, without
@@ -2829,7 +2949,8 @@ gap that still leaves). Each submodule's own unpushed work is judged by its own 
 a repository of its own. The one git call built outside
 `gitCommand` is the read of the person's own credential helper, which needs
 the person's real global configuration: it runs once per pass from an empty
-directory outside the workspace, discovers no repository, runs no program,
+directory outside the workspace, under `~/.niwa/w-<key>/scratch/` and
+checked for owner and mode first, discovers no repository, runs no program,
 and its value goes only to network calls to proof remotes made against the
 scratch store. The ancestry and merged-by-content checks run only in the
 scratch store, against the tip ids `ls-remote` returned, so a replace ref, a
@@ -2840,7 +2961,18 @@ history walk, so the store has no alternates into the clone: the proof
 remote's tip history is fetched into it with no haves offered, the local
 side is read in through `index-pack`, and every object the checks read was
 hashed from its content on the way in. An object the agent writes into the
-clone under a remote commit's id can't take that commit's place. Only a
+clone under a remote commit's id can't take that commit's place. That holds
+only while nothing else writes into the store, so the store lives under
+`~/.niwa/w-<key>/scratch/`, inside the `~/.niwa/` boundary the guide tells
+workspaces to deny, never in a shared temporary directory a sandbox may
+leave writable; each pass creates it fresh, 0700, and before each use niwa
+`Lstat`s the directory and its parent and keeps the unit unless both are
+real directories owned by the person's uid with mode 0700. niwa writes the
+store's `config` and compares it byte for byte with what it wrote before
+each network call, so a planted `url.<base>.insteadOf`, proxy or
+certificate setting keeps the unit instead of steering `ls-remote` to a
+host that would advertise the unpushed commit as a tip; the fixed
+`-c http.proxy=` and `-c http.sslVerify=true` back that up. Only a
 proof remote counts as evidence that a
 commit is held or merged: the clone URL the workspace configuration gives the
 repository, read at the root and never from the instance, or a match for a
@@ -2854,8 +2986,9 @@ that can name a repository outside the prefix the string appeared to
 match; it is never a proof remote, and a commit only it could hold keeps
 with "remote URL not allowed" and the reason. Any other remote is
 never contacted, and a commit only it could hold keeps the unit with
-"remote not recognized". Network calls run against the scratch store, so
-no repository setting applies to them, with a validated URL niwa builds,
+"remote not recognized". Network calls run against the scratch store, whose
+configuration is niwa's own and checked before each call, so no setting
+the agent wrote applies to them, with a validated URL niwa builds,
 never the string the agent wrote: the workspace's configured clone URL on
 a clone-URL match, or, on a prefix match, a URL that takes its scheme,
 user, host and port from the prefix and only its path from the remote's
@@ -2976,8 +3109,12 @@ stops and keeps the rest of the tree at any `.git` entry or git directory
 it meets, so a repository created in the tree after the trim's checks
 isn't removed with it. Every `claude` call niwa makes (`claude agents`,
 `claude rm`, in the pass and in `niwa destroy`) runs from an empty
-temporary directory outside the workspace with the filtered `PATH`, so an
-instance's settings aren't the project Claude Code reads for it, and a
+directory outside the workspace, under `~/.niwa/w-<key>/scratch/` where the
+agent is denied writes and checked for owner and mode before each call,
+with the filtered `PATH`, so an
+instance's settings aren't the project Claude Code reads for it, and no
+`.claude/settings.json` written into a shared temporary directory can take
+their place; a
 functional scenario checks that hooks an instance's settings define run
 through neither a reap nor `niwa destroy`. `.niwa` and
 `pids` must be real directories, and every record read and write happens
@@ -3058,10 +3195,15 @@ person, so niwa can't stop it from writing outside its instance; whether it
 can is up to the sandbox it runs under. The guide names every place
 outside the instance whose contents drive removal and restore, or that
 niwa runs, and tells workspaces to deny the agent writes to them:
-`~/.niwa/` (the ledger, the kept set, the locks); in the workspace root
+`~/.niwa/` (the ledger, the kept set, the locks, and the scratch directory
+that holds the scratch object store and the empty directories `claude`
+and the credential-helper read run from); in the workspace root
 `.niwa/` (whose `workspace.toml` holds the clone URLs, the `proof_remotes`
 prefixes and the over command), `.niwa-launch/` and `.niwa-tombstone-*`;
-and `~/.gitconfig`, `~/.config/git/config` and `~/.ssh/config`. It names
+`~/.gitconfig` and `~/.config/git/config`; and the whole `~/.ssh/`
+directory, with any file outside it that an `Include` in `~/.ssh/config`
+names, since ssh follows `Include` while the credential-helper read
+doesn't follow git's includes. It names
 the mechanism too: sandbox write restrictions that also cover Bash (Claude
 Code's sandbox or an operating-system equivalent), since a path deny rule
 in Claude Code's permission settings covers its file tools and not a shell
@@ -3181,16 +3323,21 @@ a proof host missing from the person's `known_hosts` reads as unreachable
 and its units keep until the person connects to it once; niwa never adds a
 host key. ssh also honors the person's own `~/.ssh/config`, so a
 `ProxyCommand`, `Match exec` or `ProxyJump` there runs or applies on every
-ssh call niwa makes to a proof remote. That file is trusted like the
-binaries on the person's `PATH`: it sits outside the workspace, and an agent
-able to write it as the person could change it whether or not niwa ran.
+ssh call niwa makes to a proof remote. ssh follows `Include`, so the same
+holds for every file that configuration includes, inside `~/.ssh/` or
+outside it (a tool's own ssh configuration, a dotfiles directory); the
+credential-helper read, by contrast, doesn't follow git's includes. Those
+files are trusted like the binaries on the person's `PATH`: they sit
+outside the workspace, and an agent able to write them as the person could
+change them whether or not niwa ran.
 The person's `~/.gitconfig` and `~/.config/git/config` sit in the same
 place with more at stake: niwa reads their `credential.helper` and starts
 it on proof-remote calls, so a `!<command>` helper an agent wrote there
 runs as the person, outside the agent's sandbox, on the next pass that
-needs a fetch, with no action by the person. These three files are trusted
-only as far as the agent is kept from writing them, which is why the guide
-lists them with `~/.niwa/`.
+needs a fetch, with no action by the person. These files, the whole
+`~/.ssh/` directory and every file an `Include` in `~/.ssh/config` names
+among them, are trusted only as far as the agent is kept from writing
+them, which is why the guide lists them with `~/.niwa/`.
 Scrubbing is pattern-based, so a short secret with no telling key name or
 shape inside a git error could still reach `unit.json`, which is 0600 but
 inside the instance, where the agent can read it. Evidence names files (the
@@ -3239,7 +3386,12 @@ index, its `refs/worktree/*` and `refs/bisect/*` and its objects live in
 the instance and would go with it, unchecked where the same refs and index
 in a worktree inside the instance are checked. A prunable one, whose
 working tree is already gone, is judged by its HEAD, per-worktree refs and
-index read from its admin directory, or kept. A forged mark, discard record or pid record
+index read from its admin directory, or kept. The main entry is held to the
+same test: it counts as reached only at the work tree the walk found for
+its git directory, and a git directory inside the instance whose main work
+tree sits outside it, set by `core.worktree` or by a `.git` file elsewhere,
+keeps the unit for the same reason, since a file staged only in its index
+would otherwise go unchecked. A forged mark, discard record or pid record
 counts for nothing without its ledger entry, a discard needs a person at a
 terminal, and what a discard releases waits in the kept set until the
 window ends. An `in_brief` file counts as handed forward only when the
@@ -3308,12 +3460,16 @@ move last, after `claude rm` and on-reap and just before the tombstone.
   `gpg.program`), a submodule's included, keeps its unit until a person removes
   the setting or destroys the instance.
 - A commit that isn't itself a live tip is judged in a fresh scratch store
-  that offers the proof remote nothing, so each such check downloads the
+  under `~/.niwa/w-<key>/scratch/` that offers the proof remote nothing, so
+  each such check downloads the
   tip's whole history, which costs network and disk on every pass that
   reaches the unit, up to the 1 GiB cap, and a repository whose history
   exceeds the cap or can't be fetched within the 10-second network context
   keeps its unit whenever such a check is needed. A squash-merged branch is
-  the common case that needs one.
+  the common case that needs one. The store sits on the disk that holds the
+  person's home, not in the host's temporary directory, so that disk needs
+  room for it, and a scratch directory with the wrong owner or mode keeps
+  every unit that would use it until a person fixes or removes it.
 - An ssh proof remote the person reaches only through an ssh agent reads as
   unreachable, since git runs without `SSH_AUTH_SOCK`, unless the person's
   ssh configuration names the agent with `IdentityAgent`.
