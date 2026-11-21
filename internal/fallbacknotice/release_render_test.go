@@ -192,3 +192,78 @@ func TestRenderContextSweepSkipped(t *testing.T) {
 		t.Errorf("a sweep-only rendering is not under the plugin store's lead:\n%s", text)
 	}
 }
+
+const (
+	testStore      = "/home/u/.niwa/w-abc/plugins"
+	testOtherStore = "/home/u/.niwa/w-def/plugins"
+)
+
+// Marketplaces that fall back from one store for one condition give one
+// warning line naming the store, the condition and every marketplace once,
+// sorted; a second store gives a line of its own.
+func TestStoreFallbackOneNoticePerStore(t *testing.T) {
+	c := New(clock())
+	c.PluginStoreFallback(testStore, "unwritable", "tools")
+	if c.Empty() {
+		t.Fatal("Empty after a store fallback record")
+	}
+	c.PluginStoreFallback(testStore, "unwritable", "skills")
+	c.PluginStoreFallback(testStore, "unwritable", "tools")
+
+	want := "warning: the host plugin store at " + testStore + " can't be used (unwritable); this instance fetched its own copy of marketplaces: skills, tools.\n"
+	if got := c.RenderText(); got != want {
+		t.Errorf("RenderText:\n got %q\nwant %q", got, want)
+	}
+	notes := c.StoreFallbacks()
+	if len(notes) != 1 || notes[0].Store != testStore || notes[0].Condition != "unwritable" || strings.Join(notes[0].Marketplaces, ",") != "skills,tools" {
+		t.Errorf("StoreFallbacks = %+v", notes)
+	}
+
+	c.PluginStoreFallback(testOtherStore, "unreadable", "skills")
+	want += "warning: the host plugin store at " + testOtherStore + " can't be used (unreadable); this instance fetched its own copy of marketplaces: skills.\n"
+	if got := c.RenderText(); got != want {
+		t.Errorf("RenderText with a second store:\n got %q\nwant %q", got, want)
+	}
+}
+
+// In the agent context the fallback line sits under the plugin store's lead,
+// before any release line, with the same sentence.
+func TestRenderContextStoreFallback(t *testing.T) {
+	c := New(clock())
+	c.PluginRelease(ReleaseNote{Outcome: ReleaseRestored, Release: testReleaseName, Instances: []string{"/ws/one"}})
+	c.PluginStoreFallback(testStore, "can't be created", "skills")
+	want := releaseContextLead + "\n\n" +
+		"  - the host plugin store at " + testStore + " can't be used (can't be created); this instance fetched its own copy of marketplaces: skills.\n" +
+		"  - restored plugin release " + testReleaseName + " for instances: /ws/one.\n"
+	if got := c.RenderContext(); got != want {
+		t.Errorf("RenderContext:\n got %q\nwant %q", got, want)
+	}
+
+	text := c.RenderText()
+	if !strings.HasPrefix(text, "warning: the host plugin store at ") {
+		t.Errorf("RenderText does not put the fallback line first:\n%s", text)
+	}
+}
+
+// The fallback line tells nobody to run a command.
+func TestStoreFallbackNamesNoCommand(t *testing.T) {
+	c := New(clock())
+	for _, cond := range []string{"unreadable", "unwritable", "can't be created", "release not placed"} {
+		c.PluginStoreFallback(testStore, cond, "skills")
+	}
+	for _, text := range []string{c.RenderText(), c.RenderContext()} {
+		for _, banned := range []string{"niwa apply", "re-run", "rerun", "Run `"} {
+			if strings.Contains(text, banned) {
+				t.Errorf("rendering names %q:\n%s", banned, text)
+			}
+		}
+	}
+}
+
+func TestNilCollectorIgnoresStoreFallback(t *testing.T) {
+	var c *Collector
+	c.PluginStoreFallback(testStore, "unwritable", "skills")
+	if c.StoreFallbacks() != nil || !c.Empty() || c.RenderText() != "" || c.RenderContext() != "" {
+		t.Error("a nil collector recorded or rendered a store fallback")
+	}
+}

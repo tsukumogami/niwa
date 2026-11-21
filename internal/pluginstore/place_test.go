@@ -759,3 +759,74 @@ func TestEnsureRefusesATamperedReleaseItMayNotFetch(t *testing.T) {
 		t.Fatalf("a refused release was moved: %v", err)
 	}
 }
+
+// A held release whose tree can't be walked because a directory in it can't
+// be listed is the store being unreadable: Ensure fetches nothing, moves
+// nothing aside, writes no link and reports CondUnreadable.
+func TestEnsureReportsAnUnwalkableTreeAsTheStoreUnreadable(t *testing.T) {
+	skipAsRoot(t)
+	f, s, r, tree := placedRelease(t)
+	rdir := releaseDir(Dir(f.home, f.root), r)
+	markPath := filepath.Join(rdir, markFileName)
+	markBefore, err := os.ReadFile(markPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirBefore, err := os.Lstat(rdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tree, 0o111); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(tree, 0o755) })
+	if held, cond := s.Held(r); !held || cond != CondNone {
+		t.Fatalf("Held = %v, %q; the setup must leave the release held", held, cond)
+	}
+	f.fetches = nil
+
+	restored, cond, err := s.Ensure(context.Background(), r, f.link(), nil, nil)
+	if restored || cond != CondUnreadable || err == nil {
+		t.Fatalf("a held release whose tree can't be walked: Ensure = %v, %q, %v; want not restored, %q and an error", restored, cond, err, CondUnreadable)
+	}
+	if len(f.fetches) != 0 {
+		t.Fatalf("a held release whose tree can't be walked was fetched again: %v", f.fetches)
+	}
+	dirAfter, err := os.Lstat(rdir)
+	if err != nil || !os.SameFile(dirBefore, dirAfter) {
+		t.Fatalf("a held release whose tree can't be walked was moved aside (%v)", err)
+	}
+	if markAfter, err := os.ReadFile(markPath); err != nil || !bytes.Equal(markAfter, markBefore) {
+		t.Fatalf("a held release whose tree can't be walked had its held.json changed (%v)", err)
+	}
+	if info, err := os.Lstat(tree); err != nil || info.Mode().Perm() != 0o111 {
+		t.Fatalf("a held release whose tree can't be walked had its mode reset (%v)", err)
+	}
+	if _, err := os.Lstat(f.link()); !os.IsNotExist(err) {
+		t.Fatalf("a held release whose tree can't be walked was linked (%v)", err)
+	}
+}
+
+// verifyCondition reads a permission error as the store being unreadable and
+// any other Verify error as a changed release.
+func TestVerifyConditionSeparatesStoreFromContent(t *testing.T) {
+	denied := fmt.Errorf("walking release acme/skills: %w", &fs.PathError{Op: "open", Path: "/s/tree/plugins", Err: syscall.EACCES})
+	gone := fmt.Errorf("walking release acme/skills: %w", &fs.PathError{Op: "lstat", Path: "/s/tree/plugins/x", Err: syscall.ENOENT})
+	var m Mark
+	parse := fmt.Errorf("parsing held.json of acme/skills: %w", json.Unmarshal([]byte("{"), &m))
+	cases := []struct {
+		name string
+		err  error
+		want Condition
+	}{
+		{"permission", denied, CondUnreadable},
+		{"vanished entry", gone, CondNone},
+		{"mark that no longer parses", parse, CondNone},
+		{"no error", nil, CondNone},
+	}
+	for _, tc := range cases {
+		if got := verifyCondition(tc.err); got != tc.want {
+			t.Errorf("%s: verifyCondition(%v) = %q, want %q", tc.name, tc.err, got, tc.want)
+		}
+	}
+}

@@ -48,7 +48,9 @@ type RepairResult struct {
 	Undeclared []RepairEntry
 	// Failed could not be restored this time (the fetch failed, say, or the
 	// store can't be used); nothing was marked held for them, and the next
-	// command tries again.
+	// command tries again. A held release whose tree the store can't walk
+	// for lack of permission is here too, as the store being unreadable: it
+	// was neither fetched again nor reported tampered, and stays as it is.
 	Failed []RepairEntry
 	// ScanErr is an instance listing that failed part way. The releases found
 	// before it were still repaired.
@@ -185,7 +187,14 @@ func (s Store) Repair(ctx context.Context, declared map[string]bool, reachable R
 		}
 		tampered := false
 		if held {
-			if intact, _ := s.Verify(r); intact {
+			intact, verr := s.Verify(r)
+			if cond := verifyCondition(verr); cond != CondNone {
+				// The store can't walk the tree: not changed, not fetched.
+				entry.Reason = fmt.Sprintf("the plugin store at %s is %s: %v", s.pluginsDir(), cond, verr)
+				res.Failed = append(res.Failed, entry)
+				continue
+			}
+			if intact {
 				continue
 			}
 			tampered = true

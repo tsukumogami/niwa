@@ -73,6 +73,12 @@ const (
 	// some unused releases, with their count and its noun.
 	sweepStoppedFormat = "the plugin store's sweep of unused releases stopped: %s; %d unused %s had already been removed."
 
+	// storeFallbackFormat: the store's plugins directory, its condition and
+	// the marketplaces that fetched their own copy. It names no command: niwa
+	// never changes a mode it didn't just create, so a store narrowed by hand
+	// is the operator's to put right.
+	storeFallbackFormat = "the host plugin store at %s can't be used (%s); this instance fetched its own copy of marketplaces: %s."
+
 	// releaseContextLead opens the plugin store's part of the agent-context
 	// rendering.
 	releaseContextLead = "While provisioning, niwa's host plugin store reported the following about releases that instances of this workspace link to:"
@@ -191,12 +197,16 @@ type releaseNotice struct {
 	restored bool
 }
 
-// releaseNotices renders the plugin store's repair records in the order they
-// were recorded, then the skipped sweep when there was one. They follow the
+// releaseNotices renders the plugin store's fallback notes first, one per
+// store and condition, then its repair records in the order they were
+// recorded, then the skipped sweep when there was one. They follow the
 // secret-store notices and have a lead of their own in the agent context, so
 // nothing about a plugin release reads as a secret-store message.
 func (c *Collector) releaseNotices() []releaseNotice {
 	var out []releaseNotice
+	for _, n := range c.StoreFallbacks() {
+		out = append(out, releaseNotice{text: fmt.Sprintf(storeFallbackFormat, clean(n.Store), clean(n.Condition), instanceList(n.Marketplaces))})
+	}
 	for _, n := range c.ReleaseNotes() {
 		name, served := clean(n.Release), instanceList(n.Instances)
 		switch n.Outcome {

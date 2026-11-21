@@ -159,6 +159,12 @@ func (s Store) Held(r Release) (bool, Condition) {
 // fetches r only if its source is in declared and reachable passes;
 // otherwise it fetches nothing, leaves link as it is and returns ErrRefused.
 //
+// A held release whose tree Verify can't walk for lack of permission is the
+// store being unreadable: Ensure returns CondUnreadable and the walk's error,
+// fetches nothing, moves nothing aside and writes no link. A seal that
+// doesn't match, or any other Verify error, is a changed release and is
+// placed again.
+//
 // A non-empty Condition means the store can't be used and the caller falls
 // back to a per-instance copy. An error with no Condition is a failure that
 // isn't the store's (the source couldn't be fetched, say, or the link
@@ -183,8 +189,14 @@ func (s Store) Ensure(ctx context.Context, r Release, link string, declared map[
 	}
 	intact := held
 	if held {
-		// A walk that fails, or a mark gone since Held, is not intact either.
-		intact, _ = s.Verify(r)
+		// A tree the store can't walk is the store being unreadable, and the
+		// release is left as it is. Any other walk failure, or a mark gone
+		// since Held, is not intact either.
+		var verr error
+		intact, verr = s.Verify(r)
+		if cond := verifyCondition(verr); cond != CondNone {
+			return false, cond, verr
+		}
 	}
 	if !intact {
 		if reachable != nil {
@@ -540,7 +552,11 @@ func measure(tree string) (measurement, error) {
 // fail it. It reads metadata only, never file contents. The error says why
 // when the mark can't be read or the walk fails inside the tree (an entry
 // gone part way, an unreadable directory); the release is not intact then
-// either.
+// either. An error that wraps fs.ErrPermission is the store's (a directory in
+// the tree that can't be listed or searched, a mark that can't be read), and
+// callers report it as the store being unreadable rather than the release as
+// changed. Any other error is the release's, as a seal that doesn't match
+// (false with no error) is.
 //
 // The walk does not catch a tree rewritten together with its held.json, or a
 // change that keeps the entry count, the size and the newest ctime.
@@ -557,6 +573,16 @@ func (s Store) Verify(r Release) (bool, error) {
 		m.seal.Bytes == mark.Seal.Bytes &&
 		m.seal.MaxCtimeNS <= mark.Seal.MaxCtimeNS &&
 		!m.writable, nil
+}
+
+// verifyCondition is the condition a Verify error puts the store in: a
+// permission failure is CondUnreadable, and anything else, nil included, is
+// CondNone, leaving the release to be judged changed or intact.
+func verifyCondition(err error) Condition {
+	if err != nil && errors.Is(err, fs.ErrPermission) {
+		return CondUnreadable
+	}
+	return CondNone
 }
 
 // writeMark writes held.json into the staging directory: a temporary name,

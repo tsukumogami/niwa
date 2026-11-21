@@ -609,3 +609,193 @@ func TestSharingOffFetchesANewMarketplaceIntoTheInstanceAndKeepsALink(t *testing
 		})
 	}
 }
+
+// sourceFetcher serves each "owner/repo" its own commit and tarball, and
+// records the owner, repo and ref of every tarball request.
+type sourceFetcher struct {
+	commits  map[string]string
+	tarballs map[string][]byte
+	fetched  []string
+}
+
+func (f *sourceFetcher) HeadCommit(_ context.Context, owner, repo, _, _ string) (string, string, int, error) {
+	commit, ok := f.commits[owner+"/"+repo]
+	if !ok {
+		return "", "", 404, nil
+	}
+	return commit, "", 200, nil
+}
+
+func (f *sourceFetcher) FetchTarball(_ context.Context, owner, repo, ref, _ string) (io.ReadCloser, string, int, *github.RenameRedirect, error) {
+	f.fetched = append(f.fetched, owner+"/"+repo+"@"+ref)
+	body, ok := f.tarballs[owner+"/"+repo]
+	if !ok {
+		return nil, "", 404, nil, nil
+	}
+	return io.NopCloser(bytes.NewReader(body)), "", 200, nil, nil
+}
+
+// skipAsRoot skips a test that relies on a mode the owner can't get past.
+func skipAsRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("file modes don't bind root")
+	}
+}
+
+// Two marketplaces falling back from one unwritable store each get their own
+// copy at the resolved commit, and the run records one notice naming the
+// store, its condition and both marketplaces. The store's narrowed mode is
+// left as it was and nothing is written in it.
+func TestStoreFallbackRecordsOneNoticePerStore(t *testing.T) {
+	skipAsRoot(t)
+	const (
+		toolsCommit = "1111111111111111111111111111111111111111"
+		kitCommit   = "2222222222222222222222222222222222222222"
+	)
+	noStableRelease(t)
+	root := setupWorkspace(t, nil)
+	instance := filepath.Join(root, "one")
+	home := t.TempDir()
+	storeDir := pluginstore.Dir(home, root)
+	if err := os.MkdirAll(storeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(storeDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { restoreWriteUnder(home) })
+
+	fetcher := &sourceFetcher{
+		commits:  map[string]string{"acme/tools": toolsCommit, "beta/kit": kitCommit},
+		tarballs: map[string][]byte{"acme/tools": toolsTarballAt(t), "beta/kit": kitTarball(t)},
+	}
+	notices := fallbacknotice.New(nil)
+	trees, missing := ResolvePluginTrees(context.Background(), PluginSkillsInputs{
+		InstanceRoot: instance,
+		Plugins:      []string{"shirabe@tools", "kitplug@kit"},
+		Marketplaces: config.MarketplaceConfigs{{Source: "acme/tools"}, {Source: "beta/kit"}},
+		Fetcher:      fetcher,
+		Home:         home,
+		Notices:      notices,
+	})
+	if len(missing) != 0 {
+		t.Fatalf("missing = %v, want none", missing)
+	}
+	if len(trees) != 2 {
+		t.Fatalf("resolved %v, want two trees", trees)
+	}
+
+	for _, name := range []string{"tools", "kit"} {
+		dest := filepath.Join(instance, ".niwa", "marketplaces", name)
+		info, err := os.Lstat(dest)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("%s: %v, mode %v; want a real directory", name, err, info.Mode())
+		}
+		if _, err := os.Stat(marketplaceManifestPath(dest)); err != nil {
+			t.Fatalf("%s holds no manifest: %v", name, err)
+		}
+	}
+	if got, want := strings.Join(fetcher.fetched, ","), "acme/tools@"+toolsCommit+",beta/kit@"+kitCommit; got != want {
+		t.Fatalf("tarball requests = %s, want %s (each at its resolved commit)", got, want)
+	}
+
+	notes := notices.StoreFallbacks()
+	if len(notes) != 1 {
+		t.Fatalf("StoreFallbacks = %+v, want one note", notes)
+	}
+	if n := notes[0]; n.Store != storeDir || n.Condition != string(pluginstore.CondUnwritable) || strings.Join(n.Marketplaces, ",") != "kit,tools" {
+		t.Fatalf("StoreFallbacks()[0] = %+v, want %s, %q and both marketplaces", n, storeDir, pluginstore.CondUnwritable)
+	}
+
+	info, err := os.Lstat(storeDir)
+	if err != nil || info.Mode().Perm() != 0o500 {
+		t.Fatalf("plugins/: %v, mode %v; want it left at 0500", err, info.Mode().Perm())
+	}
+	if entries, err := os.ReadDir(storeDir); err != nil || len(entries) != 0 {
+		t.Fatalf("plugins/ holds %d entries (%v), want none", len(entries), err)
+	}
+}
+
+// An instance that already links into a store that can't be used is kept on
+// its link and reported through the missing plugin, with no store fallback
+// notice: it was not given a copy of its own.
+func TestKeptLinkRecordsNoStoreFallback(t *testing.T) {
+	skipAsRoot(t)
+	const kitCommit = "2222222222222222222222222222222222222222"
+	noStableRelease(t)
+	root := setupWorkspace(t, nil)
+	instance := filepath.Join(root, "one")
+	contentRoot := filepath.Join(instance, ".niwa", "marketplaces")
+	if err := os.MkdirAll(contentRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	t.Cleanup(func() { restoreWriteUnder(home) })
+	marketplaces := config.MarketplaceConfigs{{Source: "beta/kit"}}
+
+	setup := PluginSkillsInputs{InstanceRoot: instance, Marketplaces: marketplaces, Fetcher: &fakeFetcher{tarball: kitTarball(t)}, Home: home}
+	store, ok := pluginStoreFor(setup)
+	if !ok {
+		t.Fatal("no plugin store for an instance under a workspace root")
+	}
+	kit, valid := pluginstore.NewRelease("beta", "kit", kitCommit, "HEAD", "")
+	if !valid {
+		t.Fatal("kit's release is not one the store can hold")
+	}
+	kitLink := filepath.Join(contentRoot, "kit")
+	if _, cond, err := store.Ensure(context.Background(), kit, kitLink, nil, nil); err != nil || cond != pluginstore.CondNone {
+		t.Fatalf("placing kit: cond %q, err %v", cond, err)
+	}
+	storeDir := pluginstore.Dir(home, root)
+	if err := os.Chmod(storeDir, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	notices := fallbacknotice.New(nil)
+	_, missing := ResolvePluginTrees(context.Background(), PluginSkillsInputs{
+		InstanceRoot: instance,
+		Plugins:      []string{"kitplug@kit"},
+		Marketplaces: marketplaces,
+		Fetcher:      &fakeFetcher{tarball: kitTarball(t), commitOID: kitCommit},
+		Home:         home,
+		Notices:      notices,
+	})
+	if notes := notices.StoreFallbacks(); len(notes) != 0 {
+		t.Fatalf("StoreFallbacks = %+v, want none for a kept link", notes)
+	}
+	if len(missing) != 1 || !strings.Contains(missing[0].Reason, storeDir) || !strings.Contains(missing[0].Reason, string(pluginstore.CondUnreadable)) {
+		t.Fatalf("missing = %v, want one naming %s as %q", missing, storeDir, pluginstore.CondUnreadable)
+	}
+	if info, err := os.Lstat(kitLink); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("kit: %v; want it still a link", err)
+	}
+}
+
+// A sweep stopped because the store can't be listed names the store and its
+// condition in the notice.
+func TestSweepStoppedNoticeNamesTheStoreCondition(t *testing.T) {
+	skipAsRoot(t)
+	root := setupWorkspace(t, nil)
+	home := t.TempDir()
+	storeDir := pluginstore.Dir(home, root)
+	if err := os.MkdirAll(storeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(storeDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { restoreWriteUnder(home) })
+
+	a := &Applier{Reporter: NewReporterWithTTY(&bytes.Buffer{}, false)}
+	notices := fallbacknotice.New(nil)
+	a.sweepPluginStore(context.Background(), PluginSkillsInputs{InstanceRoot: filepath.Join(root, "one"), Home: home}, notices)
+
+	reason, skipped := notices.SweepSkipped()
+	if want := "the plugin store at " + storeDir + " is unreadable: "; !skipped || !strings.HasPrefix(reason, want) {
+		t.Fatalf("SweepSkipped = %q, %v; want a reason starting %q", reason, skipped, want)
+	}
+	if !strings.Contains(reason, storeDir) {
+		t.Fatalf("SweepSkipped = %q, want the path named", reason)
+	}
+}

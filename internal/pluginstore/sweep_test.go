@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -593,4 +594,93 @@ func TestLinkedStaysLenient(t *testing.T) {
 	if _, err := scanLinks(instances, true); err == nil || !strings.Contains(err.Error(), unreadable) {
 		t.Fatalf("strict scan error = %v, want one naming %s", err, unreadable)
 	}
+}
+
+// requireSweepError runs Sweep with scan and returns its error as a
+// *SweepError, failing when it is anything else.
+func requireSweepError(t *testing.T, s Store, scan func() ([]string, error)) *SweepError {
+	t.Helper()
+	res, err := s.Sweep(context.Background(), scan)
+	var serr *SweepError
+	if !errors.As(err, &serr) {
+		t.Fatalf("Sweep error = %v (%T), want a *SweepError", err, err)
+	}
+	if len(res.Removed) != 0 {
+		t.Fatalf("Removed = %v after a failed sweep", ids(res.Removed))
+	}
+	return serr
+}
+
+// A plugins/ that can't be listed is the store that couldn't be used, and
+// the message still names the path.
+func TestSweepErrorSaysTheStoreCouldNotBeUsed(t *testing.T) {
+	skipAsRoot(t)
+	f := newSweepFixture(t)
+	s := f.store()
+	twoReleases(t, f, s)
+	chmodFor(t, s.pluginsDir(), 0, 0o700)
+
+	serr := requireSweepError(t, s, nil)
+
+	if serr.Cond != CondUnreadable || serr.ScanFailed() {
+		t.Fatalf("SweepError = %+v, ScanFailed %v; want %q and the store's side", serr, serr.ScanFailed(), CondUnreadable)
+	}
+	if !strings.Contains(serr.Error(), s.pluginsDir()) {
+		t.Fatalf("Sweep error = %v, want one naming %s", serr, s.pluginsDir())
+	}
+	if errors.Unwrap(serr) != serr.Err {
+		t.Fatal("SweepError does not unwrap to its Err")
+	}
+}
+
+// An instance whose marketplaces can't be read, and a scan that fails, are
+// each the scan's side.
+func TestSweepErrorSaysTheScanFailed(t *testing.T) {
+	skipAsRoot(t)
+	t.Run("unreadable marketplaces", func(t *testing.T) {
+		f := newSweepFixture(t)
+		s := f.store()
+		twoReleases(t, f, s)
+		marketplaces := filepath.Join(f.instance("one"), ".niwa", MarketplacesDir)
+		chmodFor(t, marketplaces, 0, 0o755)
+
+		serr := requireSweepError(t, s, nil)
+
+		if !serr.ScanFailed() || serr.Cond != CondNone {
+			t.Fatalf("SweepError = %+v, want the scan's side", serr)
+		}
+		if !strings.Contains(serr.Error(), marketplaces) {
+			t.Fatalf("Sweep error = %v, want one naming %s", serr, marketplaces)
+		}
+	})
+	t.Run("scan error", func(t *testing.T) {
+		f := newSweepFixture(t)
+		s := f.store()
+		twoReleases(t, f, s)
+		boom := errors.New("listing instances failed")
+
+		serr := requireSweepError(t, s, func() ([]string, error) { return nil, boom })
+
+		if !serr.ScanFailed() || !errors.Is(serr, boom) {
+			t.Fatalf("SweepError = %+v, want the scan's side wrapping its error", serr)
+		}
+	})
+}
+
+// A .trash/ that can't be written stops the delete of an unlinked older
+// release, and that is the store being unwritable.
+func TestSweepErrorOnAnUnwritableTrash(t *testing.T) {
+	skipAsRoot(t)
+	f := newSweepFixture(t)
+	s := f.store()
+	old, newest := twoReleases(t, f, s)
+	chmodFor(t, filepath.Join(s.pluginsDir(), trashDirName), 0o500, 0o700)
+
+	serr := requireSweepError(t, s, nil)
+
+	if serr.Cond != CondUnwritable || serr.ScanFailed() {
+		t.Fatalf("SweepError = %+v, want %q", serr, CondUnwritable)
+	}
+	requireHeld(t, s, old, true)
+	requireHeld(t, s, newest, true)
 }

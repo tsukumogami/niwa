@@ -445,3 +445,44 @@ func TestLinkedCountsKeptInstances(t *testing.T) {
 		t.Fatalf("Linked = %+v", linked)
 	}
 }
+
+// TestRepairReportsAnUnwalkableTreeAsTheStoreUnreadable links one held
+// release from two instances and makes its tree unlistable: Repair reports it
+// failed because the store is unreadable, naming both instances, and neither
+// fetches it again nor reports it tampered.
+func TestRepairReportsAnUnwalkableTreeAsTheStoreUnreadable(t *testing.T) {
+	skipAsRoot(t)
+	f := newRepairFixture(t)
+	s := f.store()
+	r := repairRelease(t, "held", heldCommit)
+	if _, cond, err := s.Ensure(context.Background(), r, "", nil, nil); err != nil || cond != CondNone {
+		t.Fatalf("placing: %q %v", cond, err)
+	}
+	one, two := f.instance("one"), f.instance("two")
+	f.linkTo(one, "held", r)
+	f.linkTo(two, "held", r)
+	tree := TreePath(f.home, f.root, r)
+	if err := os.Chmod(tree, 0o111); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(tree, 0o755) })
+	f.resetFetches()
+
+	res := s.Repair(context.Background(), declaredAcme(), everythingReachable)
+
+	if len(res.Tampered) != 0 || len(res.Restored) != 0 {
+		t.Fatalf("a held release whose tree can't be walked was reported tampered %+v or restored %+v", res.Tampered, res.Restored)
+	}
+	if got := f.fetched(); len(got) != 0 {
+		t.Fatalf("a held release whose tree can't be walked was fetched again: %v", got)
+	}
+	if len(res.Failed) != 1 || res.Failed[0].Release.ID() != r.ID() || !reflect.DeepEqual(res.Failed[0].Instances, []string{one, two}) || !strings.Contains(res.Failed[0].Reason, "is unreadable") {
+		t.Fatalf("a held release whose tree can't be walked: Failed = %+v, want one entry naming both instances as the store being unreadable", res.Failed)
+	}
+	if len(res.Refused)+len(res.Undeclared) != 0 {
+		t.Fatalf("unexpected result %+v", res)
+	}
+	if held, _ := s.Held(r); !held {
+		t.Fatal("a held release whose tree can't be walked is no longer held")
+	}
+}

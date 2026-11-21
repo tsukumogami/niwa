@@ -36,6 +36,7 @@ type tarballFakeServer struct {
 	repoMeta   map[string]string    // key: owner/repo → JSON body for GET /repos/{owner}/{repo}
 	metaStatus map[string]int       // key: owner/repo → status code override for the bare repo metadata endpoint
 	behind     map[string]bool      // key: owner/repo@base...head → head is behind base
+	down       map[string]bool      // key: owner/repo → commits and tarball answer 503
 	requests   []tarballFakeRequest // request log
 }
 
@@ -55,6 +56,7 @@ func newTarballFakeServer() *tarballFakeServer {
 		repoMeta:   map[string]string{},
 		metaStatus: map[string]int{},
 		behind:     map[string]bool{},
+		down:       map[string]bool{},
 	}
 	s.srv = httptest.NewServer(http.HandlerFunc(s.handle))
 	return s
@@ -129,6 +131,16 @@ func (s *tarballFakeServer) SetStatus(owner, repo, ref string, status int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.statuses[key(owner, repo, ref)] = status
+}
+
+// SetDown takes the source owner/repo down: its commits endpoint and its
+// tarball answer 503 Service Unavailable for every ref, whatever else is
+// configured for them. Other sources, and the bare metadata endpoint, are
+// unaffected.
+func (s *tarballFakeServer) SetDown(owner, repo string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.down[owner+"/"+repo] = true
 }
 
 // SetRename simulates a 301 redirect from /repos/{oldOwner}/{oldRepo}/...
@@ -232,6 +244,11 @@ func (s *tarballFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		newPath := strings.Replace(r.URL.Path, owner+"/"+repo, newPair, 1)
 		s.mu.Unlock()
 		http.Redirect(w, r, s.srv.URL+newPath, http.StatusMovedPermanently)
+		return
+	}
+	if s.down[owner+"/"+repo] && (op == "commits" || op == "tarball") {
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
 	if status, ok := s.statuses[key(owner, repo, ref)]; ok {

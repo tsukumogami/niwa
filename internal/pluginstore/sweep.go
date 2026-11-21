@@ -28,6 +28,31 @@ type SweepResult struct {
 	Busy []Release
 }
 
+// SweepError is every error Sweep returns. It says which side failed: the
+// store couldn't be used, with Cond naming its condition, or the scan of the
+// instances on disk failed, with Cond empty. Its message is Err's.
+type SweepError struct {
+	Cond Condition
+	Err  error
+}
+
+func (e *SweepError) Error() string { return e.Err.Error() }
+
+func (e *SweepError) Unwrap() error { return e.Err }
+
+// ScanFailed reports whether the scan of the instances failed, rather than
+// the store.
+func (e *SweepError) ScanFailed() bool { return e.Cond == CondNone }
+
+// sweepErr wraps a non-nil err as a SweepError with cond, and leaves nil as
+// nil.
+func sweepErr(cond Condition, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &SweepError{Cond: cond, Err: err}
+}
+
 // sweepLockWait is SweepLockWait or its default.
 func (s Store) sweepLockWait() time.Duration {
 	if s.SweepLockWait > 0 {
@@ -59,6 +84,12 @@ func (s Store) sweepLockWait() time.Duration {
 // nothing; its .tmp/ and .trash/ entries go with it, and so do the owner and
 // repo directories it leaves empty. A store with no plugins directory is left
 // alone and never created.
+//
+// Every error is a *SweepError, which says which of two kinds it is. The
+// store couldn't be used: plugins/ or a level under it can't be inspected or
+// listed (CondUnreadable), or a candidate's lock, .trash/ or move into it
+// failed (CondUnwritable). Or the scan of the instances failed, the first or
+// a candidate's rescan, and Cond is empty.
 func (s Store) Sweep(ctx context.Context, scan func() ([]string, error)) (SweepResult, error) {
 	var res SweepResult
 	if scan == nil {
@@ -66,11 +97,11 @@ func (s Store) Sweep(ctx context.Context, scan func() ([]string, error)) (SweepR
 	}
 	candidates, exists, err := s.sweepCandidates()
 	if err != nil || !exists {
-		return res, err
+		return res, sweepErr(CondUnreadable, err)
 	}
 	linked, err := linkedStrict(scan)
 	if err != nil {
-		return res, err
+		return res, sweepErr(CondNone, err)
 	}
 	for _, r := range candidates {
 		if linked[r.ID()] {
@@ -82,7 +113,7 @@ func (s Store) Sweep(ctx context.Context, scan func() ([]string, error)) (SweepR
 				res.Busy = append(res.Busy, r)
 				continue
 			}
-			return res, fmt.Errorf("locking release %s: %w", r.Label(), err)
+			return res, sweepErr(CondUnwritable, fmt.Errorf("locking release %s: %w", r.Label(), err))
 		}
 		removed, err := s.sweepRelease(r, scan)
 		unlock()
@@ -97,11 +128,11 @@ func (s Store) Sweep(ctx context.Context, scan func() ([]string, error)) (SweepR
 }
 
 // sweepRelease deletes r when a strict rescan finds no instance linking it.
-// The caller holds r's lock.
+// The caller holds r's lock. Its errors are SweepErrors.
 func (s Store) sweepRelease(r Release, scan func() ([]string, error)) (bool, error) {
 	linked, err := linkedStrict(scan)
 	if err != nil {
-		return false, err
+		return false, sweepErr(CondNone, err)
 	}
 	if linked[r.ID()] {
 		return false, nil
@@ -109,10 +140,10 @@ func (s Store) sweepRelease(r Release, scan func() ([]string, error)) (bool, err
 	pdir := s.pluginsDir()
 	trash := filepath.Join(pdir, trashDirName)
 	if err := hostdir.CreatePrivateDir(trash); err != nil {
-		return false, err
+		return false, sweepErr(CondUnwritable, err)
 	}
 	if err := s.trashRelease(r); err != nil {
-		return false, err
+		return false, sweepErr(CondUnwritable, err)
 	}
 	clearStaging(filepath.Join(pdir, tmpDirName), r)
 	clearStaging(trash, r)

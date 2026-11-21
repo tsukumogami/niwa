@@ -57,6 +57,7 @@ type pluginStoreScenario struct {
 	started      []*startedCreate  // creates started in the background
 	holdPath     string            // the hold: fault's release path
 	sweep        pluginSweepScenario
+	narrowedMode os.FileMode // the mode an unusable-store step gave sweep.unreadable
 }
 
 func pluginState(ctx context.Context) (*testState, *pluginStoreScenario, error) {
@@ -120,6 +121,17 @@ func registerPluginStoreSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the GitHub fake served one tarball request for "([^"]*)" at "([^"]*)" and no commit-resolve request for it$`, oneTarballRequestAtRefAndNoResolve)
 	ctx.Step(`^the marketplace "([^"]*)" of instance "([^"]*)" and of instance "([^"]*)" hold the same tree$`, theMarketplacesHoldTheSameTree)
 	ctx.Step(`^every marketplace's skill resolves in instance "([^"]*)" of workspace root "([^"]*)" at its root, in repo "([^"]*)" and in a session worktree$`, everySkillResolvesUnderRoot)
+	ctx.Step(`^the plugin store of workspace root "([^"]*)" (cannot be read|cannot be written|cannot be created|cannot take a release)$`, thePluginStoreIsUnusable)
+	ctx.Step(`^the narrowed path keeps its mode$`, theNarrowedPathKeepsItsMode)
+	ctx.Step(`^the key directory of workspace root "([^"]*)" is writable$`, theKeyDirectoryIsWritable)
+	ctx.Step(`^the output reports the plugin store of workspace root "([^"]*)" as "([^"]*)" once, for every marketplace$`, theOutputReportsTheStoreFallback)
+	ctx.Step(`^the marketplaces of the (second|newest) instance are real directories holding their manifests$`, marketplacesOfNamedInstanceAreRealDirectories)
+	ctx.Step(`^I start (\d+) "([^"]*)" process(?:es)?$`, iStartCreates)
+	ctx.Step(`^I start (\d+) "([^"]*)" processes, each with its own name$`, iStartNamedCreates)
+	ctx.Step(`^every started create reports the plugin store of workspace root "([^"]*)" as "([^"]*)" for every marketplace$`, everyStartedCreateReportsTheStoreFallback)
+	ctx.Step(`^every instance of workspace root "([^"]*)" holds each marketplace as a real directory$`, everyInstanceHoldsRealDirectories)
+	ctx.Step(`^the plugin store of workspace root "([^"]*)" holds nothing$`, thePluginStoreHoldsNothing)
+	ctx.Step(`^the GitHub marketplace "([^"]*)" is down$`, theGitHubMarketplaceIsDown)
 	registerPluginRepairSteps(ctx)
 	registerPluginSweepSteps(ctx)
 }
@@ -925,29 +937,8 @@ func iStartHeldCreates(ctx context.Context, n int, command string) (context.Cont
 	s.envOverrides["NIWA_TEST_FAULT"] = "hold:" + ps.holdPath + "@plugin-store-download"
 	env := s.buildEnv()
 	delete(s.envOverrides, "NIWA_TEST_FAULT")
-	// A create left running by a failing step would outlive the scenario.
-	s.cleanups = append(s.cleanups, func() {
-		_ = os.WriteFile(ps.holdPath, nil, 0o600)
-		for _, c := range ps.started {
-			_ = c.cmd.Process.Kill()
-		}
-	})
-
-	args := strings.Fields(command)
-	if len(args) == 0 || args[0] != "niwa" {
-		return ctx, fmt.Errorf("not a niwa command: %q", command)
-	}
-	for i := 0; i < n; i++ {
-		c := &startedCreate{done: make(chan error, 1)}
-		c.cmd = exec.Command(s.binPath, args[1:]...)
-		c.cmd.Dir = s.homeDir
-		c.cmd.Env = env
-		c.cmd.Stdout, c.cmd.Stderr = &c.stdout, &c.stderr
-		if err := c.cmd.Start(); err != nil {
-			return ctx, fmt.Errorf("starting %s: %w", command, err)
-		}
-		go func() { c.done <- c.cmd.Wait() }()
-		ps.started = append(ps.started, c)
+	if err := startCreates(s, ps, n, command, env); err != nil {
+		return ctx, err
 	}
 
 	deadline := time.Now().Add(60 * time.Second)
@@ -980,6 +971,50 @@ func iStartHeldCreates(ctx context.Context, n int, command string) (context.Cont
 		}
 	}
 	return ctx, nil
+}
+
+// startCreates starts n processes of command, a niwa command, from the
+// sandbox home with env, and records each in ps.started. A process left
+// running by a failing step is killed when the scenario ends, and a hold
+// path, when one is set, is let go first.
+func startCreates(s *testState, ps *pluginStoreScenario, n int, command string, env []string) error {
+	return startCreatesWith(s, ps, n, command, env, nil)
+}
+
+// startCreatesWith is startCreates with extra, when set, giving the further
+// arguments of the i-th process (i from 1). Every process is still started
+// before any is waited on.
+func startCreatesWith(s *testState, ps *pluginStoreScenario, n int, command string, env []string, extra func(i int) []string) error {
+	s.cleanups = append(s.cleanups, func() {
+		if ps.holdPath != "" {
+			_ = os.WriteFile(ps.holdPath, nil, 0o600)
+		}
+		for _, c := range ps.started {
+			_ = c.cmd.Process.Kill()
+		}
+	})
+
+	args := strings.Fields(command)
+	if len(args) == 0 || args[0] != "niwa" {
+		return fmt.Errorf("not a niwa command: %q", command)
+	}
+	for i := 0; i < n; i++ {
+		c := &startedCreate{done: make(chan error, 1)}
+		cmdArgs := args[1:]
+		if extra != nil {
+			cmdArgs = append(append([]string(nil), cmdArgs...), extra(i+1)...)
+		}
+		c.cmd = exec.Command(s.binPath, cmdArgs...)
+		c.cmd.Dir = s.homeDir
+		c.cmd.Env = env
+		c.cmd.Stdout, c.cmd.Stderr = &c.stdout, &c.stderr
+		if err := c.cmd.Start(); err != nil {
+			return fmt.Errorf("starting %s: %w", command, err)
+		}
+		go func() { c.done <- c.cmd.Wait() }()
+		ps.started = append(ps.started, c)
+	}
+	return nil
 }
 
 func theHeldDownloadIsLetGo(ctx context.Context) error {
@@ -1342,4 +1377,336 @@ func everySkillResolvesUnderRoot(ctx context.Context, instance, root, repoName s
 		return ctx, err
 	}
 	return skillsResolveIn(ctx, filepath.Join(pluginRootDir(s, root), instance), repoName, "skills-"+instance)
+}
+
+// thePluginStoreIsUnusable narrows one path so the root's plugin store can't
+// be used, in the way the row names:
+//
+//   - cannot be read: plugins/ at 000;
+//   - cannot be written: plugins/ at 0500, with the key directory still 0700;
+//   - cannot be created: ~/.niwa itself at 0500, with no key directory and
+//     ~/.niwa/locks and ~/.niwa/empty-hooks made first;
+//   - cannot take a release: plugins/.tmp at 0500.
+//
+// The key directory can't be the narrowed path for "cannot be created": a
+// create checks the workspace's git mirrors before it reaches the plugin
+// store, and the mirror puts the key directory back to 0700 (ensureLayout and
+// tightenModes in internal/mirror). It never changes the mode of ~/.niwa
+// itself, so that is narrowed instead, and the locks and empty-hooks
+// directories the mirror and the create's own locks need are made before it
+// is. The narrowed mode is checked here, before the act, and again after it
+// by "the narrowed path keeps its mode", so a reset fails the scenario rather
+// than passing it unnoticed. The mode comes back when the scenario ends, or
+// earlier with "its mode is restored".
+func thePluginStoreIsUnusable(ctx context.Context, root, how string) (context.Context, error) {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	if os.Geteuid() == 0 {
+		return ctx, fmt.Errorf("the plugin store can't be narrowed for root: modes don't bind it; run the suite as a non-root user")
+	}
+	keyDir, err := keyDirOf(s, root)
+	if err != nil {
+		return ctx, err
+	}
+	store := filepath.Join(keyDir, "plugins")
+	var path string
+	var mode os.FileMode
+	restore := os.FileMode(0o700)
+	switch how {
+	case "cannot be read", "cannot be written":
+		if err := os.MkdirAll(store, 0o700); err != nil {
+			return ctx, err
+		}
+		path, mode = store, 0
+		if how == "cannot be written" {
+			mode = 0o500
+			if info, err := os.Lstat(keyDir); err != nil || info.Mode().Perm() != 0o700 {
+				return ctx, fmt.Errorf("%s: want the key directory at 0700 beside an unwritable plugins/ (%v)", keyDir, err)
+			}
+		}
+	case "cannot be created":
+		niwa := filepath.Join(s.homeDir, ".niwa")
+		for _, dir := range []string{niwa, filepath.Join(niwa, "locks"), filepath.Join(niwa, "empty-hooks")} {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return ctx, err
+			}
+		}
+		if _, err := os.Lstat(keyDir); err == nil {
+			// Only an empty key directory is taken away; anything in it
+			// belongs to the scenario.
+			if err := os.Remove(keyDir); err != nil {
+				return ctx, fmt.Errorf("the key directory %s must not exist for the store to be uncreatable: %w", keyDir, err)
+			}
+		}
+		info, err := os.Lstat(niwa)
+		if err != nil {
+			return ctx, err
+		}
+		path, mode, restore = niwa, 0o500, info.Mode().Perm()
+	case "cannot take a release":
+		path, mode = filepath.Join(store, ".tmp"), 0o500
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return ctx, err
+		}
+	default:
+		return ctx, fmt.Errorf("unknown store condition %q", how)
+	}
+
+	if err := os.Chmod(path, mode); err != nil {
+		return ctx, err
+	}
+	s.cleanups = append(s.cleanups, func() { _ = os.Chmod(path, restore) })
+	if info, err := os.Lstat(path); err != nil || info.Mode().Perm() != mode {
+		return ctx, fmt.Errorf("%s: want mode %04o before the act (%v)", path, mode, err)
+	}
+	if how == "cannot be created" {
+		if _, err := os.Lstat(keyDir); !os.IsNotExist(err) {
+			return ctx, fmt.Errorf("%s exists (%v), want no key directory before the act", keyDir, err)
+		}
+	}
+	names := []string{path}
+	if real, err := filepath.EvalSymlinks(path); err == nil && real != path {
+		names = append(names, real)
+	}
+	ps.sweep = pluginSweepScenario{unreadable: path, unreadableNames: names, unreadableMode: restore}
+	ps.narrowedMode = mode
+	return ctx, nil
+}
+
+// theNarrowedPathKeepsItsMode checks that the command left the path an
+// unusable-store step narrowed at the mode it was given: niwa never resets a
+// mode it didn't just create.
+func theNarrowedPathKeepsItsMode(ctx context.Context) error {
+	_, ps, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	if ps.sweep.unreadable == "" {
+		return fmt.Errorf("no path was narrowed")
+	}
+	info, err := os.Lstat(ps.sweep.unreadable)
+	if err != nil {
+		return err
+	}
+	if got := info.Mode().Perm(); got != ps.narrowedMode {
+		return fmt.Errorf("%s has mode %04o after the command, want %04o as it was narrowed", ps.sweep.unreadable, got, ps.narrowedMode)
+	}
+	return nil
+}
+
+// theKeyDirectoryIsWritable gives the root's key directory mode 0700 and
+// checks a file can be made and removed in it, so only plugins/ itself is
+// unwritable.
+func theKeyDirectoryIsWritable(ctx context.Context, root string) (context.Context, error) {
+	s, _, err := pluginState(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	keyDir, err := keyDirOf(s, root)
+	if err != nil {
+		return ctx, err
+	}
+	if err := os.Chmod(keyDir, 0o700); err != nil {
+		return ctx, err
+	}
+	f, err := os.CreateTemp(keyDir, ".writable-*")
+	if err != nil {
+		return ctx, fmt.Errorf("the key directory %s is not writable: %w", keyDir, err)
+	}
+	name := f.Name()
+	_ = f.Close()
+	return ctx, os.Remove(name)
+}
+
+// storeFallbackLead is how the fallback line for the store at dir starts,
+// whatever its condition.
+func storeFallbackLead(dir string) string {
+	return "the host plugin store at " + dir + " can't be used ("
+}
+
+// checkStoreFallback checks out for exactly one fallback line about the store
+// at dir, saying cond and naming every published marketplace, and naming no
+// command to run. Repair's and the sweep's lines about the same store are not
+// counted.
+func checkStoreFallback(ps *pluginStoreScenario, out, dir, cond string) error {
+	lead := storeFallbackLead(dir)
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, lead) {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) != 1 {
+		return fmt.Errorf("%d fallback lines about the plugin store at %s, want 1:\n%s", len(lines), dir, out)
+	}
+	line := lines[0]
+	sentence := lead + cond + "); this instance fetched its own copy of marketplaces: "
+	_, list, ok := strings.Cut(line, sentence)
+	if !ok {
+		return fmt.Errorf("the fallback line does not say %q:\n%s", cond, line)
+	}
+	named := map[string]bool{}
+	for _, name := range strings.Split(strings.TrimSuffix(strings.TrimSpace(list), "."), ", ") {
+		named[name] = true
+	}
+	for _, slug := range ps.order {
+		if mk := ps.marketplaces[slug]; !named[mk.repo] {
+			return fmt.Errorf("the fallback line does not name marketplace %q:\n%s", mk.repo, line)
+		}
+	}
+	for _, banned := range []string{"niwa apply", "re-run", "rerun", "Run `"} {
+		if strings.Contains(line, banned) {
+			return fmt.Errorf("the fallback line names %q:\n%s", banned, line)
+		}
+	}
+	return nil
+}
+
+// theOutputReportsTheStoreFallback reads the last command's output, the
+// hook's context included, for the fallback line about the root's store.
+func theOutputReportsTheStoreFallback(ctx context.Context, root, cond string) error {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	dir, err := pluginStoreDirOf(s, root)
+	if err != nil {
+		return err
+	}
+	return checkStoreFallback(ps, commandOutput(s), dir, cond)
+}
+
+func marketplacesOfNamedInstanceAreRealDirectories(ctx context.Context, which string) error {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	instance, err := namedInstance(s, ps, which)
+	if err != nil {
+		return err
+	}
+	return marketplacesAreRealDirectories(ctx, instance, ".")
+}
+
+// iStartCreates starts n processes of command with nothing held, and returns
+// once each has started.
+func iStartCreates(ctx context.Context, n int, command string) (context.Context, error) {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	return ctx, startCreates(s, ps, n, command, s.buildEnv())
+}
+
+// iStartNamedCreates is iStartCreates with "--name burst-<i>" added to the
+// i-th process, so creates started in the same instant don't race for one
+// instance name.
+func iStartNamedCreates(ctx context.Context, n int, command string) (context.Context, error) {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	return ctx, startCreatesWith(s, ps, n, command, s.buildEnv(), func(i int) []string {
+		return []string{"--name", fmt.Sprintf("burst-%d", i)}
+	})
+}
+
+// everyStartedCreateReportsTheStoreFallback checks each finished started
+// create's own output for the fallback line about the root's store.
+func everyStartedCreateReportsTheStoreFallback(ctx context.Context, root, cond string) error {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	dir, err := pluginStoreDirOf(s, root)
+	if err != nil {
+		return err
+	}
+	if len(ps.started) == 0 {
+		return fmt.Errorf("no create was started")
+	}
+	for i, c := range ps.started {
+		select {
+		case err := <-c.done:
+			c.done <- err
+		default:
+			return fmt.Errorf("create %d is still running", i+1)
+		}
+		if err := checkStoreFallback(ps, c.stdout.String()+"\n"+c.stderr.String(), dir, cond); err != nil {
+			return fmt.Errorf("create %d: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
+// everyInstanceHoldsRealDirectories checks that every instance under the
+// root, at least one per started create, holds each marketplace as a real
+// directory with its manifest and skill.
+func everyInstanceHoldsRealDirectories(ctx context.Context, root string) error {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	found, err := filepath.Glob(filepath.Join(pluginRootDir(s, root), "*", ".niwa", "instance.json"))
+	if err != nil {
+		return err
+	}
+	if len(found) == 0 || len(found) < len(ps.started) {
+		return fmt.Errorf("found %d instances under %s, want at least %d", len(found), pluginRootDir(s, root), max(len(ps.started), 1))
+	}
+	for _, f := range found {
+		instance := filepath.Base(filepath.Dir(filepath.Dir(f)))
+		if err := marketplacesAreRealDirectories(ctx, instance, root); err != nil {
+			return fmt.Errorf("instance %s: %w", instance, err)
+		}
+	}
+	return nil
+}
+
+// thePluginStoreHoldsNothing checks that the root's plugins/ is absent or
+// empty: no release, no staging, no trash and no probe left behind.
+func thePluginStoreHoldsNothing(ctx context.Context, root string) error {
+	s, _, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	dir, err := pluginStoreDirOf(s, root)
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if len(entries) != 0 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		return fmt.Errorf("%s holds %v, want nothing", dir, names)
+	}
+	return nil
+}
+
+// theGitHubMarketplaceIsDown makes the fake answer 503 for the source's
+// commit resolve and tarball, at every ref.
+func theGitHubMarketplaceIsDown(ctx context.Context, slug string) (context.Context, error) {
+	s, _, err := pluginState(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	if s.githubFake == nil {
+		return ctx, fmt.Errorf("no GitHub fake")
+	}
+	owner, repo, err := splitOwnerRepo(slug)
+	if err != nil {
+		return ctx, err
+	}
+	s.githubFake.SetDown(owner, repo)
+	return ctx, nil
 }

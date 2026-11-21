@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -122,6 +123,11 @@ type PluginSkillsInputs struct {
 	// one is reported with that reason rather than tried a second time in
 	// the same command; the next command's repair tries again.
 	Unrestored map[string]string
+
+	// Notices receives a record each time the host plugin store can't be
+	// used and a marketplace is fetched into the instance instead, naming the
+	// store, its condition and the marketplace. Nil records nothing.
+	Notices *fallbacknotice.Collector
 }
 
 // ResolvePluginTrees resolves every configured plugin to the tree its skills are
@@ -235,7 +241,10 @@ func marketplaceRoots(ctx context.Context, in PluginSkillsInputs) (map[string]st
 // picked and, with the store in use and sharing on, resolved to a commit and
 // held once on the host, the instance getting a link to it; otherwise the
 // content is fetched into the instance at the unresolved ref, as before the
-// store existed.
+// store existed. When the store can't be used (it can't be read, written or
+// created, or can't take the release), the content is fetched into the
+// instance at the resolved commit instead, and the fallback is recorded in
+// in.Notices with the store's path and its condition.
 //
 // Re-fetching on every apply would put a network round trip in front of every
 // preparation and would swap the tree under a running session for no benefit:
@@ -302,7 +311,8 @@ func ensureMarketplaceContent(ctx context.Context, in PluginSkillsInputs, name s
 			}
 			// The store can't be used: fall back to a copy in this instance,
 			// at the same commit, so the instance holds what the store would
-			// have.
+			// have, and say so.
+			in.Notices.PluginStoreFallback(pluginstore.Dir(store.Home, store.WorkspaceRoot), string(cond), name)
 			ref = commit
 		}
 	}
@@ -900,7 +910,8 @@ const pluginScanWarning = "plugin store: not every instance could be listed for 
 // the newest of each source, and logs each one it removed.
 //
 // A sweep that deleted nothing because the scan of the instances or the
-// store failed is reported through the run's notices, naming the path, so it
+// store failed is reported through the run's notices, naming the path, and
+// for a store that couldn't be used, the store and its condition, so it
 // reaches the hook's context as well as the terminal; repair's own warning
 // about the same listing is then not printed. When the sweep succeeds,
 // repair's kept warning is printed here. The sweep never fetches, so it runs
@@ -923,7 +934,12 @@ func (a *Applier) sweepPluginStore(ctx context.Context, in PluginSkillsInputs, n
 	scanErr := a.pluginScanErr[dir]
 	delete(a.pluginScanErr, dir)
 	if err != nil {
-		notices.PluginSweepStopped(err.Error(), len(res.Removed))
+		reason := err.Error()
+		var serr *pluginstore.SweepError
+		if errors.As(err, &serr) && !serr.ScanFailed() {
+			reason = fmt.Sprintf("the plugin store at %s is %s: %s", dir, serr.Cond, err.Error())
+		}
+		notices.PluginSweepStopped(reason, len(res.Removed))
 	} else if scanErr != nil && a.Reporter != nil {
 		a.Reporter.Warn(pluginScanWarning, scanErr)
 	}

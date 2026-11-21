@@ -1002,3 +1002,115 @@ Feature: niwa holds each plugin marketplace release once per host
       | setting                      |
       |                              |
       | share_plugin_releases = true |
+
+  # A store niwa can't use falls back to a copy fetched into the instance, as
+  # niwa did before the store, and the create says which store and why. The
+  # narrowed mode is left as it was: niwa never changes a mode it didn't just
+  # create. For "cannot be created" ~/.niwa itself is narrowed, since the git
+  # mirror the create checks first puts a narrowed key directory back.
+  @critical
+  Scenario Outline: A create on a plugin store that <how> falls back to its own copy and names the store
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    Given the plugin store of workspace root "." <how>
+    When the GitHub fake log is cleared
+    And I run "niwa create ws"
+    Then the exit code is 0
+    And the output reports the plugin store of workspace root "." as "<condition>" once, for every marketplace
+    And the marketplaces of instance "ws" of workspace root "." are real directories holding their manifests
+    And every marketplace's skill resolves in instance "ws" of workspace root "." at its root, in repo "app" and in a session worktree
+    And the narrowed path keeps its mode
+    When its mode is restored
+    Then no marketplace has a release directory or a held.json in the plugin store of workspace root "."
+
+    Examples:
+      | how                   | condition          |
+      | cannot be read        | unreadable         |
+      | cannot be written     | unwritable         |
+      | cannot be created     | can't be created   |
+      | cannot take a release | release not placed |
+
+  # The write probe is of plugins/ itself, so a writable key directory above
+  # it doesn't hide an unwritable store.
+  @critical
+  Scenario: An unwritable plugins/ under a writable key directory is reported as unwritable
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    Given the plugin store of workspace root "." cannot be written
+    And the key directory of workspace root "." is writable
+    When I run "niwa create ws"
+    Then the exit code is 0
+    And the marketplaces of instance "ws" of workspace root "." are real directories holding their manifests
+    And the output reports the plugin store of workspace root "." as "unwritable" once, for every marketplace
+    And the narrowed path keeps its mode
+
+  # Dispatch prints the same notice on its stderr, and the SessionStart hook
+  # carries it in the context it injects.
+  @critical
+  Scenario Outline: Dispatch and the hook report an unusable store through <second>
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    Given the plugin store of workspace root "." cannot be written
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When the GitHub fake log is cleared
+    And I make the second instance with <second>
+    Then the exit code is 0
+    And the output reports the plugin store of workspace root "." as "unwritable" once, for every marketplace
+    And the marketplaces of the second instance are real directories holding their manifests
+    And every marketplace's skill resolves in the second instance at its root, in repo "app" and in a session worktree
+
+    Examples:
+      | second                |
+      | niwa dispatch         |
+      | the SessionStart hook |
+
+  # Three creates at once on an unwritable store each fall back to their own
+  # copy and each says so; none leaves a probe, a staging entry or a release
+  # under plugins/. The config stops tracking its source first, as in the
+  # overlapping-creates scenario above (issue #297).
+  @critical
+  Scenario: Three creates in a burst on an unwritable store each fall back
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    Given the config of workspace root "." no longer tracks its source
+    And the plugin store of workspace root "." cannot be written
+    When I start 3 "niwa create ws" processes, each with its own name
+    Then every started create exits 0
+    And every started create reports the plugin store of workspace root "." as "unwritable" for every marketplace
+    And every instance of workspace root "." holds each marketplace as a real directory
+    And the plugin store of workspace root "." holds nothing
+
+  # A release that isn't held, while its source is down, fails as a fetch
+  # does: the create names the source and the failure, and nothing is held or
+  # copied for it. The other marketplace is linked as usual.
+  @critical
+  Scenario: A create of an unheld release with its source down names the source and holds nothing
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    Given the GitHub marketplace "acme/skills" is down
+    When I run "niwa create ws"
+    Then the exit code is 0
+    And the error output contains "acme/skills"
+    And the error output contains "503"
+    And the plugin store of workspace root "." holds nothing for the release "v1.0.0" of "acme/skills"
+    And the file ".niwa/marketplaces/skills" does not exist in instance "ws"
+    And instance "ws" links "beta/tools" to its release "v2.1.0"
+
+  # An unreadable store that instances already link into: the new instance
+  # falls back and says so, repair reports the store unreadable rather than a
+  # release tampered with, and the sweep's notice names the store's condition.
+  @critical
+  Scenario: An unreadable store with linked instances reports repair and the sweep with the store's condition
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the plugin store of workspace root "." cannot be read
+    When I run "niwa create ws"
+    Then the exit code is 0
+    And the output reports the plugin store of workspace root "." as "unreadable" once, for every marketplace
+    And the error output contains "sweep of unused releases was skipped: the plugin store at"
+    And the error output contains "is unreadable"
+    And the error output does not contain "tampered with"
+    When its mode is restored

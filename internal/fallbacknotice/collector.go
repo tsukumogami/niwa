@@ -4,8 +4,10 @@
 // store writes that could not happen. It also carries what the host plugin
 // store's repair pass did about the releases instances link to, since that
 // pass is the other store a provisioning run restores with nobody asking,
-// and it has to reach the same surfaces: the terminal, dispatch's stderr and
-// the SessionStart hook's context.
+// and each time the host plugin store couldn't be used and a marketplace was
+// fetched into the instance instead, and all of these have to reach the same
+// surfaces: the terminal, dispatch's stderr and the SessionStart hook's
+// context.
 //
 // It is a stdlib-only leaf. Its Identity is its own struct rather than
 // vault.Identity, so the CLI can hold a collector without importing the
@@ -106,6 +108,14 @@ type Collector struct {
 	sweepReason   string
 	sweepRemoved  int
 	sweepSkipped  bool
+	// storeFallbacks maps a (store, condition) pair to the set of
+	// marketplaces that fell back from it.
+	storeFallbacks map[storeFallbackKey]map[string]bool
+}
+
+// storeFallbackKey is the store and condition one fallback notice is about.
+type storeFallbackKey struct {
+	store, condition string
 }
 
 // New returns an empty collector. now is the clock ages are measured
@@ -267,7 +277,67 @@ func (c *Collector) Empty() bool {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return len(c.served) == 0 && len(c.misses) == 0 && len(c.lockTimeouts) == 0 && !c.inWorkTree && !c.unwritable && len(c.releases) == 0 && !c.sweepSkipped
+	return len(c.served) == 0 && len(c.misses) == 0 && len(c.lockTimeouts) == 0 && !c.inWorkTree && !c.unwritable && len(c.releases) == 0 && !c.sweepSkipped && len(c.storeFallbacks) == 0
+}
+
+// StoreFallbackNote is one host plugin store that couldn't be used, for one
+// condition, and every marketplace that fetched its own copy instead.
+type StoreFallbackNote struct {
+	// Store is the store's plugins directory.
+	Store string
+	// Condition is why it couldn't be used, as printed ("unwritable", say).
+	Condition string
+	// Marketplaces are the marketplace names that fell back, sorted, each
+	// once.
+	Marketplaces []string
+}
+
+// PluginStoreFallback records that the host plugin store at store couldn't
+// be used, for condition, so marketplace was fetched into the instance
+// instead. Records for one store and condition gather into one note, each
+// marketplace named once. The store path is niwa's own, the condition is one
+// of the store's fixed words and the marketplace name comes from the
+// workspace config; none carries a secret.
+func (c *Collector) PluginStoreFallback(store, condition, marketplace string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.storeFallbacks == nil {
+		c.storeFallbacks = map[storeFallbackKey]map[string]bool{}
+	}
+	key := storeFallbackKey{store: store, condition: condition}
+	if c.storeFallbacks[key] == nil {
+		c.storeFallbacks[key] = map[string]bool{}
+	}
+	c.storeFallbacks[key][marketplace] = true
+}
+
+// StoreFallbacks returns the store fallback notes, sorted by store and then
+// condition, each with its marketplaces sorted.
+func (c *Collector) StoreFallbacks() []StoreFallbackNote {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]StoreFallbackNote, 0, len(c.storeFallbacks))
+	for key, set := range c.storeFallbacks {
+		names := make([]string, 0, len(set))
+		for name := range set {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		out = append(out, StoreFallbackNote{Store: key.store, Condition: key.condition, Marketplaces: names})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Store != out[j].Store {
+			return out[i].Store < out[j].Store
+		}
+		return out[i].Condition < out[j].Condition
+	})
+	return out
 }
 
 // ReleaseOutcome is what the plugin store's repair pass did about one

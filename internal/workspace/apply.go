@@ -2033,6 +2033,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		Fetcher:      fetcher,
 		Home:         a.DeveloperHome,
 		SharingOff:   !effectiveCfg.Workspace.SharePluginReleasesEnabled(),
+		Notices:      notices,
 	}
 	// Repair's scan warning is printed by the sweep below; a pass that
 	// returns before reaching it prints the warning here.
