@@ -616,10 +616,16 @@ Feature: niwa holds each plugin marketplace release once per host
       | left as it is                        |
       | stripped of its .niwa/instance.json  |
 
-  # A scan that can't see every instance deletes nothing. The command still
+  # A scan that can't see every instance deletes nothing. When the kept
+  # directory or one instance's marketplaces can't be read, the command still
   # succeeds and says, in one line naming the path, that the sweep was
   # skipped; repair's own line about the same listing is not printed beside
   # it. With the mode back, the next command sweeps as usual.
+  #
+  # An unreadable workspace root never reaches the sweep: apply fails earlier,
+  # at the config swap, because clearing the old snapshot needs to list the
+  # root. The scenario after the outline asserts that failure and a store
+  # with every release still in it, then restores the mode and sweeps.
   @critical
   Scenario Outline: An unreadable scan skips the sweep when <unreadable> cannot be read
     When I run niwa init from config repo "ws"
@@ -647,9 +653,36 @@ Feature: niwa holds each plugin marketplace release once per host
 
     Examples:
       | unreadable                          |
-      | the workspace root                  |
       | the kept directory                  |
       | the marketplaces of instance "ws-2" |
+
+  @critical
+  Scenario: An unreadable workspace root stops apply before the sweep and leaves every release in place
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the GitHub marketplace "acme/skills" publishes release "v1.1.0"
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given instance "ws" is removed from disk
+    And the workspace root cannot be read
+    When the GitHub fake log is cleared
+    And I run "niwa apply" in instance "ws-3"
+    Then the exit code is not 0
+    And the error output contains "EnsureConfigSnapshot"
+    And the error output contains "permission denied"
+    And the output does not contain "sweep of unused releases"
+    And the error output does not contain "sweep of unused releases"
+    And the plugin store of workspace root "." holds only the releases "v1.0.0,v1.1.0" of "acme/skills"
+    Given its mode is restored
+    When I run "niwa apply" in instance "ws-3"
+    Then the exit code is 0
+    And the output does not contain "sweep of unused releases"
+    And the error output does not contain "sweep of unused releases"
+    And the plugin store of workspace root "." holds only the release "v1.1.0" of "acme/skills"
 
   # Destroying one instance deletes nothing from the store; the next
   # provisioning command sweeps the release it freed.
