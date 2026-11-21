@@ -2,11 +2,112 @@ package workspace
 
 import (
 	"bytes"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tsukumogami/niwa/internal/hostdir"
+	"github.com/tsukumogami/niwa/internal/pluginstore"
 )
+
+// storeFixture is a workspace root and a sandbox home whose plugin store
+// holds one read-only release tree, as a held release is.
+type storeFixture struct {
+	root, home, keyDir, storeDir string
+}
+
+func newStoreFixture(t *testing.T) storeFixture {
+	t.Helper()
+	root := destroySetupWorkspace(t)
+	home := t.TempDir()
+	f := storeFixture{root: root, home: home, keyDir: hostdir.WorkspaceDir(home, root), storeDir: pluginstore.Dir(home, root)}
+	tree := filepath.Join(f.storeDir, "github.com", "acme", "skills", strings.Repeat("a", 40), "tree")
+	if err := os.MkdirAll(filepath.Join(tree, ".claude-plugin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tree, ".claude-plugin", "marketplace.json"), []byte("{}"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{filepath.Join(tree, ".claude-plugin"), tree} {
+		if err := os.Chmod(dir, 0o555); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A kept store's read-only tree is more than t.TempDir's cleanup removes.
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(home, func(p string, d fs.DirEntry, err error) error {
+			if err == nil && d.IsDir() {
+				_ = os.Chmod(p, 0o755)
+			}
+			return nil
+		})
+	})
+	return f
+}
+
+func (f storeFixture) destroy(t *testing.T) string {
+	t.Helper()
+	var out bytes.Buffer
+	if err := DestroyWorkspace(f.root, DestroyWorkspaceOpts{Home: f.home, StoreOut: &out}); err != nil {
+		t.Fatalf("DestroyWorkspace: %v", err)
+	}
+	if _, err := os.Stat(f.root); !os.IsNotExist(err) {
+		t.Fatalf("workspace root survived: %v", err)
+	}
+	return out.String()
+}
+
+// With no kept instance, the store goes with the workspace, read-only tree
+// and all, and so does the key directory it leaves empty.
+func TestDestroyWorkspaceRemovesThePluginStore(t *testing.T) {
+	f := newStoreFixture(t)
+	if out := f.destroy(t); out != "" {
+		t.Errorf("printed %q, want nothing", out)
+	}
+	for _, dir := range []string{f.storeDir, f.keyDir} {
+		if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+			t.Errorf("%s survived: %v", dir, err)
+		}
+	}
+}
+
+// A kept instance under the key directory's kept/ may still link into the
+// store, so the store stays and its path is printed.
+func TestDestroyWorkspaceKeepsTheStoreForAKeptInstance(t *testing.T) {
+	f := newStoreFixture(t)
+	kept := filepath.Join(f.keyDir, hostdir.KeptDirName, "old")
+	if err := os.MkdirAll(kept, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	out := f.destroy(t)
+	if want := "kept the plugin store at " + f.storeDir + ": kept instances still link into it"; !strings.Contains(out, want) {
+		t.Errorf("printed %q, want a line %q", out, want)
+	}
+	for _, dir := range []string{f.storeDir, kept} {
+		if _, err := os.Lstat(dir); err != nil {
+			t.Errorf("%s was removed: %v", dir, err)
+		}
+	}
+}
+
+// The mirrors beside the store keep the key directory, which is removed only
+// when nothing else is left in it.
+func TestDestroyWorkspaceKeepsAKeyDirWithMirrors(t *testing.T) {
+	f := newStoreFixture(t)
+	mirrors := filepath.Join(f.keyDir, "mirrors", "app.git")
+	if err := os.MkdirAll(mirrors, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.destroy(t)
+	if _, err := os.Lstat(f.storeDir); !os.IsNotExist(err) {
+		t.Errorf("the store survived: %v", err)
+	}
+	if _, err := os.Lstat(mirrors); err != nil {
+		t.Errorf("the mirrors were removed: %v", err)
+	}
+}
 
 func TestDestroyWorkspace_EmptyWorkspace(t *testing.T) {
 	root := destroySetupWorkspace(t)

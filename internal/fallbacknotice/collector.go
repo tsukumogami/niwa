@@ -1,7 +1,13 @@
 // Package fallbacknotice collects what a provisioning run's store fallback
 // did that the operator has to hear about: values served from the store of
 // last-resolved values, identities with nothing stored to fall back on, and
-// store writes that could not happen.
+// store writes that could not happen. It also carries what the host plugin
+// store's repair pass did about the releases instances link to, since that
+// pass is the other store a provisioning run restores with nobody asking,
+// and each time the host plugin store couldn't be used and a marketplace was
+// fetched into the instance instead, and all of these have to reach the same
+// surfaces: the terminal, dispatch's stderr and the SessionStart hook's
+// context.
 //
 // It is a stdlib-only leaf. Its Identity is its own struct rather than
 // vault.Identity, so the CLI can hold a collector without importing the
@@ -98,6 +104,18 @@ type Collector struct {
 	inWorkTree    bool
 	unwritableDir string
 	unwritable    bool
+	releases      []ReleaseNote
+	sweepReason   string
+	sweepRemoved  int
+	sweepSkipped  bool
+	// storeFallbacks maps a (store, condition) pair to the set of
+	// marketplaces that fell back from it.
+	storeFallbacks map[storeFallbackKey]map[string]bool
+}
+
+// storeFallbackKey is the store and condition one fallback notice is about.
+type storeFallbackKey struct {
+	store, condition string
 }
 
 // New returns an empty collector. now is the clock ages are measured
@@ -259,7 +277,175 @@ func (c *Collector) Empty() bool {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return len(c.served) == 0 && len(c.misses) == 0 && len(c.lockTimeouts) == 0 && !c.inWorkTree && !c.unwritable
+	return len(c.served) == 0 && len(c.misses) == 0 && len(c.lockTimeouts) == 0 && !c.inWorkTree && !c.unwritable && len(c.releases) == 0 && !c.sweepSkipped && len(c.storeFallbacks) == 0
+}
+
+// StoreFallbackNote is one host plugin store that couldn't be used, for one
+// condition, and every marketplace that fetched its own copy instead.
+type StoreFallbackNote struct {
+	// Store is the store's plugins directory.
+	Store string
+	// Condition is why it couldn't be used, as printed ("unwritable", say).
+	Condition string
+	// Marketplaces are the marketplace names that fell back, sorted, each
+	// once.
+	Marketplaces []string
+}
+
+// PluginStoreFallback records that the host plugin store at store couldn't
+// be used, for condition, so marketplace was fetched into the instance
+// instead. Records for one store and condition gather into one note, each
+// marketplace named once. The store path is niwa's own, the condition is one
+// of the store's fixed words and the marketplace name comes from the
+// workspace config; none carries a secret.
+func (c *Collector) PluginStoreFallback(store, condition, marketplace string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.storeFallbacks == nil {
+		c.storeFallbacks = map[storeFallbackKey]map[string]bool{}
+	}
+	key := storeFallbackKey{store: store, condition: condition}
+	if c.storeFallbacks[key] == nil {
+		c.storeFallbacks[key] = map[string]bool{}
+	}
+	c.storeFallbacks[key][marketplace] = true
+}
+
+// StoreFallbacks returns the store fallback notes, sorted by store and then
+// condition, each with its marketplaces sorted.
+func (c *Collector) StoreFallbacks() []StoreFallbackNote {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]StoreFallbackNote, 0, len(c.storeFallbacks))
+	for key, set := range c.storeFallbacks {
+		names := make([]string, 0, len(set))
+		for name := range set {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		out = append(out, StoreFallbackNote{Store: key.store, Condition: key.condition, Marketplaces: names})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Store != out[j].Store {
+			return out[i].Store < out[j].Store
+		}
+		return out[i].Condition < out[j].Condition
+	})
+	return out
+}
+
+// ReleaseOutcome is what the plugin store's repair pass did about one
+// release an instance on disk links to.
+type ReleaseOutcome int
+
+const (
+	// ReleaseRestored: the release was missing or unmarked and is held again.
+	ReleaseRestored ReleaseOutcome = iota + 1
+	// ReleaseRefused: its commit is not shown to be in its source's own
+	// history, so nothing was fetched and its links were left as they are.
+	ReleaseRefused
+	// ReleaseUndeclared: its source is no longer declared by the workspace,
+	// so it was left alone.
+	ReleaseUndeclared
+	// ReleaseNotRestored: the restore failed this time; nothing was marked
+	// held for it.
+	ReleaseNotRestored
+	// ReleaseTampered: the release was held but its tree was changed after
+	// it was placed, so it was fetched again and is held again.
+	ReleaseTampered
+)
+
+// ReleaseNote is one plugin release the repair pass reports.
+type ReleaseNote struct {
+	Outcome ReleaseOutcome
+	// Release is "github.com/<owner>/<repo>@<commit>".
+	Release string
+	// Instances are the instance directories whose links name it.
+	Instances []string
+	// Reason is why it was refused or not restored; empty otherwise.
+	Reason string
+}
+
+// PluginRelease records what the plugin store's repair pass did about one
+// release. The release name and instance paths are niwa's own, and the
+// reason is an error message; none carries a secret.
+func (c *Collector) PluginRelease(n ReleaseNote) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n.Instances = append([]string(nil), n.Instances...)
+	c.releases = append(c.releases, n)
+}
+
+// ReleaseNotes returns the plugin release records in the order they were
+// recorded.
+func (c *Collector) ReleaseNotes() []ReleaseNote {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]ReleaseNote, len(c.releases))
+	copy(out, c.releases)
+	return out
+}
+
+// PluginSweepSkipped records that the plugin store's sweep of unused
+// releases deleted nothing this run, and why: the scan of the instances on
+// disk failed, or the store couldn't be listed. The reason is an error
+// message naming the path; it carries no secret. Only the first call in a
+// run is kept.
+func (c *Collector) PluginSweepSkipped(reason string) {
+	c.PluginSweepStopped(reason, 0)
+}
+
+// PluginSweepStopped records that the plugin store's sweep stopped early,
+// and why, after it had already removed removed unused releases. A sweep
+// that fails its rescan partway through has deleted some releases before it
+// stops, and the notice must not say nothing was deleted. With removed at 0
+// it is PluginSweepSkipped. Only the first call in a run is kept.
+func (c *Collector) PluginSweepStopped(reason string, removed int) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.sweepSkipped {
+		c.sweepSkipped = true
+		c.sweepReason = reason
+		c.sweepRemoved = removed
+	}
+}
+
+// SweepRemovedBeforeStop returns how many releases the sweep recorded by
+// PluginSweepStopped had removed before it stopped, 0 when none were or no
+// sweep stopped.
+func (c *Collector) SweepRemovedBeforeStop() int {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sweepRemoved
+}
+
+// SweepSkipped returns the reason recorded by PluginSweepSkipped and whether
+// one was recorded.
+func (c *Collector) SweepSkipped() (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sweepReason, c.sweepSkipped
 }
 
 func sortedIdentities(set map[Identity]bool) []Identity {

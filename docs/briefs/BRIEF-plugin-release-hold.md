@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Accepted
+status: Done
 problem: |
   Every niwa create downloads each plugin marketplace's release and writes a
   full copy of it into the new instance, even when another instance on the
@@ -24,7 +24,7 @@ motivating_context: |
 
 ## Status
 
-Accepted
+Done
 
 The framing below is ready for the requirements. Three things are left to the
 design on purpose: how a held release is named on disk (including a

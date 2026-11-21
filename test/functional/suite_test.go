@@ -186,6 +186,11 @@ type testState struct {
 	// mirror_steps_test.go.
 	mirror *mirrorScenario
 
+	// plugins is the plugin-release-hold scenario state: the marketplaces
+	// published to the fakes and the releases each one has (see
+	// pluginstore_steps_test.go).
+	plugins *pluginStoreScenario
+
 	// cleanups run in the After hook, last registered first, so a scenario
 	// that started a process or a listener stops it however the scenario
 	// ended.
@@ -635,4 +640,8 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// --- mirror repair: a deleted host mirror restored by an ordinary
 	// command, with borrowers the scenarios build from niwa's own clones ---
 	registerMirrorSteps(ctx)
+
+	// --- plugin release hold: each github marketplace release held once per
+	// workspace on the host, the instances linking to it ---
+	registerPluginStoreSteps(ctx)
 }
