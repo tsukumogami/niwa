@@ -189,8 +189,10 @@ A few cases need a decision from you, or are worth knowing:
   the old snapshot. The next niwa command puts it back and says so on
   stderr; the next refresh then runs normally.
 - Local files are copied on every refresh, so keep large data
-  elsewhere, and a write into `.niwa/` that lands while a refresh is
-  copying can be lost.
+  elsewhere. niwa's own writes into `.niwa/` (session mappings) wait
+  for a refresh in progress, but anything else written into `.niwa/`
+  while a refresh is copying, such as a dispatch brief or a hand edit,
+  can be lost.
 
 ### Provenance marker
 
@@ -232,14 +234,41 @@ swap:
 4. fsync the parent directory.
 5. RemoveAll `.niwa.prev/`.
 
-There is a sub-microsecond window between steps 2 and 3 where
-`.niwa/` does not exist; the PRD's R12 contract accepts this. The
-snapshot-consuming code runs after the swap completes. Workspace
-discovery, which every command runs first, restores `.niwa.prev/`
-when it finds `.niwa/` missing, so a second command that lands in
-that window puts the old snapshot back; the refresh's step 3 then
-fails, its rollback fails with it, and it exits with an error,
-leaving the old snapshot in place and nothing lost.
+There is a short window between steps 2 and 3 where `.niwa/` does
+not exist; the PRD's R12 contract accepts this. The
+snapshot-consuming code runs after the swap completes.
+
+Every refresh of one config directory holds an exclusive lock on a
+sibling file, `<workspace>/.niwa.lock`, from before the preflight to
+after step 5. Overlay snapshots and the global config directory get
+their own lock beside them the same way (`<overlay dir>.lock`,
+`$XDG_CONFIG_HOME/niwa/global.lock`). The lock file is never removed;
+its presence only means a refresh has run there at some point. These
+wait on the lock:
+
+- another refresh of the same directory, so two commands never share
+  `.niwa.next/` or `.niwa.prev/`;
+- writing or deleting a session mapping under `.niwa/sessions/`, so a
+  mapping never lands in a `.niwa/` a refresh has already copied, and
+  the mapping read `niwa worktree destroy` makes;
+- workspace discovery, which every command runs first, before it puts
+  `.niwa.prev/` back. Once it holds the lock it looks for `.niwa/`
+  again, so it only restores a swap that really died, never one
+  another command is in the middle of;
+- reading a config file that turns out to be missing beside an
+  existing lock. The read waits for the lock and tries once more.
+
+A command waits up to 30 seconds for each acquisition. If the lock is
+still held after that it fails with an error like:
+
+```
+timed out after 30s waiting for the config lock <workspace>/.niwa.lock: another niwa command is refreshing <workspace>/.niwa
+```
+
+It never goes on without the lock. The holder is usually fetching the
+config source, so a slow network is the common cause; rerun the
+command once the other one finishes. On platforms without `flock`
+(Windows) there is no lock and refreshes aren't serialized.
 
 If extraction fails partway, the staging directory is orphaned at
 `.niwa.next/`; the previous `.niwa/` is intact. The next apply's

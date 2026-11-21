@@ -145,6 +145,10 @@ const (
 	// niwa's lineage resource attributes on its telemetry, beside the ones the
 	// developer's own settings set (row 26).
 	DispatchResourceAttributes
+
+	// DispatchFirstReadGuard is a dispatched background worker held to its
+	// brief's declared first read by a PreToolUse guard (row 27).
+	DispatchFirstReadGuard
 )
 
 // Route names how a capability's delivery reaches a session. It is a property
@@ -207,6 +211,7 @@ var catalog = []capabilityRow{
 	{GitExcludeBookkeeping, "git-exclude-bookkeeping", RouteProcedure},
 	{DispatchInboundAcceptance, "dispatch-inbound-acceptance", RouteLaunch},
 	{DispatchResourceAttributes, "dispatch-resource-attributes", RouteLaunch},
+	{DispatchFirstReadGuard, "dispatch-first-read-guard", RouteLaunch},
 }
 
 // All returns every capability in matrix order. The result is a fresh slice, so

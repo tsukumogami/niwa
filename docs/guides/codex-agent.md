@@ -411,6 +411,8 @@ debt, and it's the one group that can shrink without the agent changing.
 - **Lineage resource attributes on a dispatched worker's telemetry.** A Codex
   launch has no settings document to carry the attributes, and whether its
   telemetry reads them from the launch environment is unverified.
+- **A guard holding a dispatched worker to its brief's declared first read.**
+  A Codex launch has no settings document to carry the guard's hook.
 
 ### What doesn't apply to Codex
 

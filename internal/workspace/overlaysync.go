@@ -26,6 +26,11 @@ import (
 // fetcher may be nil for non-GitHub overlays (the fallback uses git).
 // GitHub overlays without a fetcher result in a no-op + nil — the
 // caller's existing-snapshot retains until a fetch client is wired.
+//
+// dir's snapshot lock is taken once, before deciding between refresh and
+// fresh materialization, so another process can't change the answer between
+// the decision and the work. The locked internals are called directly; the
+// exported wrappers would take the lock a second time and wait on it.
 func EnsureOverlaySnapshot(ctx context.Context, urlSlug, dir string, fetcher FetchClient, reporter *Reporter) (wasFreshClone bool, rank int, err error) {
 	src, parseErr := parseOverlaySlug(urlSlug)
 	if parseErr != nil {
@@ -34,21 +39,31 @@ func EnsureOverlaySnapshot(ctx context.Context, urlSlug, dir string, fetcher Fet
 
 	markers := config.OverlayMarkerSet()
 
-	if provenanceMarkerExists(dir) || dotGitExists(dir) {
-		// Existing snapshot or legacy working tree: refresh / R28 lazy
-		// conversion via the standard pipeline.
-		_, refreshRank, refreshErr := EnsureConfigSnapshotWithStatus(ctx, dir, markers, fetcher, reporter)
-		return false, refreshRank, refreshErr
-	}
-
-	// Fresh materialization. Make sure the parent dir exists; the
-	// snapshot writer creates dir itself via the atomic swap.
-	// Pass urlSlug verbatim as the marker's source_url so the
-	// URL-change gate in apply matches what the registry stores.
+	// The snapshot writer creates dir itself via the atomic swap; the
+	// parent has to exist for the swap and for the lock beside dir.
 	if mkErr := os.MkdirAll(filepath.Dir(dir), 0o755); mkErr != nil {
 		return true, 0, fmt.Errorf("overlay: ensure parent: %w", mkErr)
 	}
-	freshRank, materializeErr := MaterializeFromSource(ctx, src, urlSlug, dir, markers, fetcher, reporter)
+	release, lockErr := config.AcquireSnapshotLock(dir)
+	if lockErr != nil {
+		// Not a fresh clone: callers skip a failed fresh clone silently as
+		// "the overlay repo doesn't exist", and a lock that can't be taken
+		// says nothing of the kind.
+		return false, 0, fmt.Errorf("overlay: %w", lockErr)
+	}
+	defer release()
+
+	if provenanceMarkerExists(dir) || dotGitExists(dir) {
+		// Existing snapshot or legacy working tree: refresh / R28 lazy
+		// conversion via the standard pipeline.
+		_, refreshRank, refreshErr := ensureConfigSnapshotLocked(ctx, dir, markers, fetcher, reporter)
+		return false, refreshRank, refreshErr
+	}
+
+	// Fresh materialization. Pass urlSlug verbatim as the marker's
+	// source_url so the URL-change gate in apply matches what the
+	// registry stores.
+	freshRank, materializeErr := materializeAndSwap(ctx, dir, src, urlSlug, markers, fetcher, reporter)
 	return true, freshRank, materializeErr
 }
 

@@ -224,6 +224,8 @@ wake() {
   esac
   printf idle > "$wk_dir/tempo"
   if [ -s "$wk_dir/extra" ]; then printf working > "$wk_dir/state"; else printf done > "$wk_dir/state"; fi
+  wk_rs=$(knob WAKE_RESPAWN)
+  if [ -n "$wk_rs" ]; then printf '%s' "$wk_rs" > "$wk_dir/respawn"; fi
   write_job "$wk_short"
   printf 'backgrounded · %s\n' "$wk_short"
 }

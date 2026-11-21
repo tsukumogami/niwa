@@ -640,7 +640,18 @@ instance's lock, it:
    instance, with no other argument, so Claude Code re-applies the saved
    options and continues the session under the same id;
 5. checks the listing (every 500 ms, for up to 20 seconds) until the same
-   session is running, and removes a copy the wake started instead.
+   session is running, and removes a copy the wake started instead;
+6. reads the options Claude Code saved for the woken session and checks them
+   against the launch record again, as in step 2.
+
+The last check exists because Claude Code writes the model a session resolved
+at startup into that session's own saved options. A wake that re-applies the
+saved `--model` keeps the dispatched model, but a session that comes back
+without it runs on the machine's default model, which may not be the one it
+was dispatched with. When the saved options differ after the wake, retask
+stops the woken session again (it keeps it; it never removes the worker's own
+session) and refuses with `woke-with-drift`, naming the flag but never its
+value.
 
 It writes nothing: the session mapping, the launch record, the short id, the
 keep-alive self-wake and the remote-control setting stay attached to the
@@ -651,6 +662,30 @@ id.
 A busy worker is refused, not queued: send the follow-up again once its turn
 ends. Retask can't see a `claude attach` viewer that is attached but silent,
 and stops the worker under it like any other live idle worker.
+
+#### Restarting a worker stuck mid-turn
+
+A worker whose turn never ends, for example one blocked inside a shell
+command that doesn't return, is always busy, so plain retask can't restart
+it. `niwa retask --interrupt <target> <prompt>` takes it anyway: after the
+same build, saved-options and policy checks, it stops the running turn with
+`claude stop <short id>`, then settles, wakes, verifies and checks the woken
+session's options exactly as it does for an idle worker. The worker comes
+back under the same session id, so its session mapping, authority binding
+and short id still reach it.
+
+Whatever the stopped turn was doing is cut off, so the prompt should tell the
+worker what was interrupted. `--interrupt` changes nothing else: a worker
+waiting for an answer is still refused with `awaiting-input`, and a worker
+that reads as busy but has no live process refuses with `state-unknown`.
+
+Prefer `--interrupt` to stopping and resuming the worker by hand. A
+`claude --bg --resume` issued before the stop has settled, or with flags of
+its own, starts a copy under a new session id. That copy keeps only the flags
+on its resume command line, so the dispatched name, settings and permission
+mode are gone, and with no `--model` it runs on the machine's default model.
+Retask waits for the stop to settle, wakes with no flags, removes a copy if
+one starts anyway, and checks the model afterwards.
 
 Every refusal names one state word, right after the target:
 `niwa: error: cannot retask "<target>": <state>: ...`. The words are stable,
@@ -667,7 +702,7 @@ so a script can act on them.
 | `job-entry-gone` | Claude Code no longer lists the session. | `niwa resume <target> <prompt>`. |
 | `state-unknown` | The listing and the job state don't agree, or don't read as a state retask acts on. | Check `claude agents`. |
 | `awaiting-input` | The worker is waiting for an answer. | `claude attach <short id>`. |
-| `busy` | The worker is in the middle of a turn. | Retry once it's idle. |
+| `busy` | The worker is in the middle of a turn. | Retry once it's idle, or, when the turn is stuck, `niwa retask --interrupt <target> <prompt>`. |
 | `policy-tightened` | The recorded permission mode is looser than the one current policy gives a new dispatch. | Change the policy back, or dispatch again. |
 | `options-drift` | The options Claude Code saved for the job differ from the launch record; the error names the flag, never its value. | Dispatch again. |
 | `stray-session` | Another session is rooted in the instance; retask leaves it alone. | Stop or remove that session yourself. |
@@ -679,13 +714,16 @@ so a script can act on them.
 | `copy-started` | Claude Code started a copy instead of continuing the session; retask removed the copy. | Retry, or use the escape below. |
 | `copy-left` | A copy started and retask couldn't remove it; the error prints the `claude stop` and `claude rm` lines that do. | Run them, then retry. |
 | `wake-unconfirmed` | The wake ran but the listing never showed the same session running. | Check `niwa list` and `claude logs <short id>`. |
+| `woke-with-drift` | The wake continued the same session, but the options Claude Code saved for it afterwards differ from the launch record (the model, most often); retask stopped it again. | Dispatch again. |
 
-After `stop-failed`, `settle-timeout`, `copy-started` and `copy-left` the
-worker may have been left stopped; it stays resumable with another
-`niwa retask`, and a keep-alive worker's self-wake is silent until the next
-wake. After `copy-started`, `copy-left` and `wake-unconfirmed` the prompt may
-already have been acted on: check `niwa list` and `claude logs <short id>`
-before sending it again.
+After `stop-failed`, `settle-timeout`, `copy-started`, `copy-left` and
+`woke-with-drift` the worker may have been left stopped; it stays resumable
+with another `niwa retask` (after `woke-with-drift` the saved options no
+longer match the record, so retask refuses it with `options-drift`), and a
+keep-alive worker's self-wake is silent until the next wake. After
+`copy-started`, `copy-left`, `wake-unconfirmed` and `woke-with-drift` the
+prompt may already have been acted on: check `niwa list` and
+`claude logs <short id>` before sending it again.
 
 Retask removes a copy only when its ids pass niwa's checks, a fresh listing
 taken just before the removal still lists it, its working directory is inside
