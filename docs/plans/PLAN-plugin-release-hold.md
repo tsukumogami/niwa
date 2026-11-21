@@ -458,7 +458,90 @@ with and without a kept instance. Then
 
 ### Step 6: share_plugin_releases = false gives a workspace's new instances their own full copy
 
-With `share_plugin_releases = false` under `[workspace]` a create writes a full per-instance tree while another workspace on the host still links and the workspace's already linked instances keep loading skills and being repaired, and a moving ref gives file-for-file the same tree (`diff -r`) with the store on and off.
+**Goal**: A workspace whose config sets `share_plugin_releases = false` under
+`[workspace]` gets a full per-instance tree on each new create, as niwa did
+before the store, while other workspaces on the host keep sharing and the
+workspace's instances that already link into the store keep loading their
+skills and keep being repaired. Steps 1 to 5 left every store path keyed on
+one test: `pluginStoreFor` in `internal/workspace/pluginskills.go` returns the
+store when the developer's home is known and the instance's parent is a
+workspace root. Four callers ask it. `ensureMarketplaceContent` places a release and
+links the instance to it. `keepMarketplaceLink` Ensures an existing link.
+`repairPluginStore` restores missing releases for every instance on disk.
+`sweepPluginStore`, called from `runPipeline` after the root skills are
+delivered (`internal/workspace/apply.go`, after Step 6.2b), deletes the
+releases nothing links to. Nothing reads a setting yet:
+`config.WorkspaceMeta` has no `share_plugin_releases` field.
+
+This step adds `WorkspaceMeta.SharePluginReleases *bool` (TOML
+`share_plugin_releases`, omitempty) and its accessor
+`SharePluginReleasesEnabled()`: absent or `true` is on, `false` is off. It
+carries the setting to the plugin pass through a field on
+`PluginSkillsInputs`, set in `runPipeline` from the effective config. The
+setting governs placement and linking only, as the design chose. With it off,
+`ensureMarketplaceContent` skips the store and calls `fetchMarketplaceIntoInstance` at
+the same ref it would have used before the store existed. It does not resolve
+the ref to a commit first, so a moving ref is fetched as it was before this
+milestone. An instance's existing link into the store is still kept and
+Ensured by `keepMarketplaceLink`, and `repairPluginStore` and
+`sweepPluginStore` still run, so instances already linked keep being repaired
+until they're removed and are never converted to a copy.
+
+The off switch therefore goes on the placement call site, not in
+`pluginStoreFor`. Making `pluginStoreFor` return `!ok` would also turn off
+repair, the sweep and the kept-link path for the workspace, which the design
+and the PRD rule out: an off switch must not leave already linked instances
+unrepaired. The sweep keeps running under the switch. A release that only an
+instance created before the switch links to stays held while that instance
+exists, and the newest release of each source is still kept.
+
+The overlay format has no `[workspace]` table, so the setting is read from the
+workspace's own config only. No config reference page lists the
+`[workspace]` keys today; step 7's section in `docs/guides/repo-marketplaces.md`
+describes the setting.
+
+**Acceptance Criteria**:
+
+- [ ] With `share_plugin_releases = false` under `[workspace]` in a workspace
+  root's config, `niwa create` writes each github marketplace as a real
+  directory tree at `.niwa/marketplaces/<name>` (not a symlink), makes the
+  tarball requests a create made before the store, and places nothing new
+  under `~/.niwa/w-<key>/plugins/`. Its skills load at the instance root, in a
+  repo and in a session worktree.
+- [ ] On the same host, a second workspace with no setting creates an instance
+  that links to its own held releases and makes no tarball request for a
+  release it already holds.
+- [ ] An instance of the first workspace created before the setting was
+  turned off still links into the store, still loads its skills, and has a
+  release that was deleted by hand restored by the next `niwa apply` with the
+  setting off.
+- [ ] With the setting off, the sweep still runs: an older release no
+  instance links to is deleted by the next provisioning command, and a
+  release linked only by an instance created before the switch survives it.
+- [ ] For a marketplace tracked at a moving ref, an instance created with the
+  store on and one created with the store off, both while the ref resolves to
+  the same commit, hold file-for-file identical plugin content (`diff -r` over
+  the resolved trees).
+- [ ] Setting the key back to `true`, or removing it, makes the next create
+  link into the store again. An instance holding its own copy is not
+  converted to a link by `niwa apply`.
+- [ ] Unit tests cover `SharePluginReleasesEnabled()` for absent, `true` and
+  `false`, the TOML round trip (`false` written, absent omitted), and the
+  plugin pass choosing the per-instance fetch for a new marketplace while it
+  still Ensures an existing release link, with the setting off.
+
+**Check**: Run `make build-test`, then `make test-functional-plugin-release-hold`.
+The new scenarios must pass: a create with the setting off holding its own
+trees while a second workspace links; an instance created before the switch
+keeping its link, its skills and its repair; the sweep running with the
+setting off; and the moving-ref `diff -r` comparison with the store on and
+off. Then
+`go test -race ./internal/config/... ./internal/pluginstore/...
+./internal/workspace/...` must exit 0.
+
+**Dependencies**: Step 5
+
+**Files**: `internal/config/config.go`, `internal/config/config_test.go`, `internal/workspace/pluginskills.go`, `internal/workspace/pluginskills_test.go`, `internal/workspace/apply.go`, `test/functional/features/plugin-release-hold.feature`, `test/functional/pluginstore_steps_test.go`
 
 ### Step 7: an unusable store falls back to a per-instance fetch and says so
 
