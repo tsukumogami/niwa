@@ -1,0 +1,31 @@
+{
+  "topic": "niwa-config-skill",
+  "decisions": [
+    {
+      "id": 1,
+      "question": "What mechanism delivers the workspace.toml config-editing skill into rank-1 single-repo workspaces, covering both new and already-adopted repos?",
+      "status": "complete",
+      "complexity": "critical",
+      "chosen": "Extend the embedded-plugin auto-install gate to rank-1",
+      "report_file": "wip/design_niwa-config-skill_decision_1_report.md"
+    },
+    {
+      "id": 2,
+      "question": "What should the skill's content be sourced from so its schema/edit guidance doesn't drift the way DESIGN-workspace-config.md did?",
+      "status": "complete",
+      "complexity": "standard",
+      "chosen": "Build-time-generated reference, embedded via go:embed, CI-freshness-enforced (restarted from Phase 6 security-verification finding)",
+      "report_file": "wip/design_niwa-config-skill_decision_2_report.md"
+    },
+    {
+      "id": 3,
+      "question": "Should niwa init --bootstrap's scaffold template change to seed the chosen mechanism for brand-new adopters?",
+      "status": "complete",
+      "complexity": "standard",
+      "chosen": "No scaffold-template change; wire configurePluginAutoInstall into defaultRunBootstrap (internal/cli/init.go)",
+      "report_file": "wip/design_niwa-config-skill_decision_3_report.md"
+    }
+  ],
+  "cross_validation": "passed",
+  "round": 0
+}
