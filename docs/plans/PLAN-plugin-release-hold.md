@@ -545,7 +545,100 @@ off. Then
 
 ### Step 7: an unusable store falls back to a per-instance fetch and says so
 
-An unreadable, unwritable, uncreatable or unplaceable store gives the create its own copy and a notice naming the store's path and the condition in the terminal (a narrowed mode on an existing `plugins/` is that condition and is never reset, and `unwritable` is a write probe of `plugins/` itself), in `niwa dispatch` output and in the SessionStart hook's context, three creates on an unwritable store each fall back, an unheld release whose source is down is reported with nothing held, and `docs/guides/repo-marketplaces.md` describes the store, the setting, the notice and the self-restore.
+**Goal**: A create whose host plugin store can't be used still gets its
+skills, from its own copy fetched as niwa did before the store, and the
+developer is told which store and why: in the terminal for `niwa create` and
+`niwa apply`, in `niwa dispatch`'s output and in the SessionStart hook's
+context. Steps 1 to 6 left the fallback silent. `ensureMarketplaceContent` in
+`internal/workspace/pluginskills.go` calls `store.Ensure`, and when the
+condition it returns isn't `pluginstore.CondNone` it fetches the release into
+the instance at the resolved commit, so the instance holds what the store
+would have, but it records nothing. `pluginstore.Ensure` already reports the
+four conditions the design names: `CondUnreadable`, `CondUnwritable`,
+`CondUncreatable` and `CondNotPlaced` (the store can't take a release),
+decided by `Store.prepare`, the write probe `probeWritable` on `plugins/`
+itself, and `place`. The run's notices already reach all three surfaces:
+`repairPluginStore` records through the `fallbacknotice.Collector` that
+`Applier.Notices` carries, and its `RenderText` and `RenderContext` give the
+terminal and dispatch's stderr, and the hook's context.
+
+This step records each fallback in that collector, with the marketplace's
+name, the store's path (`pluginstore.Dir`) and the condition, and renders it
+on all three surfaces. A run that falls back for several marketplaces on the
+same store gives one notice naming the store, its condition and each
+marketplace. A narrowed mode on an existing `plugins/` is the unwritable or
+unreadable condition and is never reset: niwa does not chmod a directory it
+didn't just create. `unwritable` is the write probe of `plugins/` itself, so a
+writable parent doesn't hide it.
+
+Two gaps that steps 4 to 6 left in the store's errors are closed here,
+because the fallback reads them. `Ensure` (`internal/pluginstore/place.go`,
+where it calls `s.Verify(r)`) and `Repair` (`internal/pluginstore/repair.go`,
+the same call) drop `Verify`'s error, so a held release whose tree can't be
+walked is treated as tampered and fetched again, when the store is in fact
+unreadable. With this step a `Verify` error caused by the store, not by the
+release's own content, comes back as `CondUnreadable`, and the release is
+neither refetched nor reported as tampered. `Sweep`
+(`internal/pluginstore/sweep.go`) returns plain errors with no split between
+a store it can't use and a scan of the instances that failed. This step adds
+that split, so `sweepPluginStore` can name the store's condition in its
+stopped notice.
+
+A release that isn't held and whose source can't be reached when the create
+resolves its ref fails as a fetch does today: the create reports the source
+and the error, and nothing is placed in the store or the instance for it.
+
+The section in `docs/guides/repo-marketplaces.md` describes, for github
+marketplace sources, the store at `~/.niwa/w-<key>/plugins/`, the symlink an
+instance holds, `[workspace] share_plugin_releases = false` and what it does
+and doesn't turn off (step 6), the fallback notice and its four conditions,
+and that a missing, unmarked or changed release is restored by the next
+provisioning command with nobody acting. It offers no repair command.
+
+**Acceptance Criteria**:
+
+- [ ] For each of the four conditions, a `niwa create` in the functional
+  suite (a `plugins/` that can't be read, one that can't be written, a
+  `~/.niwa` where `w-<key>/plugins/` can't be created, and a store that can't
+  take a release) writes the marketplace as a real directory tree at
+  `.niwa/marketplaces/<name>`, its skills load at the instance root, and its
+  output names the store's path and that condition.
+- [ ] A `plugins/` whose mode was narrowed by hand keeps that mode after the
+  create: niwa doesn't reset it.
+- [ ] A `plugins/` that can't be written while its parent can is reported as
+  unwritable.
+- [ ] `niwa dispatch` on an unusable store prints the same notice, and the
+  SessionStart hook's context carries it.
+- [ ] Three creates in a burst against an unwritable store each fall back to
+  their own copy, each reports the notice, and none leaves anything under
+  `plugins/`.
+- [ ] A create of a release that isn't held, while its source is down, reports
+  the source and the failure, and nothing is held for it in the store.
+- [ ] A held release whose tree can't be walked because the store can't be
+  read is reported as the store being unreadable by `Ensure` and by `Repair`:
+  it isn't fetched again and isn't reported as tampered. A release whose seal
+  doesn't match is still refetched and reported as tampered, as in step 4.
+- [ ] `Sweep`'s error says whether the store couldn't be used or the scan of
+  the instances failed, and the sweep's stopped notice names the store's
+  condition in the first case.
+- [ ] `docs/guides/repo-marketplaces.md` has a section covering the store, the
+  instance's link, `share_plugin_releases`, the fallback notice with its four
+  conditions, and the self-restore, and it names no repair command.
+- [ ] Unit tests cover the collector's fallback record and its rendering in
+  text and in hook context (one notice per store, every marketplace named),
+  `Ensure` and `Repair` on a `Verify` error, and `Sweep`'s split error.
+
+**Check**: Run `make build-test`, then `make test-functional-plugin-release-hold`.
+The new scenarios must pass: a create on each of the four conditions with the
+notice; the narrowed mode left as it was; dispatch's output and the hook's
+context; the burst of three on an unwritable store; and the unheld release
+with its source down. The chmod scenarios run as a non-root user. Then
+`go test -race ./internal/fallbacknotice/... ./internal/pluginstore/...
+./internal/workspace/...` must exit 0.
+
+**Dependencies**: Step 6
+
+**Files**: `internal/workspace/pluginskills.go`, `internal/workspace/pluginskills_test.go`, `internal/fallbacknotice/collector.go`, `internal/fallbacknotice/render.go`, `internal/fallbacknotice/collector_test.go`, `internal/fallbacknotice/render_test.go`, `internal/pluginstore/place.go`, `internal/pluginstore/place_test.go`, `internal/pluginstore/repair.go`, `internal/pluginstore/repair_test.go`, `internal/pluginstore/sweep.go`, `internal/pluginstore/sweep_test.go`, `test/functional/features/plugin-release-hold.feature`, `test/functional/pluginstore_steps_test.go`, `docs/guides/repo-marketplaces.md`
 
 ## Implementation Sequence
 
