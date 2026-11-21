@@ -731,3 +731,274 @@ Feature: niwa holds each plugin marketplace release once per host
     Then the exit code is 0
     And the plugin store of the removed workspace root is kept, and the output names its path
     And every marketplace's skill resolves in the kept instance "ws" at its root and in repo "app"
+
+  # share_plugin_releases = false under [workspace] gives a create its own
+  # copy of each marketplace, fetched by tag as a create did before the store,
+  # and nothing is held for that root. Another workspace on the same host,
+  # with no setting, still links and downloads nothing it already holds.
+  @critical
+  Scenario: With share_plugin_releases off a create holds its own copy while another workspace links
+    Given a config repo "ws-off" exists with body:
+      """
+      [workspace]
+      name = "ws-off"
+      share_plugin_releases = false
+
+      [groups.tools]
+
+      [claude]
+      plugins = ["skills-kit@skills", "tools-kit@tools"]
+
+      [[claude.marketplaces]]
+      source = "acme/skills"
+
+      [[claude.marketplaces]]
+      source = "beta/tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run niwa init "one" from config repo "ws-off"
+    Then the exit code is 0
+    When I run niwa init "two" from config repo "ws"
+    Then the exit code is 0
+    When the GitHub fake log is cleared
+    And I run "niwa create one"
+    Then the exit code is 0
+    And the marketplaces of instance "one" of workspace root "one" are real directories holding their manifests
+    And the GitHub fake served one tarball request for each marketplace, at the tag of its newest release, and nothing else for them
+    And workspace root "one" has no plugin store
+    And every marketplace's skill resolves in instance "one" of workspace root "one" at its root, in repo "app" and in a session worktree
+    And workspace root "one" has no plugin store
+    When the GitHub fake log is cleared
+    And I run "niwa create two"
+    Then the exit code is 0
+    When the GitHub fake log is cleared
+    And I run "niwa create two"
+    Then the exit code is 0
+    And the GitHub fake served no tarball request
+    And the marketplaces of instance "two-2" are only links into the plugin store of workspace root "two"
+    And the workspace config of root "two" carries no "share_plugin_releases" key
+
+  # An instance linked before the setting was turned off keeps its link and
+  # its skills, and a release of it deleted by hand is restored by the next
+  # apply with the setting off. The instance made after the switch keeps its
+  # own copy through that apply.
+  @critical
+  Scenario: An instance linked before the switch keeps its link, its skills and its repair
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the config repo "ws" is force-pushed to:
+      """
+      [workspace]
+      name = "ws"
+      share_plugin_releases = false
+
+      [groups.tools]
+
+      [claude]
+      plugins = ["skills-kit@skills", "tools-kit@tools"]
+
+      [[claude.marketplaces]]
+      source = "acme/skills"
+
+      [[claude.marketplaces]]
+      source = "beta/tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run "niwa create ws"
+    Then the exit code is 0
+    And the marketplaces of instance "ws-2" of workspace root "." are real directories holding their manifests
+    And the marketplaces of instance "ws" are only links into the plugin store of workspace root "."
+    Given the release "v1.0.0" of "acme/skills" is deleted from the plugin store of workspace root "."
+    When the GitHub fake log is cleared
+    And I run "niwa apply" in instance "ws-2"
+    Then the exit code is 0
+    And the GitHub fake served 1 tarball request for the release "v1.0.0" of "acme/skills"
+    And the GitHub fake served 1 tarball request in all
+    And the release "v1.0.0" of "acme/skills" is held again in the plugin store of workspace root "."
+    And the output reports the release "v1.0.0" of "acme/skills" restored for instance "ws"
+    And instance "ws" links "acme/skills" to its release "v1.0.0"
+    And every marketplace's skill resolves in instance "ws" at its root, in repo "app" and in a session worktree
+    And the marketplace "skills" of instance "ws-2" is the same real directory
+    And the marketplace "tools" of instance "ws-2" is the same real directory
+
+  # The sweep still runs with the setting off: an older release no instance
+  # links to is deleted by the next create, and a release only an instance
+  # made before the switch links to survives it, beside the newest.
+  @critical
+  Scenario: The sweep runs with the setting off
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the GitHub marketplace "acme/skills" publishes release "v1.1.0"
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the GitHub marketplace "acme/skills" publishes release "v1.2.0"
+    When I run "niwa create ws"
+    Then the exit code is 0
+    And the plugin store of workspace root "." holds only the releases "v1.0.0,v1.1.0,v1.2.0" of "acme/skills"
+    Given the config repo "ws" is force-pushed to:
+      """
+      [workspace]
+      name = "ws"
+      share_plugin_releases = false
+
+      [groups.tools]
+
+      [claude]
+      plugins = ["skills-kit@skills", "tools-kit@tools"]
+
+      [[claude.marketplaces]]
+      source = "acme/skills"
+
+      [[claude.marketplaces]]
+      source = "beta/tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    And instance "ws-2" is removed from disk
+    When I run "niwa create ws"
+    Then the exit code is 0
+    And the plugin store of workspace root "." holds only the releases "v1.0.0,v1.2.0" of "acme/skills"
+    And instance "ws" links "acme/skills" to its release "v1.0.0"
+
+  # A marketplace tracked at a moving ref gives the same content to an
+  # instance made with the store on and to one made with it off, while the
+  # ref names the same commit. With the store off the ref is fetched as it
+  # is, with no commit resolve first.
+  @critical
+  Scenario: A moving ref gives the same content with the store on and off
+    Given a config repo "moving" exists with body:
+      """
+      [workspace]
+      name = "ws"
+
+      [groups.tools]
+
+      [claude]
+      plugins = ["skills-kit@skills", "tools-kit@tools"]
+
+      [[claude.marketplaces]]
+      source = "acme/skills"
+      track = "main"
+
+      [[claude.marketplaces]]
+      source = "beta/tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    And the GitHub marketplace "acme/skills"'s main branch is at release "v1.0.0"
+    When I run niwa init from config repo "moving"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    And the marketplaces of instance "ws" are only links into the plugin store of workspace root "."
+    Given the config repo "moving" is force-pushed to:
+      """
+      [workspace]
+      name = "ws"
+      share_plugin_releases = false
+
+      [groups.tools]
+
+      [claude]
+      plugins = ["skills-kit@skills", "tools-kit@tools"]
+
+      [[claude.marketplaces]]
+      source = "acme/skills"
+      track = "main"
+
+      [[claude.marketplaces]]
+      source = "beta/tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When the GitHub fake log is cleared
+    And I run "niwa create ws"
+    Then the exit code is 0
+    And the marketplaces of instance "ws-2" of workspace root "." are real directories holding their manifests
+    And the GitHub fake served one tarball request for "acme/skills" at "HEAD" and no commit-resolve request for it
+    And the marketplace "skills" of instance "ws" and of instance "ws-2" hold the same tree
+
+  # Removing the key, or setting it back to true, links the next create into
+  # the store again, and an instance holding its own copy is not converted to
+  # a link by an apply.
+  @critical
+  Scenario Outline: Turning sharing back on links new creates and converts nothing
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the config repo "ws" is force-pushed to:
+      """
+      [workspace]
+      name = "ws"
+      share_plugin_releases = false
+
+      [groups.tools]
+
+      [claude]
+      plugins = ["skills-kit@skills", "tools-kit@tools"]
+
+      [[claude.marketplaces]]
+      source = "acme/skills"
+
+      [[claude.marketplaces]]
+      source = "beta/tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When I run "niwa create ws"
+    Then the exit code is 0
+    And the marketplaces of instance "ws-2" of workspace root "." are real directories holding their manifests
+    Given the config repo "ws" is force-pushed to:
+      """
+      [workspace]
+      name = "ws"
+      <setting>
+
+      [groups.tools]
+
+      [claude]
+      plugins = ["skills-kit@skills", "tools-kit@tools"]
+
+      [[claude.marketplaces]]
+      source = "acme/skills"
+
+      [[claude.marketplaces]]
+      source = "beta/tools"
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
+    When the GitHub fake log is cleared
+    And I run "niwa create ws"
+    Then the exit code is 0
+    And the GitHub fake served no tarball request
+    And the marketplaces of instance "ws-3" are only links into the plugin store of workspace root "."
+    When I run "niwa apply" in instance "ws-2"
+    Then the exit code is 0
+    And the marketplace "skills" of instance "ws-2" is the same real directory
+    And the marketplace "tools" of instance "ws-2" is the same real directory
+
+    Examples:
+      | setting                      |
+      |                              |
+      | share_plugin_releases = true |

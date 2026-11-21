@@ -2032,6 +2032,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		RepoIndex:    marketplaceIndex,
 		Fetcher:      fetcher,
 		Home:         a.DeveloperHome,
+		SharingOff:   !effectiveCfg.Workspace.SharePluginReleasesEnabled(),
 	}
 	// Repair's scan warning is printed by the sweep below; a pass that
 	// returns before reaching it prints the warning here.
@@ -2084,7 +2085,10 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 	// With this instance linked, the host plugin store's sweep deletes the
 	// held releases no instance on disk links to, except the newest of each
-	// source, once per command per store.
+	// source, once per command per store. It runs with share_plugin_releases
+	// set to false as well: the setting stops new links only, and the
+	// releases that instances linked before it are kept by the sweep's own
+	// link scan.
 	a.sweepPluginStore(ctx, pluginInputs, notices)
 
 	// Step 6.3: Generate the workspace's declared MCP servers and session

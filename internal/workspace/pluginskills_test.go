@@ -3,6 +3,7 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/fallbacknotice"
+	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/pluginstore"
 )
 
@@ -436,4 +438,174 @@ func TestARepairWarningPrintsWhenNoSweepFollows(t *testing.T) {
 			t.Fatalf("%d sweep notices, want one:\n%s", n, f.notices.RenderText())
 		}
 	})
+}
+
+// refRecordingFetcher is a fakeFetcher that records the owner, repo and ref
+// of every tarball request.
+type refRecordingFetcher struct {
+	*fakeFetcher
+	fetched []string
+}
+
+func (f *refRecordingFetcher) FetchTarball(ctx context.Context, owner, repo, ref, etag string) (io.ReadCloser, string, int, *github.RenameRedirect, error) {
+	f.fetched = append(f.fetched, owner+"/"+repo+"@"+ref)
+	return f.fakeFetcher.FetchTarball(ctx, owner, repo, ref, etag)
+}
+
+// kitTarball is a second marketplace, kit, declaring the plugin kitplug. Its
+// wrapper directory names the release commit (2222222...) because the store
+// checks that.
+func kitTarball(t *testing.T) []byte {
+	t.Helper()
+	return makeFakeTarball(t, map[string]string{
+		"beta-kit-2222222/.claude-plugin/marketplace.json":              `{"name":"kit","plugins":[{"name":"kitplug","source":"./plugins/kitplug"}]}`,
+		"beta-kit-2222222/plugins/kitplug/.claude-plugin/plugin.json":   `{"name":"kitplug"}`,
+		"beta-kit-2222222/plugins/kitplug/skills/build/SKILL.md":        "build body\n",
+		"beta-kit-2222222/plugins/kitplug/skills/build/references/a.md": "a\n",
+	})
+}
+
+// toolsTarballAt is marketplaceTarball with the wrapper acme-tools-1111111. The
+// wrapper names the commit because the store checks it.
+func toolsTarballAt(t *testing.T) []byte {
+	t.Helper()
+	return makeFakeTarball(t, map[string]string{
+		"acme-tools-1111111/.claude-plugin/marketplace.json":                  marketplaceManifest,
+		"acme-tools-1111111/plugins/shirabe/.claude-plugin/plugin.json":       `{"name":"shirabe"}`,
+		"acme-tools-1111111/plugins/shirabe/skills/review/SKILL.md":           "review body\n",
+		"acme-tools-1111111/plugins/shirabe/skills/review/references/note.md": "note\n",
+	})
+}
+
+// restoreWriteUnder makes every directory under dir writable again: the store seals release trees read-only, and this lets t.TempDir remove them.
+func restoreWriteUnder(dir string) {
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			_ = os.Chmod(path, 0o755)
+		}
+		return nil
+	})
+}
+
+// With share_plugin_releases off, a marketplace the instance does not hold yet
+// is fetched into the instance at its unresolved ref, and an existing link into
+// the store is still kept and Ensured against it.
+func TestSharingOffFetchesANewMarketplaceIntoTheInstanceAndKeepsALink(t *testing.T) {
+	const (
+		toolsCommit = "1111111111111111111111111111111111111111"
+		kitCommit   = "2222222222222222222222222222222222222222"
+	)
+
+	for _, sharingOff := range []bool{true, false} {
+		name := "sharing off"
+		if !sharingOff {
+			name = "sharing on"
+		}
+		t.Run(name, func(t *testing.T) {
+			home := homelessMachine(t)
+			t.Cleanup(func() { restoreWriteUnder(home) })
+			noStableRelease(t)
+			root := setupWorkspace(t, nil)
+			instance := filepath.Join(root, "one")
+			contentRoot := filepath.Join(instance, ".niwa", "marketplaces")
+			if err := os.MkdirAll(contentRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			marketplaces := config.MarketplaceConfigs{{Source: "acme/tools"}, {Source: "beta/kit"}}
+
+			// Place kit's release with sharing on and link the instance to
+			// it, then point the link at the same release under another
+			// home, so a relink by the run below shows.
+			setup := PluginSkillsInputs{
+				InstanceRoot: instance,
+				Marketplaces: marketplaces,
+				Fetcher:      &fakeFetcher{tarball: kitTarball(t)},
+				Home:         home,
+			}
+			store, ok := pluginStoreFor(setup)
+			if !ok {
+				t.Fatal("no plugin store for an instance under a workspace root")
+			}
+			kit, valid := pluginstore.NewRelease("beta", "kit", kitCommit, "HEAD", "")
+			if !valid {
+				t.Fatal("kit's release is not one the store can hold")
+			}
+			kitLink := filepath.Join(contentRoot, "kit")
+			if _, cond, err := store.Ensure(context.Background(), kit, kitLink, nil, nil); err != nil || cond != pluginstore.CondNone {
+				t.Fatalf("placing kit: cond %q, err %v", cond, err)
+			}
+			if err := os.Remove(kitLink); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(pluginstore.TreePath(t.TempDir(), root, kit), kitLink); err != nil {
+				t.Fatal(err)
+			}
+
+			fetcher := &refRecordingFetcher{fakeFetcher: &fakeFetcher{tarball: toolsTarballAt(t), commitOID: toolsCommit}}
+			trees, missing := ResolvePluginTrees(context.Background(), PluginSkillsInputs{
+				InstanceRoot: instance,
+				Plugins:      []string{"shirabe@tools", "kitplug@kit"},
+				Marketplaces: marketplaces,
+				Fetcher:      fetcher,
+				Home:         home,
+				SharingOff:   sharingOff,
+			})
+			if len(missing) != 0 {
+				t.Fatalf("missing = %v, want none", missing)
+			}
+			if len(trees) != 2 {
+				t.Fatalf("resolved %v, want two trees", trees)
+			}
+
+			tools := filepath.Join(contentRoot, "tools")
+			info, err := os.Lstat(tools)
+			if err != nil {
+				t.Fatalf("tools: %v", err)
+			}
+			acmeInStore := filepath.Join(pluginstore.Dir(home, root), pluginstore.Forge, "acme")
+			if sharingOff {
+				if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+					t.Fatalf("tools is %v, want a real directory", info.Mode())
+				}
+				if _, err := os.Stat(marketplaceManifestPath(tools)); err != nil {
+					t.Fatalf("tools holds no manifest: %v", err)
+				}
+				if want := []string{"acme/tools@HEAD"}; strings.Join(fetcher.fetched, ",") != strings.Join(want, ",") {
+					t.Fatalf("tarball requests = %v, want %v", fetcher.fetched, want)
+				}
+				if fetcher.headCalls != 0 {
+					t.Fatalf("resolved a commit %d times, want none", fetcher.headCalls)
+				}
+				if _, err := os.Lstat(acmeInStore); !os.IsNotExist(err) {
+					t.Fatalf("the store holds something for acme/tools (lstat err %v)", err)
+				}
+			} else {
+				if info.Mode()&os.ModeSymlink == 0 {
+					t.Fatalf("tools is %v, want a link into the store", info.Mode())
+				}
+				target, err := os.Readlink(tools)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.HasPrefix(target, acmeInStore+string(filepath.Separator)) {
+					t.Fatalf("tools links to %s, want a release under %s", target, acmeInStore)
+				}
+			}
+
+			kitInfo, err := os.Lstat(kitLink)
+			if err != nil {
+				t.Fatalf("kit: %v", err)
+			}
+			if kitInfo.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("kit is %v, want it still a link", kitInfo.Mode())
+			}
+			target, err := os.Readlink(kitLink)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := pluginstore.TreePath(home, root, kit); target != want {
+				t.Fatalf("kit links to %s, want %s (Ensured against this store)", target, want)
+			}
+		})
+	}
 }

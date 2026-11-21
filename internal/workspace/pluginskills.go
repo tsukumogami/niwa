@@ -111,6 +111,12 @@ type PluginSkillsInputs struct {
 	// instance whose parent is not a workspace root.
 	Home string
 
+	// SharingOff is set when the workspace sets share_plugin_releases =
+	// false: a marketplace with no entry is fetched into the instance at its
+	// ref, while an existing link is still kept and Ensured, and repair and
+	// the sweep still run. The zero value is sharing on.
+	SharingOff bool
+
 	// Unrestored maps a release id the store's repair pass refused or could
 	// not restore in this command to the reason. A link of this instance to
 	// one is reported with that reason rather than tried a second time in
@@ -226,9 +232,10 @@ func marketplaceRoots(ctx context.Context, in PluginSkillsInputs) (map[string]st
 // before the host store, or one that fell back to its own copy) is used as it
 // is. A link into the host plugin store is kept on the release it names,
 // which Ensure checks is still held. Only when there is no entry is the ref
-// picked and, with the store in use, resolved to a commit and held once on the
-// host, the instance getting a link to it; otherwise the content is fetched
-// into the instance as before the store existed.
+// picked and, with the store in use and sharing on, resolved to a commit and
+// held once on the host, the instance getting a link to it; otherwise the
+// content is fetched into the instance at the unresolved ref, as before the
+// store existed.
 //
 // Re-fetching on every apply would put a network round trip in front of every
 // preparation and would swap the tree under a running session for no benefit:
@@ -273,7 +280,7 @@ func ensureMarketplaceContent(ctx context.Context, in PluginSkillsInputs, name s
 	}
 
 	ref := marketplaceContentRef(mc)
-	if store, ok := pluginStoreFor(in); ok {
+	if store, ok := pluginStoreFor(in); ok && !in.SharingOff {
 		commit, err := resolveMarketplaceCommit(ctx, in.Fetcher, owner, repo, ref)
 		if err != nil {
 			return "", fmt.Errorf("resolving marketplace %q at %s: %w", mc.Source, ref, err)
@@ -690,6 +697,13 @@ func reconcileSkillsDir(spec agentplan.SkillsReconcileSpec) ([]string, error) {
 // and the instance's parent is a workspace root that holds its config: a
 // single-instance layout keeps its marketplaces in the instance and writes
 // nothing under ~/.niwa for them.
+//
+// share_plugin_releases does not change its answer. The setting governs
+// placing new marketplaces only, which ensureMarketplaceContent decides on
+// its own; the kept-link Ensure, repair and the sweep also ask this function,
+// and an instance linked before the setting was turned off has to keep being
+// Ensured and repaired, and its releases kept from the sweep, while it
+// exists.
 func pluginStoreFor(in PluginSkillsInputs) (pluginstore.Store, bool) {
 	if in.Home == "" || in.InstanceRoot == "" {
 		return pluginstore.Store{}, false

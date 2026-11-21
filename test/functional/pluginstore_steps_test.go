@@ -33,6 +33,8 @@ import (
 type pluginRelease struct {
 	tag, commit string
 	commitTime  time.Time
+	entries     map[string]string // the tarball's entries, as served
+	executables map[string]bool   // the entries served with mode 0755
 }
 
 // pluginMarketplace is one published github marketplace.
@@ -111,6 +113,13 @@ func registerPluginStoreSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^no marketplace has a release directory or a held\.json in the plugin store of workspace root "([^"]*)"$`, noMarketplaceReleaseDirectory)
 	ctx.Step(`^the config of workspace root "([^"]*)" no longer tracks its source$`, theConfigNoLongerTracksItsSource)
 	ctx.Step(`^the plugin store of workspace root "([^"]*)" holds no staging entry for any marketplace$`, noStagingEntryForAnyMarketplace)
+	ctx.Step(`^the marketplaces of instance "([^"]*)" of workspace root "([^"]*)" are real directories holding their manifests$`, marketplacesAreRealDirectories)
+	ctx.Step(`^the GitHub fake served one tarball request for each marketplace, at the tag of its newest release, and nothing else for them$`, oneTarballRequestAtTagPerMarketplaceOnly)
+	ctx.Step(`^workspace root "([^"]*)" has no plugin store$`, workspaceRootHasNoPluginStore)
+	ctx.Step(`^the GitHub marketplace "([^"]*)"'s main branch is at release "([^"]*)"$`, theMainBranchIsAtRelease)
+	ctx.Step(`^the GitHub fake served one tarball request for "([^"]*)" at "([^"]*)" and no commit-resolve request for it$`, oneTarballRequestAtRefAndNoResolve)
+	ctx.Step(`^the marketplace "([^"]*)" of instance "([^"]*)" and of instance "([^"]*)" hold the same tree$`, theMarketplacesHoldTheSameTree)
+	ctx.Step(`^every marketplace's skill resolves in instance "([^"]*)" of workspace root "([^"]*)" at its root, in repo "([^"]*)" and in a session worktree$`, everySkillResolvesUnderRoot)
 	registerPluginRepairSteps(ctx)
 	registerPluginSweepSteps(ctx)
 }
@@ -224,7 +233,7 @@ func theGitHubMarketplacePublishesRelease(ctx context.Context, slug, tag string)
 	// ref, as a layout without a workspace root still does. A store fetch by
 	// tag shows in the log, which the request steps check by exact path.
 	s.githubFake.SetTarballAt(owner, repo, tag, entries, commitTime, executables)
-	mk.releases = append(mk.releases, pluginRelease{tag: tag, commit: commit, commitTime: commitTime})
+	mk.releases = append(mk.releases, pluginRelease{tag: tag, commit: commit, commitTime: commitTime, entries: entries, executables: executables})
 	return ctx, nil
 }
 
@@ -1170,4 +1179,167 @@ func theConfigNoLongerTracksItsSource(ctx context.Context, root string) (context
 		return ctx, fmt.Errorf("removing %s: %w", marker, err)
 	}
 	return ctx, nil
+}
+
+// marketplacesAreRealDirectories checks that each published marketplace of
+// the instance is a real directory, not a link, holding its manifest and its
+// skill, and records each one's digest for the "is the same real directory"
+// step.
+func marketplacesAreRealDirectories(ctx context.Context, instance, root string) error {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(pluginRootDir(s, root), instance, ".niwa", "marketplaces")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	if len(entries) != len(ps.order) {
+		return fmt.Errorf("%s holds %d entries, want %d", dir, len(entries), len(ps.order))
+	}
+	for _, slug := range ps.order {
+		mk := ps.marketplaces[slug]
+		p := filepath.Join(dir, mk.repo)
+		info, err := os.Lstat(p)
+		if err != nil {
+			return fmt.Errorf("%s: %w", p, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("%s is %v, want a real directory", p, info.Mode())
+		}
+		manifest := filepath.Join(p, ".claude-plugin", "marketplace.json")
+		if info, err := os.Lstat(manifest); err != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("%s: want a regular file (%v)", manifest, err)
+		}
+		skill := filepath.Join(p, "plugins", "kit", "skills", mk.repo+"-skill", "SKILL.md")
+		data, err := os.ReadFile(skill)
+		if err != nil {
+			return fmt.Errorf("%s: %w", skill, err)
+		}
+		if !strings.Contains(string(data), "SENTINEL-"+mk.owner+"-"+mk.repo+"-") {
+			return fmt.Errorf("%s holds %q, not %s's skill", skill, string(data), slug)
+		}
+		digest, err := treeDigest(p)
+		if err != nil {
+			return err
+		}
+		ps.snapshots[p] = digest
+	}
+	return nil
+}
+
+// oneTarballRequestAtTagPerMarketplaceOnly checks what a create made before
+// the store asks of GitHub: one tarball request per marketplace, by the tag of
+// its newest release, and no other request for that source.
+func oneTarballRequestAtTagPerMarketplaceOnly(ctx context.Context) error {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	for _, slug := range ps.order {
+		mk := ps.marketplaces[slug]
+		newest := mk.releases[len(mk.releases)-1]
+		want := "/repos/" + mk.owner + "/" + mk.repo + "/tarball/" + newest.tag
+		rs := requestsFor(s, mk.owner, mk.repo)
+		if len(rs) != 1 || rs[0].Method != "GET" || rs[0].Path != want {
+			return fmt.Errorf("%s: requests\n%s\nwant exactly GET %s", slug, describeRequests(rs), want)
+		}
+	}
+	return nil
+}
+
+func workspaceRootHasNoPluginStore(ctx context.Context, root string) error {
+	s, _, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	store, err := pluginStoreDirOf(s, root)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(store); !os.IsNotExist(err) {
+		return fmt.Errorf("%s exists (%v), want no plugin store", store, err)
+	}
+	return nil
+}
+
+// theMainBranchIsAtRelease points the fake's HEAD of a marketplace at one of
+// its releases: HEAD resolves to the release's commit and its tarball is the
+// release's, so a track on main resolves and fetches that release.
+func theMainBranchIsAtRelease(ctx context.Context, slug, tag string) (context.Context, error) {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	mk := ps.marketplaces[slug]
+	if mk == nil {
+		return ctx, fmt.Errorf("no published marketplace %s", slug)
+	}
+	for _, rel := range mk.releases {
+		if rel.tag == tag {
+			s.githubFake.SetCommit(mk.owner, mk.repo, "HEAD", rel.commit)
+			s.githubFake.SetTarballAt(mk.owner, mk.repo, "HEAD", rel.entries, rel.commitTime, rel.executables)
+			return ctx, nil
+		}
+	}
+	return ctx, fmt.Errorf("%s has no release %s", slug, tag)
+}
+
+// oneTarballRequestAtRefAndNoResolve checks a fetch made at an unresolved
+// ref: one tarball request for the source at ref and no commit resolve.
+func oneTarballRequestAtRefAndNoResolve(ctx context.Context, slug, ref string) error {
+	s, ps, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	mk := ps.marketplaces[slug]
+	if mk == nil {
+		return fmt.Errorf("no published marketplace %s", slug)
+	}
+	want := "/repos/" + mk.owner + "/" + mk.repo + "/tarball/" + ref
+	var tarballs []string
+	for _, r := range requestsFor(s, mk.owner, mk.repo) {
+		switch {
+		case strings.Contains(r.Path, "/commits/"):
+			return fmt.Errorf("%s: a commit-resolve request %s, want none", slug, r.Path)
+		case strings.Contains(r.Path, "/tarball/"):
+			tarballs = append(tarballs, r.Path)
+		}
+	}
+	if len(tarballs) != 1 || tarballs[0] != want {
+		return fmt.Errorf("%s: tarball requests %v, want exactly [%s]", slug, tarballs, want)
+	}
+	return nil
+}
+
+// theMarketplacesHoldTheSameTree runs diff -r over the trees two instances'
+// marketplace resolves to: a link's target or a real directory.
+func theMarketplacesHoldTheSameTree(ctx context.Context, name, a, b string) error {
+	s, _, err := pluginState(ctx)
+	if err != nil {
+		return err
+	}
+	var trees []string
+	for _, instance := range []string{a, b} {
+		tree, err := filepath.EvalSymlinks(filepath.Join(s.workspaceRoot, instance, ".niwa", "marketplaces", name))
+		if err != nil {
+			return err
+		}
+		trees = append(trees, tree)
+	}
+	if out, err := exec.Command("diff", "-r", trees[0], trees[1]).CombinedOutput(); err != nil {
+		return fmt.Errorf("diff -r %s %s: %v\n%s", trees[0], trees[1], err, out)
+	}
+	return nil
+}
+
+// everySkillResolvesUnderRoot is everySkillResolves for an instance of a named
+// workspace root.
+func everySkillResolvesUnderRoot(ctx context.Context, instance, root, repoName string) (context.Context, error) {
+	s, _, err := pluginState(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	return skillsResolveIn(ctx, filepath.Join(pluginRootDir(s, root), instance), repoName, "skills-"+instance)
 }
