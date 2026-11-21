@@ -1477,7 +1477,10 @@ mode before each use (Decision 1), as the credential-helper read below
 does, with the filtered `PATH`, so no instance's `.claude/settings.json` or
 `settings.local.json`, which the agent can write, is the project Claude Code
 reads for that call; the rest of its environment is the person's, since
-`claude` needs their authentication and configuration. This filter is a narrow control: it stops a
+`claude` needs their authentication and configuration. A `claude rm` in the
+pass also waits on a vet of the unit's job directory root (Data Flow step 7),
+since Claude Code deletes that directory itself, and a root that fails keeps
+the unit with no call made. The `PATH` filter is a narrow control: it stops a
 binary planted inside the workspace from being picked up, but the agent runs
 as the person and can write other directories on the person's `PATH`
 (`~/.local/bin`, say), which niwa can't tell from the person's own tools.
@@ -2429,7 +2432,8 @@ An all-unit pass, before a dispatch:
    per-worktree refs matches the snapshot, a fresh configuration check of
    its repository flags nothing and its `git status` reports no entry (any
    of these keeps), by niwa's own removal below, `claude rm` the
-   sessions from the same empty directory, checked again first, run on-reap, take the tombstone lock shared, rename the instance
+   sessions from the same empty directory, checked again first, and only
+   after the job directory's vet below passes, run on-reap, take the tombstone lock shared, rename the instance
    to its tombstone and repeat there the process listing, the configuration
    check on every repository, git status (`--ignore-submodules=all
    --untracked-files=all`), the
@@ -2469,6 +2473,17 @@ An all-unit pass, before a dispatch:
    `git worktree prune` is no substitute and niwa never runs it, since it
    also deletes `worktrees/<id>` by path and follows one swapped for a
    link.
+
+   `claude rm` takes a session id, not a path, and Claude Code deletes the
+   unit's job directory by its own means, which niwa can't see. So right
+   before the call niwa vets the directory's root: it `Lstat`s
+   `~/.claude/jobs/` and then `~/.claude/jobs/<id>`, and each must be a real
+   directory, not a link, owned by the person's uid, with no write
+   permission for group or others, with no link on any component from the
+   home directory down, and `<id>` on the same device as `~/.claude/jobs/`.
+   Any mismatch keeps the unit with the path named in the evidence, and
+   niwa makes no `claude rm` call for it. The vet covers only that chain;
+   the residual in Security Considerations gives what it leaves.
 8. For a trim: check the root apply lock, no keep record protecting build
    trees, no process with its working directory in the tree or a file under it
    open, no repository found inside the tree, the newest write older than
@@ -2673,6 +2688,15 @@ Deliverables:
   unforced destroy refuses the same way; under `--force` the worktree is
   left to go with the instance directory, and the outside directory is
   still unchanged after the destroy.
+- Security scenario for the job directory's vet, run through a reap: a
+  clean unit whose `~/.claude/jobs/<id>` is replaced by a symlink to a
+  directory outside the sandbox holding a marker file, with its listing,
+  sizes and hashes recorded first; in further runs `~/.claude/jobs/` itself
+  is that symlink, and `~/.claude/jobs/<id>` is a real directory with the
+  wrong owner, or with group or other write permission. In every run the
+  unit keeps with the failing path named, a `claude` wrapper logs no
+  `claude rm` call, and the outside directory's listing, sizes and hashes
+  match the recorded ones with the marker file still there.
 - Security scenarios for the proof-remote and tombstone checks, each
   through a reap and, where it applies, the verdict-only mode:
   with `proof_remotes = ["https://<test host>/dana/"]`, a remote
@@ -3225,7 +3249,12 @@ instance's settings aren't the project Claude Code reads for it, and no
 `.claude/settings.json` written into a shared temporary directory can take
 their place; a
 functional scenario checks that hooks an instance's settings define run
-through neither a reap nor `niwa destroy`. `.niwa` and
+through neither a reap nor `niwa destroy`. Before a reap's `claude rm`, niwa
+`Lstat`s `~/.claude/jobs/` and `~/.claude/jobs/<id>`: each must be a real
+directory owned by the person, not writable by group or others, with no link
+on the chain from the home directory, and the unit's directory on the same
+device as `~/.claude/jobs/`; any mismatch keeps the unit with the path named
+and no `claude rm` runs for it. `.niwa` and
 `pids` must be real directories, and every record read and write happens
 relative to their `O_NOFOLLOW` descriptors. The restore checks that
 `kept_entry` names a directory directly under `kept-files/<instance>/`,
@@ -3335,7 +3364,11 @@ at the instance root), to a git-ignored path inside one, or into the job
 directory isn't seen, and it's deleted with the rest; the job directory is
 never tombstoned at all, and `claude rm` removes it after the re-read. This
 needs a writer the process listing missed, or a registered helper, as in
-the case above. The trim has the same gap in a smaller form: its removal
+the case above. That delete is Claude Code's, done by a mechanism this
+design doesn't state, since `claude rm` takes a session id, not a path.
+niwa's vet before the call checks only the chain down to the job directory's
+root, so a subdirectory swapped for a link while Claude Code deletes the
+tree, or a root swapped between the vet and the call, isn't stopped. The trim has the same gap in a smaller form: its removal
 walk stops at a repository it meets, but a plain file written into a build
 tree after the trim's checks is removed with the tree. Later
 hardening would record a manifest of path, size, mtime and ctime for the
