@@ -44,6 +44,7 @@ rationale: |
   store already scans. A single 30-second budget per pass, with fair ordering,
   caps what a dispatch waits for without ever changing what the rule decides.
 upstream: docs/prds/PRD-over-remover.md
+user_visible_surface: true
 decision_provenance: inline-resolved
 ---
 
@@ -392,7 +393,10 @@ The package also settles the mechanics the PRD left to the design:
   `https://host/owner/repo` but not `https://host/owner-evil/repo`. A local
   commit whose id is itself a tip `git ls-remote` returns for a proof remote
   is held without reading any object. Any other local commit is held when
-  it is an ancestor of such a tip. Merged by content means `git merge-tree --write-tree` of the proof
+  it is an ancestor of such a tip. The tips are every ref `git ls-remote`
+  lists for the proof remote with no pattern, so a forge's other namespaces,
+  such as `refs/pull/*`, count as well as branches and tags, and the fetch
+  brings the history of the tips a check tests against. Merged by content means `git merge-tree --write-tree` of the proof
   remote's default branch's live tip and the local branch exits 0, with no
   conflict, and yields the default branch's own tree, which is what a squash
   merge leaves. Any other remote is
@@ -600,7 +604,9 @@ has moved or is gone, a new stash entry, or a HEAD or worktree HEAD that
 points elsewhere counts as a difference, with "changed during the pass:
 ref <name>" as evidence. The only entries allowed to disappear are those of
 a worktree niwa itself removed in between, and only those that matched the
-snapshot when niwa read them right before that removal. Any difference
+snapshot when niwa read them right before that removal. A path the
+kept-set move took out may also read as gone or deleted, while anything
+found at such a path again counts as a difference. Any difference
 renames it back with
 `workspace.UntombstoneInstance` and keeps the unit with "changed during the
 pass", left as the delete-then-reap path leaves one, its sessions and
@@ -1192,7 +1198,11 @@ must name exactly `~/.niwa/w-<key>/kept-files/<instance>/<UTC>/` for the
 record's own instance, a direct descendant reached with no symlink, or the
 restore refuses. Every original path in `entry.json` and the rewritten keep
 record passes `removal.ResolveRecorded` against the fresh instance, and every
-source path must resolve inside the entry's own `files/` directory. Missing
+source path must resolve inside the entry's own `files/` directory. A
+destination with a path component named `.git` or `.claude`, compared
+case-insensitively, refuses the restore, as one outside the instance does,
+so no restore writes a hook or settings file a later git or `claude` call
+runs. Missing
 parent directories are created one component at a time, each opened with
 `O_DIRECTORY|O_NOFOLLOW` so no link is followed, and each file is created
 with `O_CREAT|O_EXCL|O_NOFOLLOW`, never over an existing file; a path that
@@ -1404,7 +1414,7 @@ scratch that's disposable only because the unit has no brief as disposable
 with a `job scratch` notice. With `--json` it prints a `niwa.verdicts/v1`
 array with the same fields, which is the form a workflow plugin asks for one
 unit. It writes no mark, removes and trims nothing, moves nothing into the
-kept set, and fetches into the scratch object store only.
+kept set, renames no tombstone back, and fetches into the scratch object store only.
 
 #### Alternatives Considered
 
@@ -1924,7 +1934,8 @@ typing back a code niwa prints there, and discarded paths wait in the kept set u
 window ends. A file the brief claims to hold counts as handed forward only
 when niwa verifies the brief's copy. Every recorded path is resolved without
 following a symlink on every read, opened component by component when
-moved, and validated again at restore, which never overwrites. The instance
+moved, and validated again at restore, which never overwrites and never
+writes under `.git` or `.claude` or outside the instance. The instance
 is renamed to a tombstone under a root-level lock and checked once more
 before it's deleted, and every string a unit supplies is scrubbed of
 credentials and control sequences before niwa stores or prints it.
@@ -2156,8 +2167,10 @@ Before its first removal step, destroy runs that job-directory
 vet on the job directory of every mapped session it will pass to
 `claude rm`, those in the decoded `claude agents` listing; on any failure it stops with
 the failing path named and removes nothing, so the instance, its worktrees
-and every session stay, the same fail-toward-keep as the pass. It
-removes each worktree with `rmtree.go`'s walk, never through git. Unforced
+and every session stay, the same fail-toward-keep as the pass.
+Destroy's existing `--keep-session` flag, which keeps the owning session, is
+unchanged: with it destroy passes no session to `claude rm`, so it vets no
+job directory. It removes each worktree with `rmtree.go`'s walk, never through git. Unforced
 destroy first runs the worktree's configuration check and `git status`, a
 change refusing the destroy as the scan's findings do, and the walk keeps a
 locked worktree or one holding a repository, which refuses the same way.
@@ -2197,7 +2210,9 @@ record and the mapping's `launch_id`.
 its replay fields when `origin` is `hook`, checks `restore_until`, checks that
 `kept_entry` is a direct descendant of `~/.niwa/w-<key>/kept-files/<instance>/`
 reached with no symlink, re-validates every path in `entry.json` and the
-rewritten keep record with `ResolveRecorded`,
+rewritten keep record with `ResolveRecorded`, which refuses a destination
+outside the instance, and also refuses, naming the file, any destination with
+a path component named `.git` or `.claude` (compared case-insensitively). It
 moves kept-set files back with a hash check, creating parents with
 `O_DIRECTORY|O_NOFOLLOW` and files with `O_CREAT|O_EXCL|O_NOFOLLOW`, and
 clears nothing else.
@@ -2553,7 +2568,9 @@ An all-unit pass, before a dispatch:
    and the record checks (any change, a
    new, moved or gone ref, a flagged key or a flagged index entry renames it
    back and keeps; only the entries of a worktree niwa removed, as they
-   stood at that fresh read, may be gone),
+   stood at that fresh read, may be gone, and a path the kept-set move took
+   out may read as gone or deleted, while anything found at such a path
+   again counts as a change),
    `DestroyInstance` on the
    tombstone, release the lock, remove the ledger, delete
    the mapping, and write `reaped_at`, `restore_until` and `kept_entry` into
@@ -2665,14 +2682,19 @@ An all-unit pass, before a dispatch:
     has its `reached_at` set to this pass, and a call blocked in the kernel
     is abandoned rather than waited on. Print the dispatch line.
 
-A retire runs steps 1, 4, 6 to 9 for one unit after writing its mark, with no
-over question and no all-unit deadline. The verdict-only mode runs steps 1 to
-6 for every unit or the one named, asks the seam where step 5 would, clears
+A retire runs steps 1 and 2 for its one unit with no all-unit deadline (the
+instance guard and the working check read step 2's listings), then writes its
+mark and runs steps 4 and 6 to 9, with no over question. The verdict-only
+mode runs steps 1 to 6 for every unit or the one named, without step 3's
+tombstone recovery, which it leaves to the next pass that acts, asks the seam
+where step 5 would, clears
 any mark the call wrote, computes the verdict the mark would lead to, and
 prints; it writes nothing else. `niwa resume` reads the launch record, checks
 `restore_until` and that `kept_entry` sits directly under
 `kept-files/<instance>/`, provisions the instance by name, re-validates every kept-set
-path against the fresh instance and the entry's `files/`, moves the files
+path against the fresh instance and the entry's `files/`, refuses, naming the
+file, any destination with a path component named `.git` or `.claude`
+(compared case-insensitively), as it refuses one outside the instance, moves the files
 back with a hash check and without following links or overwriting anything,
 and starts the session.
 
@@ -2716,7 +2738,9 @@ Deliverables:
   that open with `O_NOFOLLOW|O_NONBLOCK` and `fstat` for a regular file
   before reading, working from `O_DIRECTORY|O_NOFOLLOW` descriptors for
   `.niwa` and `pids`.
-- `internal/cli/pass.go` with the deadline, ordering, re-read, the tombstone
+- `internal/cli/pass.go` with the deadline, units taken in a fresh random
+  order each pass until Phase 4 writes `unit.json` (until then every unit
+  reads as never reached), re-read, the tombstone
   rename and check under the tombstone lock with lock-guarded recovery, and
   the mapped sweep and backstop routed through the rule; kept instances
   printed with their first keeping check. `DestroyInstance`'s `Lstat` and
@@ -2747,8 +2771,9 @@ Deliverables:
 - `niwa reap --verdict-only [<instance>] [--json]` without over answers.
 - Unit tests per check and class; `@critical` functional scenarios for
   reap's loss scan (clone and worktree), an unreachable remote, a nested
-  repository, the path-class cases and the overlapping-pass and held-lock
-  cases.
+  repository, the path-class cases, the overlapping-pass and held-lock
+  cases, and a tombstone an interrupted pass left, which the verdict-only
+  mode leaves in place and the next reap renames back.
 - Security scenarios: a repository with `core.fsmonitor`, `core.hooksPath`,
   `core.sshCommand`, `core.pager` and `credential.helper` set to a script
   that writes a marker file runs none of them through a reap and the
@@ -2830,6 +2855,22 @@ Deliverables:
   repository whose configuration sets `extensions.partialClone` or a
   `remote.<name>.promisor` keeps with "partial clone needs git 2.45" before
   any call that could read an object.
+- Security scenarios for the proof-remote and tombstone checks, each
+  through a reap and, where it applies, the verdict-only mode:
+  with `proof_remotes = ["https://<test host>/dana/"]`, a remote
+  `https://<test host>/dana/../mallory/repo` added in the clone, whose
+  target advertises the unit's unpushed commit, keeps the unit with "remote
+  URL not allowed" naming the dot segment, and the test server sees no
+  request; the same with a percent-encoded `..`, and with userinfo in an
+  `https` URL, keeps the same way; a remote under
+  `https://<test host>/dana-evil/` that advertises the commit doesn't match
+  the prefix and keeps with "remote not recognized", and so does a remote on
+  `https://<test host>:<other port>/dana/repo`; a loose object written
+  into the clone under the id of a real proof-remote commit, with the unit's
+  unpushed commit as its parent, leaves that commit kept by both the
+  ancestry and the merged-by-content checks; a commit made in the instance after the
+  re-read and before the rename, which leaves `git status` clean, renames
+  the tombstone back and keeps with the ref named.
 
 ### Phase 2: Worktrees before the session, and every other removal
 
@@ -2924,22 +2965,6 @@ Deliverables:
   the marker file still there. A control run with the link replaced by a
   regular file reaps the unit, a `claude` wrapper logging one `claude rm`
   for that session, as the functional scenario below also shows.
-- Security scenarios for the proof-remote and tombstone checks, each
-  through a reap and, where it applies, the verdict-only mode:
-  with `proof_remotes = ["https://<test host>/dana/"]`, a remote
-  `https://<test host>/dana/../mallory/repo` added in the clone, whose
-  target advertises the unit's unpushed commit, keeps the unit with "remote
-  URL not allowed" naming the dot segment, and the test server sees no
-  request; the same with a percent-encoded `..`, and with userinfo in an
-  `https` URL, keeps the same way; a remote under
-  `https://<test host>/dana-evil/` that advertises the commit doesn't match
-  the prefix and keeps with "remote not recognized", and so does a remote on
-  `https://<test host>:<other port>/dana/repo`; a loose object written
-  into the clone under the id of a real proof-remote commit, with the unit's
-  unpushed commit as its parent, leaves that commit kept by both the
-  ancestry and the merged-by-content checks; a commit made in the instance after the
-  re-read and before the rename, which leaves `git status` clean, renames
-  the tombstone back and keeps with the ref named.
 - Functional scenarios: a clean unit holding a niwa worktree leaves no session
   behind after a reap and after `niwa destroy`; failed-dispatch cleanup keeps
   `partial.txt`; no `claude` call a wrapper logs carries an override flag,
@@ -2965,7 +2990,13 @@ Deliverables:
 - The guide's advice to over-command authors that the instance is
   untrusted input.
 - Marked-unit reaps in the pass, needing the launch record dispatch already
-  writes; a marked unit without one kept with that reason.
+  writes; a marked unit without one kept with that reason. Until Phase 6,
+  the undo for a reap on a mark is `niwa resume` as it works today, which
+  restores the instance under its name from that launch record and resumes
+  the session while Claude Code keeps its transcript; from Phase 5 the named
+  files such a reap moves wait in the kept set, shown by `niwa list --kept`,
+  for the person to copy back. The window's dates, the refusal past it and
+  the restore of kept files arrive in Phase 6.
 - `docs/guides/over-command.md` with the contract and the takeover key, and a
   functional test of the key against a real `koto init --supersede`.
 - Functional scenarios for the three answers, a timeout leaving no process and
@@ -2974,14 +3005,19 @@ Deliverables:
   run from inside an instance and from a process whose ancestor sits in one,
   a detached `--override-not-over` with no controlling terminal refusing,
   the instance name typed in place of the printed code refusing, a
-  disagreement, and the six kinds kept and listed.
+  disagreement, the six kinds kept and listed, a retire of a clean, stopped
+  unit whose session `claude agents` lists, reaped with one `claude rm` a
+  `claude` wrapper logs after that session's vet, and a unit a retire
+  reaped, brought back by `niwa resume` under its original name with its
+  session started.
 
 ### Phase 4: The listing, the dispatch line, the trim and pid records
 
 Deliverables:
 - `unit.json` written by the pass with its ledger entry; `niwa list` state
   lines and the JSON `unit` object, re-scrubbed on read; the dispatch line;
-  reap's counts.
+  reap's counts; and the pass taking units by `reached_at`, never-reached
+  first, as Data Flow step 3 describes.
 - Over answers in the verdict-only mode, with the mark each would write.
 - The trim with `trim` and `trim_after`, the root apply lock, the process
   checks for build trees, the refusal of a tree that holds a repository, and
@@ -2995,8 +3031,10 @@ Deliverables:
 - Functional scenarios for the no-command dispatch line, the idle build tree,
   the time budget and units not reached, the local listing with the network
   off, a pid record written by hand that doesn't release a live process, a
-  `niwa helper` call naming a process that isn't the caller's child, and a
-  `unit.json` carrying terminal escapes that the listing prints clean.
+  `niwa helper` call naming a process that isn't the caller's child, a
+  `unit.json` carrying terminal escapes that the listing prints clean, and,
+  with more units than one pass reaches, the units it didn't reach taken
+  first by the next pass.
 
 ### Phase 5: Keep records, the handoff brief and the kept set
 
@@ -3028,8 +3066,11 @@ Deliverables:
   counts as nothing and keeps as unique; a `discard.json` written by hand with no
   ledger entry, which releases nothing; a `discard.json` path through a
   symlink or with `..`, which keeps; a detached, session-less
-  `niwa discard`, which refuses with "no controlling terminal"; and a
-  confirmed discard whose paths are found in the kept set after the reap.
+  `niwa discard`, which refuses with "no controlling terminal"; a reap of a
+  clean unit whose `keep.json` names an untracked file in its main clone,
+  which removes the instance, with the file and its hash in the kept-set
+  entry; and a confirmed discard whose paths are found in the kept set after
+  the reap.
 
 ### Phase 6: Launch records for hook sessions, the restore window and restore
 
@@ -3040,7 +3081,9 @@ Deliverables:
   `restore_window` with the seven-day floor.
 - `niwa resume` refusing past the window and restoring kept files first,
   `kept_entry` checked to sit directly under `kept-files/<instance>/`, every
-  path re-validated, parents created without following links, files created
+  path re-validated, a destination with a path component named `.git` or
+  `.claude` (compared case-insensitively) or outside the instance refused
+  with the file named, parents created without following links, files created
   with `O_CREAT|O_EXCL|O_NOFOLLOW`.
 - The guide's deny-write advice gains the root's `.niwa-launch/` this
   phase writes, under the same sandbox write restrictions, and its note
@@ -3053,8 +3096,10 @@ Deliverables:
   without the setting, for an `entry.json` edited to name `../` or an
   absolute path, a launch record whose `kept_entry` names another directory,
   and a fresh instance with a symlink where a kept file goes (all refuse and
-  write nothing outside the instance), and for the
-  three-day setting failing the configuration load.
+  write nothing outside the instance), for an `entry.json` naming
+  `.git/hooks/pre-commit`, `.CLAUDE/settings.local.json` or a path outside
+  the instance, each refusing the restore with that file named and nothing
+  written, and for the three-day setting failing the configuration load.
 - A security scenario for the guide: its deny-write list names the whole
   `~/.ssh/` directory and, as an example, a file outside it that an
   `Include` in `~/.ssh/config` names (`Include ~/dotfiles/ssh/hosts`).
@@ -3105,7 +3150,9 @@ the change rather than settling the point on its own.
    and leave as R27 requires (the first clash, reconciled in Decision 5).
 4. **The pattern list's format.** Current position: one entry per line, the
    pattern, a tab, and the review that added it; a line naming no review is a
-   parse error that keeps every unit; no pattern syntax is defined. Settled by
+   parse error that keeps every unit; no pattern syntax is defined. That
+   reading of that work hasn't been checked against its code, which may
+   already match entries as a shell `case` glob. Settled by
    that work's list format and the first additions from its review of shadow
    passes. niwa's side: the shipped list and the workspace's `disposable`
    entries, each with a required review, in the glob-plus-`**` syntax Decision
@@ -3148,6 +3195,15 @@ the change rather than settling the point on its own.
     successor that holds `koto/superseded-carry-complete`. Open only in that
     the key has been read from koto's source and not yet seen in a live run,
     which the seam's functional test closes.
+11. **Linked worktrees inside the unit.** Current position: the earlier
+    remover always keeps linked worktrees, clean or not, and removes none.
+    Settled by that work's acting step as it merges. niwa's side: a clean
+    linked worktree inside the instance is removed by niwa's own walk before
+    the session (Decision 1, Data Flow step 7), since one left in place makes
+    `claude rm` refuse and the session outlives the reap; a worktree outside
+    the instance, or one that isn't clean, keeps. This is the second clash,
+    kept on niwa's side because the worktrees-first order is what lets a reap
+    leave no session behind.
 
 ## Relation to Other Work
 
@@ -3233,9 +3289,11 @@ what is left.
 
 ### External artifact handling
 
-niwa reads four kinds of untrusted input: the over command's exit status and
-output, the per-unit records, the git repositories inside the instance, and
-the kept-set entries it reads back at restore. Git is the largest. A
+niwa reads five kinds of untrusted input: the over command's exit status and
+output, the per-unit records, the git repositories inside the instance, the
+history a proof remote sends into the scratch store, whose branches the agent
+may have pushed and whose objects git re-hashes as it indexes them, and the
+kept-set entries it reads back at restore. Git is the largest. A
 repository's configuration can make `git status` or a fetch run a program
 (`core.fsmonitor`, hooks, a pager, `core.sshCommand`, askpass, credential
 helpers, filter, diff and merge drivers, a `gpg.program` that
@@ -3452,7 +3510,8 @@ hook the agent wrote, unsandboxed. A recorded
 path through a symlink could have the kept-set move copy a secret from
 outside the instance into a directory that persists (a `keep.json` naming
 `bench/link` pointing at `~/.ssh/id_ed25519`), or a restore could write
-outside the fresh instance. The walk could follow a link or a mount out of
+outside the fresh instance, or into a hook or settings file a later git or
+`claude` call runs. The walk could follow a link or a mount out of
 the instance, `os.RemoveAll` could be handed a symlinked or misplaced
 directory, a recursive delete that goes by path, as `git worktree remove`'s
 does, would follow a directory swapped for a link out of the instance, and
@@ -3509,8 +3568,10 @@ named and no `claude rm` runs for it. `.niwa` and
 `pids` must be real directories, and every record read and write happens
 relative to their `O_NOFOLLOW` descriptors. The restore checks that
 `kept_entry` names a directory directly under `kept-files/<instance>/`,
-re-validates every path, creates parents and files with `O_NOFOLLOW` and
-never overwrites. Kept-set expiry removes only a direct-child directory of
+re-validates every path, refuses, naming the file, any destination with a
+path component named `.git` or `.claude` (compared case-insensitively), as
+well as one outside the instance, creates parents and files with
+`O_NOFOLLOW` and never overwrites. Kept-set expiry removes only a direct-child directory of
 `kept-files/<instance>/` that it found by enumeration and `Lstat`ed as a
 real directory, never a path read from `entry.json`, so an edited entry
 can't point the removal anywhere else. The hook worktree sweep never forces
@@ -3548,7 +3609,9 @@ refs are read again right before niwa removes it: a detached-HEAD
 commit or a new `refs/worktree/*` or `refs/bisect/*` entry made since the
 re-read keeps the unit before that worktree goes, and the tombstone check
 lets a removed worktree's entries be missing only when they matched the
-snapshot at that read.
+snapshot at that read, and lets a path the kept-set move took out read as
+missing or deleted, while anything found at such a path again counts as a
+change.
 Lock files in `~/.niwa/locks/` are created 0600 with `O_NOFOLLOW`, and the
 mark clean-up after an over answer runs under the instance lock. niwa uses no
 sudo, opens no listener, passes no force flag to `claude` or to git outside
@@ -3713,7 +3776,10 @@ discard records and pid records rest on.
 
 ### Supply chain or dependency trust
 
-niwa downloads nothing new. Its trust inputs are the over command, which
+niwa installs nothing new: no library, binary or plugin. The one thing it
+downloads is data, the proof-remote history the held and merged checks fetch
+into the scratch store (Decision 1), which nothing runs, capped at 1 GiB per
+store and costed in Consequences. Its trust inputs are the over command, which
 comes from workspace configuration like the hooks it already runs; the git,
 `lsof`, `claude` and `sh` binaries; git's version, since
 `merge-tree --write-tree` needs 2.38 and `GIT_NO_LAZY_FETCH` 2.45; and
@@ -3885,6 +3951,14 @@ shown due a day before it leaves, but files a person asked to keep can
 expire while their unit stays. Later hardening would move the files back,
 which were hashed on the way out, when a reap stops, or do the kept-set
 move last, after `claude rm` and on-reap and just before the tombstone.
+
+A kept-set entry has no size cap, and the move doesn't gate which kinds of
+hold it acts for: whatever a keep record or a discard names moves, however
+large, and takes that much of the home disk until the entry is due. A move
+that runs out of space fails a write, which keeps the unit with nothing
+removed (Decision 5), so the cost is disk, not loss. Later hardening would
+cap an entry and keep a unit whose move would pass the cap; niwa doesn't do
+that now.
 
 The seven-day floor holds only for a `restore_window` the workspace sets.
 With the setting unset, the window is Claude Code's `cleanupPeriodDays`,
