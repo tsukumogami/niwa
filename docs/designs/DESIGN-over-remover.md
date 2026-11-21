@@ -180,7 +180,8 @@ the PRD leaves destroy's checks alone.
 Key assumptions:
 - The rule can run on git plumbing alone (`git status --porcelain=v2`,
   `git ls-files -v`, `git for-each-ref`, `git stash list`, `git ls-remote`,
-  `git worktree list`, `git merge-tree --write-tree`) with no forge call. Git 2.38 or newer is
+  `git worktree list`, `git diff-index --cached`, `git merge-tree --write-tree`)
+  with no forge call. Git 2.38 or newer is
   needed for `merge-tree --write-tree`; an older git makes the
   merged-by-content check undecidable, which keeps.
 - Those plumbing calls give correct answers with system and global git
@@ -205,9 +206,10 @@ the fixed order R11 sets (liveness; a keep record's hold; a missing or
 unreadable record the rule needs, the launch record for a reap on a mark
 included; each repository in path order, with git errors and unreachable
 remotes first, then commits and refs no live remote ref holds (every ref
-`for-each-ref` lists and each worktree's HEAD from `git worktree list`, a
-detached HEAD included), stashes, modified tracked files, index entries
-flagged assume-unchanged or skip-worktree, untracked files, which git is
+`for-each-ref` lists and each worktree's HEAD from
+`git worktree list --porcelain -z`, a detached HEAD included), stashes,
+modified tracked files, index entries flagged assume-unchanged or
+skip-worktree, untracked files, which git is
 made to report in full whatever the repository's configuration says;
 paths outside every repository; named
 files missing or changed), the evidence for each, and the class of every path
@@ -248,7 +250,25 @@ The package also settles the mechanics the PRD left to the design:
   on another device keeps the unit with "another filesystem at <path>" as
   evidence. A `.git` file whose `gitdir:` (or the `commondir` it names)
   resolves outside the instance and the job directory keeps the unit with
-  "external git directory" as evidence and is not followed.
+  "external git directory" as evidence and is not followed. The reverse
+  case is checked too. A linked worktree's working tree can sit anywhere
+  (`git worktree add /tmp/w`), while its index, its `refs/worktree/*` and
+  `refs/bisect/*` and every object it made stay in the instance and are
+  deleted with it. So every entry `git worktree list --porcelain -z`
+  reports for a repository the walk found counts as reached only when the
+  walk found, at that entry's path, a `.git` file naming that entry's
+  admin directory under the common directory's `worktrees/`. The listed
+  path alone isn't enough, since it comes from the admin directory's
+  `gitdir` file, which the agent can write. niwa also lists `worktrees/`
+  itself, and an admin directory there that git doesn't report counts as
+  unreached. An unreached entry keeps the unit with "worktree outside the
+  instance: <path>" as evidence. The one exception is an entry git marks
+  prunable, whose working tree is gone: niwa runs the configuration check
+  on its admin directory's `config.worktree`, then reads its HEAD, its
+  per-worktree refs and its index against that HEAD
+  (`git diff-index --cached`) with `--git-dir=<admin directory>`, through
+  `gitCommand`. That HEAD and those refs count like any worktree's, and a
+  read that fails or a staged entry that differs from HEAD keeps.
 - **Git runs in a fixed, hardened environment.** Every git call niwa's
   removal paths make in a repository an agent could have written is built by
   one function, `gitCommand` in `internal/removal/git.go`. That covers the
@@ -305,7 +325,14 @@ The package also settles the mechanics the PRD left to the design:
   `--ignore-submodules=all` and `--untracked-files=all` on every status, and
   `--git-dir` and `--work-tree` passed from the walk. `git worktree remove`
   is given only a worktree path from niwa's own walk, never one read from
-  `git worktree list`. Network
+  `git worktree list`. Every git output niwa parses is read in its
+  NUL-terminated form: `git worktree list --porcelain -z`,
+  `git status --porcelain=v2 -z`, `git ls-files -v -z`,
+  `git config --list -z`, and `-z` or a `%00` separator wherever else git
+  offers one. Without it, git prints a newline in a path as is, so a
+  `gitdir` file naming a path with a newline and a `HEAD <pushed id>` line
+  after it could add a record that hides a worktree's unpushed detached
+  HEAD. A record that doesn't parse keeps the unit. Network
   calls go only to proof remotes (below), take
   an explicit, validated URL niwa builds itself and run against the scratch
   object store, never inside the unit's repository.
@@ -472,8 +499,8 @@ file". niwa then repeats the cheap checks on the tombstone: a fresh process
 listing for working directories and open files under it, in which a
 registered helper counts as it does at liveness (it doesn't keep a stopped
 unit),
-`git status --porcelain=v2 --ignore-submodules=all --untracked-files=all`
-and `git ls-files -v`
+`git status --porcelain=v2 -z --ignore-submodules=all --untracked-files=all`
+and `git ls-files -v -z`
 of every repository the walk found, preceded by a fresh run of the
 program-naming configuration check on each of them (a flagged key or a
 newly flagged index entry counts as a difference), the
@@ -486,8 +513,9 @@ clean when a short-lived writer commits, branches or stashes, so with the
 re-read before removal the pass records, for every repository the walk
 found, every ref `for-each-ref` lists (branches, tags, remote-tracking refs
 and `refs/stash`, and in a linked worktree its own `refs/worktree/*` and
-`refs/bisect/*`), HEAD, the `stash list` and each worktree's HEAD from
-`git worktree list`, all local reads through `gitCommand`. Right before
+`refs/bisect/*`, a prunable entry's read from its admin directory), HEAD,
+the `stash list` and each worktree's HEAD from
+`git worktree list --porcelain -z`, all local reads through `gitCommand`. Right before
 each `git worktree remove`, niwa reads that worktree's HEAD and its
 per-worktree refs again through `gitCommand` and compares them with the
 snapshot; any change keeps the unit with "changed during the pass: ref
@@ -1361,7 +1389,7 @@ rule must land before anything starts more removals.
 Resolved inline.
 
 The rule runs `git status`, `ls-files`, `for-each-ref`, `stash list`, `ls-remote`,
-`worktree list`, `pack-objects`, `merge-tree` and a fetch inside repositories whose `.git`
+`worktree list`, `diff-index --cached`, `pack-objects`, `merge-tree` and a fetch inside repositories whose `.git`
 the unit's agent can write, automatically, before every dispatch. Left to
 git's defaults, a repository's own configuration turns those calls into code
 execution or network traffic of the agent's choosing: `core.fsmonitor`,
@@ -1493,8 +1521,8 @@ can start a filter (git's own clean check inside an unforced remove is a
 status) and seconds can pass between the first read and them. A key found
 then keeps the unit with "changed during the pass: repository configuration
 names a program: <key>" and the call isn't started. `ls-files -v`,
-`for-each-ref`, `stash list`, `worktree list`, `pack-objects` and
-`branch -d` start no program the repository names under the overrides, so
+`for-each-ref`, `stash list`, `worktree list`, `diff-index --cached`,
+`pack-objects` and `branch -d` start no program the repository names under the overrides, so
 they need no second read. When a
 key from any scope other than `command` names a program git might run
 during the rule's calls, niwa runs nothing more there and
@@ -2235,6 +2263,13 @@ An all-unit pass, before a dispatch:
    it can take seconds, and every
    network call made only to a proof remote whose URL passed validation and
    matched the clone URL or a `proof_remotes` prefix on whole path segments.
+   Every git output is read in its NUL-terminated form
+   (`git worktree list --porcelain -z` among them), and a record that
+   doesn't parse keeps. A worktree git lists that the walk didn't reach, by
+   a `.git` file at its path naming its admin directory, keeps with
+   "worktree outside the instance: <path>"; a prunable one is judged by its
+   HEAD, per-worktree refs and index read from its admin directory, and a
+   failed read keeps.
    A commit that is itself a live tip is held; any other is judged in a
    fresh scratch store with no alternates, into which the proof remote's
    tip history is fetched and the local side read through `index-pack`. A
@@ -2331,7 +2366,8 @@ Deliverables:
   included) as the only remotes contacted or
   counted, remote URL validation, and network calls against the scratch
   store with the person's helper for proof remotes only; the walk's
-  no-symlink, one-filesystem and external-git-directory rules;
+  no-symlink, one-filesystem, external-git-directory and unreached-worktree
+  rules; NUL-terminated parsing of every git output;
   `ResolveRecorded`; `ScrubEvidence` with the widened patterns and
   truncation after scrubbing; size-capped, strictly decoded record readers
   that open with `O_NOFOLLOW|O_NONBLOCK` and `fstat` for a regular file
@@ -2375,7 +2411,15 @@ Deliverables:
   URL is held; a remote matching a `proof_remotes` prefix is held; a symlink
   inside the instance pointing at a file outside is never read or summed; a
   `.niwa` replaced by a symlink keeps the unit and nothing is written
-  through it; a `.git` file pointing outside keeps; an untracked, not
+  through it; a `.git` file pointing outside keeps; a linked worktree added
+  outside the instance (`git worktree add <temporary dir>`), with a commit
+  only on its `refs/worktree/` and a file staged only in its index, keeps
+  the unit with "worktree outside the instance" and the path named; a
+  prunable worktree whose working tree was deleted and whose
+  `refs/bisect/` holds a commit no proof remote has keeps the unit; a
+  worktree's `gitdir` file rewritten to a path holding a newline and a
+  `HEAD` line naming a pushed commit doesn't hide that worktree's unpushed
+  detached HEAD, which keeps the unit; an untracked, not
   ignored, file written into a repository's working tree after the re-read
   renames the tombstone back and keeps; a second
   pass started while the first holds a tombstone leaves it alone; a
@@ -3186,7 +3230,16 @@ remote can show a commit is pushed or merged, so a remote the agent added
 can't launder unpushed work. The commit checks count every ref
 `for-each-ref` lists and each worktree's HEAD from `git worktree list`, so
 a commit made on a detached HEAD in a worktree and never put on a branch
-keeps the unit like any other unpushed commit. A forged mark, discard record or pid record
+keeps the unit like any other unpushed commit. That listing, like every git
+output niwa parses, is read NUL-terminated (`--porcelain -z`), so a newline
+written into a worktree's `gitdir` can't forge a HEAD line that hides one.
+A worktree git lists that the walk never reaches, such as one added outside
+the instance, keeps the unit: its working files sit elsewhere, but its
+index, its `refs/worktree/*` and `refs/bisect/*` and its objects live in
+the instance and would go with it, unchecked where the same refs and index
+in a worktree inside the instance are checked. A prunable one, whose
+working tree is already gone, is judged by its HEAD, per-worktree refs and
+index read from its admin directory, or kept. A forged mark, discard record or pid record
 counts for nothing without its ledger entry, a discard needs a person at a
 terminal, and what a discard releases waits in the kept set until the
 window ends. An `in_brief` file counts as handed forward only when the
