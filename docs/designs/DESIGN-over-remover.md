@@ -179,8 +179,8 @@ the PRD leaves destroy's checks alone.
 
 Key assumptions:
 - The rule can run on git plumbing alone (`git status --porcelain=v2`,
-  `git for-each-ref`, `git stash list`, `git ls-remote`, `git worktree list`,
-  `git merge-tree --write-tree`) with no forge call. Git 2.38 or newer is
+  `git ls-files -v`, `git for-each-ref`, `git stash list`, `git ls-remote`,
+  `git worktree list`, `git merge-tree --write-tree`) with no forge call. Git 2.38 or newer is
   needed for `merge-tree --write-tree`; an older git makes the
   merged-by-content check undecidable, which keeps.
 - Those plumbing calls give correct answers with system and global git
@@ -206,7 +206,8 @@ unreadable record the rule needs, the launch record for a reap on a mark
 included; each repository in path order, with git errors and unreachable
 remotes first, then commits and refs no live remote ref holds (every ref
 `for-each-ref` lists and each worktree's HEAD from `git worktree list`, a
-detached HEAD included), stashes, modified tracked files, untracked files;
+detached HEAD included), stashes, modified tracked files, index entries
+flagged assume-unchanged or skip-worktree, untracked files;
 paths outside every repository; named
 files missing or changed), the evidence for each, and the class of every path
 (tracked, pushed, build tree, generated, disposable or unique, with a
@@ -358,6 +359,21 @@ The package also settles the mechanics the PRD left to the design:
   builds the local pack, which is read-only and changes no verdict, since
   every such object is re-hashed on its way into the store and only a proof
   remote's refs count as held.
+- **An index flag keeps the unit.** `git status` doesn't compare a file
+  whose index entry carries the assume-unchanged or skip-worktree bit, so
+  an agent that sets either one with `git update-index` can hide a modified
+  tracked file from the modified-files check. niwa reads
+  `git ls-files -v` in every repository the walk found, through
+  `gitCommand`, and any entry whose tag letter is lowercase
+  (assume-unchanged) or `S` (skip-worktree) keeps the unit with "index flag
+  hides changes: <flag> <path>" as evidence. niwa doesn't try to tell a
+  harmless flag from a hiding one; its clones aren't sparse, so a flag in
+  one is something the agent or its tools set. A sparse checkout sets
+  skip-worktree on every path outside its cone and therefore always keeps.
+  `.git/info/exclude`, and a `core.excludesFile` the repository's own
+  configuration names, are ignore sources exactly as `.gitignore` is: a
+  path they match is git-ignored, and `ignored_files` decides what it
+  counts as.
 - **Build trees** are git-ignored directories carrying `CACHEDIR.TAG` with the
   standard signature line (cargo's `target/` and any tool following the Cache
   Directory Tagging convention), plus directories a workspace declares for a
@@ -409,10 +425,13 @@ to `<root>/.niwa-tombstone-<instance>-<8 hex>` in the same directory. A
 writer that opens a path under the old name from then on gets "no such
 file". niwa then repeats the cheap checks on the tombstone: a fresh process
 listing for working directories and open files under it,
-`git status --porcelain=v2 --ignore-submodules=all` of every repository the
-walk found, preceded by a fresh run of the program-naming configuration
-check on each of them (a flagged key counts as a difference), the
-hashes of the records in `.niwa/`, and a ref snapshot. `git status` stays
+`git status --porcelain=v2 --ignore-submodules=all` and `git ls-files -v`
+of every repository the walk found, preceded by a fresh run of the
+program-naming configuration check on each of them (a flagged key or a
+newly flagged index entry counts as a difference), the
+hashes of the records in `.niwa/`, and a ref snapshot. The walk's mount
+and device check isn't repeated there (Security Considerations gives what
+that leaves). `git status` stays
 clean when a short-lived writer commits, branches or stashes, so with the
 re-read before removal the pass records, for every repository the walk
 found, every ref `for-each-ref` lists (branches, tags, remote-tracking refs
@@ -1265,7 +1284,7 @@ rule must land before anything starts more removals.
 
 Resolved inline.
 
-The rule runs `git status`, `for-each-ref`, `stash list`, `ls-remote`,
+The rule runs `git status`, `ls-files`, `for-each-ref`, `stash list`, `ls-remote`,
 `worktree list`, `pack-objects`, `merge-tree` and a fetch inside repositories whose `.git`
 the unit's agent can write, automatically, before every dispatch. Left to
 git's defaults, a repository's own configuration turns those calls into code
@@ -1314,7 +1333,13 @@ git runs with no inherited environment except `HOME`, and with:
   with `IdentityAgent`; otherwise it uses the key files that configuration
   and ssh's defaults name, and in batch mode only those it can use without
   a prompt. An ssh proof remote the person reaches only through an agent
-  therefore reads as unreachable and keeps;
+  therefore reads as unreachable and keeps. Batch mode also turns ssh's
+  question about an unknown host key into a failure, so a proof host not
+  yet in the person's `known_hosts` reads as unreachable and keeps too; niwa
+  never accepts a key on the person's behalf. ssh still reads the person's
+  own `~/.ssh/config`, so its `ProxyCommand`, `Match exec` and other
+  program-running settings run on these calls, trusted as the person's own
+  configuration;
 - `GIT_PAGER=cat`, `GIT_OPTIONAL_LOCKS=0` (status never rewrites the index,
   so nothing under the unit's `.git` changes), `GIT_NO_LAZY_FETCH=1` (a
   partial clone can't fetch missing objects from its promisor remote during
@@ -1391,6 +1416,15 @@ internal address of the agent's choosing, and is never offered the person's
 ssh keys. For a proof remote, niwa adds the person's own credential helpers,
 read beforehand with `git config --global --get-all credential.helper`, as
 `-c credential.helper=<value>` after the reset; no other helper runs.
+Network calls also pass `-c http.followRedirects=false`. Git's default
+(`initial`) follows a redirect on the first request of a call, which would
+let a proof host hand the call to another host whose refs would then count
+as the proof remote's. With redirects off, a proof remote that answers with
+one fails the call, which reads as unreachable and keeps with git's message
+as evidence; a repository that moved needs its clone URL or prefix updated
+in the workspace configuration. That is simpler than following a redirect
+and parsing git's warning text to check where it went, and it fails toward
+keeping.
 
 That read is the one named exception to `gitCommand`, because it has to see
 the person's real global configuration, which `gitCommand` sets aside with
@@ -1919,6 +1953,8 @@ args:
     -c credential.helper= -c submodule.recurse=false -c fetch.recurseSubmodules=false
     -c core.useReplaceRefs=false -c core.commitGraph=false
   every status: --ignore-submodules=all
+index flags: ls-files -v in every repository the walk found; a lowercase tag
+  (assume-unchanged) or S (skip-worktree) on any entry keeps
 first call in each repository: git config --list --show-scope --includes, 10-second context,
   run on every repository the walk finds under the unit (submodules, gitlinks, nested
   repositories) before the first other git call in any
@@ -1926,7 +1962,8 @@ network calls (ls-remote, fetch): proof remotes only (the workspace's clone URL 
   proof_remotes prefix matched on whole path segments), --git-dir=<scratch store>,
   literal validated URL (no dot or empty segment, percent-encoding, backslash,
   control character, or userinfo beyond the ssh user git),
-  -c credential.helper=<person's helper>; fetch killed past 1 GiB, store removed on exit
+  -c credential.helper=<person's helper>, -c http.followRedirects=false (a redirect
+  fails the call, which keeps); fetch killed past 1 GiB, store removed on exit
 scratch store: bare, 0700, no objects/info/alternates, no refs; the fetch offers no haves
   and brings the tip's whole history; the local side comes in as
   pack-objects --revs --stdout (in the unit) read by index-pack --stdin (in the store)
@@ -2044,8 +2081,9 @@ An all-unit pass, before a dispatch:
    sessions, run on-reap, take the tombstone lock shared, rename the instance
    to its tombstone and repeat there the process listing, the configuration
    check on every repository, git status (`--ignore-submodules=all`), the
-   ref snapshot and the record checks (any change, a new, moved or gone
-   ref, or a flagged key renames it back and keeps),
+   index-flag read, the ref snapshot and the record checks (any change, a
+   new, moved or gone ref, a flagged key or a flagged index entry renames it
+   back and keeps),
    `DestroyInstance` on the
    tombstone, release the lock, remove the ledger, delete
    the mapping, and write `reaped_at`, `restore_until` and `kept_entry` into
@@ -2528,7 +2566,10 @@ match; it is never a proof remote, and a commit only it could hold keeps
 with "remote URL not allowed" and the reason. Any other remote is
 never contacted, and a commit only it could hold keeps the unit with
 "remote not recognized". Network calls use the literal, validated URL
-against the scratch store, so no repository setting applies to them. The
+against the scratch store, so no repository setting applies to them, and
+pass `http.followRedirects=false`, so a proof host that answers with a
+redirect can't hand the call to another host whose refs would then count;
+the call fails, the remote reads as unreachable, and the unit keeps. The
 mark, `discard.json`, pid records and `unit.json` count only when they match
 the ledger outside the instance (Decision 9), and pid records come only
 through `niwa helper`, which accepts a process only when it is the caller's
@@ -2558,10 +2599,17 @@ written by the unit's own workflow by design, so a brief can still make job
 scratch and loose root files older than it disposable, and no ledger can
 vouch for it; a ledger entry written by the brief writer is left to the
 brief work. The inputs that decide a path's class are agent-written too:
-`.gitignore`, a directory's `CACHEDIR.TAG`, the `managed_files` list in
-`instance.json` and a job directory's `state.json` all sit inside the unit.
-An agent can therefore make a file holding unique results read as
-disposable or regenerable by ignoring it (released while `ignored_files` is
+`.gitignore`, `.git/info/exclude` and any `core.excludesFile` the
+repository's configuration names, a directory's `CACHEDIR.TAG`, the
+`managed_files` list in `instance.json` and a job directory's `state.json`
+all sit inside the unit. So do the index's assume-unchanged and
+skip-worktree bits, which make `git status` skip a tracked file however
+it has changed; those don't decide a class, because the rule reads
+`git ls-files -v` and keeps the unit when either flag is set on any entry,
+naming the flag and the path (Decision 1), and the tombstone check reads
+them again. An agent can therefore make a file holding unique results read as
+disposable or regenerable by ignoring it through any of those ignore
+sources (released while `ignored_files` is
 `"disposable"`, the default), by tagging an ignored directory as a build
 tree, or by listing it as a managed file. This reaches only the unit's own
 files, which the agent could delete outright anyway, so it changes what a
@@ -2652,7 +2700,12 @@ but moved into the kept set until the restore window ends.
 What is left: after the tombstone check, a process that already held a
 descriptor inside the tree and that the process listing missed (`lsof` on
 macOS can miss a short-lived one) can still write there before
-`os.RemoveAll` finishes. An agent that allocates its own pseudo-terminal
+`os.RemoveAll` finishes. The mount and device check runs in the walk, and
+the tombstone check doesn't repeat it: a filesystem mounted inside the tree
+after the walk isn't seen, and `os.RemoveAll` descends into it and deletes
+what it can reach there. Mounting one takes root on most hosts, or a FUSE
+or disk-image mount the person's account is allowed to make, and whatever
+such a mount exposes the agent could already delete as the person. An agent that allocates its own pseudo-terminal
 (`script`, `expect`) can answer the terminal prompt itself; what it gains is
 a discard whose paths still sit in the kept set until the window ends, so a
 person who reads the listing can get them back. The agent runs as the
@@ -2734,6 +2787,14 @@ those in the key files the person's ssh configuration and ssh's defaults
 name that ssh can use without a prompt, and an agent's keys only when that
 configuration names the agent with `IdentityAgent`, since git runs without
 `SSH_AUTH_SOCK`. That is no more than the person's own pushes show it.
+Batch mode makes an unknown host key a failure rather than a question, so
+a proof host missing from the person's `known_hosts` reads as unreachable
+and its units keep until the person connects to it once; niwa never adds a
+host key. ssh also honors the person's own `~/.ssh/config`, so a
+`ProxyCommand`, `Match exec` or `ProxyJump` there runs or applies on every
+ssh call niwa makes to a proof remote. That file is trusted like the
+binaries on the person's `PATH`: it sits outside the workspace, and an agent
+able to write it as the person could change it whether or not niwa ran.
 Scrubbing is pattern-based, so a short secret with no telling key name or
 shape inside a git error could still reach `unit.json`, which is 0600 but
 inside the instance, where the agent can read it. Evidence names files (the
