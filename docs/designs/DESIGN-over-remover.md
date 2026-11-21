@@ -285,9 +285,14 @@ The package also settles the mechanics the PRD left to the design:
   or one whose URL starts with a prefix the workspace lists in
   `[session.removal] proof_remotes` (for people who push to forks). URLs are
   compared after normalizing: scheme and host lowercased, the scp-like form
-  rewritten as `ssh://`, a trailing `/` or `.git` dropped. A local commit is
-  held when it is an ancestor of a tip `git ls-remote` returns for a proof
-  remote. Merged by content means `git merge-tree --write-tree` of the proof
+  rewritten as `ssh://`, a trailing `/` or `.git` dropped. Normalization
+  does no path cleaning, so a URL that would need it is refused rather than
+  compared (below). A `proof_remotes` prefix matches on whole path segments
+  after normalizing, never as a string prefix: `https://host/owner/` matches
+  `https://host/owner/repo` but not `https://host/owner-evil/repo`. A local
+  commit whose id is itself a tip `git ls-remote` returns for a proof remote
+  is held without reading any object. Any other local commit is held when
+  it is an ancestor of such a tip. Merged by content means `git merge-tree --write-tree` of the proof
   remote's default branch's live tip and the local branch yields the default
   branch's own tree, which is what a squash merge leaves. Any other remote is
   never contacted, and a repository the workspace configuration doesn't name
@@ -297,29 +302,62 @@ The package also settles the mechanics the PRD left to the design:
   that would widen it. The ancestry test (`git merge-base --is-ancestor`)
   and `merge-tree` run only in a scratch object store outside the unit (a
   temporary bare repository, created 0700 under niwa's temporary directory,
-  whose `objects/info/alternates` points at the clone's objects), never with
-  the unit's repository as `--git-dir`. The tips they test against are the
-  object ids `ls-remote` returned, never the unit's remote-tracking refs. The
-  scratch store carries none of the unit's refs, replace refs or grafts, and
-  replace refs, grafts and commit-graph files are turned off for every call
+  with no `objects/info/alternates` and no refs), never with the unit's
+  repository as `--git-dir`. The tips they test against are the object ids
+  `ls-remote` returned, never the unit's remote-tracking refs. The scratch
+  store carries none of the unit's refs, replace refs or grafts, and replace
+  refs, grafts and commit-graph files are turned off for every call
   (Decision 8), so a `refs/replace/` entry, an `info/grafts` file or a forged
   commit-graph in the unit's `.git` can't make a remote tip look like it
-  descends from an unpushed commit. Objects come from the clone only through
-  the alternates link, and an object's id is the hash of its content, so a
-  commit read that way is the commit the remote has. When the live tip's
-  objects aren't in the clone, the check fetches them into the same store.
-  `merge-tree --write-tree` writes its tree objects into that store too, so
-  nothing under the unit's `.git` changes, which the verdict-only mode needs.
-  The fetch is killed, and the unit kept, when the scratch store grows past
-  1 GiB; the store is removed on every exit path, and a pass removes any
-  store an earlier, interrupted pass left. Each network call runs under a
-  10-second context; an error or timeout keeps with the git error,
-  credentials scrubbed, as evidence. A proof remote whose URL isn't `https`,
-  `ssh` or the scp-like `host:path` form, or whose host or path starts with
-  `-`, is never contacted and keeps with "remote URL not allowed" as
-  evidence. A clone's own `objects/info/alternates` may name directories
-  outside the unit; git reads objects from them, which is read-only and
-  changes no verdict, since only a proof remote's refs count as held.
+  descends from an unpushed commit. Git doesn't re-hash an object when a
+  history walk reads it, so the checks never read the clone's object store
+  at all: an object written into the clone under the id of a real remote
+  commit, with the unpushed commit as its parent, would otherwise make that
+  commit read as an ancestor of the tip, or become the merge base that makes
+  `merge-tree` return the default branch's own tree. Instead the check
+  fetches the live tip's history from the proof remote into the scratch
+  store. Since the store has no refs and no alternates, the fetch offers the
+  server nothing it already has, so the server sends the whole history of
+  that tip, and git computes every object's id from its content as it
+  indexes the pack. The local side `merge-tree` needs comes in the same way:
+  niwa builds a pack of the local branch's objects in the unit's repository
+  (`git pack-objects --revs --stdout`, through `gitCommand`) and reads it
+  into the store with `git index-pack --stdin`, which also recomputes each
+  id from content and refuses an object whose id the store already holds
+  with different content. A forged object therefore lands under its true id,
+  or not at all, and never takes the place of the copy the proof remote
+  sent; an object the walk needs and the store lacks is a git error, which
+  keeps. `merge-tree --write-tree` writes its tree objects into that store
+  too, so nothing under the unit's `.git` changes, which the verdict-only
+  mode needs. The fetch and the local pack are killed, and the unit kept,
+  when the scratch store grows past 1 GiB; the store is removed on every
+  exit path, and a pass removes any store an earlier, interrupted pass left.
+  Each network call runs under a 10-second context; an error or timeout
+  keeps with the git error, credentials scrubbed, as evidence. A proof
+  remote whose URL isn't `https`, `ssh` or the scp-like `host:path` form, or
+  whose host or path starts with `-`, is never contacted and keeps with
+  "remote URL not allowed" as evidence. Before either comparison niwa
+  parses every URL involved (the clone URL the configuration gives, each
+  `proof_remotes` prefix and each remote URL read from the repository) and
+  refuses one whose path holds a `.` or `..` segment or an empty segment
+  between two slashes, that carries any percent-encoding, a backslash or a
+  control character, or that has userinfo: any userinfo at all in an
+  `https` URL, and in an `ssh` or scp-like URL anything other than the bare
+  user name `git` (no password, no other name), which is kept as part of
+  the compared URL. The reason is that the string niwa compares isn't the
+  request git sends: libcurl removes dot segments before it sends, and a
+  server may decode percent-escapes, so
+  `https://github.com/dana/../mallory/repo` starts with the prefix
+  `https://github.com/dana/` but reaches `github.com/mallory/repo`. A
+  refused URL is never a proof remote: a refused remote is never contacted,
+  a refused clone URL or prefix vouches for nothing, and a commit only it
+  could hold keeps the unit with "remote URL not allowed: <reason>" as
+  evidence, the reason naming the dot segment, empty segment, encoding,
+  character or userinfo found. A clone's own `objects/info/alternates` may
+  name directories outside the unit; git reads objects from them when it
+  builds the local pack, which is read-only and changes no verdict, since
+  every such object is re-hashed on its way into the store and only a proof
+  remote's refs count as held.
 - **Build trees** are git-ignored directories carrying `CACHEDIR.TAG` with the
   standard signature line (cargo's `target/` and any tool following the Cache
   Directory Tagging convention), plus directories a workspace declares for a
@@ -373,8 +411,19 @@ file". niwa then repeats the cheap checks on the tombstone: a fresh process
 listing for working directories and open files under it,
 `git status --porcelain=v2 --ignore-submodules=all` of every repository the
 walk found, preceded by a fresh run of the program-naming configuration
-check on each of them (a flagged key counts as a difference), and the
-hashes of the records in `.niwa/`. Any difference renames it back with
+check on each of them (a flagged key counts as a difference), the
+hashes of the records in `.niwa/`, and a ref snapshot. `git status` stays
+clean when a short-lived writer commits, branches or stashes, so with the
+re-read before removal the pass records, for every repository the walk
+found, every ref `for-each-ref` lists (branches, tags, remote-tracking refs
+and `refs/stash`), HEAD, the `stash list` and each worktree's HEAD from
+`git worktree list`, all local reads through `gitCommand`. The check on the
+tombstone takes the same snapshot again and compares: a ref that is new,
+has moved or is gone, a new stash entry, or a HEAD or worktree HEAD that
+points elsewhere counts as a difference, with "changed during the pass:
+ref <name>" as evidence. The only entries allowed to disappear are those of
+the worktrees niwa itself removed in between. Any difference renames it
+back with
 `workspace.UntombstoneInstance` and keeps the unit with "changed during the
 pass", left as the delete-then-reap path leaves one, its sessions and
 worktrees already gone and the unit listed. Otherwise `DestroyInstance`
@@ -1032,7 +1081,14 @@ not a control.
 `proof_remotes` is a list of URL prefixes, each an `https://` or `ssh://`
 URL ending in `/` with at least a host and one path segment, so a bare host
 can't be listed by mistake; a prefix that doesn't parse is a configuration
-error. It is empty by default, which leaves the clone URL as the only proof
+error. A prefix matches on whole path segments after normalizing, so
+`https://host/owner/` covers `https://host/owner/repo` and not
+`https://host/owner-evil/repo`. A prefix, a clone URL or a remote URL with a
+dot segment, an empty segment, any percent-encoding, a backslash, a control
+character or userinfo (any in `https`; in `ssh`, anything but the bare user
+`git`) is refused as Decision 1 describes: it vouches for nothing, and a
+commit only it could hold keeps with "remote URL not allowed: <reason>". The
+list is empty by default, which leaves the clone URL as the only proof
 remote (Decision 1), and a remote matching a prefix also gets the person's
 credential helper (Decision 8).
 
@@ -1210,7 +1266,7 @@ rule must land before anything starts more removals.
 Resolved inline.
 
 The rule runs `git status`, `for-each-ref`, `stash list`, `ls-remote`,
-`worktree list`, `merge-tree` and a fetch inside repositories whose `.git`
+`worktree list`, `pack-objects`, `merge-tree` and a fetch inside repositories whose `.git`
 the unit's agent can write, automatically, before every dispatch. Left to
 git's defaults, a repository's own configuration turns those calls into code
 execution or network traffic of the agent's choosing: `core.fsmonitor`,
@@ -1253,7 +1309,12 @@ git runs with no inherited environment except `HOME`, and with:
 - `GIT_ALLOW_PROTOCOL=https:ssh`, so `ext::`, `file://`, local paths and
   every other transport are refused by git itself;
 - `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ForwardAgent=no"`, which
-  overrides any `core.sshCommand`;
+  overrides any `core.sshCommand`. `SSH_AUTH_SOCK` isn't passed, so ssh
+  reaches no ssh agent unless the person's own `~/.ssh/config` names one
+  with `IdentityAgent`; otherwise it uses the key files that configuration
+  and ssh's defaults name, and in batch mode only those it can use without
+  a prompt. An ssh proof remote the person reaches only through an agent
+  therefore reads as unreachable and keeps;
 - `GIT_PAGER=cat`, `GIT_OPTIONAL_LOCKS=0` (status never rewrites the index,
   so nothing under the unit's `.git` changes), `GIT_NO_LAZY_FETCH=1` (a
   partial clone can't fetch missing objects from its promisor remote during
@@ -1268,9 +1329,9 @@ git runs with no inherited environment except `HOME`, and with:
   -c core.hooksPath=/dev/null -c core.pager=cat -c credential.helper=
   -c submodule.recurse=false -c fetch.recurseSubmodules=false
   -c core.useReplaceRefs=false -c core.commitGraph=false`. The commit-graph
-  setting matters because git loads commit-graph files from alternate object
-  directories without verifying them, so a forged one in the clone could
-  otherwise give a remote tip a parent it doesn't have;
+  setting matters because git loads commit-graph files, its own and those
+  of any alternate object directory, without verifying them, so a forged
+  one in a clone could otherwise give a commit a parent it doesn't have;
 - `--ignore-submodules=all` on every `git status`. Without it git starts a
   status of its own inside every submodule and gitlink, and that child reads
   the submodule's own configuration, which can name a filter driver; the
@@ -1281,7 +1342,14 @@ git runs with no inherited environment except `HOME`, and with:
 The ancestry and merged-by-content checks that decide whether work is held
 elsewhere run only with the scratch store as `--git-dir`, against the tip
 ids `ls-remote` returned (Decision 1). They never read the unit's refs,
-replace refs, grafts or commit-graph files.
+replace refs, grafts or commit-graph files, and never its objects: the
+scratch store has no `objects/info/alternates` and no refs, so the fetch
+offers the proof remote no haves and brings the tip's whole history, and
+the local side arrives as a pack built in the unit's repository by
+`pack-objects` and read in by `index-pack`. Every object the ancestry walk
+and `merge-tree` read is one git hashed from its content as it indexed a
+pack, so an object the agent wrote under another commit's id can't stand
+in for the commit the remote has.
 
 `GIT_NO_LAZY_FETCH` needs git 2.45; with an older git, niwa treats a
 repository whose configuration sets `extensions.partialClone` as undecidable
@@ -1495,9 +1563,11 @@ git call the pass, the hook worktree sweep and `niwa destroy` make goes
 through one hardened builder that runs nothing the repository names and
 reads no history override it carries, the read of the person's own
 credential helper being the one named exception, and only a proof remote
-(the workspace's clone URL, or a `proof_remotes` prefix) can show a commit
-is pushed or merged, judged in the scratch store; no other remote is
-contacted. The mark, the discard record, pid records (now
+(the workspace's clone URL, or a `proof_remotes` prefix matched on whole
+path segments, a URL with dot segments, encoding or userinfo refused) can
+show a commit is pushed or merged, judged in the scratch store only from
+objects git hashed as they came in; no other remote is contacted. The
+tombstone check also compares a ref snapshot, so a late commit keeps. The mark, the discard record, pid records (now
 registered through `niwa helper`) and `unit.json` count only when they match
 a ledger niwa keeps at `~/.niwa/w-<key>/ledger/`. `niwa discard` and
 `niwa retire --override-not-over` need a person at a controlling terminal
@@ -1572,10 +1642,14 @@ nested repositories included, before the first other git call in any, and
   configuration check, run on every repository the walk finds under a unit
   (submodule git directories, gitlinks and nested repositories included)
   before the first other git call in any; the proof-remote match against the
-  workspace's clone URL and `proof_remotes`; remote URL validation;
+  workspace's clone URL and `proof_remotes`, on whole path segments; remote
+  URL validation, refusing dot segments, empty segments, percent-encoding,
+  backslashes, control characters and userinfo;
   per-repository checks, held by a proof remote's live refs, merged by
-  content, both run only in the scratch object store, with its 1 GiB cap and
-  cleanup, 10-second network contexts. The filtered `PATH` used to resolve
+  content, both run only in the scratch object store (no alternates, the
+  tip's history fetched, the local side read in through `index-pack`), with
+  its 1 GiB cap and cleanup, 10-second network contexts; the ref snapshot
+  the tombstone check compares. The filtered `PATH` used to resolve
   git, `lsof` and `claude`.
 - `paths.go`: `ResolveRecorded(base, path)`, the read-time check every
   recorded path passes (relative, no `..`, `job:` bound to the unit's job
@@ -1849,10 +1923,16 @@ first call in each repository: git config --list --show-scope --includes, 10-sec
   run on every repository the walk finds under the unit (submodules, gitlinks, nested
   repositories) before the first other git call in any
 network calls (ls-remote, fetch): proof remotes only (the workspace's clone URL or a
-  proof_remotes prefix), --git-dir=<scratch store>, literal validated URL,
+  proof_remotes prefix matched on whole path segments), --git-dir=<scratch store>,
+  literal validated URL (no dot or empty segment, percent-encoding, backslash,
+  control character, or userinfo beyond the ssh user git),
   -c credential.helper=<person's helper>; fetch killed past 1 GiB, store removed on exit
+scratch store: bare, 0700, no objects/info/alternates, no refs; the fetch offers no haves
+  and brings the tip's whole history; the local side comes in as
+  pack-objects --revs --stdout (in the unit) read by index-pack --stdin (in the store)
 ancestry (merge-base --is-ancestor) and merge-tree --write-tree: --git-dir=<scratch store>
-  only, against the tip ids ls-remote returned; tree objects written there
+  only, against the tip ids ls-remote returned; every object read came through
+  index-pack; tree objects written there
 other remotes: never contacted; a commit only they could hold keeps ("remote not recognized")
 keep without running: a repository-scope filter.*.{clean,smudge,process},
   diff.external, diff.*.{textconv,command}, merge.*.driver, credential.*.helper or
@@ -1943,22 +2023,29 @@ An all-unit pass, before a dispatch:
 6. Run `removal.Evaluate`, every git call built by `gitCommand`, the
    configuration check run on every repository the walk found (submodules
    included) before any other git call, and every
-   network call made only to a proof remote; a commit no proof remote holds
-   keeps, and an `in_brief` file whose brief copy doesn't verify is unique.
+   network call made only to a proof remote whose URL passed validation and
+   matched the clone URL or a `proof_remotes` prefix on whole path segments.
+   A commit that is itself a live tip is held; any other is judged in a
+   fresh scratch store with no alternates, into which the proof remote's
+   tip history is fetched and the local side read through `index-pack`. A
+   commit no proof remote holds keeps, and an `in_brief` file whose brief
+   copy doesn't verify is unique.
    A unit is a reap candidate when it carries a valid
    mark, when its session is gone (the delete-then-reap path, which needs no
    mark and no launch record), or when the backstop finds it unmapped.
    Anything else that's stopped and has idle build trees is a trim candidate.
 7. For a reap: ask the gate (step names as today: `reap`, `reap-backstop`,
-   and the new `retire`), re-read sessions, processes and git state, and keep
-   with "changed during the pass" when anything differs. Then move named
+   and the new `retire`), re-read sessions, processes and git state, take
+   each repository's ref snapshot, and keep with "changed during the pass"
+   when anything differs. Then move named
    files, discarded paths and a discard patch into the kept set (regular
    files only, opened component by component, hashed from the descriptor,
    0700 entry), remove worktrees inside the instance, `claude rm` the
    sessions, run on-reap, take the tombstone lock shared, rename the instance
    to its tombstone and repeat there the process listing, the configuration
-   check on every repository, git status (`--ignore-submodules=all`) and the
-   record checks (any change or flagged key renames it back and keeps),
+   check on every repository, git status (`--ignore-submodules=all`), the
+   ref snapshot and the record checks (any change, a new, moved or gone
+   ref, or a flagged key renames it back and keeps),
    `DestroyInstance` on the
    tombstone, release the lock, remove the ledger, delete
    the mapping, and write `reaped_at`, `restore_until` and `kept_entry` into
@@ -2082,6 +2169,21 @@ Deliverables:
   file that would trigger it, keeps the unit through a reap, the
   verdict-only mode and the hook worktree sweep, makes an unforced destroy
   refuse with the key named, and the driver never runs (no marker file).
+- Security scenarios for the proof-remote and tombstone checks, each
+  through a reap and, where it applies, the verdict-only mode:
+  with `proof_remotes = ["https://<test host>/dana/"]`, a remote
+  `https://<test host>/dana/../mallory/repo` added in the clone, whose
+  target advertises the unit's unpushed commit, keeps the unit with "remote
+  URL not allowed" naming the dot segment, and the test server sees no
+  request; the same with a percent-encoded `..`, and with userinfo in an
+  `https` URL, keeps the same way; a remote under
+  `https://<test host>/dana-evil/` that advertises the commit doesn't match
+  the prefix and keeps with "remote not recognized"; a loose object written
+  into the clone under the id of a real proof-remote commit, with the unit's
+  unpushed commit as its parent, leaves that commit kept by both the
+  ancestry and the merged-by-content checks; a commit made in the instance after the
+  re-read and before the rename, which leaves `git status` clean, renames
+  the tombstone back and keeps with the ref named.
 - Functional scenarios: a clean unit holding a niwa worktree leaves no session
   behind after a reap and after `niwa destroy`; failed-dispatch cleanup keeps
   `partial.txt`; no `claude` call a wrapper logs carries an override flag,
@@ -2408,10 +2510,22 @@ scratch store. The ancestry and merged-by-content checks run only in the
 scratch store, against the tip ids `ls-remote` returned, so a replace ref, a
 grafts file or a forged commit-graph in the unit's `.git` can't make an
 unpushed commit read as held, and the tree objects `merge-tree` writes land
-in the scratch store, not the unit. Only a proof remote counts as evidence that a
+in the scratch store, not the unit. Git doesn't re-hash objects during a
+history walk, so the store has no alternates into the clone: the proof
+remote's tip history is fetched into it with no haves offered, the local
+side is read in through `index-pack`, and every object the checks read was
+hashed from its content on the way in. An object the agent writes into the
+clone under a remote commit's id can't take that commit's place. Only a
+proof remote counts as evidence that a
 commit is held or merged: the clone URL the workspace configuration gives the
 repository, read at the root and never from the instance, or a match for a
-`proof_remotes` prefix the workspace lists (Decision 1). Any other remote is
+`proof_remotes` prefix the workspace lists (Decision 1), matched on whole
+path segments. A URL with a dot segment, an empty segment, percent-encoding,
+a backslash, a control character or userinfo (beyond the bare ssh user
+`git`) is refused before any comparison, because git sends a cleaned path
+that can name a repository outside the prefix the string appeared to
+match; it is never a proof remote, and a commit only it could hold keeps
+with "remote URL not allowed" and the reason. Any other remote is
 never contacted, and a commit only it could hold keeps the unit with
 "remote not recognized". Network calls use the literal, validated URL
 against the scratch store, so no repository setting applies to them. The
@@ -2434,9 +2548,10 @@ agent wrote, and a parser flaw in git is outside niwa's reach. The refusal
 covers the program-naming keys git has today; one a later git release adds
 would need adding, though the fixed overrides and the scratch-store network
 calls don't depend on that list. A clone's `objects/info/alternates` can
-name directories outside the unit, which git then reads objects from; that
-is read-only and can't change a verdict, since only a proof remote's refs
-count. A workspace that lists a broad `proof_remotes` prefix trusts every
+name directories outside the unit, which git then reads objects from when
+it builds the local pack; that is read-only and can't change a verdict,
+since those objects are re-hashed by `index-pack` and only a proof remote's
+refs count. A workspace that lists a broad `proof_remotes` prefix trusts every
 repository under it: an agent able to push there can make a commit read as
 held, though the commit then does exist on that host. The handoff brief is
 written by the unit's own workflow by design, so a brief can still make job
@@ -2510,7 +2625,10 @@ a real directory that is a direct child of the root, so a
 `.niwa-tombstone-*` symlink can't have it rename or evaluate a directory
 elsewhere. The check on the tombstone reruns the program-naming
 configuration check on every repository before its `git status`, so a
-driver planted after the first check still runs nothing and keeps the unit.
+driver planted after the first check still runs nothing and keeps the unit,
+and compares a ref snapshot taken with the re-read, so a commit, branch,
+tag or stash made in between, which leaves `git status` clean, renames the
+tombstone back and keeps the unit with the ref named.
 Lock files in `~/.niwa/locks/` are created 0600 with `O_NOFOLLOW`, and the
 mark clean-up after an over answer runs under the instance lock. niwa uses no
 sudo, opens no listener and passes no force flag to `claude` or to git
@@ -2611,8 +2729,11 @@ workspace lists them in `env`. Transcript modification times and sizes are
 read, never copied or sent, and no telemetry is added.
 
 What is left: a host behind a `proof_remotes` prefix the workspace listed
-learns the machine's address and, over ssh, which public keys the person's
-ssh agent offers, which is what the person's own pushes already show it.
+learns the machine's address and, over ssh, the public keys ssh offers it:
+those in the key files the person's ssh configuration and ssh's defaults
+name that ssh can use without a prompt, and an agent's keys only when that
+configuration names the agent with `IdentityAgent`, since git runs without
+`SSH_AUTH_SOCK`. That is no more than the person's own pushes show it.
 Scrubbing is pattern-based, so a short secret with no telling key name or
 shape inside a git error could still reach `unit.json`, which is 0600 but
 inside the instance, where the agent can read it. Evidence names files (the
@@ -2696,6 +2817,19 @@ scratch and loose root files older than it.
   credential program or an fsmonitor hook (a per-repository LFS install,
   for one), a submodule's included, keeps its unit until a person removes
   the setting or destroys the instance.
+- A commit that isn't itself a live tip is judged in a fresh scratch store
+  that offers the proof remote nothing, so each such check downloads the
+  tip's whole history, which costs network and disk on every pass that
+  reaches the unit, up to the 1 GiB cap, and a repository whose history
+  exceeds the cap or can't be fetched within the 10-second network context
+  keeps its unit whenever such a check is needed. A squash-merged branch is
+  the common case that needs one.
+- An ssh proof remote the person reaches only through an ssh agent reads as
+  unreachable, since git runs without `SSH_AUTH_SOCK`, unless the person's
+  ssh configuration names the agent with `IdentityAgent`.
+- A remote URL with a dot segment, percent-encoding or `https` userinfo,
+  even one a person wrote, no longer counts as proof, and its commits keep
+  their unit.
 - Only the workspace's clone URL counts as proof by default, so work pushed
   only to a fork or a personal remote keeps its unit, and a repository the
   workspace doesn't name (one the agent cloned for reference, a nested
@@ -2746,6 +2880,11 @@ scratch and loose root files older than it.
 - A kept unit's listing names the configuration key that stopped the rule,
   so the fix (drop the setting, or `niwa destroy`) is named where the person
   looks.
+- A local commit that is itself a tip the proof remote advertises needs no
+  fetch at all, which covers a unit whose branches were pushed and not
+  rewritten; the store is removed on every exit path, so the disk is held
+  only while the check runs, and a kept unit names the fetch error or the
+  cap, and the refused URL with its reason, where the person looks.
 - The listing names each unrecognized remote with "remote not recognized"
   and the `proof_remotes` setting that would count it, so a person who
   pushes to forks lists their own prefix once; a reference clone can be
