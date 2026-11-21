@@ -274,15 +274,28 @@ The package also settles the mechanics the PRD left to the design:
   merge, credential or signing program, an fsmonitor hook or any other
   program is kept with that key as evidence, nothing else runs in it,
   and the unit is kept; a submodule is treated exactly as a top-level
-  repository is. Every `git status` niwa runs passes
+  repository is. That first run isn't the last. Seconds can pass between it
+  and a later call in the same repository (the network calls and local pack
+  before a repository's status, the gate, the kept-set move), and a process
+  still alive in the instance can write configuration in between, so the
+  `gitCommand` invoker runs the check again on a repository, its common
+  directory's configuration and its `config.worktree` included, right before
+  it starts every `git status` and every unforced `git worktree remove`
+  there: the rule's status in each repository, the re-read's, each worktree
+  removal in the pass, `DestroySession`'s status and remove in the hook
+  sweep, and destroy's scan status and unforced removal. A key found on a
+  re-check keeps the unit (in the sweep, the worktree) with "changed during
+  the pass: repository configuration names a program: <key>" as evidence,
+  and the call isn't started. Every `git status` niwa runs passes
   `--ignore-submodules=all` and `--untracked-files=all`, and the fixed
   overrides carry the same untracked setting to the status git starts
   inside `git worktree remove`. `--ignore-submodules=all` means git never
   starts a status of its own inside
   a submodule or gitlink, where it would read that repository's
   configuration and run the drivers it names. `git worktree remove` takes no
-  such flag, so there the control is the check having already run on every
-  repository under the worktree; git's unforced remove also refuses a
+  such flag, so there the control is the check having run on every
+  repository under the worktree before the first call and again on the
+  worktree's own repository right before the remove; git's unforced remove also refuses a
   worktree that contains submodules. `git worktree list`, `for-each-ref`,
   `stash list` and `branch -d` don't descend into submodules. Decision 8 gives the
   settings and the reasons. In short: no inherited environment, system and
@@ -308,7 +321,13 @@ The package also settles the mechanics the PRD left to the design:
   compared after normalizing: scheme and host lowercased, the scp-like form
   rewritten as `ssh://`, a trailing `/` or `.git` dropped. Normalization
   does no path cleaning, so a URL that would need it is refused rather than
-  compared (below). A `proof_remotes` prefix matches on whole path segments
+  compared (below). A match compares the whole authority, scheme, user, host
+  and port, with a default port made explicit (443 for `https`, 22 for
+  `ssh`), so a remote that names a port the clone URL or prefix doesn't name
+  doesn't match: `ssh://git@host:2222/dana/repo` is another service on the
+  same host, not a repository under `ssh://git@host/dana/`. A URL niwa
+  rebuilds on a match takes its authority from the clone URL or prefix,
+  never from the remote. A `proof_remotes` prefix matches on whole path segments
   after normalizing, never as a string prefix: `https://host/owner/` matches
   `https://host/owner/repo` but not `https://host/owner-evil/repo`. A local
   commit whose id is itself a tip `git ls-remote` returns for a proof remote
@@ -425,9 +444,14 @@ then calls it with force off and with a git invoker built on `gitCommand`.
 With force off, `DestroySession` runs the unforced `git worktree remove`
 instead of the `--force` form it passes today even when its caller doesn't
 force, so the sweep never force-removes a worktree; git's refusal keeps the
-worktree and is named like any other disagreement.
-The before-remove gate, the instance lock, the re-read before removal and the
-on-reap step stay as they are and wrap the rule's verdict. The removal itself
+worktree and is named like any other disagreement. That invoker runs the
+configuration check again right before `DestroySession`'s `git status` and
+its `git worktree remove`, so a key written after the sweep's first check
+keeps the worktree.
+The before-remove gate, the instance lock, the re-read before removal (whose
+`git status`, like every status, the invoker precedes with a fresh
+configuration check) and the on-reap step stay as they are and wrap the
+rule's verdict. The removal itself
 gains two guards. `workspace.DestroyInstance` `Lstat`s the instance directory,
 refuses a symlink, and refuses any path that isn't a direct child of the
 resolved workspace root. And the last step before it renames the instance to a
@@ -445,7 +469,9 @@ and immediately before `DestroyInstance`, `actReap` calls a new
 to `<root>/.niwa-tombstone-<instance>-<8 hex>` in the same directory. A
 writer that opens a path under the old name from then on gets "no such
 file". niwa then repeats the cheap checks on the tombstone: a fresh process
-listing for working directories and open files under it,
+listing for working directories and open files under it, in which a
+registered helper counts as it does at liveness (it doesn't keep a stopped
+unit),
 `git status --porcelain=v2 --ignore-submodules=all --untracked-files=all`
 and `git ls-files -v`
 of every repository the walk found, preceded by a fresh run of the
@@ -465,7 +491,10 @@ and `refs/stash`, and in a linked worktree its own `refs/worktree/*` and
 each `git worktree remove`, niwa reads that worktree's HEAD and its
 per-worktree refs again through `gitCommand` and compares them with the
 snapshot; any change keeps the unit with "changed during the pass: ref
-<name>" and that worktree isn't removed. The check on the
+<name>" and that worktree isn't removed. The same read runs the
+configuration check again on that worktree's repository, as the invoker
+does before every unforced remove, and a flagged key keeps the unit the
+same way, with the key named. The check on the
 tombstone takes the same snapshot again and compares: a ref that is new,
 has moved or is gone, a new stash entry, or a HEAD or worktree HEAD that
 points elsewhere counts as a difference, with "changed during the pass:
@@ -774,8 +803,9 @@ Each unit's records sit in its instance's `.niwa/` directory:
   named file, except a file flagged `in_brief`, which is left to the brief
   only when niwa can verify the brief's copy. The brief must name that copy as
   `stored_at`, an absolute path outside the instance and the job directory;
-  niwa opens it component by component with `O_NOFOLLOW`, requires a regular
-  file, and hashes the opened descriptor, and only a hash equal to both the
+  niwa opens it component by component with `O_NOFOLLOW` and `O_NONBLOCK`,
+  `fstat`s the descriptor and requires a regular file before reading it, and
+  hashes that descriptor, and only a hash equal to both the
   record's SHA-256 and the file in the instance makes the file handed forward.
   Anything else (no `stored_at`, a link, a missing file, a mismatch) makes it
   unique, so it keeps the unit and is named "brief copy not verified". Scratch
@@ -827,7 +857,12 @@ Each unit's records sit in its instance's `.niwa/` directory:
   working it changes nothing, and once the session is stopped it no longer
   counts as liveness, and the listing names it. The pass never signals it;
   whoever registered it accepts that the helper ends on its own when the
-  instance goes. A pid record with no matching ledger entry is absent. Without
+  instance goes. `niwa helper` runs in its starter's context, which is the
+  agent's or a tool it ran, so under a sandbox that confines the agent's
+  writes, Bash included (the boundary Decision 9 asks for), its ledger write
+  to `~/.niwa/` fails, nothing is registered, and the helper keeps its unit.
+  That is the safe side, and the guide says so; moving registration out of
+  the agent's context is later hardening. A pid record with no matching ledger entry is absent. Without
   a valid record, any live process with its working directory in the instance
   keeps the unit, as the PRD requires.
 - **`unit.json`, the unit record behind the listing.** Written by the pass
@@ -843,7 +878,12 @@ Each unit's records sit in its instance's `.niwa/` directory:
 
 Every record is untrusted input on read, because the unit's agent can write
 anything under its instance. Each reader in `internal/removal/records.go`
-opens the file with `O_NOFOLLOW`, requires a regular file owned by the user,
+opens the file with `O_NOFOLLOW|O_NONBLOCK`, so a FIFO planted in a record's
+place can't block the open (an open waiting in the kernel isn't cancelled by
+the pass's deadline), then `fstat`s the descriptor and requires a regular
+file owned by the user before reading a byte. The same open serves every
+other untrusted file niwa reads: a named file the rule hashes, a brief's
+`stored_at` copy and the kept-set move's sources. Each reader
 caps its size (64 KiB for the mark, `discard.json`, `pids/*.json`,
 `unit.json` and `entry.json`, 1 MiB for `keep.json`), decodes into a fixed
 struct, and rejects an unknown schema name. A failure always lands on the
@@ -955,10 +995,12 @@ and a delete of the source, and a failed write or a hash mismatch keeps the
 unit with nothing removed. The move takes only regular files, and it checks
 what it opens rather than the path it checked earlier: each source is opened
 component by component from the instance (or job directory) descriptor, every
-directory with `O_DIRECTORY|O_NOFOLLOW` and the file with `O_NOFOLLOW`, so a
-directory swapped for a link between the check and the open fails the open.
-niwa then `fstat`s the descriptor (a regular file, owned by the user, on the
-instance's device, with a link count of exactly one) and hashes and copies
+directory with `O_DIRECTORY|O_NOFOLLOW` and the file with
+`O_NOFOLLOW|O_NONBLOCK`, so a directory swapped for a link between the check
+and the open fails the open and a FIFO can't block it.
+niwa then `fstat`s the descriptor before reading from it (a regular file,
+owned by the user, on the instance's device, with a link count of exactly
+one) and hashes and copies
 from that descriptor, never from
 the path; a same-filesystem move is a `renameat` relative to the opened
 parent. Anything else (a symlink, a device, a directory, a file with a
@@ -1134,7 +1176,9 @@ URL ending in `/` with at least a host and one path segment, so a bare host
 can't be listed by mistake; a prefix that doesn't parse is a configuration
 error. A prefix matches on whole path segments after normalizing, so
 `https://host/owner/` covers `https://host/owner/repo` and not
-`https://host/owner-evil/repo`. A prefix, a clone URL or a remote URL with a
+`https://host/owner-evil/repo`, and only on the same scheme, user, host and
+port, a default port made explicit, so a remote on another port of the
+prefix's host doesn't match it. A prefix, a clone URL or a remote URL with a
 dot segment, an empty segment, any percent-encoding, a backslash, a control
 character or userinfo (any in `https`; in `ssh`, anything but the bare user
 `git`) is refused as Decision 1 describes: it vouches for nothing, and a
@@ -1348,7 +1392,13 @@ is resolved through symlinks, and any that resolves inside the workspace
 root is dropped too. `lsof` and `claude` are resolved once per pass from the
 same filtered `PATH` and run by absolute path, and the over command and the
 other session commands keep running under `/bin/sh` by its absolute path,
-with that filtered `PATH` in their environment. This filter is a narrow control: it stops a
+with that filtered `PATH` in their environment. Every `claude` call niwa
+makes (`claude agents`, `claude rm`) runs from an empty temporary directory
+outside the workspace, as the credential-helper read below does, with the
+filtered `PATH`, so no instance's `.claude/settings.json` or
+`settings.local.json`, which the agent can write, is the project Claude Code
+reads for that call; the rest of its environment is the person's, since
+`claude` needs their authentication and configuration. This filter is a narrow control: it stops a
 binary planted inside the workspace from being picked up, but the agent runs
 as the person and can write other directories on the person's `PATH`
 (`~/.local/bin`, say), which niwa can't tell from the person's own tools.
@@ -1435,7 +1485,17 @@ worktree sweep and `niwa destroy`'s scan included, and it runs on every
 repository under the unit before the first other git call in any of them:
 each clone and worktree and each submodule, gitlink and nested repository
 under them, all found by niwa's own walk rather than by git, a submodule's
-configuration under `.git/modules/` included. When a
+configuration under `.git/modules/` included. It isn't only the first call.
+The invoker `gitCommand` builds runs the same read again on a repository,
+under the same 10-second context, right before it starts any `git status`
+or unforced `git worktree remove` there, because those are the calls that
+can start a filter (git's own clean check inside an unforced remove is a
+status) and seconds can pass between the first read and them. A key found
+then keeps the unit with "changed during the pass: repository configuration
+names a program: <key>" and the call isn't started. `ls-files -v`,
+`for-each-ref`, `stash list`, `worktree list`, `pack-objects` and
+`branch -d` start no program the repository names under the overrides, so
+they need no second read. When a
 key from any scope other than `command` names a program git might run
 during the rule's calls, niwa runs nothing more there and
 keeps the unit with "repository configuration names a program: <key>" as
@@ -1463,7 +1523,8 @@ validates them, and runs `ls-remote` and the fetch against the scratch
 object store, whose configuration niwa writes, with a URL niwa builds
 rather than the string the agent wrote: on a clone-URL match, the clone URL
 the workspace configuration gives; on a `proof_remotes` prefix match, a URL
-rebuilt from the remote's parsed, normalized parts. The
+that takes its scheme, user, host and port from the prefix and only its
+path from the remote's parsed, normalized parts. The
 repository's `insteadOf`, `uploadpack`, credential and proxy settings
 therefore never apply to them. A remote the agent added is never contacted,
 so it can't vouch for a commit, can't turn `ls-remote` into a request to an
@@ -1543,11 +1604,15 @@ record it wrote from one the agent wrote.
 
 Key assumptions:
 - The agent writes inside its instance in normal work; writing into
-  `~/.niwa/` takes a deliberate step outside it, which Claude Code's
-  permission settings can deny.
+  `~/.niwa/` takes a deliberate step outside it, which sandbox write
+  restrictions that also cover Bash (Claude Code's sandbox or an
+  operating-system equivalent) can deny. A path deny rule in Claude Code's
+  permission settings covers its file tools, not a shell command that
+  writes the same path, so it can't deny that step on its own.
 - Every writer of these three records can be a niwa command: the pass and
   `niwa retire` for the mark, `niwa discard`, and a starter that runs
-  `niwa helper`.
+  `niwa helper`, which runs in the agent's context, so the same sandbox
+  confines it.
 
 #### Chosen: a per-unit ledger under the workspace's host directory, and `niwa helper` for pid records
 
@@ -1570,14 +1635,28 @@ gone. `niwa helper` replaces hand-written pid records, with the checks in
 Decision 4, so a pid record can only name a process its own caller started.
 The ledger is only as good as the boundary around `~/.niwa/`, so
 `docs/guides/ephemeral-session-instances.md` tells workspaces to deny the
-agent writes to `~/.niwa/` in its Claude Code permission settings, and says
-that this, not the ledger file, is the actual boundary. The same advice
+agent writes to `~/.niwa/` with sandbox write restrictions that also cover
+Bash (Claude Code's sandbox or an operating-system equivalent), and says
+that this, not the ledger file, is the actual boundary. A path deny rule in
+Claude Code's permission settings covers its file tools and not a shell
+command that writes the same path, so the guide says deny rules alone
+aren't the boundary, and that a worker with no such sandbox has none: there
+the ledger is advisory, since the agent can write an entry as easily as a
+record. The same advice
 covers three places in the workspace root that also drive removal and
 restore: `<root>/.niwa/`, whose `workspace.toml` holds the clone URLs, the
 `proof_remotes` prefixes and the over command; `<root>/.niwa-launch/`; and
-the `<root>/.niwa-tombstone-*` directories. Under Claude Code's default
-permissions all of them sit outside the agent's working directory, and the
-guide says so rather than leaving it implied.
+the `<root>/.niwa-tombstone-*` directories. It also covers three files
+outside the workspace whose contents niwa runs: `~/.gitconfig` and
+`~/.config/git/config`, whose `credential.helper` niwa reads and starts on
+proof-remote calls (Decision 8), and `~/.ssh/config`, whose program
+settings ssh runs on those calls. All of them sit outside the agent's
+working directory, but that says where they are, not what stops a write,
+and the guide says so rather than leaving it implied. Under such a sandbox
+`niwa helper` can't write the ledger either, since it runs in the agent's
+context, so a helper the agent starts can't be registered and keeps its
+unit; the guide says that too. Moving registration out of the agent's
+context, so a sandboxed helper can be registered, is later hardening.
 
 #### Alternatives Considered
 
@@ -1626,7 +1705,8 @@ that answers for a replaced unit reads koto's fence and
 
 Removal is never forced. Once the rule passes a unit and the gate allows it,
 niwa re-reads the sessions, processes and git state and keeps the unit when
-any changed. Otherwise it moves named and discarded files into the kept set, removes the
+any changed, a repository configuration that now names a program included.
+Otherwise it moves named and discarded files into the kept set, removes the
 worktrees inside the instance with an unforced `git worktree remove`, runs
 `claude rm` on the sessions without either override flag, runs on-reap,
 removes the instance through `workspace.DestroyInstance`, and writes the
@@ -1712,6 +1792,7 @@ entry in the unit's ledger outside the instance, and every git call under
 `niwa destroy` goes through `gitCommand`, with the program-naming
 configuration check run on every repository under the unit, submodules and
 nested repositories included, before the first other git call in any, and
+again right before every status and unforced worktree removal, and
 `--ignore-submodules=all` and `--untracked-files=all` on every status.
 
 ### Components
@@ -1736,8 +1817,11 @@ nested repositories included, before the first other git call in any, and
   builds, and `--no-show-signature` on every log-family call; the program-naming
   configuration check, run on every repository the walk finds under a unit
   (submodule git directories, gitlinks and nested repositories included)
-  before the first other git call in any; the proof-remote match against the
-  workspace's clone URL and `proof_remotes`, on whole path segments; remote
+  before the first other git call in any, and run again by the invoker on a
+  repository right before every `git status` and unforced
+  `git worktree remove` there; the proof-remote match against the
+  workspace's clone URL and `proof_remotes`, on scheme, user, host and port
+  (default ports made explicit) and whole path segments; remote
   URL validation, refusing dot segments, empty segments, percent-encoding,
   backslashes, control characters and userinfo;
   per-repository checks, held by a proof remote's live refs, merged by
@@ -1755,7 +1839,8 @@ nested repositories included, before the first other git call in any, and
 - `patterns.go`: the shipped list and the glob matcher with `**`.
 - `records.go`: readers and writers for `retired.json`, `keep.json`,
   `discard.json`, `pids/`, and `unit.json`, with the validity rules each
-  carries, size caps, `O_NOFOLLOW` opens, strict decoding, 0600 writes and
+  carries, size caps, `O_NOFOLLOW|O_NONBLOCK` opens `fstat`ed as regular
+  files before any read, strict decoding, 0600 writes and
   the ledger match, all relative to an `O_DIRECTORY|O_NOFOLLOW` descriptor
   for `.niwa` and `pids`.
 - `procs.go`: the per-pass process listing (`/proc` on Linux, `lsof` on
@@ -1763,10 +1848,11 @@ nested repositories included, before the first other git call in any, and
   build trees, pid records applied; process ancestry for the instance guard.
 - `brief.go`: the handoff brief's freshness test (later of mtime and ctime)
   and the `in_brief` check, which hashes the brief's `stored_at` copy
-  through an `O_NOFOLLOW` descriptor and counts the file as unique unless it
-  matches.
+  through an `O_NOFOLLOW|O_NONBLOCK` descriptor `fstat`ed as a regular file
+  and counts the file as unique unless it matches.
 - `keptmove.go`: the kept-set move, opening each source component by
-  component with `O_NOFOLLOW`, `fstat`ing the descriptor (one link only)
+  component with `O_NOFOLLOW` (the file also `O_NONBLOCK`), `fstat`ing the
+  descriptor before reading (a regular file, one link only)
   and hashing it, and moving named files to `files/` and discarded paths to `discarded/`.
 
 **`internal/cli/pass.go` (new).** `runPass` with three modes (act on every
@@ -1775,7 +1861,8 @@ gathering (moved out of `selectReapTargets`, `selectStoredMappingTargets`
 and `selectBackstopTargets`), the acting steps (`actReap`, `actTrim`), the
 re-read before removal, the read of each worktree's HEAD and per-worktree
 refs right before its `git worktree remove`, the removal of trimmed trees
-by a no-follow walk from the instance's descriptor, the tombstone rename
+by a no-follow walk from the instance's descriptor that stops, and keeps
+the rest of the tree, at any `.git` entry or git directory it meets, the tombstone rename
 and check before
 `DestroyInstance` under the shared tombstone lock, the recovery of
 tombstones an interrupted pass left under that lock taken exclusively, and
@@ -1787,14 +1874,18 @@ and the program-naming configuration check on every repository it finds
 there, the worktree's own and each submodule, gitlink and nested repository
 under it, before any other git call in any of them; a flagged one keeps the
 worktree. It then calls `DestroySession` with force off and the
-`gitCommand` invoker.
+`gitCommand` invoker, which runs the check again before that call's status
+and remove.
 
 **`internal/worktree/worktree.go`.** `DestroySession` already takes a
 `GitInvoker`, so its `git status --porcelain`, `git worktree remove` and
 `git branch -d` calls run hardened once the sweep passes the `gitCommand`
 invoker instead of `StdGitInvoker`, which no removal path uses any more.
 The invoker adds `--ignore-submodules=all` and `--untracked-files=all` to
-the `git status` call. With
+the `git status` call, and runs the program-naming configuration check on
+the worktree's repository right before that status and before the remove,
+returning an error that names the key, which keeps the worktree, when it
+finds one. With
 force off it runs `git worktree remove` without `--force`.
 
 **`internal/cli/over.go` (new).** `overSeam`, built like `removalGate`:
@@ -1839,7 +1930,8 @@ summary, adds `--kept`, and adds the `unit` object to
 
 **`internal/cli/destroy.go`, `destroy_session.go`.** `runDestroyInstance`
 removes worktrees inside the instance after the scan and before
-`removeOwningSessionsListed`; unforced destroy uses unforced
+`removeOwningSessionsListed`, whose `claude` calls run from an empty
+temporary directory outside the workspace like the pass's; unforced destroy uses unforced
 `git worktree remove`, and `--force` keeps its meaning and removes them with
 git's own force before the session, since the person already accepted the
 loss. Those worktree calls go through `removal.gitCommand`, and so does
@@ -1857,7 +1949,11 @@ A repository it flags gets no further git call: the scan reports it as a
 `LossScanError` naming the key, the way it already reports a repository it
 can't read, so an unforced destroy refuses as for any other loss, and
 `--force` leaves the worktree holding that repository to go with the
-directory. What the scan checks and decides is otherwise left as it is;
+directory. The `gitCommand` builder runs the check again right before the
+scan's `git status` in each repository and before each unforced
+`git worktree remove`, and a key found then is reported and refused the
+same way; `--force` removal skips git's clean check, so it starts no status
+and needs no second read. What the scan checks and decides is otherwise left as it is;
 only how it starts git changes.
 
 **`internal/cli/instance_from_hook.go`.** Writes the hook session's launch
@@ -1944,8 +2040,9 @@ pids/<pid>.json       pid records (niwa.pid/v1, written by niwa helper)
 unit.json             the unit record (niwa.unit/v1), written by the pass
 ```
 
-Every file here is agent-writable and read as untrusted: `O_NOFOLLOW`, a
-regular file owned by the user, size-capped, strictly decoded, every path in
+Every file here is agent-writable and read as untrusted: opened
+`O_NOFOLLOW|O_NONBLOCK` and `fstat`ed as a regular file owned by the user
+before it's read, size-capped, strictly decoded, every path in
 it through `ResolveRecorded`, and the mark, `discard.json`, pid records and
 `unit.json` valid only with a matching ledger entry. `.niwa` and `pids` must
 be real directories, opened with `O_DIRECTORY|O_NOFOLLOW`.
@@ -2110,7 +2207,8 @@ An all-unit pass, before a dispatch:
    days fails the command before the pass.
 2. Start the 30-second deadline. Resolve git, `lsof` and `claude` to
    absolute paths from the filtered `PATH`. Read `claude agents --json
-   --all` once, the job entries, the session mappings, the launch records,
+   --all` once, run like every `claude` call from an empty temporary
+   directory outside the workspace, then the job entries, the session mappings, the launch records,
    the ledgers and one process listing. Note each repository's clone URL and
    the `proof_remotes` prefixes from the configuration loaded in step 1.
    Remove scratch stores an interrupted pass left.
@@ -2132,7 +2230,9 @@ An all-unit pass, before a dispatch:
    instance lock. Store the answer, scrubbed.
 6. Run `removal.Evaluate`, every git call built by `gitCommand`, the
    configuration check run on every repository the walk found (submodules
-   included) before any other git call, and every
+   included) before any other git call and again right before each
+   repository's `git status`, since the network calls and local pack before
+   it can take seconds, and every
    network call made only to a proof remote whose URL passed validation and
    matched the clone URL or a `proof_remotes` prefix on whole path segments.
    A commit that is itself a live tip is held; any other is judged in a
@@ -2145,15 +2245,18 @@ An all-unit pass, before a dispatch:
    mark and no launch record), or when the backstop finds it unmapped.
    Anything else that's stopped and has idle build trees is a trim candidate.
 7. For a reap: ask the gate (step names as today: `reap`, `reap-backstop`,
-   and the new `retire`), re-read sessions, processes and git state, take
+   and the new `retire`), re-read sessions, processes and git state (each
+   repository's status and index-flag read, the status preceded by a fresh
+   configuration check), take
    each repository's ref snapshot, and keep with "changed during the pass"
-   when anything differs. Then move named
+   when anything differs or a key is flagged. Then move named
    files, discarded paths and a discard patch into the kept set (regular
    files only, one link, opened component by component, hashed from the
    descriptor, 0700 entry), remove worktrees inside the instance, each by a
    path from niwa's own walk and only after a fresh read of its HEAD and
-   per-worktree refs matches the snapshot (a change keeps), `claude rm` the
-   sessions, run on-reap, take the tombstone lock shared, rename the instance
+   per-worktree refs matches the snapshot and a fresh configuration check
+   of its repository flags nothing (either change keeps), `claude rm` the
+   sessions from the same empty directory, run on-reap, take the tombstone lock shared, rename the instance
    to its tombstone and repeat there the process listing, the configuration
    check on every repository, git status (`--ignore-submodules=all
    --untracked-files=all`), the
@@ -2174,7 +2277,11 @@ An all-unit pass, before a dispatch:
    directory opened with `O_DIRECTORY|O_NOFOLLOW` and every entry removed
    relative to its parent's descriptor, as the kept-set move opens its
    sources, so a directory swapped for a link sends nothing outside the
-   instance. The instance, checkout and session stay.
+   instance. The removal walk stops at any `.git` entry or git directory
+   (a `HEAD` beside `objects/` and `refs/`) it meets, keeps the rest of the
+   tree and names the path, so a repository created in the tree after the
+   checks isn't removed; a partly trimmed build tree is regenerable. The
+   instance, checkout and session stay.
 9. Write `unit.json` (0600) with the answer, time stopped, size, verdict,
    scrubbed evidence and `reached_at`, and its hash into the ledger.
 10. Handle the kept set: mark entries due on their date and note in
@@ -2216,15 +2323,19 @@ Deliverables:
   1 GiB cap and cleanup on every exit path), patterns, and
   `.niwa/dispatch-retain` as a hold for unmapped instances.
 - `gitCommand` with the hardened environment and overrides, the filtered
-  `PATH` for git, `lsof`, `claude` and the session commands, the program-naming
-  configuration check, proof remotes (the clone URL from the workspace
-  configuration and `proof_remotes`) as the only remotes contacted or
+  `PATH` for git, `lsof`, `claude` and the session commands, `claude` run
+  from an empty temporary directory outside the workspace, the program-naming
+  configuration check, run first and again by the invoker before every
+  status and unforced worktree removal, proof remotes (the clone URL from the workspace
+  configuration and `proof_remotes`, matched on the full authority, port
+  included) as the only remotes contacted or
   counted, remote URL validation, and network calls against the scratch
   store with the person's helper for proof remotes only; the walk's
   no-symlink, one-filesystem and external-git-directory rules;
   `ResolveRecorded`; `ScrubEvidence` with the widened patterns and
-  truncation after scrubbing; size-capped, `O_NOFOLLOW`, strictly decoded
-  record readers working from `O_DIRECTORY|O_NOFOLLOW` descriptors for
+  truncation after scrubbing; size-capped, strictly decoded record readers
+  that open with `O_NOFOLLOW|O_NONBLOCK` and `fstat` for a regular file
+  before reading, working from `O_DIRECTORY|O_NOFOLLOW` descriptors for
   `.niwa` and `pids`.
 - `internal/cli/pass.go` with the deadline, ordering, re-read, the tombstone
   rename and check under the tombstone lock with lock-guarded recovery, and
@@ -2242,7 +2353,12 @@ Deliverables:
   `core.sshCommand`, `core.pager` and `credential.helper` set to a script
   that writes a marker file runs none of them through a reap and the
   verdict-only mode; a `filter.x.clean` in repository config keeps the unit
-  with the key as evidence; the same driver set only in `config.worktree`,
+  with the key as evidence; a `filter.x.clean` set to a marker-writing
+  script, with an attributes entry and a stat-dirty tracked file that
+  select it, planted in a repository's configuration after the pass's first
+  configuration check and before the rule's `git status` there, or before
+  the re-read's, keeps the unit with "changed during the pass" and the key
+  named, and the filter never runs (no marker file); the same driver set only in `config.worktree`,
   with `extensions.worktreeConfig` on, keeps the unit with the key named and
   never runs; a repository holding a signed commit in `refs/stash`, with
   `log.showSignature` set and a `gpg.program` that writes a marker file,
@@ -2299,7 +2415,13 @@ Deliverables:
   `filter.x.clean` driver, with a `.gitattributes` entry and a stat-dirty
   file that would trigger it, keeps the unit through a reap, the
   verdict-only mode and the hook worktree sweep, makes an unforced destroy
-  refuse with the key named, and the driver never runs (no marker file).
+  refuse with the key named, and the driver never runs (no marker file); the
+  same driver planted in a worktree's repository after the first check and
+  before that worktree's `git worktree remove` in a reap, before
+  `DestroySession`'s status or remove in the hook worktree sweep, and before
+  the status or unforced removal in `niwa destroy`, keeps the unit (the
+  worktree, in the sweep; an unforced destroy refuses) with the key named,
+  and the driver never runs.
 - Security scenarios for the proof-remote and tombstone checks, each
   through a reap and, where it applies, the verdict-only mode:
   with `proof_remotes = ["https://<test host>/dana/"]`, a remote
@@ -2309,7 +2431,8 @@ Deliverables:
   request; the same with a percent-encoded `..`, and with userinfo in an
   `https` URL, keeps the same way; a remote under
   `https://<test host>/dana-evil/` that advertises the commit doesn't match
-  the prefix and keeps with "remote not recognized"; a loose object written
+  the prefix and keeps with "remote not recognized", and so does a remote on
+  `https://<test host>:<other port>/dana/repo`; a loose object written
   into the clone under the id of a real proof-remote commit, with the unit's
   unpushed commit as its parent, leaves that commit kept by both the
   ancestry and the merged-by-content checks; a commit made in the instance after the
@@ -2319,7 +2442,10 @@ Deliverables:
   behind after a reap and after `niwa destroy`; failed-dispatch cleanup keeps
   `partial.txt`; no `claude` call a wrapper logs carries an override flag,
   and no `git` call a wrapper logs carries `--force` outside `niwa destroy
-  --force`.
+  --force`; every `claude` call a wrapper logs runs from a directory outside
+  the workspace; an instance whose `.claude/settings.json` and
+  `settings.local.json` define every hook event with a command that writes
+  a marker file writes no marker through a reap and through `niwa destroy`.
 
 ### Phase 3: The over seam, the mark and the retire command
 
@@ -2354,7 +2480,8 @@ Deliverables:
 - Over answers in the verdict-only mode, with the mark each would write.
 - The trim with `trim` and `trim_after`, the root apply lock, the process
   checks for build trees, the refusal of a tree that holds a repository, and
-  removal by a no-follow walk from the instance's descriptor.
+  removal by a no-follow walk from the instance's descriptor that stops at
+  any `.git` entry or git directory it meets.
 - `niwa helper` with its child-of-caller and not-a-session checks and its
   ledger entry; pid record reading in liveness; the pid record format and
   `niwa helper` in the guide.
@@ -2406,9 +2533,14 @@ Deliverables:
   `kept_entry` checked to sit directly under `kept-files/<instance>/`, every
   path re-validated, parents created without following links, files created
   with `O_CREAT|O_EXCL|O_NOFOLLOW`.
-- The guide's advice to deny the agent writes to `~/.niwa/`, and to the
-  root's `.niwa/`, `.niwa-launch/` and `.niwa-tombstone-*`, in Claude Code's
-  permission settings.
+- The guide's advice to deny the agent writes to `~/.niwa/`, to the root's
+  `.niwa/`, `.niwa-launch/` and `.niwa-tombstone-*`, and to `~/.gitconfig`,
+  `~/.config/git/config` and `~/.ssh/config`, with sandbox write
+  restrictions that also cover Bash (Claude Code's sandbox or an
+  operating-system equivalent) rather than path deny rules alone; its note
+  that a worker without such a sandbox has no boundary and the ledger is
+  advisory there; and its note that under such a sandbox `niwa helper`
+  can't register a helper, which then keeps its unit.
 - Strict decoding of launch records, and `niwa resume` ignoring the replay
   fields on a record whose `origin` is `hook`.
 - Functional scenarios for restore inside and past the window, with and
@@ -2627,7 +2759,12 @@ repository's settings, only `https` and `ssh` allowed, and `--git-dir` and
 is the first git call in
 every repository on all of these paths, and it runs on every repository
 under a unit, each submodule, gitlink and nested repository included, found
-by niwa's own walk, before the first other git call in any of them. The
+by niwa's own walk, before the first other git call in any of them. It
+isn't a single gate: the invoker runs it again on a repository right before
+every `git status` and every unforced `git worktree remove` there, since a
+process still alive in the instance could add a key in the seconds between
+the first check and those calls, and a key found then keeps the unit with
+"changed during the pass" and the key named. The
 walk recognizes a git directory by its structure as well as by the name
 `.git`, so a bare repository, a removed submodule's store under `modules/`
 and a repository inside a build tree are all found and checked. A
@@ -2642,7 +2779,9 @@ names; every `git status` niwa runs therefore passes
 `--ignore-submodules=all` (and `--untracked-files=all`), and
 `git worktree remove`, which takes no such
 flag, runs only after the check has cleared every repository under the
-worktree. Each submodule's own unpushed work is judged by its own checks as
+worktree and, a moment before the remove, cleared the worktree's own
+repository again (the late-write residual under Permission scope gives the
+gap that still leaves). Each submodule's own unpushed work is judged by its own checks as
 a repository of its own. The one git call built outside
 `gitCommand` is the read of the person's own credential helper, which needs
 the person's real global configuration: it runs once per pass from an empty
@@ -2661,8 +2800,10 @@ clone under a remote commit's id can't take that commit's place. Only a
 proof remote counts as evidence that a
 commit is held or merged: the clone URL the workspace configuration gives the
 repository, read at the root and never from the instance, or a match for a
-`proof_remotes` prefix the workspace lists (Decision 1), matched on whole
-path segments. A URL with a dot segment, an empty segment, percent-encoding,
+`proof_remotes` prefix the workspace lists (Decision 1), matched on scheme,
+user, host and port, a default port made explicit, and on whole path
+segments, so a remote naming a port the clone URL or prefix doesn't name
+doesn't match. A URL with a dot segment, an empty segment, percent-encoding,
 a backslash, a control character or userinfo (beyond the bare ssh user
 `git`) is refused before any comparison, because git sends a cleaned path
 that can name a repository outside the prefix the string appeared to
@@ -2672,8 +2813,9 @@ never contacted, and a commit only it could hold keeps the unit with
 "remote not recognized". Network calls run against the scratch store, so
 no repository setting applies to them, with a validated URL niwa builds,
 never the string the agent wrote: the workspace's configured clone URL on
-a clone-URL match, or a URL rebuilt from the remote's parsed, normalized
-parts on a prefix match. They pass `http.followRedirects=false`, so a proof host that answers with a
+a clone-URL match, or, on a prefix match, a URL that takes its scheme,
+user, host and port from the prefix and only its path from the remote's
+parsed, normalized parts. They pass `http.followRedirects=false`, so a proof host that answers with a
 redirect can't hand the call to another host whose refs would then count;
 the call fails, the remote reads as unreachable, and the unit keeps. The
 mark, `discard.json`, pid records and `unit.json` count only when they match
@@ -2681,7 +2823,8 @@ the ledger outside the instance (Decision 9), and pid records come only
 through `niwa helper`, which accepts a process only when it is the caller's
 own child. An `in_brief` file counts as handed forward only when niwa hashes
 the brief's stored copy and it matches; otherwise it is unique. Every record
-is read with `O_NOFOLLOW` from a `.niwa` directory opened without following
+is opened with `O_NOFOLLOW` and `O_NONBLOCK`, and `fstat`ed as a regular
+file before it's read, from a `.niwa` directory opened without following
 links, with a size cap and strict decoding, and any failure lands on the
 keeping side. The over command's reason, git evidence and every other string
 a unit supplies pass `ScrubEvidence` and `sanitizeRemovalGateText` before
@@ -2736,7 +2879,13 @@ are `ignored_files = "unique"`, which makes every ignored file count, and
 the verdict-only mode, whose git-ignored notice names each ignored path
 before anything is released. The configuration read follows `include.path` to any file the
 repository names, a FIFO included; it runs under a 10-second context, so
-such a file can hang it only until the context ends, which keeps. The
+such a file can hang it only until the context ends, which keeps. niwa's
+own reads of agent-written files (records, a brief's copy, named files and
+the kept-set move's sources) can't be bounded that way, since the pass's
+deadline doesn't interrupt an open waiting in the kernel, so each is opened
+with `O_NONBLOCK` and checked by `fstat` as a regular file before any read:
+a FIFO planted in one's place fails the check, which lands on the keeping
+side, and can't hang every dispatch on the host. The
 credential-helper read misses a helper scoped to a URL
 (`credential.<url>.helper`) or set only in an included file, and the remote
 it was needed for then reads as unreachable and keeps. The launch records
@@ -2752,7 +2901,11 @@ boundary for the replay fields is the deny-write advice below.
 ### Permission scope
 
 The pass deletes directories, moves files between volumes, and runs
-`git worktree remove`, `claude rm` and on-reap as the person. A recorded
+`git worktree remove`, `claude rm` and on-reap as the person. Claude Code
+reads project settings, hook commands included, from the project it runs
+in, and an instance's `.claude/settings.json` and `settings.local.json` are
+agent-writable, so a `claude` call started inside an instance could run a
+hook the agent wrote, unsandboxed. A recorded
 path through a symlink could have the kept-set move copy a secret from
 outside the instance into a directory that persists (a `keep.json` naming
 `bench/link` pointing at `~/.ssh/id_ed25519`), or a restore could write
@@ -2774,7 +2927,15 @@ only a file with a link count of one, so a hard link to a file outside the
 instance keeps the unit with the path named. The trim removes a build tree
 the same way, walking from the instance's directory descriptor with every
 directory opened `O_DIRECTORY|O_NOFOLLOW`, so a directory swapped for a
-link mid-removal can't send the delete outside the instance. `.niwa` and
+link mid-removal can't send the delete outside the instance, and the walk
+stops and keeps the rest of the tree at any `.git` entry or git directory
+it meets, so a repository created in the tree after the trim's checks
+isn't removed with it. Every `claude` call niwa makes (`claude agents`,
+`claude rm`, in the pass and in `niwa destroy`) runs from an empty
+temporary directory outside the workspace with the filtered `PATH`, so an
+instance's settings aren't the project Claude Code reads for it, and a
+functional scenario checks that hooks an instance's settings define run
+through neither a reap nor `niwa destroy`. `.niwa` and
 `pids` must be real directories, and every record read and write happens
 relative to their `O_NOFOLLOW` descriptors. The restore checks that
 `kept_entry` names a directory directly under `kept-files/<instance>/`,
@@ -2797,9 +2958,14 @@ Recovery `Lstat`s a tombstone before renaming it back and goes on only for
 a real directory that is a direct child of the root, so a
 `.niwa-tombstone-*` symlink can't have it rename or evaluate a directory
 elsewhere. The check on the tombstone reruns the program-naming
-configuration check on every repository before its `git status`, so a
-driver planted after the first check still runs nothing and keeps the unit,
-and compares a ref snapshot taken with the re-read, so a commit, branch,
+configuration check on every repository before its `git status`, as the
+invoker does before every other `git status` and unforced
+`git worktree remove` on every removal path (the rule's status in each
+repository, the re-read, each worktree removal, the hook sweep's
+`DestroySession` and destroy's scan), so a driver planted after the first
+check still runs nothing and keeps the unit, with "changed during the
+pass" and the key named; the residual below gives the gap that's left. The
+tombstone check also compares a ref snapshot taken with the re-read, so a commit, branch,
 tag or stash made in between, which leaves `git status` clean, renames the
 tombstone back and keeps the unit with the ref named. A worktree niwa
 removes takes its admin directory with it, so its HEAD and per-worktree
@@ -2831,7 +2997,11 @@ but moved into the kept set until the restore window ends.
 What is left: after the tombstone check, a process that already held a
 descriptor inside the tree and that the process listing missed (`lsof` on
 macOS can miss a short-lived one) can still write there before
-`os.RemoveAll` finishes. The mount and device check runs in the walk, and
+`os.RemoveAll` finishes. So can a helper registered through `niwa helper`,
+which the listing sees but counts as it does at liveness, so it doesn't
+keep a stopped unit: it's the one writer the design knows is alive during
+a reap, and its working directory moves with the rename, so its relative
+writes still land in the tombstone. The mount and device check runs in the walk, and
 the tombstone check doesn't repeat it: a filesystem mounted inside the tree
 after the walk isn't seen, and `os.RemoveAll` descends into it and deletes
 what it can reach there. Mounting one takes root on most hosts, or a FUSE
@@ -2841,14 +3011,23 @@ such a mount exposes the agent could already delete as the person. An agent that
 a discard whose paths still sit in the kept set until the window ends, so a
 person who reads the listing can get them back. The agent runs as the
 person, so niwa can't stop it from writing outside its instance; whether it
-can is up to Claude Code's permission settings. The guide names every place
-outside the instance whose contents drive removal and restore and tells
-workspaces to deny the agent writes to them: `~/.niwa/` (the ledger, the
-kept set, the locks), and in the workspace root `.niwa/` (whose
-`workspace.toml` holds the clone URLs, the `proof_remotes` prefixes and the
-over command), `.niwa-launch/` and `.niwa-tombstone-*`. Under Claude Code's
-default permissions all of them are outside the agent's working directory,
-and the guide says so. The over command is code the
+can is up to the sandbox it runs under. The guide names every place
+outside the instance whose contents drive removal and restore, or that
+niwa runs, and tells workspaces to deny the agent writes to them:
+`~/.niwa/` (the ledger, the kept set, the locks); in the workspace root
+`.niwa/` (whose `workspace.toml` holds the clone URLs, the `proof_remotes`
+prefixes and the over command), `.niwa-launch/` and `.niwa-tombstone-*`;
+and `~/.gitconfig`, `~/.config/git/config` and `~/.ssh/config`. It names
+the mechanism too: sandbox write restrictions that also cover Bash (Claude
+Code's sandbox or an operating-system equivalent), since a path deny rule
+in Claude Code's permission settings covers its file tools and not a shell
+command that writes the same path. All of these places are outside the
+agent's working directory, but that's where they are, not what stops a
+write: a worker without such a sandbox has no boundary at all, the ledger
+is advisory there, and the guide says so. Under such a sandbox
+`niwa helper` can't write the ledger either, since it runs in the agent's
+context, so a helper the agent starts can't be registered and keeps its
+unit, which is the safe side. The over command is code the
 workspace chose, with the same trust as hooks and the removal gate; it now
 runs more often, inside every dispatch, under its fixed environment,
 process-group kill and the shared 30-second budget.
@@ -2858,7 +3037,10 @@ A write after the re-read to a path outside every repository (a loose file
 at the instance root), to a git-ignored path inside one, or into the job
 directory isn't seen, and it's deleted with the rest; the job directory is
 never tombstoned at all, and `claude rm` removes it after the re-read. This
-needs the same writer the process listing missed as the case above. Later
+needs a writer the process listing missed, or a registered helper, as in
+the case above. The trim has the same gap in a smaller form: its removal
+walk stops at a repository it meets, but a plain file written into a build
+tree after the trim's checks is removed with the tree. Later
 hardening would record a manifest of path, size, mtime and ctime for the
 paths outside every repository and for the job directory during the
 evaluation, compare it at the tombstone, and re-check the job directory
@@ -2866,6 +3048,24 @@ against it before `claude rm`. A commit made in the instant between a
 worktree's last read and git removing it is lost the same way, and git's
 own worktree removal works by path, which niwa can't make
 descriptor-relative.
+
+The configuration re-checks narrow the gap for a planted filter; they don't
+close it. Between niwa's `git config --list` and git's own read of the
+configuration at the start of the `git status` or `git worktree remove`
+that follows there's a sub-second gap, and a writer that watches for
+niwa's read can still win it; the tombstone check's re-run lives with the
+same race. The writers that can try are a helper registered through
+`niwa helper`, which the design lets live through the reap with its
+working directory inside the instance, and any process the listing missed
+or whose working directory and open files sit outside the instance. Under
+a sandbox that confines the agent's writes a helper can't be registered,
+but an unregistered one still lives: it keeps its unit, yet the rule still
+runs every check there, its status included, so it can race that status
+the same way. What a
+win costs is more than one unit's files: the filter runs as the person,
+outside any sandbox the agent runs under, and can write `~/.niwa/` or the
+root's `workspace.toml`, which defeats the deny-write boundary the ledger,
+discard records and pid records rest on.
 
 ### Supply chain or dependency trust
 
@@ -2940,6 +3140,13 @@ host key. ssh also honors the person's own `~/.ssh/config`, so a
 ssh call niwa makes to a proof remote. That file is trusted like the
 binaries on the person's `PATH`: it sits outside the workspace, and an agent
 able to write it as the person could change it whether or not niwa ran.
+The person's `~/.gitconfig` and `~/.config/git/config` sit in the same
+place with more at stake: niwa reads their `credential.helper` and starts
+it on proof-remote calls, so a `!<command>` helper an agent wrote there
+runs as the person, outside the agent's sandbox, on the next pass that
+needs a fetch, with no action by the person. These three files are trusted
+only as far as the agent is kept from writing them, which is why the guide
+lists them with `~/.niwa/`.
 Scrubbing is pattern-based, so a short secret with no telling key name or
 shape inside a git error could still reach `unit.json`, which is 0600 but
 inside the instance, where the agent can read it. Evidence names files (the
@@ -2994,12 +3201,14 @@ so a person copies them from the kept set. The ledger's value rests on the
 agent not writing `~/.niwa/`; an agent that can write there can forge a
 ledger entry as easily as a record, which is why the guide tells workspaces
 to deny the agent writes to `~/.niwa/`, and to the root's `.niwa/`,
-`.niwa-launch/` and `.niwa-tombstone-*`, in Claude Code's permission
-settings. And a brief written by the unit's own workflow can still release
+`.niwa-launch/` and `.niwa-tombstone-*`, with sandbox write restrictions
+that also cover Bash, not path deny rules alone; where a worker runs
+without one, the ledger is advisory. And a brief written by the unit's own workflow can still release
 scratch and loose root files older than it.
 
 A reap that stops after the kept-set move, because the tombstone renames
-back or a later step (worktree removal, `claude rm`, on-reap) disagrees,
+back or a later step (worktree removal or the configuration re-check
+before it, `claude rm`, on-reap) disagrees,
 leaves the unit listed with its named and discarded files already in a
 kept-set entry no launch record points at, and that entry still leaves on
 its due date. A named file tracked in a linked worktree makes that worktree
@@ -3074,7 +3283,9 @@ move last, after `claude rm` and on-reap and just before the tombstone.
   tombstone an interrupted pass left can sit for a while on a busy host.
 - A helper's starter has to run `niwa helper`; a pid record written by hand
   no longer releases a live process, and a helper that daemonizes before
-  registering can't be registered.
+  registering can't be registered. Nor can any helper the agent starts
+  under a sandbox that denies it writes to `~/.niwa/`, so under the boundary
+  the guide recommends every such helper keeps its unit.
 - A worker can no longer retire itself or write its own discard record:
   `niwa retire` and `niwa discard` refuse inside an instance.
 - The ledger is a second host store per unit; a ledger lost or out of step
@@ -3134,6 +3345,9 @@ move last, after `claude rm` and on-reap and just before the tombstone.
   tombstone is listed, so the person can see it.
 - The guide documents `niwa helper` and says to run it before a helper
   detaches; an unregistered helper keeps its unit, which is the safe side.
+  The guide also says registration fails under a sandbox that denies the
+  agent writes to `~/.niwa/`, so a sandboxed workspace knows its helpers
+  keep their units until registration moves out of the agent's context.
 - The over command, which runs from the workspace root, answers for workers;
   a person retires or discards from a terminal outside the instances.
 - Every failure of the ledger lands on keeping, and the next over answer,
