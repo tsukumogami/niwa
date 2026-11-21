@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
@@ -346,8 +347,13 @@ func TestRetaskCommandSurface(t *testing.T) {
 	if !found {
 		t.Fatal("retask is not registered on the root command")
 	}
-	if retaskCmd.Flags().HasAvailableFlags() {
-		t.Errorf("retask defines flags; it takes none")
+	var flags []string
+	retaskCmd.Flags().VisitAll(func(f *pflag.Flag) { flags = append(flags, f.Name) })
+	if !slices.Equal(flags, []string{retaskInterruptFlag}) {
+		t.Errorf("retask defines flags %q; it takes only --%s", flags, retaskInterruptFlag)
+	}
+	if f := retaskCmd.Flags().Lookup(retaskInterruptFlag); f == nil || f.DefValue != "false" {
+		t.Errorf("--%s must be a boolean that defaults to off", retaskInterruptFlag)
 	}
 	for _, args := range [][]string{
 		{"retask", "a"},
@@ -493,7 +499,7 @@ func TestRetaskStateWordsAreStable(t *testing.T) {
 		"awaiting-input", "busy", "policy-tightened", "options-drift",
 		"stray-session", "concurrency", "agent-unsupported", "build-forks",
 		"stop-failed", "settle-timeout", "copy-started", "copy-left",
-		"wake-unconfirmed",
+		"wake-unconfirmed", "woke-with-drift",
 	}
 	if !slices.Equal(retaskStateWords, want) {
 		t.Errorf("retask's state words are\n %q\nwant\n %q\nThey are a stable contract: change this test and the guide together with them.", retaskStateWords, want)

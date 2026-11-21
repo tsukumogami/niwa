@@ -35,8 +35,11 @@
 // is one, else from FAKE_CLAUDE_<NAME>: VERSION, SETTLE_LISTINGS, ALWAYS_COPY
 // (1 copies every wake), STOP_FAIL and RM_FAIL (1 makes the verb exit 1),
 // WAKE ("dead" leaves the woken row with no pid and no status, "vanish" drops
-// it from the listing) and ARMED (1 makes a new session an armed keep-alive
-// worker: state working, one session_cron task in flight).
+// it from the listing), WAKE_RESPAWN (a JSON array of strings that replaces
+// the session's saved options when a wake continues it in place, the way
+// Claude Code writes the model a session resolved at startup into its own
+// respawnFlags) and ARMED (1 makes a new session an armed keep-alive worker:
+// state working, one session_cron task in flight).
 package claudestub
 
 import (
