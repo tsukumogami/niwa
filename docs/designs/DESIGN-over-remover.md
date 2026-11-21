@@ -207,7 +207,8 @@ included; each repository in path order, with git errors and unreachable
 remotes first, then commits and refs no live remote ref holds (every ref
 `for-each-ref` lists and each worktree's HEAD from `git worktree list`, a
 detached HEAD included), stashes, modified tracked files, index entries
-flagged assume-unchanged or skip-worktree, untracked files;
+flagged assume-unchanged or skip-worktree, untracked files, which git is
+made to report in full whatever the repository's configuration says;
 paths outside every repository; named
 files missing or changed), the evidence for each, and the class of every path
 (tracked, pushed, build tree, generated, disposable or unique, with a
@@ -218,9 +219,21 @@ names the first.
 The package also settles the mechanics the PRD left to the design:
 
 - **Repositories are found by walking.** The walk covers the instance and the
-  unit's job directory, finds every `.git` directory or file (clones,
-  worktrees, submodules, nested `git init` repositories), and doesn't descend
-  into a build tree except to sum its size. A nested repository the outer one
+  unit's job directory and finds every `.git` directory or file (clones,
+  worktrees, submodules, nested `git init` repositories). It also recognizes
+  a git directory by its structure, a `HEAD` file beside `objects/` and
+  `refs/` directories, whatever it's named, so a bare repository counts, and
+  so does every git directory under a git directory's `modules/` at any
+  depth: a submodule that was deinitialized or removed with `git rm` leaves
+  its commits there with no working-tree `.git` file pointing at them. The
+  walk doesn't descend into a build tree except to sum its size, and that
+  descent, which visits every entry anyway, looks for the same `.git`
+  entries and git directories; a build tree that holds one is never
+  trimmed. Every repository found gets the full checks, the configuration
+  check first; one with no work tree (a bare repository, a submodule's
+  store with no checkout) gets them with `--git-dir` alone, and the status,
+  `ls-files` and index-flag reads, which need a work tree, don't apply to
+  it. A nested repository the outer one
   ignores is still a repository with its own checks, so its unpushed commit
   keeps the unit rather than passing as a git-ignored path. A submodule is
   judged the same way, as a repository of its own: its commits, stashes,
@@ -257,11 +270,15 @@ The package also settles the mechanics the PRD left to the design:
   clone and worktree, and each submodule (whose configuration is a file of
   its own under the parent's `.git/modules/`, which the parent's check never
   reads), gitlink and nested repository under them. A repository whose own
-  configuration names a filter, diff, merge or credential program or an
-  fsmonitor hook is kept with that key as evidence, nothing else runs in it,
+  configuration, in any scope but the command line, names a filter, diff,
+  merge, credential or signing program, an fsmonitor hook or any other
+  program is kept with that key as evidence, nothing else runs in it,
   and the unit is kept; a submodule is treated exactly as a top-level
   repository is. Every `git status` niwa runs passes
-  `--ignore-submodules=all`, so git never starts a status of its own inside
+  `--ignore-submodules=all` and `--untracked-files=all`, and the fixed
+  overrides carry the same untracked setting to the status git starts
+  inside `git worktree remove`. `--ignore-submodules=all` means git never
+  starts a status of its own inside
   a submodule or gitlink, where it would read that repository's
   configuration and run the drivers it names. `git worktree remove` takes no
   such flag, so there the control is the check having already run on every
@@ -269,13 +286,16 @@ The package also settles the mechanics the PRD left to the design:
   worktree that contains submodules. `git worktree list`, `for-each-ref`,
   `stash list` and `branch -d` don't descend into submodules. Decision 8 gives the
   settings and the reasons. In short: no inherited environment, system and
-  global configuration ignored, hooks, fsmonitor, pagers, askpass and
-  credential helpers turned off, replace refs, grafts and commit-graph files
-  ignored, only `https` and `ssh` allowed, `--ignore-submodules=all` on every
-  status, and `--git-dir` and `--work-tree` passed from the walk. Network
+  global configuration ignored, hooks, fsmonitor, pagers, askpass,
+  credential helpers and signature checks turned off, replace refs, grafts
+  and commit-graph files ignored, only `https` and `ssh` allowed,
+  `--ignore-submodules=all` and `--untracked-files=all` on every status, and
+  `--git-dir` and `--work-tree` passed from the walk. `git worktree remove`
+  is given only a worktree path from niwa's own walk, never one read from
+  `git worktree list`. Network
   calls go only to proof remotes (below), take
-  an explicit, validated URL and run against the scratch object store, never
-  inside the unit's repository.
+  an explicit, validated URL niwa builds itself and run against the scratch
+  object store, never inside the unit's repository.
 - **Held means a proof remote's live ref holds it.** Only a proof remote can
   show that a commit exists somewhere else, because the remotes in a
   repository's configuration are written by the agent, which could add one
@@ -417,32 +437,42 @@ no path to write to.
 The tombstone closes most of the gap between the last check and the delete.
 The re-read comes before seconds of worktree removal, `claude rm`, on-reap
 and `os.RemoveAll`, and the instance lock binds only niwa, so a process the
-listing missed or a helper that starts late could otherwise write into the
-instance after the re-read and have that write deleted unseen. After on-reap,
+listing missed or a helper that starts late could otherwise change a
+repository or a record after the re-read and have that change deleted
+unseen. After on-reap,
 and immediately before `DestroyInstance`, `actReap` calls a new
 `workspace.TombstoneInstance(root, name)`, which renames `<root>/<instance>`
 to `<root>/.niwa-tombstone-<instance>-<8 hex>` in the same directory. A
 writer that opens a path under the old name from then on gets "no such
 file". niwa then repeats the cheap checks on the tombstone: a fresh process
 listing for working directories and open files under it,
-`git status --porcelain=v2 --ignore-submodules=all` and `git ls-files -v`
+`git status --porcelain=v2 --ignore-submodules=all --untracked-files=all`
+and `git ls-files -v`
 of every repository the walk found, preceded by a fresh run of the
 program-naming configuration check on each of them (a flagged key or a
 newly flagged index entry counts as a difference), the
-hashes of the records in `.niwa/`, and a ref snapshot. The walk's mount
-and device check isn't repeated there (Security Considerations gives what
-that leaves). `git status` stays
+hashes of the records in `.niwa/`, and a ref snapshot. These compare git
+state and records only: neither the walk nor its mount and device check
+is repeated there, so a late write outside every repository, to a
+git-ignored path or into the job directory isn't seen (Security
+Considerations gives what that leaves). `git status` stays
 clean when a short-lived writer commits, branches or stashes, so with the
 re-read before removal the pass records, for every repository the walk
 found, every ref `for-each-ref` lists (branches, tags, remote-tracking refs
-and `refs/stash`), HEAD, the `stash list` and each worktree's HEAD from
-`git worktree list`, all local reads through `gitCommand`. The check on the
+and `refs/stash`, and in a linked worktree its own `refs/worktree/*` and
+`refs/bisect/*`), HEAD, the `stash list` and each worktree's HEAD from
+`git worktree list`, all local reads through `gitCommand`. Right before
+each `git worktree remove`, niwa reads that worktree's HEAD and its
+per-worktree refs again through `gitCommand` and compares them with the
+snapshot; any change keeps the unit with "changed during the pass: ref
+<name>" and that worktree isn't removed. The check on the
 tombstone takes the same snapshot again and compares: a ref that is new,
 has moved or is gone, a new stash entry, or a HEAD or worktree HEAD that
 points elsewhere counts as a difference, with "changed during the pass:
 ref <name>" as evidence. The only entries allowed to disappear are those of
-the worktrees niwa itself removed in between. Any difference renames it
-back with
+a worktree niwa itself removed in between, and only those that matched the
+snapshot when niwa read them right before that removal. Any difference
+renames it back with
 `workspace.UntombstoneInstance` and keeps the unit with "changed during the
 pass", left as the delete-then-reap path leaves one, its sessions and
 worktrees already gone and the unit listed. Otherwise `DestroyInstance`
@@ -928,11 +958,13 @@ component by component from the instance (or job directory) descriptor, every
 directory with `O_DIRECTORY|O_NOFOLLOW` and the file with `O_NOFOLLOW`, so a
 directory swapped for a link between the check and the open fails the open.
 niwa then `fstat`s the descriptor (a regular file, owned by the user, on the
-instance's device) and hashes and copies from that descriptor, never from
+instance's device, with a link count of exactly one) and hashes and copies
+from that descriptor, never from
 the path; a same-filesystem move is a `renameat` relative to the opened
-parent. Anything else (a symlink, a device, a directory) keeps the unit with
+parent. Anything else (a symlink, a device, a directory, a file with a
+second hard link) keeps the unit with
 the path named, so a keep record can't point the move at a file outside the
-instance. A unit's entry also holds the paths its discard record released,
+instance, a hard link to one included. A unit's entry also holds the paths its discard record released,
 under `discarded/` at their in-unit paths, with their own due date in
 `entry.json`: the end of the restore window. Entry directories are created 0700, `entry.json` and
 the rewritten keep record 0600, and each file keeps its permission bits with
@@ -1290,7 +1322,8 @@ the unit's agent can write, automatically, before every dispatch. Left to
 git's defaults, a repository's own configuration turns those calls into code
 execution or network traffic of the agent's choosing: `core.fsmonitor`,
 `core.hooksPath`, `core.pager`, `core.sshCommand`, `core.askPass`,
-`credential.helper`, filter, diff and merge drivers, and `ext::` or `file://`
+`credential.helper`, filter, diff and merge drivers, a `gpg.program` that
+`log.showSignature` makes `stash list` run, and `ext::` or `file://`
 remote URLs. The question is how to run the calls the rule needs without
 running anything the repository names.
 
@@ -1353,11 +1386,24 @@ git runs with no inherited environment except `HOME`, and with:
   walk (which overrides any `core.worktree`), and `-c core.fsmonitor=false
   -c core.hooksPath=/dev/null -c core.pager=cat -c credential.helper=
   -c submodule.recurse=false -c fetch.recurseSubmodules=false
-  -c core.useReplaceRefs=false -c core.commitGraph=false`. The commit-graph
+  -c core.useReplaceRefs=false -c core.commitGraph=false
+  -c log.showSignature=false -c status.showUntrackedFiles=all
+  -c core.untrackedCache=false`. The commit-graph
   setting matters because git loads commit-graph files, its own and those
   of any alternate object directory, without verifying them, so a forged
-  one in a clone could otherwise give a commit a parent it doesn't have;
-- `--ignore-submodules=all` on every `git status`. Without it git starts a
+  one in a clone could otherwise give a commit a parent it doesn't have.
+  `git stash list` is `git log -g` underneath, and with `log.showSignature`
+  on, git verifies every listed commit that carries a signature by running
+  `gpg.program`; the override turns that off, and every log-family call
+  (`stash list`, and any `git log` that `ScanInstance` makes) also passes
+  `--no-show-signature`. The two untracked settings make every status
+  report each untracked file whatever the repository's
+  `status.showUntrackedFiles` says, read from the directories rather than
+  from an untracked cache the agent could have written into the index; as `-c`
+  values they also reach the status git starts inside `git worktree
+  remove`, so git's own clean check sees the same files;
+- `--ignore-submodules=all` and `--untracked-files=all` on every
+  `git status`. Without the first, git starts a
   status of its own inside every submodule and gitlink, and that child reads
   the submodule's own configuration, which can name a filter driver; the
   `-c` overrides reach the child, but no override switches off a filter. The
@@ -1390,16 +1436,22 @@ repository under the unit before the first other git call in any of them:
 each clone and worktree and each submodule, gitlink and nested repository
 under them, all found by niwa's own walk rather than by git, a submodule's
 configuration under `.git/modules/` included. When a
-key from the repository's own scope or a file it includes names a program
-git might run during the rule's calls (`filter.*.clean`, `filter.*.smudge`,
-`filter.*.process`, `diff.external`, `diff.*.textconv`, `diff.*.command`,
-`merge.*.driver`, `credential.*.helper`, or `core.fsmonitor` set to a hook
-rather than a boolean), niwa runs nothing more there and
+key from any scope other than `command` names a program git might run
+during the rule's calls, niwa runs nothing more there and
 keeps the unit with "repository configuration names a program: <key>" as
-evidence. A submodule's key keeps the unit exactly as a top-level
-repository's does. The `core.fsmonitor` override already turns the hook off
-for every call; refusing it as well means the submodule case doesn't depend
-on that override reaching a git process git itself starts.
+evidence. That covers the `local` scope, the `worktree` scope
+(`config.worktree` under `extensions.worktreeConfig`) and any file either
+includes; only niwa's own `-c` values are exempt. The keys refused by name
+are `filter.*.clean`, `filter.*.smudge`, `filter.*.process`,
+`diff.external`, `diff.*.textconv`, `diff.*.command`, `merge.*.driver`,
+`credential.*.helper`, `gpg.program`, `gpg.ssh.program`,
+`gpg.x509.program`, and `core.fsmonitor` set to a hook rather than a
+boolean. Beyond that list the rule is general: any key whose name says it
+names a program (`*.program`, `*.command`, `*Command`, `*.helper`) is
+refused when set outside the `command` scope. A submodule's key keeps the
+unit exactly as a top-level repository's does. The `core.fsmonitor`
+override already turns the hook off for every call; refusing it as well
+means the submodule case doesn't depend on that override reaching a git process git itself starts.
 A repository git refuses for ownership (`safe.directory`) keeps
 with git's message; niwa never adds a `safe.directory` entry.
 
@@ -1407,8 +1459,11 @@ Network calls never run inside the unit's repository, and they go only to
 proof remotes. niwa reads each remote URL from the setting listing, keeps
 only those that are proof remotes (the clone URL the workspace configuration
 gives that repository, or a match for a `proof_remotes` prefix; Decision 1),
-validates them, and runs `ls-remote` and the fetch with that literal URL
-against the scratch object store, whose configuration niwa writes. The
+validates them, and runs `ls-remote` and the fetch against the scratch
+object store, whose configuration niwa writes, with a URL niwa builds
+rather than the string the agent wrote: on a clone-URL match, the clone URL
+the workspace configuration gives; on a `proof_remotes` prefix match, a URL
+rebuilt from the remote's parsed, normalized parts. The
 repository's `insteadOf`, `uploadpack`, credential and proxy settings
 therefore never apply to them. A remote the agent added is never contacted,
 so it can't vouch for a commit, can't turn `ls-remote` into a request to an
@@ -1600,8 +1655,10 @@ credential helper being the one named exception, and only a proof remote
 (the workspace's clone URL, or a `proof_remotes` prefix matched on whole
 path segments, a URL with dot segments, encoding or userinfo refused) can
 show a commit is pushed or merged, judged in the scratch store only from
-objects git hashed as they came in; no other remote is contacted. The
-tombstone check also compares a ref snapshot, so a late commit keeps. The mark, the discard record, pid records (now
+objects git hashed as they came in; no other remote is contacted. Each
+worktree's HEAD and per-worktree refs are read again right before it's
+removed, and the tombstone check compares a ref snapshot, so a late commit
+keeps. The mark, the discard record, pid records (now
 registered through `niwa helper`) and `unit.json` count only when they match
 a ledger niwa keeps at `~/.niwa/w-<key>/ledger/`. `niwa discard` and
 `niwa retire --override-not-over` need a person at a controlling terminal
@@ -1655,7 +1712,7 @@ entry in the unit's ledger outside the instance, and every git call under
 `niwa destroy` goes through `gitCommand`, with the program-naming
 configuration check run on every repository under the unit, submodules and
 nested repositories included, before the first other git call in any, and
-`--ignore-submodules=all` on every status.
+`--ignore-submodules=all` and `--untracked-files=all` on every status.
 
 ### Components
 
@@ -1665,14 +1722,18 @@ nested repositories included, before the first other git call in any, and
   `CheckHold`, `CheckRecords`, `CheckRepository`, `CheckOutside`,
   `CheckNamedFiles`), and the `Verdict` and `Check` types.
 - `walk.go`: the walk of the instance and job directory, repository
-  discovery, path classes, build-tree detection, generated paths, size; it
+  discovery (`.git` entries, and git directories recognized by `HEAD`,
+  `objects/` and `refs/`, bare ones and those under `modules/` included,
+  inside build trees too), path classes, build-tree detection, generated
+  paths, size; it
   `Lstat`s every entry, follows no symlink, stays on one filesystem, and
   keeps on a `.git` file whose git directory lies outside the unit.
 - `git.go`: `gitCommand`, the only builder of git commands, with the fixed
   environment and overrides of Decision 8, and a `GitInvoker` and a scan
   command builder made from it for the worktree and workspace packages; the
   person's credential-helper read, the one git call built outside it;
-  `--ignore-submodules=all` on every status it builds; the program-naming
+  `--ignore-submodules=all` and `--untracked-files=all` on every status it
+  builds, and `--no-show-signature` on every log-family call; the program-naming
   configuration check, run on every repository the walk finds under a unit
   (submodule git directories, gitlinks and nested repositories included)
   before the first other git call in any; the proof-remote match against the
@@ -1705,14 +1766,17 @@ nested repositories included, before the first other git call in any, and
   through an `O_NOFOLLOW` descriptor and counts the file as unique unless it
   matches.
 - `keptmove.go`: the kept-set move, opening each source component by
-  component with `O_NOFOLLOW`, `fstat`ing and hashing the descriptor, and
-  moving named files to `files/` and discarded paths to `discarded/`.
+  component with `O_NOFOLLOW`, `fstat`ing the descriptor (one link only)
+  and hashing it, and moving named files to `files/` and discarded paths to `discarded/`.
 
 **`internal/cli/pass.go` (new).** `runPass` with three modes (act on every
 unit, act on one, verdict-only), the deadline, the ordering, candidate
 gathering (moved out of `selectReapTargets`, `selectStoredMappingTargets`
 and `selectBackstopTargets`), the acting steps (`actReap`, `actTrim`), the
-re-read before removal, the tombstone rename and check before
+re-read before removal, the read of each worktree's HEAD and per-worktree
+refs right before its `git worktree remove`, the removal of trimmed trees
+by a no-follow walk from the instance's descriptor, the tombstone rename
+and check before
 `DestroyInstance` under the shared tombstone lock, the recovery of
 tombstones an interrupted pass left under that lock taken exclusively, and
 the counts the dispatch line and reap print.
@@ -1729,7 +1793,8 @@ worktree. It then calls `DestroySession` with force off and the
 `GitInvoker`, so its `git status --porcelain`, `git worktree remove` and
 `git branch -d` calls run hardened once the sweep passes the `gitCommand`
 invoker instead of `StdGitInvoker`, which no removal path uses any more.
-The invoker adds `--ignore-submodules=all` to the `git status` call. With
+The invoker adds `--ignore-submodules=all` and `--untracked-files=all` to
+the `git status` call. With
 force off it runs `git worktree remove` without `--force`.
 
 **`internal/cli/over.go` (new).** `overSeam`, built like `removalGate`:
@@ -1783,8 +1848,8 @@ every git call destroy's existing scan makes: `runDestroyInstance` passes
 from `gitCommand`, and `gitOutput` in `internal/workspace/scan.go` starts
 git only through it, so the workspace package doesn't import the removal
 package. The scan's own `git status` call (`scanStatus`, scan.go:366) gains
-`--ignore-submodules=all`. `ScanInstance` finds no submodules or nested
-repositories of its own, so before the scan's first git call, and before
+`--ignore-submodules=all` and `--untracked-files=all`. `ScanInstance`
+finds no submodules or nested repositories of its own, so before the scan's first git call, and before
 `--force` removes a worktree, `runDestroyInstance` runs the removal walk
 over the instance and the program-naming configuration check on every
 repository it finds, submodules, gitlinks and nested repositories included.
@@ -1952,15 +2017,21 @@ args:
     -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.pager=cat
     -c credential.helper= -c submodule.recurse=false -c fetch.recurseSubmodules=false
     -c core.useReplaceRefs=false -c core.commitGraph=false
-  every status: --ignore-submodules=all
+    -c log.showSignature=false -c status.showUntrackedFiles=all -c core.untrackedCache=false
+  every status: --ignore-submodules=all --untracked-files=all
+  every log-family call (stash list, git log): --no-show-signature
+  git worktree remove: only a worktree path from niwa's walk, never from git worktree list
 index flags: ls-files -v in every repository the walk found; a lowercase tag
   (assume-unchanged) or S (skip-worktree) on any entry keeps
 first call in each repository: git config --list --show-scope --includes, 10-second context,
   run on every repository the walk finds under the unit (submodules, gitlinks, nested
-  repositories) before the first other git call in any
+  repositories, bare repositories and git directories under modules/, build trees
+  included) before the first other git call in any
 network calls (ls-remote, fetch): proof remotes only (the workspace's clone URL or a
   proof_remotes prefix matched on whole path segments), --git-dir=<scratch store>,
-  literal validated URL (no dot or empty segment, percent-encoding, backslash,
+  a validated URL niwa builds (the configured clone URL on a clone-URL match, or one
+  rebuilt from the remote's parsed, normalized parts on a prefix match; never the
+  agent-written string; no dot or empty segment, percent-encoding, backslash,
   control character, or userinfo beyond the ssh user git),
   -c credential.helper=<person's helper>, -c http.followRedirects=false (a redirect
   fails the call, which keeps); fetch killed past 1 GiB, store removed on exit
@@ -1971,9 +2042,11 @@ ancestry (merge-base --is-ancestor) and merge-tree --write-tree: --git-dir=<scra
   only, against the tip ids ls-remote returned; every object read came through
   index-pack; tree objects written there
 other remotes: never contacted; a commit only they could hold keeps ("remote not recognized")
-keep without running: a repository-scope filter.*.{clean,smudge,process},
-  diff.external, diff.*.{textconv,command}, merge.*.driver, credential.*.helper or
-  core.fsmonitor naming a hook, in any repository under the unit, a submodule included
+keep without running: from any scope but command (local, worktree, any included file)
+  a filter.*.{clean,smudge,process}, diff.external, diff.*.{textconv,command},
+  merge.*.driver, credential.*.helper, gpg.program, gpg.ssh.program, gpg.x509.program,
+  core.fsmonitor naming a hook, or any other *.program, *.command, *Command or *.helper
+  key, in any repository under the unit, a submodule included
 the one call outside gitCommand: git config --global --get-all credential.helper,
   once per pass, from an empty directory outside the workspace, 10-second context
 ```
@@ -2076,14 +2149,18 @@ An all-unit pass, before a dispatch:
    each repository's ref snapshot, and keep with "changed during the pass"
    when anything differs. Then move named
    files, discarded paths and a discard patch into the kept set (regular
-   files only, opened component by component, hashed from the descriptor,
-   0700 entry), remove worktrees inside the instance, `claude rm` the
+   files only, one link, opened component by component, hashed from the
+   descriptor, 0700 entry), remove worktrees inside the instance, each by a
+   path from niwa's own walk and only after a fresh read of its HEAD and
+   per-worktree refs matches the snapshot (a change keeps), `claude rm` the
    sessions, run on-reap, take the tombstone lock shared, rename the instance
    to its tombstone and repeat there the process listing, the configuration
-   check on every repository, git status (`--ignore-submodules=all`), the
+   check on every repository, git status (`--ignore-submodules=all
+   --untracked-files=all`), the
    index-flag read, the ref snapshot and the record checks (any change, a
    new, moved or gone ref, a flagged key or a flagged index entry renames it
-   back and keeps),
+   back and keeps; only the entries of a worktree niwa removed, as they
+   stood at that fresh read, may be gone),
    `DestroyInstance` on the
    tombstone, release the lock, remove the ledger, delete
    the mapping, and write `reaped_at`, `restore_until` and `kept_entry` into
@@ -2091,9 +2168,13 @@ An all-unit pass, before a dispatch:
    message scrubbed.
 8. For a trim: check the root apply lock, no keep record protecting build
    trees, no process with its working directory in the tree or a file under it
-   open, the newest write older than `trim_after`, and the gate (step
-   `trim`); then remove
-   each tree. The instance, checkout and session stay.
+   open, no repository found inside the tree, the newest write older than
+   `trim_after`, and the gate (step `trim`); then remove
+   each tree by walking it from the instance's directory descriptor, every
+   directory opened with `O_DIRECTORY|O_NOFOLLOW` and every entry removed
+   relative to its parent's descriptor, as the kept-set move opens its
+   sources, so a directory swapped for a link sends nothing outside the
+   instance. The instance, checkout and session stay.
 9. Write `unit.json` (0600) with the answer, time stopped, size, verdict,
    scrubbed evidence and `reached_at`, and its hash into the ledger.
 10. Handle the kept set: mark entries due on their date and note in
@@ -2161,15 +2242,26 @@ Deliverables:
   `core.sshCommand`, `core.pager` and `credential.helper` set to a script
   that writes a marker file runs none of them through a reap and the
   verdict-only mode; a `filter.x.clean` in repository config keeps the unit
-  with the key as evidence; an `ext::` and a `file://` remote are never
+  with the key as evidence; the same driver set only in `config.worktree`,
+  with `extensions.worktreeConfig` on, keeps the unit with the key named and
+  never runs; a repository holding a signed commit in `refs/stash`, with
+  `log.showSignature` set and a `gpg.program` that writes a marker file,
+  writes no marker through a reap and the verdict-only mode and keeps with
+  `gpg.program` named; a repository with `status.showUntrackedFiles=no`
+  and an untracked `notes.txt` keeps the unit with "untracked files:
+  notes.txt"; a deinitialized submodule whose `.git/modules/<name>` holds a
+  commit no proof remote has keeps the unit, as do a bare repository in the
+  instance and a nested repository inside a `CACHEDIR.TAG` build tree, each
+  holding such a commit; an `ext::` and a `file://` remote are never
   contacted and keep; a repository whose agent-added remote advertises the
   local commit, served by a test server, is kept with "remote not
   recognized" and the server sees no request; a commit pushed to the clone
   URL is held; a remote matching a `proof_remotes` prefix is held; a symlink
   inside the instance pointing at a file outside is never read or summed; a
   `.niwa` replaced by a symlink keeps the unit and nothing is written
-  through it; a `.git` file pointing outside keeps; a write into the
-  instance after the re-read renames the tombstone back and keeps; a second
+  through it; a `.git` file pointing outside keeps; an untracked, not
+  ignored, file written into a repository's working tree after the re-read
+  renames the tombstone back and keeps; a second
   pass started while the first holds a tombstone leaves it alone; a
   credential in a remote URL, an `AKIA` key id, an `xoxb-` token and a
   `?access_token=` query value never appear in `unit.json` or any output; a
@@ -2191,7 +2283,8 @@ Deliverables:
 - The hook worktree sweep (`internal/cli/reap_worktrees.go`,
   `internal/worktree/worktree.go`) and `niwa destroy`'s scan
   (`internal/workspace/scan.go`) building every git call with `gitCommand`,
-  every status with `--ignore-submodules=all`, the program-naming
+  every status with `--ignore-submodules=all` and `--untracked-files=all`,
+  every log-family call with `--no-show-signature`, the program-naming
   configuration check run on every repository niwa's walk finds under the
   worktree or instance, submodules, gitlinks and nested repositories
   included, before the first other git call in any, and `DestroySession`
@@ -2259,8 +2352,9 @@ Deliverables:
   lines and the JSON `unit` object, re-scrubbed on read; the dispatch line;
   reap's counts.
 - Over answers in the verdict-only mode, with the mark each would write.
-- The trim with `trim` and `trim_after`, the root apply lock, and the process
-  checks for build trees.
+- The trim with `trim` and `trim_after`, the root apply lock, the process
+  checks for build trees, the refusal of a tree that holds a repository, and
+  removal by a no-follow walk from the instance's descriptor.
 - `niwa helper` with its child-of-caller and not-a-session checks and its
   ledger entry; pid record reading in liveness; the pid record format and
   `niwa helper` in the guide.
@@ -2503,8 +2597,11 @@ output, the per-unit records, the git repositories inside the instance, and
 the kept-set entries it reads back at restore. Git is the largest. A
 repository's configuration can make `git status` or a fetch run a program
 (`core.fsmonitor`, hooks, a pager, `core.sshCommand`, askpass, credential
-helpers, filter, diff and merge drivers) or contact a host of the agent's
-choosing through an `ext::` or `file://` URL. The remotes themselves are
+helpers, filter, diff and merge drivers, a `gpg.program` that
+`log.showSignature` makes `git stash list` run) or contact a host of the
+agent's choosing through an `ext::` or `file://` URL. It can also hide
+work: `status.showUntrackedFiles=no` makes `git status` report no
+untracked file at all. The remotes themselves are
 agent-written too: an agent can add a remote pointing at a host it controls
 and serve a ref at its own unpushed commit, or a default branch whose tree
 equals the merge result, so that the commit reads as pushed or merged. The
@@ -2522,21 +2619,28 @@ an agent controls, and the sweep runs before every dispatch, so the
 implementation changes `internal/worktree/worktree.go`,
 `internal/cli/reap_worktrees.go` and `internal/workspace/scan.go` to build
 their calls with it. The builder means no inherited environment, system and
-global configuration ignored, hooks, fsmonitor, pagers, askpass and
-credential helpers off, replace refs, grafts and commit-graph files ignored,
-only `https` and `ssh` allowed, and `--git-dir` and `--work-tree` taken from
-the walk. The program-naming configuration check is the first git call in
+global configuration ignored, hooks, fsmonitor, pagers, askpass,
+credential helpers and signature checks off, replace refs, grafts and
+commit-graph files ignored, every untracked file reported whatever the
+repository's settings, only `https` and `ssh` allowed, and `--git-dir` and
+`--work-tree` taken from the walk. The program-naming configuration check
+is the first git call in
 every repository on all of these paths, and it runs on every repository
 under a unit, each submodule, gitlink and nested repository included, found
-by niwa's own walk, before the first other git call in any of them. A
-repository whose own configuration names a filter, diff, merge or
-credential program or an fsmonitor hook is kept, with its unit, without
+by niwa's own walk, before the first other git call in any of them. The
+walk recognizes a git directory by its structure as well as by the name
+`.git`, so a bare repository, a removed submodule's store under `modules/`
+and a repository inside a build tree are all found and checked. A
+repository whose configuration, in any scope but the command line, names a
+filter, diff, merge, credential or signing program, an fsmonitor hook or
+any other program is kept, with its unit, without
 running anything more in it, and a submodule is treated the same way as the
 repository around it. That matters because a submodule's configuration is a
 file of its own, and a plain `git status` in the parent starts a status
 inside every submodule and gitlink that reads it and runs any filter it
 names; every `git status` niwa runs therefore passes
-`--ignore-submodules=all`, and `git worktree remove`, which takes no such
+`--ignore-submodules=all` (and `--untracked-files=all`), and
+`git worktree remove`, which takes no such
 flag, runs only after the check has cleared every repository under the
 worktree. Each submodule's own unpushed work is judged by its own checks as
 a repository of its own. The one git call built outside
@@ -2565,9 +2669,11 @@ that can name a repository outside the prefix the string appeared to
 match; it is never a proof remote, and a commit only it could hold keeps
 with "remote URL not allowed" and the reason. Any other remote is
 never contacted, and a commit only it could hold keeps the unit with
-"remote not recognized". Network calls use the literal, validated URL
-against the scratch store, so no repository setting applies to them, and
-pass `http.followRedirects=false`, so a proof host that answers with a
+"remote not recognized". Network calls run against the scratch store, so
+no repository setting applies to them, with a validated URL niwa builds,
+never the string the agent wrote: the workspace's configured clone URL on
+a clone-URL match, or a URL rebuilt from the remote's parsed, normalized
+parts on a prefix match. They pass `http.followRedirects=false`, so a proof host that answers with a
 redirect can't hand the call to another host whose refs would then count;
 the call fails, the remote reads as unreachable, and the unit keeps. The
 mark, `discard.json`, pid records and `unit.json` count only when they match
@@ -2586,15 +2692,27 @@ the same way: as data, never as a directory to `cd` into and run `git`,
 
 What is left: git still parses objects, the index and configuration the
 agent wrote, and a parser flaw in git is outside niwa's reach. The refusal
-covers the program-naming keys git has today; one a later git release adds
-would need adding, though the fixed overrides and the scratch-store network
+covers the program-naming keys git has today and any key named like one
+(`*.program`, `*.command`, `*Command`, `*.helper`); a later git key that
+names a program under some other kind of name would need adding, though
+the fixed overrides and the scratch-store network
 calls don't depend on that list. A clone's `objects/info/alternates` can
 name directories outside the unit, which git then reads objects from when
 it builds the local pack; that is read-only and can't change a verdict,
 since those objects are re-hashed by `index-pack` and only a proof remote's
 refs count. A workspace that lists a broad `proof_remotes` prefix trusts every
 repository under it: an agent able to push there can make a commit read as
-held, though the commit then does exist on that host. The handoff brief is
+held, though the commit then does exist on that host.
+
+Normalization treats the scp-like and `ssh://` forms of a URL as one
+remote, and a path with `.git` and one without it as one too. On a server
+other than the big forges they can name different repositories: scp-like
+`host:path` is relative to the login's home, while `ssh://host/path` is
+absolute. A prefix match can therefore count a repository the person never
+listed, on a host they did. Later hardening would keep these forms
+distinct unless the host is known to treat them alike.
+
+The handoff brief is
 written by the unit's own workflow by design, so a brief can still make job
 scratch and loose root files older than it disposable, and no ledger can
 vouch for it; a ledger entry written by the brief writer is left to the
@@ -2651,7 +2769,12 @@ Every recorded path passes `ResolveRecorded` on every read: relative, no
 `..`, `job:` bound to the unit's own job directory, each component `Lstat`ed
 with no symlink and no change of device. The kept-set move opens each source
 component by component with `O_NOFOLLOW`, `fstat`s the descriptor and hashes
-and copies from it, so a swap after the check fails the open. `.niwa` and
+and copies from it, so a swap after the check fails the open, and it takes
+only a file with a link count of one, so a hard link to a file outside the
+instance keeps the unit with the path named. The trim removes a build tree
+the same way, walking from the instance's directory descriptor with every
+directory opened `O_DIRECTORY|O_NOFOLLOW`, so a directory swapped for a
+link mid-removal can't send the delete outside the instance. `.niwa` and
 `pids` must be real directories, and every record read and write happens
 relative to their `O_NOFOLLOW` descriptors. The restore checks that
 `kept_entry` names a directory directly under `kept-files/<instance>/`,
@@ -2661,8 +2784,10 @@ never overwrites. Kept-set expiry removes only a direct-child directory of
 real directory, never a path read from `entry.json`, so an edited entry
 can't point the removal anywhere else. The hook worktree sweep never forces
 a worktree's removal: with force off, `DestroySession` runs the unforced
-`git worktree remove`. The walk never follows a link, stays on one filesystem and
-keeps a unit whose git directory sits outside it. `DestroyInstance` refuses a
+`git worktree remove`. Every `git worktree remove` gets a path from niwa's
+own walk, never one read from `git worktree list`, so an edited worktree
+entry can't name a directory elsewhere. The walk never follows a link,
+stays on one filesystem and keeps a unit whose git directory sits outside it. `DestroyInstance` refuses a
 symlink and anything that isn't a direct child of the root. The tombstone
 rename (Decision 1) takes the instance's path away from late writers and
 repeats the cheap checks before the delete, renaming back on any change; the
@@ -2676,7 +2801,13 @@ configuration check on every repository before its `git status`, so a
 driver planted after the first check still runs nothing and keeps the unit,
 and compares a ref snapshot taken with the re-read, so a commit, branch,
 tag or stash made in between, which leaves `git status` clean, renames the
-tombstone back and keeps the unit with the ref named.
+tombstone back and keeps the unit with the ref named. A worktree niwa
+removes takes its admin directory with it, so its HEAD and per-worktree
+refs are read again right before its `git worktree remove`: a detached-HEAD
+commit or a new `refs/worktree/*` or `refs/bisect/*` entry made since the
+re-read keeps the unit before that worktree goes, and the tombstone check
+lets a removed worktree's entries be missing only when they matched the
+snapshot at that read.
 Lock files in `~/.niwa/locks/` are created 0600 with `O_NOFOLLOW`, and the
 mark clean-up after an over answer runs under the instance lock. niwa uses no
 sudo, opens no listener and passes no force flag to `claude` or to git
@@ -2721,6 +2852,20 @@ and the guide says so. The over command is code the
 workspace chose, with the same trust as hooks and the removal gate; it now
 runs more often, inside every dispatch, under its fixed environment,
 process-group kill and the shared 30-second budget.
+
+The tombstone check compares git state and the records, not every path.
+A write after the re-read to a path outside every repository (a loose file
+at the instance root), to a git-ignored path inside one, or into the job
+directory isn't seen, and it's deleted with the rest; the job directory is
+never tombstoned at all, and `claude rm` removes it after the re-read. This
+needs the same writer the process listing missed as the case above. Later
+hardening would record a manifest of path, size, mtime and ctime for the
+paths outside every repository and for the job directory during the
+evaluation, compare it at the tombstone, and re-check the job directory
+against it before `claude rm`. A commit made in the instant between a
+worktree's last read and git removing it is lost the same way, and git's
+own worktree removal works by path, which niwa can't make
+descriptor-relative.
 
 ### Supply chain or dependency trust
 
@@ -2814,6 +2959,15 @@ person's global configuration; a helper whose command line itself carries
 a secret is shown the same way whenever the person's own git starts it, so
 niwa adds no exposure beyond what that helper already has.
 
+git runs the person's helper on niwa's calls as it would on the person's
+own, so the helper gets `store` after a call that authenticates and `erase`
+after one that fails authentication, not only `get`. An agent that picks a
+repository path under a `proof_remotes` prefix whose host answers 401 can
+therefore make niwa erase the person's stored credential for that host,
+and every successful call writes to the person's store. The person then
+signs in again; nothing leaves the machine. Later hardening would forward
+only `get` to the person's helpers.
+
 ### Data loss
 
 The feature deletes on its own, so a wrong verdict loses work nobody chose to
@@ -2843,6 +2997,18 @@ to deny the agent writes to `~/.niwa/`, and to the root's `.niwa/`,
 `.niwa-launch/` and `.niwa-tombstone-*`, in Claude Code's permission
 settings. And a brief written by the unit's own workflow can still release
 scratch and loose root files older than it.
+
+A reap that stops after the kept-set move, because the tombstone renames
+back or a later step (worktree removal, `claude rm`, on-reap) disagrees,
+leaves the unit listed with its named and discarded files already in a
+kept-set entry no launch record points at, and that entry still leaves on
+its due date. A named file tracked in a linked worktree makes that worktree
+dirty once it's moved, so git's unforced removal refuses and this happens
+with no race at all. The loss isn't silent, since the entry is listed and
+shown due a day before it leaves, but files a person asked to keep can
+expire while their unit stays. Later hardening would move the files back,
+which were hashed on the way out, when a reap stops, or do the kept-set
+move last, after `claude rm` and on-reap and just before the tombstone.
 
 ## Consequences
 
@@ -2874,9 +3040,10 @@ scratch and loose root files older than it.
 - niwa counts only marks it wrote itself, so a mark the earlier remover or a
   person writes by hand into `retired.json` reads as no mark in niwa, and
   each remover ignores the other's marks.
-- A repository whose own configuration names a filter, diff, merge or
-  credential program or an fsmonitor hook (a per-repository LFS install,
-  for one), a submodule's included, keeps its unit until a person removes
+- A repository whose own configuration names a filter, diff, merge,
+  credential or signing program, an fsmonitor hook or any other program (a
+  per-repository LFS install, for one, or a local `core.sshCommand` or
+  `gpg.program`), a submodule's included, keeps its unit until a person removes
   the setting or destroys the instance.
 - A commit that isn't itself a live tip is judged in a fresh scratch store
   that offers the proof remote nothing, so each such check downloads the
