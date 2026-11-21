@@ -867,7 +867,73 @@ func (a *Applier) repairPluginStore(ctx context.Context, in PluginSkillsInputs, 
 	record(fallbacknotice.ReleaseRefused, res.Refused, true)
 	record(fallbacknotice.ReleaseUndeclared, res.Undeclared, false)
 	record(fallbacknotice.ReleaseNotRestored, res.Failed, true)
-	if res.ScanErr != nil && a.Reporter != nil {
-		a.Reporter.Warn("plugin store: not every instance could be listed for its release links: %v", res.ScanErr)
+	// The scan error is kept rather than printed: the sweep, which meets the
+	// same failure, says it once (see sweepPluginStore).
+	if res.ScanErr != nil {
+		if a.pluginScanErr == nil {
+			a.pluginScanErr = map[string]error{}
+		}
+		a.pluginScanErr[dir] = res.ScanErr
+	}
+}
+
+// pluginScanWarning is repair's line for an instance listing that failed.
+const pluginScanWarning = "plugin store: not every instance could be listed for its release links: %v"
+
+// sweepPluginStore runs the host plugin store's sweep for the workspace this
+// instance belongs to, once per command per store, after this instance is
+// linked. It deletes the held releases no instance on disk links to, except
+// the newest of each source, and logs each one it removed.
+//
+// A sweep that deleted nothing because the scan of the instances or the
+// store failed is reported through the run's notices, naming the path, so it
+// reaches the hook's context as well as the terminal; repair's own warning
+// about the same listing is then not printed. When the sweep succeeds,
+// repair's kept warning is printed here. The sweep never fetches, so it runs
+// on a run that does no fetching too.
+func (a *Applier) sweepPluginStore(ctx context.Context, in PluginSkillsInputs, notices *fallbacknotice.Collector) {
+	store, ok := pluginStoreFor(in)
+	if !ok {
+		return
+	}
+	dir := pluginstore.Dir(store.Home, store.WorkspaceRoot)
+	if a.pluginStoresSwept[dir] {
+		return
+	}
+	if a.pluginStoresSwept == nil {
+		a.pluginStoresSwept = map[string]bool{}
+	}
+	a.pluginStoresSwept[dir] = true
+
+	res, err := store.Sweep(ctx, nil)
+	scanErr := a.pluginScanErr[dir]
+	delete(a.pluginScanErr, dir)
+	if err != nil {
+		notices.PluginSweepStopped(err.Error(), len(res.Removed))
+	} else if scanErr != nil && a.Reporter != nil {
+		a.Reporter.Warn(pluginScanWarning, scanErr)
+	}
+	if a.Reporter != nil {
+		for _, r := range res.Removed {
+			a.Reporter.Log("plugin store: removed unused release %s", r.Name())
+		}
+	}
+}
+
+// flushPluginScanWarnings prints repair's warning for every store whose scan
+// error no sweep has taken, and forgets it. runPipeline defers it, so a pass
+// that repairs and then returns before the sweep still prints the warning
+// once.
+func (a *Applier) flushPluginScanWarnings() {
+	dirs := make([]string, 0, len(a.pluginScanErr))
+	for dir := range a.pluginScanErr {
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+	for _, dir := range dirs {
+		if a.Reporter != nil {
+			a.Reporter.Warn(pluginScanWarning, a.pluginScanErr[dir])
+		}
+		delete(a.pluginScanErr, dir)
 	}
 }

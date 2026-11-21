@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -69,15 +70,50 @@ func (r Release) Name() string { return Forge + "/" + r.Owner + "/" + r.Repo + "
 // this store's path. Nothing is read through a link.
 func (s Store) Linked() ([]Linked, error) {
 	instances, scanErr := hostdir.InstanceDirs(s.Home, s.WorkspaceRoot)
+	// The lenient scan returns no error of its own.
+	linked, _ := scanLinks(instances, false)
+	return linked, scanErr
+}
+
+// scanLinks reads the release links of each instance in instances, the one
+// parser both the lenient and the strict scan use. Each instance's
+// .niwa/marketplaces must be a real directory by Lstat; an instance without
+// one has no links. Each entry counts when it is a symlink whose target
+// parses as a release link, and nothing is read through it.
+//
+// The lenient scan, repair's, passes over an instance it can't read. The
+// strict scan, the sweep's, fails instead, naming the path: a Lstat of
+// <inst>/.niwa or <inst>/.niwa/marketplaces that fails for a reason other
+// than absence, a marketplaces directory that can't be listed, or a link that
+// can't be read. The strict scan never counts fewer links than the lenient
+// one: an instance whose .niwa is itself a link is still read, because a
+// release it links to must not look unused to the sweep.
+func scanLinks(instances []string, strict bool) ([]Linked, error) {
 	byID := map[string]*Linked{}
 	for _, inst := range instances {
+		if strict {
+			niwaDir := filepath.Join(inst, ".niwa")
+			_, err := os.Lstat(niwaDir)
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return nil, fmt.Errorf("inspecting %s: %w", niwaDir, err)
+			}
+			if err != nil {
+				continue
+			}
+		}
 		dir := filepath.Join(inst, ".niwa", MarketplacesDir)
 		info, err := os.Lstat(dir)
+		if strict && err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("inspecting %s: %w", dir, err)
+		}
 		if err != nil || !info.IsDir() {
 			continue
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
+			if strict {
+				return nil, fmt.Errorf("reading %s: %w", dir, err)
+			}
 			continue
 		}
 		seen := map[string]bool{}
@@ -85,8 +121,12 @@ func (s Store) Linked() ([]Linked, error) {
 			if e.Type()&os.ModeSymlink == 0 {
 				continue
 			}
-			target, err := os.Readlink(filepath.Join(dir, e.Name()))
+			link := filepath.Join(dir, e.Name())
+			target, err := os.Readlink(link)
 			if err != nil {
+				if strict {
+					return nil, fmt.Errorf("reading link %s: %w", link, err)
+				}
 				continue
 			}
 			r, ok := ParseLink(target)
@@ -111,7 +151,7 @@ func (s Store) Linked() ([]Linked, error) {
 		out = append(out, *l)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Release.ID() < out[j].Release.ID() })
-	return out, scanErr
+	return out, nil
 }
 
 // Repair restores every release an instance on disk links to that is not

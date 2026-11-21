@@ -120,7 +120,9 @@ func checkOwnedDir(dir string) (os.FileInfo, error) {
 //
 // An error listing the root, or listing a kept/ directory that exists, is
 // returned with whatever was listed before it; a caller that deletes on the
-// strength of the answer deletes nothing then.
+// strength of the answer deletes nothing then. The plugin store's sweep is
+// that reader: on this error it deletes no release. A new place instances
+// live is added here, so the sweep and repair both see their links.
 func InstanceDirs(home, workspaceRoot string) ([]string, error) {
 	var dirs []string
 	rootEntries, err := os.ReadDir(workspaceRoot)

@@ -507,3 +507,194 @@ Feature: niwa holds each plugin marketplace release once per host
     And the GitHub fake served 1 tarball request in all
     And the release "v1.0.0" of "acme/skills" in the plugin store of workspace root "." matches its tarball
     And the output reports the release "v1.0.0" of "acme/skills" tampered for instances "ws,ws-2,ws-3"
+
+  # Each provisioning command sweeps the held releases no instance on disk
+  # links to, except the newest of each source by commit time. Three releases
+  # of one source, the two older linked by instances since taken off disk, go
+  # down to the newest, with the staging and trash entries of the two older
+  # ones, and nothing is downloaded.
+  @critical
+  Scenario: Three held releases of a source are swept down to the newest
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the GitHub marketplace "acme/skills" publishes release "v1.1.0"
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the GitHub marketplace "acme/skills" publishes release "v1.2.0"
+    When I run "niwa create ws"
+    Then the exit code is 0
+    And the plugin store of workspace root "." holds only the releases "v1.0.0,v1.1.0,v1.2.0" of "acme/skills"
+    Given instances "ws,ws-2" are removed from disk
+    And staging and trash entries are planted in the plugin store of workspace root "." for the releases "v1.0.0,v1.1.0" of "acme/skills"
+    When the GitHub fake log is cleared
+    And I run "niwa apply" in instance "ws-3"
+    Then the exit code is 0
+    And the GitHub fake served 0 tarball requests in all
+    And the plugin store of workspace root "." holds only the release "v1.2.0" of "acme/skills"
+    And the plugin store of workspace root "." holds no staging or trash entry for the releases "v1.0.0,v1.1.0" of "acme/skills"
+    And the plugin store of workspace root "." holds only the release "v2.1.0" of "beta/tools"
+    And every marketplace's skill resolves in instance "ws-3" at its root, in repo "app" and in a session worktree
+
+  # The newest held release survives with no instance linking it. A release
+  # repair restores at its old commit keeps its old commit time, so the newest
+  # stays the newest and survives the next sweep as well.
+  @critical
+  Scenario: The newest release survives unlinked and a restored older release keeps its commit time
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the GitHub marketplace "acme/skills" publishes release "v1.1.0"
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the GitHub marketplace "acme/skills" publishes release "v1.2.0"
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given instances "ws-2,ws-3" are removed from disk
+    When the GitHub fake log is cleared
+    And I run "niwa apply" in instance "ws"
+    Then the exit code is 0
+    And the GitHub fake served 0 tarball requests in all
+    And the plugin store of workspace root "." holds only the releases "v1.0.0,v1.2.0" of "acme/skills"
+    Given the release "v1.0.0" of "acme/skills" is deleted from the plugin store of workspace root "."
+    When the GitHub fake log is cleared
+    And I run "niwa apply" in instance "ws"
+    Then the exit code is 0
+    And the GitHub fake served 1 tarball request for the release "v1.0.0" of "acme/skills"
+    And the GitHub fake served 1 tarball request in all
+    And the release "v1.0.0" of "acme/skills" is held again in the plugin store of workspace root "."
+    And the plugin store of workspace root "." holds only the releases "v1.0.0,v1.2.0" of "acme/skills"
+
+  # An older release linked only by an instance kept under the sandbox home's
+  # kept/ survives every command that provisions or removes an instance of the
+  # workspace, and the kept instance's skills still resolve.
+  @critical
+  Scenario Outline: A kept instance keeps its older release through <command>
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the GitHub marketplace "acme/skills" publishes release "v1.1.0"
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given instance "ws" is moved under the sandbox home's kept/
+    When I run <command> beside the kept instance
+    Then the exit code is 0
+    And the plugin store of workspace root "." holds only the releases "v1.0.0,v1.1.0" of "acme/skills"
+    And every marketplace's skill resolves in the kept instance "ws" at its root and in repo "app"
+
+    Examples:
+      | command                     |
+      | niwa create ws              |
+      | niwa apply in instance ws-2 |
+      | niwa dispatch               |
+      | the SessionStart hook       |
+      | niwa reset ws-2             |
+      | niwa destroy ws-2           |
+
+  # The same holds for an older release linked only by an instance under the
+  # root, whether or not it still has its .niwa/instance.json.
+  @critical
+  Scenario Outline: An instance on disk keeps its older release when it is <holder>
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the GitHub marketplace "acme/skills" publishes release "v1.1.0"
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given instance "ws" is <holder>
+    When I run "niwa apply" in instance "ws-2"
+    Then the exit code is 0
+    And the plugin store of workspace root "." holds only the releases "v1.0.0,v1.1.0" of "acme/skills"
+    And every marketplace's skill resolves in instance "ws" at its root and in repo "app"
+
+    Examples:
+      | holder                               |
+      | left as it is                        |
+      | stripped of its .niwa/instance.json  |
+
+  # A scan that can't see every instance deletes nothing. The command still
+  # succeeds and says, in one line naming the path, that the sweep was
+  # skipped; repair's own line about the same listing is not printed beside
+  # it. With the mode back, the next command sweeps as usual.
+  @critical
+  Scenario Outline: An unreadable scan skips the sweep when <unreadable> cannot be read
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the GitHub marketplace "acme/skills" publishes release "v1.1.0"
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given instance "ws" is removed from disk
+    And <unreadable> cannot be read
+    When the GitHub fake log is cleared
+    And I run "niwa apply" in instance "ws-3"
+    Then the exit code is 0
+    And the plugin store of workspace root "." holds only the releases "v1.0.0,v1.1.0" of "acme/skills"
+    And the output reports the sweep skipped once, naming the path that could not be read, and no repair scan warning
+    Given its mode is restored
+    When I run "niwa apply" in instance "ws-3"
+    Then the exit code is 0
+    And the output does not contain "sweep of unused releases"
+    And the error output does not contain "sweep of unused releases"
+    And the plugin store of workspace root "." holds only the release "v1.1.0" of "acme/skills"
+
+    Examples:
+      | unreadable                          |
+      | the workspace root                  |
+      | the kept directory                  |
+      | the marketplaces of instance "ws-2" |
+
+  # Destroying one instance deletes nothing from the store; the next
+  # provisioning command sweeps the release it freed.
+  @critical
+  Scenario: A destroyed instance's release is swept by the next command
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the GitHub marketplace "acme/skills" publishes release "v1.1.0"
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I run "niwa destroy ws --force" from workspace root
+    Then the exit code is 0
+    And the plugin store of workspace root "." holds only the releases "v1.0.0,v1.1.0" of "acme/skills"
+    When I run "niwa apply" in instance "ws-2"
+    Then the exit code is 0
+    And the plugin store of workspace root "." holds only the release "v1.1.0" of "acme/skills"
+
+  # Destroying the whole workspace removes its plugin store when no kept
+  # instance remains, and its key directory only when nothing else is left in
+  # it.
+  @critical
+  Scenario: Destroying the workspace removes its plugin store
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    When I run "niwa destroy --workspace --confirm ws" from workspace root
+    Then the exit code is 0
+    And the plugin store of the removed workspace root is gone, and its key directory with it unless something else is in it
+
+  # With a kept instance still there, the store stays, its path is printed,
+  # and the kept instance's skills still resolve.
+  @critical
+  Scenario: Destroying the workspace keeps the plugin store for a kept instance
+    When I run niwa init from config repo "ws"
+    Then the exit code is 0
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given the GitHub marketplace "acme/skills" publishes release "v1.1.0"
+    When I run "niwa create ws"
+    Then the exit code is 0
+    Given instance "ws" is moved under the sandbox home's kept/
+    When I run "niwa destroy --workspace --confirm ws" from workspace root
+    Then the exit code is 0
+    And the plugin store of the removed workspace root is kept, and the output names its path
+    And every marketplace's skill resolves in the kept instance "ws" at its root and in repo "app"

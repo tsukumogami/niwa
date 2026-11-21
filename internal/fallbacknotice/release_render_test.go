@@ -110,7 +110,85 @@ func TestReleaseLineCapsAndCleansInstances(t *testing.T) {
 func TestNilCollectorIgnoresReleaseNotes(t *testing.T) {
 	var c *Collector
 	c.PluginRelease(ReleaseNote{Outcome: ReleaseRestored, Release: testReleaseName})
+	c.PluginSweepSkipped("listing workspace root /ws: permission denied")
+	if _, ok := c.SweepSkipped(); ok {
+		t.Error("a nil collector recorded a skipped sweep")
+	}
 	if c.ReleaseNotes() != nil || c.RenderText() != "" || c.RenderContext() != "" {
 		t.Error("a nil collector recorded or rendered a release note")
+	}
+}
+
+const testSweepReason = "listing workspace root /ws: open /ws: permission denied"
+
+// A skipped sweep is one warning line naming the path, after the release
+// lines; only the first reason in a run is kept.
+func TestRenderTextSweepSkipped(t *testing.T) {
+	c := New(clock())
+	c.PluginSweepSkipped(testSweepReason)
+	if c.Empty() {
+		t.Fatal("Empty after a skipped sweep")
+	}
+	want := "warning: the plugin store's sweep of unused releases was skipped: " + testSweepReason + "; nothing was deleted.\n"
+	if got := c.RenderText(); got != want {
+		t.Errorf("RenderText:\n got %q\nwant %q", got, want)
+	}
+
+	c.PluginSweepSkipped("a second reason")
+	if reason, ok := c.SweepSkipped(); !ok || reason != testSweepReason {
+		t.Errorf("SweepSkipped = %q, %v; want the first reason", reason, ok)
+	}
+
+	c.PluginRelease(ReleaseNote{Outcome: ReleaseRestored, Release: testReleaseName, Instances: []string{"/ws/one"}})
+	want = "note: restored plugin release " + testReleaseName + " for instances: /ws/one.\n" + want
+	if got := c.RenderText(); got != want {
+		t.Errorf("RenderText with a release line:\n got %q\nwant %q", got, want)
+	}
+}
+
+// A sweep that stops after it has already removed releases says how many,
+// never that nothing was deleted; one removal takes the singular noun.
+func TestRenderTextSweepStoppedAfterRemovals(t *testing.T) {
+	c := New(clock())
+	c.PluginSweepStopped(testSweepReason, 2)
+	want := "warning: the plugin store's sweep of unused releases stopped: " + testSweepReason + "; 2 unused releases had already been removed.\n"
+	if got := c.RenderText(); got != want {
+		t.Errorf("RenderText:\n got %q\nwant %q", got, want)
+	}
+	if got := c.SweepRemovedBeforeStop(); got != 2 {
+		t.Errorf("SweepRemovedBeforeStop = %d, want 2", got)
+	}
+
+	one := New(clock())
+	one.PluginSweepStopped(testSweepReason, 1)
+	want = "warning: the plugin store's sweep of unused releases stopped: " + testSweepReason + "; 1 unused release had already been removed.\n"
+	if got := one.RenderText(); got != want {
+		t.Errorf("RenderText with one removal:\n got %q\nwant %q", got, want)
+	}
+
+	none := New(clock())
+	none.PluginSweepStopped(testSweepReason, 0)
+	if got := none.RenderText(); !strings.Contains(got, "; nothing was deleted.") {
+		t.Errorf("a stop with no removals should keep the skipped text, got %q", got)
+	}
+}
+
+// In the agent context the skipped sweep sits under the plugin store's lead,
+// after the release lines, with the same sentence.
+func TestRenderContextSweepSkipped(t *testing.T) {
+	c := New(clock())
+	c.PluginRelease(ReleaseNote{Outcome: ReleaseRestored, Release: testReleaseName, Instances: []string{"/ws/one"}})
+	c.PluginSweepSkipped(testSweepReason)
+	want := releaseContextLead + "\n\n" +
+		"  - restored plugin release " + testReleaseName + " for instances: /ws/one.\n" +
+		"  - the plugin store's sweep of unused releases was skipped: " + testSweepReason + "; nothing was deleted.\n"
+	if got := c.RenderContext(); got != want {
+		t.Errorf("RenderContext:\n got %q\nwant %q", got, want)
+	}
+
+	only := New(clock())
+	only.PluginSweepSkipped(testSweepReason)
+	if text := only.RenderContext(); !strings.HasPrefix(text, releaseContextLead) || strings.Contains(text, contextLead) {
+		t.Errorf("a sweep-only rendering is not under the plugin store's lead:\n%s", text)
 	}
 }

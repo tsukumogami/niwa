@@ -103,6 +103,9 @@ type Collector struct {
 	unwritableDir string
 	unwritable    bool
 	releases      []ReleaseNote
+	sweepReason   string
+	sweepRemoved  int
+	sweepSkipped  bool
 }
 
 // New returns an empty collector. now is the clock ages are measured
@@ -264,7 +267,7 @@ func (c *Collector) Empty() bool {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return len(c.served) == 0 && len(c.misses) == 0 && len(c.lockTimeouts) == 0 && !c.inWorkTree && !c.unwritable && len(c.releases) == 0
+	return len(c.served) == 0 && len(c.misses) == 0 && len(c.lockTimeouts) == 0 && !c.inWorkTree && !c.unwritable && len(c.releases) == 0 && !c.sweepSkipped
 }
 
 // ReleaseOutcome is what the plugin store's repair pass did about one
@@ -323,6 +326,56 @@ func (c *Collector) ReleaseNotes() []ReleaseNote {
 	out := make([]ReleaseNote, len(c.releases))
 	copy(out, c.releases)
 	return out
+}
+
+// PluginSweepSkipped records that the plugin store's sweep of unused
+// releases deleted nothing this run, and why: the scan of the instances on
+// disk failed, or the store couldn't be listed. The reason is an error
+// message naming the path; it carries no secret. Only the first call in a
+// run is kept.
+func (c *Collector) PluginSweepSkipped(reason string) {
+	c.PluginSweepStopped(reason, 0)
+}
+
+// PluginSweepStopped records that the plugin store's sweep stopped early,
+// and why, after it had already removed removed unused releases. A sweep
+// that fails its rescan partway through has deleted some releases before it
+// stops, and the notice must not say nothing was deleted. With removed at 0
+// it is PluginSweepSkipped. Only the first call in a run is kept.
+func (c *Collector) PluginSweepStopped(reason string, removed int) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.sweepSkipped {
+		c.sweepSkipped = true
+		c.sweepReason = reason
+		c.sweepRemoved = removed
+	}
+}
+
+// SweepRemovedBeforeStop returns how many releases the sweep recorded by
+// PluginSweepStopped had removed before it stopped, 0 when none were or no
+// sweep stopped.
+func (c *Collector) SweepRemovedBeforeStop() int {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sweepRemoved
+}
+
+// SweepSkipped returns the reason recorded by PluginSweepSkipped and whether
+// one was recorded.
+func (c *Collector) SweepSkipped() (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sweepReason, c.sweepSkipped
 }
 
 func sortedIdentities(set map[Identity]bool) []Identity {

@@ -54,6 +54,7 @@ type pluginStoreScenario struct {
 	second       string            // the instance "the second instance" names
 	started      []*startedCreate  // creates started in the background
 	holdPath     string            // the hold: fault's release path
+	sweep        pluginSweepScenario
 }
 
 func pluginState(ctx context.Context) (*testState, *pluginStoreScenario, error) {
@@ -111,6 +112,7 @@ func registerPluginStoreSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the config of workspace root "([^"]*)" no longer tracks its source$`, theConfigNoLongerTracksItsSource)
 	ctx.Step(`^the plugin store of workspace root "([^"]*)" holds no staging entry for any marketplace$`, noStagingEntryForAnyMarketplace)
 	registerPluginRepairSteps(ctx)
+	registerPluginSweepSteps(ctx)
 }
 
 // pluginRootDir is the workspace root a scenario names: "." for the suite's own
@@ -408,27 +410,40 @@ func instanceLinksMarketplaceToRelease(ctx context.Context, instance, slug, tag 
 // links: at the instance root, in the repo, and in a session worktree made for
 // the check. A link that leads nowhere fails the read.
 func everySkillResolves(ctx context.Context, instance, repoName string) (context.Context, error) {
-	return skillsResolveIn(ctx, instance, repoName, "skills-"+instance)
+	s, _, err := pluginState(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	return skillsResolveIn(ctx, filepath.Join(s.workspaceRoot, instance), repoName, "skills-"+instance)
 }
 
-// skillsResolveIn is everySkillResolves with the session worktree's purpose
-// given, for an instance whose name is no valid purpose (a dispatched
-// instance's name carries a "+").
-func skillsResolveIn(ctx context.Context, instance, repoName, purpose string) (context.Context, error) {
+// skillsResolveIn is everySkillResolves for the instance at instRoot, with
+// the session worktree's purpose given, for an instance whose name is no
+// valid purpose (a dispatched instance's name carries a "+"). An empty
+// purpose makes no session worktree and checks the root and the repo only:
+// an instance kept outside the workspace root, or one with no
+// .niwa/instance.json, is no instance a worktree can be made in.
+func skillsResolveIn(ctx context.Context, instRoot, repoName, purpose string) (context.Context, error) {
 	s, ps, err := pluginState(ctx)
 	if err != nil {
 		return ctx, err
 	}
-	instRoot := filepath.Join(s.workspaceRoot, instance)
 	repoDirs, _ := filepath.Glob(filepath.Join(instRoot, "*", repoName))
 	if len(repoDirs) != 1 {
 		return ctx, fmt.Errorf("repo %q in %s: found %v", repoName, instRoot, repoDirs)
 	}
-	ctx, err = iCallCreateWorktree(ctx, repoName, purpose, instance)
-	if err != nil {
-		return ctx, err
+	places := []string{instRoot, repoDirs[0]}
+	if purpose != "" {
+		instance, err := filepath.Rel(s.workspaceRoot, instRoot)
+		if err != nil {
+			return ctx, err
+		}
+		ctx, err = iCallCreateWorktree(ctx, repoName, purpose, instance)
+		if err != nil {
+			return ctx, err
+		}
+		places = append(places, s.lastSessionWorktreePath)
 	}
-	places := []string{instRoot, repoDirs[0], s.lastSessionWorktreePath}
 	for _, slug := range ps.order {
 		mk := ps.marketplaces[slug]
 		for _, place := range places {
@@ -877,7 +892,7 @@ func everySkillResolvesInNamedInstance(ctx context.Context, which, repoName stri
 	if err != nil {
 		return ctx, err
 	}
-	return skillsResolveIn(ctx, instance, repoName, "skills-"+which)
+	return skillsResolveIn(ctx, filepath.Join(s.workspaceRoot, instance), repoName, "skills-"+which)
 }
 
 // startedCreate is a create running in the background.

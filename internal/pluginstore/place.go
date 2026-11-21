@@ -27,6 +27,10 @@ import (
 // holder past it is stuck rather than slow.
 const DefaultLockWait = 2 * time.Minute
 
+// placeRenameAttempts bounds how often place makes the repo and owner levels
+// again and retries its final rename after an ENOENT.
+const placeRenameAttempts = 3
+
 // markSchema is the held.json schema version.
 const markSchema = 1
 
@@ -60,6 +64,10 @@ type Store struct {
 	// LockWait bounds the wait for a release's lock; zero means
 	// DefaultLockWait.
 	LockWait time.Duration
+	// SweepLockWait bounds the sweep's wait for a candidate release's lock;
+	// zero means two seconds. A busy lock means a command is placing
+	// or linking that release, so the sweep skips it rather than waiting long.
+	SweepLockWait time.Duration
 	// Fetch streams the tarball at the commit. The caller wraps its GitHub
 	// client; the store never sees a token.
 	Fetch func(ctx context.Context, owner, repo, commit string) (io.ReadCloser, error)
@@ -328,13 +336,23 @@ func (s Store) place(ctx context.Context, r Release) (Condition, error) {
 	}
 
 	repoDir := filepath.Dir(releaseDir(pdir, r))
-	for _, dir := range []string{filepath.Join(pdir, Forge), filepath.Dir(repoDir), repoDir} {
-		if err := hostdir.CreatePrivateDir(dir); err != nil {
-			return CondNotPlaced, err
+	// A sweep removing another release of this source may remove the repo
+	// or owner directory it left empty between their creation here and the
+	// rename, which then fails with ENOENT; the levels are made again and
+	// the rename retried.
+	for attempt := 1; ; attempt++ {
+		for _, dir := range []string{filepath.Join(pdir, Forge), filepath.Dir(repoDir), repoDir} {
+			if err := hostdir.CreatePrivateDir(dir); err != nil {
+				return CondNotPlaced, err
+			}
 		}
-	}
-	if err := os.Rename(staging, releaseDir(pdir, r)); err != nil {
-		return CondNotPlaced, fmt.Errorf("placing %s: %w", r.Label(), err)
+		err := os.Rename(staging, releaseDir(pdir, r))
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, fs.ErrNotExist) || attempt == placeRenameAttempts {
+			return CondNotPlaced, fmt.Errorf("placing %s: %w", r.Label(), err)
+		}
 	}
 	placed = true
 	_ = syncDir(repoDir)

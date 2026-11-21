@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/fallbacknotice"
+	"github.com/tsukumogami/niwa/internal/pluginstore"
 )
 
 // marketplaceManifest is the manifest a marketplace tree carries, declaring one
@@ -304,4 +307,133 @@ func writeMarketplaceTree(t *testing.T, root string) {
 			t.Fatal(err)
 		}
 	}
+}
+
+// scanFailure is a workspace whose root can't be listed, with an Applier
+// whose reporter output is captured, the plugin inputs of one instance and
+// the run's notices.
+type scanFailure struct {
+	a        *Applier
+	in       PluginSkillsInputs
+	out      *bytes.Buffer
+	notices  *fallbacknotice.Collector
+	root     string
+	storeDir string
+}
+
+// newScanFailure makes the workspace and narrows its root to mode 0311, so
+// it can be entered but not listed. withStore makes the plugin store's
+// directory first.
+func newScanFailure(t *testing.T, withStore bool) *scanFailure {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("file modes don't bind root")
+	}
+	root := setupWorkspace(t, nil)
+	home := t.TempDir()
+	f := &scanFailure{
+		in:      PluginSkillsInputs{InstanceRoot: filepath.Join(root, "one"), Home: home, Fetcher: &fakeFetcher{}},
+		out:     &bytes.Buffer{},
+		notices: fallbacknotice.New(nil),
+		root:    root,
+	}
+	f.a = &Applier{Reporter: NewReporterWithTTY(f.out, false)}
+	f.storeDir = pluginstore.Dir(home, root)
+	if withStore {
+		if err := os.MkdirAll(f.storeDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(root, 0o311); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+	return f
+}
+
+// pass runs what runPipeline runs for the store: the deferred flush, the
+// repair, and the sweep unless returnEarly.
+func (f *scanFailure) pass(ctx context.Context, returnEarly bool) {
+	defer f.a.flushPluginScanWarnings()
+	f.a.repairPluginStore(ctx, f.in, f.notices)
+	if returnEarly {
+		return
+	}
+	f.a.sweepPluginStore(ctx, f.in, f.notices)
+}
+
+// repairWarnings counts repair's scan warning lines in the reporter output.
+func (f *scanFailure) repairWarnings() int {
+	return strings.Count(f.out.String(), "not every instance could be listed")
+}
+
+// An unlistable root is reported once. With a store, the sweep's skipped
+// notice names the root and repair's warning is not printed; with no store,
+// the sweep has nothing to do and repair's warning is printed once.
+func TestAScanFailurePrintsOneLine(t *testing.T) {
+	t.Run("with a store", func(t *testing.T) {
+		f := newScanFailure(t, true)
+		f.pass(context.Background(), false)
+		reason, skipped := f.notices.SweepSkipped()
+		if !skipped || !strings.Contains(reason, f.root) {
+			t.Fatalf("SweepSkipped = %q, %v; want a reason naming %s", reason, skipped, f.root)
+		}
+		if n := f.repairWarnings(); n != 0 {
+			t.Fatalf("repair's warning printed %d times beside the sweep's notice:\n%s", n, f.out.String())
+		}
+	})
+	t.Run("with no store", func(t *testing.T) {
+		f := newScanFailure(t, false)
+		f.pass(context.Background(), false)
+		if _, skipped := f.notices.SweepSkipped(); skipped {
+			t.Fatal("a sweep with no store reported itself skipped")
+		}
+		if n := f.repairWarnings(); n != 1 {
+			t.Fatalf("repair's warning printed %d times, want once:\n%s", n, f.out.String())
+		}
+		if _, err := os.Lstat(f.storeDir); !os.IsNotExist(err) {
+			t.Fatalf("the sweep created the store (%v)", err)
+		}
+	})
+}
+
+// Every pass that repairs without reaching a sweep that runs still prints
+// repair's warning once, and the deferred flush adds nothing after a sweep
+// that took it.
+func TestARepairWarningPrintsWhenNoSweepFollows(t *testing.T) {
+	t.Run("a return before the sweep", func(t *testing.T) {
+		f := newScanFailure(t, true)
+		f.pass(context.Background(), true)
+		if n := f.repairWarnings(); n != 1 {
+			t.Fatalf("repair's warning printed %d times, want once:\n%s", n, f.out.String())
+		}
+		if _, skipped := f.notices.SweepSkipped(); skipped {
+			t.Fatal("a sweep notice with no sweep run")
+		}
+	})
+	t.Run("the store already swept", func(t *testing.T) {
+		f := newScanFailure(t, true)
+		f.a.pluginStoresSwept = map[string]bool{f.storeDir: true}
+		f.pass(context.Background(), false)
+		if n := f.repairWarnings(); n != 1 {
+			t.Fatalf("repair's warning printed %d times, want once:\n%s", n, f.out.String())
+		}
+		if _, skipped := f.notices.SweepSkipped(); skipped {
+			t.Fatal("a sweep notice from a sweep the guard skipped")
+		}
+	})
+	t.Run("a sweep that errors", func(t *testing.T) {
+		f := newScanFailure(t, true)
+		f.pass(context.Background(), false)
+		f.a.flushPluginScanWarnings()
+		if n := f.repairWarnings(); n != 0 {
+			t.Fatalf("repair's warning printed %d times beside the sweep's notice:\n%s", n, f.out.String())
+		}
+		if _, skipped := f.notices.SweepSkipped(); !skipped {
+			t.Fatal("no sweep notice from a sweep that failed")
+		}
+		if n := strings.Count(f.notices.RenderText(), "sweep of unused releases was skipped"); n != 1 {
+			t.Fatalf("%d sweep notices, want one:\n%s", n, f.notices.RenderText())
+		}
+	})
 }

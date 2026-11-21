@@ -87,6 +87,18 @@ type Applier struct {
 	pluginStoresRepaired map[string]bool
 	pluginUnrestored     map[string]string
 
+	// pluginStoresSwept holds the plugin store directories this Applier has
+	// already swept, once per command per store like the repair pass, but
+	// on a guard of its own: repair marks its store before the sweep runs in
+	// the same pipeline pass, and the sweep runs on a run that does no
+	// fetching too. pluginScanErr holds, by store directory, the instance
+	// listing error repair's scan met, so it is printed once: by the sweep
+	// when the sweep succeeds, not at all when the sweep's own notice names
+	// the failure, and by flushPluginScanWarnings when the pass ends without
+	// a sweep. Both are written without a lock, like the maps above.
+	pluginStoresSwept map[string]bool
+	pluginScanErr     map[string]error
+
 	// MirrorCommand names the command in the mirror log when set, in place of
 	// the pipeline's own create or apply: a SessionStart hook or a dispatch
 	// provisions through Create but logs as itself.
@@ -2021,6 +2033,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		Fetcher:      fetcher,
 		Home:         a.DeveloperHome,
 	}
+	// Repair's scan warning is printed by the sweep below; a pass that
+	// returns before reaching it prints the warning here.
+	defer a.flushPluginScanWarnings()
 	a.repairPluginStore(ctx, pluginInputs, notices)
 	pluginInputs.Unrestored = a.pluginUnrestored
 	pluginTrees, missingPlugins := ResolvePluginTrees(ctx, pluginInputs)
@@ -2066,6 +2081,11 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		}
 		allWarnings = append(allWarnings, rootSkills.Warnings...)
 	}
+
+	// With this instance linked, the host plugin store's sweep deletes the
+	// held releases no instance on disk links to, except the newest of each
+	// source, once per command per store.
+	a.sweepPluginStore(ctx, pluginInputs, notices)
 
 	// Step 6.3: Generate the workspace's declared MCP servers and session
 	// environment into each agent's own format. Both declarations are

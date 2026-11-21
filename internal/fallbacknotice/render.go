@@ -65,6 +65,14 @@ const (
 	releaseNotRestoredFormat = "could not restore plugin release %s, linked from instances: %s: %s; nothing was marked held for it."
 	releaseTamperedFormat    = "plugin release %s was changed after it was placed (tampered with); fetched it again for instances: %s."
 
+	// sweepSkippedFormat: why the sweep of unused releases deleted nothing,
+	// naming the path it couldn't read.
+	sweepSkippedFormat = "the plugin store's sweep of unused releases was skipped: %s; nothing was deleted."
+
+	// sweepStoppedFormat: why the sweep stopped after it had already removed
+	// some unused releases, with their count and its noun.
+	sweepStoppedFormat = "the plugin store's sweep of unused releases stopped: %s; %d unused %s had already been removed."
+
 	// releaseContextLead opens the plugin store's part of the agent-context
 	// rendering.
 	releaseContextLead = "While provisioning, niwa's host plugin store reported the following about releases that instances of this workspace link to:"
@@ -184,9 +192,9 @@ type releaseNotice struct {
 }
 
 // releaseNotices renders the plugin store's repair records in the order they
-// were recorded. They follow the secret-store notices and have a lead of
-// their own in the agent context, so nothing about a plugin release reads as
-// a secret-store message.
+// were recorded, then the skipped sweep when there was one. They follow the
+// secret-store notices and have a lead of their own in the agent context, so
+// nothing about a plugin release reads as a secret-store message.
 func (c *Collector) releaseNotices() []releaseNotice {
 	var out []releaseNotice
 	for _, n := range c.ReleaseNotes() {
@@ -202,6 +210,17 @@ func (c *Collector) releaseNotices() []releaseNotice {
 			out = append(out, releaseNotice{text: fmt.Sprintf(releaseNotRestoredFormat, name, served, clean(n.Reason))})
 		case ReleaseTampered:
 			out = append(out, releaseNotice{text: fmt.Sprintf(releaseTamperedFormat, name, served)})
+		}
+	}
+	if reason, ok := c.SweepSkipped(); ok {
+		if removed := c.SweepRemovedBeforeStop(); removed > 0 {
+			noun := "releases"
+			if removed == 1 {
+				noun = "release"
+			}
+			out = append(out, releaseNotice{text: fmt.Sprintf(sweepStoppedFormat, clean(reason), removed, noun)})
+		} else {
+			out = append(out, releaseNotice{text: fmt.Sprintf(sweepSkippedFormat, clean(reason))})
 		}
 	}
 	return out
