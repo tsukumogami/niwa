@@ -322,7 +322,18 @@ and sets the cascade's default to on wherever a workspace root exists.
 - **Environment probe.** `NIWA_TEST_GIT_ENV_PROBE=<file>`, tagged build only:
   each mirror git process appends one JSON line with its kind (network or
   local) and the `GIT_*` entries of the environment it was given, so R12's
-  criteria can see exactly what reached git.
+  criteria can see exactly what reached git. A `GIT_CONFIG_VALUE_<n>` is
+  recorded as the SHA-256 of its value, never the value, since such values
+  often carry tokens.
+
+Four checks keep the hooks and the gate honest. Every borrowing entry point
+goes through one function, `borrowEnabled(cfg, repo)`, which the untagged R16
+test covers. An untagged test sets all three `NIWA_TEST_*` variables above and
+checks that a create's behaviour doesn't change. A unit test parses the
+package sources and fails if any file without the `niwa_functional` tag
+names those variables. And a check in CI fails if the release configuration
+ever passes `-tags niwa_functional`. `niwa version` prints "test build" when
+the tag is set, so a stray test binary is easy to spot.
 
 #### Alternatives Considered
 
@@ -389,9 +400,14 @@ instead of one clone. `Recorded` runs over it too, so a mirror whose repo left
 the config while a clone still names it keeps being checked and restored. The
 strict mode is the only one that can authorize a removal. A missing alternates
 file names nothing; anything else counts as a failure: an error listing the
-root, `kept/`, an instance or a group, an error reading an alternates file, a
-file over 64 KiB, or a directory that vanished between listing and reading. A
-strict read resolves each line (a relative one against the clone's
+root, `kept/`, an instance or a group; a symlink or non-directory where a
+root, instance or group directory should be; an alternates file that isn't a
+regular file, is over 64 KiB, or holds a line that is quoted or doesn't
+parse; a resolution error other than not-exist; or a directory that vanished
+between listing and reading. Alternates files are opened without following a
+symlink and read through a bounded reader. A leftover
+`alternates.niwa-dissociate` (Decision 4) is read as an alternates file, so
+it pins what it names. A strict read resolves each line (a relative one against the clone's
 `.git/objects`, then symlinks) and says a line pins a store when it resolves
 into that store's directory, checked with `os.SameFile` on its `objects`
 directory, whether the line names the stable path or a `.store/` directory
@@ -432,7 +448,11 @@ store's entry is seeded from the state file.
 lists a retired store at least an hour old. It takes the lock with
 `TryFileLock`, skipping when busy, calls `Scan`, and removes by exact name
 each such store that no line pins and that neither the link nor the state file
-names. A nil scan or any error removes nothing and leaves the record. A pinned
+names. Before any removal the recorded name must match the store-name pattern
+`<repo-id>-<UTC stamp>-<rand>` for this mirror's validated repo id, and an
+`Lstat` must show a real directory directly inside a real `.store/`; a name
+that fails either is left alone and logged, never joined into a path for
+`RemoveAll`. A nil scan or any error removes nothing and leaves the record. A pinned
 store stays and is looked at again later; a last-swept time in the record
 limits a mirror to one scan an hour. The hour is a margin for borrower git
 processes that resolved the old store before the swap and for a create
@@ -451,9 +471,12 @@ the plugin store. After the root is gone the only instances left are in
 mirror. It keeps the whole mirror and prints the mirror's path and the reason
 when a kept clone pins it ("a kept instance borrows from it"), when
 `TryFileLock` finds the lock held ("busy"), or when the scan failed ("kept
-instances couldn't be read"). Otherwise it removes the link, the state file,
-the record and every `.store/<repo-id>-*` directory, then `mirrors/` once
-empty, then the key directory if that leaves it empty.
+instances couldn't be read"). Otherwise it removes the link, then each store
+the record and the state file name, by exact name with the sweep's
+validation, then the state file and the record, then `mirrors/` once empty,
+then the key directory if that leaves it empty. It never removes by a
+`<repo-id>-*` glob, because repo ids `app` and `app-extra` would collide
+under it; a store directory no record names is left and reported.
 
 #### Alternatives Considered
 
@@ -522,6 +545,15 @@ argument and defaults to the instance the working directory is in.
    failure.
 6. Report each clone changed.
 
+A crash inside step 5 can leave `alternates.niwa-dissociate` behind. The
+strict scan reads that file as alternates, so the store it names stays
+pinned, and the next `niwa dissociate` on the instance finishes the step for
+that clone: it runs `git fsck` with the file still aside and removes it on a
+pass, or renames it back on a failure. Every git call the command makes runs
+with every inherited `GIT_*` variable stripped and with `-c gc.auto=0 -c
+core.fsmonitor=false -c core.hooksPath=<niwa's empty hooks directory>`, so a
+clone's own config can't start a collection or run a hook mid-copy.
+
 #### Alternatives Considered
 
 - **`niwa instance unshare`.** The `instance` group is hidden and serves the
@@ -559,23 +591,35 @@ and copies back from the parent environment exactly the variables R12 names:
 `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_SSH_VARIANT`, `GIT_ASKPASS`,
 `GIT_PROXY_COMMAND`, `GIT_SSL_CAINFO`, `GIT_SSL_CAPATH`, `GIT_SSL_NO_VERIFY`,
 `GIT_HTTP_PROXY_AUTHMETHOD`, and `GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_<n>`
-and `GIT_CONFIG_VALUE_<n>` for each n below the count. A count that isn't a
-small non-negative integer is dropped with its entries. `gitExecNetwork` (the
-clone, fetch and fetch by id) uses `networkEnv`; every other mirror process
-uses `localEnv`. One refinement: an entry whose key names something the
-mirror pins in its own config (`gc.*`, `maintenance.*`, `fetch.prune*`,
-`core.hooksPath`, `transfer.fsckObjects`, `receive.*`) is dropped and the rest
-renumbered. Environment config overrides a repository's config file, so a
-user's `gc.pruneExpire` reaching a mirror fetch would otherwise undo the
-never-prune rule.
+and `GIT_CONFIG_VALUE_<n>` for each n below the count. The count is parsed as
+the plain decimal git reads; one that doesn't parse, or is above 64, is
+dropped with its entries. `gitExecNetwork` (the clone, fetch and fetch by id)
+uses `networkEnv`; every other mirror process uses `localEnv`.
+
+The config entries are filtered by an allowlist, compared case-folded,
+because environment config overrides a repository's config file and some keys
+would undo the mirror's own guards. Kept: keys under `http.` and `https.`
+(proxy, TLS, `http.extraHeader`), `credential.`, `url.<base>.insteadOf`,
+`protocol.`, `ssh.`, `core.sshCommand`, `core.gitProxy` and `core.askPass`.
+Every other entry is dropped and the rest renumbered; that includes
+`include.*` and `includeIf.*` (which would load a config file past the
+filter), `remote.*` (which could rewrite the mirror's refspec or prune it),
+`gc.*`, `maintenance.*`, `fetch.prune*`, `core.hooksPath`, `core.fsmonitor`,
+`core.alternateRefsCommand`, `uploadpack.*`, `safe.directory` and
+`extensions.*`. This narrows R12's "`GIT_CONFIG_COUNT` with its entries" to
+the entries that carry remote access, which is what the variable list is for.
+No environment value is ever written to the mirror log.
 
 **niwa#525.** Decision 3 already moves every removal out of the restore: a
 restore removes no store that was ever linked, and the sweep removes retired
 stores later, so removal always follows the probe and recovery, and the mirror
 log shows the probe's lines before any removal line. During salvage, an old
 store whose pack fails `verify-pack` is fed through `git unpack-objects -r`
-into a temporary object directory, which writes every object it can read; those
-objects join the salvage. The probe then reads each borrower ref: all objects
+under `localEnv` into a temporary object directory under the mirror's own
+`.tmp/`, on the same volume, after a free-space check against the pack's
+size. Every object it can read is written there and checked with `git
+cat-file -e` before it joins the salvage, and the directory is removed on every
+exit path. The probe then reads each borrower ref: all objects
 present means it reads to the root; otherwise recovery by id from the remote;
 and a ref neither can complete is named unrecoverable, as today.
 
@@ -888,10 +932,13 @@ objects. Removal is by exact name and never follows a link.
 **The environment on network calls.** R12 hands the mirror's network calls
 the user's own transport and credential settings, which is what makes them
 work for a user who needs them. They're taken from the user's environment,
-never from the workspace config or the remote. Config entries that would
-override the mirror's pinned keys are dropped, so a stray `gc.*` or
-`core.hooksPath` in the environment can't make a mirror fetch prune or run a
-hook. Local reads keep stripping every `GIT_*` variable.
+never from the workspace config or the remote. Config entries pass only
+through the allowlist in Decision 5, compared case-folded, so `include.path`,
+`remote.*`, `gc.*`, `core.hooksPath` and the like can't make a mirror fetch
+load another config file, prune or run a hook. No environment value reaches
+the mirror log, and the test probe records config values only as hashes.
+Local reads, the recovering unpack and `niwa dissociate` keep stripping every
+`GIT_*` variable.
 
 **Retention.** The mirror keeps every commit it ever fetched, by the settled
 retention decision. The per-repo off setting and the guide's purge steps,
@@ -904,7 +951,33 @@ environment probe exist only in the `niwa_functional` build. A release build
 has no code that reads their variables.
 
 **Output.** Fallback notices use a fixed vocabulary and the repo name from
-the workspace config, never text the remote chose.
+the workspace config, never text the remote chose. A repo name that doesn't
+match the mirror's repo-id pattern already clones in full; the notice prints
+it cut to printable ASCII and 256 bytes, escaped as the mirror log escapes,
+since it goes to a terminal and into the hook's `additionalContext`.
+
+**Paths the sweep and destroy remove.** Only names recorded in
+`.meta/<repo-id>.stores` that match the store-name pattern for a validated
+repo id, and that `Lstat` shows as real directories directly inside a real
+`.store/`. Nothing is removed by glob or through a link.
+
+**What borrowing changes for a user.**
+- Instances of one workspace are no longer a boundary between copies of
+  history: every borrower reads the same store. A repo whose history must not
+  be shared that way gets the per-repo off setting.
+- `niwa dissociate` copies everything a clone reaches into it, a removed
+  secret included, so purging a commit from a dissociated clone means a fresh
+  clone. The guide says so.
+- A clone copied by hand to another place keeps an alternates line the scan
+  can't see; once its store is retired and swept, that copy breaks. The guide
+  says to run `niwa dissociate` before copying an instance.
+- The mirror's network calls now honour `GIT_SSH_COMMAND`, `GIT_ASKPASS`,
+  `GIT_SSL_NO_VERIFY` and the rest of R12's list from whatever environment
+  started niwa, the SessionStart hook and dispatched workers included. That's
+  the same trust a plain `git clone` in that environment already gives them.
+- The remote comparison treats the SSH and HTTPS spellings of one host and
+  path as one remote, so salvage crosses that change; a different host or
+  path never shares a store.
 
 ## Consequences
 
