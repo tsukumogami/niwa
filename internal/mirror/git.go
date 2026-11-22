@@ -8,8 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
+
+	"github.com/tsukumogami/niwa/internal/testhook"
 )
 
 // gitBaseConfig is set on every git call in a mirror, whatever the store's
@@ -24,13 +29,15 @@ var gitBaseConfig = []string{
 	"gc.auto=0",
 }
 
-// gitEnv is the environment every git call here starts from: the parent's,
-// with every inherited GIT_* variable removed (GIT_DIR, GIT_EXEC_PATH and
-// GIT_ALTERNATE_OBJECT_DIRECTORIES among them, any of which would point git
-// somewhere else). gitRun adds what niwa sets after it.
-func gitEnv() []string {
+// localEnv is the environment every git call here starts from: environ, the
+// parent's, with every inherited GIT_* variable removed (GIT_DIR,
+// GIT_EXEC_PATH and GIT_ALTERNATE_OBJECT_DIRECTORIES among them, any of which
+// would point git somewhere else). A local call gets nothing more of the
+// parent's; a network call gets inheritedNetworkEnv back on top of it. gitRun
+// adds what niwa sets after both.
+func localEnv(environ []string) []string {
 	var env []string
-	for _, kv := range os.Environ() {
+	for _, kv := range environ {
 		if strings.HasPrefix(kv, "GIT_") {
 			continue
 		}
@@ -39,7 +46,212 @@ func gitEnv() []string {
 	return env
 }
 
-// localReadEnv is added, after gitEnv's scrub, to every git call that doesn't
+// networkVars are the inherited variables a network call keeps, copied back
+// verbatim: the user's ssh transport, askpass helper, git:// proxy command,
+// TLS trust settings and proxy auth method. A remote that needs them can't
+// be reached without them, and none of them points git at another
+// repository or object store. GIT_CONFIG_COUNT and its entries are kept
+// separately, through networkConfig's filter.
+var networkVars = []string{
+	"GIT_SSH",
+	"GIT_SSH_COMMAND",
+	"GIT_SSH_VARIANT",
+	"GIT_ASKPASS",
+	"GIT_PROXY_COMMAND",
+	"GIT_SSL_CAINFO",
+	"GIT_SSL_CAPATH",
+	"GIT_SSL_NO_VERIFY",
+	"GIT_HTTP_PROXY_AUTHMETHOD",
+}
+
+// maxConfigCount is the largest GIT_CONFIG_COUNT a network call honours. A
+// user's environment config holds a handful of entries; a larger count is
+// dropped with its entries rather than read entry by entry.
+const maxConfigCount = 64
+
+// configCountPattern is the GIT_CONFIG_COUNT git reads as written: git parses
+// it with a base-10 strtoul and refuses trailing text, but strtoul also
+// takes leading space and a sign, which this doesn't.
+var configCountPattern = regexp.MustCompile(`^[0-9]+$`)
+
+// inheritedNetworkEnv is what a network call keeps of environ, the parent's
+// environment: each of networkVars that is set, with its value as given
+// (git honours some of them, GIT_SSL_NO_VERIFY among them, when set at all,
+// so an empty value is kept too), then networkConfig's entries.
+// GIT_TERMINAL_PROMPT isn't among them: niwa sets it to 0 itself on every
+// call (see gitRun).
+func inheritedNetworkEnv(environ []string) []string {
+	vals := map[string]string{}
+	for _, kv := range environ {
+		if name, value, ok := strings.Cut(kv, "="); ok && strings.HasPrefix(name, "GIT_") {
+			vals[name] = value
+		}
+	}
+	var out []string
+	for _, name := range networkVars {
+		if v, ok := vals[name]; ok {
+			out = append(out, name+"="+v)
+		}
+	}
+	return append(out, networkConfig(vals)...)
+}
+
+// networkConfig is what a network call keeps of the GIT_CONFIG_COUNT
+// entries in vals (the parent's GIT_* variables by name): the entries whose
+// key carries remote access (remoteAccessKey), renumbered from 0, and
+// GIT_CONFIG_COUNT set to how many were kept.
+//
+// The filter is an allowlist because an environment entry outranks the
+// store's config file, and most keys would undo one of the mirror's guards:
+// an include makes git read another file, which could set any key past the
+// filter, a remote.* entry could change the mirror's refspec or prune it and
+// lose the refs that keep removed commits recoverable, and gc.*, fetch.prune,
+// core.hooksPath or core.fsmonitor would undo the retention config or run a
+// command. Of the keys kept, git reads the environment's entries before the
+// -c pairs, so a -c pair niwa passes (protocol.ext.allow=never,
+// protocol.version=2) still wins over an entry for the same key.
+//
+// A count that isn't plain decimal digits, is above maxConfigCount, or names
+// an entry whose key or value isn't set drops the count and every entry: git
+// refuses to run with such a count, and passing it would fail the call.
+func networkConfig(vals map[string]string) []string {
+	raw, ok := vals["GIT_CONFIG_COUNT"]
+	if !ok || !configCountPattern.MatchString(raw) {
+		return nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n > maxConfigCount {
+		return nil
+	}
+	var kept []configEntry
+	for i := 0; i < n; i++ {
+		key, kok := vals["GIT_CONFIG_KEY_"+strconv.Itoa(i)]
+		value, vok := vals["GIT_CONFIG_VALUE_"+strconv.Itoa(i)]
+		if !kok || !vok {
+			return nil
+		}
+		if remoteAccessKey(key) {
+			kept = append(kept, configEntry{key, value})
+		}
+	}
+	out := []string{"GIT_CONFIG_COUNT=" + strconv.Itoa(len(kept))}
+	for i, e := range kept {
+		out = append(out,
+			"GIT_CONFIG_KEY_"+strconv.Itoa(i)+"="+e.key,
+			"GIT_CONFIG_VALUE_"+strconv.Itoa(i)+"="+e.value)
+	}
+	return out
+}
+
+// remoteAccessPrefixes are the sections whose every key carries remote
+// access: http transport settings (proxy, TLS, extra headers), credential
+// helpers, protocol policy and ssh variant.
+var remoteAccessPrefixes = []string{"http.", "https.", "credential.", "protocol.", "ssh."}
+
+// remoteAccessKeys are the single keys outside those sections that do.
+var remoteAccessKeys = []string{"core.sshcommand", "core.gitproxy", "core.askpass"}
+
+// remoteAccessKey reports whether key, compared case-folded as git compares
+// section and key names, carries remote access: under one of
+// remoteAccessPrefixes, url.<base>.insteadOf, or one of remoteAccessKeys.
+func remoteAccessKey(key string) bool {
+	k := strings.ToLower(key)
+	for _, p := range remoteAccessPrefixes {
+		if strings.HasPrefix(k, p) && len(k) > len(p) {
+			return true
+		}
+	}
+	if slices.Contains(remoteAccessKeys, k) {
+		return true
+	}
+	const urlPrefix, insteadOf = "url.", ".insteadof"
+	return strings.HasPrefix(k, urlPrefix) && strings.HasSuffix(k, insteadOf) &&
+		len(k) > len(urlPrefix)+len(insteadOf)
+}
+
+// The network notes a log line can carry: names, never values, of what a
+// network call honoured that a reader of the log should know about.
+const (
+	noteSSLNoVerify  = "ssl-no-verify"
+	noteProxyCommand = "proxy-command"
+)
+
+// networkNotes collects the notes of the network calls one mirror's check,
+// restore and refresh made.
+type networkNotes struct {
+	mu   sync.Mutex
+	seen map[string]bool
+}
+
+// networkNotesKey keys a mirror's networkNotes on a context.
+type networkNotesKey struct{}
+
+// withNetworkNotes returns ctx carrying a new, empty networkNotes.
+func withNetworkNotes(ctx context.Context) context.Context {
+	return context.WithValue(ctx, networkNotesKey{}, &networkNotes{seen: map[string]bool{}})
+}
+
+// noteNetworkCall records on ctx's networkNotes, if it has one, what
+// inherited, the entries a network call kept of the parent's environment,
+// honours: GIT_SSL_NO_VERIFY, and a proxy command from GIT_PROXY_COMMAND or
+// a kept core.gitProxy entry.
+func noteNetworkCall(ctx context.Context, inherited []string) {
+	n, ok := ctx.Value(networkNotesKey{}).(*networkNotes)
+	if !ok {
+		return
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, kv := range inherited {
+		name, value, _ := strings.Cut(kv, "=")
+		switch {
+		case name == "GIT_SSL_NO_VERIFY":
+			n.seen[noteSSLNoVerify] = true
+		case name == "GIT_PROXY_COMMAND":
+			n.seen[noteProxyCommand] = true
+		case strings.HasPrefix(name, "GIT_CONFIG_KEY_") && strings.EqualFold(value, "core.gitProxy"):
+			n.seen[noteProxyCommand] = true
+		}
+	}
+}
+
+// networkNotesFrom returns the notes ctx's networkNotes holds, in a fixed
+// order, or nil.
+func networkNotesFrom(ctx context.Context) []string {
+	n, ok := ctx.Value(networkNotesKey{}).(*networkNotes)
+	if !ok {
+		return nil
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	var out []string
+	for _, note := range []string{noteSSLNoVerify, noteProxyCommand} {
+		if n.seen[note] {
+			out = append(out, note)
+		}
+	}
+	return out
+}
+
+// lastWins returns env with each name once, at its last value, in the
+// order each name first appears. exec does the same with a repeated name, so
+// the probe records exactly what the process is given.
+func lastWins(env []string) []string {
+	index := map[string]int{}
+	var out []string
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if i, ok := index[name]; ok {
+			out[i] = kv
+			continue
+		}
+		index[name] = len(out)
+		out = append(out, kv)
+	}
+	return out
+}
+
+// localReadEnv is added, after localEnv's scrub, to every git call that doesn't
 // reach the remote: no system or global config is read, so nothing the
 // user's or the system's config names (a trace2 target, a helper, a pager)
 // runs for a read of local files, and git takes no optional lock, so a check
@@ -97,9 +309,10 @@ func gitOutput(ctx context.Context, config []string, stdin string, args ...strin
 var gitHook func(args []string)
 
 // gitProc is what gitProcHook sees of one git process: every -c pair it
-// carries, the environment niwa added after gitEnv's scrub, and its
-// arguments after the -c pairs.
-type gitProc struct{ Config, Env, Args []string }
+// carries, the environment niwa added after localEnv's scrub, what a network
+// call kept of the parent's environment (inheritedNetworkEnv; empty on a
+// local call), and its arguments after the -c pairs.
+type gitProc struct{ Config, Env, Inherited, Args []string }
 
 // gitProcHook, when a test sets it, is called beside gitHook for every git
 // process the package starts. It's nil outside the tests.
@@ -108,15 +321,24 @@ var gitProcHook func(gitProc)
 // gitExec runs git as gitOutput does, with env added to the cleaned
 // environment, as a call that reads local files only (see gitRun).
 func gitExec(ctx context.Context, env, config []string, stdin string, args ...string) (string, error) {
-	return gitRun(ctx, false, env, config, stdin, args...)
+	return gitRun(ctx, "", env, config, stdin, args...)
 }
 
-// gitExecNetwork runs git as gitExec does, for one of the three calls that
-// reach the remote (cloneMirror, fetchMirror and fetchByID): it keeps the
-// user's system and global config, and their credential helper and ssh
-// command, since the remote may need them.
-func gitExecNetwork(ctx context.Context, env, config []string, stdin string, args ...string) (string, error) {
-	return gitRun(ctx, true, env, config, stdin, args...)
+// The network calls, as gitExecNetwork names them to the test build's
+// environment probe.
+const (
+	callClone     = "clone"
+	callFetch     = "fetch"
+	callFetchByID = "fetch-by-id"
+)
+
+// gitExecNetwork runs git as gitExec does, for call, one of the three calls
+// that reach the remote (cloneMirror, fetchMirror and fetchByID): it keeps
+// the user's system and global config, their credential helper and ssh
+// command, and the remote-access variables of their environment
+// (inheritedNetworkEnv), since the remote may need them.
+func gitExecNetwork(ctx context.Context, call string, env, config []string, stdin string, args ...string) (string, error) {
+	return gitRun(ctx, call, env, config, stdin, args...)
 }
 
 // gitRun is the one place the package starts a git process. It refuses to
@@ -125,12 +347,21 @@ func gitExecNetwork(ctx context.Context, env, config []string, stdin string, arg
 // the user owns with mode 0700 (checkEmptyHooks): a hook planted there, or a
 // link put in its place, would run inside every git call.
 //
+// netCall names a network call (callClone, callFetch or callFetchByID) and
+// is empty for a local one. Every process starts from localEnv's scrub of
+// the parent's environment; a network call gets inheritedNetworkEnv back on
+// top, and its notes go on ctx (noteNetworkCall).
+//
 // Every process carries gitBaseConfig and core.hooksPath naming that
 // directory, so no hook in a store, and no core.hooksPath its config sets,
-// runs. A call that isn't network also carries localReadConfig and, after
-// gitEnv's scrub, localReadEnv. GIT_TERMINAL_PROMPT=0 rides every call,
-// since nobody is there to answer. config and env, the caller's, come last.
-func gitRun(ctx context.Context, network bool, env, config []string, stdin string, args ...string) (string, error) {
+// runs. A call that isn't network also carries localReadConfig and
+// localReadEnv. GIT_TERMINAL_PROMPT=0 rides every call, whatever the parent's
+// environment says, since nobody is there to answer: a mirror call runs
+// inside niwa commands and the SessionStart hook, where a credential prompt
+// would hang the command. A credential helper and GIT_ASKPASS still work.
+// config and env, the caller's, come last.
+func gitRun(ctx context.Context, netCall string, env, config []string, stdin string, args ...string) (string, error) {
+	network := netCall != ""
 	hooks, ok := emptyHooksFrom(ctx)
 	if !ok {
 		return "", errors.New("refusing to run git: no empty-hooks directory was set up for it")
@@ -150,33 +381,48 @@ func gitRun(ctx context.Context, network bool, env, config []string, stdin strin
 		added = append(added, localReadEnv...)
 	}
 	added = append(added, env...)
+	parent := os.Environ()
+	var inherited []string
+	if network {
+		inherited = inheritedNetworkEnv(parent)
+	}
 
 	full := make([]string, 0, 2*len(pairs)+len(args))
 	for _, kv := range pairs {
 		full = append(full, "-c", kv)
 	}
 	full = append(full, args...)
+	// The first argument that isn't an option names the subcommand.
+	sub := ""
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			sub = a
+			break
+		}
+	}
 	if gitHook != nil {
 		gitHook(slices.Clone(args))
 	}
 	if gitProcHook != nil {
-		gitProcHook(gitProc{Config: slices.Clone(pairs), Env: slices.Clone(added), Args: slices.Clone(args)})
+		gitProcHook(gitProc{Config: slices.Clone(pairs), Env: slices.Clone(added), Inherited: slices.Clone(inherited), Args: slices.Clone(args)})
+	}
+	procEnv := lastWins(append(append(localEnv(parent), inherited...), added...))
+	if network {
+		noteNetworkCall(ctx, inherited)
+		testhook.ProbeGitEnv(testhook.KindNetwork, netCall, procEnv)
+	} else {
+		testhook.ProbeGitEnv(testhook.KindLocal, sub, procEnv)
 	}
 	cmd := exec.CommandContext(ctx, "git", full...)
-	cmd.Env = append(gitEnv(), added...)
+	cmd.Env = procEnv
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		// The first argument that isn't an option names the subcommand.
-		sub := args[0]
-		for _, a := range args {
-			if !strings.HasPrefix(a, "-") {
-				sub = a
-				break
-			}
-		}
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			return "", fmt.Errorf("git %s: %w: %s", sub, err, msg)
 		}
@@ -331,7 +577,7 @@ const fetchReflogAction = "GIT_REFLOG_ACTION=niwa mirror refresh"
 // written to the store: the reflog message is fixed, and no FETCH_HEAD, which
 // would name the URL, is written.
 func fetchMirror(ctx context.Context, store, url string) error {
-	_, err := gitExecNetwork(ctx, []string{fetchReflogAction}, nil, "",
+	_, err := gitExecNetwork(ctx, callFetch, []string{fetchReflogAction}, nil, "",
 		"--git-dir="+store, "fetch", "--no-prune", "--no-write-fetch-head", "--quiet", "--", url, "+refs/*:refs/*")
 	return err
 }
@@ -359,7 +605,7 @@ func fetchByID(ctx context.Context, store, url string, ids []string) error {
 	}
 	args := append([]string{"--git-dir=" + store,
 		"fetch", "--no-write-fetch-head", "--no-tags", "--quiet", "--", url}, ids...)
-	_, err := gitExecNetwork(ctx, []string{fetchReflogAction}, []string{"protocol.version=2"}, "", args...)
+	_, err := gitExecNetwork(ctx, callFetchByID, []string{fetchReflogAction}, []string{"protocol.version=2"}, "", args...)
 	return err
 }
 
@@ -386,7 +632,7 @@ func headCommitReadable(ctx context.Context, store string) error {
 // config, which the restore then replaces whole with the fixed one
 // (writeStoreConfig) before anything else reads the store.
 func cloneMirror(ctx context.Context, url, dir string) error {
-	_, err := gitExecNetwork(ctx, nil,
+	_, err := gitExecNetwork(ctx, callClone, nil,
 		[]string{
 			"transfer.fsckObjects=true",
 			"fetch.fsckObjects=true",

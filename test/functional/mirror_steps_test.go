@@ -96,6 +96,7 @@ func registerMirrorSteps(ctx *godog.ScenarioContext) {
 	registerMirrorHealthySteps(ctx)
 	registerMirrorHostileSteps(ctx)
 	registerMirrorIdentitySteps(ctx)
+	registerMirrorEnvSteps(ctx)
 }
 
 // mirrorState returns the scenario's mirror state, allocating it on first use.

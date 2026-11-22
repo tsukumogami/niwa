@@ -30,6 +30,10 @@ const logMax = 1 << 20
 // when the new store was built with salvage: it names the old stores the
 // salvage read, relative to the mirrors directory, so a reader can tell a
 // restore that kept what the old store held from one that started over.
+// NetworkNotes, on a restore or refresh line only, names what the event's
+// network calls honoured from the user's environment that weakens or
+// reroutes the connection (noteSSLNoVerify, noteProxyCommand). It carries
+// names only: no environment value ever reaches the log.
 type logLine struct {
 	Time         string   `json:"time"`
 	Command      string   `json:"command"`
@@ -40,11 +44,12 @@ type logLine struct {
 	CheckMs      int64    `json:"check_ms"`
 	TookMs       *int64   `json:"took_ms,omitempty"`
 	SalvagedFrom []string `json:"salvaged_from,omitempty"`
+	NetworkNotes []string `json:"network_notes,omitempty"`
 }
 
 // cut returns l with every string a caller, a remote or a person could have
 // chosen cut by cleanName, so the line stays one bounded line of printable
-// ASCII. Time and Event are niwa's own and kept.
+// ASCII. Time, Event and NetworkNotes are niwa's own and kept.
 func (l logLine) cut() logLine {
 	l.Command = cleanName(l.Command)
 	l.Mirror = cleanName(l.Mirror)
@@ -103,6 +108,7 @@ func unrecoverableLines(restoreLine logLine, lost []LostRef) []any {
 		base.Event = eventUnrecoverable
 		base.TookMs = nil
 		base.SalvagedFrom = nil
+		base.NetworkNotes = nil
 		lines = append(lines, unrecoverableLine{
 			logLine:        base,
 			Instance:       l.Instance,
