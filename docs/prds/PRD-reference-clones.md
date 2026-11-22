@@ -170,6 +170,12 @@ works on the borrowers users would actually have.
   clone, clones that repo in full as niwa does today, finishes, and its
   output names the repo and the reason it didn't borrow. Borrowing never
   makes a create fail that would have succeeded without it.
+
+  *Note added after acceptance, from the plan:* the first R4 check below
+  can't stop the sandbox remote outright, because a full clone of a stopped
+  remote fails too. Its scenario makes the mirror's seed or restore for that
+  repo fail while the full clone still reaches the remote; the create then
+  exits 0, clones that repo in full and names it with the reason.
 - **R5. Only new clones borrow.** A repo already cloned in an instance is
   never converted to a borrower or back by sync, apply or any other
   command except the one in R8.
