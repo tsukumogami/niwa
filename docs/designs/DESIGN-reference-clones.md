@@ -596,6 +596,11 @@ and `GIT_CONFIG_VALUE_<n>` for each n below the count. The count is parsed as
 the plain decimal git reads; one that doesn't parse, or is above 64, is
 dropped with its entries. `gitExecNetwork` (the clone, fetch and fetch by id)
 uses `networkEnv`; every other mirror process uses `localEnv`.
+`networkEnv` also sets `GIT_TERMINAL_PROMPT=0` itself, whatever the user's
+environment holds, because a mirror network call runs inside niwa commands
+and the SessionStart hook, where a credential prompt can't be answered and
+would hang the command. It's niwa's own setting, outside R12's inherited
+list; credential helpers and `GIT_ASKPASS` still work.
 
 The config entries are filtered by an allowlist, compared case-folded,
 because environment config overrides a repository's config file and some keys

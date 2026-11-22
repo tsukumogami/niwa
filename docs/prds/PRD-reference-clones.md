@@ -226,6 +226,18 @@ works on the borrowers users would actually have.
   with its `GIT_CONFIG_KEY_<n>` and `GIT_CONFIG_VALUE_<n>` entries. Local
   reads of the mirror keep stripping every inherited `GIT_*` variable, as
   the mirror-repair design requires.
+
+  *Note added after acceptance, from the design:* the `GIT_CONFIG_KEY_<n>`
+  and `GIT_CONFIG_VALUE_<n>` entries pass only for keys that carry remote
+  access (under `http.`, `https.`, `credential.`, `protocol.`, `ssh.`,
+  `url.<base>.insteadOf`, and `core.sshCommand`, `core.gitProxy`,
+  `core.askPass`). `include.*` and `includeIf.*` stay out because an include
+  makes git read another config file that could set any key past the filter,
+  and `remote.*` stays out because it could change the mirror's refspec or
+  prune it and lose the refs that keep removed commits recoverable. niwa
+  also sets `GIT_TERMINAL_PROMPT=0` itself on every mirror network call,
+  outside the inherited list above, because those calls run where a
+  credential prompt can't be answered.
 - **R13. Old stores outlive borrower recovery (niwa#525).** A restore
   removes no old store until the borrower probe and recovery by id have
   finished. From a truncated old pack it salvages every object that can
