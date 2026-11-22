@@ -1451,7 +1451,7 @@ func TestOnReap_CallSites(t *testing.T) {
 		}
 	}
 
-	want := map[string]bool{"on_reap.go": true, "reap.go": true, "destroy_session.go": true, "watch.go": true}
+	want := map[string]bool{"on_reap.go": true, "pass.go": true, "destroy_session.go": true, "watch.go": true}
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatal(err)

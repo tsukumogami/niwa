@@ -578,6 +578,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	registerDispatchSteps(ctx)
 	registerDispatchInterruptSteps(ctx)
 	registerDispatchSpillSteps(ctx)
+	registerReapLossScanSteps(ctx)
 	registerDispatchLineageSteps(ctx)
 	registerNiwaResumeSteps(ctx)
 	registerRetaskSteps(ctx)

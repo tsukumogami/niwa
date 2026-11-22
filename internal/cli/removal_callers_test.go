@@ -27,8 +27,8 @@ type removalCaller struct {
 var removalCallers = map[string]removalCaller{
 	// Gated: niwa removes these on its own judgment that nothing needs them,
 	// so the workspace's command gets the last word.
-	"reap.go:reapWorkspace": {true, "the mapped reap asks with step reap and the instance's mapped session ids"},
-	"reap.go:reapBackstop":  {true, "the backstop for unmapped dispatch instances asks with step reap-backstop and no session ids"},
+	"pass.go:runPass":      {true, "the mapped reap asks with step reap and the instance's mapped session ids"},
+	"reap.go:reapBackstop": {true, "the backstop for unmapped dispatch instances asks with step reap-backstop and no session ids"},
 	"watch.go:discardStagedRecord": {true,
 		"niwa watch's discard of a staged review asks with step watch-discard; a kept review keeps its instance and its record"},
 	"destroy.go:runDestroyInstance": {true,

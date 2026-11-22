@@ -3515,6 +3515,14 @@ func (a *Applier) discoverAllRepos(ctx context.Context, sources []config.SourceC
 	return allRepos, nil
 }
 
+// SourceSSHURL is the SSH URL apply records for a repository a source lists
+// by name, the URL RepoCloneURL clones it from when no [repos.<name>] url
+// overrides it. Reap's removal check builds the same URL through it, so the
+// clone URL a unit is judged against is the one apply cloned from.
+func SourceSSHURL(org, name string) string {
+	return fmt.Sprintf("git@github.com:%s/%s.git", org, name)
+}
+
 func (a *Applier) discoverRepos(ctx context.Context, source config.SourceConfig) ([]github.Repo, error) {
 	// If the source specifies explicit repos, build the list directly
 	// without calling the GitHub API.
@@ -3523,7 +3531,7 @@ func (a *Applier) discoverRepos(ctx context.Context, source config.SourceConfig)
 		for i, name := range source.Repos {
 			repos[i] = github.Repo{
 				Name:     name,
-				SSHURL:   fmt.Sprintf("git@github.com:%s/%s.git", source.Org, name),
+				SSHURL:   SourceSSHURL(source.Org, name),
 				CloneURL: fmt.Sprintf("https://github.com/%s/%s.git", source.Org, name),
 			}
 		}

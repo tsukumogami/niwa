@@ -83,6 +83,9 @@ type removalGate struct {
 	cfgErr error
 
 	started time.Time
+	// deadline, when set, is the end of the pass the gate asks within; no
+	// run gets time past it, whatever is left of the gate's own budget.
+	deadline time.Time
 }
 
 func newRemovalGate(workspaceRoot, step string, out io.Writer) *removalGate {
@@ -135,6 +138,15 @@ func (g *removalGate) check(path string, sessionIDs []string) (allowed bool, rea
 	remaining := g.budget - time.Since(g.started)
 	if remaining <= 0 {
 		return false, fmt.Sprintf("this step's %s before_remove time ran out before it could ask", g.budget)
+	}
+	if !g.deadline.IsZero() {
+		left := time.Until(g.deadline)
+		if left <= 0 {
+			return false, "the pass's time ran out before before_remove could ask"
+		}
+		if left < remaining {
+			remaining = left
+		}
 	}
 	timeout := g.cfg.TimeoutDuration()
 	if timeout > remaining {

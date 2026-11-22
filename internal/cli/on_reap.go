@@ -109,6 +109,9 @@ type onReapStep struct {
 	cfgErr error
 
 	started time.Time
+	// deadline, when set, is the end of the pass the step runs within; no
+	// run gets time past it, whatever is left of the step's own budget.
+	deadline time.Time
 }
 
 func newOnReapStep(workspaceRoot string, out io.Writer) *onReapStep {
@@ -173,6 +176,16 @@ func (s *onReapStep) run(r removedSession) bool {
 	if remaining <= 0 {
 		s.warn(r.SessionID, fmt.Sprintf("skipped: this step's %s on-reap budget is spent; a later reap runs it", onReapStepBudget))
 		return false
+	}
+	if !s.deadline.IsZero() {
+		left := time.Until(s.deadline)
+		if left <= 0 {
+			s.warn(r.SessionID, "skipped: the pass's time ran out; a later reap runs it")
+			return false
+		}
+		if left < remaining {
+			remaining = left
+		}
 	}
 	timeout := s.cfg.TimeoutDuration()
 	if timeout > remaining {
