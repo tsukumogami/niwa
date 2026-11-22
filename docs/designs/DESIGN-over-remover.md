@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Accepted
+status: Planned
 problem: |
   niwa removes a stopped instance only when its session has been deleted or a
   person names it to `niwa destroy`, and nothing in niwa can be told when a
@@ -52,7 +52,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Accepted
+Planned
 
 ## Context and Problem Statement
 
