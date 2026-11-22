@@ -531,6 +531,36 @@ The package also settles the mechanics the PRD left to the design:
   or holding only empty directories, is classed generated too wherever it
   sits in the instance or the job directory: it holds nothing to lose, and
   git doesn't report one inside a clone.
+- **A watch review instance's `pr-clone` is generated** while it is still
+  niwa's own fetch. `watch.FetchPRHead` (internal/watch/fetch.go) creates a
+  fresh repository with no remote, fetches the PR head's SHA into it, checks
+  that commit out and moves the git directory into `pr-clone/.git`. The
+  SHA it fetched is recorded outside the instance, in the watch's handled
+  set at `<root>/.niwa/watch-handled` (`handledSetRelPath`,
+  internal/watch/state.go), under the root's `.niwa/` that the guide
+  already tells workspaces to deny the agent writes to. Every time watch
+  appends a handled entry (`watch.AppendHandled`) for a review it staged in
+  an instance, at a successful stage, at a failed-stage rollback the rule
+  keeps (below) and at a continuation that fetches a new head into the
+  same instance, the entry also records that review instance's name. The
+  rule classes `pr-clone` generated only when that repository still has no
+  remote, its HEAD equals the head SHA of the handled entry naming that
+  instance, and it holds no other ref, no stash and no uncommitted change.
+  This holds in every evaluation: a pass, a retire, the verdict-only mode,
+  the watch's discard and the failed-stage rollback. The rollback's entry
+  is written only once the rule has kept the instance, so the rollback
+  evaluates with the SHA `stageReview` fetched, the one its entry then
+  records. An entry that names no instance, one written before this change
+  or by a head adoption, matches nothing, and neither does an entry a later
+  stage of the same PR rewrote for its own instance, so that `pr-clone` is
+  judged by the normal rule. It's regenerable because niwa itself fetched
+  that exact commit from the PR's repository, so the same fetch makes it
+  again, and nothing in it is unique work. The configuration check still
+  runs on it first. Anything else about it, a remote added, HEAD moved, a
+  new commit or an uncommitted change, is judged by the normal rule, which
+  keeps the unit on it. The review draft, `watch-review-draft.md` at the instance root, and
+  anything else the review agent wrote are ordinary unit content, judged by
+  the rule like any other path.
 - **Processes** come from one listing per pass: `/proc/<pid>/cwd` and
   `/proc/<pid>/fd` on Linux, `lsof -n -P -w -F 0pn` on macOS, whose fields
   end in NUL rather than a newline so a crafted file name can't forge a
@@ -564,6 +594,31 @@ check keeps the worktree. The sweep records the worktree's HEAD and
 per-worktree refs with its evaluation, and the invoker reads them again
 right before the removal; any change keeps the worktree with "changed
 during the pass: ref <name>".
+
+A watch review instance hosted a whole review session, so the rule often
+keeps one, and the two watch paths say what happens then. When the rule
+keeps a review instance at the discard (`discardStagedRecord`, reached from
+`pruneStagedRecord` at watch.go:657 for a session no longer live and at
+:677 for a stale review), the discard still deletes the staged record and
+prints the keeping check with the path it names. The instance stays and is
+listed as a stopped unit under the normal lifecycle (once its session has
+stopped, for a stale review whose session is still live), and the listing,
+the over command and `niwa retire` handle it from there. The discard's
+evaluation takes the recorded SHA from the handled entry naming the
+instance, and that entry stays after the staged record goes, so a later
+pass still recognizes niwa's own fetch: once the person deletes the draft
+and the review session is gone, the next reap removes the instance. A keep
+from the before-remove gate still leaves the instance and its record as
+they are, as today. When the rule keeps the instance at the failed-stage
+rollback, the rollback still appends the handled entry for that PR and
+head SHA through `watch.AppendHandled`, which today only a successful stage
+writes (watch.go:896, `AppendHandled(workspaceRoot, owner, repo string,
+number int, sha string)`, which gains the instance's name). The next watch
+pass then never stages the same PR head into a new instance, and the kept
+instance is listed as a stopped unit the same way. A stage that fails before the review agent launches (watch.go:864)
+holds only niwa's own fetch beside the files niwa provisioned, so the rule
+passes it and the rollback removes it as today.
+
 The before-remove gate, the instance lock, the re-read before removal (whose
 `git status`, like every status, the invoker precedes with a fresh
 configuration check) stay as they are and wrap the
@@ -1238,8 +1293,25 @@ the unit's kept-set entry into it. The window is the workspace's
 retention read at reap time. A `restore_window` under seven days is a
 configuration error from `validateSessionDeclaration`, naming the setting and
 the seven-day minimum, so every command that loads the configuration exits
-non-zero and no pass runs. `niwa resume` refuses a record past
-`restore_until` with the date the window ended. Inside it, before the session
+non-zero and no pass runs. The launch-record sweep, `sweepLaunchRecords`
+(internal/cli/launch_records.go), today removes a record once its transcript
+is gone. It now keeps every record that carries `reaped_at` until its
+`restore_until` has passed, whether or not the transcript still exists, and
+only after that applies today's transcript rule. Without that, a reaped
+unit's record could go inside its window: Claude Code's retention counts
+from the transcript's last write, which comes no later than the reap, so the
+transcript can be removed before `restore_until`, and the next pass would
+take the record and its `kept_entry` with it. So the record, and the kept
+entry it names, are there for the whole window. That alone doesn't make a
+unit resumable: `niwa resume` still needs the session's transcript and
+refuses, naming it, once the transcript is gone (`checkWorkerInstance`,
+resume.go:262-276), so a window longer than Claude Code's retention keeps
+the record and the kept entry but can't resume the unit. Restoring a unit
+without its session is out of scope. Either way the kept files stay
+copyable from the kept set, at the paths `niwa list --kept` shows, until
+they're due. `niwa resume` refuses a record past `restore_until` with the
+date the window ended, for as long as the record is there. Inside the
+window, with the transcript still there, before the session
 starts, it moves the entry's files back to their original paths with a hash
 check, and refuses, leaving everything in place and naming the file, when one
 doesn't match. A later step of the resume can still fail before the session
@@ -1967,7 +2039,10 @@ due dates shown a day before entries leave. The SessionStart hook writes
 launch records, so hook sessions can be reaped on a mark and restored, and
 `niwa resume` refuses past `restore_until`, which defaults to Claude Code's
 transcript retention; a `restore_window` the workspace sets can't be below
-seven days.
+seven days. The launch-record sweep keeps a reaped unit's record until
+`restore_until` has passed, even once its transcript is gone; a resume
+still needs the transcript and refuses, naming it, without one, while the
+kept files stay copyable from the kept set until they're due.
 
 Everything in an instance is treated as written by an untrusted agent. Every
 git call the pass, the hook worktree sweep and `niwa destroy` make goes
@@ -2147,7 +2222,12 @@ and check before
 tombstones an interrupted pass left under that lock taken exclusively, and
 the counts the dispatch line and reap print.
 `reapWorkspace` becomes a thin call into it; `sweepLaunchRecords` and
-`sweepHookWorktrees` stay as steps of the pass. `sweepHookWorktrees`
+`sweepHookWorktrees` stay as steps of the pass. `sweepLaunchRecords`
+(`internal/cli/launch_records.go`) changes in one way: a record that
+carries `reaped_at` is kept until its `restore_until` has passed, whether
+or not its transcript still exists, and only after that does today's rule,
+which removes a record whose transcript is gone, apply to it (Decision 5).
+Every other record is swept as today. `sweepHookWorktrees`
 (`internal/cli/reap_worktrees.go`) runs the removal walk over each worktree
 and the program-naming configuration check on every repository it finds
 there, the worktree's own and each submodule, gitlink and nested repository
@@ -2178,11 +2258,17 @@ internal/cli/session_lifecycle_cmd.go:663) and `destroySessionWorktrees`
 (internal/cli/worktree_destroy_resolve.go:404), keep today's remover and
 invoker: they pass `StdGitInvoker` and a remover that runs today's
 `git worktree remove --force` through it with its result discarded, so what
-they do doesn't change. The sweep's invoker adds
-`--ignore-submodules=all` and `--untracked-files=all` to the `git status`
-call, and runs the program-naming configuration check on the worktree's
+they do doesn't change. The flags and the check belong to the sweep's
+path alone. `worktreeHasUncommittedChanges` keeps building
+`status --porcelain` for every caller, and the sweep's `gitCommand`
+invoker, which receives that call's arguments, adds
+`--ignore-submodules=all` and `--untracked-files=all` when it builds the
+status, and runs the program-naming configuration check on the worktree's
 repository right before that status and before the removal, returning an
-error that names the key, which keeps the worktree, when it finds one. With
+error that names the key, which keeps the worktree, when it finds one. The
+other callers' status stays `git status --porcelain` as today, with no
+added flags and no configuration check, since `StdGitInvoker` builds the
+call as it's given. With
 force off, a change the status reports keeps the worktree, as it does
 today; with force on, the status is skipped, as it is today.
 
@@ -3012,8 +3098,14 @@ Deliverables:
   listing holds, removing nothing when one fails.
 - Failed-dispatch cleanup, the watch's discard and the watch's failed-stage
   rollback (`stageReview`'s deferred cleanup) calling `removal.Evaluate`
-  before `destroyInstanceFunc`; the hook worktree sweep evaluating each
-  worktree's repository checks.
+  before `destroyInstanceFunc`, with a review instance's `pr-clone` classed
+  generated while it is still niwa's own fetch at the head SHA of the
+  handled entry naming the instance, in every evaluation (Decision 1);
+  every handled entry watch appends for a staged review recording the
+  instance's name; on a keep, the discard deleting the staged record and
+  the rollback appending the handled entry for that PR head, the instance
+  listed as a stopped unit either way; the hook worktree sweep evaluating
+  each worktree's repository checks.
 - The hook worktree sweep (`internal/cli/reap_worktrees.go`,
   `internal/worktree/worktree.go`) and `niwa destroy`'s scan
   (`internal/workspace/scan.go`) building every git call with `gitCommand`,
@@ -3093,7 +3185,15 @@ Deliverables:
 - Functional scenarios: a clean unit holding a niwa worktree leaves no session
   behind after a reap and after `niwa destroy`; failed-dispatch cleanup keeps
   `partial.txt`, and the watch's failed-stage rollback keeps a file the
-  review agent wrote; no `claude` call a wrapper logs carries an override flag,
+  review agent wrote and appends the handled entry, so the next watch pass
+  stages no new instance for that PR head; a stage that fails before the
+  agent launches leaves no instance; the watch's discard removes a review
+  instance holding only niwa's fetch at the recorded SHA, and keeps one
+  holding the review draft, or a `pr-clone` with a commit on top of that
+  SHA, deleting the staged record and listing the instance as a stopped
+  unit; once the person deletes that draft and the review session is
+  deleted, a later `niwa reap` removes the instance, its `pr-clone`
+  matched through the handled entry; no `claude` call a wrapper logs carries an override flag,
   no `git` call a wrapper logs is `git worktree remove` or
   `git worktree prune`, and none carries `--force` outside `niwa destroy
   --force`; every `claude` call a wrapper logs runs from a directory outside
@@ -3205,7 +3305,9 @@ Deliverables:
 - `niwa instance from-hook` writing launch records; the mapping's
   `launch_id`.
 - `reaped_at`, `restore_until` and `kept_entry` on the launch record;
-  `restore_window` with the seven-day floor.
+  `restore_window` with the seven-day floor; `sweepLaunchRecords` keeping a
+  record that carries `reaped_at` until `restore_until` has passed, and
+  applying its transcript rule only after.
 - `niwa resume` refusing past the window and restoring kept files first,
   `kept_entry` checked to sit directly under `kept-files/<instance>/`, every
   path re-validated, a destination with a path component named `.git` or
@@ -4116,8 +4218,16 @@ doesn't do that now.
 Failed-dispatch cleanup, the watch's discard and the watch's failed-stage
 rollback act on the rule's verdict
 without the re-read and tombstone check a reap makes, so a write between
-their evaluation and the destroy is lost unseen. Their instances have seen
-little agent time, which keeps the case small.
+their evaluation and the destroy is lost unseen. A failed dispatch's
+instance has seen little agent time, which keeps that case small. A watch
+review instance hosted a whole review session, so its case isn't small,
+and the rule now covers it differently: the discard and the rollback remove
+a review instance only when nothing in it keeps, its `pr-clone` counting
+as generated while it is still niwa's own fetch at the recorded SHA. The draft or any other file the
+agent wrote keeps the instance, and the discard then deletes the staged
+record while the rollback appends the handled entry, so the kept instance
+is listed as a stopped unit and isn't staged again. What remains is a
+write that lands after the evaluation, which is lost unseen as above.
 
 A commit reachable only from a reflog, left behind by a `git reset` or a
 rebase, counts for nothing and goes with the instance. git's own garbage
