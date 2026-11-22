@@ -414,6 +414,7 @@ func Seed(ctx context.Context, opts Options, repo Repo) Result {
 func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 	_ = prepareEmptyHooks(opts.Home)
 	ctx = withEmptyHooks(ctx, emptyHooksDir(opts.Home))
+	ctx = withNetworkNotes(ctx)
 	tightenModes(opts.Home, opts.WorkspaceRoot, r.ID)
 	mdir := mirrorsDir(opts.Home, opts.WorkspaceRoot)
 	res := Result{RepoID: r.ID, StablePath: filepath.Join(mdir, r.ID)}
@@ -457,6 +458,7 @@ func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 	restoreLine.Time = logTime(restoreStart)
 	restoreLine.Event = eventRestore
 	restoreLine.TookMs = &took
+	restoreLine.NetworkNotes = networkNotesFrom(ctx)
 	lines := []any{checkLine, restoreLine}
 	logged(appendLog(mdir, append(lines, unrecoverableLines(restoreLine, res.Unrecoverable)...)...))
 	return res
