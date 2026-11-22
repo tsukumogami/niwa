@@ -77,7 +77,7 @@ names nothing, who loses nothing unasked, sees every stopped unit with its
 answer, age and size and a count at each dispatch, retires one unit under the
 same test, and has idle build trees trimmed. That's this document's Goals.
 
-The seven reviewer journeys (a command that answers over, not over and fails;
+The seven scenarios (a command that answers over, not over and fails;
 a workspace with no command; a keep record naming one file; a scratch file
 newer than the handoff brief; a verdict-only run; an idle build tree in a unit
 that isn't over; a restore inside and past the window) are the User Stories,

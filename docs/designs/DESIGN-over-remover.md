@@ -524,7 +524,10 @@ The package also settles the mechanics the PRD left to the design:
   provisioning: `instance.json` and the other files under `<instance>/.niwa/`
   that niwa manages, the files `managed_files` in `instance.json` lists,
   context files, plugin and marketplace trees, and a job directory's
-  `state.json` and `timeline.jsonl`.
+  `state.json` and `timeline.jsonl`. An empty directory, one with no entries
+  or holding only empty directories, is classed generated too wherever it
+  sits in the instance or the job directory: it holds nothing to lose, and
+  git doesn't report one inside a clone.
 - **Processes** come from one listing per pass: `/proc/<pid>/cwd` and
   `/proc/<pid>/fd` on Linux, `lsof -n -P -w -F 0pn` on macOS, whose fields
   end in NUL rather than a newline so a crafted file name can't forge a
@@ -559,8 +562,12 @@ right before the removal; any change keeps the worktree with "changed
 during the pass: ref <name>".
 The before-remove gate, the instance lock, the re-read before removal (whose
 `git status`, like every status, the invoker precedes with a fresh
-configuration check) and the on-reap step stay as they are and wrap the
-rule's verdict. The removal itself
+configuration check) stay as they are and wrap the
+rule's verdict. The on-reap step moves: today `onReap.settle` runs the
+on-reap command and deletes the mapping after `destroyInstanceFunc`
+(reap.go:668-679), while the pass runs the command after `claude rm` and
+before the tombstone, and deletes the mapping only after `DestroyInstance`
+(Data Flow step 7). The removal itself
 gains two guards. `workspace.DestroyInstance` `Lstat`s the instance directory,
 refuses a symlink, and refuses any path that isn't a direct child of the
 resolved workspace root. And the last step before it renames the instance to a
@@ -773,8 +780,12 @@ reason, stored for the listing. After any outcome but exit 0, niwa removes
 whose `marked_at` is later than the moment the call began, so no mark exists
 after any answer but over, whoever wrote it. The question and this clean-up
 both run under the instance lock, which is a requirement rather than an
-accident of order: a `niwa retire` writing a mark at the same moment waits on
-the lock, so the clean-up can't remove the mark it just wrote.
+accident of order. The lock is taken without blocking, a single try as
+`takeInstanceLock` makes today: a pass that finds it held asks nothing and
+leaves the unit for a later pass (Data Flow step 4), and a `niwa retire`
+that finds it held reports the unit kept, held by another niwa command, try
+again, and writes nothing, so the clean-up can't remove a mark a retire
+wrote at the same moment.
 
 niwa asks only about units that are stopped, carry no valid mark and aren't
 held by a keep record, and it asks each of them again at every pass, within
@@ -2239,7 +2250,16 @@ scan's `git status` in each repository and before the status that comes
 right before each unforced worktree removal, and a key found then is
 reported and refused the same way; `--force` removal skips that status, so
 it starts no git process and needs no second read. What the scan checks and decides is otherwise left as it is;
-only how it starts git changes.
+only how it starts git changes. `niwa destroy --workspace`
+(`runDestroyWorkspace`, destroy.go:429) goes through the same scan, order
+and vet: it scans every instance through `workspace.ScanInstancesParallel`,
+which calls `ScanInstance` for each and is given the same `ScanOption`
+after the same walk and configuration check, and it removes each instance's
+worktrees as an unforced destroy does, after the confirmation and before
+`removeOwningSessionsListed`, with the job-directory vet of every listed
+session before its first removal step. Today it runs `claude rm` there
+(destroy.go:525) before `DestroyWorkspace` removes the instance directories
+with their worktrees still inside.
 
 **`internal/cli/instance_from_hook.go`.** Writes the hook session's launch
 record and the mapping's `launch_id`.
@@ -2253,7 +2273,9 @@ outside the instance, and also refuses, naming the file, any destination with
 a path component named `.git` or `.claude` (compared case-insensitively). It
 moves kept-set files back with a hash check, creating parents with
 `O_DIRECTORY|O_NOFOLLOW` and files with `O_CREAT|O_EXCL|O_NOFOLLOW`, and
-clears nothing else.
+clears nothing else. It writes `restored_at` into the fresh instance's
+`unit.json` the way niwa writes every record, recording its ledger entry
+before the rename into place.
 
 **`internal/workspace/destroy.go`, `tombstone.go` (new), `ledger_store.go`
 (new).** `DestroyInstance` `Lstat`s the instance directory, refuses a symlink
@@ -3194,8 +3216,8 @@ the change rather than settling the point on its own.
    parse error that keeps every unit; no pattern syntax is defined. That
    reading of that work hasn't been checked against its code, which may
    already match entries as a shell `case` glob. Settled by
-   that work's list format and the first additions from its review of shadow
-   passes. niwa's side: the shipped list and the workspace's `disposable`
+   that work's list format and the first additions from its review of passes
+   run without acting. niwa's side: the shipped list and the workspace's `disposable`
    entries, each with a required review, in the glob-plus-`**` syntax Decision
    6 defines, offered as the syntax that work adopts.
 5. **The launch record.** Current position: that remover writes its own per
@@ -3226,7 +3248,7 @@ the change rather than settling the point on its own.
    work's pass order as it merges. niwa's side: no interval; the restore
    window is the undo.
 9. **The interim scratch copy.** Current position: a 48-hour copy of a unit's
-   job directory and loose root files, skipped in shadow passes, made for
+   job directory and loose root files, skipped in passes run without acting, made for
    every reaped unit because the handoff-brief field is always empty there.
    Settled by that work's acting step. niwa doesn't carry it: a unit with no
    brief lets its scratch go by the project owner's default, and a workspace
@@ -3245,6 +3267,13 @@ the change rather than settling the point on its own.
     the instance, or one that isn't clean, keeps. This is the second clash,
     kept on niwa's side because the worktrees-first order is what lets a reap
     leave no session behind.
+12. **Where a brief stores the bytes it holds.** This point is open on the
+    separate work that writes the handoff brief, not on the earlier remover.
+    Current position: that work defines no location for the bytes of a file
+    a brief holds, so niwa has no copy to check an `in_brief` claim against
+    (R28). Settled by the brief work as it defines that location. niwa's
+    side: until then, every `in_brief` file counts as unique and keeps its
+    unit.
 
 ## Relation to Other Work
 
@@ -3276,8 +3305,8 @@ request is refused, and the session outlives the destroy. Phase 2 removes the
 worktrees first, in destroy and in the pass.
 
 **A worktree-cleanup policy proposed separately** would remove a worktree
-seven days after its spawn finished whatever it holds, archive at teardown,
-and run a periodic `gc` verb that has since been dropped. Its time-based
+seven days after its spawn finished whatever it holds and archive at
+teardown. Its time-based
 deletion would remove exactly the worktrees this rule keeps for holding
 unique work. This design's removal rule takes precedence for every removal
 niwa makes: a worktree is a path like any other and goes only when the rule
