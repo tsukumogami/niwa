@@ -72,6 +72,17 @@ record by removing a hook unit's record by hand. R18 is unchanged: a unit
 with no launch record is still kept from a reap on a mark. The amended text
 stands as accepted.
 
+Amended after acceptance (2026-11-22): a review instance that `niwa watch`
+provisions isn't removed by the rule in this release. The rule judges the
+PR's fetched copy in it like any other repository, and that copy nearly
+always keeps the instance, so it stays listed until a person destroys it. Telling
+niwa's own fetch apart from what a review agent wrote, without handing an
+agent a path it could use to make niwa delete or skip anything, needs work
+that moves to a follow-up, tsukumogami/niwa#551. R15 is unchanged: the
+watch's removals still apply the rule, which keeps the instance; no
+requirement or acceptance check expected a review instance to be removed,
+and Known Limitations gains the line. The amended text stands as accepted.
+
 Absorbed [BRIEF-over-remover](docs/briefs/BRIEF-over-remover.md); carried in Absorbed Brief.
 
 ## Absorbed Brief
@@ -1246,6 +1257,10 @@ and keeps its unit.
   as one removed by hand.
 - Until something writes pid records, a background watch or keep-alive a unit
   started keeps that unit.
+- A review instance `niwa watch` provisions stays kept and listed until a
+  person destroys it; its removal through the rule is tsukumogami/niwa#551.
+- A watch stage that fails after its fetch leaves that PR head handled with
+  no review until the head moves; tsukumogami/niwa#551 restores the retry.
 - The listing measures disk use by walking each stopped unit, which costs time
   on large build trees. R36 keeps it local, but its speed on a host with many
   units is unmeasured.
