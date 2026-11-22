@@ -60,6 +60,13 @@ the safety net for paths a person has just released, so a discard faked
 through a terminal an agent controls still loses nothing until the window
 ends. The amended requirements stand as accepted.
 
+Amended after acceptance (2026-11-22): Known Limitations said a unit the
+SessionStart hook provisions has no launch record, so a mark alone never
+reaps it. The design writes a launch record for hook sessions too, and
+`niwa resume` restores them, so that limitation now covers only a unit whose
+launch record is gone. R18 is unchanged: a unit with no launch record is
+still kept from a reap on a mark. The amended text stands as accepted.
+
 Absorbed [BRIEF-over-remover](docs/briefs/BRIEF-over-remover.md); carried in Absorbed Brief.
 
 ## Absorbed Brief
@@ -1225,8 +1232,10 @@ and keeps its unit.
   until someone runs one.
 - The kept set is per user and per host. Whether niwa's own removal of a
   workspace removes that workspace's kept set is the design's to say.
-- A unit provisioned by the SessionStart hook has no launch record today, so a
-  mark alone never reaps it (R18).
+- A unit with no launch record is never reaped on a mark alone (R18). Units
+  the SessionStart hook provisions get a launch record from this feature, as
+  dispatched ones already do, so this covers a unit whose record is gone, such
+  as one removed by hand.
 - Until something writes pid records, a background watch or keep-alive a unit
   started keeps that unit.
 - The listing measures disk use by walking each stopped unit, which costs time

@@ -541,14 +541,36 @@ The package also settles the mechanics the PRD left to the design:
   another filesystem, a tmpfs `/tmp` on Linux for one, every fetch leaves
   `pr-clone` with no `.git`. `FetchPRHead` now takes a scratch parent from
   its two callers and makes the fetch-local HOME and the git directory in a
-  fresh directory under `<root>/.niwa/watch-fetch-tmp/`, created 0700 and
+  fresh directory under `<root>/.niwa-watch-fetch-tmp/`, created 0700 and
   removed when the fetch returns, as today's temporary HOME is. That puts
   them on the instance's filesystem, since every instance is a directory
   under the root, and outside `checkoutDir`, so git never finds them from
-  the checked-out tree. They sit under the root's `.niwa/`, beside the
-  fetch record below, which the guide already tells workspaces to deny the
-  agent writes to, so nothing the review agent writes reaches the git
-  directory before it's moved. When the move into `pr-clone/.git` still
+  the checked-out tree. The directory is a child of the root, not of the
+  root's `.niwa/`: that is the configuration snapshot `niwa apply` replaces
+  by rename, carrying local paths into the new snapshot by copy
+  (internal/config/snapshotlock.go:9-15,
+  internal/workspace/snapshot_carryover.go:144-161), so a fetch in flight
+  across a swap would fail or go on in a copy, and a leftover would be
+  carried at every refresh. It sits outside every instance, and its
+  `.niwa-` prefix keeps it out of `workspace.EnumerateInstances` through
+  the skip of `.niwa` and of every `.niwa-` name that Decision 1 adds there
+  for the tombstone; `hostdir.InstanceDirs` still lists it, as it lists
+  `.niwa-launch/`, which only gives the plugin store's sweep one more
+  directory to scan. The guide's deny-write advice names this directory
+  from the release that adds launch records for hook sessions (Phase 6);
+  where a workspace doesn't follow that advice, what holds is that the
+  git directory sits outside every instance and exists only while the fetch
+  runs, when no review session runs in the instance: `stageReview` fetches
+  before it launches the review agent, and the continuation refetches only
+  once the session has stopped. A fetch killed before its cleanup leaves
+  its directory behind, so the watch sweeps them. Each fetch holds
+  `<root>/.niwa-watch-fetch-tmp/.lock` shared, taken before it creates its
+  directory and released after it removes it, and each watch pass, before
+  its first fetch, tries that lock exclusively without blocking: when it
+  gets it, no fetch in any watch process is live, and it removes every
+  other entry there before releasing it, taking no other lock meanwhile;
+  when it doesn't, it leaves them for a later pass. Two watch processes
+  therefore never remove each other's live scratch. When the move into `pr-clone/.git` still
   fails, `FetchPRHead` returns an error naming it instead of leaving the
   clone without one: `stageReview`'s stage then fails before the review
   agent launches and is rolled back (below), and the continuation's
@@ -669,9 +691,18 @@ lasts too (the instance marking at watch.go:818, the fetch at :824, the
 settings at :840, the digest at :848, the reap key at :857 or the launch
 at :864, `claude` missing from cron's `PATH` for one), every pass would
 otherwise stage the head into one more full instance. So the rollback
-writes a kept-stage record at `<root>/.niwa/watch-kept-stage/<instance>.json`,
-next to the fetch records and written the same way, atomically with mode
-0600 and outside the instance, holding the PR's owner, repository and
+writes a kept-stage record at `<root>/.niwa-watch-kept-stage/<instance>.json`,
+written as the fetch records are, atomically with mode 0600 and outside the
+instance. It sits outside the root's `.niwa/` for the reason the fetch
+scratch does: a record written there between the snapshot swap's copy and
+its rename would be thrown away with the old snapshot (Decision 4's
+rejected alternative). As a root child it stays on the instance's
+filesystem, outside every instance, and out of `EnumerateInstances` through
+the same `.niwa-` skip. The guide's deny-write advice names its directory
+from the release that adds launch records for hook sessions (Phase 6).
+Where a workspace doesn't follow that advice, a forged record can only hold
+back staging of the PR head it names while the instance it names exists,
+and never removes anything. The record holds the PR's owner, repository and
 number, the head SHA it tried to stage and the kept instance's name. It's
 a separate record: the handled entry keeps its meaning, one entry per PR
 naming no instance, and this rollback still appends none. `Decide` doesn't
@@ -1386,7 +1417,10 @@ the dispatch shape it writes today, with `launch_id` set as well.
 The launch record also carries the window. At every reap of a unit that has
 a launch record, whether it was reaped on a mark, on a deleted session or by
 the backstop, the pass writes `reaped_at`, `restore_until` (the reap time plus the window) and the path of
-the unit's kept-set entry into it. The window is the workspace's
+the unit's kept-set entry into it. A unit with no kept-set entry, a clean
+one with no keep record and nothing discarded, gets `reaped_at` and
+`restore_until` and no `kept_entry`: the field is absent, never written
+empty. The window is the workspace's
 `restore_window` setting when set, otherwise Claude Code's transcript
 retention read at reap time. A `restore_window` under seven days is a
 configuration error from `validateSessionDeclaration`, naming the setting and
@@ -1412,17 +1446,21 @@ date the window ended, for as long as the record is there. Inside the
 window, with the transcript still there, before the session
 starts, it moves the entry's files back to their original paths with a hash
 check, and refuses, leaving everything in place and naming the file, when one
-doesn't match. A later step of the resume can still fail before the session
+doesn't match. A record with no `kept_entry` moves no files: inside the
+window, with the transcript there, resume starts the session as it does
+today and creates no kept-set entry. A later step of the resume can still fail before the session
 starts, and its rollback removes the fresh instance (resume.go:385-389), so
 the rollback first moves every restored file back into the entry unchanged,
 checked by hash; a failed resume leaves the kept set and the restore window as
 they were. A file that can't be moved back that way keeps the instance, which
 the rollback then leaves in place with the file named. The restore trusts no
 path it reads. The launch record sits
-under the workspace root, where the agent can reach it, so its `kept_entry`
-must name exactly `~/.niwa/w-<key>/kept-files/<instance>/<UTC>/` for the
+under the workspace root, where the agent can reach it, so a `kept_entry`
+that is present must name exactly `~/.niwa/w-<key>/kept-files/<instance>/<UTC>/` for the
 record's own instance, a direct descendant reached with no symlink, or the
-restore refuses. Every original path in `entry.json` and the rewritten keep
+restore refuses. The strict decoding keeps absent and empty apart: an
+absent `kept_entry` is valid, and one present but empty is refused like any
+other path that doesn't match. Every original path in `entry.json` and the rewritten keep
 record passes `removal.ResolveRecorded` against the fresh instance, and every
 source path must resolve inside the entry's own `files/` directory. A
 destination with a path component named `.git` or `.claude`, compared
@@ -2507,9 +2545,10 @@ The session mapping `runResume` writes follows the record's origin
 `DispatchID` and `launch_id` set, so `niwa authority check` answers
 `not-dispatched` for the restored session; for a dispatch record, today's
 dispatch shape with `launch_id` added.
-It checks `restore_until`, checks that
+It checks `restore_until`, checks that a present
 `kept_entry` is a direct descendant of `~/.niwa/w-<key>/kept-files/<instance>/`
-reached with no symlink, re-validates every path in `entry.json` and the
+reached with no symlink, refusing one present but empty, and for a record
+with no `kept_entry` moves no files and starts the session. It re-validates every path in `entry.json` and the
 rewritten keep record with `ResolveRecorded`, which refuses a destination
 outside the instance, and also refuses, naming the file, any destination with
 a path component named `.git` or `.claude` (compared case-insensitively). It
@@ -2885,7 +2924,8 @@ An all-unit pass, before a dispatch:
    path (Decision 1), release the lock, remove the ledger, delete
    the mapping, and write `reaped_at`, `restore_until` and `kept_entry` into
    the unit's launch record when it has one, whichever of the three made it
-   a candidate. Any refusal is a disagreement, kept and named with its
+   a candidate; a unit with no kept-set entry gets the first two and no
+   `kept_entry`. Any refusal is a disagreement, kept and named with its
    message scrubbed.
 
    niwa removes a worktree itself, never through `git worktree remove`,
@@ -3005,13 +3045,14 @@ tombstone recovery, which it leaves to the next pass that acts, asks the seam
 where step 5 would, clears
 any mark the call wrote, computes the verdict the mark would lead to, and
 prints; it writes nothing else. `niwa resume` reads the launch record, checks
-`restore_until` and that `kept_entry` sits directly under
-`kept-files/<instance>/`, provisions the instance by name, re-validates every kept-set
+`restore_until` and that `kept_entry`, when present, sits directly under
+`kept-files/<instance>/` (one present but empty refuses), provisions the instance by name, re-validates every kept-set
 path against the fresh instance and the entry's `files/`, refuses, naming the
 file, any destination with a path component named `.git` or `.claude`
 (compared case-insensitively), as it refuses one outside the instance, moves the files
 back with a hash check and without following links or overwriting anything,
-and starts the session. A step that fails after the files are back and before
+and starts the session. A record with no `kept_entry` skips the kept-set
+steps and only provisions and starts the session. A step that fails after the files are back and before
 the session starts moves them into the entry again, unchanged by hash, before
 the rollback removes the instance.
 
@@ -3084,7 +3125,8 @@ Deliverables:
   rather than path deny rules alone; its note that ssh follows `Include`
   while the credential-helper read doesn't follow git's includes; and its
   note that a worker without such a sandbox has no boundary. Phase 6 adds only
-  `.niwa-launch/` and its restore-window note.
+  `.niwa-launch/`, the root's `.niwa-watch-kept-stage/` and
+  `.niwa-watch-fetch-tmp/`, and its restore-window note.
 - `niwa reap --verdict-only [<instance>] [--json]` without over answers.
 - Unit tests per check and class; `@critical` functional scenarios for
   reap's loss scan (clone and worktree), an unreachable remote, a nested
@@ -3215,11 +3257,14 @@ Deliverables:
   of a stage that fails before the review agent launches treating the
   whole `pr-clone` tree as niwa's output and appending no handled entry,
   and, when the rule keeps that instance anyway, writing the kept-stage
-  record at `<root>/.niwa/watch-kept-stage/<instance>.json` that stops
+  record at `<root>/.niwa-watch-kept-stage/<instance>.json` that stops
   `Decide` staging that PR head again while the instance exists;
   `FetchPRHead` making its fetch-local HOME and git directory under
-  `<root>/.niwa/watch-fetch-tmp/` and failing the fetch when the move into
-  `pr-clone/.git` fails; on
+  `<root>/.niwa-watch-fetch-tmp/`, holding that directory's `.lock` shared
+  while it runs, and failing the fetch when the move into
+  `pr-clone/.git` fails; each watch pass, before its first fetch, removing
+  every leftover entry there when it takes that lock exclusively without
+  blocking; on
   a keep, the discard deleting the staged record and a rollback after
   launch appending the handled entry for that PR head, the handled entry
   otherwise as today, the instance listed as a stopped unit either way; the
@@ -3305,13 +3350,15 @@ Deliverables:
   `partial.txt`, and the watch's failed-stage rollback keeps a file the
   review agent wrote and appends the handled entry, so the next watch pass
   stages no new instance for that PR head; a stage that fails before the
-  agent launches, including one whose `.git` hand-off failed or whose
+  agent launches, including one whose `.git` move failed, failing the fetch, or whose
   checkout failed part-way, leaves no instance and appends no handled
   entry, and the next watch pass stages that PR head again; a lasting
   launch failure paired with an unreachable proof remote leaves one kept
   instance after two passes, not two, and the head is staged again once
   that instance is gone; with `TMPDIR` on another filesystem a fetch still
-  leaves a `pr-clone` with `.git`; the watch's
+  leaves a `pr-clone` with `.git`; a directory a killed fetch left under
+  `<root>/.niwa-watch-fetch-tmp/` is gone after the next watch pass, while
+  one a concurrent watch's live fetch holds stays; the watch's
   discard removes a review instance holding only niwa's fetch at its fetch
   record's SHA, and keeps one holding the review draft, or a `pr-clone`
   with a commit on top of that SHA, deleting the staged record and listing
@@ -3432,25 +3479,41 @@ Deliverables:
 Deliverables:
 - `niwa instance from-hook` writing launch records; the mapping's
   `launch_id`.
-- `reaped_at`, `restore_until` and `kept_entry` on the launch record;
-  `restore_window` with the seven-day floor; `sweepLaunchRecords` keeping a
+- `reaped_at`, `restore_until` and `kept_entry` on the launch record at
+  every reap of a unit that has one, with `kept_entry` absent for a unit
+  with no kept-set entry; `restore_window` with the seven-day floor;
+  `sweepLaunchRecords` keeping a
   record that carries `reaped_at` until `restore_until` has passed, and
   applying its transcript rule only after.
 - `niwa resume` refusing past the window and restoring kept files first,
-  `kept_entry` checked to sit directly under `kept-files/<instance>/`, every
+  a present `kept_entry` checked to sit directly under
+  `kept-files/<instance>/` and one present but empty refused, a record with
+  no `kept_entry` resumed with no files moved, every
   path re-validated, a destination with a path component named `.git` or
   `.claude` (compared case-insensitively) or outside the instance refused
   with the file named, parents created without following links, files created
   with `O_CREAT|O_EXCL|O_NOFOLLOW`.
 - The guide's deny-write advice gains the root's `.niwa-launch/` this
-  phase writes, under the same sandbox write restrictions, and its note
+  phase writes, and the root's `.niwa-watch-kept-stage/` and
+  `.niwa-watch-fetch-tmp/`, under the same sandbox write restrictions,
+  saying why each watch directory matters (a forged kept-stage record holds
+  back a PR head's staging; the fetch scratch holds the git directory before
+  it moves into `pr-clone/.git`), and its note
   that `cleanupPeriodDays` in Claude Code's user settings, already on
   Phase 1's list, now sets the default restore window. The rest of the
   list ships in Phase 1.
 - Strict decoding of launch records, and `niwa resume` ignoring the replay
   fields on a record whose `origin` is `hook`.
+- `validateLaunchRecord` accepting a hook-shaped instance name
+  (`<config>-<8 hex>-<3 hex>`) when the record's `origin` is `hook`, and
+  `niwa resume` writing a hook record's session mapping in the shape
+  `niwa instance from-hook` writes, with no origin, no `DispatchID` and
+  `launch_id` set, so `niwa authority check` answers `not-dispatched` for
+  the restored session; a dispatch record keeps today's dispatch shape with
+  `launch_id` added.
 - Functional scenarios for restore inside and past the window, with and
-  without the setting, for an `entry.json` edited to name `../` or an
+  without the setting, for a clean unit with no keep record whose record
+  has no `kept_entry`, resumed with nothing restored, for an `entry.json` edited to name `../` or an
   absolute path, a launch record whose `kept_entry` names another directory,
   and a fresh instance with a symlink where a kept file goes (all refuse and
   write nothing outside the instance), for an `entry.json` naming
@@ -3931,9 +3994,10 @@ device differs from `~/.claude/jobs/`, with "another filesystem at <path>"
 named. Any mismatch keeps the unit with the path
 named and no `claude rm` runs for it. `.niwa` and
 `pids` must be real directories, and every record read and write happens
-relative to their `O_NOFOLLOW` descriptors. The restore checks that
-`kept_entry` names a directory directly under `kept-files/<instance>/`,
-re-validates every path, refuses, naming the file, any destination with a
+relative to their `O_NOFOLLOW` descriptors. The restore checks that a
+`kept_entry` that is present names a directory directly under
+`kept-files/<instance>/`, refuses one present but empty, moves no files for
+a record without one, re-validates every path, refuses, naming the file, any destination with a
 path component named `.git` or `.claude` (compared case-insensitively), as
 well as one outside the instance, creates parents and files with
 `O_NOFOLLOW` and never overwrites. Kept-set expiry removes only a direct-child directory of
@@ -4034,7 +4098,8 @@ niwa runs, and tells workspaces to deny the agent writes to them:
 that holds the scratch object store and the empty directories `claude`
 and the credential-helper read run from); in the workspace root
 `.niwa/` (whose `workspace.toml` holds the clone URLs, the `proof_remotes`
-prefixes and the over command), `.niwa-launch/` and `.niwa-tombstone-*`;
+prefixes and the over command), `.niwa-launch/`, `.niwa-tombstone-*`,
+`.niwa-watch-kept-stage/` and `.niwa-watch-fetch-tmp/`;
 `~/.gitconfig` and `~/.config/git/config`; the whole `~/.ssh/`
 directory, with any file outside it that an `Include` in `~/.ssh/config`
 names, since ssh follows `Include` while the credential-helper read
