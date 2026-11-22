@@ -171,8 +171,8 @@ borrowing from it or falling back (R18).
 - **The rollout condition can't be bypassed** by a setting, an environment
   variable or a config file in a release build (R16, R17). The test build is
   the only place borrowing runs before the turn-on.
-- **The turn-on is one small change** that flips a default and touches no
-  logic, so its merge order is easy to read from history (R17).
+- **The turn-on is one small change** that removes a build-time hold and
+  touches no logic, so its merge order is easy to read from history (R17).
 - **Settings follow the precedent users already know**: `[workspace]
   share_plugin_releases` (`SharePluginReleases *bool`, nil meaning on) and
   the per-repo `*bool` overrides `ReadEnvExample` and `WorktreeSetup` with
@@ -307,8 +307,9 @@ full clones and seeds no mirror for borrowing whatever any config says. The
 setting parses in every build; the guide documents it as taking effect once
 borrowing ships. A unit test in the untagged build asserts that a create with
 the setting on, and with it unset, makes full clones and seeds no mirror,
-which is R16's criterion. The turn-on (R17) deletes the two files and the AND
-and sets the cascade's default to on wherever a workspace root exists.
+which is R16's criterion. The cascade's own default is already on wherever a
+workspace root exists; the constant is what holds it off. The turn-on (R17)
+deletes the two files and the AND, and nothing else changes.
 
 **Test hooks**, each in a tagged file with an untagged no-op twin:
 - **Faults.** `testfault.Maybe` is active in every build, so it isn't called
@@ -617,7 +618,9 @@ R12's list is for; an entry for any other key is not passed. No environment
 value is ever written to the mirror log.
 
 **niwa#525.** Decision 3 already moves every removal out of the restore: a
-restore removes no store that was ever linked, and the sweep removes retired
+restore removes no store that was ever linked (except, under space pressure,
+retired stores the scan shows unpinned, which it removes only after the
+probe and recovery of an earlier restore), and the sweep removes retired
 stores later, so removal always follows the probe and recovery, and the mirror
 log shows the probe's lines before any removal line. During salvage, an old
 store whose pack fails `verify-pack` is fed through `git unpack-objects -r`
@@ -753,7 +756,9 @@ type RepoOverride struct {
 	// existing fields ...
 	ShareGitHistory *bool `toml:"share_git_history"`
 }
-// ShareGitHistoryEnabled: repo value, else workspace value, else true.
+// ShareGitHistoryEnabled: repo value, else workspace value, else true
+// wherever a workspace root exists. Callers go through borrowEnabled, which
+// ANDs this with borrowReleased until the turn-on deletes it.
 func (c *WorkspaceConfig) ShareGitHistoryEnabled(repo string) bool
 ```
 
@@ -818,7 +823,8 @@ prints one warning per fallback. The hook path puts the same lines in its
 same-remote stores (damaged packs through `git unpack-objects -r`), mark it
 linked in `.stores`, swap the link, write the state file, then probe and
 recover borrowers from a fresh lenient walk. Mark the replaced store retired
-with the time. Remove nothing that was ever linked. Log each step.
+with the time. Remove nothing that was ever linked, except under space
+pressure as Decision 3 describes. Log each step.
 
 **A sweep.** On a later `EnsureHealthy`, for a mirror whose `.stores` has a
 retired store at least an hour old and a `last_swept` at least an hour old:
@@ -841,7 +847,9 @@ niwa#524 and niwa#525 and on the rerun. Everything before it ships dark.
 ### Phase 1: Remote-access variables on network calls (niwa#524)
 
 `localEnv` and `networkEnv` in `internal/mirror/git.go`, the config-key
-filter, the tagged environment probe, and the functional scenario with an
+filter, `internal/testhook` with all three test hooks (the fault labels, the
+lock-wait override and the environment probe, which later phases' scenarios
+use too), and the functional scenario with an
 SSH-style wrapper reached only through `GIT_SSH_COMMAND`.
 
 Deliverables:
@@ -912,9 +920,12 @@ Deliverables:
 
 ### Phase 8: Turn on by default
 
-Delete the two `borrow_*.go` files and the AND, set the default to on
-wherever a workspace root exists, and update the guide. Merged only after
-Phases 1, 3 and 7 (R17). Gating on Phase 3's niwa#525 fix is this project's
+Delete the two `borrow_*.go` files and the AND, so the cascade's default (on
+wherever a workspace root exists) takes effect, and update the guide. Merged
+only after Phases 1, 3, 6 and 7: R17 names the fixes for niwa#524 and niwa#525
+and the rerun, and Phase 6 is added because the guide and the per-repo off
+setting are the conditions the retention decision was accepted on. Its pull
+request states the residual risks below for the reviewer to accept. Gating on Phase 3's niwa#525 fix is this project's
 own addition, stricter than the condition the turn-on had to meet. Phase 2's
 niwa#522 fix doesn't gate it; if it slips, it stays a named limit.
 
@@ -937,8 +948,17 @@ objects. Removal is by exact name and never follows a link.
 
 **The environment on network calls.** R12 hands the mirror's network calls
 the user's own transport and credential settings, which is what makes them
-work for a user who needs them. They're taken from the user's environment,
-never from the workspace config or the remote. Config entries pass only
+work for a user who needs them. They're taken from the environment niwa runs
+in, never from the remote. For the SessionStart hook and dispatched workers
+that environment includes what the workspace config sets through the
+settings niwa generates, so a workspace config author can set them there;
+that author already chooses the commands and hooks those sessions run, so
+this adds no new trust. A connection with `GIT_SSL_NO_VERIFY` or a hostile
+proxy could put extra objects or refs into the shared mirror, but a borrower
+never takes a ref from the mirror: its refs come from its own fetch of the
+remote, and git reads a borrowed object only by the id one of those refs
+reaches, checking its hash. So a mirror fetch made that way can add unused
+bytes, not change what a borrower checks out. Config entries pass only
 through the allowlist in Decision 5, compared case-folded, so `include.path`,
 `remote.*`, `gc.*`, `core.hooksPath` and the like can't make a mirror fetch
 load another config file, prune or run a hook. No environment value reaches
@@ -995,8 +1015,16 @@ repo id, and that `Lstat` shows as real directories directly inside a real
   says to run `niwa dissociate` before copying an instance.
 - The mirror's network calls now honour `GIT_SSH_COMMAND`, `GIT_ASKPASS`,
   `GIT_SSL_NO_VERIFY` and the rest of R12's list from whatever environment
-  started niwa, the SessionStart hook and dispatched workers included. That's
-  the same trust a plain `git clone` in that environment already gives them.
+  started niwa, the SessionStart hook and dispatched workers included.
+
+**Residual risk the turn-on accepts.** Before Phase 8 merges, its pull request
+lists these for the reviewer to accept explicitly: instances of a workspace no
+longer hold separate copies of history; the mirror keeps commits removed from
+the remote, as the retention decision already accepted on the two conditions
+this work ships; and `niwa dissociate` copies those retained objects into the
+clone it frees. `niwa dissociate` acts only on alternates lines that resolve
+into one of this workspace's mirror stores; a clone whose alternates names
+anything else is reported and left as it is.
 - The remote comparison treats the SSH and HTTPS spellings of one host and
   path as one remote, so salvage crosses that change; a different host or
   path never shares a store. A site that served different content per
@@ -1027,8 +1055,8 @@ repo id, and that `Lstat` shows as real directories directly inside a real
 
 ### Negative
 
-- A store can't be removed sooner than an hour after it's replaced, so a host
-  briefly holds two generations after each restore.
+- Outside space pressure, a store can't be removed sooner than an hour after
+  it's replaced, so a host briefly holds two generations after each restore.
 - A kept instance that borrows pins its mirror's store indefinitely, so a
   long-kept instance holds disk until it's dissociated or deleted.
 - The strict scan reads every clone's alternates file on every sweep and every
