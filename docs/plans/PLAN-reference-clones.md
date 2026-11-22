@@ -92,6 +92,8 @@ pull request per group.
 - [ ] A functional scenario changes only the user part of the repo's URL, damages the mirror, and sees the restore salvage the old store exactly as in the SSH-to-HTTPS scenario (R14).
 - [ ] `internal/mirror` holds exactly one `remoteIdentity`, and `urlChanged` calls it; if <<ISSUE:3>> landed first, this issue reuses its function and its salvage filter is left comparing through the same one.
 
+**Note**: Issue 1's branch gives the `plugin-release-hold.feature` source repo fixture a commit, since an empty source repo breaks `niwa worktree create` on git older than 2.42 (Apple git 2.39 on macOS). Until that branch merges, main still has the empty fixture, so the full functional suite on macOS fails those scenarios on this branch too. If local verification fails there, carry the same one-file fixture change here; it is identical to Issue 1's, so the two merge cleanly in either order.
+
 **Dependencies**: None
 
 ### Issue 3: fix(mirror): keep old stores until a strict scan proves no borrower names them
