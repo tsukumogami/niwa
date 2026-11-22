@@ -634,7 +634,7 @@ last, `claude` missing from cron's `PATH` for one, and since a fetch that
 wrote anything leaves a `pr-clone` the rule keeps, every pass would
 otherwise stage the head into one more full instance. With the entry in
 place, `currentHeads` confirms that PR's head and `decideKind` returns
-`Noop` while it equals the recorded SHA (select.go:176-177); a new head for
+`Noop` while it equals the recorded SHA (select.go:177-178); a new head for
 the same PR stages as it would have. No record of kept stages beyond the
 handled entry is needed.
 
@@ -645,10 +645,13 @@ with no review, and it isn't retried at that head, even after a person
 destroys the kept instance: only the next push to the PR stages it again.
 Today the pre-launch rollback removes the instance and the next pass
 retries. Giving that up is the price of never staging a head into one more
-instance each pass. So `AppendHandled`'s doc comment, which says it's
+instance each pass. So the four comments that state the old contract are
+updated to say a failed stage whose instance the rule keeps records the
+head too: `AppendHandled`'s doc comment (state.go:131-136), which says it's
 called only after a successful contained dispatch so a transient failure
-never suppresses a review, is updated to say a failed stage whose instance
-the rule keeps records the head too, and the rollback's output, besides
+never suppresses a review, `stageReview`'s doc comment (watch.go:771-772),
+the "Record ONLY on success" comment (watch.go:878) and the comment at
+`stageReview`'s call site (watch.go:305-306). The rollback's output, besides
 the keeping check and path, says that PR head won't be staged again until
 it moves. A rollback whose instance the rule passes removes
 it as today and appends no handled entry, so the PR stays eligible and the
@@ -3199,8 +3202,11 @@ Deliverables:
   deleting the staged record, and any rollback, before or after the review
   agent launched, appending the handled entry for that PR head and saying
   in its output that the head won't be staged again until it moves, with
-  `AppendHandled`'s doc comment updated to say a kept failed stage records
-  the head too, the handled entry otherwise as today, the instance listed
+  the four comments that state the old contract (`AppendHandled`'s doc
+  comment at state.go:131-136, `stageReview`'s doc comment at
+  watch.go:771-772, the "Record ONLY on success" comment at watch.go:878
+  and the call-site comment at watch.go:305-306) updated to say a kept
+  failed stage records the head too, the handled entry otherwise as today, the instance listed
   as a stopped unit either way; `FetchPRHead` unchanged, with the fetch record, the removal of review
   instances through the rule and the rest of Decision 1's follow-up in
   tsukumogami/niwa#551; the hook worktree sweep evaluating each worktree's
@@ -3283,18 +3289,27 @@ Deliverables:
   for that session, as the functional scenario below also shows.
 - Functional scenarios: a clean unit holding a niwa worktree leaves no session
   behind after a reap and after `niwa destroy`; failed-dispatch cleanup keeps
-  `partial.txt`, and the watch's failed-stage rollback keeps a file the
-  review agent wrote and appends the handled entry, so the next watch pass
-  stages no new instance for that PR head; a stage whose fetch fails before
-  it writes anything into `pr-clone` leaves no instance and appends no
-  handled entry, and the next watch pass stages that PR head again; with
-  `claude` missing from the watch's `PATH`, so every launch fails, and the
-  rule keeping the instance, two `watch --once` passes over the same PR
-  head leave one instance, not two, because the first rollback appended
-  the handled entry; the watch's discard of a review instance holding the
-  review draft keeps the instance with the draft's path named, deletes the
-  staged record and lists the instance as a stopped unit, which `niwa list`
-  still shows; no `claude` call a wrapper logs carries an override flag,
+  `partial.txt`, and the watch's failed-stage rollback after launch keeps a
+  file the review agent wrote, in place with its contents unchanged, names
+  the first keeping check, `pr-clone`'s repository check, and appends the
+  handled entry, so the next watch pass stages no new instance for that PR
+  head, while `niwa reap --verdict-only` lists that file among the keeping
+  checks; a stage whose fetch fails before it writes anything into
+  `pr-clone` leaves no instance and appends no handled entry, and the next
+  watch pass stages that PR head again; with every launch failing through
+  the `dispatchLaunch` seam (dispatch_launcher.go:70, called at
+  watch.go:864) and `claude` on `PATH`, so the rule's liveness read
+  decodes, and the rule keeping the instance on `pr-clone`'s repository
+  check, two `watch --once` passes over the same PR head leave one
+  instance, not two, because the first rollback appended the handled
+  entry, and the first pass's output names that check and path and says
+  the head won't be staged again until it moves; the watch's discard of a
+  review instance holding the review draft keeps the instance with its
+  first keeping check named, `pr-clone`'s repository check (a commit no
+  remote ref holds), leaves the draft on disk with its contents unchanged,
+  deletes the staged record and lists the instance as a stopped unit,
+  which `niwa list` still shows, and `niwa reap --verdict-only` lists the
+  draft among the keeping checks, after `pr-clone`'s; no `claude` call a wrapper logs carries an override flag,
   no `git` call a wrapper logs is `git worktree remove` or
   `git worktree prune`, and none carries `--force` outside `niwa destroy
   --force`; every `claude` call a wrapper logs runs from a directory outside
