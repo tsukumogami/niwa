@@ -422,7 +422,29 @@ func Seed(ctx context.Context, opts Options, repo Repo) Result {
 // (tightenModes). An empty-hooks directory that can't be made safe isn't an
 // error here: gitRun checks it again on every call and refuses to run git,
 // so the check finds the store unreadable and the restore can't clone.
+//
+// Last, for every outcome but busy, it sweeps the mirror's retired stores
+// (sweep) and logs what the sweep removed or kept after the call's other
+// lines, so a store line never comes before the restore line whose probe it
+// followed.
 func ensureOne(ctx context.Context, opts Options, r Repo) Result {
+	res := checkAndRestore(ctx, opts, r)
+	if res.Outcome == OutcomeBusy {
+		return res
+	}
+	mdir := mirrorsDir(opts.Home, opts.WorkspaceRoot)
+	base := logLine{Command: opts.Command, Mirror: r.ID}
+	if lines := sweep(opts, mdir, r, base); len(lines) > 0 {
+		if err := appendLog(mdir, lines...); err != nil && res.LogErr == nil {
+			res.LogErr = err
+		}
+	}
+	return res
+}
+
+// checkAndRestore is ensureOne's check, restore and refresh of one mirror,
+// before the sweep.
+func checkAndRestore(ctx context.Context, opts Options, r Repo) Result {
 	_ = prepareEmptyHooks(opts.Home)
 	ctx = withEmptyHooks(ctx, emptyHooksDir(opts.Home))
 	ctx = withNetworkNotes(ctx)

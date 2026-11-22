@@ -214,7 +214,11 @@ func rebuild(ctx context.Context, mdir string, r Repo, args rebuildArgs) rebuild
 	}
 
 	if err := checkFreeSpace(mdir, r.ID); err != nil {
-		return fail(err)
+		events, err := makeRoom(mdir, r.ID, &rec, args.scan, err)
+		res.events = append(res.events, events...)
+		if err != nil {
+			return fail(err)
+		}
 	}
 
 	// Salvage and pin sources are the stores the record lists as linked,
@@ -609,4 +613,31 @@ func clearLeftoversIfIdle(opts Options, mdir, repoID string) {
 	}
 	defer release()
 	clearLeftovers(mdir, repoID)
+}
+
+// makeRoom is the restore's answer to a free-space check that refused
+// (refusal): with a strict scan to call, it calls it under the lock the
+// caller holds, removes every retired store no clone's alternates resolves
+// into, whatever its age, and checks the free space again. A refused
+// restore leaves every borrower broken, which is worse than reclaiming a
+// retired store early. With no scan, a scan that fails, or still too little
+// room, the refusal stands and nothing more is removed.
+func makeRoom(mdir, repoID string, rec *storesFile, scan func() ([]string, error), refusal error) ([]storeEvent, error) {
+	if scan == nil {
+		return nil, refusal
+	}
+	clones, err := scan()
+	if err != nil {
+		return nil, refusal
+	}
+	events, removed := removeUnpinned(mdir, repoID, rec, clones, 0, reasonSpace, time.Now())
+	if removed {
+		// The stores are gone either way; a record that can't be written
+		// here keeps their entries until dropVanished prunes them.
+		_ = writeStores(mdir, repoID, *rec)
+	}
+	if err := checkFreeSpace(mdir, repoID); err != nil {
+		return events, err
+	}
+	return events, nil
 }
