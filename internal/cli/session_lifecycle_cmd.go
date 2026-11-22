@@ -8,12 +8,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/cli/sessionattach"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/hostdir"
 	"github.com/tsukumogami/niwa/internal/mirror"
 	"github.com/tsukumogami/niwa/internal/workspace"
 	"github.com/tsukumogami/niwa/internal/worktree"
@@ -926,10 +928,14 @@ const worktreeProbeTimeout = 5 * time.Second
 
 // checkWorktreeMirror checks repo's host mirror for `niwa worktree create`,
 // restoring it when it's broken, and warns on stderr about a result other
-// than healthy in the form every mirror check prints. The borrower it looks
-// at is the instance's own clone of repo; the workspace root is the
-// instance's parent, as for the pipeline's check. A repo with no mirror, or a
-// clone or home it can't find, checks nothing and writes nothing.
+// than healthy in the form every mirror check prints. Whether the repo has a
+// mirror at all is told from the instance's own clone of repo; once it has
+// one, the borrowers the check and probe look at are every clone on disk
+// (hostdir.Clones), since a restore here replaces the store every instance
+// reads, and the strict walk (hostdir.StrictClones) is the scan that alone
+// can authorize removing a retired store. The workspace root is the
+// instance's parent, as for the pipeline's check. A repo with no mirror, or
+// a clone or home it can't find, checks nothing and writes nothing.
 func checkWorktreeMirror(ctx context.Context, instanceRoot, repo string, stderr io.Writer) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -948,10 +954,15 @@ func checkWorktreeMirror(ctx context.Context, instanceRoot, repo string, stderr 
 	if len(mirror.Mirrored(home, workspaceRoot, []string{clone}, []mirror.Repo{{ID: repo}})) == 0 {
 		return
 	}
+	clones := hostdir.Clones(home, workspaceRoot)
+	if !slices.Contains(clones, clone) {
+		clones = append(clones, clone)
+	}
 	opts := mirror.Options{
 		Home:          home,
 		WorkspaceRoot: workspaceRoot,
-		Instances:     []string{clone},
+		Instances:     clones,
+		Scan:          func() ([]string, error) { return hostdir.StrictClones(home, workspaceRoot) },
 		Command:       mirrorCommandWorktree,
 	}
 	reporter := workspace.NewReporter(stderr)

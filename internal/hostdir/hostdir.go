@@ -188,25 +188,57 @@ var beforeRead func(dir string)
 // it fit for finding the clones a check, a restore or a probe looks at, and
 // unfit to authorize removing anything: only StrictClones may do that.
 func Clones(home, workspaceRoot string) []string {
-	instances, _ := InstanceDirs(home, workspaceRoot)
 	var clones []string
-	for _, inst := range instances {
-		groups, err := os.ReadDir(inst)
+	for _, inst := range lenientInstances(home, workspaceRoot) {
+		clones = append(clones, InstanceClones(inst)...)
+	}
+	return sortedUnique(clones)
+}
+
+// lenientInstances lists the instances Clones walks: those InstanceDirs
+// lists, except that a root that can't be listed still leaves kept/'s
+// instances to walk, and the other way round.
+func lenientInstances(home, workspaceRoot string) []string {
+	var dirs []string
+	if entries, err := os.ReadDir(workspaceRoot); err == nil {
+		for _, e := range entries {
+			if e.Name() != ".niwa" && e.Type().IsDir() {
+				dirs = append(dirs, filepath.Join(workspaceRoot, e.Name()))
+			}
+		}
+	}
+	kept := filepath.Join(WorkspaceDir(home, workspaceRoot), KeptDirName)
+	if entries, err := os.ReadDir(kept); err == nil {
+		for _, e := range entries {
+			if e.Type().IsDir() {
+				dirs = append(dirs, filepath.Join(kept, e.Name()))
+			}
+		}
+	}
+	return dirs
+}
+
+// InstanceClones is the lenient walk of one instance: its real directories
+// two levels down (<group>/<repo>), names starting with a dot skipped at
+// both levels and anything unreadable skipped, sorted. A caller whose own
+// instance must be in the answer whatever the root's listing gave adds this.
+func InstanceClones(instance string) []string {
+	var clones []string
+	groups, err := os.ReadDir(instance)
+	if err != nil {
+		return nil
+	}
+	for _, g := range groups {
+		if !g.Type().IsDir() || strings.HasPrefix(g.Name(), ".") {
+			continue
+		}
+		repos, err := os.ReadDir(filepath.Join(instance, g.Name()))
 		if err != nil {
 			continue
 		}
-		for _, g := range groups {
-			if !g.Type().IsDir() || strings.HasPrefix(g.Name(), ".") {
-				continue
-			}
-			repos, err := os.ReadDir(filepath.Join(inst, g.Name()))
-			if err != nil {
-				continue
-			}
-			for _, r := range repos {
-				if r.Type().IsDir() && !strings.HasPrefix(r.Name(), ".") {
-					clones = append(clones, filepath.Join(inst, g.Name(), r.Name()))
-				}
+		for _, r := range repos {
+			if r.Type().IsDir() && !strings.HasPrefix(r.Name(), ".") {
+				clones = append(clones, filepath.Join(instance, g.Name(), r.Name()))
 			}
 		}
 	}
