@@ -129,39 +129,40 @@ never wakes to a history it can't read.
 
 ### IN
 
-- A borrowing create: `niwa create`, `niwa apply` on a new repo,
-  `niwa dispatch` and the SessionStart hook clone each repo against the
-  workspace's host mirror, seeding a repo's first mirror when it has none,
-  and write the mirror's stable path into the clone's alternates.
+- A borrowing create: every command that provisions an instance clones each
+  repo against the workspace's host mirror, seeding a repo's first mirror
+  when it has none, so the clone holds only what the mirror lacks.
 - The fallback to a full clone, with a notice, whenever the mirror isn't
   usable.
-- An off setting that works for a workspace and for a single repo; a repo
-  with it set gets a full clone, no alternates entry and no mirror.
-- A command that makes one instance independent of the host's stores.
-- How a mirror generation is replaced, and how niwa finds every instance on
-  disk, kept ones included, that still borrows from one, so no generation is
-  retired while any of them names it.
-- A user guide section saying where a workspace's mirrors live and giving
-  the purge steps in the order that keeps a commit out.
-- The rollout condition: niwa#524 fixed with a covering scenario, and the
+- An off setting that works for a whole workspace and for a single repo; a
+  repo with it set gets a full clone, borrows nothing and has no mirror on
+  the host.
+- A way to make one instance independent of the host's shared history.
+- How a repo's mirror is replaced by a newer generation, and how niwa finds
+  every instance on disk, kept ones included, that still borrows from one, so
+  no generation is retired while any of them names it.
+- A user guide section saying where a workspace's shared history lives and
+  giving the purge steps in the order that keeps a commit out.
+- The rollout condition: niwa#524 fixed with a covering test, and the
   mirror-repair proofs rerun against borrowers the real create made, both
   before sharing is turned on for any user; turning it on is the last step.
-- A stated place for niwa#525 and niwa#522, which each narrow the commits a
+- A stated place for niwa#525 and niwa#522, which each, while open, add to the commits a
   restore can lose: fixed in this work, a stated dependency, or a named
   limit with its reason.
 
 ### OUT
 
-- A copy-on-write seed instance copied with `clonefile` or reflinks. It is
-  held pending a measurement and isn't part of this work.
+- A copy-on-write seed instance, copied whole on filesystems that support
+  it. It is held pending a measurement and isn't part of this work.
 - The shared plugin store, which shipped separately and already shares the
-  `~/.niwa/w-<key>/` directory this work uses.
+  per-workspace host directory this work uses.
 - Changes to how the mirror detects and restores damage beyond the named
   issues. That contract is settled; this work calls it.
 - Pruning or garbage-collecting the mirror. It never prunes, by the
   retention decision, and this work doesn't revisit that.
 - Sharing git state any other way: one shared repository with worktrees,
-  shallow or blobless clones, or repo subsets.
+  shallow or partial clones, or creating an instance with only some of its
+  repos.
 - Single-instance layouts with no workspace root, which keep today's full
   clones.
 - A daemon, scheduler or background job. Everything runs inside commands
