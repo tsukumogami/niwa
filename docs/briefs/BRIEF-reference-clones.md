@@ -43,14 +43,11 @@ made to stand on its own again, how an old mirror is replaced without
 breaking an instance that still reads from it, and how a user removes a
 commit the mirror keeps.
 
-Turning this on for users also carries a condition. The repair work's test
-built its borrowers by hand, the way a borrowing create would, because no
-such create existed. And one defect found in its review, niwa#524, drops
-the git variables that carry credentials and transport settings from the
-mirror's own clone and fetch, so a user whose access depends on one of them
-would get a mirror that can't refresh or restore. Until that defect is fixed
-and the repair test has been run against borrowers the real create made,
-nobody can show that what ships is the thing that was tested.
+Turning this on for users carries a condition of its own. One defect found
+in the repair work's review, niwa#524, drops the git variables that carry
+credentials and transport settings from the mirror's clone and fetch, and
+the repair test built its borrowers by hand because no borrowing create
+existed yet. A user should not get sharing until both are behind it.
 
 ## User Outcome
 
@@ -71,43 +68,44 @@ its whole history after the host's copy is gone. A user who has to remove a
 commit from the host, a leaked secret for instance, finds where the shared
 history lives and the steps that keep the commit out in niwa's guide.
 
-The sharing is on by default wherever a workspace root exists, and that
-default reaches users only once the condition above holds: niwa#524 fixed
-with a scenario covering it, and the repair test rerun against borrowers the
-real create made.
+The sharing is on by default wherever a workspace root exists, once the
+condition above holds.
 
 ## User Journeys
 
 ### A second instance on a busy host
 
 A developer who already has one instance of a twelve-repo workspace runs
-`niwa create` (or dispatches a session, which creates one through the hook).
+`niwa create`, or dispatches a session that creates one through the hook.
 The create finds the workspace's mirrors healthy, borrows from them, and
-fetches only what the mirror lacks. Free space on the volume drops by less
-than two thirds of what the first create took, and the instance's sessions
-work exactly as before.
+fetches only what the mirror lacks. The instance arrives in a fraction of
+the time and disk the first one took, and its sessions work exactly as
+before.
 
 ### Turning sharing off for a repo or a workspace
 
 A maintainer whose workspace includes a repo with sensitive history sets the
 off setting for that repo. The next create clones that repo in full, writes
 no alternates entry for it and keeps no mirror of it under `~/.niwa/`, while
-the other repos still borrow. Another user sets it for the whole workspace
-and gets full clones everywhere.
+the other repos still borrow. An operator of a shared build host who wants
+no host-level copies at all sets it for the whole workspace and gets full
+clones everywhere.
 
 ### Making one instance independent
 
-A user about to archive an instance, or copy it to another machine, runs the
-command that makes it independent. niwa copies the borrowed objects into the
-instance and drops its alternates entries. The user then deletes the host's
-mirror and the instance still reads its whole history.
+A developer handing an instance to a colleague on another machine, or
+archiving it before the host is wiped, runs the command that makes it
+independent. niwa copies the borrowed objects into the instance and drops
+its alternates entries. The developer then deletes the host's mirror and
+the instance still reads its whole history.
 
 ### The mirror is gone or unreachable at create time
 
-A user's mirror was deleted by hand, or the remote can't be reached to seed
-one. The create doesn't fail: it clones in full, as niwa does today, and its
-output says the instance doesn't borrow and why. Instances that already
-borrow are restored by the repair the next ordinary command runs.
+A developer on a laptop that has just lost its network, or whose mirror was
+deleted by a disk cleanup tool, dispatches a new session. The create doesn't
+fail: it clones in full when it can, as niwa does today, and its output says
+the instance doesn't borrow and why. Instances that already borrow are
+restored by the repair the next ordinary command runs.
 
 ### Purging a commit from the host
 
@@ -117,13 +115,13 @@ live, and follow the purge steps in the order that keeps the commit from
 coming back: rotate the secret, clear the borrowing instances' refs that
 reach it, delete the mirror's stores, ask the forge to drop the commit.
 
-### An old mirror replaced while kept instances still borrow
+### A long-lived instance across a mirror replacement
 
-A user keeps an old instance for weeks while new ones come and go. When niwa
-replaces a repo's mirror with a new generation, it finds every instance on
-disk that still names the old one, kept instances included, and doesn't
-retire the old generation while any of them does, so the kept instance
-never wakes to a history it can't read.
+A developer keeps a reference instance for weeks while dispatched sessions
+come and go around it. One of those creates replaces a repo's mirror with a
+new generation. When the developer next opens the kept instance, its history
+reads in full, because niwa found every instance on disk that still named the
+old generation, the kept one included, and didn't retire it while any did.
 
 ## Scope Boundary
 
