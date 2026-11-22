@@ -67,7 +67,8 @@ works on the borrowers users would actually have.
   instance independent before moving it, and find the purge steps for a
   commit that must leave the host.
 - Borrowing is on by default wherever a workspace root exists, and reaches
-  users only once the condition above holds.
+  users only after niwa#524 is fixed with a covering scenario and the repair
+  proofs pass against borrowers the real create made (R16, R17).
 
 ## User Stories
 
@@ -99,52 +100,63 @@ works on the borrowers users would actually have.
 ### Functional
 
 - **R1. Borrowing create.** When borrowing is on for a repo, every path that
-  clones that repo into an instance (`niwa create`, `niwa apply` adding a
-  repo, `niwa dispatch`, the SessionStart hook's provisioning, `niwa init`
-  when it creates an instance) clones it borrowing from that repo's mirror,
-  after the mirror-repair check has run, and only when the check reports the
-  mirror usable. The new clone holds only objects the mirror lacks.
+  clones that repo into an instance (`niwa create`, `niwa apply` after a repo
+  is added to the config, `niwa dispatch`, the SessionStart hook's
+  provisioning, and `niwa init` when it creates an instance) clones it
+  borrowing from that repo's mirror. The mirror-repair check, and any
+  restore it triggers, runs first; the clone borrows only when the check
+  reports the mirror usable. The new clone holds only objects the mirror
+  lacks.
 - **R2. First mirror.** When a repo has no mirror yet, the create seeds one
   through the mirror-repair feature's seeding entry point and then borrows
   from it, so the first instance's create already builds what later
   instances share.
-- **R3. Alternates name the stable path.** A borrowing clone's alternates
-  file holds exactly one line, the repo's stable mirror path followed by
-  `/objects`, never a resolved store path. niwa writes nothing else inside
-  the instance for borrowing: the clone's `origin`, refs, config and hooks
-  are what a full clone would have.
+- **R3. Alternates name the stable path, and nothing else changes.** A
+  borrowing clone's alternates file holds exactly one line, the repo's
+  stable mirror path followed by `/objects`, never a resolved store path.
+  Apart from that file and the objects it lets the clone omit, the clone is
+  what a full clone would be: the same `origin` URL, refs, config keys and
+  hooks.
 - **R4. Fallback.** When the mirror is not usable for a repo at create time
-  (missing and can't be seeded, restore failed, busy past the lock wait,
-  the remote unreachable for seeding), or a borrowing clone fails part way,
-  the create clones that repo in full as niwa does today, leaves no partial
-  borrower behind, finishes, and its output names the repo and the reason it
-  didn't borrow. Borrowing never makes a create fail that would have
-  succeeded without it.
+  (missing and seeding failed, restore failed, busy past the mirror-repair
+  lock wait of five minutes, or ten seconds in the SessionStart hook), or a
+  borrowing clone fails after it started, the create removes any partial
+  clone, clones that repo in full as niwa does today, finishes, and its
+  output names the repo and the reason it didn't borrow. Borrowing never
+  makes a create fail that would have succeeded without it.
 - **R5. Only new clones borrow.** A repo already cloned in an instance is
   never converted to a borrower or back by sync, apply or any other
   command except the one in R8.
 - **R6. Off setting, workspace and repo.** A workspace setting turns
   borrowing off for the whole workspace, and a per-repo setting turns it off
-  or back on for one repo, the repo's value winning over the workspace's.
-  A repo with borrowing off gets a full clone and no alternates entry, and
-  niwa seeds, refreshes and restores no mirror for it under `~/.niwa/`. The
-  setting governs clones made after it changes; existing clones keep what
-  they are.
+  or on for one repo; the repo's value wins over the workspace's, in both
+  directions. A repo with borrowing off gets a full clone and no alternates
+  entry, and niwa seeds no mirror for it. The setting governs clones made
+  after it changes. A repo turned off while some instance still borrows from
+  its mirror keeps that mirror checked and restored until no instance on
+  disk names it; the guide (R11) tells the user to make those instances
+  independent (R8) and then delete the mirror.
 - **R7. Kept instances count.** Every mirror check, restore and probe, and
   every decision to remove a mirror store, considers every instance on disk
   for the workspace: those under the workspace root and those kept under
-  the workspace's host directory, half-created ones included.
+  the workspace's host directory, half-created ones (a directory with no
+  instance state file) included.
 - **R8. Make an instance independent.** A user command makes a named
   instance (by default the current one) independent of the host's stores:
   it copies every borrowed object into each of the instance's clones, then
-  removes their alternates entries. It changes nothing until the copy is
-  complete and each clone passes `git fsck`, checks free space before it
-  starts, takes the instance's lock, is safe to run again, covers worktrees
-  of those clones, and reports what it changed. Afterwards the instance
-  reads its whole history with the mirror deleted.
+  removes their alternates files. Before it changes anything it takes the
+  instance's lock (refusing, with nothing changed, when another command
+  holds it) and checks that free space covers the mirror's pack sizes for
+  the instance's repos (refusing, with nothing changed, when it doesn't). A
+  clone's alternates file is removed only after its copy has finished and
+  `git fsck` passes with the mirror unreachable; a failure part way leaves
+  every clone still borrowing and readable. It covers worktrees of those
+  clones, does nothing to a clone that doesn't borrow, and reports each
+  clone it changed. Afterwards the instance reads its whole history with
+  the mirror deleted.
 - **R9. Generations are never retired while named.** A mirror generation
   (one store directory behind a repo's stable path) is replaced by a newer
-  one only through the mirror-repair restore or a rebuild for a changed
+  one only through the mirror-repair restore or its rebuild for a changed
   remote. niwa removes an old generation only after it has enumerated every
   instance on disk per R7 without error, and never removes a store that any
   clone's alternates names, directly or through the stable path. A failed
@@ -152,133 +164,168 @@ works on the borrowers users would actually have.
 - **R10. Workspace destroy.** Destroying a workspace removes its mirrors
   when no instance on disk, kept ones included, still borrows from them, and
   keeps them, saying so, when one does.
-- **R11. Purge guide.** A user guide section says where a workspace's
-  mirrors live (`~/.niwa/w-<key>/mirrors/`) and gives the purge steps for a
-  commit that must not stay on the host, in this order: rotate the secret;
-  in each borrowing instance, rewrite or delete any local branch that
-  reaches the commit and run `git fetch --prune`; delete the repo's stable
-  path and its `.store/<repo-id>-*` directories; ask the forge to drop the
-  commit. It says why the order matters, and it documents the off setting
-  and the R8 command.
-- **R12. Credential and transport variables reach the mirror's network
-  calls (niwa#524).** The mirror's clone and fetch keep the user's
-  `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_ASKPASS` and the other inherited
-  variables git uses to authenticate to or reach a remote, while local
-  reads keep stripping every inherited `GIT_*` variable as the mirror-repair
-  design requires.
-- **R13. Old stores outlive borrower recovery (niwa#525).** A restore keeps
-  every old store until the borrower probe and recovery by id have finished,
-  and recovers from a truncated old pack whatever objects remain readable, so
-  objects an old store still held are not lost because they were removed
-  before the probe asked for them.
+- **R11. Guide.** A user guide section says where a workspace's mirrors live
+  (`~/.niwa/w-<key>/mirrors/`) and gives the purge steps for a commit that
+  must not stay on the host, in this order: rotate the secret; in each
+  borrowing instance, rewrite or delete any local branch that reaches the
+  commit and run `git fetch --prune`; delete the repo's stable path and its
+  `.store/<repo-id>-*` directories; ask the forge to drop the commit. It
+  says why the order matters, and it documents the off setting at both
+  levels and the R8 command.
+- **R12. Remote access variables reach the mirror's network calls
+  (niwa#524).** The mirror's seed, refresh, restore and fetch-by-id keep the
+  user's inherited `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_SSH_VARIANT`,
+  `GIT_ASKPASS`, `GIT_PROXY_COMMAND`, `GIT_SSL_CAINFO`, `GIT_SSL_CAPATH`,
+  `GIT_SSL_NO_VERIFY`, `GIT_HTTP_PROXY_AUTHMETHOD`, and `GIT_CONFIG_COUNT`
+  with its `GIT_CONFIG_KEY_<n>` and `GIT_CONFIG_VALUE_<n>` entries. Local
+  reads of the mirror keep stripping every inherited `GIT_*` variable, as
+  the mirror-repair design requires.
+- **R13. Old stores outlive borrower recovery (niwa#525).** A restore
+  removes no old store until the borrower probe and recovery by id have
+  finished. From a truncated old pack it salvages every object that can
+  still be read and verified, so a borrower ref whose objects all survive
+  reads to the root afterwards, and a ref that needs an object neither the
+  salvage nor the remote can supply is reported unrecoverable by name.
 - **R14. A different spelling of the same remote is the same remote
-  (niwa#522).** Moving a repo's URL between its SSH and HTTPS forms, or
-  changing only the user part, is treated as the same remote: the restore
-  salvages old stores as for any other fault. A genuinely different host or
-  path still rebuilds with no salvage, as today.
-- **R15. Repair proofs against real borrowers.** The mirror-repair proofs
-  (deleted mirror, damaged mirror, deleted remote commits, and the refresh,
-  concurrency, failed-restore and healthy-check scenarios) run against
-  borrowers that the borrowing create made, with no hand-written alternates,
-  in the functional suite on Linux and macOS, and pass.
-- **R16. Off for users until the condition holds.** Until R12 is met with a
-  covering scenario and R15 passes, no released niwa borrows for any user:
-  the borrowing create runs only where the functional suite enables it, and
-  no setting a user can write turns it on. The R6 setting may exist before
-  then; setting it to on does nothing until R17.
-- **R17. Turn on by default.** Borrowing becomes on by default wherever a
-  workspace root exists, as its own last change, made only after R12 (with
-  its scenario), R13 and R15 have landed. A layout with no workspace root
-  keeps full clones.
+  (niwa#522).** A URL change between a repo's SSH form
+  (`git@host:owner/repo.git`) and HTTPS form (`https://host/owner/repo.git`),
+  or in the user part alone, is treated as the same remote: the restore
+  salvages old stores as for any other fault. A change of host or path
+  still rebuilds with no salvage, as today.
+- **R15. Repair proofs against real borrowers.** Every scenario in the
+  mirror-repair feature file (the deleted mirror, damaged mirror and
+  deleted remote commits proofs, and the refresh, concurrency,
+  failed-restore and healthy-check scenarios, the last with its 100 ms
+  bound) runs against borrowers made by `niwa create`, with no step that
+  writes an alternates file by hand, in the functional suite on Linux and
+  macOS, and passes.
+- **R16. Off for users until the condition holds.** Until the R12 fix with
+  its scenario and the R15 rerun have both landed, a niwa built for release
+  borrows for no user: the borrowing create runs only in the functional
+  suite's test build, and no setting a user can write turns it on. The R6
+  setting may exist before then; setting it to on does nothing until R17.
+- **R17. Turn on by default, last.** Borrowing becomes on by default
+  wherever a workspace root exists, as its own change, merged only after
+  the changes for R12 (with its scenario), R13 and R15. A layout with no
+  workspace root keeps full clones.
+- **R18. Concurrent first creates.** Several creates of the same workspace
+  started together on a host with no mirror yet produce one mirror per
+  repo, and every clone they make either borrows from it or, per R4, is a
+  full clone.
 
 ### Non-functional
 
-- **R18. Saving.** On a multi-repo workspace in the functional suite's
-  sandbox, the second create's write to the volume, read from free space
-  before and after, is less than two thirds of the first create's.
-- **R19. No new cost when healthy.** Borrowing adds no network call to a
-  create beyond what fetching the mirror's missing objects needs, and the
-  healthy mirror check stays offline and under 100 ms per mirror.
+- **R19. Saving.** On a multi-repo workspace, the second create writes less
+  than two thirds of what the first did, read from volume free space before
+  and after each, and the second instance's clones hold no pack the mirror
+  already holds.
 - **R20. Platforms and isolation.** Everything works on Linux and macOS with
   portable git and no reflink or snapshot support, runs inside commands niwa
   already performs with no daemon, and every test runs in the suite's own
   `$HOME` and local git server with no network.
-- **R21. niwa never undoes borrowing by itself.** niwa runs no `git repack
-  -a -d`, `--dissociate` or collection in a borrower except through R8, and
-  sets no maintenance that would.
+- **R21. niwa never undoes borrowing by itself.** No niwa command but the
+  R8 command copies a borrower's borrowed objects into it, and niwa sets no
+  `gc.*` or `maintenance.*` key in a borrower.
 
 ## Acceptance Criteria
 
 - [ ] On a fresh sandbox host, `niwa create` of a three-repo workspace seeds
-  a mirror for each repo and each clone's
-  `.git/objects/info/alternates` is exactly `<stable path>/objects`, with
-  the stable path under `~/.niwa/w-<key>/mirrors/`. (R1, R2, R3)
-- [ ] A second `niwa create` of the same workspace writes less than two
-  thirds of what the first did, read from volume free space before and after
-  each. (R18)
-- [ ] A commit made in one instance is absent from the other; after it is
-  pushed and the other instance fetches, the commit is present there.
-  (R1, R3)
-- [ ] With the mirror for one repo deleted and its remote unreachable, a
-  create still finishes, clones that repo in full with no alternates file,
-  and its output names the repo and the reason. (R4)
-- [ ] A borrowing clone made to fail after the clone started leaves no
-  partial clone, and the create's retry or fallback produces a full clone.
-  (R4)
-- [ ] An instance created with borrowing off, then synced and applied after
-  borrowing is turned on, still has no alternates file. (R5)
+  a mirror for each repo under `~/.niwa/w-<key>/mirrors/`, and each clone's
+  `.git/objects/info/alternates` contains exactly one line,
+  `<stable path>/objects`, where the stable path is the symlink and not its
+  target. (R1, R2, R3)
+- [ ] The same alternates check passes for a repo cloned by each of
+  `niwa apply` after the repo is added to the config, `niwa dispatch`, the
+  SessionStart hook's provisioning and `niwa init`. (R1)
+- [ ] With a repo's mirror deleted before a second `niwa create`, the
+  create's output and the mirror log show a restore before the clone, and
+  the new clone borrows from the restored mirror. (R1)
+- [ ] A borrowing clone and a full clone of the same repo at the same commit
+  have the same `origin` URL, the same `git for-each-ref` output and the
+  same `git config --local --list` output, and neither has a hook file the
+  other lacks. (R3)
+- [ ] With one repo's mirror deleted and the sandbox remote for that repo
+  stopped, a create finishes with exit 0, clones the other repos borrowing,
+  and its output names the repo it cloned in full and why; that clone has no
+  alternates file. (R4)
+- [ ] With the test build's fault hook making a borrowing clone fail after
+  it started, the create still finishes, the repo's clone is a full clone
+  with no alternates file, and no partial directory is left beside it. (R4)
+- [ ] An instance created with borrowing off, then synced and applied with
+  borrowing on, still has no alternates file in any clone. (R5)
 - [ ] With the workspace setting off, a create makes full clones, writes no
-  alternates file and creates no `mirrors/` entry for any repo. (R6)
-- [ ] With the workspace setting on and one repo's setting off, that repo
-  gets a full clone, no alternates file and no mirror under `~/.niwa/`,
-  while the others borrow. (R6)
-- [ ] With an instance moved under the workspace's `kept/` directory, a
-  restore's probe reports on that instance's clones, and the old store a
-  kept clone needs is not removed. (R7, R9)
+  alternates file and creates no `mirrors/` entry. (R6)
+- [ ] With the workspace setting off and one repo's setting on, that repo
+  borrows and the others are full clones; with the workspace setting on and
+  one repo's setting off, that repo is a full clone with no mirror and the
+  others borrow. (R6)
+- [ ] With a repo turned off after an instance borrowed from it, deleting
+  that repo's mirror and running `niwa apply` restores it; after the
+  instance is made independent, the next command neither checks nor restores
+  that mirror. (R6, R8)
+- [ ] With a borrowing instance moved under the workspace's `kept/`
+  directory and a half-created instance directory beside the others, a
+  restore's probe lists both instances' clones in the mirror log. (R7)
 - [ ] After the make-independent command runs on an instance and the
   mirror is deleted, `git log --all` and `git fsck` in each of its clones
-  and their worktrees come back clean, and none has an alternates file.
-  Running the command again changes nothing and says so. (R8)
-- [ ] The make-independent command run with too little free space for the
-  copy changes nothing and says why. (R8)
-- [ ] With enumeration of instances made to fail, a restore removes no old
+  and a worktree of one of them exit 0, and no clone has an alternates file;
+  a second run reports nothing to change. (R8)
+- [ ] The make-independent command refuses and changes nothing when another
+  command holds the instance's lock, and when free space is below the
+  mirror's pack sizes for the instance's repos. (R8)
+- [ ] With the test build's fault hook failing the copy for the second of
+  three clones, every clone still has its alternates file and passes
+  `git fsck` with the mirror present. (R8)
+- [ ] With the `kept/` directory made unreadable, a restore removes no old
   store. (R9)
-- [ ] A clone whose alternates names a store directory directly keeps that
-  store through a restore. (R9)
+- [ ] A clone whose alternates names a `.store/` directory directly keeps
+  that store through a restore and through a rebuild for a changed remote.
+  (R9)
 - [ ] Destroying a workspace with no kept instances removes its `mirrors/`
   directory; with a kept borrowing instance it keeps it and says so. (R10)
 - [ ] The user guide has a section naming `~/.niwa/w-<key>/mirrors/`, the
   four purge steps in the R11 order with the reason for the order, the off
   setting at both levels and the make-independent command. (R11)
-- [ ] A functional scenario sets `GIT_SSH_COMMAND` to a wrapper that the
-  sandbox's remote requires, deletes a borrower's mirror, and sees the next
-  command restore it and the wrapper invoked; on niwa before the niwa#524
-  fix the same scenario reports the restore failed. (R12)
-- [ ] A functional scenario truncates an old store's pack holding objects a
-  borrower needs and the remote no longer serves, triggers a restore, and
-  sees the borrower's ref read to the root afterwards. (R13)
-- [ ] A functional scenario changes a repo's URL from its SSH form to its
-  HTTPS form for the same sandbox remote, then damages the mirror, and sees
-  the restore salvage the old store rather than rebuild with no salvage.
-  (R14)
-- [ ] Every mirror-repair proof scenario runs against borrowers made by
-  `niwa create` in the functional suite, with no step that writes an
-  alternates file by hand, and passes in CI on Ubuntu and macOS. (R15)
-- [ ] Before the turn-on change, a released build with no workspace or repo
-  setting, and one with the setting set to on, both make full clones and no
-  mirror. (R16)
-- [ ] The turn-on change is a separate change from every other one in this
-  work, merged after the R12, R13 and R15 changes, and after it a create
-  with no setting borrows wherever a workspace root exists, while an
-  instance with no workspace root makes full clones. (R17)
-- [ ] A create with a healthy mirror makes no network call beyond the
-  repo's own fetch of missing objects, and the mirror check's logged
-  duration stays under 100 ms. (R19)
+- [ ] A functional scenario puts the sandbox remote behind an SSH-style
+  wrapper reached only through `GIT_SSH_COMMAND`, creates a borrowing
+  instance, deletes the mirror, and sees the next command restore it with
+  the wrapper invoked; the same scenario against niwa without the fix
+  reports `restore-failed`. (R12)
+- [ ] With `GIT_DIR` and `GIT_ALTERNATE_OBJECT_DIRECTORIES` set to unrelated
+  paths in the environment, the healthy check of a borrower's mirror still
+  reports healthy and reads nothing from those paths. (R12)
+- [ ] A functional scenario truncates an old store's pack halfway, where the
+  first half holds every object one borrower ref needs and the second half
+  an object another ref needs, with the remote no longer serving either;
+  after the restore the first ref reads to the root and the second is
+  reported unrecoverable by name. (R13)
+- [ ] A scenario changes a repo's URL from its SSH form to its HTTPS form
+  for the same sandbox remote, damages the mirror, and sees the restore
+  salvage the old store; a scenario that points the repo at a different
+  sandbox remote sees a rebuild with no salvage. (R14)
+- [ ] Every scenario in the mirror-repair feature file runs against
+  borrowers made by `niwa create`, no step writes an alternates file by
+  hand, and the feature passes in CI on Ubuntu and macOS. (R15)
+- [ ] Before the turn-on change, a release build (not the test build) makes
+  full clones and no mirror both with no setting and with the setting set
+  to on. (R16)
+- [ ] After the turn-on change, a create with no setting borrows wherever a
+  workspace root exists, and an instance with no workspace root makes full
+  clones. The merge history shows the turn-on change merged after the
+  changes for R12, R13 and R15. (R17)
+- [ ] Three `niwa create` runs of the same workspace started together on a
+  host with no mirror produce one stable path and one store per repo, and
+  every clone either borrows from it or is a full clone named in that
+  create's output. (R18)
+- [ ] By hand, on a real multi-repo workspace and host, a reviewer reads
+  volume free space before and after two creates and sees the second write
+  less than two thirds of the first; in the functional suite, the second
+  instance's clones hold no pack file whose name a mirror store holds. (R19)
 - [ ] The functional scenarios for this work run on Ubuntu and macOS under
   the suite's sentinels and write nothing outside the sandbox `$HOME`. (R20)
-- [ ] No niwa command other than the make-independent command leaves a
-  borrower with its borrowed objects copied in; a borrower's config after
-  create sets no `gc` or maintenance key. (R21)
+- [ ] After create, sync, apply and a restore, each borrower holds no pack
+  file whose name a mirror store holds, and `git config --local --list` in
+  it shows no `gc.` or `maintenance.` key. (R21)
 
 ## Out of Scope
 
@@ -340,3 +387,11 @@ works on the borrowers users would actually have.
   forbids.
 - **The off setting has a per-repo form (R6)** because the retention
   decision accepted the mirror's risk on that condition.
+- **Failures are injected through the test build.** The R4 and R8
+  failure-part-way criteria rely on a fault hook present only in the
+  functional suite's test build, the same build R16 lets borrow before the
+  turn-on; a release build carries neither.
+- **The saving is checked two ways (R19).** Volume free space is the figure
+  a user feels but is too noisy for CI, so the suite checks that a borrower
+  holds none of the mirror's packs, and the free-space figure is a reviewer's
+  hand check.
