@@ -1230,7 +1230,13 @@ non-zero and no pass runs. `niwa resume` refuses a record past
 `restore_until` with the date the window ended. Inside it, before the session
 starts, it moves the entry's files back to their original paths with a hash
 check, and refuses, leaving everything in place and naming the file, when one
-doesn't match. The restore trusts no path it reads. The launch record sits
+doesn't match. A later step of the resume can still fail before the session
+starts, and its rollback removes the fresh instance (resume.go:385-389), so
+the rollback first moves every restored file back into the entry unchanged,
+checked by hash; a failed resume leaves the kept set and the restore window as
+they were. A file that can't be moved back that way keeps the instance, which
+the rollback then leaves in place with the file named. The restore trusts no
+path it reads. The launch record sits
 under the workspace root, where the agent can reach it, so its `kept_entry`
 must name exactly `~/.niwa/w-<key>/kept-files/<instance>/<UTC>/` for the
 record's own instance, a direct descendant reached with no symlink, or the
@@ -2212,9 +2218,17 @@ and every session stay, the same fail-toward-keep as the pass.
 Destroy's existing `--keep-session` flag, which keeps the owning session, is
 unchanged: with it destroy passes no session to `claude rm`, so it vets no
 job directory. It removes each worktree with `rmtree.go`'s walk, never through git. Unforced
-destroy first runs the worktree's configuration check and `git status`, a
-change refusing the destroy as the scan's findings do, and the walk keeps a
-locked worktree or one holding a repository, which refuses the same way.
+destroy first runs the worktree's configuration check and `git status` with
+the scan, before any prompt, and a change it reports, or a locked worktree or
+one holding a repository that the walk keeps, joins the scan's findings and is
+handled the way destroy handles those today (destroy.go:213-232): on a
+terminal destroy lists it with the rest and asks for the instance name, going
+ahead only on a match, and when stdin isn't a terminal it aborts with nothing
+removed. Once the name matches, a worktree the walk won't remove is left to go
+with the directory, as under `--force`. The status that comes right before
+each worktree's removal only checks that nothing changed since that listing; a
+change the listing didn't show stops the destroy before that worktree goes,
+with the path named, since no confirmation covered it.
 `--force` keeps its meaning: it skips that status and removes the worktrees
 with the same walk before the session, since the person already accepted
 the loss, and a worktree the walk won't remove (locked, holding a
@@ -2243,19 +2257,28 @@ over the instance and the program-naming configuration check on every
 repository it finds, submodules, gitlinks and nested repositories included.
 A repository it flags gets no further git call: the scan reports it as a
 `LossScanError` naming the key, the way it already reports a repository it
-can't read, so an unforced destroy refuses as for any other loss, and
-`--force` leaves the worktree holding that repository to go with the
-directory. The `gitCommand` builder runs the check again right before the
-scan's `git status` in each repository and before the status that comes
-right before each unforced worktree removal, and a key found then is
-reported and refused the same way; `--force` removal skips that status, so
+can't read, so an unforced destroy lists it as loss and asks for the instance
+name on a terminal, going ahead only on a match, and aborts when stdin isn't
+a terminal, as for any other loss; once confirmed, and under `--force`, the
+worktree holding that repository goes with the directory. The `gitCommand`
+builder runs the check again right before the scan's `git status` in each
+repository and before the status that comes right before each unforced
+worktree removal. A key found at the scan's status is listed as loss the
+same way; one first found at the status before a worktree's removal, after
+the confirmation, stops the destroy before that worktree goes, with the key
+named; `--force` removal skips that status, so
 it starts no git process and needs no second read. What the scan checks and decides is otherwise left as it is;
 only how it starts git changes. `niwa destroy --workspace`
 (`runDestroyWorkspace`, destroy.go:429) goes through the same scan, order
 and vet: it scans every instance through `workspace.ScanInstancesParallel`,
 which calls `ScanInstance` for each and is given the same `ScanOption`
-after the same walk and configuration check, and it removes each instance's
-worktrees as an unforced destroy does, after the confirmation and before
+after the same walk and configuration check. Those findings are listed with
+the rest of every instance's scan and handled as the scan's findings are
+there today (from destroy.go:429): without `--confirm`, on a terminal it asks
+for the workspace name and goes ahead only on a match, and when stdin isn't a
+terminal it aborts; with `--confirm <name>` matching the workspace name it
+goes ahead with no prompt; and it takes no `--force`. It removes each
+instance's worktrees as an unforced destroy does, after the confirmation and before
 `removeOwningSessionsListed`, with the job-directory vet of every listed
 session before its first removal step. Today it runs `claude rm` there
 (destroy.go:525) before `DestroyWorkspace` removes the instance directories
@@ -2273,7 +2296,10 @@ outside the instance, and also refuses, naming the file, any destination with
 a path component named `.git` or `.claude` (compared case-insensitively). It
 moves kept-set files back with a hash check, creating parents with
 `O_DIRECTORY|O_NOFOLLOW` and files with `O_CREAT|O_EXCL|O_NOFOLLOW`, and
-clears nothing else. It writes `restored_at` into the fresh instance's
+clears nothing else. Its `rollback`, which calls `destroyInstanceFunc` on the
+fresh instance when a later step fails, first moves every restored file back
+into the entry unchanged by hash, and leaves the instance in place, naming the
+file, when one can't be. It writes `restored_at` into the fresh instance's
 `unit.json` the way niwa writes every record, recording its ledger entry
 before the rename into place.
 
@@ -2759,7 +2785,9 @@ path against the fresh instance and the entry's `files/`, refuses, naming the
 file, any destination with a path component named `.git` or `.claude`
 (compared case-insensitively), as it refuses one outside the instance, moves the files
 back with a hash check and without following links or overwriting anything,
-and starts the session.
+and starts the session. A step that fails after the files are back and before
+the session starts moves them into the entry again, unchanged by hash, before
+the rollback removes the instance.
 
 ## Implementation Approach
 

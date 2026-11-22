@@ -52,6 +52,14 @@ the newer-scratch and verdict-only scenarios, Out of Scope, Known Limitations
 and Decisions and Trade-offs carry the choice. The amended requirements stand
 as accepted.
 
+Amended after acceptance: R26 and R13 now say that paths a discard record
+releases wait in the unit's kept-set entry under `discarded/` until the restore
+window ends, and then go, where R26 had said nothing but the files a keep
+record names goes into the kept set. Removing them with the instance would drop
+the safety net for paths a person has just released, so a discard faked
+through a terminal an agent controls still loses nothing until the window
+ends. The amended requirements stand as accepted.
+
 Absorbed [BRIEF-over-remover](docs/briefs/BRIEF-over-remover.md); carried in Absorbed Brief.
 
 ## Absorbed Brief
@@ -375,7 +383,9 @@ niwa ships or in a workspace's own list in its configuration, or when a discard
 record written for that unit names it. The shipped list includes at least
 editor swap and backup files, `.DS_Store`, `__pycache__` and `.pytest_cache`;
 its full contents are a deliverable of the design. Nothing joins either list on
-a guess. The list's format and the discard record's form
+a guess. A path a discard record names isn't removed with the instance: it
+waits in the kept set under `discarded/` until the restore window ends, and
+then goes (R26). The list's format and the discard record's form
 and command are open dependencies. Serves the no-command and verdict-only
 scenarios.
 
@@ -495,9 +505,12 @@ record that names files is reaped, niwa moves the record and the files it names
 into the kept set before removing the instance, and rewrites each file's path
 in the record to its place there. Each file lands with the same SHA-256 it had
 in the instance; across volumes the move is a copy, a hash check and a delete.
-A named file that is missing or whose hash doesn't match keeps the unit. Nothing
-else of the instance goes into the kept set, and a unit with no keep record
-leaves nothing behind. The kept set follows niwa's rule for host-level state:
+A named file that is missing or whose hash doesn't match keeps the unit. Paths
+a discard record releases (R13) also go into the unit's kept-set entry, under
+`discarded/`, where they wait until the restore window ends and then go; a
+restore doesn't put them back. Nothing else of the instance goes into the kept
+set, and a unit with neither a keep record nor a discard record leaves nothing
+behind. The kept set follows niwa's rule for host-level state:
 under `~/.niwa/`, in a directory keyed by the workspace root's canonical path,
 never under the workspace root's `.niwa/` or inside an instance. Serves the
 keep-record scenario.
