@@ -1,9 +1,12 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 )
 
 const minimalConfig = `
@@ -85,6 +88,102 @@ vars = { EXTRA_FLAG = "claude-only" }
 files = ["env/workspace.env"]
 vars = { LOG_LEVEL = "debug" }
 `
+
+// pointerState renders a tri-state setting for messages: nil, true or false.
+func pointerState(p *bool) string {
+	if p == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("%t", *p)
+}
+
+func TestSharePluginReleasesEnabled(t *testing.T) {
+	cases := []struct {
+		name  string
+		value *bool
+		want  bool
+	}{
+		{"absent", nil, true},
+		{"true", boolPtr(true), true},
+		{"false", boolPtr(false), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := WorkspaceMeta{Name: "ws", SharePluginReleases: tc.value}
+			if got := w.SharePluginReleasesEnabled(); got != tc.want {
+				t.Fatalf("SharePluginReleasesEnabled() with %s = %t, want %t", pointerState(tc.value), got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSharePluginReleasesTOMLRoundTrip(t *testing.T) {
+	cases := []struct {
+		name     string
+		value    *bool
+		wantLine string // "" means the key must be absent
+	}{
+		{"absent", nil, ""},
+		{"true", boolPtr(true), "share_plugin_releases = true"},
+		{"false", boolPtr(false), "share_plugin_releases = false"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := WorkspaceConfig{Workspace: WorkspaceMeta{Name: "ws", SharePluginReleases: tc.value}}
+			var buf bytes.Buffer
+			if err := toml.NewEncoder(&buf).Encode(cfg); err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			out := buf.String()
+			if tc.wantLine == "" {
+				if strings.Contains(out, "share_plugin_releases") {
+					t.Fatalf("absent setting should be omitted, got:\n%s", out)
+				}
+			} else if !strings.Contains(out, tc.wantLine) {
+				t.Fatalf("encoding missing %q:\n%s", tc.wantLine, out)
+			}
+
+			var decoded WorkspaceConfig
+			if _, err := toml.Decode(out, &decoded); err != nil {
+				t.Fatalf("decoding the encoded config: %v\n%s", err, out)
+			}
+			if got, want := pointerState(decoded.Workspace.SharePluginReleases), pointerState(tc.value); got != want {
+				t.Fatalf("decoded share_plugin_releases = %s, want %s", got, want)
+			}
+
+			// The [workspace] table alone, as the encoder wrote it, goes back
+			// through Parse to the same pointer state.
+			body := "[workspace]\nname = \"ws\"\n"
+			if tc.wantLine != "" {
+				body += tc.wantLine + "\n"
+			}
+			result, err := Parse([]byte(body))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if got, want := pointerState(result.Config.Workspace.SharePluginReleases), pointerState(tc.value); got != want {
+				t.Fatalf("parsed share_plugin_releases = %s, want %s", got, want)
+			}
+		})
+	}
+}
+
+func TestParseSharePluginReleasesIsAKnownField(t *testing.T) {
+	for _, value := range []string{"true", "false"} {
+		t.Run(value, func(t *testing.T) {
+			body := "[workspace]\nname = \"ws\"\nshare_plugin_releases = " + value + "\n"
+			result, err := Parse([]byte(body))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			for _, w := range result.Warnings {
+				if strings.Contains(w, "unknown config field") {
+					t.Fatalf("share_plugin_releases reported as unknown: %q", w)
+				}
+			}
+		})
+	}
+}
 
 func TestParseMinimalConfig(t *testing.T) {
 	result, err := Parse([]byte(minimalConfig))

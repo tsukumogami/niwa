@@ -28,7 +28,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tsukumogami/niwa/internal/filelock"
+	"github.com/tsukumogami/niwa/internal/hostdir"
 )
 
 // repoIDPattern is what a repo id must look like to get a mirror. No id
@@ -45,17 +45,16 @@ func ValidRepoID(id string) bool {
 	return repoIDPattern.MatchString(id)
 }
 
-// WorkspaceKey names a workspace's directory under ~/.niwa: "w-" and the first
-// 32 hex digits of the sha256 of the workspace root's canonical path, so the
-// same root reached through a symlink or a trailing slash gets one key.
+// WorkspaceKey names a workspace's directory under ~/.niwa. The definition is
+// hostdir.WorkspaceKey, shared with every other host store, so the mirrors and
+// the plugin releases of one workspace sit under one key directory.
 func WorkspaceKey(workspaceRoot string) string {
-	sum := sha256.Sum256([]byte(filelock.CanonicalPath(workspaceRoot)))
-	return "w-" + hex.EncodeToString(sum[:])[:32]
+	return hostdir.WorkspaceKey(workspaceRoot)
 }
 
 // keyDir is the workspace key directory, ~/.niwa/w-<key>.
 func keyDir(home, workspaceRoot string) string {
-	return filepath.Join(home, ".niwa", WorkspaceKey(workspaceRoot))
+	return hostdir.WorkspaceDir(home, workspaceRoot)
 }
 
 // mirrorsDir holds every mirror of the workspace and niwa's own entries.
@@ -110,38 +109,15 @@ func randHex() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// ownedByUser reports whether info belongs to the current user. It reads the
-// unix owner, so the package builds for unix only, like the flock it relies on
-// and every platform niwa releases for.
+// ownedByUser reports whether info belongs to the current user.
 func ownedByUser(info os.FileInfo) bool {
-	st, ok := info.Sys().(*syscall.Stat_t)
-	return ok && int(st.Uid) == os.Getuid()
+	return hostdir.OwnedByUser(info)
 }
 
 // ensurePrivateDir makes dir a real directory the user owns with mode exactly
-// 0700, creating it when missing and tightening a wider mode. The mode is set
-// explicitly, never left to the umask. A symlink or anything else at dir is
-// refused, never followed.
+// 0700; see hostdir.EnsurePrivateDir, where the definition lives.
 func ensurePrivateDir(dir string) error {
-	if err := os.Mkdir(dir, 0o700); err != nil && !os.IsExist(err) {
-		return fmt.Errorf("creating %s: %w", dir, err)
-	}
-	info, err := os.Lstat(dir)
-	if err != nil {
-		return fmt.Errorf("inspecting %s: %w", dir, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory (mode %s)", dir, info.Mode().Type())
-	}
-	if !ownedByUser(info) {
-		return fmt.Errorf("%s is not owned by the current user", dir)
-	}
-	if info.Mode().Perm() != 0o700 {
-		if err := os.Chmod(dir, 0o700); err != nil {
-			return fmt.Errorf("setting the mode of %s: %w", dir, err)
-		}
-	}
-	return nil
+	return hostdir.EnsurePrivateDir(dir)
 }
 
 // createPrivateDir makes dir a real directory the user owns, creating it with
