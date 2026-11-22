@@ -448,7 +448,7 @@ func buildStore(ctx context.Context, mdir string, r Repo, srcs, noGit []string, 
 		_ = os.RemoveAll(tmp)
 		return "", "", err
 	}
-	salvage(ctx, srcs, tmp)
+	salvage(ctx, mdir, r.ID, srcs, tmp)
 	var pinFrom []string
 	for _, src := range srcs {
 		if !slices.Contains(noGit, src) {
