@@ -16,7 +16,7 @@ Feature: niwa holds each plugin marketplace release once per host
     And a fake claude for plugin pre-warming
     And the GitHub marketplace "acme/skills" publishes release "v1.0.0"
     And the GitHub marketplace "beta/tools" publishes release "v2.1.0"
-    And a source repo "app" exists
+    And a source repo "app" exists with a commit
     And a config repo "ws" exists with body:
       """
       [workspace]
