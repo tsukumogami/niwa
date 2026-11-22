@@ -372,8 +372,8 @@ Downstream deliverables:
 - [ ] `internal/removal/rmtree.go` provides the descriptor-relative no-follow removal walk: every directory opened with `O_DIRECTORY|O_NOFOLLOW` and `fstat`ed, every entry removed relative to its parent's descriptor, a link met as a link removed as one and never followed, a directory on another device stopping the walk with "another filesystem at <path>", and any `.git` entry or git directory (a `HEAD` beside `objects/` and `refs/`) other than a worktree's own top-level `.git` file stopping the walk with the rest of the tree kept and the path named.
 - [ ] `RemoveWorktree` in `rmtree.go` keeps the worktree, with the path named, when its top-level `.git` file is not a regular file opened `O_NOFOLLOW|O_NONBLOCK` or doesn't name its admin directory, when the admin directory holds a `locked` file, or when the walk finds a repository below the tree's top level or a git directory in the admin directory; otherwise it removes the tree with its `.git` file last, then the admin directory, then `worktrees/` if empty.
 - [ ] An open that fails during the walk (a directory turned into a link, or any other failure) stops it, keeps the rest of the tree and the admin directory, and keeps the unit with "changed during the pass: <path>", so the worktree stays registered.
-- [ ] In the pass, each worktree niwa's walk found inside a unit is removed before any `claude rm`, and only after a fresh read of its HEAD and per-worktree refs matches the snapshot and a `git status` built by `gitCommand` reports no entry; any difference keeps the unit.
-- [ ] `runDestroyInstance` removes worktrees inside the instance after the scan and before `removeOwningSessionsListed`, always through the `rmtree.go` walk. Unforced, the worktree's `git status` runs with the scan, and a change it reports, or a worktree the walk keeps (locked, holding a repository), joins the scan's findings with the path named and is handled as destroy handles them today: on a terminal destroy lists it and asks for the instance name, going ahead only on a match (a worktree the walk won't remove then goes with the instance directory), and when stdin isn't a terminal it aborts with nothing removed. A change the status before a worktree's removal finds that the listing didn't show stops the destroy before that worktree goes, with the path named.
+- [ ] In the pass, each worktree niwa's walk found inside a unit is removed after the job-directory vet of every listed session (from <<ISSUE:10>>) and before any `claude rm`, and only after a fresh read of its HEAD and per-worktree refs matches the snapshot and a `git status` built by `gitCommand` reports no entry; any difference keeps the unit.
+- [ ] `runDestroyInstance` removes worktrees inside the instance after the scan and the job-directory vet of every listed session, and before `removeOwningSessionsListed`, always through the `rmtree.go` walk. Unforced, the worktree's `git status` runs with the scan, and a change it reports, or a worktree the walk keeps (locked, holding a repository), joins the scan's findings with the path named and is handled as destroy handles them today: on a terminal destroy lists it and asks for the instance name, going ahead only on a match (a worktree the walk won't remove then goes with the instance directory), and when stdin isn't a terminal it aborts with nothing removed. A change the status before a worktree's removal finds that the listing didn't show stops the destroy before that worktree goes, with the path named.
 - [ ] `niwa destroy --force` skips that status, removes worktrees with the same walk before the session, and leaves a worktree the walk won't remove (locked, holding a repository, a `.git` file that doesn't name its admin directory, a link where a directory should be) to go with the instance directory.
 - [ ] Swap scenario, deep entry: a clean unit whose niwa worktree holds `deep/a/b/file.txt`, with an outside directory holding a marker file whose listing, sizes and hashes are recorded first; a test hook in the walk, after it reads an entry's type and before it opens it, renames `deep/` aside and puts a symlink to the outside directory in its place. Through a reap, `niwa destroy` and `niwa destroy --force`, the outside directory's listing, sizes and hashes match and the marker is still there.
 - [ ] Swap scenario, worktree directory: the same setup with the hook swapping the worktree's own directory for such a symlink before the removal opens it; through the same three paths nothing outside the instance is deleted.
@@ -386,7 +386,7 @@ Downstream deliverables:
 - [ ] Must deliver: the pass's worktrees-before-the-session order, never forced, as the step a marked unit's reap runs through (required by <<ISSUE:13>>).
 - [ ] Must deliver: the walk callable on an arbitrary tree from the instance's directory descriptor, stopping at any `.git` entry or git directory and at another device (required by <<ISSUE:18>>).
 
-**Dependencies**: Blocked by <<ISSUE:1>>, <<ISSUE:7>>, <<ISSUE:8>>
+**Dependencies**: Blocked by <<ISSUE:1>>, <<ISSUE:7>>, <<ISSUE:8>>, <<ISSUE:10>>
 
 **Repo**: tsukumogami/niwa
 
@@ -430,22 +430,25 @@ Downstream deliverables:
 
 ### Issue 11: fix(cli): run failed-dispatch cleanup, the watch's discard, the hook worktree sweep and destroy's scan through the rule
 
-**Goal**: Failed-dispatch cleanup and the watch's discard call `removal.Evaluate` before `destroyInstanceFunc`, and the hook worktree sweep and `niwa destroy`'s scan build every git call with `gitCommand` and run the program-naming configuration check on every repository they find, with `DestroySession` removing through the `WorktreeRemover`, so `partial.txt` survives a failed dispatch and a planted driver keeps the worktree or refuses an unforced destroy with the key named and never runs.
+**Goal**: Failed-dispatch cleanup, the watch's discard and the watch's failed-stage rollback call `removal.Evaluate` before `destroyInstanceFunc`, and the hook worktree sweep and `niwa destroy`'s scan build every git call with `gitCommand` and run the program-naming configuration check on every repository they find, with `DestroySession` removing through the `WorktreeRemover`, so `partial.txt` survives a failed dispatch and a planted driver keeps the worktree or refuses an unforced destroy with the key named and never runs.
 
 **Acceptance Criteria**:
 
-Failed-dispatch cleanup and the watch's discard:
+Failed-dispatch cleanup, the watch's discard and the watch's failed-stage rollback:
 
 - [ ] The failed-dispatch rollback calls `removal.Evaluate` for its instance before `destroyInstanceFunc`; a keeping verdict leaves the instance directory on disk and prints the first keeping check with the path it names.
 - [ ] Scenario: a dispatch that fails after a file `partial.txt` is written in its instance leaves `partial.txt` in place with its contents unchanged, and the output names it.
 - [ ] Scenario: a dispatch that fails without writing anything leaves no instance behind.
 - [ ] `discardStagedRecord` calls `removal.Evaluate` for the record's instance before `destroyInstanceFunc`; a keeping verdict leaves the instance directory on disk and names the check and path.
+- [ ] The deferred rollback `stageReview` arms in `internal/cli/watch.go`, which runs when staging fails, including after the review agent has launched, calls `removal.Evaluate` for its instance before `destroyInstanceFunc`, as failed-dispatch cleanup does; a keeping verdict leaves the instance directory on disk and names the check and path.
+- [ ] Scenario: a watch stage in which the review agent writes a file with unique contents in its instance and staging then fails leaves that file in place with its contents unchanged, the instance stays, and the output names the keeping check and the file.
 
 The hook worktree sweep and `DestroySession`:
 
 - [ ] Before any other git call, the sweep runs the removal walk over each worktree and the program-naming configuration check on every repository it finds there (the worktree's own, each submodule, gitlink and nested repository), and evaluates the worktree's repository checks; a flagged or failing repository keeps that worktree with the key or check named.
-- [ ] The sweep calls `DestroySession` with force off, a git invoker built on `gitCommand` and the `rmtree.go` remover as its `WorktreeRemover`; no removal path passes `worktree.StdGitInvoker` any more.
-- [ ] `DestroySession` makes no `git worktree remove` call, forced or not; it removes the worktree's tree and admin directory through the `WorktreeRemover` before `git branch -d`, and a removal that stops returns an error naming the path.
+- [ ] The sweep calls `DestroySession` with force off, a git invoker built on `gitCommand` and the `rmtree.go` remover as its `WorktreeRemover`; the reap-time sweep (`internal/cli/reap_worktrees.go`) passes `worktree.StdGitInvoker` nowhere any more.
+- [ ] `DestroySession` takes a `WorktreeRemover` beside its `GitInvoker` and removes the worktree through it before `git branch -d`. With the sweep's `rmtree.go` remover it makes no `git worktree remove` call, forced or not; that remover takes the worktree's tree and admin directory, and a removal that stops returns an error naming the path.
+- [ ] The other callers of `DestroySession`, the hook teardown (`teardownHookSession`, `internal/cli/session_from_hook_cmd.go:376`), the failed-hook reconcile (`reconcileFailedHookCreate`, `session_from_hook_cmd.go:254`), the person-run worktree destroy (`destroyOneWorktree`, `internal/cli/session_lifecycle_cmd.go:663`) and `destroySessionWorktrees` (`internal/cli/worktree_destroy_resolve.go:404`), keep today's remover and invoker: they pass `worktree.StdGitInvoker` and a remover that runs today's `git worktree remove --force` through it, so what they do doesn't change.
 - [ ] With force off, a change `DestroySession`'s own `git status` reports keeps the worktree, named like any other disagreement; with force on, that status is skipped as today.
 - [ ] `DestroySession`'s `git status` carries `--ignore-submodules=all` and `--untracked-files=all`, and the invoker runs the configuration check again right before that status and right before the removal, returning an error that names the key and keeps the worktree.
 
@@ -457,7 +460,7 @@ The hook worktree sweep and `DestroySession`:
 - [ ] The scan runs the same status in each submodule and nested repository the walk hands it, after that repository's configuration check, and a change found in one is loss the way a change in the parent is. Scenario: an instance whose submodule holds a modified tracked file makes an unforced `niwa destroy` refuse as loss with the submodule's path named, and the instance stays.
 - [ ] Before the scan's first git call, and before `--force` removes a worktree, `runDestroyInstance` runs the removal walk over the instance and the configuration check on every repository it finds, submodules, gitlinks and nested repositories included; a flagged repository gets no further git call and is reported as a `LossScanError` naming the key, so an unforced destroy lists it as loss, asks for the instance name on a terminal and goes ahead only on a match, and aborts when stdin isn't a terminal; once confirmed, and under `--force`, that worktree goes with the instance directory.
 - [ ] The builder runs the check again right before the scan's `git status` in each repository and before the status that precedes each unforced worktree removal; a key found at the scan's status is listed as loss the same way, and one first found at the status before a worktree's removal, after the confirmation, stops the destroy before that worktree goes, with the key named. A `--force` removal starts no git process.
-- [ ] `niwa destroy --workspace` (`runDestroyWorkspace`) goes through the same scan and order as an unforced `runDestroyInstance`: it passes `workspace.ScanInstancesParallel` the same `gitCommand`-built `ScanOption` after the same walk and configuration check on every instance, and lists a change, a flagged key or a worktree the walk keeps with the rest of the scan's findings, handled as it handles them today: without `--confirm` it asks for the workspace name on a terminal and goes ahead only on a match, and aborts when stdin isn't a terminal; with `--confirm <name>` it goes ahead with no prompt; it takes no `--force`. After the confirmation and before `removeOwningSessionsListed` it removes each instance's worktrees through the `rmtree.go` walk with the same status before each one, a change the listing didn't show stopping the destroy with the path named before any `claude rm` or instance directory removal. Scenario: `niwa destroy --workspace --confirm <name>` on a workspace whose instance holds a clean niwa worktree and a stopped session leaves no session in a `claude agents` listing, and a `claude` wrapper that records whether the worktree path exists when `claude rm` runs finds it gone; an instance holding an unpushed commit is listed as loss the way single-instance destroy lists it.
+- [ ] `niwa destroy --workspace` (`runDestroyWorkspace`) goes through the same scan and order as an unforced `runDestroyInstance`: it passes `workspace.ScanInstancesParallel` the same `gitCommand`-built `ScanOption` after the same walk and configuration check on every instance, and lists a change, a flagged key or a worktree the walk keeps with the rest of the scan's findings, handled as it handles them today: without `--confirm` it asks for the workspace name on a terminal and goes ahead only on a match, and aborts when stdin isn't a terminal; with `--confirm <name>` it goes ahead with no prompt; it takes no `--force`. After the confirmation and the job-directory vet of every listed session, and before `removeOwningSessionsListed`, it removes each instance's worktrees through the `rmtree.go` walk with the same status before each one, a change the listing didn't show stopping the destroy with the path named before any `claude rm` or instance directory removal. Scenario: `niwa destroy --workspace --confirm <name>` on a workspace whose instance holds a clean niwa worktree and a stopped session leaves no session in a `claude agents` listing, and a `claude` wrapper that records whether the worktree path exists when `claude rm` runs finds it gone; an instance holding an unpushed commit is listed as loss the way single-instance destroy lists it.
 
 Security scenarios:
 
@@ -474,9 +477,9 @@ Security scenarios:
 Skeleton and downstream:
 
 - [ ] E2E flow still works (do not break the skeleton): a deleted session's instance holding an unpushed commit is still kept by `niwa reap` with its first keeping check and branch named, and a clean one is still removed.
-- [ ] Must deliver: every removal niwa makes without a person naming it (failed-dispatch cleanup, the watch's discard, the hook worktree sweep, and the pass) decides through `removal.Evaluate` or `gitCommand` with the configuration check, and the sweep never forces a worktree's removal, so the marked-unit reap adds a reason to remove without adding a path around the rule (required by <<ISSUE:13>>).
+- [ ] Must deliver: every removal niwa makes without a person naming it (failed-dispatch cleanup, the watch's discard, the watch's failed-stage rollback, the hook worktree sweep, and the pass) decides through `removal.Evaluate` or `gitCommand` with the configuration check, and the sweep never forces a worktree's removal, so the marked-unit reap adds a reason to remove without adding a path around the rule (required by <<ISSUE:13>>).
 
-**Dependencies**: Blocked by <<ISSUE:1>>, <<ISSUE:3>>, <<ISSUE:7>>, <<ISSUE:9>>
+**Dependencies**: Blocked by <<ISSUE:1>>, <<ISSUE:3>>, <<ISSUE:7>>, <<ISSUE:9>>, <<ISSUE:10>>
 
 **Repo**: tsukumogami/niwa
 
@@ -494,7 +497,7 @@ Configuration and the seam:
 - [ ] The pass asks every unit that is stopped, carries no valid mark and isn't held, and asks each of them again at every pass, within the pass's budget and the over command's per-run deadline, so a unit answered not over or unknown at one pass is asked again at the next; a unit with a valid mark is never asked again.
 - [ ] Three answers: exit 0 writes `<instance>/.niwa/retired.json`; exit 1 writes no mark and hands the reason to the pass, which <<ISSUE:16>> stores in `unit.json`; exit 3 (and any other code, a signal or a command that can't start) reads as unknown, keeps the unit and writes no mark. The reason is the last non-empty stdout line, sanitized and no longer than 200 characters.
 - [ ] Timeout: an over command that sleeps past its deadline gets `SIGTERM` to its process group, then `SIGKILL` two seconds later; after the pass no process from that group is left running and no mark exists.
-- [ ] The pass makes no koto or forge call to decide whether a unit is over. Scenario: with no over command configured and wrappers for `koto` and `gh` on `PATH` that log calls, a dispatch over a stopped unit whose pull request merged and whose koto run is terminal leaves the unit unmarked, and neither wrapper logs a call from niwa.
+- [ ] The pass makes no koto or forge call to decide whether a unit is over. Scenario: with no over command configured and wrappers for `koto` and `gh` on `PATH` that log calls, a dispatch over a stopped unit whose pull request merged and whose koto run is terminal leaves the unit unmarked and still listed by `niwa list`, and neither wrapper logs a call from niwa.
 - [ ] The ask step skips a unit the rule reports as held: a unit test giving the pass a held verdict for a stopped, unmarked unit shows the seam is never called for it and no mark is written. The functional scenario with a real `keep.json` hold belongs to <<ISSUE:20>>.
 - [ ] After any answer but exit 0, a `retired.json` that is a regular file owned by the user with `marked_at` later than the call's start is removed, so a command that writes its own mark and then exits 1 or times out leaves none. The question and this clean-up both run under the instance lock, taken without blocking: a test holding the instance lock shows the pass asks nothing, removes no mark and leaves the unit for a later pass.
 
@@ -633,6 +636,7 @@ Downstream deliverables:
 - [ ] Network-off scenario: with every network call failing (a `git` wrapper that fails `ls-remote` and fetch, no route out), `niwa list` and `niwa list --json` exit 0 with the same output as with the network on, and a wrapper log shows no `git`, no over-command and no `claude` call made by the listing.
 - [ ] Each `niwa dispatch` prints one line to standard error after its opportunistic pass, in the form `niwa: <N> stopped unit[s] not retired, <size>; <D> kept-set entr(y|ies) due; <U> unit[s] not reached (niwa list)`, with sizes in binary units to one decimal place (`0 B`, `412 MiB`, `4.2 GiB`) and correct singular and plural forms.
 - [ ] No-command dispatch scenario: in a workspace with no `[session.over]` command configured, `niwa dispatch` still prints the dispatch line, counting stopped units whose state is `no over command configured`.
+- [ ] No-command removal scenario: in a workspace with no `[session.over]`, with two stopped, clean, dispatched units whose sessions are present and a listing of the workspace root, both instances and their job directories recorded first, `niwa dispatch` leaves both instances, their job directories and their transcripts on disk, the before and after listings differ only by the new worker, and the dispatch line counts 2 stopped units.
 - [ ] The dispatch line's count and size leave out marked units the rule keeps, which the listing still shows as `retired, kept by ...`.
 - [ ] `niwa reap` prints the stopped-not-retired, kept-set-due and not-reached counts together with its reaped and kept counts.
 - [ ] E2E flow still works (do not break the skeleton): a deleted session's instance holding an unpushed commit is still kept by `niwa reap` with its first keeping check and branch named, and a clean one is still removed through the gate and `DestroyInstance`.
@@ -795,9 +799,10 @@ Skeleton and downstream:
 - [ ] Nothing goes into the kept set from the instance except the files a keep record names and the paths a discard record releases, which wait under the entry's `discarded/` until the restore window ends; a reaped unit with neither a keep record that names files nor a discard record creates no entry.
 - [ ] A per-workspace lock at `~/.niwa/locks/k-<key>.lock`, created 0600 with `O_NOFOLLOW`, guards every write to and removal from the kept set.
 - [ ] After the move, the tombstone re-check treats a path the move took out as gone or deleted without calling it a change, while anything found at such a path again counts as "changed during the pass" and renames the tombstone back.
-- [ ] An entry's due date is the keep record's review date when it has one, and otherwise the move time plus the restore window read from `cleanupPeriodDays` in Claude Code's user settings (30 days when unset).
-- [ ] On or after the due date, the pass marks the entry due and writes `first_shown_due` into `entry.json` the first time it is shown; an entry is still on disk after a second pass the same day and is removed by the first pass at least a day after it was first shown.
-- [ ] `niwa list` ends with `kept set: <n> entries, <m> due (niwa list --kept)`, with `<m>` the entries this issue marks due.
+- [ ] The due date of an entry's `files/` is the keep record's review date when it has one, and otherwise the move time plus the restore window read from `cleanupPeriodDays` in Claude Code's user settings (30 days when unset); the due date of its `discarded/` is always the move time plus the restore window.
+- [ ] On or after `files/`'s due date, the pass marks it due and writes `first_shown_due` into `entry.json` the first time it is shown; `files/` is still on disk after a second pass the same day and is removed by the first pass at least a day after it was first shown.
+- [ ] An entry's `files/` and `discarded/` expire separately: the pass marks `discarded/` due on `discarded_due` and writes `discarded_first_shown_due` the first time it is shown, removes it at the first pass at least a day after that, leaves it in place when `files/` goes earlier, and removes the entry directory only once both parts are gone. A unit test over an entry written with both parts and a `due` before `discarded_due` shows `files/` leaving first, `discarded/` staying until a day after it was first shown due, and the entry directory going last.
+- [ ] `niwa list` ends with `kept set: <n> entries, <m> due (niwa list --kept)`, with `<m>` the entries this issue marks due, an entry counting as due while either of its parts is.
 - [ ] The dispatch line keeps <<ISSUE:16>>'s one-line template, `niwa: <N> stopped unit[s] not retired, <size>; <D> kept-set entr(y|ies) due; <U> unit[s] not reached (niwa list)`, with its `<D> kept-set entr(y|ies) due` count read from the entries this issue marks due: with one due entry it reads `1 kept-set entry due`, and with two it reads `2 kept-set entries due`.
 - [ ] An entry to remove is found by enumerating `kept-files/<instance>/` and `Lstat`ing each direct child, which must be a real directory; a symlink there is skipped and left alone, and no path read from `entry.json` is ever passed to a removal.
 - [ ] `niwa list --kept` lists every entry by instance, moved time and due state, with each file's path and size and never its contents; `niwa list --kept --json` prints the same as JSON; every path and string printed passes `removal.ScrubEvidence`.
@@ -833,7 +838,8 @@ Skeleton and downstream:
 - [ ] Scenario: a `discard.json` written by hand with no ledger entry releases nothing; the reap keeps the unit with the same unique paths named as without the file.
 - [ ] Scenario: a `discard.json` naming a path through a symlink, and one naming a path with `..`, each keep the unit with that path named and the record read as unreadable.
 - [ ] Scenario: after a confirmed discard of an untracked file, a reap of the otherwise clean unit removes the instance, and the discarded path (and the patch, when given) is found under the kept-set entry's `discarded/<in-unit path>`, moved with the same regular-file, one-link, component-by-component open the named-file move uses.
-- [ ] The kept-set entry's `entry.json` records `discarded_due` as the end of the restore window, computed by the single restore-window function <<ISSUE:21>> provides (Claude Code's transcript retention read at reap time, until <<ISSUE:23>> adds `restore_window`), and `niwa list --kept` shows the discarded paths with their sizes and that date.
+- [ ] The kept-set entry's `entry.json` records `discarded_due` as the end of the restore window, computed by the single restore-window function <<ISSUE:21>> provides (Claude Code's transcript retention read at reap time, until <<ISSUE:23>> adds `restore_window`), and `niwa list --kept` shows the discarded paths with their sizes, that date and their own due state, apart from the entry's `files/`.
+- [ ] Scenario: a unit with a keep record whose review date is one day ahead, naming an untracked file, plus a confirmed discard of another untracked file, is reaped. After the entry's `files/` leaves, `discarded/` is still on disk until `discarded_due`, is then shown due by `niwa list --kept`, and goes at the first pass at least a day later, after which the entry directory is gone.
 - [ ] E2E flow still works (do not break the skeleton): the reap of a deleted session's instance that holds an unpushed commit still keeps it and names the path.
 
 **Dependencies**: Blocked by <<ISSUE:1>>, <<ISSUE:14>>, <<ISSUE:21>>
@@ -890,7 +896,7 @@ Skeleton and downstream:
 - [ ] Every original path in `entry.json` and the rewritten keep record passes `removal.ResolveRecorded` against the fresh instance, and every source path must resolve inside the entry's own `files/` directory, or the restore refuses with the file named.
 - [ ] Missing parent directories are created one component at a time, each opened with `O_DIRECTORY|O_NOFOLLOW`, and each file is created with `O_CREAT|O_EXCL|O_NOFOLLOW`, never over an existing file; a failure refuses the restore with the file named.
 - [ ] Discarded paths under the entry's `discarded/` are not put back.
-- [ ] When the entry already left because its review date came before the window's end, the restore goes ahead without those files and the output names the entry that was gone.
+- [ ] When the entry's `files/` already left because its review date came before the window's end, the restore goes ahead without those files and the output names the entry whose files were gone.
 - [ ] Scenario: a unit reaped on a mark with `restore_window` set and resumed inside the window gets its kept files back at their original paths with matching hashes.
 - [ ] Scenario: a unit reaped on a mark with no `restore_window` set (window from Claude Code's transcript retention) and resumed inside the window gets its kept files back.
 - [ ] Scenario: the same two units resumed past `restore_until` each refuse with the date the window ended, with and without the setting.
@@ -962,11 +968,13 @@ graph TD
     I6 --> I8
     I7 --> I9
     I8 --> I9
+    I10 --> I9
     I6 --> I10
     I8 --> I10
     I3 --> I11
     I7 --> I11
     I9 --> I11
+    I10 --> I11
     I8 --> I12
     I9 --> I13
     I10 --> I13
@@ -1021,11 +1029,11 @@ The graph draws direct edges only. Most outlines also list Issue 1, the skeleton
 
 **Merge order:** `rule-and-worktrees` (Issues 1-11), then `over-mark-listing` (Issues 12-19), then `keep-and-restore` (Issues 20-24). Each group lands as one pull request, opened only after the group before it merges.
 
-**Critical path:** Issue 1 -> Issue 2 -> Issue 3 -> Issue 8 -> Issue 7 -> Issue 9 -> Issue 11 -> Issue 13 -> Issue 16 -> Issue 18 -> Issue 20 -> Issue 21 -> Issue 22 -> Issue 23 -> Issue 24 (15 of 24 issues). The chain is long because the design's six phases build one removal rule in order. A second chain of the same length runs through Issue 6 in place of Issue 3 (1 -> 2 -> 6 -> 8 -> ...).
+**Critical path:** Issue 1 -> Issue 2 -> Issue 3 -> Issue 8 -> Issue 7 -> Issue 9 -> Issue 11 -> Issue 13 -> Issue 16 -> Issue 18 -> Issue 20 -> Issue 21 -> Issue 22 -> Issue 23 -> Issue 24 (15 of 24 issues). The chain is long because the design's six phases build one removal rule in order. Other chains of the same length run through Issue 6 in place of Issue 3 (1 -> 2 -> 6 -> 8 -> ...) and through Issue 10 in place of Issue 7 (... -> 8 -> 10 -> 9 -> ...).
 
 **Parallelization:** Issue 1 is the only one that can start right away. After that, issues at the same depth have no edge between them and can be worked side by side, inside their group's pull request:
 
-- `rule-and-worktrees`: Issues 3 and 6 after Issue 2; Issues 4 and 8 after those; then Issues 5, 7 and 10 together once Issue 8 is in (Issue 5 also waits on Issue 4). Issue 9 follows Issue 7, and Issue 11 closes the group.
+- `rule-and-worktrees`: Issues 3 and 6 after Issue 2; Issues 4 and 8 after those; then Issues 5, 7 and 10 together once Issue 8 is in (Issue 5 also waits on Issue 4). Issue 9 follows Issues 7 and 10, and Issue 11 closes the group.
 - `over-mark-listing`: Issue 12 can start as soon as Issue 8 is done, alongside the rest of the first group's work, but Issue 13 waits on Issues 9 through 12. After Issue 13, Issues 16 and 19 run together; after Issue 16, Issues 14, 15 and 18 run together; Issue 17 closes the group once Issue 18 is in.
 - `keep-and-restore`: Issues 20, 21, 22, 23 and 24 form a single chain, with no parallel work inside the group.
 

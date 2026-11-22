@@ -166,7 +166,10 @@ The PRD lists six places niwa removes something without a person naming it,
 and wants the same answer from all of them and from the verdict-only mode.
 Today each place carries its own guards: the mapped sweep and backstop in
 reap.go, the worktree sweep in reap_worktrees.go, destroy's preflight and
-scan, the watch's discard. Adding a loss scan to each would give six copies of
+scan, the watch's discard. The watch's rollback of a failed stage, the
+deferred `destroyInstanceFunc` in `stageReview` (watch.go:809-814), carries
+none, though it can run after the review agent has launched
+(watch.go:862-864). Adding a loss scan to each would give six copies of
 the rule. The question is where the rule's code lives, what drives it, and how
 the time budget the PRD asks for is enforced around commands and network
 calls that each have their own timeouts.
@@ -544,11 +547,12 @@ verdict-only mode calls it with acting turned off. The five things
 loop: units whose session is gone (today's mapped sweep), stopped units the
 over command may answer, marked units, unmapped dispatch instances (the
 backstop, which still honors `.niwa/dispatch-retain`), and trim candidates.
-Failed-dispatch cleanup and the watch's discard call `removal.Evaluate` for
-their one instance before `destroyInstanceFunc`, and the hook worktree sweep
+Failed-dispatch cleanup, the watch's discard and the watch's failed-stage
+rollback call `removal.Evaluate` for their one instance before
+`destroyInstanceFunc`, and the hook worktree sweep
 evaluates each worktree's repository checks before `worktree.DestroySession`,
 then calls it with force off and with a git invoker built on `gitCommand`.
-With force off, `DestroySession` no longer runs the
+On the sweep's path, `DestroySession` no longer runs the
 `git worktree remove --force` it runs today even when its caller doesn't
 force. Its own `git status` is the clean check: a change it reports keeps
 the worktree, named like any other disagreement, and otherwise niwa removes
@@ -1155,8 +1159,9 @@ The kept set lives at `~/.niwa/w-<key>/kept-files/`, one entry per unit and
 move: `kept-files/<instance>/<UTC time of the move>/` holding `files/` with
 each named file at its in-unit path, the keep record with every path
 rewritten to its place there, and `entry.json` (schema `niwa.kept/v1`: the
-instance, its creation time, when it was moved, the due date, when it was
-first shown due, and each file's original path, SHA-256 and size). A move
+instance, its creation time, when it was moved, the due date of `files/`,
+when it was first shown due, and each file's original path, SHA-256 and
+size). A move
 within one filesystem is a rename; across volumes it's a copy, a hash check
 and a delete of the source, and a failed write or a hash mismatch keeps the
 unit with nothing removed. The move takes only regular files, and it checks
@@ -1174,8 +1179,10 @@ parent. Anything else (a symlink, a device, a directory, a file with a
 second hard link) keeps the unit with
 the path named, so a keep record can't point the move at a file outside the
 instance, a hard link to one included. A unit's entry also holds the paths its discard record released,
-under `discarded/` at their in-unit paths, with their own due date in
-`entry.json`: the end of the restore window. Entry directories are created 0700, `entry.json` and
+under `discarded/` at their in-unit paths, with their own due date and
+first-shown date in `entry.json` (`discarded_due`,
+`discarded_first_shown_due`): the due date is the end of the restore window,
+whatever review date the keep record gives. Entry directories are created 0700, `entry.json` and
 the rewritten keep record 0600, and each file keeps its permission bits with
 setuid, setgid and sticky cleared. A per-workspace lock in `~/.niwa/locks/`
 guards the entries; every lock file there is created 0600 with `O_NOFOLLOW`.
@@ -1190,11 +1197,16 @@ reads, and the two never share a directory or an instance name. This is
 named as an overlap with tsukumogami/niwa#536, which has landed, so this
 work checks the release store's layout as it now stands.
 
-The due-date clash is reconciled by store. niwa's kept set follows R27: an
-entry's due date is the keep record's review date, or the end of the unit's
-restore window when the record names none; on that date the pass marks it
-due, the listing and the dispatch line show it, and the first pass at least
-a day after it was first shown removes it. The earlier remover's own kept
+The due-date clash is reconciled by store. niwa's kept set follows R27, and
+an entry's `files/` and `discarded/` expire separately, each with its own due
+date and first-shown date. `files/` is due at the keep record's review date,
+or at the end of the unit's restore window when the record names none;
+`discarded/` is due at the end of the restore window. On a part's due date
+the pass marks that part due, the listing and the dispatch line show it (an
+entry counts as due while either part is), and the first pass at least a day
+after that part was first shown removes it. The entry directory goes when
+both parts are gone, so a review date before the window's end takes the
+named files early but never the discarded paths. The earlier remover's own kept
 set, in that remover's state, keeps its never-expires rule; niwa never reads
 or removes it, and its entries aren't carried into niwa's. A person who wants
 an entry kept longer gives the record a later review date. If the earlier
@@ -1252,10 +1264,10 @@ parent directories are created one component at a time, each opened with
 with `O_CREAT|O_EXCL|O_NOFOLLOW`, never over an existing file; a path that
 fails any of this refuses the restore the same way a hash mismatch does,
 naming the file. Discarded paths aren't put back; they stay in the entry's
-`discarded/` for the person to copy until the window ends. When the entry
-already left because its review date came
+`discarded/` for the person to copy until the window ends. When the entry's
+`files/` already left because its review date came
 before the window's end, the restore goes ahead without those files and says
-which entry was gone, since the person who set that date chose it. The
+which entry's files were gone, since the person who set that date chose it. The
 restored instance carries no mark.
 
 #### Alternatives Considered
@@ -1414,7 +1426,8 @@ keeps its array and adds a `unit` object to each record with `state`,
 `answer`, `reason`, `retired`, `mark_voided`, `verdict`, `kept_by` (check,
 paths, evidence), `disagreement` (step, message), `held` (owner, reason,
 review, due) and `not_reached`. `niwa list --kept [--json]` lists the kept set
-by entry, file path and size, never file contents.
+by entry, file path and size, with the due date and due state of each
+entry's `files/` and `discarded/`, never file contents.
 
 Every string that comes from a unit (the over command's reason, git error
 evidence, a keep record's owner and reason, paths) passes
@@ -1906,8 +1919,9 @@ decide. The pass, `runPass` in
 today and adds stopped units and marked units, gives every all-unit pass one
 30-second deadline shared by everything inside it, takes units oldest-reached
 first, and counts the ones it didn't start. `reapOpportunistically`,
-`niwa reap`, `niwa retire`, failed-dispatch cleanup, the watch's discard and
-the hook worktree sweep all go through it or through `removal.Evaluate`.
+`niwa reap`, `niwa retire`, failed-dispatch cleanup, the watch's discard, the
+watch's failed-stage rollback and the hook worktree sweep all go through it
+or through `removal.Evaluate`.
 
 On top of the rule sits the seam. A workspace names its over command in
 `[session.over]`; niwa runs it like the removal gate, in its own process
@@ -2020,8 +2034,9 @@ niwa retire <instance>  ──> write mark ──> runPass(one) ───┘    
                                                      ledger, launch record)
 ```
 
-Failed-dispatch cleanup and the watch's discard call `removal.Evaluate` for
-their one instance; the hook worktree sweep evaluates a worktree's repository
+Failed-dispatch cleanup, the watch's discard and the watch's failed-stage
+rollback call `removal.Evaluate` for their one instance before
+`destroyInstanceFunc`; the hook worktree sweep evaluates a worktree's repository
 checks before removing it. Both boxes write their record together with its
 entry in the unit's ledger outside the instance, and every git call under
 `removal.Evaluate`, the acting steps, the hook worktree sweep and
@@ -2147,12 +2162,23 @@ worktree with "changed during the pass: ref <name>".
 **`internal/worktree/worktree.go`.** `DestroySession` already takes a
 `GitInvoker`, so its `git status --porcelain` and `git branch -d` calls run
 hardened once the sweep passes the `gitCommand` invoker instead of
-`StdGitInvoker`, which no removal path uses any more. It stops calling
-`git worktree remove`: it takes a `WorktreeRemover` beside the invoker and
-removes the worktree's tree and admin directory with it, forced or not,
-before `git branch -d`, which then finds the branch checked out nowhere. A
-removal that stops comes back as an error naming the path, where today the
-result of `git worktree remove` is discarded. The invoker adds
+`StdGitInvoker`, which the reap-time sweep in reap_worktrees.go no longer
+uses anywhere. It takes a `WorktreeRemover` beside the invoker and removes
+the worktree through it before `git branch -d`. The sweep passes the
+`rmtree.go` remover, so on the sweep's path `DestroySession` makes no
+`git worktree remove` call, forced or not: the remover takes the worktree's
+tree and admin directory, and `git branch -d` then finds the branch checked
+out nowhere. A removal the `rmtree.go` remover stops comes back as an error
+naming the path, where today the result of `git worktree remove` is
+discarded. The other callers, the hook teardown (`teardownHookSession`,
+internal/cli/session_from_hook_cmd.go:376), the failed-hook reconcile
+(`reconcileFailedHookCreate`, session_from_hook_cmd.go:254), the person-run
+worktree destroy (`destroyOneWorktree`,
+internal/cli/session_lifecycle_cmd.go:663) and `destroySessionWorktrees`
+(internal/cli/worktree_destroy_resolve.go:404), keep today's remover and
+invoker: they pass `StdGitInvoker` and a remover that runs today's
+`git worktree remove --force` through it with its result discarded, so what
+they do doesn't change. The sweep's invoker adds
 `--ignore-submodules=all` and `--untracked-files=all` to the `git status`
 call, and runs the program-naming configuration check on the worktree's
 repository right before that status and before the removal, returning an
@@ -2416,7 +2442,9 @@ Host files:
     files/<in-unit path>                             named files, unchanged, no setuid bits
     discarded/<in-unit path>                         paths a discard record released, due at window end
     keep.json                                        paths rewritten, 0600
-    entry.json                                       niwa.kept/v1: due, discarded_due, first_shown_due, files; 0600
+    entry.json                                       niwa.kept/v1: due and first_shown_due (files/),
+                                                     discarded_due and discarded_first_shown_due
+                                                     (discarded/), files; 0600
 ~/.niwa/w-<workspace key>/ledger/<instance>.json     niwa.ledger/v1, 0600
 ~/.niwa/w-<workspace key>/scratch/<pass>/            0700, made fresh each pass; owner and mode of it
                                                      and its parent checked before each use
@@ -2760,12 +2788,16 @@ An all-unit pass, before a dispatch:
    instance, checkout and session stay.
 9. Write `unit.json` (0600) with the answer, time stopped, size, verdict,
    scrubbed evidence and `reached_at`, and its hash into the ledger.
-10. Handle the kept set: mark entries due on their date and note in
-    `entry.json` when each was first shown, and remove entries first shown
-    due at least a day before. An entry to remove is found by enumerating
+10. Handle the kept set, each entry's `files/` and `discarded/` apart: mark
+    a part due on its own date (`due` for `files/`, `discarded_due` for
+    `discarded/`) and note in `entry.json` when that part was first shown
+    (`first_shown_due`, `discarded_first_shown_due`), remove a part first
+    shown due at least a day before, and remove the entry directory once
+    both parts are gone. An entry is found by enumerating
     `kept-files/<instance>/` and `Lstat`ing each direct child, which must be
     a real directory, never a symlink; the removal takes that enumerated
-    directory and never a path read from `entry.json`.
+    directory, or its `files/` or `discarded/` child checked the same way,
+    and never a path read from `entry.json`.
 11. Stop when the deadline is reached; count the units not started. A unit
     the deadline cuts short mid-evaluation keeps, counts as not reached and
     has its `reached_at` set to this pass, and a call blocked in the kernel
@@ -2978,7 +3010,8 @@ Deliverables:
   pass to `claude rm`, those in the decoded `claude agents` listing, before
   its first removal step, as destroy does with every mapped session the
   listing holds, removing nothing when one fails.
-- Failed-dispatch cleanup and the watch's discard calling `removal.Evaluate`
+- Failed-dispatch cleanup, the watch's discard and the watch's failed-stage
+  rollback (`stageReview`'s deferred cleanup) calling `removal.Evaluate`
   before `destroyInstanceFunc`; the hook worktree sweep evaluating each
   worktree's repository checks.
 - The hook worktree sweep (`internal/cli/reap_worktrees.go`,
@@ -2988,8 +3021,9 @@ Deliverables:
   every log-family call with `--no-show-signature`, the program-naming
   configuration check run on every repository niwa's walk finds under the
   worktree or instance, submodules, gitlinks and nested repositories
-  included, before the first other git call in any, and `DestroySession`
-  removing its worktree through the `WorktreeRemover` instead of
+  included, before the first other git call in any, and `DestroySession`,
+  on the sweep's path, removing its worktree through the `rmtree.go`
+  `WorktreeRemover` instead of
   `git worktree remove --force`, with its own status as the clean check when
   force is off.
 - Security scenarios: a hook-provisioned worktree's repository and an
@@ -3058,7 +3092,8 @@ Deliverables:
   for that session, as the functional scenario below also shows.
 - Functional scenarios: a clean unit holding a niwa worktree leaves no session
   behind after a reap and after `niwa destroy`; failed-dispatch cleanup keeps
-  `partial.txt`; no `claude` call a wrapper logs carries an override flag,
+  `partial.txt`, and the watch's failed-stage rollback keeps a file the
+  review agent wrote; no `claude` call a wrapper logs carries an override flag,
   no `git` call a wrapper logs is `git worktree remove` or
   `git worktree prune`, and none carries `--force` outside `niwa destroy
   --force`; every `claude` call a wrapper logs runs from a directory outside
@@ -3144,7 +3179,8 @@ Deliverables:
 - `niwa discard` with `insideInstance` and `confirmOnTerminal`, its ledger
   entry and the ledger match on read, and discarded paths moved to the
   entry's `discarded/`, due at the end of the restore window (computed from
-  Claude Code's retention until phase 6 adds the setting). It lands here
+  Claude Code's retention until phase 6 adds the setting) and removed on
+  their own date and notice, apart from the entry's `files/`. It lands here
   rather than in phase 1 because a discard must never release a path before
   the kept set can hold it.
 - Functional scenarios for the keep-record, newer-scratch and held-unit
@@ -3308,7 +3344,8 @@ the change rather than settling the point on its own.
 **tsukumogami/niwa#300**, the reap's missing loss scan, is closed by phase 1:
 the mapped sweep and the backstop evaluate the rule before removing, a scan
 error keeps, and the other non-interactive removals (failed-dispatch cleanup,
-the watch's discard) go through the same rule.
+the watch's discard, the watch's failed-stage rollback) go through the same
+rule.
 
 **tsukumogami/niwa#458** asks for a way to keep one chosen instance from reap.
 The holding form of `keep.json` is that first-class marker, and `niwa list`
@@ -3712,8 +3749,9 @@ missing or deleted, while anything found at such a path again counts as a
 change.
 Lock files in `~/.niwa/locks/` are created 0600 with `O_NOFOLLOW`, and the
 mark clean-up after an over answer runs under the instance lock. niwa uses no
-sudo, opens no listener, passes no force flag to `claude` or to git outside
-`niwa destroy --force`, and runs neither `git worktree remove` nor
+sudo, opens no listener and passes no force flag to `claude`; in the pass,
+the reap-time sweep and `niwa destroy` it passes none to git outside
+`niwa destroy --force` and runs neither `git worktree remove` nor
 `git worktree prune`, which a functional test checks.
 
 `niwa retire`, `niwa discard` and `--override-not-over` refuse inside an
@@ -4040,8 +4078,8 @@ A reap that stops after the kept-set move, because the tombstone renames
 back or a later step (worktree removal, or the configuration re-check or
 status before it, `claude rm`, on-reap) disagrees,
 leaves the unit listed with its named and discarded files already in a
-kept-set entry no launch record points at, and that entry still leaves on
-its due date. A named file tracked in a linked worktree makes that worktree
+kept-set entry no launch record points at, and that entry's parts still
+leave on their due dates. A named file tracked in a linked worktree makes that worktree
 dirty once it's moved, so the status niwa runs before removing it reports
 the change, the removal keeps, and this happens
 with no race at all. The loss isn't silent, since the entry is listed and
@@ -4075,7 +4113,8 @@ upload reads as held, while the large files it points at exist only under
 keep a unit only when its local LFS objects aren't on the remote; niwa
 doesn't do that now.
 
-Failed-dispatch cleanup and the watch's discard act on the rule's verdict
+Failed-dispatch cleanup, the watch's discard and the watch's failed-stage
+rollback act on the rule's verdict
 without the re-read and tombstone check a reap makes, so a write between
 their evaluation and the destroy is lost unseen. Their instances have seen
 little agent time, which keeps the case small.
@@ -4226,7 +4265,8 @@ though no file in its result is lost.
   Ordering the discard after the kept set means no part ever releases a path
   it can't hold.
 - Discarded paths are listed by `niwa list --kept` with their size and leave
-  at the window's end like any due entry; within one filesystem the move is
+  on their own due date, the window's end, after a day's notice, even when
+  the entry's named files left earlier; within one filesystem the move is
   a rename.
 - The `in_brief` check fails toward keeping: an unverified file keeps its
   unit and is listed as "brief copy not verified", so nothing is lost while
