@@ -49,7 +49,8 @@ Amended after acceptance: the project owner chose the default for job scratch
 in a unit with no handoff brief, the default of the idle-time setting, and how
 the verdict-only mode shows job scratch. R1, R4, R11, R24, R28, R29 and R35,
 the newer-scratch and verdict-only scenarios, Out of Scope, Known Limitations
-and Decisions and Trade-offs carry the choice. The PRD stays Accepted.
+and Decisions and Trade-offs carry the choice. The amended requirements stand
+as accepted.
 
 Absorbed [BRIEF-over-remover](docs/briefs/BRIEF-over-remover.md); carried in Absorbed Brief.
 

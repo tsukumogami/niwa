@@ -44,7 +44,7 @@ Every later issue refines that path in the design's phase order, and none moves 
 2. `over-mark-listing` (Issues 12-19): a workspace that names an over command sees finished units go at the next dispatch, a person removes a clean stopped unit with `niwa retire`, every stopped unit shows its answer, age and size, and idle build trees are trimmed.
 3. `keep-and-restore` (Issues 20-24): a person can hold a unit or keep chosen files past its reap, release paths the rule would keep with a confirmed `niwa discard`, and restore a unit reaped on a mark inside a known window.
 
-The issues of one group land together in one pull request, so an issue never reaches the default branch ahead of the rest of its part. The design's six phases each end with niwa safe to release, but the design picked three parts as the delivery unit, so the plan doesn't split further. Contracted to groups, the issue dependencies run only forward: from `rule-and-worktrees` into `over-mark-listing` (Issues 3, 5, 8, 9, 10 and 11 into 12, 13, 15, 17, 18 and 19), from `over-mark-listing` into `keep-and-restore` (Issues 13, 14, 16 and 18 into 20, 22 and 23), and from `rule-and-worktrees` into `keep-and-restore` (Issue 5 into 23). The merge order is acyclic and linear. No non-PR gate is declared: nothing between the groups is a publish, a deploy or a manual step.
+The issues of one group land together in one pull request, so an issue never reaches the default branch ahead of the rest of its part. The design's six phases each end with niwa safe to release, but the design picked three parts as the delivery unit, so the plan doesn't split further. Contracted to groups, the issue dependencies run only forward: from `rule-and-worktrees` into `over-mark-listing` (Issues 3, 5, 8, 9, 10 and 11 into 12, 13, 15, 17, 18 and 19), from `over-mark-listing` into `keep-and-restore` (Issues 13, 14, 15, 16 and 18 into 20, 22, 23 and 24), and from `rule-and-worktrees` into `keep-and-restore` (Issue 5 into 23). The merge order is acyclic and linear. No non-PR gate is declared: nothing between the groups is a publish, a deploy or a manual step.
 
 ## Issue Outlines
 
@@ -67,6 +67,7 @@ The issues of one group land together in one pull request, so an issue never rea
 - [ ] Clone half of the `@critical` reap loss-scan scenario: a dispatched unit whose session was deleted by hand, with a commit on a branch that was never pushed to the clone URL, survives `niwa reap` with its instance directory unchanged, and the output names the instance, the repository check and the branch.
 - [ ] The same unit, with its session deleted and no unpushed commit, is removed by `niwa reap`, and the existing scenario "niwa reap reclaims a dispatch instance after its session is deleted" still passes.
 - [ ] A kept unit is printed by `niwa reap` with its first keeping check, and the opportunistic reap before `niwa dispatch`, `niwa create` and `niwa watch` keeps the same unit and never fails the command it runs before.
+- [ ] The pass runs only inside niwa commands: niwa adds no daemon, timer or background process for it, and after any pass no niwa process remains running and no launchd, systemd or cron entry was added.
 - [ ] CI green.
 
 **Dependencies**: None
@@ -318,10 +319,10 @@ Scenarios (each through a reap):
 **Acceptance Criteria**:
 
 Re-read and tombstone:
-- [ ] After the gate allows a reap, the pass re-reads sessions, the process listing and, for every repository the walk found, its `git status` (preceded by a fresh program-naming configuration check), index-flag read and, for a prunable worktree, `git diff-index --cached` from its admin directory, all through `gitCommand`; any difference or flagged key keeps the unit with "changed during the pass" and nothing is removed.
+- [ ] After the gate allows a reap, the pass re-reads sessions and, for every repository the walk found, its `git status` (preceded by a fresh program-naming configuration check), index-flag read and, for a prunable worktree, `git diff-index --cached` from its admin directory, all through `gitCommand`; any difference or flagged key keeps the unit with "changed during the pass" and nothing is removed.
 - [ ] With the re-read, the pass records a ref snapshot per repository: every ref `for-each-ref` lists (in a linked worktree its own `refs/worktree/*` and `refs/bisect/*`, a prunable entry's read from its admin directory), HEAD, `stash list` and each worktree's HEAD from `git worktree list --porcelain -z`, and a hash of each record in `.niwa/`.
 - [ ] After on-reap and immediately before `DestroyInstance`, the pass takes `~/.niwa/locks/t-<workspace key>.lock` shared and renames the instance to `<root>/.niwa-tombstone-<instance>-<8 hex>` in the same directory; a path opened under the old name afterwards gets "no such file".
-- [ ] On the tombstone the pass repeats the process listing, the configuration check on every repository, `git status --porcelain=v2 -z --ignore-submodules=all --untracked-files=all`, `git ls-files -v -z`, the prunable worktree's `git diff-index --cached`, the record hashes and the ref snapshot; a new, moved or gone ref, a new stash entry, a HEAD or worktree HEAD pointing elsewhere, a flagged key or a flagged index entry counts as a difference.
+- [ ] On the tombstone the pass repeats the configuration check on every repository, `git status --porcelain=v2 -z --ignore-submodules=all --untracked-files=all`, `git ls-files -v -z`, the prunable worktree's `git diff-index --cached`, the record hashes and the ref snapshot; a new, moved or gone ref, a new stash entry, a HEAD or worktree HEAD pointing elsewhere, a flagged key or a flagged index entry counts as a difference.
 - [ ] Any difference calls `workspace.UntombstoneInstance`, which renames the tombstone back to `<root>/<instance>`, and the unit is kept with "changed during the pass" (with the ref, key or path named) and listed as the delete-then-reap path leaves one; otherwise `DestroyInstance` removes the tombstone. The tombstone lock is released once `DestroyInstance` or the rename back returns.
 - [ ] Scenario (`@critical`): an untracked, not ignored, file written into a repository's working tree after the re-read renames the tombstone back, keeps the unit with "changed during the pass" and the path named, and the file still exists under `<root>/<instance>`.
 - [ ] Scenario (`@critical`, through a reap and the verdict-only mode where it applies): a commit made in the instance after the re-read and before the rename, which leaves `git status` clean, renames the tombstone back and keeps the unit with "changed during the pass: ref <name>".
@@ -443,7 +444,9 @@ The hook worktree sweep and `DestroySession`:
 `niwa destroy`'s scan:
 
 - [ ] `runDestroyInstance` passes `workspace.ScanInstance` a `ScanOption` carrying a command builder made from `gitCommand`, `gitOutput` starts git only through it, and `internal/workspace` imports nothing from `internal/removal`.
+- [ ] The scan's durability check in `internal/workspace/durable.go`, `gitNetwork` (`ls-remote` and `fetch`) and `gitOutputEnv`, also starts git only through that builder, so no call the scan makes starts plain `git` with the inherited environment.
 - [ ] `scanStatus` passes `--porcelain=v1 --ignore-submodules=all --untracked-files=all`, and every log-family call the scan makes carries `--no-show-signature`.
+- [ ] The scan runs the same status in each submodule and nested repository the walk hands it, after that repository's configuration check, and a change found in one is loss the way a change in the parent is. Scenario: an instance whose submodule holds a modified tracked file makes an unforced `niwa destroy` refuse as loss with the submodule's path named, and the instance stays.
 - [ ] Before the scan's first git call, and before `--force` removes a worktree, `runDestroyInstance` runs the removal walk over the instance and the configuration check on every repository it finds, submodules, gitlinks and nested repositories included; a flagged repository gets no further git call and is reported as a `LossScanError` naming the key, so an unforced destroy refuses and `--force` leaves that worktree to go with the instance directory.
 - [ ] The builder runs the check again right before the scan's `git status` in each repository and before the status that precedes each unforced worktree removal; a key found then is reported and refused the same way. A `--force` removal starts no git process.
 
@@ -479,9 +482,10 @@ Skeleton and downstream:
 Configuration and the seam:
 - [ ] A workspace with `[session.over]` `command`, `timeout` and `env` loads; an invalid timeout or env name fails the configuration load with the field named; leaving the table out turns marking off and no over command runs.
 - [ ] The over command runs as `/bin/sh -c` from the workspace root in its own process group with only `PATH`, `HOME`, `NIWA_REMOVE_PATH` (the instance path), `NIWA_SESSION_IDS` and the configured env names set, and its stdin empty.
-- [ ] The pass asks only units that are stopped, carry no valid mark and aren't held; a unit with a valid mark is never asked again.
+- [ ] The pass asks every unit that is stopped, carries no valid mark and isn't held, and asks each of them again at every pass, within the pass's budget and the over command's per-run deadline, so a unit answered not over or unknown at one pass is asked again at the next; a unit with a valid mark is never asked again.
 - [ ] Three answers: exit 0 writes `<instance>/.niwa/retired.json`; exit 1 writes no mark and hands the reason to the pass, which <<ISSUE:16>> stores in `unit.json`; exit 3 (and any other code, a signal or a command that can't start) reads as unknown, keeps the unit and writes no mark. The reason is the last non-empty stdout line, sanitized and no longer than 200 characters.
 - [ ] Timeout: an over command that sleeps past its deadline gets `SIGTERM` to its process group, then `SIGKILL` two seconds later; after the pass no process from that group is left running and no mark exists.
+- [ ] The pass makes no koto or forge call to decide whether a unit is over. Scenario: with no over command configured and wrappers for `koto` and `gh` on `PATH` that log calls, a dispatch over a stopped unit whose pull request merged and whose koto run is terminal leaves the unit unmarked, and neither wrapper logs a call from niwa.
 - [ ] The ask step skips a unit the rule reports as held: a unit test giving the pass a held verdict for a stopped, unmarked unit shows the seam is never called for it and no mark is written. The functional scenario with a real `keep.json` hold belongs to <<ISSUE:20>>.
 - [ ] After any answer but exit 0, a `retired.json` that is a regular file owned by the user with `marked_at` later than the call's start is removed, so a command that writes its own mark and then exits 1 or times out leaves none. The question and this clean-up both run under the instance lock, and a test holding the instance lock shows the clean-up waits for it.
 
@@ -558,6 +562,7 @@ Downstream deliverables:
 - [ ] In retire, which has no all-unit deadline, the vet runs under its own 10-second context and keeps the unit when that expires.
 - [ ] Scenario: a unit a retire reaped is brought back by `niwa resume` under its original name, from the launch record dispatch wrote, with its session started.
 - [ ] A retire passes no force flag to `claude` or to git and stops no running process.
+- [ ] Scenario (one rule): `niwa reap --verdict-only`, `niwa retire`, `niwa reap` and the pass before `niwa dispatch` give the same verdict for the same unit, on one unit of each verdict, and the verdict-only `--json` output for that one unit carries the same verdict and the same first keeping check.
 - [ ] Must deliver: `insideInstance` and `confirmOnTerminal` as reusable functions taking the instance and the text to show (what the command will release and the prompt), so `niwa discard` can call both with its own messages (required by <<ISSUE:22>>).
 - [ ] E2E flow still works (do not break the skeleton): the reap of a deleted session's instance holding an unpushed commit still keeps it and names the path.
 
@@ -578,7 +583,7 @@ Downstream deliverables:
 - [ ] The guide states how niwa runs the command: `/bin/sh -c` from the workspace root, in its own process group, with only `PATH`, `HOME`, `NIWA_REMOVE_PATH` (the instance path) and `NIWA_SESSION_IDS` plus the configured `env` names, and on the deadline `SIGTERM` to the group followed by `SIGKILL` two seconds later.
 - [ ] The guide states the reason line: the last non-empty line of standard output, sanitized and cut to 200 characters, stored and shown in the listing.
 - [ ] The guide says niwa writes `<instance>/.niwa/retired.json` itself, that a mark the command writes during a call that doesn't exit 0 is removed, and that a mark without niwa's ledger entry counts as no mark, so a command should only answer and never write the mark.
-- [ ] The guide says which units niwa asks about (stopped, carrying no valid mark, not held, not asked since they last worked) and that a yes is never asked again.
+- [ ] The guide says which units niwa asks about (stopped, carrying no valid mark, not held), that it asks each of them again at every pass, and that a yes is never asked again.
 - [ ] The guide defines a landed takeover as both of these holding: the unit's own koto session carries a `session_superseded` fence naming a successor, and that successor's context holds `koto/superseded-carry-complete`. It says a fence without the key is a takeover in progress and must answer not over, that a unit without a fence is answered on its own run, and that a unit with no koto run answers unknown with "no takeover found".
 - [ ] The guide gives a takeover-key example command that a reader can copy: exit 0 for a landed takeover, exit 1 for a fence without the key, and an unknown exit with the reason "no takeover found" for a unit with no koto run.
 - [ ] The guide tells authors to treat the instance as untrusted input: read it as data, never `cd` into it and run `git`, `make` or a script from there, and never source a file from it.
@@ -608,8 +613,8 @@ Downstream deliverables:
 - [ ] The pass sorts units by `reached_at` from a ledger-matched `unit.json`, never-reached first, so a unit with no record or a non-matching one is taken before every unit with a valid one.
 - [ ] Time budget scenario: with the 30-second deadline shortened in the test and more units than one pass can reach, `niwa reap` reports a non-zero count of units not reached, the units it didn't start get no answer and no mark, a unit the deadline cut short mid-evaluation keeps and has its `reached_at` set to that pass, and a vet the deadline cuts short leaves the unit counted as not reached.
 - [ ] Units-not-reached scenario: running the next pass after that one takes the units the first pass didn't reach before the ones it did, shown by their `reached_at` values and by the second pass's not-reached count dropping.
-- [ ] `niwa list` prints, under each instance's name, a state line read only from `unit.json` and the records: `stopped <age>, <size>, not over: <reason>`; `no over command configured`; `unknown (exit <n>)` with its reason; `retired, kept by <check>: <paths>`; or `retired, kept by a disagreement: <step> refused: <message>`, with the existing `resume:` line kept; a unit whose mark was voided shows unmarked with `mark voided` and why, and one whose mark has no ledger entry with `mark not written by niwa`.
-- [ ] Six kinds scenario, the listing half of the one <<ISSUE:13>> keeps: with an over command answering six stopped units as the design's table does, `niwa list` shows each one under its name, scrubbed, with its time stopped and size, the three not-over units as `stopped <age>, <size>, not over: <reason>` with the reasons `run not finished` (with the run's state), `blocked, waiting for a person` and `pull request open`, and the three unknown units with `unknown (exit <n>)` and the reason `no takeover found` or `no evidence` (for a top session and for a plain chat).
+- [ ] `niwa list` prints, under each instance's name, a state line read only from `unit.json` and the records: `stopped <age>, <size>, not over: <reason>`; `no over command configured`; `unknown: <reason>` when the command gave a reason, or `unknown (exit <n>)` when it gave none; `retired, kept by <check>: <paths>`; or `retired, kept by a disagreement: <step> refused: <message>`, with the existing `resume:` line kept; a unit whose mark was voided shows unmarked with `mark voided` and why, and one whose mark has no ledger entry with `mark not written by niwa`.
+- [ ] Six kinds scenario, the listing half of the one <<ISSUE:13>> keeps: with an over command answering six stopped units as the design's table does, `niwa list` shows each one under its name, scrubbed, with its time stopped and size, the three not-over units as `stopped <age>, <size>, not over: <reason>` with the reasons `run not finished` (with the run's state), `blocked, waiting for a person` and `pull request open`, and the three unknown units as `unknown: no takeover found` or `unknown: no evidence` (for a top session and for a plain chat).
 - [ ] `niwa list --json` keeps its array and adds a `unit` object to each record with `state`, `stopped_since`, `stopped_seconds`, `size_bytes`, `size_measured_at`, `answer`, `reason`, `retired`, `mark_voided`, `verdict`, `kept_by`, `disagreement`, `held` and `not_reached`; the existing fields and their `omitempty` behaviour are unchanged.
 - [ ] Terminal-escape scenario: a `unit.json` written with a matching ledger entry whose `reason` and `kept_by.evidence` carry ANSI escape and control sequences and a token shape prints through `niwa list`, `niwa list --json` and the dispatch line with no escape or control byte and the token as `[redacted]`, because every stored string is scrubbed again on read.
 - [ ] Network-off scenario: with every network call failing (a `git` wrapper that fails `ls-remote` and fetch, no route out), `niwa list` and `niwa list --json` exit 0 with the same output as with the network on, and a wrapper log shows no `git`, no over-command and no `claude` call made by the listing.
@@ -663,7 +668,7 @@ Downstream deliverables:
 - [ ] `[session.removal] trim` (bool, default `true`) and `trim_after` (duration, default `24h`) parse from workspace config. An invalid `trim_after` fails config loading with a message that names the key. With `trim = false` the pass trims nothing and reap reports `0` trimmed.
 - [ ] Root `niwa apply` holds an exclusive lock at `~/.niwa/locks/a-<workspace key>.lock` for its run. The trim tries that lock without blocking, and while apply holds it the pass trims nothing for that workspace, removes no file under any build tree and doesn't wait on the lock.
 - [ ] `removal.Evaluate` returns `KeepAndTrim` for a stopped unit it keeps that has an idle build tree, with `Verdict.Trim` listing each tree the trim would remove. `niwa reap --verdict-only` shows those trees and leaves every file in them in place.
-- [ ] Idle build-tree scenario: a stopped unit that stays (its session is live, or another check keeps it) has a git-ignored `target/` carrying `CACHEDIR.TAG` with the standard signature, and its newest write is older than `trim_after`. After `niwa reap`, `target/` is gone, the instance directory, its clone, its other files and its session are still there, and reap's count line reports `1` trimmed.
+- [ ] Idle build-tree scenario: a stopped unit that stays (it is stopped but not over, or another check keeps it) has a git-ignored `target/` carrying `CACHEDIR.TAG` with the standard signature, and its newest write is older than `trim_after`. After `niwa reap`, `target/` is gone, the instance directory, its clone, its other files and its session are still there, and reap's count line reports `1` trimmed.
 - [ ] A directory declared in `[repos.<name>] build_trees` (an exact path with a trailing slash) is trimmed the same way when idle. A directory without `CACHEDIR.TAG` and without a declaration is never trimmed.
 - [ ] A build tree with a file or directory written within `trim_after` (newest write measured across the whole tree) isn't trimmed, and stays in the unit's verdict.
 - [ ] A build tree that a running process uses as its working directory, or that holds a file a process has open, isn't trimmed. The check uses the pass's single process listing (`/proc` on Linux, `lsof -n -P -w -F 0pn` on macOS). If that listing fails, no tree in any unit it covers is trimmed.
@@ -697,6 +702,7 @@ Downstream deliverables:
 - [ ] Scenario: a pid record written by hand (no matching ledger entry) for a live process with its working directory in the instance doesn't release it: the unit is kept by the liveness check.
 - [ ] A record whose start time doesn't match the live process with that pid (a reused pid) doesn't release it, and the unit is kept by liveness.
 - [ ] The pid-record reader in `internal/removal/records.go` opens each file `O_NOFOLLOW|O_NONBLOCK`, requires a regular file owned by the user by `fstat` before reading, caps it at 64 KiB, decodes it strictly and rejects an unknown schema name; a symlink, FIFO, oversized, malformed or wrong-schema record reads as absent, so its process keeps the unit (one test per case).
+- [ ] `internal/removal/procs.go` takes the pass's one process listing (`/proc/<pid>/cwd` and `/proc/<pid>/fd` on Linux, `lsof -n -P -w -F 0pn` on macOS, read NUL-terminated) and attributes each process to its instance; a failed listing keeps every unit it would have cleared. After the gate allows a reap, the pass's re-read takes the listing again, and so does the tombstone re-check; a process that differs from the first listing keeps the unit with "changed during the pass", on the tombstone renaming it back first.
 - [ ] The tombstone re-check's fresh process listing applies the same pid records, so a registered helper that is still alive in the tombstone doesn't block a stopped unit's reap, while an unregistered process there still does.
 - [ ] `docs/guides/ephemeral-session-instances.md` documents the `niwa.pid/v1` fields, the `niwa helper` command with its checks and refusal message, that a helper is never signalled and ends on its own when the instance goes, and that under the deny-write sandbox the guide names `niwa helper` can't write the ledger, so the helper isn't registered and keeps its unit.
 - [ ] E2E flow still works (do not break the skeleton): the reap of a deleted session's instance holding an unpushed commit still keeps it and names the first keeping check and the branch.
@@ -714,7 +720,7 @@ Downstream deliverables:
 **Acceptance Criteria**:
 
 Keep record reading:
-- [ ] `internal/removal/records.go` gains a `keep.json` reader for schema `niwa.keep/v1`: opened `O_NOFOLLOW|O_NONBLOCK` from the `.niwa` directory descriptor, `fstat`ed as a regular file owned by the user, capped at 1 MiB, strictly decoded into a fixed struct (owner, reason, `written`, `written_at`, `review`, `protects`, `files` with `path`, `sha256`, `bytes`, `in_brief`, `stored_at`, and `brief.written_at`), with an unknown schema name or unknown field rejected.
+- [ ] `internal/removal/records.go` gains a `keep.json` reader for schema `niwa.keep/v1`: opened `O_NOFOLLOW|O_NONBLOCK` from the `.niwa` directory descriptor, `fstat`ed as a regular file owned by the user, capped at 1 MiB, strictly decoded into a fixed struct (`instance`, owner, reason, `written`, `written_at`, `review`, `protects`, `files` with `path`, `sha256`, `bytes`, `in_brief`, `stored_at`, and `brief.written_at`), with an unknown schema name or unknown field rejected.
 - [ ] A `keep.json` that is a symlink, a FIFO, oversize, malformed or of another schema keeps the unit as a missing record the rule needs, and `niwa reap --verdict-only` names the record and the reason.
 - [ ] A record with `protects` containing `instance`, or with neither `protects` nor `files`, is a hold: reap keeps the unit whatever its session state or over answer, and the verdict names the keep record with its owner and reason after `ScrubEvidence`.
 - [ ] Past the record's `review` date a hold still keeps the unit and is reported as due for review; nothing about the unit changes because the date passed.
@@ -742,6 +748,7 @@ Functional scenarios (`@critical`, in `test/functional/features/over-remover.fea
 - [ ] Newer scratch: a unit with a brief, one job scratch file older than the brief and one newer; the verdict lists the older as disposable and keeps the unit naming the newer one as newer than the brief.
 - [ ] Held unit, in `test/functional/features/ephemeral-session.feature`: two dispatched units, one held by `keep.json`, both sessions deleted; reap removes the unheld instance and keeps the held one, which `niwa list` shows as held.
 - [ ] Held unit not asked: with `[session.over]` configured, a stopped, unmarked unit held by `keep.json` is never asked, an over-command wrapper's log shows no call for it, and it carries no mark after the pass.
+- [ ] Keep record through apply: after `niwa apply` in a held unit's instance, its `keep.json` is still there unchanged and still holds the unit through the next reap.
 - [ ] A keep record naming a symlink to a file outside the instance keeps the unit with the path named, and nothing is copied or moved anywhere.
 - [ ] An `in_brief` file with no `stored_at` keeps the unit as unique with "brief copy not verified".
 - [ ] An `in_brief` file whose `stored_at` copy differs from the recorded hash keeps the unit as unique with "brief copy not verified".
@@ -764,7 +771,7 @@ Skeleton and downstream:
 
 **Acceptance Criteria**:
 
-- [ ] When a unit that passes the rule has a `keep.json` naming files, the reap moves each named file into `~/.niwa/w-<key>/kept-files/<instance>/<UTC time of the move>/files/<in-unit path>`, where `<key>` is `mirror.WorkspaceKey` of the workspace root, before any worktree removal, tombstone rename or `DestroyInstance`.
+- [ ] When a unit that passes the rule has a `keep.json` naming files, the reap moves each named file into `~/.niwa/w-<key>/kept-files/<instance>/<UTC time of the move>/files/<in-unit path>`, where `<key>` is `hostdir.WorkspaceKey` of the workspace root, before any worktree removal, tombstone rename or `DestroyInstance`.
 - [ ] The entry also holds the keep record with every path rewritten to its place in the entry, and an `entry.json` with schema `niwa.kept/v1` carrying the instance, its creation time, when it was moved, the due date, `first_shown_due` (empty at the move) and each file's original path, SHA-256 and size.
 - [ ] Entry directories are created 0700, and `entry.json` and the rewritten keep record are 0600; each moved file keeps its permission bits with setuid, setgid and sticky cleared.
 - [ ] Each source is opened component by component from the instance's directory descriptor (or the job directory's), every directory with `O_DIRECTORY|O_NOFOLLOW` and the file with `O_NOFOLLOW|O_NONBLOCK`; niwa `fstat`s the descriptor and moves only a regular file owned by the user, on the instance's device, with a link count of exactly one, and hashes and copies from that descriptor, never from the path.
@@ -859,6 +866,7 @@ Skeleton and downstream:
 - [ ] `niwa resume <target>` on a launch record whose `restore_until` has passed exits non-zero with `niwa: cannot resume <name>: its restore window ended on <date>`, provisions no instance and starts no session.
 - [ ] `niwa resume` checks that `kept_entry` names exactly `~/.niwa/w-<key>/kept-files/<instance>/<UTC>/` for the record's own instance, a direct descendant reached with no symlink, and refuses otherwise.
 - [ ] Inside the window, `niwa resume` provisions the instance by name, moves the entry's files back to their original paths with a hash check before the session starts, and the restored instance carries no mark.
+- [ ] The restore records its time as `restored_at` in the unit's `unit.json`, and the pass doesn't ask the restored unit's over command until its session has worked after that time and stopped again: an over-command wrapper's log shows no call for it at a dispatch before then, and one call at the first dispatch after it has worked and stopped. `docs/guides/over-command.md`'s account of which units niwa asks about gains this exception.
 - [ ] A kept file whose hash doesn't match refuses the restore with that file named, leaving every kept file in place in the entry.
 - [ ] Every original path in `entry.json` and the rewritten keep record passes `removal.ResolveRecorded` against the fresh instance, and every source path must resolve inside the entry's own `files/` directory, or the restore refuses with the file named.
 - [ ] Missing parent directories are created one component at a time, each opened with `O_DIRECTORY|O_NOFOLLOW`, and each file is created with `O_CREAT|O_EXCL|O_NOFOLLOW`, never over an existing file; a failure refuses the restore with the file named.
@@ -877,7 +885,7 @@ Skeleton and downstream:
 - [ ] `go test ./...` and the functional suite pass.
 - [ ] E2E flow still works (do not break the skeleton)
 
-**Dependencies**: Blocked by <<ISSUE:1>>, <<ISSUE:23>>
+**Dependencies**: Blocked by <<ISSUE:1>>, <<ISSUE:15>>, <<ISSUE:23>>
 
 **Repo**: tsukumogami/niwa
 
@@ -968,6 +976,7 @@ graph TD
     I13 --> I23
     I21 --> I23
     I22 --> I23
+    I15 --> I24
     I23 --> I24
 
     classDef done fill:#c8e6c9

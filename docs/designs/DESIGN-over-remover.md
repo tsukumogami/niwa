@@ -65,7 +65,7 @@ The first is the reap. `niwa reap` (`internal/cli/reap.go`, a Cobra command
 with no flags and no arguments) and its opportunistic form,
 `reapOpportunistically` (reap.go:985-995), run `reapWorkspace` and
 `sweepHookWorktrees`. `reapOpportunistically` is called before every
-`niwa create` (create.go:182-185), every `niwa dispatch` (dispatch.go:594-596)
+`niwa create` (create.go:182-185), every `niwa dispatch` (dispatch.go:613-615)
 and every review instance `niwa watch` provisions (watch.go:792), with errors
 swallowed. `reapWorkspace` (reap.go:610-717) runs a mapped sweep
 (`selectReapTargets`) that joins instance records with session mappings in
@@ -305,10 +305,13 @@ The package also settles the mechanics the PRD left to the design:
   which today start plain `git` with the inherited environment through
   `StdGitInvoker` in `internal/worktree/worktree.go`, as its
   `git worktree remove --force` does); and every call
-  `niwa destroy`'s scan, `workspace.ScanInstance`, makes through `gitOutput`
-  in `internal/workspace/scan.go`, which today also starts plain `git`. The
-  implementation changes both of those files so their calls go through
-  `gitCommand` (Components gives how). No other code in the package, the
+  `niwa destroy`'s scan, `workspace.ScanInstance`, makes, through `gitOutput`
+  in `internal/workspace/scan.go` and, for its durability check, through
+  `gitNetwork` (`ls-remote` and `fetch`) and `gitOutputEnv` in
+  `internal/workspace/durable.go`, all three of which today also start plain
+  `git` with the inherited environment. The implementation changes those
+  files so their calls go through `gitCommand` (Components gives how).
+  No other code in the package, the
   pass, the sweep or destroy starts git, with one named exception: the read
   of the person's own credential helper, bounded as Decision 8 describes.
   On these paths niwa runs the program-naming configuration check on every
@@ -754,11 +757,16 @@ both run under the instance lock, which is a requirement rather than an
 accident of order: a `niwa retire` writing a mark at the same moment waits on
 the lock, so the clean-up can't remove the mark it just wrote.
 
-niwa asks only about units that are stopped, carry no valid mark, aren't
-held by a keep record, and haven't been asked since they last worked (a
-unit's `unit.json` keeps the time of its last answer, and a unit restored
-after a reap isn't asked again until its session has worked and stopped
-again). A yes is never asked again; the mark stands until the reap.
+niwa asks only about units that are stopped, carry no valid mark and aren't
+held by a keep record, and it asks each of them again at every pass, within
+the pass's budget and the per-run deadline (R2, R34): the over command can
+answer from state outside the unit, such as a pull request that merges, so a
+"not over" from an earlier pass doesn't stand for later ones. The one
+exception is R32's: a unit restored after a reap isn't asked until its
+session has worked after the restore and stopped again, which `unit.json`
+records as the restore time. A unit's `unit.json` also keeps its last answer
+and when it was given, for the listing.
+A yes is never asked again; the mark stands until the reap.
 
 niwa writes the mark in the earlier format and place, atomically (a temp file
 made exclusively in `<instance>/.niwa/`, mode 0600, then a rename), with the
@@ -1099,10 +1107,10 @@ that directory for plugin links (`hostdir.InstanceDirs`), while this kept set
 holds only the files keep records name.
 
 Key assumptions:
-- The workspace key is `mirror.WorkspaceKey` ("w-" plus the first 32 hex of
-  the SHA-256 of the canonical root, internal/mirror/layout.go:48-60), which
-  tsukumogami/niwa#536 moves to `internal/hostdir`; whichever change lands
-  second uses the other's home for it.
+- The workspace key is `hostdir.WorkspaceKey` ("w-" plus the first 32 hex of
+  the SHA-256 of the canonical root, internal/hostdir/hostdir.go:34), which
+  tsukumogami/niwa#536 moved there from `internal/mirror`;
+  `mirror.WorkspaceKey` now delegates to it.
 - Claude Code's transcript retention is `cleanupPeriodDays` in Claude
   Code's user settings, `settings.json` in the config directory niwa
   resolves as Claude Code does (`CLAUDE_CONFIG_DIR` when set, `~/.claude`
@@ -1149,8 +1157,8 @@ directory finds no entries from it; its entries carry no
 `.niwa/marketplaces/` links that scan would need to count. If whole kept
 instances ever arrive, they keep the `kept/` name the release store already
 reads, and the two never share a directory or an instance name. This is
-named as an overlap with tsukumogami/niwa#536 so whichever lands second
-checks the other's layout.
+named as an overlap with tsukumogami/niwa#536, which has landed, so this
+work checks the release store's layout as it now stands.
 
 The due-date clash is reconciled by store. niwa's kept set follows R27: an
 entry's due date is the keep record's review date, or the end of the unit's
@@ -1361,7 +1369,9 @@ kept set: 3 entries, 1 due (niwa list --kept)
 ```
 
 A unit with no command configured shows `no over command configured`; an
-unknown answer shows `unknown (exit 3)` and the reason; a disagreement shows
+unknown answer shows `unknown: <reason>` when the command gave one, as the
+six-kinds table under Relation to Other Work does, and `unknown (exit 3)`
+(the exit status it got) when it gave none; a disagreement shows
 `retired, kept by a disagreement: <step> refused: <message>`. The JSON form
 keeps its array and adds a `unit` object to each record with `state`,
 `stopped_since`, `stopped_seconds`, `size_bytes`, `size_measured_at`,
@@ -2184,10 +2194,18 @@ lies outside the unit, so a forced destroy stops on a failing job directory
 the same way. That status goes through `removal.gitCommand`, and so does
 every git call destroy's existing scan makes: `runDestroyInstance` passes
 `workspace.ScanInstance` a `ScanOption` carrying the command builder made
-from `gitCommand`, and `gitOutput` in `internal/workspace/scan.go` starts
-git only through it, so the workspace package doesn't import the removal
-package. The scan's own `git status` call (`scanStatus`, scan.go:366) gains
-`--ignore-submodules=all` and `--untracked-files=all`. `ScanInstance`
+from `gitCommand`, and `gitOutput` in `internal/workspace/scan.go`, with
+`gitNetwork` and `gitOutputEnv` in `internal/workspace/durable.go` for the
+scan's durability check, start git only through it, so the workspace
+package doesn't import the removal package. The scan's own `git status` call
+(`scanStatus`, scan.go:366) gains `--ignore-submodules=all` and
+`--untracked-files=all`, like every status niwa runs, so it no longer
+recurses into a submodule on its own. A person's destroy must still count a
+modified submodule as loss, as it does today, since destroy keeps its own
+checks and gains only the worktree order: the scan therefore runs the same
+status in each submodule and nested repository the walk below hands it,
+after that repository's configuration check, and a change in one is loss
+the way a change in the parent is. `ScanInstance`
 finds no submodules or nested repositories of its own, so before the scan's first git call, and before
 `--force` removes a worktree, `runDestroyInstance` runs the removal walk
 over the instance and the program-naming configuration check on every
@@ -3225,8 +3243,8 @@ dispatched units, one held, both sessions deleted, is that test, in
 **tsukumogami/niwa#536** implemented `docs/designs/current/DESIGN-plugin-release-hold.md`
 and reads `~/.niwa/w-<key>/kept/` as a directory of whole kept instances.
 This design's kept set sits in `kept-files/` beside it and writes nothing to
-`kept/`, and both compute the same workspace key; that's the overlap to check
-when either lands.
+`kept/`, and both compute the same workspace key, `hostdir.WorkspaceKey`;
+that's the overlap this work checks against the landed layout.
 
 **Destroy leaving sessions behind.** Today `niwa destroy` runs `claude rm`
 before it removes the directory, so a session whose worktree sits inside the
