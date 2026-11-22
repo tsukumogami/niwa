@@ -102,7 +102,7 @@ pull request per group.
 
 **Group**: mirror-retention
 
-**Goal**: Make a mirror restore keep every old store, record it in `.meta/<repo-id>.stores`, and leave its removal to a sweep that removes a retired store only after a strict scan of every instance on disk shows no alternates line resolves into it, which fixes niwa#525. It waits on Issue 1 for `internal/testhook`'s fault labels and lock-wait override.
+**Goal**: Make a mirror restore keep every old store, record it in `.meta/<repo-id>.stores`, and leave its removal to a sweep that removes a retired store only after a strict scan of every instance on disk shows no alternates line resolves into it, which fixes niwa#525. It waits on Issue 1 for `internal/testhook`'s fault labels and lock-wait override, and on Issue 2 for `remoteIdentity(url)` and the per-store identity the `.stores` record holds.
 
 **Acceptance Criteria**:
 - [ ] Unit tests for `hostdir.Clones` and `hostdir.StrictClones` show both list every clone two levels under each directory from `hostdir.InstanceDirs` (root children except `.niwa`, plus every real directory under `~/.niwa/w-<key>/kept/`), including an instance with no state file and a repo the config doesn't name. `StrictClones` returns an error, and `Clones` doesn't, for each of: an unreadable root, `kept/`, instance or group directory; a symlink or non-directory where an instance or group directory belongs; a `.git` that is a symlink or gitfile; a symlinked `.git/objects/info`; an alternates file that isn't regular, is over 64 KiB or holds a quoted or unparseable line; and a directory removed between listing and reading. (R7, R9)
@@ -118,7 +118,7 @@ pull request per group.
 - [ ] Destroying a workspace with no kept instances removes `mirrors/` (and the key directory when that leaves it empty). With a kept borrowing instance it keeps that mirror and prints its path with "a kept instance borrows from it"; with the mirror lock held it keeps it and prints "busy"; with `kept/` unreadable it keeps it and prints "kept instances couldn't be read". A `.store/` directory no record names is left and reported, never removed by glob. (R10)
 - [ ] `go test ./...` and the functional suite pass on Ubuntu and macOS, with the new scenarios writing nothing outside the sandbox `$HOME`. (R20)
 
-**Dependencies**: Blocked by <<ISSUE:1>>
+**Dependencies**: Blocked by <<ISSUE:1>>, <<ISSUE:2>>
 
 ### Issue 4: feat(config): add share_git_history and the release-build gate
 
@@ -258,6 +258,7 @@ graph TD
     I8["Issue 8: turn on reference clones by default"]
 
     I1 --> I3
+    I2 --> I3
     I1 --> I4
     I3 --> I5
     I4 --> I5
@@ -292,8 +293,8 @@ The gate `turn-on-condition` sits between Issues 1, 3, 6 and 7 and Issue 8.
 
 **Parallel work**:
 
-- Issues 1 and 2 start at once. Issue 2 gates nothing.
-- After Issue 1, Issues 3 and 4 run in parallel.
+- Issues 1 and 2 start at once. Issue 2 gates Issue 3.
+- After Issue 1, Issue 4 starts; Issue 3 starts once Issues 1 and 2 have landed.
 - Issue 5 starts once Issues 3 and 4 have landed.
 - After Issue 5, Issues 6 and 7 run in parallel.
 - Issue 8 is last, after Issues 1, 3, 6 and 7 and the `turn-on-condition` gate.
@@ -302,5 +303,5 @@ The gate `turn-on-condition` sits between Issues 1, 3, 6 and 7 and Issue 8.
 store retirement sweep, the borrowing create and the turn-on each change what
 every user's clones depend on. Issues 2, 4, 6 and 7 are testable.
 
-Issues 2 and 3 both use `remoteIdentity(url)`. Whichever lands first adds it
-and the other reuses it; Issue 3 doesn't wait on Issue 2.
+Issue 2 adds `remoteIdentity(url)` and the identity the mirror state
+records; Issue 3 reuses both, so it waits on Issue 2.
