@@ -534,29 +534,34 @@ The package also settles the mechanics the PRD left to the design:
 - **A watch review instance's `pr-clone` is generated** while it is still
   niwa's own fetch. `watch.FetchPRHead` (internal/watch/fetch.go) creates a
   fresh repository with no remote, fetches the PR head's SHA into it, checks
-  that commit out and moves the git directory into `pr-clone/.git`. The
-  SHA it fetched is recorded outside the instance, in the watch's handled
-  set at `<root>/.niwa/watch-handled` (`handledSetRelPath`,
-  internal/watch/state.go), under the root's `.niwa/` that the guide
-  already tells workspaces to deny the agent writes to. Every time watch
-  appends a handled entry (`watch.AppendHandled`) for a review it staged in
-  an instance, at a successful stage, at a failed-stage rollback the rule
-  keeps (below) and at a continuation that fetches a new head into the
-  same instance, the entry also records that review instance's name. The
-  rule classes `pr-clone` generated only when that repository still has no
-  remote, its HEAD equals the head SHA of the handled entry naming that
-  instance, and it holds no other ref, no stash and no uncommitted change.
-  This holds in every evaluation: a pass, a retire, the verdict-only mode,
-  the watch's discard and the failed-stage rollback. The rollback's entry
-  is written only once the rule has kept the instance, so the rollback
-  evaluates with the SHA `stageReview` fetched, the one its entry then
-  records. An entry that names no instance, one written before this change
-  or by a head adoption, matches nothing, and neither does an entry a later
-  stage of the same PR rewrote for its own instance, so that `pr-clone` is
-  judged by the normal rule. It's regenerable because niwa itself fetched
-  that exact commit from the PR's repository, so the same fetch makes it
-  again, and nothing in it is unique work. The configuration check still
-  runs on it first. Anything else about it, a remote added, HEAD moved, a
+  that commit out and hands the git directory to `pr-clone/.git`, best
+  effort (fetch.go:136-139). Each time a fetch into an instance completes,
+  at `stageReview`'s fetch (watch.go:824) and at the continuation's
+  refetch in `preWake` (watch_continue.go:337), the only two callers of
+  `FetchPRHead`, niwa writes a fetch record at
+  `<root>/.niwa/watch-fetched/<instance>.json` with the PR's owner,
+  repository and number, the head SHA it fetched and the fetch time. The
+  record is written atomically with mode 0600, lives outside the instance,
+  under the root's `.niwa/` that the guide already tells workspaces to
+  deny the agent writes to, and is replaced by each new fetch into the
+  same instance. It goes with the instance, alongside the instance's other
+  host-side records: the pass removes it after `DestroyInstance`, where it
+  removes the unit's ledger file (Decision 9, Data Flow step 7), the
+  watch's discard and failed-stage rollback remove it after their
+  `destroyInstanceFunc`, and one whose instance is gone is ignored and
+  removed, as a ledger is. The rule classes `pr-clone` generated when its
+  HEAD equals that record's SHA and its repository has no remote, no other
+  ref, no stash and no uncommitted change. This holds in every evaluation:
+  a pass, a retire, the verdict-only mode, the watch's discard and the
+  failed-stage rollback. With no fetch record, or one whose SHA doesn't
+  match, `pr-clone` is judged by the normal rule, and so is one left with
+  no `.git` once the review agent has launched. The one exception is the
+  rollback of a stage that fails before the review agent launches, which
+  treats the whole `pr-clone` tree as niwa's output (below). It's
+  regenerable because niwa itself fetched that exact commit from the PR's
+  repository, and the record outside the instance says which one, so the
+  same fetch makes it again, and nothing in it is unique work. The
+  configuration check still runs on it first. Anything else about it, a remote added, HEAD moved, a
   new commit or an uncommitted change, is judged by the normal rule, which
   keeps the unit on it. The review draft, `watch-review-draft.md` at the instance root, and
   anything else the review agent wrote are ordinary unit content, judged by
@@ -603,21 +608,42 @@ keeps a review instance at the discard (`discardStagedRecord`, reached from
 prints the keeping check with the path it names. The instance stays and is
 listed as a stopped unit under the normal lifecycle (once its session has
 stopped, for a stale review whose session is still live), and the listing,
-the over command and `niwa retire` handle it from there. The discard's
-evaluation takes the recorded SHA from the handled entry naming the
-instance, and that entry stays after the staged record goes, so a later
-pass still recognizes niwa's own fetch: once the person deletes the draft
-and the review session is gone, the next reap removes the instance. A keep
-from the before-remove gate still leaves the instance and its record as
-they are, as today. When the rule keeps the instance at the failed-stage
-rollback, the rollback still appends the handled entry for that PR and
-head SHA through `watch.AppendHandled`, which today only a successful stage
-writes (watch.go:896, `AppendHandled(workspaceRoot, owner, repo string,
-number int, sha string)`, which gains the instance's name). The next watch
-pass then never stages the same PR head into a new instance, and the kept
-instance is listed as a stopped unit the same way. A stage that fails before the review agent launches (watch.go:864)
-holds only niwa's own fetch beside the files niwa provisioned, so the rule
-passes it and the rollback removes it as today.
+the over command and `niwa retire` handle it from there. The instance's
+fetch record stays after the staged record goes, so a later pass still
+recognizes niwa's own fetch: once the person deletes the draft and the
+review session is gone, the next reap removes the instance. That holds
+after a force-push too. The stale review's discard keeps instance A, the
+next pass stages the PR at its new head into a new instance B, whose fetch
+writes B's own record, and A's record still names the SHA fetched into A.
+A continuation whose wake is refused after its refetch leaves a record
+naming the new head, so `pr-clone` at that head still matches. A keep from
+the before-remove gate still leaves the instance and its record as they
+are, as today.
+
+The handled entry (`watch.AppendHandled`, internal/watch/state.go) keeps
+today's meaning and format: one entry per PR, at the head last handled,
+written by a successful stage (watch.go:896), by a continuation whose
+re-review prompt was delivered (watch_continue.go:371) and by a legacy
+entry's head adoption (watch.go:329). It names no
+instance, and the rule never reads it. The one addition is at the
+failed-stage rollback. When a stage fails after the review agent launched
+(watch.go:864) and the rule keeps the instance, the rollback still appends
+the handled entry for that PR and head SHA through
+`AppendHandled(workspaceRoot, owner, repo string, number int, sha string)`,
+so the next watch pass never stages the same PR head into a new instance,
+and the kept instance is listed as a stopped unit the same way. A stage
+that fails before the review agent launches is different. Until then
+nothing but niwa has written in the instance, so that rollback treats the
+whole `pr-clone` tree, with or without `.git`, as niwa's output. It has
+to: `FetchPRHead` hands its git directory over best effort, so a temporary
+directory on another filesystem, or a checkout that failed part-way
+(fetch.go:130-135), can leave PR files there with no `.git`. The rule then
+passes the instance and the rollback removes it as today. That rollback
+appends no handled entry, so the PR stays eligible and the next watch pass
+stages that head again. Should the rule still keep such an instance on
+another check, a provisioned clone whose remote can't be reached at that
+moment for example, the instance stays as a unit and the PR is staged
+again all the same.
 
 The before-remove gate, the instance lock, the re-read before removal (whose
 `git status`, like every status, the invoker precedes with a fresh
@@ -1281,7 +1307,16 @@ keyed by a launch id it mints in the dispatch-id shape
 and the time, and a new optional `origin` field set to `hook`. The session
 mapping gains a `launch_id` field that names it. `resolveLaunchRecord`
 already matches by instance name and session, so `niwa resume` finds it
-unchanged. A hook record carries none of the fields `niwa resume` replays
+with no change to that lookup. The check that follows it does change.
+Today `validateLaunchRecord` (resume.go:579-585) refuses any record whose
+instance name fails `isDispatchInstanceName`, and that pattern
+(`\+[a-z0-9_]*-[0-9a-f]{8}$`, dispatch.go:1503) matches no hook instance.
+The hook names its instance `<config>-` followed by the first 12
+characters of the session's UUID (`sessionNamePrefixLen`,
+instance_from_hook.go:90 and :262-270), so the name ends in
+`-<8 hex>-<3 hex>` and holds no `+`. `validateLaunchRecord` accepts a valid
+instance name of that hook shape when the record's `origin` is `hook`, and
+a dispatch-shaped one otherwise, as today. A hook record carries none of the fields `niwa resume` replays
 for a dispatched session (permission mode, settings, environment), and
 resume ignores those fields on any record whose `origin` is `hook`; every
 launch record is decoded strictly, with unknown fields refused.
@@ -2400,7 +2435,10 @@ with their worktrees still inside.
 record and the mapping's `launch_id`.
 
 **`internal/cli/resume.go`.** Decodes the launch record strictly and ignores
-its replay fields when `origin` is `hook`, checks `restore_until`, checks that
+its replay fields when `origin` is `hook`. `validateLaunchRecord` accepts a
+hook-shaped instance name (`<config>-<8 hex>-<3 hex>`, Decision 5) when the
+record's `origin` is `hook`, and a dispatch-shaped one otherwise, as today.
+It checks `restore_until`, checks that
 `kept_entry` is a direct descendant of `~/.niwa/w-<key>/kept-files/<instance>/`
 reached with no symlink, re-validates every path in `entry.json` and the
 rewritten keep record with `ResolveRecorded`, which refuses a destination
@@ -3100,12 +3138,16 @@ Deliverables:
   rollback (`stageReview`'s deferred cleanup) calling `removal.Evaluate`
   before `destroyInstanceFunc`, with a review instance's `pr-clone` classed
   generated while it is still niwa's own fetch at the head SHA of the
-  handled entry naming the instance, in every evaluation (Decision 1);
-  every handled entry watch appends for a staged review recording the
-  instance's name; on a keep, the discard deleting the staged record and
-  the rollback appending the handled entry for that PR head, the instance
-  listed as a stopped unit either way; the hook worktree sweep evaluating
-  each worktree's repository checks.
+  instance's fetch record, in every evaluation (Decision 1); the fetch
+  record at `<root>/.niwa/watch-fetched/<instance>.json`, written 0600 at
+  `stageReview`'s fetch and the continuation's refetch, replaced by each
+  new fetch into the instance and removed with the instance; the rollback
+  of a stage that fails before the review agent launches treating the
+  whole `pr-clone` tree as niwa's output and appending no handled entry; on
+  a keep, the discard deleting the staged record and a rollback after
+  launch appending the handled entry for that PR head, the handled entry
+  otherwise as today, the instance listed as a stopped unit either way; the
+  hook worktree sweep evaluating each worktree's repository checks.
 - The hook worktree sweep (`internal/cli/reap_worktrees.go`,
   `internal/worktree/worktree.go`) and `niwa destroy`'s scan
   (`internal/workspace/scan.go`) building every git call with `gitCommand`,
@@ -3187,13 +3229,19 @@ Deliverables:
   `partial.txt`, and the watch's failed-stage rollback keeps a file the
   review agent wrote and appends the handled entry, so the next watch pass
   stages no new instance for that PR head; a stage that fails before the
-  agent launches leaves no instance; the watch's discard removes a review
-  instance holding only niwa's fetch at the recorded SHA, and keeps one
-  holding the review draft, or a `pr-clone` with a commit on top of that
-  SHA, deleting the staged record and listing the instance as a stopped
-  unit; once the person deletes that draft and the review session is
-  deleted, a later `niwa reap` removes the instance, its `pr-clone`
-  matched through the handled entry; no `claude` call a wrapper logs carries an override flag,
+  agent launches, including one whose `.git` hand-off failed or whose
+  checkout failed part-way, leaves no instance and appends no handled
+  entry, and the next watch pass stages that PR head again; the watch's
+  discard removes a review instance holding only niwa's fetch at its fetch
+  record's SHA, and keeps one holding the review draft, or a `pr-clone`
+  with a commit on top of that SHA, deleting the staged record and listing
+  the instance as a stopped unit; once the person deletes that draft and
+  the review session is deleted, a later `niwa reap` removes the instance,
+  its `pr-clone` matched through its fetch record, and the same holds for
+  an instance kept at the discard after a force-push while the PR was
+  staged again into a new instance; a continuation whose wake is refused
+  after it refetched a new head leaves `pr-clone` at that head classed
+  generated; no `claude` call a wrapper logs carries an override flag,
   no `git` call a wrapper logs is `git worktree remove` or
   `git worktree prune`, and none carries `--force` outside `niwa destroy
   --force`; every `claude` call a wrapper logs runs from a directory outside
@@ -4223,11 +4271,15 @@ instance has seen little agent time, which keeps that case small. A watch
 review instance hosted a whole review session, so its case isn't small,
 and the rule now covers it differently: the discard and the rollback remove
 a review instance only when nothing in it keeps, its `pr-clone` counting
-as generated while it is still niwa's own fetch at the recorded SHA. The draft or any other file the
-agent wrote keeps the instance, and the discard then deletes the staged
-record while the rollback appends the handled entry, so the kept instance
-is listed as a stopped unit and isn't staged again. What remains is a
-write that lands after the evaluation, which is lost unseen as above.
+as generated while it is still niwa's own fetch at the SHA of the
+instance's fetch record. The draft or any other file the agent wrote
+keeps the instance, and the discard then deletes the staged record while
+a rollback after the agent launched appends the handled entry, so the
+kept instance is listed as a stopped unit and isn't staged again. A
+rollback before launch treats the whole `pr-clone` tree as niwa's output,
+since nothing else has written there yet, and appends no handled entry,
+so that PR head is staged again. What remains is a write that lands after
+the evaluation, which is lost unseen as above.
 
 A commit reachable only from a reflog, left behind by a `git reset` or a
 rebase, counts for nothing and goes with the instance. git's own garbage
