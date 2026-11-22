@@ -25,11 +25,11 @@ var (
 //
 // The faults are checked in this order, so each damage names what's wrong
 // rather than a symptom of it: the link and the state file first (missing),
-// then whether the store was cloned from the URL the config gives now
-// (url-changed), then whether the store holds any object at all
-// (objects-empty), then each pack the manifest lists (pack-missing,
-// pack-changed), and last whether the store is a repository git can read
-// (repo-unreadable).
+// then whether the store was cloned from the remote the config's URL names
+// now, however it's spelled (url-changed), then whether the store holds any
+// object at all (objects-empty), then each pack the manifest lists
+// (pack-missing, pack-changed), and last whether the store is a repository
+// git can read (repo-unreadable).
 //
 // Before anything else, the workspace key directory, mirrors/, .meta/ and
 // .store/ must each be a real directory the user owns (layoutIsReal); a link
@@ -58,11 +58,16 @@ func check(ctx context.Context, mdir string, r Repo) Fault {
 }
 
 // urlChanged reports whether the config's URL for r is another remote than
-// the one rec was cloned from. Both sides go through recordURL, so a URL that
-// differs only in userinfo, query or fragment is the same remote. A repo with
-// no URL (a caller that found none to give) is never compared.
+// the one rec was cloned from. Both sides go through remoteIdentity, so a URL
+// that differs only in scheme, user, a default port, a trailing ".git" or
+// slash, the host's case, or a query or fragment is the same remote: its new
+// spelling reaches the store's config at the next refresh, and a restore for
+// any other fault salvages as usual. The recorded side is derived from
+// rec.URL rather than read from rec.Identity, so the record the identity
+// came from is the one judged. A repo with no URL (a caller that found none
+// to give) is never compared.
 func urlChanged(r Repo, rec state) bool {
-	return r.URL != "" && recordURL(r.URL) != rec.URL
+	return r.URL != "" && remoteIdentity(r.URL) != remoteIdentity(rec.URL)
 }
 
 // checkStore checks the store rec records, as though the stable link named

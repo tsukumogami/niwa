@@ -26,16 +26,20 @@ const (
 const logMax = 1 << 20
 
 // logLine is one line of .meta/mirror.log. TookMs is set on a restore or
-// refresh line only.
+// refresh line only. SalvagedFrom is set on a restore line only, and only
+// when the new store was built with salvage: it names the old stores the
+// salvage read, relative to the mirrors directory, so a reader can tell a
+// restore that kept what the old store held from one that started over.
 type logLine struct {
-	Time    string  `json:"time"`
-	Command string  `json:"command"`
-	Mirror  string  `json:"mirror"`
-	Event   string  `json:"event"`
-	Fault   Fault   `json:"fault"`
-	Result  Outcome `json:"result"`
-	CheckMs int64   `json:"check_ms"`
-	TookMs  *int64  `json:"took_ms,omitempty"`
+	Time         string   `json:"time"`
+	Command      string   `json:"command"`
+	Mirror       string   `json:"mirror"`
+	Event        string   `json:"event"`
+	Fault        Fault    `json:"fault"`
+	Result       Outcome  `json:"result"`
+	CheckMs      int64    `json:"check_ms"`
+	TookMs       *int64   `json:"took_ms,omitempty"`
+	SalvagedFrom []string `json:"salvaged_from,omitempty"`
 }
 
 // cut returns l with every string a caller, a remote or a person could have
@@ -46,6 +50,13 @@ func (l logLine) cut() logLine {
 	l.Mirror = cleanName(l.Mirror)
 	l.Fault = Fault(cleanName(string(l.Fault)))
 	l.Result = Outcome(cleanName(string(l.Result)))
+	if l.SalvagedFrom != nil {
+		from := make([]string, len(l.SalvagedFrom))
+		for i, name := range l.SalvagedFrom {
+			from[i] = cleanName(name)
+		}
+		l.SalvagedFrom = from
+	}
 	return l
 }
 
@@ -91,6 +102,7 @@ func unrecoverableLines(restoreLine logLine, lost []LostRef) []any {
 		base := restoreLine
 		base.Event = eventUnrecoverable
 		base.TookMs = nil
+		base.SalvagedFrom = nil
 		lines = append(lines, unrecoverableLine{
 			logLine:        base,
 			Instance:       l.Instance,
