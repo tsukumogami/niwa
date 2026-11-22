@@ -827,6 +827,10 @@ changing `draft.md` and retire again.
       holds `plan.md`'s bytes rather than naming it only by path, the retire
       reports the unit removed, the kept set gains no copy of `plan.md`, and
       the bytes the brief holds have the SHA-256 recorded at setup. (R28)
+      This check waits on where a brief stores the bytes it holds (open
+      dependencies): it applies once the brief work defines that location,
+      and until then the retire reports the unit kept with `plan.md` listed
+      as "brief copy not verified".
 - [ ] Repeating the setup with no handoff brief, the retire reports the unit
       removed, and the kept set gains nothing. (R11, R28)
 - [ ] Repeating that with the workspace setting that makes job scratch unique,
@@ -1156,6 +1160,13 @@ this work follows it rather than settling the point on its own.
 One more key isn't in the earlier remover at all: the key an over command reads
 to learn that a successor's takeover has landed. That remover reads no such
 key. R5 requires the design to name it.
+
+One point is open on the separate work that writes the handoff brief rather
+than on the earlier remover: where a brief stores the bytes of a file it
+holds. Today that work defines no such location, so niwa has no copy it can
+check a brief's claim against (R28). The brief work settles it by defining
+that location; until it does, a file a brief says it holds counts as unique
+and keeps its unit.
 
 ## Related work
 

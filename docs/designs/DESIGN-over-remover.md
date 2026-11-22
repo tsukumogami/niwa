@@ -243,8 +243,9 @@ The package also settles the mechanics the PRD left to the design:
   modified and untracked files go through its own checks, and its parent's
   status doesn't look inside it (below), so nothing in it passes on the
   strength of the parent's answer. The workspace configuration names no
-  submodule, so a commit in one is held only through a `proof_remotes`
-  prefix and otherwise keeps with "remote not recognized". The walk uses
+  submodule, so a commit in one is held only through a workspace
+  repository's clone URL or a `proof_remotes` prefix (below) and otherwise
+  keeps with "remote not recognized". The walk uses
   `Lstat` and never follows a symlink: a link is a path of its own, classed by
   its own name, and nothing behind it is read, summed or searched for
   repositories. It stays on the filesystem the instance sits on; a directory
@@ -402,12 +403,17 @@ The package also settles the mechanics the PRD left to the design:
   brings the history of the tips a check tests against. Merged by content means `git merge-tree --write-tree` of the proof
   remote's default branch's live tip and the local branch exits 0, with no
   conflict, and yields the default branch's own tree, which is what a squash
-  merge leaves. Any other remote is
-  never contacted, and a repository the workspace configuration doesn't name
-  (a nested `git init`, a repository the agent cloned) has no proof remote at
-  all; a commit only such remotes could hold keeps the unit with "remote not
-  recognized: <remote name>" as evidence, and the verdict names the setting
-  that would widen it. The ancestry test (`git merge-base --is-ancestor`)
+  merge leaves. A repository the workspace configuration doesn't name (a
+  nested `git init`, a repository the agent cloned) gives no clone URL of its
+  own, so its proof remotes are only those whose URL equals a clone URL the
+  workspace configuration gives some repository, or matches a
+  `proof_remotes` prefix, on the full authority as above: a clean, fully
+  pushed clone of a workspace repository's remote passes wherever it sits in
+  the instance (R11), and its held check rebuilds the URL from that clone
+  URL. A nested `git init` with no such remote has no proof remote at all.
+  Any other remote is never contacted; a commit only such remotes could hold
+  keeps the unit with "remote not recognized: <remote name>" as evidence,
+  and the verdict names the setting that would widen it. The ancestry test (`git merge-base --is-ancestor`)
   and `merge-tree` run only in a scratch object store outside the unit (a
   bare repository created 0700 under `~/.niwa/w-<key>/scratch/`, below,
   with no `objects/info/alternates` and no refs), never with the unit's
@@ -615,7 +621,15 @@ renames it back with
 pass", left as the delete-then-reap path leaves one, its sessions and
 worktrees already gone and the unit listed. Otherwise `DestroyInstance`
 removes the tombstone, which is a direct child of the root and passes its
-checks. The instance lock can't guard a directory that has been renamed, so a
+checks. Its plugin-record prune and Claude trust withdrawal key on the path
+they are given (`pluginrecord.InstanceOwned` matches records under it, and
+the trust keys are that path resolved), and the records and grants name the
+instance's original path, so on the tombstone path alone both would match
+nothing and leave every record and grant behind. The pass therefore calls
+or extends `DestroyInstance` so the prune and the withdrawal use the
+original path `<root>/<instance>`, with any key that needs the path to
+exist resolved before the rename, while the directory removal works on the
+tombstone. The instance lock can't guard a directory that has been renamed, so a
 root-level tombstone lock, `~/.niwa/locks/t-<workspace key>.lock`, does: a
 pass holds it shared from the rename until `DestroyInstance` or the rename
 back returns, so several passes can each hold a tombstone at once.
@@ -627,8 +641,13 @@ tombstone left behind recoverable. Holding the lock, recovery `Lstat`s the
 tombstone and goes on only when it is a real directory, never a symlink,
 that is a direct child of the root; it then renames the tombstone back when
 the instance name is free and evaluates it as usual, or
-keeps and lists it when the name is taken. Instance enumeration skips names
-starting with `.niwa-`, as it skips `.niwa` and `.niwa-launch` today.
+keeps and lists it when the name is taken. `workspace.EnumerateInstances`,
+which the pass and its other callers use, gains a skip of `.niwa` and of
+every name starting with `.niwa-`. No such skip exists there today: it drops
+only non-directories and names `ValidName` rejects, and a tombstone, which
+still holds `.niwa/instance.json`, would be listed as an instance.
+`hostdir.InstanceDirs`, which skips only `.niwa`, stays as it is, so the
+plugin store's sweep still sees a tombstone's links.
 
 The budget is one deadline. An all-unit pass gets 30 seconds from its start,
 the figure the existing removal gate already uses per pass
@@ -1224,7 +1243,7 @@ restored instance carries no mark.
 
 #### Alternatives Considered
 
-**Use `~/.niwa/w-<key>/kept/<instance>/` as the earlier plans proposed.** One
+**Use `~/.niwa/w-<key>/kept/<instance>/`.** One
 name for everything kept. Rejected because the release store treats every
 real directory there as an instance whose plugin links count and stops its
 sweep when one can't be read, so file-only entries would sit in a scan built
@@ -1686,7 +1705,8 @@ with git's message; niwa never adds a `safe.directory` entry.
 Network calls never run inside the unit's repository, and they go only to
 proof remotes. niwa reads each remote URL from the setting listing, keeps
 only those that are proof remotes (the clone URL the workspace configuration
-gives that repository, or a match for a `proof_remotes` prefix; Decision 1),
+gives that repository, any clone URL it gives for a repository it doesn't
+name, or a match for a `proof_remotes` prefix; Decision 1),
 validates them, and runs `ls-remote` and the fetch against the scratch
 object store, whose configuration niwa writes, with a URL niwa builds
 rather than the string the agent wrote: on a clone-URL match, the clone URL
@@ -1852,7 +1872,7 @@ Rejected because not every unit has a launch record until phase 6 lands,
 and the launch record sits under the workspace root, one `cd ..` from the
 instance.
 
-**Accept agent-written records, as the first draft did.** Simplest, and the
+**Accept agent-written records.** Simplest, and the
 rule still gates every reap. Rejected because the discard record isn't gated
 by the rule; it is an input that tells the rule which paths don't matter.
 
@@ -2517,9 +2537,11 @@ An all-unit pass, before a dispatch:
    Read its records as untrusted input, each size-capped, checked against
    the ledger, and every path in them through `ResolveRecorded`. Decide
    liveness. A working unit is noted as working and left alone.
-5. For a stopped unit with no valid mark, no hold and no answer since it last
-   worked, and with an over command configured, ask the seam if the remaining
-   budget covers its timeout. Exit 0 writes the mark and its ledger entry;
+5. For a stopped unit with no valid mark and no hold, other than a restored
+   unit whose session hasn't worked since `restored_at` (R32), and with an
+   over command configured, ask the seam at every pass if the remaining
+   budget covers its timeout; an earlier answer of not over or unknown
+   doesn't stop the question. Exit 0 writes the mark and its ledger entry;
    any other outcome clears a mark written during the call, still under the
    instance lock. Store the answer, scrubbed.
 6. Run `removal.Evaluate`, every git call built by `gitCommand`, the
@@ -2590,7 +2612,8 @@ An all-unit pass, before a dispatch:
    out may read as gone or deleted, while anything found at such a path
    again counts as a change),
    `DestroyInstance` on the
-   tombstone, release the lock, remove the ledger, delete
+   tombstone, its plugin-record prune and trust withdrawal on the original
+   path (Decision 1), release the lock, remove the ledger, delete
    the mapping, and write `reaped_at`, `restore_until` and `kept_entry` into
    the launch record. Any refusal is a disagreement, kept and named with its
    message scrubbed.
@@ -4079,7 +4102,8 @@ though no file in its result is lost.
 - Only the workspace's clone URL counts as proof by default, so work pushed
   only to a fork or a personal remote keeps its unit, and a repository the
   workspace doesn't name (one the agent cloned for reference, a nested
-  `git init`) keeps its unit whenever it holds a commit.
+  `git init`) keeps its unit whenever it holds a commit, unless its remote
+  is a workspace repository's clone URL or matches a `proof_remotes` prefix.
 - `niwa discard` and `niwa retire --override-not-over` need a person at a
   terminal typing back a code niwa prints there, so neither can be scripted, and
   `niwa discard` arrives in the third part rather than the first.
@@ -4135,8 +4159,8 @@ though no file in its result is lost.
   cap, and the refused URL with its reason, where the person looks.
 - The listing names each unrecognized remote with "remote not recognized"
   and the `proof_remotes` setting that would count it, so a person who
-  pushes to forks lists their own prefix once; a reference clone can be
-  released with a confirmed `niwa discard`, and its paths then wait in the
+  pushes to forks lists their own prefix once; a reference clone of any
+  other remote can be released with a confirmed `niwa discard`, and its paths then wait in the
   kept set like any other discard.
 - The terminal prompt is the point: the code stops a process that can only
   type into the terminal. A process running as the person that can read the
