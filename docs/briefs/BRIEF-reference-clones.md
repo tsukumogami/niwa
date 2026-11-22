@@ -1,6 +1,6 @@
 ---
 schema: brief/v1
-status: Draft
+status: Accepted
 problem: |
   Every niwa instance holds a full private copy of every repo's git history,
   so each create on a host downloads and writes all of it again, though the
@@ -17,7 +17,7 @@ outcome: |
 
 ## Status
 
-Draft
+Accepted
 
 ## Problem Statement
 
