@@ -1181,7 +1181,7 @@ key. R5 requires the design to name it.
 - `docs/designs/DESIGN-instances-outlive-sessions.md` describes the removal
   gate and the launch records `niwa resume` replays, which R18, R20 and R32
   build on.
-- `docs/designs/DESIGN-plugin-release-hold.md` states the rule for host-level
+- `docs/designs/current/DESIGN-plugin-release-hold.md` states the rule for host-level
   state the kept set follows (R26). It also assumes that entries under the
   workspace's host-level `kept/` directory are whole instances whose plugin
   links count; a kept set holding only named files has to be reconciled with

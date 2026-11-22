@@ -1092,8 +1092,8 @@ at all. A restore needs a window with an end date. Two existing positions
 pull against the PRD here. The earlier remover's kept set never expires: only
 a person removes an entry. The PRD instead marks an entry due on its date,
 shows it, and removes it at the first pass at least a day after it was first
-shown (R27). And `docs/designs/DESIGN-plugin-release-hold.md`, which
-tsukumogami/niwa#536 (an open draft) implements, plans for teardown work to
+shown (R27). And `docs/designs/current/DESIGN-plugin-release-hold.md`, which
+tsukumogami/niwa#536 implemented, plans for teardown work to
 keep whole finished instances at `~/.niwa/w-<key>/kept/<instance>/` and scans
 that directory for plugin links (`hostdir.InstanceDirs`), while this kept set
 holds only the files keep records name.
@@ -3222,7 +3222,7 @@ instance and reclaiming an unmarked one. The phase 5 scenario with two
 dispatched units, one held, both sessions deleted, is that test, in
 `ephemeral-session.feature`.
 
-**tsukumogami/niwa#536** implements `docs/designs/DESIGN-plugin-release-hold.md`
+**tsukumogami/niwa#536** implemented `docs/designs/current/DESIGN-plugin-release-hold.md`
 and reads `~/.niwa/w-<key>/kept/` as a directory of whole kept instances.
 This design's kept set sits in `kept-files/` beside it and writes nothing to
 `kept/`, and both compute the same workspace key; that's the overlap to check
