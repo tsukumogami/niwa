@@ -202,12 +202,18 @@ var storeIDPattern = regexp.MustCompile(`^(.+)-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$`)
 
 // Recorded lists the repo ids that have a mirror or should, found from what's
 // on disk alone, for a caller that has no repo list of its own: a state file
-// in .meta/, an entry at a stable path, a store directory in .store/, or a
-// stable path that the alternates of one of clones names. Only ids
-// ValidRepoID accepts are returned, sorted. It only reads: a workspace with no
-// mirror directory gets nothing returned and nothing written.
+// or a store record in .meta/, an entry at a stable path, a store directory
+// in .store/, or a stable path that the alternates of one of clones names.
+// Only ids ValidRepoID accepts are returned, sorted. It only reads: a
+// workspace with no mirror directory gets nothing returned and nothing
+// written.
 func Recorded(home, workspaceRoot string, clones []string) []string {
-	mdir := mirrorsDir(home, workspaceRoot)
+	return recordedIn(mirrorsDir(home, workspaceRoot), clones)
+}
+
+// recordedIn is Recorded for the mirrors directory mdir, so the teardown can
+// list ids once the workspace root its path came from is gone.
+func recordedIn(mdir string, clones []string) []string {
 	found := map[string]bool{}
 	add := func(id string) {
 		if ValidRepoID(id) {
@@ -217,9 +223,13 @@ func Recorded(home, workspaceRoot string, clones []string) []string {
 
 	if entries, err := os.ReadDir(metaDir(mdir)); err == nil {
 		for _, e := range entries {
-			// A leftover temporary state file is ".<id>.json-<rand>", which
-			// has no ".json" suffix and starts with a dot ValidRepoID rejects.
+			// A leftover temporary state file or record is
+			// ".<id>.json-<rand>" or ".<id>.stores-<rand>", which has neither
+			// suffix and starts with a dot ValidRepoID rejects.
 			if id, ok := strings.CutSuffix(e.Name(), ".json"); ok {
+				add(id)
+			}
+			if id, ok := strings.CutSuffix(e.Name(), ".stores"); ok {
 				add(id)
 			}
 		}
