@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: Draft
+status: Accepted
 problem: |
   Every niwa instance clones each repo's full history, so a host with several
   instances of a workspace downloads and writes the same history once per
@@ -22,7 +22,7 @@ upstream: docs/briefs/BRIEF-reference-clones.md
 
 ## Status
 
-Draft
+Accepted
 
 ## Problem Statement
 
