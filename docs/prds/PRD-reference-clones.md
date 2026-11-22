@@ -15,7 +15,8 @@ goals: |
   failed create. Borrowing reaches users by default only after the
   credential-variable defect is fixed and the repair proofs pass against
   borrowers the real create made.
-upstream: docs/briefs/BRIEF-reference-clones.md
+absorbed:
+  - docs/briefs/BRIEF-reference-clones.md
 ---
 
 # PRD: reference-clones
@@ -23,6 +24,49 @@ upstream: docs/briefs/BRIEF-reference-clones.md
 ## Status
 
 Accepted
+
+Absorbed [BRIEF-reference-clones](docs/briefs/BRIEF-reference-clones.md); carried in Absorbed Brief.
+
+## Absorbed Brief
+
+The feature exists because every niwa instance holds its own full copy of
+every repo's history, though that history is the same in every instance and
+only each instance's own branches and unpushed commits differ. A second
+instance on a host costs as much disk and network as the first, and a burst
+of creates spends its clone phase competing for one link. niwa already keeps
+a self-repairing mirror per repo on the host, but nothing borrows from it, so
+the user gets none of the saving, and borrowing brings questions the
+mirror-repair work left to this one: turning it off, making one instance
+independent, replacing a mirror generation safely, and purging a commit the
+mirror keeps. This document's Problem Statement states that in full,
+including the two things borrowing waits on before it reaches users:
+niwa#524 and repair proofs run against borrowers the real create made.
+
+The outcome asked for is a second instance that arrives faster and takes
+much less disk while nothing inside it looks different, a shared history
+nobody has to tend, an off setting for a workspace or one repo, a command
+that makes one instance independent, and purge steps in niwa's guide, with
+borrowing on by default wherever a workspace root exists once that condition
+holds. That's this document's Goals.
+
+The journeys (a second instance on a busy host, turning sharing off for a
+repo or a workspace, making one instance independent, a mirror gone or
+unreachable at create time, purging a commit from the host, and a kept
+instance across a mirror replacement) are the User Stories, with the
+operator of a shared build host split out as its own story.
+
+The boundary held the feature to the borrowing create with its first-mirror
+seed and its fallback, the off setting at both levels, the make-independent
+command, generation replacement that never retires a generation any instance
+on disk names, the guide section, the rollout condition, and a stated place
+for niwa#525 and niwa#522; the requirements carry each of those. It left out
+a copy-on-write seed instance, the shared plugin store, changes to how the
+mirror detects and restores damage beyond the named issues, pruning the
+mirror, other ways to share git state, layouts with no workspace root, and
+any daemon; those are this document's Out of Scope. The shared plugin store
+it set aside is the one `docs/designs/current/DESIGN-plugin-release-hold.md`
+describes, which uses the same host directory, lock scheme and scan of
+instances on disk that this work relies on.
 
 ## Problem Statement
 
