@@ -211,7 +211,9 @@ unreadable record the rule needs, the launch record for a reap on a mark
 included; each repository in path order, with git errors and unreachable
 remotes first, then commits and refs no live remote ref holds (every ref
 `for-each-ref` lists and each worktree's HEAD from
-`git worktree list --porcelain -z`, a detached HEAD included), stashes,
+`git worktree list --porcelain -z`, a detached HEAD included; a branch is
+held by its tip commit, a tag only by a proof remote listing the same tag
+name at the same object), stashes,
 modified tracked files, index entries flagged assume-unchanged or
 skip-worktree, untracked files, which git is
 made to report in full whatever the repository's configuration says;
@@ -403,7 +405,18 @@ The package also settles the mechanics the PRD left to the design:
   it is an ancestor of such a tip. The tips are every ref `git ls-remote`
   lists for the proof remote with no pattern, so a forge's other namespaces,
   such as `refs/pull/*`, count as well as branches and tags, and the fetch
-  brings the history of the tips a check tests against. Merged by content means `git merge-tree --write-tree` of the proof
+  brings the history of the tips a check tests against. A branch, and every
+  other ref outside `refs/tags/`, is judged by its tip commit as above. A
+  tag is held only when a proof remote lists the same name under
+  `refs/tags/` at the same object: the commit id for a lightweight tag, and
+  for an annotated tag the tag object's own id, which `git ls-remote` lists
+  as the tag ref's value. A local tag no proof remote lists that way is
+  local-only and keeps the unit with the tag named, even when the commit it
+  points at is held: a lightweight tag made on a pushed HEAD and never
+  pushed keeps its unit, as does a tag whose name the remote lists at
+  another object. This is how the design reads R11's "local-only refs": a
+  tag is a name a person gave, and only the remote holding that name at
+  that object shows it exists elsewhere. Merged by content means `git merge-tree --write-tree` of the proof
   remote's default branch's live tip and the local branch exits 0, with no
   conflict, and yields the default branch's own tree, which is what a squash
   merge leaves. A repository the workspace configuration doesn't name (a
@@ -1458,9 +1471,10 @@ path it reads. The launch record sits
 under the workspace root, where the agent can reach it, so a `kept_entry`
 that is present must name exactly `~/.niwa/w-<key>/kept-files/<instance>/<UTC>/` for the
 record's own instance, a direct descendant reached with no symlink, or the
-restore refuses. The strict decoding keeps absent and empty apart: an
-absent `kept_entry` is valid, and one present but empty is refused like any
-other path that doesn't match. Every original path in `entry.json` and the rewritten keep
+restore refuses. The strict decoding keeps absent and empty apart: the
+field is decoded as a `*string`, nil when the field is absent, so an
+absent `kept_entry` is valid, and a present empty string is told apart and
+refused like any other path that doesn't match. Every original path in `entry.json` and the rewritten keep
 record passes `removal.ResolveRecorded` against the fresh instance, and every
 source path must resolve inside the entry's own `files/` directory. A
 destination with a path component named `.git` or `.claude`, compared
@@ -2290,7 +2304,9 @@ again right before every status and unforced worktree removal, and
   (default ports made explicit) and whole path segments; remote
   URL validation, refusing dot segments, empty segments, percent-encoding,
   backslashes, control characters and userinfo;
-  per-repository checks, held by a proof remote's live refs, merged by
+  per-repository checks, held by a proof remote's live refs (a branch by
+  its tip commit, a tag only by the remote listing the same name under
+  `refs/tags/` at the same object, else kept as local-only), merged by
   content, both run only in the scratch object store (no alternates, the
   tip's history fetched, the local side read in through `index-pack`), with
   its 1 GiB cap and cleanup, 10-second network contexts; the scratch
@@ -2547,8 +2563,9 @@ The session mapping `runResume` writes follows the record's origin
 dispatch shape with `launch_id` added.
 It checks `restore_until`, checks that a present
 `kept_entry` is a direct descendant of `~/.niwa/w-<key>/kept-files/<instance>/`
-reached with no symlink, refusing one present but empty, and for a record
-with no `kept_entry` moves no files and starts the session. It re-validates every path in `entry.json` and the
+reached with no symlink, refusing one present but empty (the field is a
+`*string`, nil when absent), and for a record with no `kept_entry` moves
+no files and starts the session. It re-validates every path in `entry.json` and the
 rewritten keep record with `ResolveRecorded`, which refuses a destination
 outside the instance, and also refuses, naming the file, any destination with
 a path component named `.git` or `.claude` (compared case-insensitively). It
@@ -2572,7 +2589,10 @@ atomically with mode 0600 and removes an entry after its instance is
 destroyed.
 
 **`internal/workspace/launch_store.go`.** `LaunchRecord` gains optional
-`Origin`, `ReapedAt`, `RestoreUntil` and `KeptEntry`; the schema name stays
+`Origin`, `ReapedAt`, `RestoreUntil` and `KeptEntry`, with `KeptEntry` a
+`*string` (`json:"kept_entry,omitempty"`) so a record without the field
+decodes to nil and one holding an empty string stays distinguishable from
+it; the schema name stays
 `niwa.launch/v1` since every field added is optional.
 
 **`internal/workspace` (apply lock).** Root `niwa apply` holds an exclusive
@@ -4598,8 +4618,9 @@ though no file in its result is lost.
 - The verdict-only mode marks scratch it would let go with a `job scratch`
   notice, and the over seam's guide tells shirabe workspaces to set
   `job_scratch = "unique"`.
-- The hook-session check's setup moves to a unit whose launch record was
-  removed by hand, a PRD amendment made when phase 6 lands.
+- The hook-session check's no-launch-record setup moves to a unit whose
+  launch record was removed by hand, a PRD amendment recorded after
+  acceptance.
 - Size is measured in the rule's own walk and stored in `unit.json`, so the
   listing and dispatch line read it rather than walking again.
 - A pid record is the starter's statement that its helper ends on its own; a

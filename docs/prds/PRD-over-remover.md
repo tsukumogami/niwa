@@ -64,8 +64,13 @@ Amended after acceptance (2026-11-22): Known Limitations said a unit the
 SessionStart hook provisions has no launch record, so a mark alone never
 reaps it. The design writes a launch record for hook sessions too, and
 `niwa resume` restores them, so that limitation now covers only a unit whose
-launch record is gone. R18 is unchanged: a unit with no launch record is
-still kept from a reap on a mark. The amended text stands as accepted.
+launch record is gone. The restore scenario's last check, which started a
+hook session to get a unit with no launch record, is amended for the same
+reason: a hook unit now has a launch record, so the check shows it reaped
+on a retire and restored by `niwa resume`, and gets a unit with no launch
+record by removing a hook unit's record by hand. R18 is unchanged: a unit
+with no launch record is still kept from a reap on a mark. The amended text
+stands as accepted.
 
 Absorbed [BRIEF-over-remover](docs/briefs/BRIEF-over-remover.md); carried in Absorbed Brief.
 
@@ -989,10 +994,13 @@ resume` on the second unit.
       the restore-window setting and the seven-day minimum, and no instance or
       kept-set entry changes. (R33)
 - [ ] Start a Claude Code background session at the workspace root, so the
-      SessionStart hook provisions its instance with no launch record, and let
-      it stop. A retire of that unit, which is clean, reports it kept with the
-      reason that it has no launch record, and the next dispatch keeps it and
-      lists it with that reason. (R18)
+      SessionStart hook provisions its instance and writes its launch record,
+      and let it stop. A retire of that unit, which is clean, reaps it, and
+      `niwa resume` inside its window brings it back with its session
+      started. Repeat with a second such unit whose launch record is then
+      removed by hand: a retire of it reports it kept with the reason that it
+      has no launch record, and the next dispatch keeps it and lists it with
+      that reason. (R18)
 
 ### Cross-cutting checks
 
