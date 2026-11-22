@@ -322,9 +322,9 @@ and sets the cascade's default to on wherever a workspace root exists.
 - **Environment probe.** `NIWA_TEST_GIT_ENV_PROBE=<file>`, tagged build only:
   each mirror git process appends one JSON line with its kind (network or
   local) and the `GIT_*` entries of the environment it was given, so R12's
-  criteria can see exactly what reached git. A `GIT_CONFIG_VALUE_<n>` is
-  recorded as the SHA-256 of its value, never the value, since such values
-  often carry tokens.
+  criteria can see exactly what reached git, each variable with its value.
+  The probe exists only in the test build and its file lives in the suite's
+  sandbox `$HOME`; a release build has no code that writes it.
 
 Four checks keep the hooks and the gate honest. Every borrowing entry point
 goes through one function, `borrowEnabled(cfg, repo)`, which the untagged R16
@@ -601,14 +601,20 @@ because environment config overrides a repository's config file and some keys
 would undo the mirror's own guards. Kept: keys under `http.` and `https.`
 (proxy, TLS, `http.extraHeader`), `credential.`, `url.<base>.insteadOf`,
 `protocol.`, `ssh.`, `core.sshCommand`, `core.gitProxy` and `core.askPass`.
-Every other entry is dropped and the rest renumbered; that includes
-`include.*` and `includeIf.*` (which would load a config file past the
-filter), `remote.*` (which could rewrite the mirror's refspec or prune it),
-`gc.*`, `maintenance.*`, `fetch.prune*`, `core.hooksPath`, `core.fsmonitor`,
-`core.alternateRefsCommand`, `uploadpack.*`, `safe.directory` and
-`extensions.*`. This narrows R12's "`GIT_CONFIG_COUNT` with its entries" to
-the entries that carry remote access, which is what the variable list is for.
-No environment value is ever written to the mirror log.
+Every other entry is dropped and the rest renumbered. Two groups matter most.
+`include.*` and `includeIf.*` stay out because an include tells git to read
+another config file, and that file could set any key at all, so no filter on
+the entries would hold. `remote.*` stays out because the mirror's correctness
+rests on its own remote settings: an environment entry for
+`remote.origin.fetch` or `remote.origin.prune` would change which refs a
+mirror fetch keeps and could delete the refs that keep removed commits
+reachable, which is what lets a borrower recover by id. The same reasoning
+drops `gc.*`, `maintenance.*`, `fetch.prune*`, `core.hooksPath`,
+`core.fsmonitor`, `core.alternateRefsCommand`, `uploadpack.*`,
+`safe.directory` and `extensions.*`. So of the `GIT_CONFIG_COUNT` entries
+R12 names, the mirror keeps the ones that carry remote access, which is what
+R12's list is for; an entry for any other key is not passed. No environment
+value is ever written to the mirror log.
 
 **niwa#525.** Decision 3 already moves every removal out of the restore: a
 restore removes no store that was ever linked, and the sweep removes retired
@@ -936,7 +942,8 @@ never from the workspace config or the remote. Config entries pass only
 through the allowlist in Decision 5, compared case-folded, so `include.path`,
 `remote.*`, `gc.*`, `core.hooksPath` and the like can't make a mirror fetch
 load another config file, prune or run a hook. No environment value reaches
-the mirror log, and the test probe records config values only as hashes.
+the mirror log; the test probe, which does record values so R12's criteria
+can check them, exists only in the test build and writes inside the sandbox.
 Local reads, the recovering unpack and `niwa dissociate` keep stripping every
 `GIT_*` variable.
 
@@ -952,9 +959,24 @@ has no code that reads their variables.
 
 **Output.** Fallback notices use a fixed vocabulary and the repo name from
 the workspace config, never text the remote chose. A repo name that doesn't
-match the mirror's repo-id pattern already clones in full; the notice prints
-it cut to printable ASCII and 256 bytes, escaped as the mirror log escapes,
-since it goes to a terminal and into the hook's `additionalContext`.
+match the mirror's repo-id pattern already clones in full, and its notice
+prints a fixed placeholder ("a repo whose name niwa can't mirror") instead of
+the name, since notices go to a terminal and into the hook's
+`additionalContext`, which an agent reads.
+
+**Details the implementation holds to.**
+- The strict scan treats a clone whose `.git` is a symlink or a gitfile, or
+  whose `.git/objects/info` is a symlink, as a scan failure; it skips blank
+  and `#` comment lines in alternates, as git does.
+- Store names in `.stores` are recorded without the `.store/` prefix, and
+  each removal `Lstat`s `.store` itself as well as the store.
+- The alternates temporary file is created with `O_EXCL`.
+- The recovering unpack's free-space check allows twice the pack's size for
+  loose objects.
+- The new fault labels are reached only through `internal/testhook`; a unit
+  test fails if any package calls `testfault.Maybe` with them directly.
+- The mirror log notes, without values, when a network call honoured
+  `GIT_SSL_NO_VERIFY` or a proxy command.
 
 **Paths the sweep and destroy remove.** Only names recorded in
 `.meta/<repo-id>.stores` that match the store-name pattern for a validated
@@ -977,7 +999,16 @@ repo id, and that `Lstat` shows as real directories directly inside a real
   the same trust a plain `git clone` in that environment already gives them.
 - The remote comparison treats the SSH and HTTPS spellings of one host and
   path as one remote, so salvage crosses that change; a different host or
-  path never shares a store.
+  path never shares a store. A site that served different content per
+  transport for one path would have its objects mixed in one store.
+- Every borrower can read every object the shared mirror ever fetched, not
+  only what its own branches reach.
+- The instance lock covers niwa commands only, so `niwa dissociate` should run
+  on an idle instance; a git command a user runs in it meanwhile is not
+  blocked.
+- Under space pressure a restore removes unpinned retired stores at once, so a
+  long-running git command in a borrower that still reads one can fail; it
+  works on a rerun.
 
 ## Consequences
 
