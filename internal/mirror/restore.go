@@ -67,9 +67,13 @@ func atStage(stage string) error {
 // puts the link, its store, the state file and the store record back as they
 // were.
 //
-// No store that was ever linked is removed here: the one the swap replaced
-// is marked retired in the store record once the probe is over, and only a
-// later sweep, on the strict scan's word, removes it (see sweep).
+// Outside the free-space path, no store that was ever linked is removed
+// here: the one the swap replaced is marked retired in the store record once
+// the probe is over, and only a later sweep, on the strict scan's word,
+// removes it (see sweep). The free-space path is the exception: when the
+// restore's free-space check would refuse, it runs the strict scan under its
+// lock and removes retired stores that no alternates line pins, whatever
+// their age (see makeRoom).
 //
 // A real directory the user owns at the stable path, such as a mirror
 // someone copied there by hand, is salvaged from where it stands and then

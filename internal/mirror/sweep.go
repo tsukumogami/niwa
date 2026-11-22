@@ -17,10 +17,13 @@ import (
 // recovery finish. A retired store is removed only after a strict scan of
 // every clone on disk succeeds under the mirror's lock and no alternates line
 // in it resolves into the store (PRD R9), and, outside the space-pressure
-// path, only once the store has been retired for an hour. The restore itself
-// never removes a store that was ever linked, so the probe and recovery
-// always finish with every old store on disk (PRD R13). A nil or failing
-// scan removes nothing.
+// path, only once the store has been retired for an hour. Outside the
+// free-space path, the restore itself never removes a store that was ever
+// linked, so the probe and recovery finish with every old store on disk (PRD
+// R13). On that path, when the restore's free-space check would refuse, it
+// runs the strict scan under its lock and removes retired stores that no
+// alternates line pins, whatever their age, before it checks again. A nil or
+// failing scan removes nothing.
 
 // retiredFor reports whether e was retired at least minAge before now. A
 // retired time that can't be read counts as old enough: the scan, not the
