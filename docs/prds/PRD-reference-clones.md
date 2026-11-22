@@ -114,7 +114,9 @@ works on the borrowers users would actually have.
 - **R3. Alternates name the stable path, and nothing else changes.** A
   borrowing clone's alternates file holds exactly one line, the repo's
   stable mirror path followed by `/objects`, never a resolved store path.
-  Apart from that file and the objects it lets the clone omit, the clone is
+  (A clone whose alternates names a store directly exists only by hand
+  editing; R9 still protects it.) Apart from that file and the objects it
+  lets the clone omit, the clone is
   what a full clone would be: the same `origin` URL, refs, config keys and
   hooks.
 - **R4. Fallback.** When the mirror is not usable for a repo at create time
@@ -199,9 +201,9 @@ works on the borrowers users would actually have.
   bound) runs against borrowers made by `niwa create`, with no step that
   writes an alternates file by hand, in the functional suite on Linux and
   macOS, and passes.
-- **R16. Off for users until the condition holds.** Until the R12 fix with
-  its scenario and the R15 rerun have both landed, a niwa built for release
-  borrows for no user: the borrowing create runs only in the functional
+- **R16. Off for users until the turn-on.** Until the R17 change lands,
+  which is after the R12 fix with its scenario, the R13 fix and the R15
+  rerun, a niwa built for release borrows for no user: the borrowing create runs only in the functional
   suite's test build, and no setting a user can write turns it on. The R6
   setting may exist before then; setting it to on does nothing until R17.
 - **R17. Turn on by default, last.** Borrowing becomes on by default
@@ -220,7 +222,7 @@ works on the borrowers users would actually have.
   and after each, and the second instance's clones hold no pack the mirror
   already holds.
 - **R20. Platforms and isolation.** Everything works on Linux and macOS with
-  portable git and no reflink or snapshot support, runs inside commands niwa
+  the git version niwa already requires, no git extension, and no reflink or snapshot support, runs inside commands niwa
   already performs with no daemon, and every test runs in the suite's own
   `$HOME` and local git server with no network.
 - **R21. niwa never undoes borrowing by itself.** No niwa command but the
@@ -248,6 +250,10 @@ works on the borrowers users would actually have.
   stopped, a create finishes with exit 0, clones the other repos borrowing,
   and its output names the repo it cloned in full and why; that clone has no
   alternates file. (R4)
+- [ ] With another process holding a repo's mirror lock for longer than the
+  lock wait (shortened by the test build), a create falls back to a full
+  clone of that repo and names it; the SessionStart hook's provisioning does
+  the same after its ten-second wait. (R4)
 - [ ] With the test build's fault hook making a borrowing clone fail after
   it started, the create still finishes, the repo's clone is a full clone
   with no alternates file, and no partial directory is left beside it. (R4)
@@ -269,7 +275,9 @@ works on the borrowers users would actually have.
 - [ ] After the make-independent command runs on an instance and the
   mirror is deleted, `git log --all` and `git fsck` in each of its clones
   and a worktree of one of them exit 0, and no clone has an alternates file;
-  a second run reports nothing to change. (R8)
+  a second run reports nothing to change. Run from inside an instance with
+  no instance named, the command acts on that instance and lists each clone
+  it changed. (R8)
 - [ ] The make-independent command refuses and changes nothing when another
   command holds the instance's lock, and when free space is below the
   mirror's pack sizes for the instance's repos. (R8)
@@ -289,16 +297,21 @@ works on the borrowers users would actually have.
 - [ ] A functional scenario puts the sandbox remote behind an SSH-style
   wrapper reached only through `GIT_SSH_COMMAND`, creates a borrowing
   instance, deletes the mirror, and sees the next command restore it with
-  the wrapper invoked; the same scenario against niwa without the fix
-  reports `restore-failed`. (R12)
+  the wrapper invoked. (R12)
+- [ ] With each variable R12 lists set in niwa's environment, a test-build
+  probe of the environment the mirror's seed, refresh and restore pass to
+  git shows each of them with its value, and shows no other inherited
+  `GIT_*` variable. (R12)
 - [ ] With `GIT_DIR` and `GIT_ALTERNATE_OBJECT_DIRECTORIES` set to unrelated
   paths in the environment, the healthy check of a borrower's mirror still
-  reports healthy and reads nothing from those paths. (R12)
+  reports healthy, and the mirror's local git calls run with neither
+  variable set. (R12)
 - [ ] A functional scenario truncates an old store's pack halfway, where the
   first half holds every object one borrower ref needs and the second half
   an object another ref needs, with the remote no longer serving either;
   after the restore the first ref reads to the root and the second is
-  reported unrecoverable by name. (R13)
+  reported unrecoverable by name. In the mirror log for that restore, the
+  probe's lines come before the line removing the old store. (R13)
 - [ ] A scenario changes a repo's URL from its SSH form to its HTTPS form
   for the same sandbox remote, damages the mirror, and sees the restore
   salvage the old store; a scenario that points the repo at a different
@@ -306,9 +319,10 @@ works on the borrowers users would actually have.
 - [ ] Every scenario in the mirror-repair feature file runs against
   borrowers made by `niwa create`, no step writes an alternates file by
   hand, and the feature passes in CI on Ubuntu and macOS. (R15)
-- [ ] Before the turn-on change, a release build (not the test build) makes
-  full clones and no mirror both with no setting and with the setting set
-  to on. (R16)
+- [ ] Before the turn-on change, a test of the release build configuration
+  (built without the test build's tag) shows the borrowing create disabled
+  both with no setting and with the setting set to on, so a create makes
+  full clones and no mirror. (R16)
 - [ ] After the turn-on change, a create with no setting borrows wherever a
   workspace root exists, and an instance with no workspace root makes full
   clones. The merge history shows the turn-on change merged after the
@@ -395,3 +409,9 @@ works on the borrowers users would actually have.
   a user feels but is too noisy for CI, so the suite checks that a borrower
   holds none of the mirror's packs, and the free-space figure is a reviewer's
   hand check.
+- **Names are the design's.** The off setting's keys, the make-independent
+  command's name and the fault hook's shape are settled in the design; the
+  requirements fix only their behaviour.
+- **The merge order is checked from history (R17).** The turn-on is a
+  release decision, so its criterion reads the merge order rather than a
+  test; that is the check the rollout condition needs.
