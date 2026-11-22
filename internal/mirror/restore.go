@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/filelock"
+	"github.com/tsukumogami/niwa/internal/testhook"
 )
 
 // The steps of a restore that can fail, named for stageHook.
@@ -83,6 +84,9 @@ func restore(ctx context.Context, opts Options, r Repo) (Outcome, []LostRef, err
 	if wait <= 0 {
 		wait = DefaultLockWait
 	}
+	// The test build may shorten the wait (the five-minute default and the
+	// SessionStart hook's ten seconds alike); a release build keeps it.
+	wait = testhook.MirrorLockWait(wait)
 	holder := fmt.Sprintf("niwa pid %d restoring mirror %s", os.Getpid(), r.ID)
 	release, err := filelock.WaitFileLock(ctx, LockPath(opts.Home, opts.WorkspaceRoot, r.ID), holder, wait)
 	if errors.Is(err, filelock.ErrLockHeld) {

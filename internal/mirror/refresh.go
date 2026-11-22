@@ -97,6 +97,7 @@ func refresh(ctx context.Context, opts Options, mdir string, r Repo, res Result)
 		line.Result = res.Outcome
 		took := elapsedNow().Sub(tookStart).Milliseconds()
 		line.TookMs = &took
+		line.NetworkNotes = networkNotesFrom(ctx)
 		logged(appendLog(mdir, append([]any{line}, unrecoverableLines(line, res.Unrecoverable)...)...))
 		return res
 	}
@@ -108,6 +109,7 @@ func refresh(ctx context.Context, opts Options, mdir string, r Repo, res Result)
 	line.Result = OutcomeHealthy
 	took := elapsedNow().Sub(tookStart).Milliseconds()
 	line.TookMs = &took
+	line.NetworkNotes = networkNotesFrom(ctx)
 	logged(appendLog(mdir, line))
 	return res
 }

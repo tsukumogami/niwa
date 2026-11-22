@@ -26,21 +26,25 @@ const (
 const logMax = 1 << 20
 
 // logLine is one line of .meta/mirror.log. TookMs is set on a restore or
-// refresh line only.
+// refresh line only. NetworkNotes, on a restore or refresh line only, names
+// what the event's network calls honoured from the user's environment that
+// weakens or reroutes the connection (noteSSLNoVerify, noteProxyCommand). It
+// carries names only: no environment value ever reaches the log.
 type logLine struct {
-	Time    string  `json:"time"`
-	Command string  `json:"command"`
-	Mirror  string  `json:"mirror"`
-	Event   string  `json:"event"`
-	Fault   Fault   `json:"fault"`
-	Result  Outcome `json:"result"`
-	CheckMs int64   `json:"check_ms"`
-	TookMs  *int64  `json:"took_ms,omitempty"`
+	Time         string   `json:"time"`
+	Command      string   `json:"command"`
+	Mirror       string   `json:"mirror"`
+	Event        string   `json:"event"`
+	Fault        Fault    `json:"fault"`
+	Result       Outcome  `json:"result"`
+	CheckMs      int64    `json:"check_ms"`
+	TookMs       *int64   `json:"took_ms,omitempty"`
+	NetworkNotes []string `json:"network_notes,omitempty"`
 }
 
 // cut returns l with every string a caller, a remote or a person could have
 // chosen cut by cleanName, so the line stays one bounded line of printable
-// ASCII. Time and Event are niwa's own and kept.
+// ASCII. Time, Event and NetworkNotes are niwa's own and kept.
 func (l logLine) cut() logLine {
 	l.Command = cleanName(l.Command)
 	l.Mirror = cleanName(l.Mirror)
@@ -91,6 +95,7 @@ func unrecoverableLines(restoreLine logLine, lost []LostRef) []any {
 		base := restoreLine
 		base.Event = eventUnrecoverable
 		base.TookMs = nil
+		base.NetworkNotes = nil
 		lines = append(lines, unrecoverableLine{
 			logLine:        base,
 			Instance:       l.Instance,
