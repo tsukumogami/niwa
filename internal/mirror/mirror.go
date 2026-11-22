@@ -36,8 +36,17 @@ type Options struct {
 	// WorkspaceRoot keys the mirrors: each workspace has its own.
 	WorkspaceRoot string
 	// Instances are the instance clone paths that may borrow, listed by the
-	// caller so this package never enumerates instances itself.
+	// caller so this package never enumerates instances itself: every clone
+	// on disk (hostdir.Clones), kept and half-created instances included.
+	// The check, the restore's probe and Recorded read it; nothing is ever
+	// removed on its strength.
 	Instances []string
+	// Scan is the strict walk of every clone on disk (hostdir.StrictClones),
+	// called under the mirror's lock at the moment a store's removal is
+	// decided, so its answer is never older than the lock. It's the only
+	// list that can authorize removing a retired store. A nil Scan removes
+	// nothing that was ever linked, and an error from it removes nothing.
+	Scan func() ([]string, error)
 	// LockWait bounds the wait for a mirror's lock; zero means
 	// DefaultLockWait.
 	LockWait time.Duration

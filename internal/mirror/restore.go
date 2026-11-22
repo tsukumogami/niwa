@@ -23,6 +23,7 @@ const (
 	stageLink   = "link"   // making the .link-<rand> link
 	stageSwap   = "swap"   // renaming that link over the stable path
 	stageRecord = "record" // renaming the state file into place, after the swap
+	stageStores = "stores" // writing the store record, before and after the swap
 
 	stageRelinkConfig = "relink-config" // rewriting a recorded store's config before a relink
 )
@@ -397,35 +398,43 @@ func swapLink(mdir, repoID, store string) error {
 }
 
 // leftoverPatterns match, for one repo id, what a restore makes under a
-// temporary name and a crash can leave behind: its clone, .tmp/<id>-<8 hex>,
-// and its state file, .meta/.<id>.json-<8 hex>. Neither matches an entry of a
-// repo whose id only starts with this one.
-func leftoverPatterns(repoID string) (tmp, stateTmp *regexp.Regexp) {
+// temporary name and a crash can leave behind: its clone, and the directory
+// a recovering unpack works in, .tmp/<id>-<8 hex>; its state file,
+// .meta/.<id>.json-<8 hex>; and its store record, .meta/.<id>.stores-<8 hex>.
+// None matches an entry of a repo whose id only starts with this one.
+func leftoverPatterns(repoID string) (tmp, stateTmp, storesTmp *regexp.Regexp) {
 	id := regexp.QuoteMeta(repoID)
 	return regexp.MustCompile(`^` + id + `-[0-9a-f]{8}$`),
-		regexp.MustCompile(`^\.` + id + `\.json-[0-9a-f]{8}$`)
+		regexp.MustCompile(`^\.` + id + `\.json-[0-9a-f]{8}$`),
+		regexp.MustCompile(`^\.` + id + `\.stores-[0-9a-f]{8}$`)
 }
 
 // leftovers lists the paths of repoID's leftovers in .tmp/ and .meta/. A
 // .tmp/ or .meta/ that isn't a real directory the user owns, a link to
 // somewhere else say, isn't read, so nothing is ever removed through it.
 func leftovers(mdir, repoID string) []string {
-	tmpRe, stateRe := leftoverPatterns(repoID)
+	tmpRe, stateRe, storesRe := leftoverPatterns(repoID)
 	var paths []string
-	for dir, re := range map[string]*regexp.Regexp{
-		filepath.Join(mdir, ".tmp"): tmpRe,
-		metaDir(mdir):               stateRe,
+	for _, d := range []struct {
+		dir string
+		res []*regexp.Regexp
+	}{
+		{filepath.Join(mdir, ".tmp"), []*regexp.Regexp{tmpRe}},
+		{metaDir(mdir), []*regexp.Regexp{stateRe, storesRe}},
 	} {
-		if !realOwnedDir(dir) {
+		if !realOwnedDir(d.dir) {
 			continue
 		}
-		entries, err := os.ReadDir(dir)
+		entries, err := os.ReadDir(d.dir)
 		if err != nil {
 			continue
 		}
 		for _, e := range entries {
-			if re.MatchString(e.Name()) {
-				paths = append(paths, filepath.Join(dir, e.Name()))
+			for _, re := range d.res {
+				if re.MatchString(e.Name()) {
+					paths = append(paths, filepath.Join(d.dir, e.Name()))
+					break
+				}
 			}
 		}
 	}
