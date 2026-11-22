@@ -365,3 +365,18 @@ func TestPins(t *testing.T) {
 		}
 	})
 }
+
+// An instance's clones come before those of an instance whose name only
+// starts with it, so a probe reads "myws" before "myws-2".
+func TestClones_OrdersByPathComponent(t *testing.T) {
+	l := newWalkLayout(t)
+	second := clone(t, filepath.Join(l.root, "myws-2", "tools", "app"))
+	first := clone(t, filepath.Join(l.root, "myws", "tools", "app"))
+	want := []string{first, second}
+	if got := hostdir.Clones(l.home, l.root); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Clones = %v, want %v", got, want)
+	}
+	if got, err := hostdir.StrictClones(l.home, l.root); err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("StrictClones = %v (%v), want %v", got, err, want)
+	}
+}

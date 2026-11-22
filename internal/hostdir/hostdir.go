@@ -558,9 +558,14 @@ func linePins(cloneObjects, line, storeReal string, objects os.FileInfo) (bool, 
 	return false, nil
 }
 
-// sortedUnique sorts paths and drops repeats.
+// sortedUnique sorts paths by their components and drops repeats. Sorting
+// the components rather than the strings keeps an instance's clones before
+// those of an instance whose name only starts with it: "myws/tools/app"
+// before "myws-2/tools/app", where a plain string sort puts "-" before "/".
+// The walks' callers probe borrowers in this order, and the mirror log lists
+// what a probe finds in it.
 func sortedUnique(paths []string) []string {
-	sort.Strings(paths)
+	sort.Slice(paths, func(i, j int) bool { return pathLess(paths[i], paths[j]) })
 	out := paths[:0]
 	for i, p := range paths {
 		if i == 0 || p != paths[i-1] {
@@ -571,4 +576,16 @@ func sortedUnique(paths []string) []string {
 		return nil
 	}
 	return out
+}
+
+// pathLess orders a before b by their components, then by depth.
+func pathLess(a, b string) bool {
+	as := strings.Split(a, string(filepath.Separator))
+	bs := strings.Split(b, string(filepath.Separator))
+	for k := 0; k < len(as) && k < len(bs); k++ {
+		if as[k] != bs[k] {
+			return as[k] < bs[k]
+		}
+	}
+	return len(as) < len(bs)
 }
