@@ -1,6 +1,6 @@
 ---
 schema: design/v1
-status: Proposed
+status: Accepted
 problem: |
   Every niwa instance clones each repo in full, so a host with several
   instances of a workspace downloads and writes the same history once per
@@ -36,7 +36,7 @@ decision_provenance: inline-resolved
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context and Problem Statement
 
