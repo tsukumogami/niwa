@@ -69,8 +69,11 @@ type passResult struct {
 // one slow unit from starving the same others every time.
 //
 // The pass runs only inside the niwa command that called it: it starts no
-// daemon, timer or background process, and every program it starts is
-// killed with its process group when the deadline passes.
+// daemon, timer or background process. Each git call runs in its own
+// process group, which the deadline kills. The mapped units' gate and
+// on-reap commands run in their own process groups too, killed on their own
+// timeouts, which are capped at what the pass has left. The backstop's gate
+// keeps its own budget.
 func runPass(ctx context.Context, workspaceRoot string, mode passMode, scope passScope) (passResult, error) {
 	var res passResult
 	if mode != passActAll {
@@ -158,7 +161,9 @@ func runPass(ctx context.Context, workspaceRoot string, mode passMode, scope pas
 				if first.Name == removal.CheckLiveness {
 					// A session that came back between selection and this
 					// re-read is a live session, not a kept unit: it is left
-					// alone without a word, as selection leaves it.
+					// alone without a word, as selection leaves it. A
+					// liveness the re-read couldn't read is left the same
+					// way, silently, as the reap before the rule left it.
 					return false, nil
 				}
 				return false, &keptUnit{Name: unit.Name, Check: first}
@@ -195,11 +200,13 @@ func runPass(ctx context.Context, workspaceRoot string, mode passMode, scope pas
 		}
 	}
 
-	// Everything after the mapped units shares the same deadline. What it
-	// cuts short is left as it is and waits for the next pass, which finds it
-	// the same way. A stored mapping whose on-reap run the deadline leaves no
-	// time for is kept with the usual skip warning, so every session still
-	// gets its line.
+	// After the mapped units, the deadline decides what starts, not how long
+	// it runs. Every stored mapping is still visited, but its on-reap run gets
+	// no time past the deadline: one with none left is kept with the usual
+	// skip warning, so every session still gets its line. The launch-record
+	// sweep and the backstop start only while time is left and take no
+	// deadline once started. Whatever is left waits for the next pass, which
+	// finds it the same way.
 	for _, m := range stored {
 		settleStoredMapping(workspaceRoot, jobsDir, m, onReap)
 	}

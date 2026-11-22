@@ -314,8 +314,9 @@ func groupKill(cmd *exec.Cmd) {
 	cmd.WaitDelay = killWait
 }
 
-// scratchDir returns one of the scratch directory's empty directories after
-// checking it, its parent and the scratch root for owner and mode.
+// scratchDir returns one of the pass directory's empty directories after
+// checking that directory, the pass directory and the scratch root above it
+// for owner and mode.
 func (e *Env) scratchDir(name string) (string, error) {
 	if e.Scratch == nil {
 		if e.ScratchErr != nil {
