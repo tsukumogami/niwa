@@ -278,3 +278,60 @@ func TestHostile_ALinkedRecordIsReplacedNotFollowed(t *testing.T) {
 	// The linked record was read as none, so the state file seeded it.
 	requireKeptRetired(t, f, old)
 }
+
+// After a url-changed rebuild the old remote's store is kept, retired, under
+// its own identity. A later restore of the new remote salvages nothing from
+// it, nor from a store directory no record names, and its restore line
+// names only the store it did salvage from.
+func TestRestore_NoSalvageFromAnotherRemoteStoreOrAnUnrecordedOne(t *testing.T) {
+	f := built(t)
+	oldRemoteStore := f.linkTarget(t)
+	onlyOld := extraPack(t, filepath.Join(f.store(t), "objects", "pack"), "only the old remote's store")
+	other := filepath.Join(filepath.Dir(f.remote), "other.git")
+	testGit(t, filepath.Dir(f.remote), "clone", "--quiet", "--bare", f.remote, other)
+	repo := Repo{ID: "app", URL: "file://" + other}
+
+	res := EnsureHealthy(context.Background(), f.applyOpts(), []Repo{repo})
+	if len(res) != 1 || res[0].Fault != FaultURLChanged || res[0].Outcome != OutcomeRestored {
+		t.Fatalf("url-changed rebuild = %+v", res)
+	}
+	requireKeptRetired(t, f, oldRemoteStore)
+	if e := entryOf(t, f, oldRemoteStore); e.Identity != remoteIdentity(f.repo().URL) {
+		t.Fatalf("the old remote's entry = %+v, want its own identity %q", e, remoteIdentity(f.repo().URL))
+	}
+	newRemoteStore := f.linkTarget(t)
+
+	unrecorded := filepath.Join(f.mdir(), ".store", "app-20200101T000000Z-0000beef")
+	onlyUnrecorded := extraPack(t, filepath.Join(unrecorded, "objects", "pack"), "only the unrecorded store")
+
+	damageHEAD(t, f)
+	res = EnsureHealthy(context.Background(), f.applyOpts(), []Repo{repo})
+	if len(res) != 1 || res[0].Fault != FaultRepoUnreadable || res[0].Outcome != OutcomeRestored || res[0].Err != nil {
+		t.Fatalf("restore of the new remote = %+v", res)
+	}
+	for name, pack := range map[string]string{"the old remote's store": onlyOld, "the unrecorded store": onlyUnrecorded} {
+		if _, err := os.Lstat(filepath.Join(f.store(t), "objects", "pack", pack)); !os.IsNotExist(err) {
+			t.Fatalf("a pack only %s held reached the new store (%v)", name, err)
+		}
+	}
+	if from, _ := salvagedFrom(t, restoreLine(t, f)); !slices.Equal(from, []string{newRemoteStore}) {
+		t.Fatalf("salvaged_from = %v, want only %s", from, newRemoteStore)
+	}
+	if _, err := os.Lstat(filepath.Join(unrecorded, "objects", "pack", onlyUnrecorded)); err != nil {
+		t.Fatalf("the unrecorded store was touched (%v)", err)
+	}
+}
+
+func TestHostile_ALoosenedRecordModeIsTightened(t *testing.T) {
+	f := built(t)
+	path := storesPath(f.mdir(), "app")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if res := EnsureHealthy(context.Background(), f.applyOpts(), []Repo{f.repo()}); len(res) != 1 || res[0].Outcome != OutcomeHealthy {
+		t.Fatalf("check = %+v, want healthy", res)
+	}
+	if info, err := os.Lstat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("store record = %v (%v), want mode 0600", info, err)
+	}
+}

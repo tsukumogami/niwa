@@ -20,9 +20,10 @@ type halfPack struct {
 
 // newHalfPack builds, in an old store of "app" under f's .store/, one
 // non-delta pack holding a small commit's objects and then a 256 KiB random
-// blob, truncated halfway with its .idx beside it. git pack-objects writes
-// commits, then trees, then blobs, each in the order given, so the large
-// blob, listed last, is written last.
+// blob, truncated halfway with its .idx beside it. With no delta computed or
+// reused and no tag in the repository, git pack-objects writes the objects
+// in the order given, so the large blob, listed last, is written last and
+// the cut falls inside it.
 func newHalfPack(t *testing.T, f fixture) halfPack {
 	t.Helper()
 	work := filepath.Join(t.TempDir(), "half")
@@ -45,7 +46,7 @@ func newHalfPack(t *testing.T, f fixture) halfPack {
 
 	order := strings.Join(append(append([]string{}, hp.small...), hp.large), "\n") + "\n"
 	base := filepath.Join(t.TempDir(), "pack")
-	name := testGitStdin(t, work, order, "pack-objects", "--window=0", "-q", base)
+	name := testGitStdin(t, work, order, "pack-objects", "--window=0", "--no-reuse-delta", "-q", base)
 
 	hp.store = filepath.Join(f.mdir(), ".store", "app-20200101T000000Z-0000aaaa")
 	packDir := filepath.Join(hp.store, "objects", "pack")
