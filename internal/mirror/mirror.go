@@ -403,8 +403,10 @@ func Seed(ctx context.Context, opts Options, repo Repo) Result {
 // lock, that another command had already fixed the mirror restored nothing
 // and logs no restore line: its check line says the fault it saw and
 // "healthy". Each borrower ref the restore left unrecoverable gets an
-// unrecoverable line after the restore line. A failed log write is kept as
-// the Result's LogErr and changes nothing else in it.
+// unrecoverable line after the restore line. The restore line lists the
+// borrowers the restore's probe read (probed), and each store the restore
+// removed or kept on the way gets a store line after the rest. A failed log
+// write is kept as the Result's LogErr and changes nothing else in it.
 //
 // A mirror the check finds healthy is refreshed when opts.Refresh is set,
 // once its check line is written (see refresh). A mirror this call restored
@@ -456,8 +458,8 @@ func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 	}
 	restoreStart := time.Now()
 	tookStart := elapsedNow()
-	var salvaged []string
-	res.Outcome, res.Unrecoverable, salvaged, res.Err = restore(ctx, opts, r)
+	rb := restore(ctx, opts, r)
+	res.Outcome, res.Unrecoverable, res.Err = rb.outcome, rb.lost, rb.err
 	took := elapsedNow().Sub(tookStart).Milliseconds()
 	checkLine.Result = res.Outcome
 	if res.Outcome == OutcomeHealthy {
@@ -468,9 +470,11 @@ func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 	restoreLine.Time = logTime(restoreStart)
 	restoreLine.Event = eventRestore
 	restoreLine.TookMs = &took
-	restoreLine.SalvagedFrom = salvaged
+	restoreLine.SalvagedFrom = rb.salvaged
 	restoreLine.NetworkNotes = networkNotesFrom(ctx)
+	restoreLine.Probed = rb.probed
 	lines := []any{checkLine, restoreLine}
-	logged(appendLog(mdir, append(lines, unrecoverableLines(restoreLine, res.Unrecoverable)...)...))
+	lines = append(lines, unrecoverableLines(restoreLine, res.Unrecoverable)...)
+	logged(appendLog(mdir, append(lines, storeLines(restoreLine, rb.events)...)...))
 	return res
 }

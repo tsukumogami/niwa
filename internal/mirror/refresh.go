@@ -36,7 +36,8 @@ const deepVerifyEvery = 24 * time.Hour
 // with fault pack-changed and log a restore line in place of the refresh
 // line; the Result then carries that fault and the restore's outcome, and
 // the refs the rebuild's probe of the borrowers left lost, each logged on an
-// unrecoverable line after the restore line.
+// unrecoverable line after the restore line, and a store line for each store
+// the rebuild removed or kept after those.
 //
 // Any other failure leaves the link, the store's packs and the state file as
 // they were, logs nothing, and returns the healthy Result with Err set: the
@@ -90,17 +91,22 @@ func refresh(ctx context.Context, opts Options, mdir string, r Repo, res Result)
 	rotten, err := refreshStore(ctx, mdir, r, rec, start)
 	if rotten {
 		res.Fault = FaultPackChanged
-		var salvaged []string
-		res.Outcome, res.Unrecoverable, salvaged, res.Err = rebuild(ctx, mdir, r, FaultPackChanged,
-			borrowersOf(opts.Instances, filepath.Join(mdir, r.ID)))
+		rb := rebuild(ctx, mdir, r, rebuildArgs{
+			fault:     FaultPackChanged,
+			borrowers: borrowersOf(opts.Instances, filepath.Join(mdir, r.ID)),
+			scan:      opts.Scan,
+		})
+		res.Outcome, res.Unrecoverable, res.Err = rb.outcome, rb.lost, rb.err
 		line.Event = eventRestore
-		line.SalvagedFrom = salvaged
+		line.SalvagedFrom = rb.salvaged
+		line.Probed = rb.probed
 		line.Fault = res.Fault
 		line.Result = res.Outcome
 		took := elapsedNow().Sub(tookStart).Milliseconds()
 		line.TookMs = &took
 		line.NetworkNotes = networkNotesFrom(ctx)
-		logged(appendLog(mdir, append([]any{line}, unrecoverableLines(line, res.Unrecoverable)...)...))
+		lines := append([]any{line}, unrecoverableLines(line, res.Unrecoverable)...)
+		logged(appendLog(mdir, append(lines, storeLines(line, rb.events)...)...))
 		return res
 	}
 	if err != nil {

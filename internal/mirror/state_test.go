@@ -146,12 +146,12 @@ func TestBuild_WritesTheStateFileAndManifest(t *testing.T) {
 			t.Fatalf(".meta holds %q", e.Name())
 		}
 	}
-	for _, name := range []string{"mirror.log.1", "app.json"} {
+	for _, name := range []string{"mirror.log.1", "app.json", "app.stores"} {
 		if !metaEntryAllowed(name) {
 			t.Fatalf("the .meta listing refuses %q", name)
 		}
 	}
-	for _, name := range []string{"mirror.log.2", "mirror.log.1.bak", ".app.json-1234abcd", "other.json", "notes.txt"} {
+	for _, name := range []string{"mirror.log.2", "mirror.log.1.bak", ".app.json-1234abcd", ".app.stores-1234abcd", "other.json", "notes.txt"} {
 		if metaEntryAllowed(name) {
 			t.Fatalf("the .meta listing accepts %q", name)
 		}
@@ -159,9 +159,10 @@ func TestBuild_WritesTheStateFileAndManifest(t *testing.T) {
 }
 
 // metaEntryAllowed reports whether name may sit in the fixture's .meta/: its
-// one repo's state file, the mirror log or the log's one older generation.
+// one repo's state file and store record, the mirror log or the log's one
+// older generation.
 func metaEntryAllowed(name string) bool {
-	return name == "app.json" || name == "mirror.log" || name == "mirror.log.1"
+	return name == "app.json" || name == "app.stores" || name == "mirror.log" || name == "mirror.log.1"
 }
 
 func TestLog_OneCheckLinePerCallAndOneRestoreLinePerRestore(t *testing.T) {

@@ -73,6 +73,7 @@ func treeFiles(t *testing.T, dir string) map[string]string {
 type mirrorSnap struct {
 	link   string // "" when there is no link
 	state  []byte
+	record []byte                       // the store record's bytes; nil when there is none
 	stores map[string]map[string]string // .store/ entry -> its files
 }
 
@@ -81,6 +82,7 @@ func snapMirror(t *testing.T, f fixture) mirrorSnap {
 	s := mirrorSnap{stores: map[string]map[string]string{}}
 	s.link, _ = os.Readlink(StablePath(f.home, f.root, "app"))
 	s.state, _ = os.ReadFile(statePath(f.mdir(), "app"))
+	s.record, _ = os.ReadFile(storesPath(f.mdir(), "app"))
 	entries, _ := os.ReadDir(filepath.Join(f.mdir(), ".store"))
 	for _, e := range entries {
 		s.stores[e.Name()] = treeFiles(t, filepath.Join(f.mdir(), ".store", e.Name()))
@@ -97,6 +99,9 @@ func (s mirrorSnap) requireSame(t *testing.T, f fixture) {
 	if !bytes.Equal(now.state, s.state) {
 		t.Fatalf("state file changed:\n%s\nwas\n%s", now.state, s.state)
 	}
+	if !bytes.Equal(now.record, s.record) {
+		t.Fatalf("store record changed:\n%s\nwas\n%s", now.record, s.record)
+	}
 	if !slices.Equal(slices.Sorted(maps.Keys(now.stores)), slices.Sorted(maps.Keys(s.stores))) {
 		t.Fatalf(".store holds %v, want %v", slices.Sorted(maps.Keys(now.stores)), slices.Sorted(maps.Keys(s.stores)))
 	}
@@ -107,12 +112,12 @@ func (s mirrorSnap) requireSame(t *testing.T, f fixture) {
 	}
 }
 
-// requireNoLeftovers fails when a restore left a clone, a link or a state
-// file under a temporary name.
+// requireNoLeftovers fails when a restore left a clone, a link, a state
+// file or a store record under a temporary name.
 func requireNoLeftovers(t *testing.T, f fixture) {
 	t.Helper()
 	emptyDir(t, filepath.Join(f.mdir(), ".tmp"))
-	for _, pattern := range []string{".link-*", filepath.Join(".meta", ".app.json-*")} {
+	for _, pattern := range []string{".link-*", filepath.Join(".meta", ".app.json-*"), filepath.Join(".meta", ".app.stores-*")} {
 		if found, _ := filepath.Glob(filepath.Join(f.mdir(), pattern)); len(found) != 0 {
 			t.Fatalf("leftovers: %v", found)
 		}
@@ -221,8 +226,9 @@ func TestRestore_AFailedStateRenameAfterTheSwapIsRebuiltNextTime(t *testing.T) {
 	if len(res) != 1 || res[0].Outcome != OutcomeRestored || res[0].Err == nil {
 		t.Fatalf("result = %+v, want restored with an error", res)
 	}
-	if f.linkTarget(t) == old || !validLinkTarget("app", f.linkTarget(t)) {
-		t.Fatalf("link = %q, want a new store", f.linkTarget(t))
+	unrecorded := f.linkTarget(t)
+	if unrecorded == old || !validLinkTarget("app", unrecorded) {
+		t.Fatalf("link = %q, want a new store", unrecorded)
 	}
 
 	stageHook = nil
@@ -234,9 +240,14 @@ func TestRestore_AFailedStateRenameAfterTheSwapIsRebuiltNextTime(t *testing.T) {
 	if err != nil || st.Store != f.linkTarget(t) {
 		t.Fatalf("state = %+v (%v), want it to name the link's target %q", st, err, f.linkTarget(t))
 	}
-	if stores := oldStores(f.mdir(), "app"); len(stores) != 1 {
-		t.Fatalf(".store holds %v of app, want one", stores)
+	// No store that was ever linked is removed by a restore: the first
+	// store and the one whose state file went unrecorded are both kept,
+	// retired, beside the linked one.
+	if stores := oldStores(f.mdir(), "app"); len(stores) != 3 {
+		t.Fatalf(".store holds %v of app, want three", stores)
 	}
+	requireKeptRetired(t, f, old)
+	requireKeptRetired(t, f, unrecorded)
 	requireNoLeftovers(t, f)
 }
 
@@ -312,8 +323,8 @@ func TestEnsureHealthy_AHealthyCheckClearsLeftoversWhenTheLockIsFree(t *testing.
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
-	if strings.Join(names, ",") != "app.json,mirror.log" {
-		t.Fatalf(".meta holds %v, want only app.json and mirror.log", names)
+	if strings.Join(names, ",") != "app.json,app.stores,mirror.log" {
+		t.Fatalf(".meta holds %v, want only app.json, app.stores and mirror.log", names)
 	}
 
 	plant()
@@ -483,6 +494,7 @@ func TestRestore_RefusesToCloneWithoutTheFreeSpace(t *testing.T) {
 func TestCheck_URLChanged(t *testing.T) {
 	f := built(t)
 	old := f.linkTarget(t)
+	recorded := entryOf(t, f, old)
 	onlyOld := extraPack(t, filepath.Join(f.store(t), "objects", "pack"), "only the old store")
 	rewriteStateURL(t, f)
 
@@ -510,8 +522,11 @@ func TestCheck_URLChanged(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(f.store(t), "objects", "pack", onlyOld)); !os.IsNotExist(err) {
 		t.Fatalf("a pack only the old store held reached the new one (%v)", err)
 	}
-	if _, err := os.Lstat(filepath.Join(f.mdir(), old)); !os.IsNotExist(err) {
-		t.Fatalf("the old store is still there (%v)", err)
+	// The old remote's store stays, retired, under the identity it was
+	// recorded with, so no later restore of this remote salvages from it.
+	requireKeptRetired(t, f, old)
+	if e := entryOf(t, f, old); e.URL != recorded.URL || e.Identity != recorded.Identity {
+		t.Fatalf("the old store's entry = %+v, want the URL and identity it was recorded with, %+v", e, recorded)
 	}
 }
 

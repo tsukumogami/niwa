@@ -465,8 +465,9 @@ func TestSeed_AFailureLeavesNothingAndTheNextSeedBuilds(t *testing.T) {
 		if res.Outcome != OutcomeRestored || res.Err == nil {
 			t.Fatalf("Seed = %+v, want restored with an error", res)
 		}
-		if !validLinkTarget("app", f.linkTarget(t)) {
-			t.Fatalf("link = %q, want the new store", f.linkTarget(t))
+		seededStore := f.linkTarget(t)
+		if !validLinkTarget("app", seededStore) {
+			t.Fatalf("link = %q, want the new store", seededStore)
 		}
 		if _, err := os.Lstat(statePath(f.mdir(), "app")); !os.IsNotExist(err) {
 			t.Fatalf("there's a state file for app (%v)", err)
@@ -482,9 +483,12 @@ func TestSeed_AFailureLeavesNothingAndTheNextSeedBuilds(t *testing.T) {
 		if err != nil || st.Store != f.linkTarget(t) {
 			t.Fatalf("state = %+v (%v), want it to name the link's target %q", st, err, f.linkTarget(t))
 		}
-		if stores := oldStores(f.mdir(), "app"); len(stores) != 1 {
-			t.Fatalf(".store holds %v of app, want one", stores)
+		// The seeded store was linked, so the rebuild keeps it, retired,
+		// beside the one it linked in its place.
+		if stores := oldStores(f.mdir(), "app"); len(stores) != 2 {
+			t.Fatalf(".store holds %v of app, want two", stores)
 		}
+		requireKeptRetired(t, f, seededStore)
 		requireNoLeftovers(t, f)
 	})
 }
