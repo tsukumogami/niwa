@@ -48,8 +48,8 @@ func atStage(stage string) error {
 // nothing.
 //
 // When only the link is gone and the state file records a store that passes
-// every check a linked store gets, cloned from the URL the config gives now,
-// a new link to that store, after its config is rewritten from the fixed
+// every check a linked store gets, cloned from the remote the config's URL
+// names now, a new link to that store, after its config is rewritten from the fixed
 // set, is all the restore makes: no network is needed. Otherwise it clones
 // r.URL, provided the file system has room for it.
 //
@@ -72,12 +72,12 @@ func atStage(stage string) error {
 //
 // Once a store is in place, the borrowers are probed for refs it can't serve
 // (see rebuild), and the refs still lost come back with the outcome.
-func restore(ctx context.Context, opts Options, r Repo) (Outcome, []LostRef, error) {
+func restore(ctx context.Context, opts Options, r Repo) (Outcome, []LostRef, []string, error) {
 	if r.URL == "" {
-		return OutcomeRestoreFailed, nil, errors.New("the workspace config gives no URL to restore from")
+		return OutcomeRestoreFailed, nil, nil, errors.New("the workspace config gives no URL to restore from")
 	}
 	if err := ensureLayout(opts.Home, opts.WorkspaceRoot); err != nil {
-		return OutcomeRestoreFailed, nil, err
+		return OutcomeRestoreFailed, nil, nil, err
 	}
 
 	wait := opts.LockWait
@@ -90,10 +90,10 @@ func restore(ctx context.Context, opts Options, r Repo) (Outcome, []LostRef, err
 	holder := fmt.Sprintf("niwa pid %d restoring mirror %s", os.Getpid(), r.ID)
 	release, err := filelock.WaitFileLock(ctx, LockPath(opts.Home, opts.WorkspaceRoot, r.ID), holder, wait)
 	if errors.Is(err, filelock.ErrLockHeld) {
-		return OutcomeBusy, nil, err
+		return OutcomeBusy, nil, nil, err
 	}
 	if err != nil {
-		return OutcomeRestoreFailed, nil, err
+		return OutcomeRestoreFailed, nil, nil, err
 	}
 	defer release()
 
@@ -103,7 +103,7 @@ func restore(ctx context.Context, opts Options, r Repo) (Outcome, []LostRef, err
 	clearLeftovers(mdir, r.ID)
 	fault := check(ctx, mdir, r)
 	if fault == FaultNone {
-		return OutcomeHealthy, nil, nil
+		return OutcomeHealthy, nil, nil, nil
 	}
 	return rebuild(ctx, mdir, r, fault, borrowersOf(opts.Instances, filepath.Join(mdir, r.ID)))
 }
@@ -119,7 +119,13 @@ func restore(ctx context.Context, opts Options, r Repo) (Outcome, []LostRef, err
 // lost come back with the outcome. A rebuild that fails before the swap, or
 // whose new store went unrecorded, probes nothing. A lost ref is the stated
 // limit of a restore, not a failure: the outcome stays restored.
-func rebuild(ctx context.Context, mdir string, r Repo, fault Fault, borrowers []string) (Outcome, []LostRef, error) {
+//
+// salvaged names the old stores a new store was built with salvage from,
+// relative to the mirrors directory (".store/<name>", or the repo id for a
+// directory found at the stable path), for the restore's log line. It's nil
+// when nothing was salvaged: a relink, a store cloned from another remote, a
+// mirror with no old store, or a rebuild that failed before the swap.
+func rebuild(ctx context.Context, mdir string, r Repo, fault Fault, borrowers []string) (Outcome, []LostRef, []string, error) {
 	stable := filepath.Join(mdir, r.ID)
 	moveAside := false
 	// noGit lists old stores git mustn't run in: a recorded store whose
@@ -130,45 +136,47 @@ func rebuild(ctx context.Context, mdir string, r Repo, fault Fault, borrowers []
 	case errors.Is(err, fs.ErrNotExist):
 		relinked, distrusted, err := relink(ctx, mdir, r)
 		if err != nil {
-			return OutcomeRestoreFailed, nil, err
+			return OutcomeRestoreFailed, nil, nil, err
 		}
 		if relinked {
-			return OutcomeRestored, recoverBorrowers(ctx, mdir, r, borrowers), nil
+			return OutcomeRestored, recoverBorrowers(ctx, mdir, r, borrowers), nil, nil
 		}
 		if distrusted != "" {
 			noGit = append(noGit, distrusted)
 		}
 	case err != nil:
-		return OutcomeRestoreFailed, nil, fmt.Errorf("inspecting %s: %w", stable, err)
+		return OutcomeRestoreFailed, nil, nil, fmt.Errorf("inspecting %s: %w", stable, err)
 	case info.Mode()&os.ModeSymlink != 0:
 	case info.IsDir() && ownedByUser(info):
 		moveAside = true
 	default:
 		// A file, a fifo or a directory another user owns: a rename over it
 		// would destroy it or fail, and moving it isn't niwa's call.
-		return OutcomeRestoreFailed, nil, fmt.Errorf("%s is not a link; left in place", stable)
+		return OutcomeRestoreFailed, nil, nil, fmt.Errorf("%s is not a link; left in place", stable)
 	}
 
 	if err := checkFreeSpace(mdir, r.ID); err != nil {
-		return OutcomeRestoreFailed, nil, err
+		return OutcomeRestoreFailed, nil, nil, err
 	}
 
 	// The old stores are listed before the new one exists, so the list can
 	// never name it. A store cloned from another remote than the config's
 	// holds nothing the new one should keep, so nothing is salvaged from it.
 	olds := oldStores(mdir, r.ID)
-	var srcs []string
+	var srcs, salvaged []string
 	if !fromOtherRemote(mdir, r, fault) {
 		for _, name := range olds {
 			srcs = append(srcs, filepath.Join(mdir, ".store", name))
+			salvaged = append(salvaged, filepath.Join(".store", name))
 		}
 		if moveAside {
 			srcs = append(srcs, stable)
+			salvaged = append(salvaged, r.ID)
 		}
 	}
 	store, stateTmp, err := buildStore(ctx, mdir, r, srcs, noGit)
 	if err != nil {
-		return OutcomeRestoreFailed, nil, err
+		return OutcomeRestoreFailed, nil, nil, err
 	}
 	discard := func() {
 		// Nothing links to the new store yet, so it goes, by its exact name.
@@ -181,12 +189,12 @@ func rebuild(ctx context.Context, mdir string, r Repo, fault Fault, borrowers []
 		name, err := newStoreName(r.ID, time.Now())
 		if err != nil {
 			discard()
-			return OutcomeRestoreFailed, nil, err
+			return OutcomeRestoreFailed, nil, nil, err
 		}
 		moved = filepath.Join(mdir, ".store", name+".moved")
 		if err := os.Rename(stable, moved); err != nil {
 			discard()
-			return OutcomeRestoreFailed, nil, fmt.Errorf("moving the directory at %s aside: %w", stable, err)
+			return OutcomeRestoreFailed, nil, nil, fmt.Errorf("moving the directory at %s aside: %w", stable, err)
 		}
 	}
 	if err := swapLink(mdir, r.ID, store); err != nil {
@@ -194,17 +202,17 @@ func rebuild(ctx context.Context, mdir string, r Repo, fault Fault, borrowers []
 		if moved != "" {
 			_ = os.Rename(moved, stable)
 		}
-		return OutcomeRestoreFailed, nil, err
+		return OutcomeRestoreFailed, nil, nil, err
 	}
 	if err := recordState(mdir, r.ID, stateTmp); err != nil {
 		// The new store is linked and borrowers read it; only its record is
 		// missing, so the next check finds no matching state file and
 		// rebuilds, salvaging from this store. The old stores stay until then.
 		_ = os.Remove(stateTmp)
-		return OutcomeRestored, nil, fmt.Errorf("recording the new store: %w", err)
+		return OutcomeRestored, nil, salvaged, fmt.Errorf("recording the new store: %w", err)
 	}
 	removeOldStores(mdir, r.ID, olds)
-	return OutcomeRestored, recoverBorrowers(ctx, mdir, r, borrowers), nil
+	return OutcomeRestored, recoverBorrowers(ctx, mdir, r, borrowers), salvaged, nil
 }
 
 // relink points a new link at the store the state file records, when that
@@ -240,7 +248,9 @@ func relink(ctx context.Context, mdir string, r Repo) (relinked bool, distrusted
 
 // fromOtherRemote reports whether the mirror's stores were cloned from
 // another remote than r.URL: the check said so, or the state file records
-// another URL behind a fault found first. A state file that can't be read
+// another remote behind a fault found first. Remotes compare by identity
+// (urlChanged), so a store recorded under another spelling of r.URL's remote
+// is salvaged from. A state file that can't be read
 // says nothing either way.
 func fromOtherRemote(mdir string, r Repo, fault Fault) bool {
 	if fault == FaultURLChanged {
@@ -320,6 +330,7 @@ func buildStore(ctx context.Context, mdir string, r Repo, srcs, noGit []string) 
 		Schema:         stateSchema,
 		RepoID:         r.ID,
 		URL:            recordURL(r.URL),
+		Identity:       remoteIdentity(r.URL),
 		Store:          filepath.Join(".store", name),
 		Packs:          packs,
 		LastRefresh:    stateTime(built),

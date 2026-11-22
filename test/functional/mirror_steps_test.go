@@ -95,6 +95,7 @@ func registerMirrorSteps(ctx *godog.ScenarioContext) {
 	registerMirrorLostSteps(ctx)
 	registerMirrorHealthySteps(ctx)
 	registerMirrorHostileSteps(ctx)
+	registerMirrorIdentitySteps(ctx)
 	registerMirrorEnvSteps(ctx)
 }
 

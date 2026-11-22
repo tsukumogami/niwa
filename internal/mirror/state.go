@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -34,6 +35,12 @@ type state struct {
 	// URL is the config's URL with userinfo, query and fragment stripped.
 	// It's a record, never cloned from.
 	URL string `json:"url"`
+	// Identity is remoteIdentity of URL: the remote the store was cloned
+	// from, whatever spelling named it. It's written for readers of the
+	// file; niwa itself derives it from URL on every read (readState), so a
+	// file written before the field existed, or one whose identity
+	// disagrees with its URL, is judged by its URL.
+	Identity string `json:"identity"`
 	// Store is the link target the build swapped in, ".store/<name>".
 	Store string      `json:"store"`
 	Packs []packEntry `json:"packs"`
@@ -91,6 +98,9 @@ func readState(mdir, repoID string) (state, error) {
 	if st.Schema != stateSchema || st.RepoID != repoID {
 		return st, fmt.Errorf("%s has schema %d for %q, want schema %d for %q", path, st.Schema, st.RepoID, stateSchema, repoID)
 	}
+	// v0.43.0 wrote no identity. It's derived here, so the next write of a
+	// state read from such a file carries it.
+	st.Identity = remoteIdentity(st.URL)
 	return st, nil
 }
 
@@ -212,4 +222,60 @@ func recordURL(raw string) string {
 		}
 	}
 	return raw
+}
+
+// defaultPorts are the ports remoteIdentity drops, by URL scheme: a remote
+// named with its scheme's default port is the same remote named without it.
+var defaultPorts = map[string]string{
+	"ssh":     "22",
+	"git+ssh": "22",
+	"ssh+git": "22",
+	"git":     "9418",
+	"http":    "80",
+	"https":   "443",
+}
+
+// remoteIdentity is the remote a clone URL names, independent of how it's
+// spelled: the host, lowercased, with its port when that isn't the scheme's
+// default, then the path with any trailing slashes and one trailing ".git"
+// removed. Scheme and user are not part of it, so the SSH and HTTPS
+// spellings of one repo, or the same URL with another user, give the same
+// identity, while another host, another port or another path doesn't.
+//
+// It reads the URL forms git takes (scheme://[user@]host[:port]/path), the
+// scp-like form ([user@]host:path, a colon before any slash), and a local
+// path. A file:// URL and a local path give the cleaned path alone, so the
+// two spellings of one local repo compare as one remote. A URL that doesn't
+// parse gives "", as recordURL does.
+func remoteIdentity(raw string) string {
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return ""
+		}
+		path := identityPath(u.Path)
+		host := strings.ToLower(u.Hostname())
+		if host == "" {
+			return path
+		}
+		if port := u.Port(); port != "" && port != defaultPorts[strings.ToLower(u.Scheme)] {
+			host = net.JoinHostPort(host, port)
+		}
+		return host + "/" + strings.TrimLeft(path, "/")
+	}
+	if colon := strings.Index(raw, ":"); colon > 0 && !strings.Contains(raw[:colon], "/") {
+		host := raw[:colon]
+		if at := strings.LastIndex(host, "@"); at >= 0 {
+			host = host[at+1:]
+		}
+		return strings.ToLower(host) + "/" + strings.TrimLeft(identityPath(raw[colon+1:]), "/")
+	}
+	return identityPath(raw)
+}
+
+// identityPath is a remote's path with its trailing slashes and one
+// trailing ".git" removed, so "o/r", "o/r.git" and "o/r.git/" are one path.
+func identityPath(p string) string {
+	p = strings.TrimRight(p, "/")
+	return strings.TrimRight(strings.TrimSuffix(p, ".git"), "/")
 }

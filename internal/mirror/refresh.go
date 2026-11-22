@@ -90,9 +90,11 @@ func refresh(ctx context.Context, opts Options, mdir string, r Repo, res Result)
 	rotten, err := refreshStore(ctx, mdir, r, rec, start)
 	if rotten {
 		res.Fault = FaultPackChanged
-		res.Outcome, res.Unrecoverable, res.Err = rebuild(ctx, mdir, r, FaultPackChanged,
+		var salvaged []string
+		res.Outcome, res.Unrecoverable, salvaged, res.Err = rebuild(ctx, mdir, r, FaultPackChanged,
 			borrowersOf(opts.Instances, filepath.Join(mdir, r.ID)))
 		line.Event = eventRestore
+		line.SalvagedFrom = salvaged
 		line.Fault = res.Fault
 		line.Result = res.Outcome
 		took := elapsedNow().Sub(tookStart).Milliseconds()
@@ -139,6 +141,7 @@ func refreshStore(ctx context.Context, mdir string, r Repo, rec state, now time.
 
 	next := rec
 	next.URL = recordURL(r.URL)
+	next.Identity = remoteIdentity(r.URL)
 	next.Packs = packs
 	next.LastRefresh = stateTime(now)
 	if deep {

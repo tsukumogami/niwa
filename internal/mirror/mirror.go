@@ -447,7 +447,8 @@ func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 	}
 	restoreStart := time.Now()
 	tookStart := elapsedNow()
-	res.Outcome, res.Unrecoverable, res.Err = restore(ctx, opts, r)
+	var salvaged []string
+	res.Outcome, res.Unrecoverable, salvaged, res.Err = restore(ctx, opts, r)
 	took := elapsedNow().Sub(tookStart).Milliseconds()
 	checkLine.Result = res.Outcome
 	if res.Outcome == OutcomeHealthy {
@@ -458,6 +459,7 @@ func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 	restoreLine.Time = logTime(restoreStart)
 	restoreLine.Event = eventRestore
 	restoreLine.TookMs = &took
+	restoreLine.SalvagedFrom = salvaged
 	restoreLine.NetworkNotes = networkNotesFrom(ctx)
 	lines := []any{checkLine, restoreLine}
 	logged(appendLog(mdir, append(lines, unrecoverableLines(restoreLine, res.Unrecoverable)...)...))
