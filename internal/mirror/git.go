@@ -417,13 +417,15 @@ func gitRun(ctx context.Context, netCall string, env, config []string, stdin str
 		testhook.ProbeGitEnv(testhook.KindLocal, sub, procEnv)
 	}
 	cmd := exec.CommandContext(ctx, "git", full...)
-	makeDisposable(ctx, cmd)
+	exited := makeDisposable(ctx, cmd)
 	cmd.Env = procEnv
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	exited()
+	if err != nil {
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			return "", fmt.Errorf("git %s: %w: %s", sub, err, msg)
 		}

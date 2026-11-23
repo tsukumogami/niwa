@@ -37,7 +37,10 @@ const (
 	// fallbackSeedFailed: the repo had no mirror and the first build failed.
 	fallbackSeedFailed = "mirror-seed-failed"
 	// fallbackBorrowCloneFailed: the borrowing clone failed, left no
-	// alternates file, or its rewritten alternates line didn't read back.
+	// alternates file, or its rewritten alternates line didn't read back;
+	// also the mirror's stable path isn't absolute or holds a line break,
+	// taking the mirror's lock failed for a reason other than another
+	// holder, or the mirror's link isn't one niwa wrote (mirror.LinkedStore).
 	fallbackBorrowCloneFailed = "borrow-clone-failed"
 	// fallbackStoreChanged: the mirror's link named another store after the
 	// borrowing clone than before it, on the retry as well.
@@ -126,13 +129,14 @@ func (a *Applier) cloneNew(ctx context.Context, job cloneJob, r *Reporter) (clon
 // returns the reason it couldn't with no clone left at the target.
 //
 // It holds the mirror's lock (mirror.LockPath, the lock a restore, a refresh
-// and the retired-store sweep take) from reading the stable link until the
-// clone's alternates file holds the stable-path line on disk. A restore can't
-// swap the store and a sweep can't scan in that time, so the sweep's strict
-// scan either finishes before the link is read or sees the new clone, which
-// is built at its final path where the strict walk (hostdir.StrictClones)
-// looks. The lock is waited for as long as a restore waits; a wait that runs
-// out is mirror-busy.
+// and the retired-store sweep take) from the first read of the stable link
+// until it returns: through the clone, the stable-path line written and read
+// back, the second read of the link that shows the store didn't change, and
+// the retry when it did. A restore can't swap the store and a sweep can't
+// scan in that time, so the sweep's strict scan either finishes before the
+// link is read or sees the new clone, which is built at its final path where
+// the strict walk (hostdir.StrictClones) looks. The lock is waited for as
+// long as a restore waits; a wait that runs out is mirror-busy.
 //
 // The clone is git clone --reference-if-able through the stable path, which
 // fetches only what the mirror lacks and records the store's resolved path
