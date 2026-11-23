@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -296,4 +297,470 @@ func TestCloneURLsFromConfig(t *testing.T) {
 	if got, ok := urls("../x"); ok {
 		t.Errorf("a name with a separator gave %q", got)
 	}
+}
+
+const verdictKeptSessionID = "66666666-6666-6666-6666-666666666666"
+
+// addKeptUnit adds a second mapped unit beside the fixture's, whose clone
+// holds a commit on branch that the remote doesn't, and returns its path.
+func (f passFixture) addKeptUnit(t *testing.T, name, branch string) string {
+	t.Helper()
+	remote := filepath.Join(filepath.Dir(f.root), "remote", "app.git")
+	inst := makeReapInstance(t, f.root, name)
+	clone := filepath.Join(inst, "tools", "app")
+	passGit(t, filepath.Dir(f.root), "clone", "-q", "file://"+remote, clone)
+	passGit(t, clone, "checkout", "-q", "-b", branch)
+	passGit(t, clone, "commit", "-q", "--allow-empty", "-m", "work")
+	mapEphemeral(t, f.root, verdictKeptSessionID, inst, true)
+	return inst
+}
+
+// appendConfig adds body to the fixture's workspace configuration.
+func (f passFixture) appendConfig(t *testing.T, body string) {
+	t.Helper()
+	cfgPath := filepath.Join(f.root, config.ConfigDir, config.ConfigFile)
+	prev, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, cfgPath, string(prev)+body)
+}
+
+func verdictByName(t *testing.T, vs []unitVerdict, name string) unitVerdict {
+	t.Helper()
+	for _, v := range vs {
+		if v.Name == name {
+			return v
+		}
+	}
+	t.Fatalf("no verdict for %s in %+v", name, vs)
+	return unitVerdict{}
+}
+
+func runVerdictPass(t *testing.T, f passFixture, instance string) passResult {
+	t.Helper()
+	res, err := runPass(context.Background(), f.root, passVerdictOnly, passScope{JobsDir: f.jobsDir, Now: time.Now(), Instance: instance})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+func TestPassVerdictOnlyRemovesNothing(t *testing.T) {
+	f := newPassFixture(t)
+	f.addKeptUnit(t, "test-ws-kept", "unpushed-work")
+	markers := t.TempDir()
+	f.appendConfig(t, "\n[session.on_reap]\ncommand = \"touch "+filepath.Join(markers, "on-reap")+"\"\n"+
+		"\n[session.before_remove]\ncommand = \"touch "+filepath.Join(markers, "gate")+"\"\n")
+
+	res := runVerdictPass(t, f, "")
+	if res.Reaped != 0 || len(*f.destroyed) != 0 {
+		t.Fatalf("reaped %d, destroyed %v; a verdict-only pass removes nothing", res.Reaped, *f.destroyed)
+	}
+	for _, id := range []string{passSessionID, verdictKeptSessionID} {
+		if _, err := workspace.ReadSessionMapping(f.root, id); err != nil {
+			t.Errorf("mapping %s is gone: %v", id, err)
+		}
+	}
+	for _, m := range []string{"on-reap", "gate"} {
+		if _, err := os.Stat(filepath.Join(markers, m)); err == nil {
+			t.Errorf("the %s command ran in a verdict-only pass", m)
+		}
+	}
+	if len(res.Verdicts) != 2 || len(res.Kept) != 0 {
+		t.Fatalf("verdicts %+v, kept %+v; want two verdicts and no kept line", res.Verdicts, res.Kept)
+	}
+	pass := verdictByName(t, res.Verdicts, "test-ws-pass")
+	if !pass.Reached || pass.Verdict.Kind != removal.Reap {
+		t.Errorf("clean unit %+v; want reached, reap", pass)
+	}
+	kept := verdictByName(t, res.Verdicts, "test-ws-kept")
+	first, _ := kept.Verdict.First()
+	if !kept.Reached || kept.Verdict.Kind != removal.Keep || first.Name != removal.CheckRepository || !strings.Contains(first.Evidence, "branch unpushed-work") {
+		t.Errorf("kept unit %+v; want kept by the repository check naming the branch", kept)
+	}
+	if strings.Contains(f.stderr.String(), "niwa: kept test-ws-kept") {
+		t.Errorf("a verdict-only pass printed the reap's kept line: %q", f.stderr.String())
+	}
+}
+
+func TestPassVerdictOnlyEvaluatesOnlyTheNamedUnit(t *testing.T) {
+	f := newPassFixture(t)
+	f.addKeptUnit(t, "test-ws-kept", "unpushed-work")
+	res := runVerdictPass(t, f, "test-ws-kept")
+	if len(res.Verdicts) != 1 || res.Verdicts[0].Name != "test-ws-kept" || !res.Verdicts[0].Reached {
+		t.Fatalf("verdicts %+v; want only test-ws-kept", res.Verdicts)
+	}
+	if res := runVerdictPass(t, f, "test-ws-none"); len(res.Verdicts) != 0 {
+		t.Fatalf("verdicts %+v for an instance that doesn't exist", res.Verdicts)
+	}
+}
+
+func TestPassVerdictOnlyMarksUnitsPastTheDeadlineNotReached(t *testing.T) {
+	f := newPassFixture(t)
+	f.addKeptUnit(t, "test-ws-kept", "unpushed-work")
+	prev := passDeadline
+	passDeadline = 0
+	t.Cleanup(func() { passDeadline = prev })
+
+	res := runVerdictPass(t, f, "")
+	if len(res.Verdicts) != 2 || res.Unreached != 2 {
+		t.Fatalf("verdicts %+v, unreached %d; want both units listed, unreached", res.Verdicts, res.Unreached)
+	}
+	for _, v := range res.Verdicts {
+		if v.Reached {
+			t.Errorf("%s reached past the deadline", v.Name)
+		}
+	}
+	var out bytes.Buffer
+	printVerdictsText(&out, res.Verdicts)
+	if strings.Count(out.String(), ": not reached\n") != 2 {
+		t.Errorf("text %q; want both units printed as not reached", out.String())
+	}
+}
+
+func TestPassVerdictOnlyMarksAUnitWhoseLockIsHeldNotReached(t *testing.T) {
+	f := newPassFixture(t)
+	prev := tryInstanceLockFunc
+	tryInstanceLockFunc = func(string, string) (func(), error) {
+		return nil, workspace.ErrLockHeld
+	}
+	t.Cleanup(func() { tryInstanceLockFunc = prev })
+
+	res := runVerdictPass(t, f, "")
+	if len(res.Verdicts) != 1 || res.Verdicts[0].Reached {
+		t.Fatalf("verdicts %+v; want the unit listed, not reached", res.Verdicts)
+	}
+	if !strings.Contains(f.stderr.String(), "niwa: kept test-ws-pass: another niwa command") {
+		t.Errorf("output %q; want the held lock named", f.stderr.String())
+	}
+}
+
+func TestPassVerdictOnlyTakesTheLockAsAVerdictOnlyReap(t *testing.T) {
+	f := newPassFixture(t)
+	var holders []string
+	prev := tryInstanceLockFunc
+	tryInstanceLockFunc = func(_ string, holder string) (func(), error) {
+		holders = append(holders, holder)
+		return func() {}, nil
+	}
+	t.Cleanup(func() { tryInstanceLockFunc = prev })
+
+	runVerdictPass(t, f, "")
+	if len(holders) != 1 || !strings.HasPrefix(holders[0], "niwa reap --verdict-only (pid ") {
+		t.Fatalf("lock holders %q; want one verdict-only reap", holders)
+	}
+}
+
+func TestPassVerdictOnlyPrintsTheLivenessKeep(t *testing.T) {
+	f := newPassFixture(t)
+	f.commitUnpushed(t, "never-pushed")
+	writeJobEntry(t, f.jobsDir, passSessionID)
+	makeReapInstance(t, f.root, "test-ws-dev")
+	other := makeReapInstance(t, f.root, "test-ws-other")
+	mapEphemeral(t, f.root, verdictKeptSessionID, other, false)
+
+	res := runVerdictPass(t, f, "")
+	if len(res.Verdicts) != 3 {
+		t.Fatalf("verdicts %+v; want every instance judged", res.Verdicts)
+	}
+	live := verdictByName(t, res.Verdicts, "test-ws-pass")
+	if !live.Reached || live.Verdict.Kind != removal.Keep || len(live.Verdict.Checks) < 2 ||
+		live.Verdict.Checks[0].Name != removal.CheckLiveness || live.Verdict.Checks[1].Name != removal.CheckRepository {
+		t.Errorf("live unit %+v; want kept on liveness with the repository check still listed", live)
+	}
+	dev := verdictByName(t, res.Verdicts, "test-ws-dev")
+	if first, _ := dev.Verdict.First(); !dev.Reached || first.Name != removal.CheckLiveness || !strings.Contains(first.Evidence, "no session mapping") {
+		t.Errorf("unmapped instance %+v; want kept on liveness, naming the missing mapping", dev)
+	}
+	nonEphemeral := verdictByName(t, res.Verdicts, "test-ws-other")
+	if first, _ := nonEphemeral.Verdict.First(); first.Name != removal.CheckLiveness || !strings.Contains(first.Evidence, "ephemeral") {
+		t.Errorf("non-ephemeral instance %+v; want kept on liveness", nonEphemeral)
+	}
+	if len(*f.destroyed) != 0 {
+		t.Errorf("destroyed %v", *f.destroyed)
+	}
+}
+
+func TestPassVerdictOnlyPrintsNoVerdictsOnInvalidSettings(t *testing.T) {
+	f := newPassFixture(t)
+	f.appendConfig(t, "build_trees = [\"target/*\"]\n")
+	res := runVerdictPass(t, f, "")
+	if len(res.Verdicts) != 0 {
+		t.Fatalf("verdicts %+v; want none on invalid settings", res.Verdicts)
+	}
+	if !strings.Contains(f.stderr.String(), "removed nothing") {
+		t.Fatalf("output %q; want the removed-nothing line", f.stderr.String())
+	}
+}
+
+func TestPassVerdictOnlySkipsStoredMappingsLaunchRecordsAndBackstop(t *testing.T) {
+	f := newPassFixture(t)
+	home := canonicalTempDir(t)
+	t.Setenv("HOME", home)
+	prevHome := userHomeDir
+	userHomeDir = func() string { return home }
+	t.Cleanup(func() { userHomeDir = prevHome })
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "projects"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "on-reap")
+	f.appendConfig(t, "\n[session.on_reap]\ncommand = \"touch "+marker+"\"\n")
+
+	// A mapping whose instance and session are both gone, which an acting
+	// pass settles by running the on-reap command.
+	const goneID = "55555555-5555-5555-5555-555555555555"
+	mapEphemeral(t, f.root, goneID, filepath.Join(f.root, "test-ws-gone"), true)
+	// A launch record whose transcript is gone, which an acting pass sweeps.
+	rec := workspace.LaunchRecord{
+		DispatchID:   "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d",
+		SessionID:    dispatchTestSessionID,
+		Agent:        "claude",
+		InstanceName: "test-ws+fix-0123abcd",
+		WrittenAt:    time.Now().Add(-2 * launchRecordGrace),
+	}
+	if err := workspace.WriteLaunchRecord(f.root, rec); err != nil {
+		t.Fatal(err)
+	}
+	// An unmapped dispatch instance past the TTL, which the backstop removes.
+	orphan := makeReapInstance(t, f.root, dispInstOld)
+	writeDispatchMarkerAt(t, orphan, time.Now().Add(-2*dispatchBackstopTTL))
+
+	res := runVerdictPass(t, f, "")
+	if len(*f.destroyed) != 0 || res.Reaped != 0 {
+		t.Fatalf("destroyed %v; a verdict-only pass removes nothing", *f.destroyed)
+	}
+	if _, err := workspace.ReadSessionMapping(f.root, goneID); err != nil {
+		t.Errorf("the stored mapping was settled: %v", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("the on-reap command ran")
+	}
+	if !launchRecordKept(t, f.root, rec) {
+		t.Error("the launch record was swept")
+	}
+	if v := verdictByName(t, res.Verdicts, dispInstOld); v.Verdict.Kind != removal.Keep {
+		t.Errorf("the orphan's verdict %+v; want kept on liveness", v)
+	}
+
+	// The same workspace under an acting pass does all three, so the
+	// fixture is one they apply to.
+	if _, err := runPass(context.Background(), f.root, passActAll, passScope{JobsDir: f.jobsDir, Now: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.ReadSessionMapping(f.root, goneID); err == nil {
+		t.Error("the acting pass did not settle the stored mapping")
+	}
+	if launchRecordKept(t, f.root, rec) {
+		t.Error("the acting pass did not sweep the launch record")
+	}
+	found := false
+	for _, p := range *f.destroyed {
+		found = found || p == orphan
+	}
+	if !found {
+		t.Errorf("the acting pass's backstop did not remove %s: destroyed %v", orphan, *f.destroyed)
+	}
+}
+
+func TestReportKeptUnitScrubsACredentialHelperURL(t *testing.T) {
+	var out bytes.Buffer
+	reportKeptUnit(&out, keptUnit{Name: "test-ws-pass", Check: removal.Check{
+		Name:     removal.CheckRepository,
+		Evidence: "tools/app: repository configuration names a program: credential.https://user:tok@example.com.helper",
+	}})
+	line := out.String()
+	if strings.Contains(line, "user:tok") || strings.Contains(line, "tok@") {
+		t.Fatalf("kept line %q carries the userinfo", line)
+	}
+	if !strings.Contains(line, "credential.https://example.com.helper") {
+		t.Fatalf("kept line %q lost the key around the userinfo", line)
+	}
+}
+
+func TestPass_KeptLineCarriesNoCredentialHelperUserinfo(t *testing.T) {
+	f := newPassFixture(t)
+	passGit(t, f.clone, "config", "credential.https://user:tok@example.com.helper", "store")
+
+	res, err := runPass(context.Background(), f.root, passActAll, passScope{JobsDir: f.jobsDir, Now: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Reaped != 0 || len(res.Kept) != 1 {
+		t.Fatalf("result %+v; want the unit kept", res)
+	}
+	out := f.stderr.String()
+	if !strings.Contains(out, "repository configuration names a program: credential.https://example.com.helper") {
+		t.Fatalf("output %q; want the kept line naming the key", out)
+	}
+	if strings.Contains(out, "user:tok") {
+		t.Fatalf("output %q carries the userinfo", out)
+	}
+}
+
+func TestPass_ReclaimedAndReapingWarningLinesAreScrubbed(t *testing.T) {
+	f := newPassFixture(t)
+	prev := destroyInstanceFunc
+	destroyInstanceFunc = func(string) error {
+		return errors.New("rm failed for https://user:hunter2@example.com/x \x1b[31m")
+	}
+	t.Cleanup(func() { destroyInstanceFunc = prev })
+	var err error
+	stderr := captureOSStderr(t, func() {
+		_, err = runPass(context.Background(), f.root, passActAll, passScope{JobsDir: f.jobsDir, Now: time.Now()})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, "niwa: warning: reaping instance") || strings.Contains(stderr, "hunter2") || strings.Contains(stderr, "\x1b") {
+		t.Fatalf("warning line %q; want it printed with the userinfo and escape gone", stderr)
+	}
+}
+
+func TestReportSparedInstancesScrubsNamesAndReasons(t *testing.T) {
+	var out bytes.Buffer
+	reportSparedInstances(&out, []sparedInstance{{
+		Name:   "test-ws+-0000aa11",
+		Reason: "it is marked to be kept: token=abc123 \x1b]0;title\x07 see https://u:p@example.com/x",
+	}})
+	for _, s := range []string{"abc123", "\x1b", "title", "u:p@"} {
+		if strings.Contains(out.String(), s) {
+			t.Errorf("spared report carries %q: %q", s, out.String())
+		}
+	}
+	if !strings.Contains(out.String(), "test-ws+-0000aa11") {
+		t.Errorf("spared report lost the name: %q", out.String())
+	}
+}
+
+// runReapCommand runs `niwa reap args...` from dir and returns its output
+// and error, with reap's flags reset before and after.
+func runReapCommand(t *testing.T, dir string, args ...string) (string, string, error) {
+	t.Helper()
+	t.Chdir(dir)
+	reset := func() { reapVerdictOnly, reapJSON = false, false }
+	reset()
+	t.Cleanup(reset)
+	var out, errOut bytes.Buffer
+	rootCmd.SetArgs(append([]string{"reap"}, args...))
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&errOut)
+	err := rootCmd.Execute()
+	rootCmd.SetArgs(nil)
+	rootCmd.SetOut(nil)
+	rootCmd.SetErr(nil)
+	reset()
+	return out.String(), errOut.String(), err
+}
+
+func TestReapRefusesAnInstanceWithoutVerdictOnly(t *testing.T) {
+	f := newPassFixture(t)
+	t.Setenv("HOME", filepath.Dir(f.jobsDir))
+	_, _, err := runReapCommand(t, f.root, "test-ws-pass")
+	if err == nil || !strings.Contains(err.Error(), "only with --verdict-only") || !strings.Contains(err.Error(), "test-ws-pass") {
+		t.Fatalf("error %v; want a usage error naming the argument", err)
+	}
+	if len(*f.destroyed) != 0 {
+		t.Fatalf("destroyed %v; a usage error removes nothing", *f.destroyed)
+	}
+}
+
+func TestReapRefusesJSONWithoutVerdictOnly(t *testing.T) {
+	f := newPassFixture(t)
+	t.Setenv("HOME", filepath.Dir(f.jobsDir))
+	_, _, err := runReapCommand(t, f.root, "--json")
+	if err == nil || !strings.Contains(err.Error(), "--json is accepted only with --verdict-only") {
+		t.Fatalf("error %v; want a usage error", err)
+	}
+	if len(*f.destroyed) != 0 {
+		t.Fatalf("destroyed %v; a usage error removes nothing", *f.destroyed)
+	}
+}
+
+func TestReapRefusesAnUnknownInstance(t *testing.T) {
+	f := newPassFixture(t)
+	t.Setenv("HOME", filepath.Dir(f.jobsDir))
+	out, _, err := runReapCommand(t, f.root, "--verdict-only", "test-ws-nope")
+	if err == nil || !strings.Contains(err.Error(), `no instance named "test-ws-nope"`) {
+		t.Fatalf("error %v; want the unknown instance named", err)
+	}
+	if out != "" || len(*f.destroyed) != 0 {
+		t.Fatalf("output %q, destroyed %v; want nothing", out, *f.destroyed)
+	}
+}
+
+func TestReapRefusesAnInstanceWithASeparator(t *testing.T) {
+	f := newPassFixture(t)
+	t.Setenv("HOME", filepath.Dir(f.jobsDir))
+	for _, arg := range []string{"../test-ws-pass", `test-ws\pass`, "/abs"} {
+		_, _, err := runReapCommand(t, f.root, "--verdict-only", arg)
+		if err == nil || !strings.Contains(err.Error(), "path separator") || !strings.Contains(err.Error(), strconv.Quote(arg)) {
+			t.Errorf("argument %q: error %v; want it refused, named", arg, err)
+		}
+	}
+	if len(*f.destroyed) != 0 {
+		t.Fatalf("destroyed %v", *f.destroyed)
+	}
+}
+
+func TestReapVerdictOnlyPrintsTextAndJSON(t *testing.T) {
+	f := newPassFixture(t)
+	f.addKeptUnit(t, "test-ws-kept", "unpushed-work")
+	t.Setenv("HOME", filepath.Dir(f.jobsDir))
+
+	text, _, err := runReapCommand(t, f.root, "--verdict-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fixture's clones check out nothing (its remote's HEAD names no
+	// branch), so a clean one is its pushed git directory alone.
+	for _, want := range []string{"test-ws-kept: keep\n", "branch unpushed-work", "test-ws-pass: reap\n", "    tools/app/.git/ pushed\n", "    .niwa/ generated\n"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("text output does not contain %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "Reaped") {
+		t.Errorf("text output carries the reap's count line:\n%s", text)
+	}
+
+	named, _, err := runReapCommand(t, f.root, "--verdict-only", "test-ws-pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(named, "test-ws-pass: reap\n") || strings.Contains(named, "test-ws-kept") {
+		t.Errorf("named output:\n%s\nwant only test-ws-pass", named)
+	}
+
+	raw, _, err := runReapCommand(t, f.root, "--verdict-only", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := decodeVerdictsStrictly(t, strings.NewReader(raw))
+	if doc.Schema != "niwa.verdicts/v1" || len(doc.Units) != 2 {
+		t.Fatalf("document %+v", doc)
+	}
+	if len(*f.destroyed) != 0 {
+		t.Fatalf("destroyed %v; verdict-only removes nothing", *f.destroyed)
+	}
+}
+
+func TestReapVerdictOnlySkipsTheWorktreeSweep(t *testing.T) {
+	f := newCreateFlowFixture(t)
+	resetSessionCreateFlags(t)
+	defer resetSessionCreateFlags(t)
+	t.Setenv("NIWA_REAP_IDLE_GRACE", "24h")
+	scratchJobsDir(t)
+	st := createHookWorktreeFor(t, f, "idle", otherSessionID, idleTranscript(t, 48*time.Hour))
+	backdate(t, f, st, 48*time.Hour)
+
+	if _, errOut, err := runReapCommand(t, f.root, "--verdict-only"); err != nil {
+		t.Fatalf("verdict-only reap: %v\n%s", err, errOut)
+	}
+	assertKept(t, f, st)
+
+	// A reap that acts removes it, so the worktree is one the sweep takes.
+	if _, errOut, err := runReapCommand(t, f.root); err != nil {
+		t.Fatalf("reap: %v\n%s", err, errOut)
+	}
+	assertRemoved(t, f, st)
 }

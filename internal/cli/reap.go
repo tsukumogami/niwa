@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
+	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -156,14 +157,59 @@ again. The command's own output is never printed; only its last line is
 quoted, as the reason.
 
 reap runs on demand and is also invoked opportunistically at the start of
-niwa create, niwa dispatch, and niwa watch so session fan-out self-bounds.`,
-	Args:          cobra.NoArgs,
+niwa create, niwa dispatch, and niwa watch so session fan-out self-bounds.
+
+With --verdict-only, reap removes nothing. It judges every instance of the
+workspace, or only the <instance> named, under the same lock and with the
+same checks a reap would use at that moment, and prints each one's verdict
+(keep or reap), every check that keeps it with the paths and evidence it
+names, and the class of every path. An instance reap would never remove is
+listed too, kept by its liveness. It runs no pre-removal or on-reap command,
+settles no session record and sweeps no worktree; one it doesn't reach
+within the 30 seconds is printed as not reached. --json prints the same as a
+niwa.verdicts/v1 document. An <instance> argument and --json are accepted
+only with --verdict-only.`,
+	Args:          reapArgs,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	RunE:          runReap,
 }
 
-func runReap(cmd *cobra.Command, _ []string) error {
+// reapVerdictOnly and reapJSON are reap's --verdict-only and --json.
+var (
+	reapVerdictOnly bool
+	reapJSON        bool
+)
+
+func init() {
+	reapCmd.Flags().BoolVar(&reapVerdictOnly, "verdict-only", false,
+		"judge each instance and print its verdict, removing nothing")
+	reapCmd.Flags().BoolVar(&reapJSON, "json", false,
+		"with --verdict-only, print the verdicts as a niwa.verdicts/v1 document")
+}
+
+// reapArgs checks reap's arguments before anything runs: at most one
+// instance, which, like --json, is accepted only with --verdict-only and
+// must be a bare instance name.
+func reapArgs(_ *cobra.Command, args []string) error {
+	if len(args) > 1 {
+		return fmt.Errorf("reap takes at most one instance argument, got %d", len(args))
+	}
+	if !reapVerdictOnly {
+		if len(args) == 1 {
+			return fmt.Errorf("an instance argument (%q) is accepted only with --verdict-only", args[0])
+		}
+		if reapJSON {
+			return fmt.Errorf("--json is accepted only with --verdict-only")
+		}
+	}
+	if len(args) == 1 && strings.ContainsAny(args[0], `/\`) {
+		return fmt.Errorf("instance %q holds a path separator; name an instance of this workspace", args[0])
+	}
+	return nil
+}
+
+func runReap(cmd *cobra.Command, args []string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting working directory: %w", err)
@@ -176,6 +222,13 @@ func runReap(cmd *cobra.Command, _ []string) error {
 	if class.WorkspaceRoot == "" {
 		return fmt.Errorf("not inside a niwa workspace")
 	}
+	if reapVerdictOnly {
+		var instance string
+		if len(args) == 1 {
+			instance = args[0]
+		}
+		return runReapVerdicts(cmd, class.WorkspaceRoot, instance)
+	}
 
 	n, err := reapWorkspace(class.WorkspaceRoot, defaultJobsDir(), time.Now())
 	if err != nil {
@@ -187,6 +240,40 @@ func runReap(cmd *cobra.Command, _ []string) error {
 	if m := sweepHookWorktrees(class.WorkspaceRoot, defaultJobsDir(), time.Now(), cmd.ErrOrStderr()); m > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Removed %d unchanged worktree(s) whose session has ended\n", m)
 	}
+	return nil
+}
+
+// runReapVerdicts is `niwa reap --verdict-only`: one verdict-only pass over
+// the workspace's instances, or the one named, printed to the command's
+// output as text or, with --json, as a niwa.verdicts/v1 document. It runs
+// no worktree sweep: that sweep removes worktrees, and this mode removes
+// nothing.
+func runReapVerdicts(cmd *cobra.Command, workspaceRoot, instance string) error {
+	if instance != "" {
+		instances, err := workspace.EnumerateInstances(workspaceRoot)
+		if err != nil {
+			return fmt.Errorf("enumerating instances: %w", err)
+		}
+		found := false
+		for _, dir := range instances {
+			if filepath.Base(dir) == instance {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("no instance named %q in this workspace", instance)
+		}
+	}
+	res, err := runPass(context.Background(), workspaceRoot, passVerdictOnly,
+		passScope{JobsDir: defaultJobsDir(), Now: time.Now(), Instance: instance})
+	if err != nil {
+		return err
+	}
+	if reapJSON {
+		return printVerdictsJSON(cmd.OutOrStdout(), res.Verdicts)
+	}
+	printVerdictsText(cmd.OutOrStdout(), res.Verdicts)
 	return nil
 }
 
@@ -258,13 +345,16 @@ func reportSparedInstances(w io.Writer, spared []sparedInstance) {
 	if len(spared) == 0 {
 		return
 	}
+	// Names and reasons come from the instances and the records in them, so
+	// each passes removal.ScrubEvidence before it is grouped and printed.
 	byReason := map[string][]string{}
 	var order []string
 	for _, s := range spared {
-		if _, seen := byReason[s.Reason]; !seen {
-			order = append(order, s.Reason)
+		reason := removal.ScrubEvidence(s.Reason, 200)
+		if _, seen := byReason[reason]; !seen {
+			order = append(order, reason)
 		}
-		byReason[s.Reason] = append(byReason[s.Reason], s.Name)
+		byReason[reason] = append(byReason[reason], removal.ScrubEvidence(s.Name, 80))
 	}
 	for _, reason := range order {
 		names := byReason[reason]
@@ -865,7 +955,8 @@ func reapBackstop(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 				return false
 			}
 			if err := destroyInstanceFunc(t.InstancePath); err != nil {
-				fmt.Fprintf(os.Stderr, "niwa: warning: reaping orphaned dispatch instance %s: %v\n", t.InstancePath, err)
+				fmt.Fprintf(os.Stderr, "niwa: warning: reaping orphaned dispatch instance %s: %s\n",
+					removal.ScrubEvidence(t.InstancePath, 400), removal.ScrubEvidence(err.Error(), 400))
 				return false
 			}
 			return true
