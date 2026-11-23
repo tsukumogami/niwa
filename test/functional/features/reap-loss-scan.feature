@@ -367,3 +367,277 @@ Feature: niwa reap keeps a deleted session's instance that holds unpushed work
     And the error output contains "liveness check"
     And the error output names the background process
     When the background process is stopped
+
+  @critical
+  Scenario: niwa reap --verdict-only judges a kept unit and a passing unit and leaves both in place
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists with a commit
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given I set env "NIWA_TEST_REMOVAL_FILE_REMOTES" to "1"
+    And a fake claude for dispatch with session "b1b1b1b1-b1b1-4b1b-8b1b-b1b1b1b1b1b1"
+    When I run "niwa dispatch keep-this --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When a commit is made on branch "unpushed-work" in repo "tools/myapp" of the dispatch instance
+    And I keep the dispatch instance as the first dispatch
+    And the dispatch session "b1b1b1b1-b1b1-4b1b-8b1b-b1b1b1b1b1b1" is deleted from the Agent View
+    Given a fake claude for dispatch with session "b2b2b2b2-b2b2-4b2b-8b2b-b2b2b2b2b2b2"
+    When I run "niwa dispatch pass-this --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When the dispatch session "b2b2b2b2-b2b2-4b2b-8b2b-b2b2b2b2b2b2" is deleted from the Agent View
+    And the workspace's units and records are recorded
+    And I run "niwa reap --verdict-only" from the workspace root
+    Then the exit code is 0
+    And the output gives the first dispatch instance the verdict "keep"
+    And the output gives the dispatch instance the verdict "reap"
+    And the output contains "repository check: tools/myapp: commits the clone URL does not show: branch unpushed-work"
+    And the output contains "tools/myapp/.git/ unique"
+    And the first dispatch instance still exists
+    And the dispatch instance still exists
+    And the fake claude removed no session
+    And the workspace's units and records are unchanged
+    When I run "niwa reap --verdict-only --json" from the workspace root
+    Then the exit code is 0
+    And the output is a niwa.verdicts/v1 document giving the first dispatch instance the verdict "keep"
+    And the output is a niwa.verdicts/v1 document giving the dispatch instance the verdict "reap"
+    And the first dispatch instance still exists
+    And the dispatch instance still exists
+    And the fake claude removed no session
+    And the workspace's units and records are unchanged
+    When I run niwa reap "--verdict-only" naming the dispatch instance from the workspace root
+    Then the exit code is 0
+    And the output gives the dispatch instance the verdict "reap"
+    And the output gives no verdict for the first dispatch instance
+    When I run niwa reap "--verdict-only --json" naming the dispatch instance from the workspace root
+    Then the exit code is 0
+    And the output is a niwa.verdicts/v1 document giving the dispatch instance the verdict "reap"
+    And the output gives no verdict for the first dispatch instance
+    And the fake claude removed no session
+    And the workspace's units and records are unchanged
+    When I run niwa reap from the workspace root
+    Then the exit code is 0
+    And the first dispatch instance still exists
+    And the dispatch instance no longer exists
+    And the error output contains "branch unpushed-work"
+
+  @critical
+  Scenario: niwa reap and its verdicts keep a unit whose .niwa is a link, and leave the link's target alone
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists with a commit
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given I set env "NIWA_TEST_REMOVAL_FILE_REMOTES" to "1"
+    And a fake claude for dispatch with session "b3b3b3b3-b3b3-4b3b-8b3b-b3b3b3b3b3b3"
+    When I run "niwa dispatch link-niwa --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When the dispatch instance's .niwa is replaced by a link to a directory
+    And the dispatch session "b3b3b3b3-b3b3-4b3b-8b3b-b3b3b3b3b3b3" is deleted from the Agent View
+    And the link's target directory is recorded
+    And I run "niwa reap --verdict-only" from the workspace root
+    Then the exit code is 0
+    And the output gives the dispatch instance the verdict "keep"
+    And the output contains "hold check: hold could not be read: .niwa is a symlink"
+    And the output contains "records check: records could not be read: .niwa is a symlink"
+    And the link's target directory is unchanged
+    When I run "niwa reap --verdict-only --json" from the workspace root
+    Then the exit code is 0
+    And the output is a niwa.verdicts/v1 document giving the dispatch instance the verdict "keep"
+    And the output contains "hold could not be read: .niwa is a symlink"
+    And the link's target directory is unchanged
+    When I run niwa reap from the workspace root
+    Then the exit code is 0
+    And the dispatch instance still exists
+    And the error output names the dispatch instance
+    And the error output contains "hold could not be read: .niwa is a symlink"
+    And the link's target directory is unchanged
+
+  @critical
+  Scenario: a credential in the clone URL appears in no output of niwa reap or its verdicts
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists with a commit
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given I set env "NIWA_TEST_REMOVAL_FILE_REMOTES" to "1"
+    And a fake claude for dispatch with session "b4b4b4b4-b4b4-4b4b-8b4b-b4b4b4b4b4b4"
+    When I run "niwa dispatch hold-a-credential --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When the dispatch session "b4b4b4b4-b4b4-4b4b-8b4b-b4b4b4b4b4b4" is deleted from the Agent View
+    And the workspace configuration's URL for repo "myapp" points at a refused local address with "user:secret" and query ""
+    And I run "niwa reap --verdict-only" from the workspace root
+    Then the exit code is 0
+    And the output gives the dispatch instance the verdict "keep"
+    And the output contains "clone URL unreachable"
+    And no output contains "secret"
+    When I run "niwa reap --verdict-only --json" from the workspace root
+    Then the exit code is 0
+    And the output is a niwa.verdicts/v1 document giving the dispatch instance the verdict "keep"
+    And the output contains "clone URL unreachable"
+    And no output contains "secret"
+    When I run niwa reap from the workspace root
+    Then the exit code is 0
+    And the dispatch instance still exists
+    And the error output names the dispatch instance
+    And the error output contains "clone URL unreachable"
+    And no output contains "secret"
+
+  @critical
+  Scenario: an access_token query value in the clone URL appears in no output of niwa reap or its verdicts
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists with a commit
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given I set env "NIWA_TEST_REMOVAL_FILE_REMOTES" to "1"
+    And a fake claude for dispatch with session "b5b5b5b5-b5b5-4b5b-8b5b-b5b5b5b5b5b5"
+    When I run "niwa dispatch hold-a-token --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When the dispatch session "b5b5b5b5-b5b5-4b5b-8b5b-b5b5b5b5b5b5" is deleted from the Agent View
+    And the workspace configuration's URL for repo "myapp" points at a refused local address with "" and query "?access_token=tq7Rv2Lx9Wp"
+    And I run "niwa reap --verdict-only" from the workspace root
+    Then the exit code is 0
+    And the output gives the dispatch instance the verdict "keep"
+    And the output contains "clone URL unreachable"
+    And no output contains "tq7Rv2Lx9Wp"
+    When I run "niwa reap --verdict-only --json" from the workspace root
+    Then the exit code is 0
+    And the output is a niwa.verdicts/v1 document giving the dispatch instance the verdict "keep"
+    And no output contains "tq7Rv2Lx9Wp"
+    When I run niwa reap from the workspace root
+    Then the exit code is 0
+    And the dispatch instance still exists
+    And the error output contains "clone URL unreachable"
+    And no output contains "tq7Rv2Lx9Wp"
+
+  @critical
+  Scenario: an AWS key id in an untracked file's name appears in no output of niwa reap or its verdicts
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists with a commit
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given I set env "NIWA_TEST_REMOVAL_FILE_REMOTES" to "1"
+    And a fake claude for dispatch with session "b6b6b6b6-b6b6-4b6b-8b6b-b6b6b6b6b6b6"
+    When I run "niwa dispatch name-a-key --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When a file "tools/myapp/notes-AKIAIOSFODNN7EXAMPLE.txt" is written in the dispatch instance with content "n"
+    And the dispatch session "b6b6b6b6-b6b6-4b6b-8b6b-b6b6b6b6b6b6" is deleted from the Agent View
+    And I run "niwa reap --verdict-only" from the workspace root
+    Then the exit code is 0
+    And the output gives the dispatch instance the verdict "keep"
+    And the output contains "untracked files:"
+    And no output contains "AKIAIOSFODNN7EXAMPLE"
+    When I run "niwa reap --verdict-only --json" from the workspace root
+    Then the exit code is 0
+    And the output is a niwa.verdicts/v1 document giving the dispatch instance the verdict "keep"
+    And the output contains "untracked files:"
+    And no output contains "AKIAIOSFODNN7EXAMPLE"
+    When I run niwa reap from the workspace root
+    Then the exit code is 0
+    And the dispatch instance still exists
+    And the error output contains "untracked files:"
+    And no output contains "AKIAIOSFODNN7EXAMPLE"
+
+  @critical
+  Scenario: a Slack token in an unpushed branch's name appears in no output of niwa reap or its verdicts
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists with a commit
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given I set env "NIWA_TEST_REMOVAL_FILE_REMOTES" to "1"
+    And a fake claude for dispatch with session "b7b7b7b7-b7b7-4b7b-8b7b-b7b7b7b7b7b7"
+    When I run "niwa dispatch name-a-branch --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When a commit is made on branch "work-xoxb-2468013579-qwertyuiop" in repo "tools/myapp" of the dispatch instance
+    And the dispatch session "b7b7b7b7-b7b7-4b7b-8b7b-b7b7b7b7b7b7" is deleted from the Agent View
+    And I run "niwa reap --verdict-only" from the workspace root
+    Then the exit code is 0
+    And the output gives the dispatch instance the verdict "keep"
+    And the output contains "commits the clone URL does not show"
+    And no output contains "xoxb-"
+    When I run "niwa reap --verdict-only --json" from the workspace root
+    Then the exit code is 0
+    And the output is a niwa.verdicts/v1 document giving the dispatch instance the verdict "keep"
+    And the output contains "commits the clone URL does not show"
+    And no output contains "xoxb-"
+    When I run niwa reap from the workspace root
+    Then the exit code is 0
+    And the dispatch instance still exists
+    And the error output contains "commits the clone URL does not show"
+    And no output contains "xoxb-"
