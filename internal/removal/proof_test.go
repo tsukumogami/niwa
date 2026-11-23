@@ -118,6 +118,21 @@ func TestRefusedCloneURLVouchesForNothing(t *testing.T) {
 	}
 }
 
+func TestSelectProofsNamesARemoteWithoutItsControlCharacters(t *testing.T) {
+	ps := selectProofs([]remoteEntry{
+		{"evil\x1b[2Jname", "https://agent.example/repo"},
+		{"bad\x07", "ext::sh"},
+	}, "", proofPolicy{}, false)
+	for _, n := range ps.notes {
+		if strings.ContainsAny(n, "\x1b\x07") {
+			t.Errorf("note %q carries a control character from a remote's name", n)
+		}
+	}
+	if len(ps.notes) != 2 {
+		t.Fatalf("notes %q", ps.notes)
+	}
+}
+
 func TestReadConfigRecordsRemoteURLs(t *testing.T) {
 	f := newFixture(t)
 	gitRun(t, f.clone, "remote", "add", "My.Fork", "https://example.invalid/fork")

@@ -149,22 +149,48 @@ func lockDir(dir string) (*os.File, error) {
 // would allow. Its scratch stores go with it. A directory that fails any of
 // these is left for a later pass, and nothing here fails this one.
 func (s *Scratch) removeLeftovers() {
-	f, err := os.Open(s.root)
+	// The root is opened without following a link and must be the one the
+	// pass checked; one swapped for a link since is left alone.
+	rootInfo, err := os.Lstat(s.root)
+	if err != nil || !rootInfo.IsDir() {
+		return
+	}
+	fd, err := unix.Open(s.root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
+		return
+	}
+	f := os.NewFile(uintptr(fd), s.root)
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(opened, rootInfo) {
+		f.Close()
 		return
 	}
 	names, _ := f.Readdirnames(-1)
 	f.Close()
 	for _, name := range names {
 		p := filepath.Join(s.root, name)
-		if p == s.Dir {
+		if p == s.Dir || !isPassName(name) {
 			continue
 		}
-		removeLeftover(p)
+		s.removeLeftover(p, rootInfo)
 	}
 }
 
-func removeLeftover(p string) {
+// isPassName reports whether name is how a pass names its directory: 16
+// lowercase hex digits.
+func isPassName(name string) bool {
+	if len(name) != 16 {
+		return false
+	}
+	for _, c := range name {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Scratch) removeLeftover(p string, rootInfo os.FileInfo) {
 	if err := checkPrivateDir(p); err != nil {
 		return
 	}
@@ -181,6 +207,11 @@ func removeLeftover(p string) {
 	// The directory opened must be the one checked; a swap in between is
 	// left alone.
 	if held, err := lock.Stat(); err != nil || !os.SameFile(held, info) {
+		return
+	}
+	// The root is checked again right before the removal, which walks the
+	// path: still a real directory, the one listed.
+	if now, err := os.Lstat(s.root); err != nil || !os.SameFile(now, rootInfo) {
 		return
 	}
 	// RemoveAll never follows a link, at the top or below it.

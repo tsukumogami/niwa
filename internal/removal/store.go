@@ -188,25 +188,24 @@ func (st *store) checkConfig() error {
 	return nil
 }
 
-// use checks the store, and the empty directory its calls run from, before a
-// local call, and returns that directory.
+// use checks the store, its config byte for byte included, and the empty
+// directory its calls run from, before every call against it, local or
+// network, and returns that directory. A local call reads the config too: a
+// merge driver or an object setting written there would change what
+// merge-tree or the ancestry walk decides.
 func (st *store) use() (string, error) {
 	if err := st.check(); err != nil {
-		return "", err
-	}
-	return st.e.scratchDir(scratchNet)
-}
-
-// useNetwork is use with the configuration compare a network call needs.
-func (st *store) useNetwork() (string, error) {
-	dir, err := st.use()
-	if err != nil {
 		return "", err
 	}
 	if err := st.checkConfig(); err != nil {
 		return "", err
 	}
-	return dir, nil
+	return st.e.scratchDir(scratchNet)
+}
+
+// useNetwork is the check a network call makes: the same as use.
+func (st *store) useNetwork() (string, error) {
+	return st.use()
 }
 
 // dirs is where a call against the store runs: the store as --git-dir and no

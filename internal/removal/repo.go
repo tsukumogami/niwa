@@ -279,12 +279,15 @@ func (e *Env) checkRepo(ctx context.Context, t repoTarget, rp repoPolicy) repoRe
 	gitDirClass := ClassPushed
 
 	// git stash list refuses to run without a work tree, so a repository
-	// with none (a bare one, a submodule store) isn't asked; a refs/stash it
-	// holds is then judged below like any other ref.
+	// with none (a bare one, a submodule store) has its stash reflog read
+	// directly: every entry keeps, not only the newest, which is all a
+	// judgment of refs/stash as a ref would see.
 	var stashes []string
 	var stashErr error
 	if t.Dirs.WorkTree != "" {
 		stashes, stashErr = listStashes(ctx, e, t.Dirs, opts)
+	} else {
+		stashes, stashErr = listStashReflog(ctx, e, t.Dirs, opts)
 	}
 	if stashErr != nil {
 		keepAt(&errs, stashErr.Error())
@@ -768,6 +771,48 @@ func listStashes(ctx context.Context, e *Env, r repoDirs, o callOpts) ([]string,
 		return nil, fmt.Errorf("listing stashes: %v", err)
 	}
 	return parseStashes(out)
+}
+
+// listStashReflog lists the stashes of a repository with no work tree from
+// its refs/stash reflog, through git log -g, which runs without one. A
+// refs/stash whose reflog lists nothing is named by the ref itself, and a
+// stash reflog with no refs/stash is an error: either way the repository
+// keeps.
+func listStashReflog(ctx context.Context, e *Env, r repoDirs, o callOpts) ([]string, error) {
+	cmd, err := e.gitCommand(ctx, r, o, "for-each-ref", "--format=%(refname)", "refs/stash")
+	if err != nil {
+		return nil, err
+	}
+	out, err := run(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("listing stashes: %v", err)
+	}
+	if strings.TrimSpace(string(out)) != "refs/stash" {
+		if _, err := os.Lstat(filepath.Join(r.GitDir, "logs", "refs", "stash")); err == nil {
+			return nil, errors.New("listing stashes: a stash reflog with no refs/stash")
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("listing stashes: %v", err)
+		}
+		return nil, nil
+	}
+	// No "--" after the ref: gitCommand appends --no-show-signature to every
+	// log call, which must stay an option.
+	cmd, err = e.gitCommand(ctx, r, o, "log", "-g", "-z", "--format=%gd", "refs/stash")
+	if err != nil {
+		return nil, err
+	}
+	out, err = run(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("listing stashes: %v", err)
+	}
+	names, err := parseStashes([]byte(strings.ReplaceAll(string(out), "refs/stash@{", "stash@{")))
+	if err != nil {
+		return nil, err
+	}
+	if len(names) == 0 {
+		names = []string{"refs/stash"}
+	}
+	return names, nil
 }
 
 // parseStashes reads stash list -z --format=%gd output, one stash@{<n>}

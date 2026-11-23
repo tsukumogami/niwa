@@ -325,8 +325,8 @@ func TestHeldJudgesABareRepositoryByTheCloneURLItsRemoteEquals(t *testing.T) {
 }
 
 // TestHeldKeepsABareRepositoryHoldingAnUnpushedStash pins how a repository
-// with no work tree is judged: git stash list isn't run there, and its
-// refs/stash is judged as a ref, so a stash no proof remote shows keeps.
+// with no work tree is judged: git stash list can't run there, so its stash
+// reflog is read instead, and a stash keeps as it does in a work tree.
 func TestHeldKeepsABareRepositoryHoldingAnUnpushedStash(t *testing.T) {
 	h := newHeldFixture(t)
 	bare := filepath.Join(h.instance, "keep.git")
@@ -343,9 +343,55 @@ func TestHeldKeepsABareRepositoryHoldingAnUnpushedStash(t *testing.T) {
 	p := h.policy(t)
 	p.CloneURLs = []string{h.remoteURL}
 	v := Evaluate(context.Background(), h.unit(), p)
-	keepWith(t, v, "keep.git: ", "commits the clone URL does not show", "refs/stash")
+	// The ref was moved in with no reflog, so the ref itself names it.
+	keepWith(t, v, "keep.git: ", "stashes: refs/stash")
 	noKeepWith(t, v, "listing stashes")
 	noKeepWith(t, v, "tools/app: ")
+}
+
+// TestHeldKeepsABareRepositoryWithAnOlderStashBehindAHeldOne pins that every
+// stash in a repository with no work tree keeps, not only the newest: an
+// older stash lives only in the refs/stash reflog, so a newest stash that a
+// proof remote happens to show must not let it go.
+func TestHeldKeepsABareRepositoryWithAnOlderStashBehindAHeldOne(t *testing.T) {
+	h := newHeldFixture(t)
+	bare := filepath.Join(h.instance, "keep.git")
+	gitRun(t, h.instance, "clone", "-q", "--bare", h.remoteURL, bare)
+	writeFile(t, filepath.Join(h.clone, "README"), "older stashed work\n")
+	gitRun(t, h.clone, "stash", "push", "-q")
+	older := gitRun(t, h.clone, "rev-parse", "refs/stash")
+	writeFile(t, filepath.Join(h.clone, "README"), "newer stashed work\n")
+	gitRun(t, h.clone, "stash", "push", "-q")
+	newer := gitRun(t, h.clone, "rev-parse", "refs/stash")
+	// The newest stash is pushed, so a proof remote lists it as a tip; the
+	// older one is nobody else's.
+	gitRun(t, h.clone, "push", "-q", "origin", newer+":refs/heads/stash-pushed")
+	gitRun(t, h.clone, "push", "-q", bare, older+":refs/carry/older", newer+":refs/carry/newer")
+	gitRun(t, h.instance, "--git-dir="+bare, "update-ref", "--create-reflog", "-m", "older", "refs/stash", older)
+	gitRun(t, h.instance, "--git-dir="+bare, "update-ref", "--create-reflog", "-m", "newer", "refs/stash", newer)
+	gitRun(t, h.instance, "--git-dir="+bare, "update-ref", "-d", "refs/carry/older")
+	gitRun(t, h.instance, "--git-dir="+bare, "update-ref", "-d", "refs/carry/newer")
+	gitRun(t, h.clone, "stash", "clear")
+	p := h.policy(t)
+	p.CloneURLs = []string{h.remoteURL}
+	v := Evaluate(context.Background(), h.unit(), p)
+	keepWith(t, v, "keep.git: ", "stashes: ", "stash@{1}")
+	noKeepWith(t, v, "tools/app: ")
+}
+
+// TestHeldKeepsAStashReflogWithNoStashRef pins that a repository with no
+// work tree and a logs/refs/stash but no refs/stash keeps.
+func TestHeldKeepsAStashReflogWithNoStashRef(t *testing.T) {
+	h := newHeldFixture(t)
+	bare := filepath.Join(h.instance, "keep.git")
+	gitRun(t, h.instance, "clone", "-q", "--bare", h.remoteURL, bare)
+	head := gitRun(t, h.clone, "rev-parse", "HEAD")
+	writeFile(t, filepath.Join(bare, "logs", "refs", "stash"),
+		strings.Repeat("0", len(head))+" "+head+" t <t@example.com> 1700000000 +0000\tstash\n")
+	p := h.policy(t)
+	p.CloneURLs = []string{h.remoteURL}
+	v := Evaluate(context.Background(), h.unit(), p)
+	keepWith(t, v, "keep.git: ", "stash reflog")
 }
 
 func TestHeldNeverContactsARePointedOrigin(t *testing.T) {

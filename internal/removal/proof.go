@@ -78,6 +78,9 @@ func selectProofs(remotes []remoteEntry, cloneURL string, pp proofPolicy, allowF
 	}
 
 	for _, r := range remotes {
+		// The name is the agent's: it goes into evidence with control
+		// characters turned to spaces.
+		r.Name = StripControls(r.Name)
 		u, err := remoteurl.Parse(r.URL, allowFile)
 		if err != nil {
 			ps.notes = append(ps.notes, fmt.Sprintf("remote URL not allowed: %v (remote %s)", err, r.Name))
