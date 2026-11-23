@@ -415,6 +415,96 @@ func TestWalkJudgesAPrunableWorktree(t *testing.T) {
 	})
 }
 
+func TestWalkKeepsAPrunableWorktreeWhoseIndexCantBeRead(t *testing.T) {
+	f := checkedOut(t)
+	admin := prunableWorktree(t, f, nil)
+	writeFile(t, filepath.Join(admin, "index"), "not an index")
+	v := Evaluate(context.Background(), f.unit(), f.policy(t))
+	keepWith(t, v, "tools/app/.git/worktrees/gone: ", "reading the index of a worktree whose working tree is gone")
+}
+
+// assertNothingJudgedUnder fails when the walk lists a repository whose
+// git directory or work tree is under dir.
+func assertNothingJudgedUnder(t *testing.T, w found, dir string) {
+	t.Helper()
+	for _, d := range w.Repositories() {
+		for _, p := range []string{d.GitDir, d.WorkTree} {
+			if p != "" && within(p, dir) {
+				t.Errorf("the walk judges %+v, under %s", d, dir)
+			}
+		}
+	}
+}
+
+func TestWalkNeverFollowsALinkedWorktreesOrModulesDirectory(t *testing.T) {
+	for _, sub := range []string{"worktrees", "modules"} {
+		t.Run(sub, func(t *testing.T) {
+			f := checkedOut(t)
+			outside := outsideDir(t)
+			// A prunable-looking admin directory and a store outside the unit.
+			writeFile(t, filepath.Join(outside, "evil", "gitdir"), filepath.Join(outside, "nowhere", ".git")+"\n")
+			writeFile(t, filepath.Join(outside, "evil", "commondir"), "../..\n")
+			writeFile(t, filepath.Join(outside, "evil", "HEAD"), strings.Repeat("a", 40)+"\n")
+			gitRun(t, outside, "init", "-q", "--bare", filepath.Join(outside, "store"))
+			if err := os.Symlink(outside, filepath.Join(f.clone, ".git", sub)); err != nil {
+				t.Fatal(err)
+			}
+			v := Evaluate(context.Background(), f.unit(), f.policy(t))
+			keepWith(t, v, "unreadable git file: tools/app/.git/"+sub+" is a symlink")
+			assertNothingJudgedUnder(t, walkUnit(context.Background(), f.unit(), f.policy(t)), outside)
+		})
+	}
+	t.Run("link inside modules", func(t *testing.T) {
+		f := checkedOut(t)
+		outside := outsideDir(t)
+		gitRun(t, outside, "init", "-q", "--bare", filepath.Join(outside, "store"))
+		if err := os.MkdirAll(filepath.Join(f.clone, ".git", "modules"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(outside, "store"), filepath.Join(f.clone, ".git", "modules", "sub")); err != nil {
+			t.Fatal(err)
+		}
+		v := Evaluate(context.Background(), f.unit(), f.policy(t))
+		keepWith(t, v, "unreadable git file: tools/app/.git/modules/sub is a symlink")
+		assertNothingJudgedUnder(t, walkUnit(context.Background(), f.unit(), f.policy(t)), outside)
+	})
+	t.Run("not a directory", func(t *testing.T) {
+		f := checkedOut(t)
+		writeFile(t, filepath.Join(f.clone, ".git", "worktrees"), "x")
+		v := Evaluate(context.Background(), f.unit(), f.policy(t))
+		keepWith(t, v, "unreadable git file: tools/app/.git/worktrees is not a directory")
+	})
+}
+
+func TestWalkChecksAPrunableAdminDirectorysOwnCommondir(t *testing.T) {
+	t.Run("outside the unit", func(t *testing.T) {
+		f := checkedOut(t)
+		admin := prunableWorktree(t, f, nil)
+		outside := outsideDir(t)
+		gitRun(t, outside, "init", "-q", "--bare", filepath.Join(outside, "common"))
+		writeFile(t, filepath.Join(admin, "commondir"), filepath.Join(outside, "common")+"\n")
+		v := Evaluate(context.Background(), f.unit(), f.policy(t))
+		keepWith(t, v, "external git directory: "+filepath.Join(outside, "common"))
+		assertNothingJudgedUnder(t, walkUnit(context.Background(), f.unit(), f.policy(t)), admin)
+	})
+	t.Run("another common directory inside", func(t *testing.T) {
+		f := checkedOut(t)
+		admin := prunableWorktree(t, f, nil)
+		other := filepath.Join(f.instance, "other.git")
+		gitRun(t, f.instance, "init", "-q", "--bare", other)
+		writeFile(t, filepath.Join(admin, "commondir"), other+"\n")
+		v := Evaluate(context.Background(), f.unit(), f.policy(t))
+		keepWith(t, v, "unreadable git file: tools/app/.git/worktrees/gone/commondir names other.git, not tools/app/.git")
+	})
+	t.Run("not one line", func(t *testing.T) {
+		f := checkedOut(t)
+		admin := prunableWorktree(t, f, nil)
+		writeFile(t, filepath.Join(admin, "commondir"), "../..\n../..\n")
+		v := Evaluate(context.Background(), f.unit(), f.policy(t))
+		keepWith(t, v, "unreadable git file: tools/app/.git/worktrees/gone/commondir")
+	})
+}
+
 func TestWalkANewlineInGitdirDoesNotHideAnUnpushedHead(t *testing.T) {
 	f := checkedOut(t)
 	pushed := gitRun(t, f.clone, "rev-parse", "HEAD")

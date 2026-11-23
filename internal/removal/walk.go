@@ -383,10 +383,12 @@ func (w *walker) add(r foundRepo) {
 
 // scanGitDir looks under a git directory for submodule stores, at any
 // depth of modules/, and for worktree admin directories in worktrees/.
-// Nothing under it is followed through a link.
+// Nothing under it is followed through a link: a modules/ or worktrees/
+// that is a link or not a directory, or a link inside modules/, keeps the
+// unit as an unreadable git file.
 func (w *walker) scanGitDir(gitDir string) {
 	modules := filepath.Join(gitDir, "modules")
-	if info, err := os.Lstat(modules); err == nil && info.IsDir() {
+	if w.realDir(modules) {
 		_ = filepath.WalkDir(modules, func(path string, d fs.DirEntry, err error) error {
 			if ctxErr := w.ctx.Err(); ctxErr != nil {
 				return ctxErr
@@ -399,7 +401,12 @@ func (w *walker) scanGitDir(gitDir string) {
 				}
 				return nil
 			}
-			if path == modules || !d.IsDir() || d.Type()&fs.ModeSymlink != 0 {
+			if d.Type()&fs.ModeSymlink != 0 {
+				label := w.f.label(path)
+				w.f.keep(label, "unreadable git file: "+label+" is a symlink")
+				return nil
+			}
+			if path == modules || !d.IsDir() {
 				return nil
 			}
 			if isGitDir(path) {
@@ -415,12 +422,13 @@ func (w *walker) scanGitDir(gitDir string) {
 		})
 	}
 	trees := filepath.Join(gitDir, "worktrees")
+	if !w.realDir(trees) {
+		return
+	}
 	entries, err := os.ReadDir(trees)
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			label := w.f.label(trees)
-			w.f.errs = append(w.f.errs, Check{Paths: []string{label}, Evidence: fmt.Sprintf("unreadable: %s: %s", label, errText(err))})
-		}
+		label := w.f.label(trees)
+		w.f.errs = append(w.f.errs, Check{Paths: []string{label}, Evidence: fmt.Sprintf("unreadable: %s: %s", label, errText(err))})
 		return
 	}
 	for _, e := range entries {
@@ -436,6 +444,32 @@ func (w *walker) scanGitDir(gitDir string) {
 		}
 		w.f.admins = append(w.f.admins, adminDir{Path: path, Common: gitDir, info: info})
 	}
+}
+
+// realDir reports whether path, a directory a git directory may hold, is
+// there as a real directory to read. One that is missing isn't. One that
+// is a link or not a directory keeps the unit as an unreadable git file,
+// and so does one that can't be read with Lstat: nothing behind it is
+// read.
+func (w *walker) realDir(path string) bool {
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return false
+	case err != nil:
+		label := w.f.label(path)
+		w.f.keep(label, "unreadable git file: "+label+": "+errText(err))
+		return false
+	case info.Mode()&fs.ModeSymlink != 0:
+		label := w.f.label(path)
+		w.f.keep(label, "unreadable git file: "+label+" is a symlink")
+		return false
+	case !info.IsDir():
+		label := w.f.label(path)
+		w.f.keep(label, "unreadable git file: "+label+" is not a directory")
+		return false
+	}
+	return true
 }
 
 // readGitFile reads a .git file through the shared reader: one line,
@@ -643,6 +677,9 @@ func (w *walker) unreachedAdmin(a *adminDir) {
 	workTree := filepath.Dir(dotGit)
 	if _, err := os.Lstat(dotGit); errors.Is(err, fs.ErrNotExist) {
 		if _, err := os.Lstat(workTree); errors.Is(err, fs.ErrNotExist) {
+			if !w.adminCommonInside(a) {
+				return
+			}
 			r := foundRepo{
 				GitDir: a.Path, Common: a.Common, Linked: true,
 				Prunable: true, PrunedAt: workTree, gitInfo: a.info,
@@ -655,6 +692,34 @@ func (w *walker) unreachedAdmin(a *adminDir) {
 		}
 	}
 	w.f.keep(label, "worktree outside the instance: "+workTree)
+}
+
+// adminCommonInside checks an admin directory's own commondir file before
+// git is run with that admin directory as --git-dir, since git reads the
+// shared refs from wherever commondir names. The file is read through the
+// shared reader and must be one line naming, in the instance or the job
+// directory and with no link on the way, the common directory the walk
+// found the admin directory under. Anything else keeps the unit.
+func (w *walker) adminCommonInside(a *adminDir) bool {
+	file := filepath.Join(a.Path, "commondir")
+	label := w.f.label(file)
+	b, err := readCapped(file, maxGitFileBytes)
+	line, ok := oneLine(b)
+	if err != nil || !ok || line == "" {
+		w.f.keep(label, "unreadable git file: "+label)
+		return false
+	}
+	common := resolveFrom(a.Path, line)
+	if !w.checkInside(label, common) {
+		return false
+	}
+	ci, err := os.Lstat(common)
+	ai, aerr := os.Lstat(a.Common)
+	if err != nil || aerr != nil || !os.SameFile(ci, ai) {
+		w.f.keep(label, "unreadable git file: "+label+" names "+w.f.label(common)+", not "+w.f.label(a.Common))
+		return false
+	}
+	return true
 }
 
 // reach checks a repository's worktree listing against the walk: every
