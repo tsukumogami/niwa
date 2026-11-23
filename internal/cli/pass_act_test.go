@@ -485,6 +485,43 @@ func TestPassAct_BackstopAgeRead(t *testing.T) {
 	}
 }
 
+// The environment and the process listing are taken once per pass, but each
+// call to setup attributes the listing to its own instances too: the
+// backstop's candidates, set up after the mapped units, are attributed as
+// well as the mapped ones.
+func TestPassAct_SetupAttributesEveryCallsInstances(t *testing.T) {
+	lockTestHome(t)
+	root := t.TempDir()
+	mapped := filepath.Join(root, "test-ws-mapped")
+	backstop := filepath.Join(root, "test-ws+-0000dd01")
+	listings := 0
+	prev := listProcessesFunc
+	listProcessesFunc = func(context.Context, *removal.Env) *removal.Listing {
+		listings++
+		return &removal.Listing{Procs: []removal.Process{
+			{PID: 101, Cwd: mapped},
+			{PID: 102, Cwd: filepath.Join(backstop, "sub")},
+		}}
+	}
+	t.Cleanup(func() { listProcessesFunc = prev })
+
+	a := &passActor{ctx: context.Background(), root: root}
+	defer a.close()
+	a.setup(context.Background(), []string{mapped})
+	a.setup(context.Background(), []string{backstop})
+
+	if listings != 1 {
+		t.Fatalf("took %d process listings, want one per pass", listings)
+	}
+	got := map[int]string{}
+	for _, p := range a.policy.Processes.Procs {
+		got[p.PID] = p.Instance
+	}
+	if got[101] != mapped || got[102] != backstop {
+		t.Fatalf("attribution %v; want pid 101 in %s and pid 102 in %s", got, mapped, backstop)
+	}
+}
+
 // syncWriter serializes writes from passes running at once.
 type syncWriter struct {
 	mu  sync.Mutex

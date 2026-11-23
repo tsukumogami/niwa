@@ -104,22 +104,29 @@ type passActor struct {
 
 	env    *removal.Env
 	policy removal.Policy
+	// attributed is every instance a setup call named, the ones the
+	// listing is attributed to.
+	attributed []string
 }
 
-// setup resolves the rule's environment and takes the pass's process
-// listing under ctx, once, the first time a unit needs them, so a pass with
-// nothing to judge makes no scratch directory and lists no processes.
+// setup prepares the units of one stage of the pass. The rule's environment
+// and the process listing are made once per pass, under ctx, the first time
+// a stage has a unit to judge, so a pass with nothing to judge makes no
+// scratch directory and lists no processes. The attribution is redone on
+// every call, over every instance any call named, so a later stage's units
+// (the backstop's candidates, set up after the mapped units) are attributed
+// in the same listing as the earlier ones. The listing itself isn't taken
+// again: each unit's re-read takes a fresh one and compares.
 func (a *passActor) setup(ctx context.Context, instances []string) {
-	if a.env != nil {
-		return
+	a.attributed = append(a.attributed, instances...)
+	if a.env == nil {
+		a.env = newRemovalEnv(a.root, userHomeDir(), os.Getenv("PATH"))
+		a.policy = removalPolicy(a.cfg, a.env)
+		a.policy.ConfigError = a.cfgErr
+		a.policy.JobsRoot = a.jobsDir
+		a.policy.Processes = listProcessesFunc(ctx, a.env)
 	}
-	a.env = newRemovalEnv(a.root, userHomeDir(), os.Getenv("PATH"))
-	a.policy = removalPolicy(a.cfg, a.env)
-	a.policy.ConfigError = a.cfgErr
-	a.policy.JobsRoot = a.jobsDir
-	procs := listProcessesFunc(ctx, a.env)
-	procs.Attribute(instances, nil)
-	a.policy.Processes = procs
+	a.policy.Processes.Attribute(a.attributed, nil)
 }
 
 // close releases the environment.
