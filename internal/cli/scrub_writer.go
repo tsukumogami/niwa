@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strings"
 	"sync"
 
 	"github.com/tsukumogami/niwa/internal/removal"
@@ -98,16 +99,19 @@ func (s *scrubLineWriter) hold(p []byte) {
 // holds, then cuts the scrubbed result to maxScrubLineBytes.
 //
 // The held text ends where the writer stopped taking the line, which can be
-// inside a token, and the text before it can collapse to almost nothing
-// (white space, escapes) once it is scrubbed. So the run of token
-// characters the scrubbed text ends with is dropped before the cut: it can
-// be the front of a token too short for any pattern to know it. A run of
-// maxScrubLineBytes or more is kept, since every pattern knows a token by
-// then and the cut leaves only the run's start.
+// inside a word, and the text before it can collapse to almost nothing
+// (white space, escapes) once it is scrubbed. The word cut there can be the
+// front of a secret no pattern knows yet: a token too short for its shape,
+// or a URL's userinfo with no @ after it. So the scrubbed text is cut back
+// to its last space and the word after it is dropped whole; with no space,
+// all of the held text goes. Only a word of maxScrubLineBytes or more made
+// of token characters alone is kept, since every pattern knows a token by
+// then and the cut leaves only the word's start.
 func (s *scrubLineWriter) settle() {
 	clean := removal.ScrubEvidence(string(s.buf), math.MaxInt)
-	if start := tokenRunStart(clean); len(clean)-start < maxScrubLineBytes {
-		clean = clean[:start]
+	start := strings.LastIndexByte(clean, ' ') + 1
+	if word := clean[start:]; len(word) < maxScrubLineBytes || tokenRunStart(word) > 0 {
+		clean = strings.TrimSuffix(clean[:start], " ")
 	}
 	s.buf = append(s.buf[:0], removal.CutText(clean, maxScrubLineBytes)...)
 	s.full = true

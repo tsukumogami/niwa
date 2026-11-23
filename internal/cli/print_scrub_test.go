@@ -36,8 +36,11 @@ var printScrubFiles = []string{
 }
 
 // printScrubWrappers are the named wrappers an argument may pass through
-// instead of calling removal.ScrubEvidence itself. The check confirms each
-// one's body calls removal.ScrubEvidence.
+// instead of calling scrub.ScrubEvidence itself. The check confirms each
+// one's body calls scrub.ScrubEvidence, from the leaf package internal/scrub.
+// It also accepts removal.ScrubEvidence, the forwarder to it, but code under
+// internal/worktree must use the leaf scrub package and never the removal
+// forwarder: internal/worktree must not import internal/removal.
 var printScrubWrappers = []string{"scrubGateText", "scrubOnReapText", "scrubJoined"}
 
 // printAllow allows the named arguments of the print calls in one function
@@ -129,7 +132,7 @@ func (v printViolation) String() string {
 type printScrubResult struct {
 	violations []printViolation
 	// badWrappers are wrappers that are missing or don't call
-	// removal.ScrubEvidence.
+	// scrub.ScrubEvidence (or removal.ScrubEvidence, its forwarder).
 	badWrappers []string
 	// unused are allow-list entries no call matched.
 	unused []printAllow
@@ -137,8 +140,9 @@ type printScrubResult struct {
 
 // checkPrintScrub checks every print call in files (by base name) against
 // the rule: each argument it prints is a literal, a call to
-// removal.ScrubEvidence or to one of wrappers that calls it, or an argument
-// allow lists for that file and function. A format string must be a literal.
+// scrub.ScrubEvidence (or removal.ScrubEvidence, its forwarder) or to one of
+// wrappers that calls it, or an argument allow lists for that file and
+// function. A format string must be a literal.
 //
 // A print call is fmt's Fprint, Fprintf, Fprintln, Print, Printf and
 // Println, log's Print, Printf and Println, io.WriteString, and any Write,
@@ -342,16 +346,21 @@ func parsePrintScrubFiles(t *testing.T) map[string]*ast.File {
 }
 
 // TestReapPathPrintsScrubUnitText is the check that keeps every print on the
-// reap and pass path going through removal.ScrubEvidence: a new print that
-// hands on a unit-sourced string unscrubbed fails it, and so does an
-// allow-list entry nothing matches any more.
+// reap and pass path going through scrub.ScrubEvidence, from the leaf
+// package internal/scrub: a new print that hands on a unit-sourced string
+// unscrubbed fails it, and so does an allow-list entry nothing matches any
+// more. The check also accepts removal.ScrubEvidence, the forwarder, but code
+// under internal/worktree must use the leaf scrub package and never the
+// removal forwarder: internal/worktree must not import internal/removal.
 func TestReapPathPrintsScrubUnitText(t *testing.T) {
 	res := checkPrintScrub(parsePrintScrubFiles(t), printScrubAllow, printScrubWrappers)
 	for _, w := range res.badWrappers {
-		t.Errorf("wrapper %s is missing or does not call removal.ScrubEvidence", w)
+		t.Errorf("wrapper %s is missing or does not call scrub.ScrubEvidence", w)
 	}
 	for _, v := range res.violations {
-		t.Errorf("%s: scrub it with removal.ScrubEvidence, or allow-list it if it is niwa-made", v)
+		t.Errorf("%s: scrub it with scrub.ScrubEvidence from internal/scrub, or allow-list it if it is niwa-made; "+
+			"under internal/worktree use the scrub package, never the removal forwarder, since internal/worktree "+
+			"must not import internal/removal", v)
 	}
 	for _, a := range res.unused {
 		t.Errorf("allow-list entry %s %s (%s) matches no print; remove it", a.file, a.fn, a.what)
@@ -538,6 +547,58 @@ func TestScrubLineWriterScrubsBeforeItCutsALongLine(t *testing.T) {
 			t.Errorf("printed %q; want %q", got, "kept\n")
 		}
 	})
+}
+
+// TestScrubLineWriterDropsAUserinfoCutAtTheEndOfWhatIsHeld: a URL whose
+// userinfo the end of what the writer holds cuts, in the user name or in a
+// password holding characters no token has ($ and .), leaves nothing of the
+// userinfo behind. The line is cut back to the last space before it, and with
+// no space before it the whole held text is dropped.
+func TestScrubLineWriterDropsAUserinfoCutAtTheEndOfWhatIsHeld(t *testing.T) {
+	const pass = "Pa$$.w0rd9xyz"
+	url := "https://bob:" + pass + "@host/r"
+	at := strings.IndexByte(url, '@')
+	held := maxScrubLineBytes + scrubLineSlack
+	leak := func(got string) string {
+		for _, s := range []string{"bob", "bo", "://", "https"} {
+			if strings.Contains(got, s) {
+				return s
+			}
+		}
+		for i := 2; i <= len(pass); i++ {
+			if strings.Contains(got, pass[:i]) {
+				return pass[:i]
+			}
+		}
+		return ""
+	}
+	for _, pad := range []struct {
+		name string
+		// before is what comes before the URL when k bytes of it are held.
+		before func(k int) string
+		want   string
+	}{
+		{"after a space", func(k int) string { return "kept" + strings.Repeat(" ", held-4-k) }, "kept\n"},
+		{"with no space before it", func(k int) string {
+			n := held - k
+			return strings.Repeat("\x1b[0m", n/4) + strings.Repeat(" ", n%4)
+		}, "\n"},
+	} {
+		for _, chunk := range []int{0, 1000, 1} {
+			for k := len("https://b"); k <= at; k++ {
+				before := pad.before(k)
+				if len(before)+k != held {
+					t.Fatalf("%s: %d bytes of the URL held, want %d", pad.name, held-len(before), k)
+				}
+				var out strings.Builder
+				w := newScrubLineWriter(&out, 400)
+				writeInChunks(t, w, before+url+" tail\n", chunk)
+				if got := out.String(); got != pad.want || leak(got) != "" {
+					t.Errorf("%s, writes of %d, cut after %q: printed %q; want %q", pad.name, chunk, url[:k], got, pad.want)
+				}
+			}
+		}
+	}
 }
 
 // writeInChunks writes s to w in pieces of n bytes, or whole when n is 0.
