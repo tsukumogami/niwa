@@ -490,12 +490,25 @@ func (st *store) ancestryPath(ctx context.Context, c, tip string) ([]string, err
 }
 
 // verifyObjects reads each object's raw content from the store and hashes
-// it, refusing one whose content doesn't hash to its name. git checks the
-// hash of a commit it is handed by name, but a walk reads each parent by
-// the id its child names without checking it, so an object planted in the
-// store under a real commit's id would otherwise be believed. The store is
-// checked before each use against the same person-level tampering; the
-// objects a decision rests on are checked here the same way.
+// it, refusing one whose content doesn't hash to its name; a mismatch or a
+// read error keeps the unit. git checks the hash of a commit it is handed by
+// name, but a walk reads each parent by the id its child names without
+// checking it.
+//
+// This is defense in depth, and it covers only the commits the checks name:
+// for the ancestry check, the commits on the --ancestry-path list from the
+// tip down to the commit, and the commit; for merged by content, both sides,
+// each merge base and the commits on the lists from each base up to both
+// sides. The tips are commit ids, so no tag is peeled. It doesn't cover the
+// trees and blobs merge-tree reads, or ancestors outside those lists (a
+// commit below the one judged is never on its --ancestry-path list).
+//
+// Object forgery inside the store by a process running as the same user is
+// outside the threat model: a process that can write into the 0700 store
+// under ~/.niwa/ can already rewrite the unit's own refs or niwa's state, so
+// a forged object gives it nothing it couldn't do without one. A store that
+// reads only packs niwa's own index-pack wrote, keeping on any loose object
+// or unrecorded pack, would close the gap; tsukumogami/niwa#564 tracks it.
 func (st *store) verifyObjects(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil

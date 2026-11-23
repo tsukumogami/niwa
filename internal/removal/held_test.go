@@ -544,6 +544,28 @@ func TestHeldRehashesTheObjectsTheAncestryWalkReads(t *testing.T) {
 	keepWith(t, v, "does not hash to its id")
 }
 
+// TestMergedByContentNeverPassesOnAMergeBaseError pins that a merge-base
+// call that fails, here on a commit the store doesn't hold, reads as not
+// merged: the commit stays unheld and its unit keeps.
+func TestMergedByContentNeverPassesOnAMergeBaseError(t *testing.T) {
+	h := newHeldFixture(t)
+	p := h.policy(t)
+	st, err := p.Env.newStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.remove()
+	d := gitRun(t, h.remote, "rev-parse", "main")
+	if err := st.fetch(context.Background(), h.remoteURL, []string{d}); err != nil {
+		t.Fatal(err)
+	}
+	absent := strings.Repeat("ab", len(d)/2)
+	merged, _ := st.mergedByContent(context.Background(), d, absent)
+	if merged {
+		t.Fatal("a merge-base error read as merged by content")
+	}
+}
+
 func TestHeldKeepsWhenTheStoreGrowsPastItsCap(t *testing.T) {
 	h := newHeldFixture(t)
 	commitFile(t, h.other, "more.txt", "m\n", "more")
