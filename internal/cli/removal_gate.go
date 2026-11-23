@@ -13,9 +13,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -253,15 +253,10 @@ func removalGateEnv(declared []string, path, step string, sessionIDs []string) [
 // sanitizeRemovalGateText is sanitizeOnReapText with Unicode's bidirectional
 // controls also turned into spaces. unicode.IsControl covers the C0 and C1
 // ranges but not these, and an override would let a command's text print in
-// an order other than the one it was written in.
+// an order other than the one it was written in. The control removal is the
+// one removal.ScrubEvidence uses, so the two can't drift.
 func sanitizeRemovalGateText(text string, max int) string {
-	text = strings.Map(func(r rune) rune {
-		if unicode.Is(unicode.Bidi_Control, r) {
-			return ' '
-		}
-		return r
-	}, text)
-	return sanitizeOnReapText(text, max)
+	return removal.CutText(removal.StripControls(removal.StripBidi(text)), max)
 }
 
 // sessionIDsByInstance groups the workspace's mapped session ids by instance

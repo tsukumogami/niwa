@@ -13,10 +13,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -305,28 +304,7 @@ func (s *onReapStep) deleteMapping(sessionID string) {
 // control characters become spaces, runs of spaces collapse, and the result
 // is cut to at most max bytes, with "..." marking a cut.
 func sanitizeOnReapText(text string, max int) string {
-	var b strings.Builder
-	space := false
-	for _, r := range strings.ToValidUTF8(text, " ") {
-		if unicode.IsControl(r) || unicode.IsSpace(r) {
-			if !space {
-				b.WriteByte(' ')
-			}
-			space = true
-			continue
-		}
-		space = false
-		b.WriteRune(r)
-	}
-	out := strings.TrimSpace(b.String())
-	if len(out) <= max {
-		return out
-	}
-	cut := max - len("...")
-	for cut > 0 && !utf8.RuneStart(out[cut]) {
-		cut--
-	}
-	return out[:cut] + "..."
+	return removal.CutText(removal.StripControls(text), max)
 }
 
 // lastLine returns the last non-blank line of s.
