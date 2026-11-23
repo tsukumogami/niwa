@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tsukumogami/niwa/internal/cli/sessionattach"
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/workspace"
@@ -763,4 +764,113 @@ func TestReapVerdictOnlySkipsTheWorktreeSweep(t *testing.T) {
 		t.Fatalf("reap: %v\n%s", err, errOut)
 	}
 	assertRemoved(t, f, st)
+}
+
+// scrubLeaks names each of leaks that out still carries.
+func scrubLeaks(out string, leaks ...string) []string {
+	var found []string
+	for _, s := range leaks {
+		if strings.Contains(out, s) {
+			found = append(found, s)
+		}
+	}
+	return found
+}
+
+func TestReportInstanceLockKeptScrubsTheNameAndTheReason(t *testing.T) {
+	// With no secret and no escape the line is the one it always was.
+	for _, err := range []error{
+		heldBy(lockTestHolder),
+		errors.New("open /home/u/.niwa/locks/0a1b2c3d.lock: permission denied"),
+	} {
+		var out bytes.Buffer
+		reportInstanceLockKept(&out, "/ws/test-ws-held", err)
+		want := "niwa: kept " + sanitizeRemovalGateText("test-ws-held", 80) + ": " + instanceLockReason(err) + "\n"
+		if out.String() != want {
+			t.Errorf("kept line %q, want %q", out.String(), want)
+		}
+	}
+
+	token := "ghp_" + strings.Repeat("A1b2", 9)
+	var out bytes.Buffer
+	reportInstanceLockKept(&out, "/ws/test-ws-token=abc123\x1b[31m",
+		heldBy("niwa retask (pid 4242) password=hunter2 "+token+" https://u:pa55@example.com/x \x1b]0;title\x07"))
+	line := out.String()
+	if leaks := scrubLeaks(line, "abc123", "hunter2", token, "u:pa55", "\x1b", "title"); len(leaks) > 0 {
+		t.Fatalf("kept line %q carries %q", line, leaks)
+	}
+	if !strings.HasPrefix(line, "niwa: kept test-ws-token=[redacted]: another niwa command is acting on it") ||
+		!strings.Contains(line, "niwa retask (pid 4242)") || !strings.HasSuffix(line, "\n") || strings.Count(line, "\n") != 1 {
+		t.Fatalf("kept line %q; want the name and the holder kept around what was scrubbed", line)
+	}
+}
+
+func TestSettleStoredMappingScrubsTheChangedRecordLine(t *testing.T) {
+	root := setupHookWorkspace(t, true)
+	stderr := captureReapStderr(t)
+	installFakeInstanceLock(t, &fakeInstanceLock{})
+	gone := filepath.Join(root, "test-ws-token=abc123\x1b[31m")
+	mapEphemeral(t, root, reapDeadSessionID, gone, true)
+	m := readMapping(t, root, reapDeadSessionID)
+	// The record on disk is no longer the one selection read.
+	m.DispatchID = "d2d2d2d2-0000-4000-8000-000000000002"
+
+	settleStoredMapping(root, t.TempDir(), m, nil)
+	out := stderr.String()
+	if leaks := scrubLeaks(out, "abc123", "\x1b"); len(leaks) > 0 {
+		t.Fatalf("output %q carries %q", out, leaks)
+	}
+	if !strings.Contains(out, "niwa: kept test-ws-token=[redacted]: its session record changed") {
+		t.Fatalf("output %q; want the changed-record line with the name scrubbed", out)
+	}
+}
+
+func TestPass_RemovedNothingLineIsScrubbed(t *testing.T) {
+	f := newPassFixture(t)
+	f.appendConfig(t, "build_trees = [\"token=hunter2\"]\n")
+	res, err := runPass(context.Background(), f.root, passActAll, passScope{JobsDir: f.jobsDir, Now: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.SettingsInvalid || len(*f.destroyed) != 0 {
+		t.Fatalf("result %+v, destroyed %v; want the settings refused and nothing removed", res, *f.destroyed)
+	}
+	out := f.stderr.String()
+	if !strings.Contains(out, "niwa: removed nothing: the workspace's removal settings are invalid: ") {
+		t.Fatalf("output %q; want the removed-nothing line", out)
+	}
+	if strings.Contains(out, "hunter2") {
+		t.Fatalf("output %q carries the secret", out)
+	}
+	if !strings.Contains(out, "token=[redacted]") {
+		t.Fatalf("output %q; want the entry named with its secret redacted", out)
+	}
+}
+
+func TestReapVerdictOnlyExitsNonZeroOnInvalidSettings(t *testing.T) {
+	for _, args := range [][]string{{"--verdict-only"}, {"--verdict-only", "--json"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			f := newPassFixture(t)
+			t.Setenv("HOME", filepath.Dir(f.jobsDir))
+			f.appendConfig(t, "build_trees = [\"target/*\"]\n")
+
+			out, _, err := runReapCommand(t, f.root, args...)
+			var exit *sessionattach.ExitCodeError
+			if !errors.As(err, &exit) || exit.Code == 0 {
+				t.Fatalf("error %v; want a non-zero exit", err)
+			}
+			if exit.Msg != "" {
+				t.Errorf("exit message %q; want none, the removed-nothing line says why", exit.Msg)
+			}
+			if out != "" {
+				t.Errorf("stdout %q; want nothing when no verdict was reached", out)
+			}
+			if !strings.Contains(f.stderr.String(), "niwa: removed nothing: the workspace's removal settings are invalid") {
+				t.Errorf("stderr %q; want the removed-nothing line", f.stderr.String())
+			}
+			if len(*f.destroyed) != 0 {
+				t.Errorf("destroyed %v", *f.destroyed)
+			}
+		})
+	}
 }

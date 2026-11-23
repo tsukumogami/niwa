@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
+	"github.com/tsukumogami/niwa/internal/cli/sessionattach"
 	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -167,8 +168,10 @@ names, and the class of every path. An instance reap would never remove is
 listed too, kept by its liveness. It runs no pre-removal or on-reap command,
 settles no session record and sweeps no worktree; one it doesn't reach
 within the 30 seconds is printed as not reached. --json prints the same as a
-niwa.verdicts/v1 document. An <instance> argument and --json are accepted
-only with --verdict-only.`,
+niwa.verdicts/v1 document. When the workspace's removal settings are
+invalid it says so on stderr, prints no verdict in either form and exits
+non-zero. An <instance> argument and --json are accepted only with
+--verdict-only.`,
 	Args:          reapArgs,
 	SilenceErrors: true,
 	SilenceUsage:  true,
@@ -269,6 +272,12 @@ func runReapVerdicts(cmd *cobra.Command, workspaceRoot, instance string) error {
 		passScope{JobsDir: defaultJobsDir(), Now: time.Now(), Instance: instance})
 	if err != nil {
 		return err
+	}
+	if res.SettingsInvalid {
+		// The pass printed why on stderr and judged nothing. Nothing goes
+		// to stdout in either form: an empty document would read as a
+		// workspace with no instances. The exit status says it failed.
+		return &sessionattach.ExitCodeError{Code: 1}
 	}
 	if reapJSON {
 		return printVerdictsJSON(cmd.OutOrStdout(), res.Verdicts)
@@ -681,7 +690,7 @@ func settleStoredMapping(workspaceRoot, jobsDir string, m workspace.SessionMappi
 			name = filepath.Base(m.InstancePath)
 		}
 		fmt.Fprintf(reapStderr, "niwa: kept %s: its session record changed while the reap ran; the next reap asks again\n",
-			sanitizeRemovalGateText(name, 80))
+			removal.ScrubEvidence(name, 80))
 		return
 	}
 	onReap.settle(current)

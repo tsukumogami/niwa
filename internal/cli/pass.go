@@ -75,6 +75,9 @@ type passResult struct {
 	// Verdicts is every unit a verdict-only pass covered, in the order it
 	// took them, reached or not. The act mode leaves it empty.
 	Verdicts []unitVerdict
+	// SettingsInvalid is true when the workspace's removal settings are
+	// invalid: the pass printed its removed-nothing line and judged no unit.
+	SettingsInvalid bool
 }
 
 // runPass is the one pass every removal niwa makes on its own runs through.
@@ -121,7 +124,8 @@ func runPass(ctx context.Context, workspaceRoot string, mode passMode, scope pas
 	var settingsErr *config.RemovalSettingsError
 	if errors.As(cfgErr, &settingsErr) {
 		fmt.Fprintf(reapStderr, "niwa: removed nothing: the workspace's removal settings are invalid: %s\n",
-			sanitizeRemovalGateText(cfgErr.Error(), 400))
+			removal.ScrubEvidence(cfgErr.Error(), 400))
+		res.SettingsInvalid = true
 		return res, nil
 	}
 
