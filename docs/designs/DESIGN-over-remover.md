@@ -92,6 +92,28 @@ the walk's would look for a live session's job entry where Claude Code
 didn't write it, and read the session as gone, which is the unsafe
 direction for a remover.
 
+### 2026-11-23 — Object forgery in the scratch store is out of scope
+
+**What changed.** Security Considerations now says that a process running
+as the same user that writes objects into the scratch store is outside the
+threat model, and says what niwa still checks there: each commit the
+ancestry and merged-by-content checks name (the tips they start from are
+commit ids, so no tag is peeled) is re-hashed from its raw content before it counts, and a mismatch or read
+error keeps the unit. Trees and blobs `merge-tree` reads, and ancestors
+outside the ancestry lists, aren't re-hashed.
+
+**Why.** Review found that an object planted in the store under an id it
+already holds, a commit naming an unpushed commit as its parent or a tree
+that makes `merge-tree` return the remote's tree, would make unpushed work
+read as held. Closing that by hashing means re-hashing every object the
+checks could reach, close to a full `git fsck` of the store on each pass.
+A process that can write into the 0700 store under `~/.niwa/` can already
+rewrite the unit's refs or niwa's state, so a forged object adds nothing
+it couldn't do without one, the same reasoning the ledger's paragraph
+under Data loss gives. A store that reads only packs niwa's own
+`index-pack` wrote is the way to close the gap; tsukumogami/niwa#564
+tracks it.
+
 ## Context and Problem Statement
 
 A unit of work in niwa is a session, the instance it runs in, its Claude Code
@@ -3818,7 +3840,20 @@ store's `config` and compares it byte for byte with what it wrote before
 each network call, so a planted `url.<base>.insteadOf`, proxy or
 certificate setting keeps the unit instead of steering `ls-remote` to a
 host that would advertise the unpushed commit as a tip; the fixed
-`-c http.proxy=` and `-c http.sslVerify=true` back that up. Only a
+`-c http.proxy=` and `-c http.sslVerify=true` back that up. Object
+forgery inside the store by a process running as the same user is out of
+scope: such a process could plant an object under an id the store already
+holds, a commit naming an unpushed commit as its parent or a tree that
+makes `merge-tree` return the remote's own tree, and git would believe it.
+A process that can write into the 0700 store under `~/.niwa/` can already
+rewrite the unit's own refs or niwa's state, so a forged object gives it
+nothing it couldn't do without one. As defense in depth, niwa re-hashes
+each commit the ancestry and merged-by-content checks name from its raw
+content before it counts, and keeps the unit on a
+mismatch or a read error; that check doesn't cover the trees and blobs
+`merge-tree` reads or ancestors outside those lists. A store that reads
+only packs niwa's own `index-pack` wrote, keeping on any loose object or
+unrecorded pack, would close the gap; tsukumogami/niwa#564 tracks it. Only a
 proof remote counts as evidence that a
 commit is held or merged: the clone URL the workspace configuration gives the
 repository, read at the root and never from the instance, or a match for a
