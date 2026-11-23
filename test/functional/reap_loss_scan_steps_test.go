@@ -33,6 +33,7 @@ func registerReapLossScanSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the link's target directory is recorded$`, theLinksTargetIsRecorded)
 	ctx.Step(`^the link's target directory is unchanged$`, theLinksTargetIsUnchanged)
 	ctx.Step(`^the workspace configuration's URL for repo "([^"]*)" points at a refused local address with "([^"]*)" and query "([^"]*)"$`, theWorkspaceURLPointsAtARefusedAddress)
+	ctx.Step(`^the workspace configuration declares the disposable pattern "([^"]*)"$`, theWorkspaceConfigurationDeclaresADisposablePattern)
 	ctx.Step(`^I run niwa reap "([^"]*)" naming the dispatch instance from the workspace root$`, iRunNiwaReapNamingTheDispatchInstance)
 	ctx.Step(`^no output contains "([^"]*)"$`, noOutputContains)
 	ctx.Step(`^the output gives the (first dispatch instance|dispatch instance) the verdict "(keep|reap)"$`, theOutputGivesTheVerdict)
@@ -399,6 +400,27 @@ func theWorkspaceURLPointsAtARefusedAddress(ctx context.Context, repo, userinfo,
 		return fmt.Errorf("no url for [repos.%s] in %s:\n%s", repo, path, data)
 	}
 	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
+}
+
+// theWorkspaceConfigurationDeclaresADisposablePattern appends one
+// [[session.removal.disposable]] entry with pattern to the workspace
+// configuration at the root, after init has loaded it, so a pattern init
+// would refuse reaches the reap.
+func theWorkspaceConfigurationDeclaresADisposablePattern(ctx context.Context, pattern string) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	path := filepath.Join(s.workspaceRoot, ".niwa", "workspace.toml")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(f, "\n[[session.removal.disposable]]\npattern = %q\nreview = \"functional test\"\n", pattern); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func iRunNiwaReapNamingTheDispatchInstance(ctx context.Context, flags string) (context.Context, error) {

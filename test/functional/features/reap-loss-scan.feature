@@ -641,3 +641,73 @@ Feature: niwa reap keeps a deleted session's instance that holds unpushed work
     And the dispatch instance still exists
     And the error output contains "commits the clone URL does not show"
     And no output contains "xoxb-"
+
+  # The settings come into doubt after init, which refuses a catch-all
+  # pattern itself: the reap is what has to stop on them.
+
+  @critical
+  Scenario: niwa reap --verdict-only prints no verdict and fails when the removal settings are invalid
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists with a commit
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given I set env "NIWA_TEST_REMOVAL_FILE_REMOTES" to "1"
+    And a fake claude for dispatch with session "b8b8b8b8-b8b8-4b8b-8b8b-b8b8b8b8b8b8"
+    When I run "niwa dispatch bad-settings --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When the dispatch session "b8b8b8b8-b8b8-4b8b-8b8b-b8b8b8b8b8b8" is deleted from the Agent View
+    And the workspace configuration declares the disposable pattern "**"
+    And I run "niwa reap --verdict-only" from the workspace root
+    Then the exit code is not 0
+    And the output is empty
+    And the error output has exactly 1 line containing "niwa: removed nothing: the workspace's removal settings are invalid: session.removal.disposable[0]: pattern"
+    And the error output contains "matches every path"
+    And the dispatch instance still exists
+    When I run "niwa reap --verdict-only --json" from the workspace root
+    Then the exit code is not 0
+    And the output is empty
+    And the error output has exactly 1 line containing "niwa: removed nothing: the workspace's removal settings are invalid: session.removal.disposable[0]: pattern"
+    And the error output contains "matches every path"
+    And the dispatch instance still exists
+
+  # The reclaimed line names an instance reclaimed on idleness, which only an
+  # agent answered by activity reaches. Its reason is niwa's own words; the
+  # instance name carries the dispatch's --name slug, which can hold a token
+  # shape, so that is the secret that reaches the line.
+
+  @critical
+  Scenario: the reclaimed line of niwa reap prints a token in the instance name scrubbed
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake codex for dispatch with session "01a60000-0000-7000-8000-00000000f00d"
+    When I run "niwa dispatch abandoned --detach --harness codex --name ghp_r8x2k7m4q9w3e6t1y5u0i2o8p4a6s3" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    Given the codex session was last worked in "48h" ago
+    When I run niwa reap from the workspace root
+    Then the exit code is 0
+    And no dispatch instance remains
+    And the error output has exactly 1 line containing "niwa: reclaimed myws+[redacted]-"
+    And the error output contains ": its codex session had gone 24h0m0s without being worked in, and nothing was writing to it"
+    And no output contains "ghp_"
+    And no output contains "r8x2k7m4q9w3e6t1y5u0i2o8p4a6s3"
