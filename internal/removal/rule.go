@@ -179,6 +179,14 @@ func Evaluate(ctx context.Context, u Unit, p Policy) Verdict {
 		CheckOutside:    checkOutside,
 		CheckNamedFiles: noCheckYet,
 	}
+	if p.ConfigError != nil {
+		// Without the workspace configuration the rule can't know what the
+		// workspace counts as disposable, so nothing counts as disposable
+		// on its say: ignored files and job scratch act as unique, and no
+		// workspace pattern or declared build tree applies.
+		p.IgnoredUnique, p.JobScratchUnique = true, true
+		p.Disposable, p.BuildTrees = nil, nil
+	}
 	s := &evalState{}
 	var v Verdict
 	for _, name := range checkOrder {

@@ -218,6 +218,81 @@ func TestEvaluateWithJobScratchUniqueKeepsJobScratch(t *testing.T) {
 	wantClass(t, v, "job:empty/", ClassGenerated, "")
 }
 
+func TestEvaluateWithTheConfigurationUnreadableKeepsJobScratch(t *testing.T) {
+	f := newFixture(t)
+	job := filepath.Join(t.TempDir(), "job")
+	writeFile(t, filepath.Join(job, "scratch.md"), "notes")
+	u := f.unit()
+	u.JobDir = job
+	p := f.policy(t)
+	p.ConfigError = os.ErrNotExist
+	p.Disposable = []string{"*.md"}
+	v := Evaluate(context.Background(), u, p)
+	var got string
+	for _, c := range v.Checks {
+		if c.Name == CheckOutside {
+			got = c.Evidence
+		}
+	}
+	if v.Kind != Keep || !strings.Contains(got, "configuration unreadable") || !strings.Contains(got, "job:scratch.md") {
+		t.Fatalf("verdict %s %+v; want job scratch kept with the unreadable configuration named", v.Kind, v.Checks)
+	}
+	if first, _ := v.First(); first.Name != CheckRepository || !strings.Contains(first.Evidence, "configuration unreadable") {
+		t.Fatalf("first check %+v; want the clone kept with the unreadable configuration named", first)
+	}
+}
+
+func TestEvaluateWithTheConfigurationUnreadableStillReapsAUnitWithNothingToKeep(t *testing.T) {
+	instance := t.TempDir()
+	writeFile(t, filepath.Join(instance, ".niwa", "instance.json"), "{}")
+	job := filepath.Join(t.TempDir(), "job")
+	writeFile(t, filepath.Join(job, "state.json"), "{}")
+	u := Unit{InstancePath: instance, Liveness: LivenessGone, JobDir: job}
+	v := Evaluate(context.Background(), u, Policy{Processes: &Listing{}, ConfigError: os.ErrNotExist})
+	if v.Kind != Reap {
+		t.Fatalf("verdict %s %+v; want reap", v.Kind, v.Checks)
+	}
+}
+
+func TestJobScratchIsUniqueWhileAHandoffBriefMayBePresent(t *testing.T) {
+	for name, setup := range map[string]func(t *testing.T, instance string){
+		"keep record present": func(t *testing.T, instance string) {
+			writeFile(t, filepath.Join(instance, ".niwa", "keep.json"), "{}")
+		},
+		"niwa directory is a link": func(t *testing.T, instance string) {
+			if err := os.Symlink(t.TempDir(), filepath.Join(instance, ".niwa")); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			instance := t.TempDir()
+			setup(t, instance)
+			job := filepath.Join(t.TempDir(), "job")
+			writeFile(t, filepath.Join(job, "scratch.md"), "notes")
+			u := Unit{InstancePath: instance, Liveness: LivenessGone, JobDir: job}
+			v := Evaluate(context.Background(), u, Policy{Processes: &Listing{}})
+			wantClass(t, v, "job:scratch.md", ClassUnique, "")
+			found := false
+			for _, c := range v.Checks {
+				if strings.Contains(c.Evidence, "a handoff brief may be present") {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("checks %+v; want job scratch kept for the possible brief", v.Checks)
+			}
+		})
+	}
+	// With no keep record, job scratch is disposable by default.
+	instance := t.TempDir()
+	writeFile(t, filepath.Join(instance, ".niwa", "instance.json"), "{}")
+	job := filepath.Join(t.TempDir(), "job")
+	writeFile(t, filepath.Join(job, "scratch.md"), "notes")
+	v := Evaluate(context.Background(), Unit{InstancePath: instance, Liveness: LivenessGone, JobDir: job}, Policy{Processes: &Listing{}})
+	wantClass(t, v, "job:scratch.md", ClassDisposable, NoticeJobScratch)
+}
+
 func TestCacheDirTagNeedsTheSignatureAndAnIgnoredDirectory(t *testing.T) {
 	f := classFixture(t)
 	writeFile(t, filepath.Join(f.clone, "fake-cache", "CACHEDIR.TAG"), "Signature: wrong\n")

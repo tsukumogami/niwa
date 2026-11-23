@@ -124,7 +124,7 @@ func checkRepositories(ctx context.Context, u Unit, p Policy, s *evalState) []Ch
 	gen := s.generated(u.InstancePath)
 	for _, c := range f.clones {
 		if p.ConfigError != nil {
-			keeps = append(keeps, Check{Paths: []string{c.Rel}, Evidence: fmt.Sprintf("%s: the workspace configuration could not be read: %v", c.Rel, p.ConfigError)})
+			keeps = append(keeps, Check{Paths: []string{c.Rel}, Evidence: fmt.Sprintf("%s: configuration unreadable: %v", c.Rel, p.ConfigError)})
 			s.classes.add(dirPath(filepath.ToSlash(c.Rel)), ClassUnique, "")
 			continue
 		}

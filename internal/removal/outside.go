@@ -281,6 +281,17 @@ func checkJobDir(ctx context.Context, u Unit, p Policy, pats []string, s *evalSt
 		s.classes.add(jobPrefix, ClassUnique, "")
 		return []Check{{Paths: []string{jobPrefix}, Evidence: "the job directory is not a directory"}}
 	}
+	// Job scratch is disposable only in a unit with no handoff brief, and
+	// only while the workspace configuration says so. Until the records
+	// check reads the brief, a brief that is present, or one the rule can't
+	// rule out, makes job scratch unique.
+	scratchUnique, why := p.JobScratchUnique, ""
+	switch {
+	case p.ConfigError != nil:
+		scratchUnique, why = true, " (configuration unreadable)"
+	case briefPossible(u.InstancePath):
+		scratchUnique, why = true, " (a handoff brief may be present: "+keepRecord+")"
+	}
 	var unique, unreadable []string
 	walkErr := filepath.WalkDir(u.JobDir, func(path string, d fs.DirEntry, err error) error {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -328,7 +339,7 @@ func checkJobDir(ctx context.Context, u Unit, p Policy, pats []string, s *evalSt
 			s.classes.add(name, ClassGenerated, "")
 		case matchAny(pats, slash, false):
 			s.classes.add(name, ClassDisposable, "")
-		case p.JobScratchUnique:
+		case scratchUnique:
 			s.classes.add(name, ClassUnique, "")
 			unique = append(unique, name)
 		default:
@@ -345,9 +356,27 @@ func checkJobDir(ctx context.Context, u Unit, p Policy, pats []string, s *evalSt
 		keeps = append(keeps, Check{Paths: []string{name}, Evidence: "unreadable: " + msg})
 	}
 	if len(unique) > 0 {
-		keeps = append(keeps, Check{Paths: unique, Evidence: "job scratch counted as unique: " + nameSome(unique)})
+		keeps = append(keeps, Check{Paths: unique, Evidence: "job scratch counted as unique" + why + ": " + nameSome(unique)})
 	}
 	return keeps
+}
+
+// keepRecord is the keep record, which carries a unit's handoff brief.
+const keepRecord = ".niwa/keep.json"
+
+// briefPossible reports whether the unit may have a handoff brief: its keep
+// record is present, or the rule can't tell, because .niwa or the record
+// can't be read or .niwa isn't a real directory.
+func briefPossible(instance string) bool {
+	info, err := os.Lstat(filepath.Join(instance, ".niwa"))
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return false
+	case err != nil || !info.IsDir():
+		return true
+	}
+	_, err = os.Lstat(filepath.Join(instance, keepRecord))
+	return !errors.Is(err, fs.ErrNotExist)
 }
 
 // emptyTree reports whether dir is a real directory with no entries, or
