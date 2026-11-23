@@ -128,6 +128,13 @@ type provisionResult struct {
 	// hook also puts their notices into the injected context, the only place
 	// a session sees them.
 	Mirrors []mirror.Result
+
+	// BorrowNotices are the warning lines for the new clones that were to
+	// borrow from their host mirror and were made in full instead (see
+	// Applier.BorrowNotices). Like Mirrors they come back on success and on a
+	// Create failure, have already been printed on stderr, and the hook puts
+	// them into the injected context after the mirror notices.
+	BorrowNotices []string
 }
 
 // The names the mirror log gives the commands that provision through
@@ -269,7 +276,7 @@ func runInstanceHookStart(cmd *cobra.Command, payload instanceHookPayload, jobsD
 	// parameter.
 	ctx := withProvisionMirror(cmd.Context(), mirrorCommandHook, hookMirrorLockWait)
 	res, err := provisionInstanceFunc(ctx, workspaceRoot, payload.Cwd, namePrefix, "-", 0)
-	mirrorNotices := mirrorResultNotices(res.Mirrors)
+	mirrorNotices := append(mirrorResultNotices(res.Mirrors), res.BorrowNotices...)
 	if errors.Is(err, workspace.ErrStrictSecrets) {
 		// A strict refusal is the workspace working as configured, and the
 		// guarantee it buys -- no instance materializes holding a shortfall --
@@ -660,6 +667,8 @@ func provisionInstance(ctx context.Context, workspaceRoot, cwd string, cloneWork
 	applier.Notices = notices
 	var mirrors []mirror.Result
 	applier.MirrorResults = &mirrors
+	var borrowNotices []string
+	applier.BorrowNotices = &borrowNotices
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -727,10 +736,10 @@ func provisionInstance(ctx context.Context, workspaceRoot, cwd string, cloneWork
 		// The keys collected before the failure travel with it. A strict
 		// refusal is the one failure whose explanation is the report, and the
 		// hook caller cannot read it off disk: Create removed the instance.
-		return provisionResult{Keys: keys.Report(), Notices: notices, Mirrors: mirrors}, err
+		return provisionResult{Keys: keys.Report(), Notices: notices, Mirrors: mirrors, BorrowNotices: borrowNotices}, err
 	}
 
-	return provisionResult{Name: name, Path: instancePath, Keys: keys.Report(), Notices: notices, Mirrors: mirrors}, nil
+	return provisionResult{Name: name, Path: instancePath, Keys: keys.Report(), Notices: notices, Mirrors: mirrors, BorrowNotices: borrowNotices}, nil
 }
 
 // mirrorResultNotices returns the Notice line of each result that has one.

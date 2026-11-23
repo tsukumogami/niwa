@@ -10,6 +10,9 @@ Feature: The mirror's network calls keep the user's remote-access settings
   build's environment probe records each mirror git process's GIT_* entries
   in a file in the sandbox home.
 
+  # The test build's creates borrow from the mirror on their own;
+  # share_git_history = false keeps them from it here, so the borrowers are
+  # the hand-made ones and the first command to see them seeds the mirror.
   Background:
     Given a clean niwa environment
     And a local git server is set up
@@ -20,6 +23,7 @@ Feature: The mirror's network calls keep the user's remote-access settings
       """
       [workspace]
       name = "myws"
+      share_git_history = false
 
       [groups.tools]
 
@@ -73,6 +77,7 @@ Feature: The mirror's network calls keep the user's remote-access settings
       """
       [workspace]
       name = "myws"
+      share_git_history = false
 
       [groups.tools]
 
@@ -118,6 +123,7 @@ Feature: The mirror's network calls keep the user's remote-access settings
       """
       [workspace]
       name = "myws"
+      share_git_history = false
 
       [groups.tools]
 
@@ -154,6 +160,7 @@ Feature: The mirror's network calls keep the user's remote-access settings
       """
       [workspace]
       name = "myws"
+      share_git_history = false
 
       [groups.tools]
 
@@ -193,6 +200,7 @@ Feature: The mirror's network calls keep the user's remote-access settings
       """
       [workspace]
       name = "myws"
+      share_git_history = false
 
       [groups.tools]
 

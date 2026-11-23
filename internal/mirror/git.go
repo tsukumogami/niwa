@@ -417,6 +417,7 @@ func gitRun(ctx context.Context, netCall string, env, config []string, stdin str
 		testhook.ProbeGitEnv(testhook.KindLocal, sub, procEnv)
 	}
 	cmd := exec.CommandContext(ctx, "git", full...)
+	makeDisposable(ctx, cmd)
 	cmd.Env = procEnv
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer

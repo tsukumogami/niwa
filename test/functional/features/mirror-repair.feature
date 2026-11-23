@@ -76,6 +76,20 @@ Feature: niwa restores a deleted or damaged host mirror by itself
       | niwa worktree create in myws               | worktree  |
 
   Scenario: A workspace with no borrowers gets no mirror
+    # The test build's creates borrow unless the setting says not to, which
+    # is what leaves this workspace with no borrowers.
+    Given the config repo "myws" is force-pushed to:
+      """
+      [workspace]
+      name = "myws"
+      share_git_history = false
+
+      [groups.tools]
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
     When I run "niwa create myws"
     Then the exit code is 0
     And the error output carries no mirror warning

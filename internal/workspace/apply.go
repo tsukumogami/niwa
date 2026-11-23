@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/agent"
@@ -69,13 +70,15 @@ type Applier struct {
 	// delivers what a session needs.
 	DeveloperHome string
 
-	// mirrorsChecked holds the stable paths of the host mirrors this Applier
-	// has already checked, so a root-level apply that runs the pipeline once
-	// per instance checks and logs each mirror once per command. A mirror
-	// whose restore failed or was busy is not retried by a later instance in
-	// the same command: the next command tries again. It is written without a
-	// lock, since the pipeline runs one instance at a time.
-	mirrorsChecked map[string]bool
+	// mirrorsChecked holds, by stable path, the host mirrors this Applier
+	// has already checked or seeded and what came of it, so a root-level
+	// apply that runs the pipeline once per instance checks and logs each
+	// mirror once per command, and a later instance's new clones borrow or
+	// not on the same result. A mirror whose restore or seed failed or was
+	// busy is not retried by a later instance in the same command: the next
+	// command tries again. It is written without a lock, since the pipeline
+	// runs one instance at a time.
+	mirrorsChecked map[string]mirrorCheck
 
 	// pluginStoresRepaired holds the plugin store directories this Applier
 	// has already run the repair pass over, so a root-level apply that runs
@@ -109,6 +112,13 @@ type Applier struct {
 	// command's; zero keeps mirror.DefaultLockWait. The SessionStart hook
 	// sets a short one, since a session waits on it.
 	MirrorLockWait time.Duration
+
+	// BorrowNotices collects the warning line for each new clone that was to
+	// borrow from its host mirror and was made in full instead, for a caller
+	// that reports them somewhere other than Reporter, such as the
+	// SessionStart hook's context. Like MirrorResults it is caller-supplied;
+	// nil collects nothing, and the warnings go to Reporter either way.
+	BorrowNotices *[]string
 
 	// MirrorResults collects every mirror result other than healthy, and a
 	// healthy one whose mirror log couldn't be written (LogErr), for a caller
@@ -432,6 +442,9 @@ type cloneJob struct {
 	targetDir     string
 	defaultBranch string
 	noPull        bool
+	// borrow is ensureMirrors' choice for a new clone of the repo: borrow
+	// from a host mirror, or clone in full with a reason (see cloneNew).
+	borrow borrowChoice
 }
 
 // cloneResult carries per-repo outputs back to the orchestrator.
@@ -442,6 +455,7 @@ type cloneResult struct {
 	cloned    bool
 	syncWarn  string // non-empty if sync produced a deferred warning
 	retries   int    // number of transient-failure retries before this clone succeeded
+	fallback  string // why a clone that was to borrow was made in full; "" otherwise
 	err       error  // non-nil on clone failure; does not include sync errors
 }
 
@@ -1739,8 +1753,9 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 
 	// Step 2.9: Restore any host mirror the workspace's clones borrow from
 	// before anything clones, fetches or reads a borrower, so a deleted mirror
-	// is back in place before a command depends on it.
-	a.ensureMirrors(ctx, effectiveCfg, classified, instanceRoot, opts.command)
+	// is back in place before a command depends on it, and seed the mirror of
+	// each repo whose new clone is to borrow and has none yet.
+	borrowChoices := a.ensureMirrors(ctx, effectiveCfg, classified, instanceRoot, opts.command)
 
 	// Step 3: Create group directories and clone repos concurrently.
 	//
@@ -1787,6 +1802,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 				targetDir:     filepath.Join(groupDir, cr.Repo.Name),
 				defaultBranch: DefaultBranch(effectiveCfg, cr.Repo.Name),
 				noPull:        a.NoPull,
+				borrow:        borrowChoices[cr.Repo.Name],
 			}
 		}
 		close(jobs)
@@ -1802,6 +1818,13 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 			if cloneErr == nil {
 				if r.retries > 0 {
 					a.Reporter.DeferWarn("cloned %s after %d transient failure(s)", r.name, r.retries)
+				}
+				if r.fallback != "" {
+					line := fallbackWarning(r.name, r.fallback)
+					a.Reporter.Warn("%s", line)
+					if a.BorrowNotices != nil {
+						*a.BorrowNotices = append(*a.BorrowNotices, line)
+					}
 				}
 				if r.syncWarn != "" {
 					a.Reporter.DeferWarn("%s", r.syncWarn)
@@ -3281,18 +3304,23 @@ func repoAlreadyCloned(dir string) bool {
 // write failed, becomes a warning (ReportMirrorResult); none fails the
 // command, which carries on whatever the result.
 //
+// It then decides, for each repo this pipeline will clone new, whether the
+// clone borrows (planBorrowing), seeding the mirror of a borrowing repo that
+// has none, and returns the choices by repo name.
+//
 // The mirrors live under the developer's home, so an Applier without
 // DeveloperHome (the unit suites) skips the check rather than reach the real
-// one. A root-level apply reaches this once per instance with the same
-// Applier; each mirror is checked on the first pass only, so the command
-// logs one check line per mirror, and the later passes skip it.
+// one, and every clone is full. A root-level apply reaches this once per
+// instance with the same Applier; each mirror is checked on the first pass
+// only, so the command logs one check line per mirror, and the later passes
+// skip it and choose on the first pass's result.
 //
 // command is the pipeline's own name for the log; MirrorCommand replaces it
 // when set, and MirrorLockWait and MirrorResults pass through as described on
 // the Applier.
-func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig, classified []ClassifiedRepo, instanceRoot, command string) {
+func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig, classified []ClassifiedRepo, instanceRoot, command string) map[string]borrowChoice {
 	if a.DeveloperHome == "" || len(classified) == 0 {
-		return
+		return nil
 	}
 	workspaceRoot := filepath.Dir(instanceRoot)
 	home := a.DeveloperHome
@@ -3309,12 +3337,12 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 	}
 
 	if a.mirrorsChecked == nil {
-		a.mirrorsChecked = map[string]bool{}
+		a.mirrorsChecked = map[string]mirrorCheck{}
 	}
 	repos := make([]mirror.Repo, 0, len(classified))
 	for _, cr := range classified {
 		stable := mirror.StablePath(home, workspaceRoot, cr.Repo.Name)
-		if a.mirrorsChecked[stable] {
+		if _, ok := a.mirrorsChecked[stable]; ok {
 			continue
 		}
 		repos = append(repos, mirror.Repo{
@@ -3336,7 +3364,7 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 		Refresh:       true,
 	}
 	for _, res := range mirror.EnsureHealthy(ctx, opts, repos) {
-		a.mirrorsChecked[res.StablePath] = true
+		a.mirrorsChecked[res.StablePath] = mirrorCheck{res: res}
 		// A healthy mirror is collected only when its log couldn't be
 		// written, so the hook's context carries that warning too. One whose
 		// refresh failed is still usable: it's reported, never collected.
@@ -3345,6 +3373,101 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 		}
 		ReportMirrorResult(a.Reporter, res)
 	}
+	return a.planBorrowing(ctx, cfg, classified, instanceRoot, opts)
+}
+
+// mirrorCheck is what an Applier's check or seed of one mirror came to.
+// seeded says the result is a first build's (mirror.Seed), not a check of a
+// mirror that was there.
+type mirrorCheck struct {
+	res    mirror.Result
+	seeded bool
+}
+
+// planBorrowing chooses, for each classified repo with no clone yet in
+// instanceRoot, whether its new clone borrows from the host mirror. A repo
+// borrowEnabled turns off gets no choice and no mirror: it's a full clone
+// with no notice. A repo whose name can't name a mirror is cloned in full
+// with reason invalid-repo-id. Every other one borrows when its mirror is
+// usable after the check, and otherwise is cloned in full with the reason:
+// mirror-busy for a mirror another command held, mirror-restore-failed for
+// one the check found broken and couldn't restore, mirror-seed-failed for a
+// first build that failed.
+//
+// A borrowing repo the check didn't look at has no mirror yet (mirror.Mirrored
+// found nothing of it), so its first one is built here with mirror.Seed. The
+// seeds of different repos run at once, each under its own mirror's lock; a
+// seed racing another command's seed of the same mirror waits for it and
+// finds the mirror built. A seed that builds the mirror prints nothing; one
+// that fails is reported by the fallback warning its clone gets, with the
+// seed's error as a log line, and a failed mirror log write is a warning.
+// Seeds aren't added to MirrorResults: the hook carries the fallback line.
+func (a *Applier) planBorrowing(ctx context.Context, cfg *config.WorkspaceConfig, classified []ClassifiedRepo, instanceRoot string, opts mirror.Options) map[string]borrowChoice {
+	home, workspaceRoot := opts.Home, opts.WorkspaceRoot
+	choices := map[string]borrowChoice{}
+	var candidates []ClassifiedRepo
+	var seeds []mirror.Repo
+	for _, cr := range classified {
+		name := cr.Repo.Name
+		if !borrowEnabled(cfg, name) || repoAlreadyCloned(filepath.Join(instanceRoot, cr.Group, name)) {
+			continue
+		}
+		if !mirror.ValidRepoID(name) {
+			choices[name] = borrowChoice{fallback: fallbackInvalidRepoID}
+			continue
+		}
+		candidates = append(candidates, cr)
+		if _, ok := a.mirrorsChecked[mirror.StablePath(home, workspaceRoot, name)]; !ok {
+			seeds = append(seeds, mirror.Repo{
+				ID:  name,
+				URL: RepoCloneURL(cfg, name, cr.Repo.SSHURL, cr.Repo.CloneURL),
+			})
+		}
+	}
+
+	seeded := make([]mirror.Result, len(seeds))
+	var wg sync.WaitGroup
+	for i, repo := range seeds {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			seeded[i] = mirror.Seed(ctx, opts, repo)
+		}()
+	}
+	wg.Wait()
+	for i, res := range seeded {
+		a.mirrorsChecked[mirror.StablePath(home, workspaceRoot, seeds[i].ID)] = mirrorCheck{res: res, seeded: true}
+		id := mirror.CleanText(res.RepoID)
+		if !res.Usable() && res.Err != nil {
+			a.Reporter.Log("mirror %s: building the first mirror failed: %s", id, mirror.CleanText(res.Err.Error()))
+		}
+		if res.LogErr != nil {
+			a.Reporter.Warn("mirror %s: writing the mirror log failed: %s", id, mirror.CleanText(res.LogErr.Error()))
+		}
+	}
+
+	for _, cr := range candidates {
+		name := cr.Repo.Name
+		stable := mirror.StablePath(home, workspaceRoot, name)
+		mc := a.mirrorsChecked[stable]
+		switch {
+		case mc.res.Usable():
+			choices[name] = borrowChoice{source: &borrowSource{
+				repoID:        name,
+				home:          home,
+				workspaceRoot: workspaceRoot,
+				stable:        stable,
+				lockWait:      opts.LockWait,
+			}}
+		case mc.res.Outcome == mirror.OutcomeBusy:
+			choices[name] = borrowChoice{fallback: fallbackMirrorBusy}
+		case mc.seeded:
+			choices[name] = borrowChoice{fallback: fallbackSeedFailed}
+		default:
+			choices[name] = borrowChoice{fallback: fallbackRestoreFailed}
+		}
+	}
+	return choices
 }
 
 // ReportMirrorResult warns about a mirror that isn't healthy, in the one form
@@ -3425,7 +3548,7 @@ func lostRefWarning(repoID string, l mirror.LostRef) string {
 func (a *Applier) cloneWorker(ctx context.Context, jobs <-chan cloneJob, results chan<- cloneResult) {
 	noop := NewReporterWithTTY(io.Discard, false)
 	for job := range jobs {
-		cloned, retries, err := a.cloneWithRetry(ctx, job, noop)
+		cloned, retries, _, fallback, err := a.cloneNew(ctx, job, noop)
 		if err != nil {
 			results <- cloneResult{
 				name:      job.cr.Repo.Name,
@@ -3455,6 +3578,7 @@ func (a *Applier) cloneWorker(ctx context.Context, jobs <-chan cloneJob, results
 			targetDir: job.targetDir,
 			cloned:    cloned,
 			retries:   retries,
+			fallback:  fallback,
 			syncWarn:  syncWarn,
 		}
 	}
