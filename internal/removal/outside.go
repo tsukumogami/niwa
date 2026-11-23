@@ -12,6 +12,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 // niwaGenerated are the entries niwa itself writes directly under an
@@ -88,16 +90,20 @@ const maxEmptyDepth = 64
 // generated returns the test for a file niwa wrote and still holds what
 // niwa wrote: a path, relative to the instance, that instance.json lists in
 // managed_files and whose content still has the hash recorded there. A file
-// edited since, or one the state can't be read for, is not generated.
+// edited since, or one the state can't be read for, is not generated. A
+// managed file the read refuses is a failure the outside check keeps the
+// unit on, named.
 func (s *evalState) generated(instance string) func(rel string) bool {
-	managed := s.managedFiles(instance).files
+	m := s.managedFiles(instance)
 	return func(rel string) bool {
-		mf, ok := managed[filepath.ToSlash(rel)]
+		key := filepath.ToSlash(rel)
+		mf, ok := m.files[key]
 		if !ok {
 			return false
 		}
-		b, err := readCapped(mf.path, maxManagedBytes)
+		b, err := s.readManagedFile(mf)
 		if err != nil {
+			m.refuse(key, err)
 			return false
 		}
 		sum := sha256.Sum256(b)
@@ -105,13 +111,83 @@ func (s *evalState) generated(instance string) func(rel string) bool {
 	}
 }
 
+// instanceOpenFlags opens the instance directory a managed file is read
+// under. The instance itself is the caller's, so a link at or above it is
+// followed, as ResolveRecorded follows it.
+const instanceOpenFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC
+
+// readManagedFile reads the managed file mf for its hash. ResolveRecorded
+// checked its path, but a directory on the way can be swapped for a link
+// after that check, so the read doesn't go by name: it starts from a
+// descriptor for the instance, or for the .niwa the evaluation opened when
+// the file is under .niwa, and opens each directory on the way relative to
+// the one before it without following a link. The file itself goes through
+// the shared reader.
+func (s *evalState) readManagedFile(mf managedFile) ([]byte, error) {
+	parts := strings.Split(mf.rel, "/")
+	if len(parts) > 1 && parts[0] == niwaDirName {
+		if err := s.niwa.usable(); err != nil {
+			return nil, err
+		}
+		return readUnder(s.niwa.fd, niwaDirName, parts[1:], maxManagedBytes)
+	}
+	fd, err := retryEINTR(func() (int, error) { return unix.Open(mf.base, instanceOpenFlags, 0) })
+	if err != nil {
+		return nil, fmt.Errorf("the instance can't be opened: %v", err)
+	}
+	defer unix.Close(fd)
+	return readUnder(fd, "", parts, maxManagedBytes)
+}
+
+// readUnder reads the file parts names under the directory open at dirfd,
+// which is named prefix in errors. Each directory on the way is opened
+// relative to the one before it with O_DIRECTORY|O_NOFOLLOW, so a link at
+// any of them is refused, and the last component goes through the shared
+// reader: not a link, not a FIFO, a regular file of the current user's, no
+// larger than max. dirfd stays open.
+func readUnder(dirfd int, prefix string, parts []string, max int64) ([]byte, error) {
+	if len(parts) == 0 {
+		return nil, errors.New("the path names no file")
+	}
+	cur := dirfd
+	closeCur := func() {
+		if cur != dirfd {
+			unix.Close(cur)
+		}
+	}
+	defer closeCur()
+	shown := prefix
+	for _, part := range parts[:len(parts)-1] {
+		shown = path.Join(shown, part)
+		next, err := retryEINTR(func() (int, error) { return unix.Openat(cur, part, dirOpenFlags, 0) })
+		if err != nil {
+			return nil, openError(shown, err)
+		}
+		closeCur()
+		cur = next
+	}
+	return readCappedAt(cur, parts[len(parts)-1], max)
+}
+
+// refuse records that the managed file rel couldn't be read for its hash,
+// once, as a failure the outside check names.
+func (m *managedRead) refuse(rel string, err error) {
+	for _, c := range m.failures {
+		if len(c.Paths) == 1 && c.Paths[0] == rel {
+			return
+		}
+	}
+	m.failures = append(m.failures, Check{Paths: []string{rel}, Evidence: fmt.Sprintf("unreadable: managed file %q: %s", rel, err.Error())})
+}
+
 // instanceStateRecord is the instance's state file under .niwa.
 const instanceStateRecord = "instance.json"
 
 // managedFile is one managed_files entry that ResolveRecorded accepted: the
-// hash niwa recorded and the path on disk it resolved to.
+// hash niwa recorded, the instance path it was resolved under, and its path
+// relative to that, slash separated.
 type managedFile struct {
-	hash, path string
+	hash, base, rel string
 }
 
 // managedRead is what one evaluation read of managed_files: each entry
@@ -187,7 +263,7 @@ func (s *evalState) readManaged(instance string) *managedRead {
 		if !ok {
 			continue
 		}
-		resolved, err := ResolveRecorded(Base{Instance: base}, rel)
+		_, err := ResolveRecorded(Base{Instance: base}, rel)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			// A generated file the agent deleted loses nothing.
@@ -196,7 +272,9 @@ func (s *evalState) readManaged(instance string) *managedRead {
 			m.failures = append(m.failures, Check{Paths: []string{rel}, Evidence: "unreadable: managed file " + err.Error()})
 			continue
 		}
-		out[rel] = managedFile{hash: mf.Hash, path: resolved}
+		// The hash is read later, from a descriptor for base, not through
+		// the path ResolveRecorded checked: see readManagedFile.
+		out[rel] = managedFile{hash: mf.Hash, base: base, rel: strings.TrimSuffix(rel, "/")}
 	}
 	return m
 }

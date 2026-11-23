@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -80,6 +81,79 @@ func TestEvaluateKeepsAManagedFileThroughASymlinkedDirectory(t *testing.T) {
 	}
 	if !strings.Contains(c.Evidence, "linked is a symlink") {
 		t.Errorf("evidence %q; want the link named", c.Evidence)
+	}
+}
+
+// swapForLink replaces the directory dir with a link to target.
+func swapForLink(t *testing.T, dir, target string) {
+	t.Helper()
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	symlink(t, target, dir)
+}
+
+func TestEvaluateKeepsAManagedFileWhoseDirectoryBecomesALinkAfterTheCheck(t *testing.T) {
+	f := classFixture(t)
+	const body = "managed body"
+	const rel = "docs/sub/notes.md"
+	writeFile(t, filepath.Join(f.instance, "docs", "sub", "notes.md"), body)
+	withManaged(t, f, body, filepath.Join(f.instance, "docs", "sub", "notes.md"))
+	u := f.unit()
+	s := &evalState{niwa: openNiwaDir(u.InstancePath)}
+	defer s.niwa.close()
+
+	// ResolveRecorded accepts the entry while sub is a real directory.
+	if m := s.managedFiles(u.InstancePath); len(m.failures) != 0 || m.files[rel].rel != rel {
+		t.Fatalf("managed read %+v; want the entry accepted", m)
+	}
+	// Then sub becomes a link to a directory holding a file with the hash
+	// niwa recorded. A read by name would follow it and find the hash.
+	elsewhere := t.TempDir()
+	writeFile(t, filepath.Join(elsewhere, "notes.md"), body)
+	swapForLink(t, filepath.Join(f.instance, "docs", "sub"), elsewhere)
+
+	if s.generated(u.InstancePath)(rel) {
+		t.Fatalf("%s classed generated through a link swapped in after the check", rel)
+	}
+	keeps := checkOutside(context.Background(), u, classPolicy(t, f), s)
+	var named bool
+	for _, c := range keeps {
+		if len(c.Paths) == 1 && c.Paths[0] == rel && strings.HasPrefix(c.Evidence, "unreadable: managed file ") {
+			named = true
+			if !strings.Contains(c.Evidence, "docs/sub") {
+				t.Errorf("evidence %q; want the swapped directory named", c.Evidence)
+			}
+		}
+	}
+	if !named {
+		t.Fatalf("outside keeps %+v; want %s named as an unreadable managed file", keeps, rel)
+	}
+	v := Verdict{Paths: s.classes.sorted()}
+	wantClass(t, v, rel, ClassUnique, "")
+	// The listed CLAUDE.md, read the same way, still counts as generated.
+	wantClass(t, v, "CLAUDE.md", ClassGenerated, "")
+}
+
+func TestReadManagedFileUnderNiwaGoesThroughTheNiwaDescriptor(t *testing.T) {
+	u, _ := bareUnit(t)
+	writeFile(t, filepath.Join(u.InstancePath, ".niwa", "extra", "notes.md"), "body")
+	s := &evalState{niwa: openNiwaDir(u.InstancePath)}
+	defer s.niwa.close()
+	mf := managedFile{base: u.InstancePath, rel: ".niwa/extra/notes.md"}
+	if b, err := s.readManagedFile(mf); err != nil || string(b) != "body" {
+		t.Fatalf("read %q, %v; want the file's body", b, err)
+	}
+	elsewhere := t.TempDir()
+	writeFile(t, filepath.Join(elsewhere, "notes.md"), "body")
+	swapForLink(t, filepath.Join(u.InstancePath, ".niwa", "extra"), elsewhere)
+	if b, err := s.readManagedFile(mf); err == nil {
+		t.Fatalf("read %q through a link under .niwa; want it refused", b)
+	}
+	// A link at the file itself is refused too.
+	symlink(t, filepath.Join(elsewhere, "notes.md"), filepath.Join(u.InstancePath, "linked.md"))
+	if b, err := s.readManagedFile(managedFile{base: u.InstancePath, rel: "linked.md"}); err == nil {
+		t.Fatalf("read %q through a link at the file; want it refused", b)
 	}
 }
 
