@@ -3312,6 +3312,14 @@ func repoAlreadyCloned(dir string) bool {
 // clone borrows (planBorrowing), seeding the mirror of a borrowing repo that
 // has none, and returns the choices by repo name.
 //
+// A layout with no workspace root still runs the check, keyed by the
+// directory above the instance; only planBorrowing stops it borrowing or
+// seeding. That is deliberate. With nothing under that key the check only
+// reads (mirror.Mirrored finds no mirror and no borrower) and creates
+// nothing. A mirror that is there, such as one an older clone still borrows
+// from, keeps being checked and restored, so that clone keeps reading its
+// history.
+//
 // The mirrors live under the developer's home, so an Applier without
 // DeveloperHome (the unit suites) skips the check rather than reach the real
 // one, and every clone is full. A root-level apply reaches this once per
@@ -3428,9 +3436,17 @@ type mirrorCheck struct {
 // that fails is reported by the fallback warning its clone gets, with the
 // seed's error as a log line, and a failed mirror log write is a warning.
 // Seeds aren't added to MirrorResults: the hook carries the fallback line.
+//
+// A layout with no workspace root (workspaceRootHoldsState) gets no choices
+// and seeds nothing, so every new clone is full with no notice. There the
+// instance is the root, and the directory above it is no workspace to key a
+// mirror by.
 func (a *Applier) planBorrowing(ctx context.Context, cfg *config.WorkspaceConfig, classified []ClassifiedRepo, instanceRoot string, opts mirror.Options) map[string]borrowChoice {
 	home, workspaceRoot := opts.Home, opts.WorkspaceRoot
 	choices := map[string]borrowChoice{}
+	if !workspaceRootHoldsState(workspaceRoot) {
+		return choices
+	}
 	var candidates []ClassifiedRepo
 	var seeds []mirror.Repo
 	for _, cr := range classified {

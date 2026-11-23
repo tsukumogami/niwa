@@ -16,12 +16,14 @@ import (
 )
 
 // borrowEnabled reports whether repo's new clone borrows objects from the
-// host mirror. Every borrowing entry point asks this one function, so the
-// release gate can't be skipped by a caller that reads the setting itself:
-// the share_git_history cascade's answer, ANDed with borrowReleased, which is
-// false in every release build.
+// host mirror: the share_git_history cascade's answer, on unless a setting
+// turns it off. Every borrowing entry point asks this one function. A layout
+// with no workspace root makes full clones whatever it says; planBorrowing
+// applies that rule, since it depends on the instance's place on disk and not
+// on the config. ensureMirrors still checks, and restores, a mirror that
+// already exists under such a layout's key, as ensureMirrors explains.
 func borrowEnabled(cfg *config.WorkspaceConfig, repo string) bool {
-	return borrowReleased && cfg.ShareGitHistoryEnabled(repo)
+	return cfg.ShareGitHistoryEnabled(repo)
 }
 
 // The reasons a new clone that was to borrow from its host mirror is made in
