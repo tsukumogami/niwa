@@ -10,7 +10,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/tsukumogami/niwa/internal/removal"
+	"github.com/tsukumogami/niwa/internal/scrub"
 )
 
 // sessionIDRe matches the 8-character lowercase hex session IDs used by the
@@ -171,18 +171,18 @@ func ListSessionLifecycleStates(sessionsDir string) ([]SessionLifecycleState, er
 		path := filepath.Join(sessionsDir, entry.Name())
 		// The error text names the instance's path and can quote the file,
 		// which the instance's agent can write, so it passes
-		// removal.ScrubEvidence, and so does the name, though it matched
+		// scrub.ScrubEvidence, and so does the name, though it matched
 		// sessionFileRe above.
 		data, err := os.ReadFile(path)
 		if err != nil {
 			log.Printf("session_lifecycle: skipping %s: read error: %s",
-				removal.ScrubEvidence(entry.Name(), 80), removal.ScrubEvidence(err.Error(), 400))
+				scrub.ScrubEvidence(entry.Name(), 80), scrub.ScrubEvidence(err.Error(), 400))
 			continue
 		}
 		var state SessionLifecycleState
 		if err := json.Unmarshal(data, &state); err != nil {
 			log.Printf("session_lifecycle: skipping %s: parse error: %s",
-				removal.ScrubEvidence(entry.Name(), 80), removal.ScrubEvidence(err.Error(), 400))
+				scrub.ScrubEvidence(entry.Name(), 80), scrub.ScrubEvidence(err.Error(), 400))
 			continue
 		}
 		states = append(states, state)

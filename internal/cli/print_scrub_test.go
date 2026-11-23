@@ -17,9 +17,10 @@ import (
 // printScrubFiles are the files on the reap and pass path whose print sites
 // TestReapPathPrintsScrubUnitText covers: the pass, reap and its sweeps, the
 // removal gate, the on-reap command, the lock's kept line, the verdict
-// printers, the line writer that scrubs what niwa hands on, and the session
-// record listing the worktree sweep reads. Paths are relative to this
-// package.
+// printers, the line writer that scrubs what niwa hands on, the hook's
+// teardown (realDestroyInstance) and the rest of the hook's file, and the
+// session record listing the worktree sweep reads. Paths are relative to
+// this package.
 var printScrubFiles = []string{
 	"pass.go",
 	"reap.go",
@@ -30,6 +31,7 @@ var printScrubFiles = []string{
 	"launch_records.go",
 	"reap_worktrees.go",
 	"scrub_writer.go",
+	"instance_from_hook.go",
 	filepath.Join("..", "worktree", "session_lifecycle.go"),
 }
 
@@ -86,6 +88,30 @@ var printScrubAllow = []printAllow{
 		file: "verdicts.go", fn: "printVerdictsJSON", what: "the niwa.verdicts/v1 document",
 		args: []string{"doc"},
 		why:  "the document holds niwa's own values and unit-sourced fields each passed through removal.ScrubEvidence as it is built above the encode",
+	},
+	{
+		file: "instance_from_hook.go", fn: "runInstanceHookStart", what: "the SessionStart reply",
+		args: []string{"out"},
+		why: "the JSON reply niwa marshals from its own sessionStartInjection for Claude Code to read, not a terminal line; " +
+			"encoding/json escapes every control character in it",
+	},
+	{
+		file: "instance_from_hook.go", fn: "runInstanceHookStart", what: "the reap key warning's session id and error",
+		args: []string{"payload.SessionID", "err"},
+		why: "the session id passed workspace.ValidSessionID at the top of the function, so it is a canonical UUID; " +
+			"the error is writeReapKeyEnvFile's own, from opening or writing the env file whose path Claude Code sets, " +
+			"not anything an instance holds",
+	},
+	{
+		file: "instance_from_hook.go", fn: "writeHookMirrorNotices", what: "the mirror notices reply",
+		args: []string{"append(encoded, '\\n')"},
+		why: "the JSON reply niwa marshals from its own sessionStartInjection for Claude Code to read, not a terminal line; " +
+			"encoding/json escapes every control character in it",
+	},
+	{
+		file: "instance_from_hook.go", fn: "writeReapKeyEnvFile", what: "the env file's export line",
+		args: []string{"config.ReapKeyEnv", "key"},
+		why:  "a constant name, and a key validReapKey checked holds only letters, digits, '_' and '-'",
 	},
 }
 
@@ -252,17 +278,19 @@ func printCall(call *ast.CallExpr) (label string, format ast.Expr, values []ast.
 	return "", nil, nil, false
 }
 
-// isScrubEvidence reports whether call is removal.ScrubEvidence(...).
+// isScrubEvidence reports whether call is scrub.ScrubEvidence(...), the leaf
+// package's function, or removal.ScrubEvidence(...), the forwarder to it.
 func isScrubEvidence(call *ast.CallExpr) bool {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return false
 	}
 	pkg, ok := sel.X.(*ast.Ident)
-	return ok && pkg.Name == "removal" && sel.Sel.Name == "ScrubEvidence"
+	return ok && (pkg.Name == "scrub" || pkg.Name == "removal") && sel.Sel.Name == "ScrubEvidence"
 }
 
-// callsScrubEvidence reports whether n holds a call to removal.ScrubEvidence.
+// callsScrubEvidence reports whether n holds a call to scrub.ScrubEvidence or
+// removal.ScrubEvidence.
 func callsScrubEvidence(n ast.Node) bool {
 	found := false
 	ast.Inspect(n, func(n ast.Node) bool {
@@ -450,5 +478,79 @@ func TestScrubLineWriterScrubsEachLine(t *testing.T) {
 	long.Write([]byte(strings.Repeat("x", 3*maxScrubLineBytes) + "\n"))
 	if got := out.String(); got != strings.Repeat("x", 37)+"...\n" {
 		t.Errorf("a long line printed %q; want it cut to 40 characters", got)
+	}
+}
+
+// TestScrubLineWriterScrubsBeforeItCutsALongLine: a token placed across the
+// writer's line limit is scrubbed whole, so no front part of it is printed,
+// whether the text before it collapses to nothing (spaces, escapes) and
+// however the line is split across writes. A token across the far end of
+// what the writer holds is dropped whole.
+func TestScrubLineWriterScrubsBeforeItCutsALongLine(t *testing.T) {
+	body := strings.Repeat("A1b2", 9)
+	token := "ghp_" + body
+	leaks := func(got string) bool {
+		return strings.Contains(got, "ghp") || strings.Contains(got, body[:4])
+	}
+	escapes := strings.Repeat("\x1b[0m", maxScrubLineBytes/4)
+	for _, tc := range []struct {
+		name, before string
+		chunk        int
+	}{
+		{"spaces, one write", strings.Repeat(" ", maxScrubLineBytes-6), 0},
+		{"spaces, small writes", strings.Repeat(" ", maxScrubLineBytes-6), 1000},
+		{"spaces, a byte at a time", strings.Repeat(" ", maxScrubLineBytes-2), 1},
+		{"escapes, one write", escapes[:maxScrubLineBytes-4], 0},
+		{"escapes, small writes", escapes[:maxScrubLineBytes-4], 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line := tc.before + token + " tail\n"
+			if start := len(tc.before); start >= maxScrubLineBytes || start+len(token) <= maxScrubLineBytes {
+				t.Fatalf("token at %d..%d does not cross the %d-byte limit", start, start+len(token), maxScrubLineBytes)
+			}
+			var out strings.Builder
+			w := newScrubLineWriter(&out, 400)
+			writeInChunks(t, w, line, tc.chunk)
+			got := out.String()
+			if want := "[redacted] tail\n"; leaks(got) || got != want {
+				t.Fatalf("printed %q; want %q", got, want)
+			}
+		})
+	}
+
+	t.Run("across the end of what is held", func(t *testing.T) {
+		held := maxScrubLineBytes + scrubLineSlack
+		for _, before := range []int{held - 6, held - 2} {
+			line := strings.Repeat(" ", before) + token + " tail\n"
+			var out strings.Builder
+			w := newScrubLineWriter(&out, 400)
+			writeInChunks(t, w, line, 0)
+			if got := out.String(); leaks(got) || got != "\n" {
+				t.Errorf("token at %d: printed %q; want an empty line", before, got)
+			}
+		}
+		// A word that is not a token is cut back the same way, and the line
+		// keeps what came before it.
+		var out strings.Builder
+		w := newScrubLineWriter(&out, 400)
+		writeInChunks(t, w, "kept"+strings.Repeat(" ", held-10)+"dropped-word\n", 1000)
+		if got := out.String(); got != "kept\n" {
+			t.Errorf("printed %q; want %q", got, "kept\n")
+		}
+	})
+}
+
+// writeInChunks writes s to w in pieces of n bytes, or whole when n is 0.
+func writeInChunks(t *testing.T, w *scrubLineWriter, s string, n int) {
+	t.Helper()
+	if n <= 0 {
+		n = len(s)
+	}
+	for len(s) > 0 {
+		k := min(n, len(s))
+		if got, err := w.Write([]byte(s[:k])); err != nil || got != k {
+			t.Fatalf("Write of %d bytes = %d, %v", k, got, err)
+		}
+		s = s[k:]
 	}
 }
