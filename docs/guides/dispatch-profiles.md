@@ -66,7 +66,7 @@ reads it says why:
 ## Dispatching with a profile
 
 ```bash
-niwa dispatch --profile coordinator --name coord --detach "/<plugin>:coordinate <args>"
+niwa dispatch --profile coordinator --name coord --detach "/<plugin>:<skill> <args>"
 ```
 
 For a Claude worker, niwa adds the profile to the launch's one `--settings`
@@ -128,15 +128,24 @@ Only niwa launches do this. Anything else started from a profiled worker's
 shell inherits the connectors switch: a `claude` opened by hand from inside
 that shell starts without account connectors.
 
+A profile trims context; it isn't a permission boundary. A profiled worker
+that keeps Bash can run `niwa dispatch` without `--profile` and start a child
+with every tool the profile denied. Don't rely on a profile to keep a tool
+away from a session.
+
 ## A profiled coordinator
 
+The profile is optional. A workspace that declares no coordinator profile
+dispatches its coordinators exactly as before, and nothing else has to change
+for one that does.
+
 Under the coordinator profile, a coordinator can't call the Skill tool, so
-its entry skill has to reach it another way. Whatever dispatches a
-coordinator does two things:
+its entry skill has to reach it another way. When a dispatch uses the
+profile, it does two things:
 
 - passes `--profile coordinator`;
-- starts the prompt with the skill's slash invocation,
-  `/<plugin>:coordinate <args>`, rather than a sentence asking the session to
+- starts the prompt with the entry skill's slash invocation,
+  `/<plugin>:<skill> <args>`, rather than a sentence asking the session to
   run the skill.
 
 Claude Code expands a leading slash command itself, with the Skill tool
@@ -236,7 +245,7 @@ The model moves it too, so read it on the model coordinators run on.
 a coordinator:
 
 ```bash
-niwa dispatch --profile coordinator --model opus --name cdp-check --detach "/<plugin>:coordinate <args>"
+niwa dispatch --profile coordinator --model opus --name cdp-check --detach "/<plugin>:<skill> <args>"
 ```
 
 Every dispatch in these checks names its model with `--model`, the one
