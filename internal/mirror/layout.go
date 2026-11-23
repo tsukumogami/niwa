@@ -74,6 +74,37 @@ func StablePath(home, workspaceRoot, repoID string) string {
 	return filepath.Join(mirrorsDir(home, workspaceRoot), repoID)
 }
 
+// LinkedStore reads the link at repoID's stable path and returns its target,
+// relative to mirrors/ (".store/<name>"), when it's a link niwa would have
+// written (validLinkTarget) to a real store directory the user owns, inside a
+// workspace key directory, mirrors/ and .store/ that are each real
+// directories the user owns. Anything else is an error, so a borrower is
+// never pointed through a link a person or another program put there. It
+// only reads. A caller that must see the same store through a whole
+// operation holds the mirror's lock (LockPath) around both reads.
+func LinkedStore(home, workspaceRoot, repoID string) (string, error) {
+	if !ValidRepoID(repoID) {
+		return "", fmt.Errorf("repo id %q can't name a mirror", repoID)
+	}
+	mdir := mirrorsDir(home, workspaceRoot)
+	for _, dir := range []string{filepath.Dir(mdir), mdir, filepath.Join(mdir, ".store")} {
+		if !realOwnedDir(dir) {
+			return "", fmt.Errorf("%s is not a directory the user owns", dir)
+		}
+	}
+	target, err := os.Readlink(filepath.Join(mdir, repoID))
+	if err != nil {
+		return "", fmt.Errorf("reading the mirror's link: %w", err)
+	}
+	if !validLinkTarget(repoID, target) {
+		return "", fmt.Errorf("the mirror's link names %q, which is not a store niwa made", CleanText(target))
+	}
+	if !realOwnedDir(filepath.Join(mdir, target)) {
+		return "", fmt.Errorf("the mirror's store %s is not a directory the user owns", target)
+	}
+	return target, nil
+}
+
 // LockPath is the per-mirror lock in niwa's lock directory. The name hashes
 // the workspace key and the repo id rather than the stable path, because
 // CanonicalPath resolves symlinks and would give each store its own lock.

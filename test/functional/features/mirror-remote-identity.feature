@@ -38,7 +38,8 @@ Feature: the host mirror treats two spellings of one remote as one remote
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -90,7 +91,8 @@ Feature: the host mirror treats two spellings of one remote as one remote
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store

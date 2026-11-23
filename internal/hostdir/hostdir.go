@@ -165,11 +165,16 @@ func InstanceDirs(home, workspaceRoot string) ([]string, error) {
 // strict read fails on it rather than read part of it.
 const alternatesMax = 64 << 10
 
+// AlternatesAside is the name niwa dissociate gives a clone's alternates file
+// while it checks the clone with the file out of git's reach. Until the
+// dissociate removes it, it still names what the clone borrowed.
+const AlternatesAside = "alternates.niwa-dissociate"
+
 // alternatesFiles are the files under a clone's .git/objects/info/ that name
 // object directories the clone reads from: the alternates file, and the copy
 // a dissociate leaves while it runs, which still names what the clone
 // borrowed until the dissociate finishes.
-var alternatesFiles = []string{"alternates", "alternates.niwa-dissociate"}
+var alternatesFiles = []string{"alternates", AlternatesAside}
 
 // beforeRead, when a test sets it, runs with each directory the strict walk
 // is about to read, once the directory above it has listed it. A test
@@ -423,6 +428,11 @@ func strictClone(clone string) error {
 	}
 	return nil
 }
+
+// ReadAlternatesStrict is readAlternatesStrict for callers outside the
+// package, so a command that acts on a clone's alternates file parses it the
+// way the strict scan does.
+func ReadAlternatesStrict(path string) ([]string, error) { return readAlternatesStrict(path) }
 
 // readAlternatesStrict reads the lines of the alternates file at path that
 // name an object directory. A missing file names nothing. It opens the file
