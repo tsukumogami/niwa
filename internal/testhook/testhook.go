@@ -14,7 +14,9 @@ package testhook
 const (
 	// LabelBorrowClone fails a borrowing clone after git started.
 	LabelBorrowClone = "borrow-clone"
-	// LabelDissociateCopy fails the copy of a clone's borrowed objects.
+	// LabelDissociateCopy fails the copy of a clone's borrowed objects: every
+	// clone's, or with ":<group>/<repo>" added (dissociate-copy:tools/app),
+	// only that clone's, so a test can fail one clone after others copied.
 	LabelDissociateCopy = "dissociate-copy"
 )
 

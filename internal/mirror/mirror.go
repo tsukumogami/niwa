@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/tsukumogami/niwa/internal/hostdir"
 )
 
 // DefaultLockWait is how long a restore waits for another command's restore
@@ -308,15 +310,28 @@ func hasStore(mdir, repoID string) bool {
 }
 
 // hasBorrower reports whether any clone's alternates file has a line naming
-// stable's objects directory.
+// stable's objects directory. The file niwa dissociate sets aside while it
+// checks a clone (hostdir.AlternatesAside) counts too: until the dissociate
+// removes it, the clone may still need what it names, and a run interrupted
+// there puts it back when its check fails.
 func hasBorrower(clones []string, stable string) bool {
 	want := filepath.Join(stable, "objects")
 	for _, clone := range clones {
-		if alternatesName(filepath.Join(clone, ".git", "objects", "info", "alternates"), want) {
+		info := filepath.Join(clone, ".git", "objects", "info")
+		if alternatesName(filepath.Join(info, "alternates"), want) ||
+			alternatesName(filepath.Join(info, hostdir.AlternatesAside), want) {
 			return true
 		}
 	}
 	return false
+}
+
+// BorrowsFrom reports whether any of clones borrows from repoID's mirror
+// through its stable path (hasBorrower). A line naming a store directly
+// doesn't count. A repo with borrowing off keeps its mirror checked only
+// while this holds (PRD R6).
+func BorrowsFrom(clones []string, home, workspaceRoot, repoID string) bool {
+	return hasBorrower(clones, StablePath(home, workspaceRoot, repoID))
 }
 
 // alternatesName reports whether the alternates file at path has a line equal

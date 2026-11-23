@@ -3304,6 +3304,10 @@ func repoAlreadyCloned(dir string) bool {
 // write failed, becomes a warning (ReportMirrorResult); none fails the
 // command, which carries on whatever the result.
 //
+// A repo borrowEnabled turns off is checked only while a clone on disk
+// borrows from its stable path (checksMirrorOf): once its last borrower is
+// dissociated, apply neither checks nor restores its mirror (PRD R6).
+//
 // It then decides, for each repo this pipeline will clone new, whether the
 // clone borrows (planBorrowing), seeding the mirror of a borrowing repo that
 // has none, and returns the choices by repo name.
@@ -3345,6 +3349,9 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 		if _, ok := a.mirrorsChecked[stable]; ok {
 			continue
 		}
+		if !checksMirrorOf(borrowEnabled(cfg, cr.Repo.Name), clones, home, workspaceRoot, cr.Repo.Name) {
+			continue
+		}
 		repos = append(repos, mirror.Repo{
 			ID:  cr.Repo.Name,
 			URL: RepoCloneURL(cfg, cr.Repo.Name, cr.Repo.SSHURL, cr.Repo.CloneURL),
@@ -3374,6 +3381,18 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 		ReportMirrorResult(a.Reporter, res)
 	}
 	return a.planBorrowing(ctx, cfg, classified, instanceRoot, opts)
+}
+
+// checksMirrorOf reports whether ensureMirrors passes repo's mirror to the
+// check. A repo with borrowing on (on) keeps the check it always had, which
+// mirror.Mirrored narrows to repos with a mirror on disk or a borrower. A repo
+// with borrowing off gets no mirror of its own, so it's checked only while a
+// clone among clones still borrows from its stable path, through its
+// alternates file or the one a dissociate sets aside (mirror.BorrowsFrom):
+// that clone still breaks when the mirror does. After its last borrower is
+// dissociated, this check leaves the mirror alone until the user deletes it.
+func checksMirrorOf(on bool, clones []string, home, workspaceRoot, repo string) bool {
+	return on || mirror.BorrowsFrom(clones, home, workspaceRoot, repo)
 }
 
 // mirrorCheck is what an Applier's check or seed of one mirror came to.

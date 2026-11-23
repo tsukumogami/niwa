@@ -190,6 +190,10 @@ type testState struct {
 	// one of them runs (see referenceState).
 	reference *referenceScenario
 
+	// dissociate holds what the niwa dissociate steps remember; nil until
+	// one of them runs (see dissociateState).
+	dissociate *dissociateScenario
+
 	// plugins is the plugin-release-hold scenario state: the marketplaces
 	// published to the fakes and the releases each one has (see
 	// pluginstore_steps_test.go).
@@ -645,6 +649,7 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// command, with borrowers the scenarios build from niwa's own clones ---
 	registerMirrorSteps(ctx)
 	registerReferenceCloneSteps(ctx)
+	registerDissociateSteps(ctx)
 
 	// --- plugin release hold: each github marketplace release held once per
 	// workspace on the host, the instances linking to it ---
