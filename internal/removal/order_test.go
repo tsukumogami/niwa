@@ -178,10 +178,23 @@ func TestParseWorktreeList(t *testing.T) {
 		"HEAD " + oid + "\x00\x00",
 		"worktree /i/app\x00HEAD nothex\x00\x00",
 		"worktree /i/app\x00HEAD " + oid + "\x00surprise field\x00\x00",
+		"worktree /i/app\x00branch refs/heads/main\x00\x00",
+		"worktree /i/app\x00HEAD " + oid + "\x00\x00worktree /tmp/w\x00detached\x00\x00",
 	} {
 		if _, err := parseWorktreeList([]byte(bad)); err == nil {
 			t.Errorf("parseWorktreeList(%q) parsed", bad)
 		}
+	}
+	if _, err := parseWorktreeList([]byte("worktree /i/app\x00branch refs/heads/main\x00\x00")); err == nil || !strings.Contains(err.Error(), "no HEAD") || !strings.Contains(err.Error(), "/i/app") {
+		t.Errorf("a record with no HEAD: error %v; want the record named", err)
+	}
+	bare, err := parseWorktreeList([]byte("worktree /i/bare.git\x00bare\x00\x00" +
+		"worktree /tmp/w\x00HEAD " + oid + "\x00branch refs/heads/main\x00\x00"))
+	if err != nil {
+		t.Fatalf("a bare record without HEAD: %v", err)
+	}
+	if len(bare) != 1 || bare[0].OID != oid || bare[0].Main {
+		t.Fatalf("heads with a bare main record %+v", bare)
 	}
 }
 

@@ -98,6 +98,36 @@ func TestSessionRemovalParse(t *testing.T) {
 			body:             "[[session.removal.disposable]]\npattern = 'a\\b'\nreview = \"r\"\n",
 			wantErrSubstring: "session.removal.disposable[0]: pattern",
 		},
+		{
+			name:             "catch-all star",
+			body:             "[[session.removal.disposable]]\npattern = \"*\"\nreview = \"r\"\n",
+			wantErrSubstring: `session.removal.disposable[0]: pattern "*": matches every path`,
+		},
+		{
+			name:             "catch-all double star",
+			body:             "[[session.removal.disposable]]\npattern = \"**\"\nreview = \"r\"\n",
+			wantErrSubstring: `session.removal.disposable[0]: pattern "**": matches every path`,
+		},
+		{
+			name:             "catch-all star then double star",
+			body:             "[[session.removal.disposable]]\npattern = \"*/**\"\nreview = \"r\"\n",
+			wantErrSubstring: `session.removal.disposable[0]: pattern "*/**": matches every path`,
+		},
+		{
+			name:             "catch-all double star directory",
+			body:             "[[session.removal.disposable]]\npattern = \"**/\"\nreview = \"r\"\n",
+			wantErrSubstring: `session.removal.disposable[0]: pattern "**/": matches every path`,
+		},
+		{
+			name:             "catch-all question marks",
+			body:             "[[session.removal.disposable]]\npattern = \"a\"\nreview = \"r\"\n[[session.removal.disposable]]\npattern = \"?*/\"\nreview = \"r\"\n",
+			wantErrSubstring: `session.removal.disposable[1]: pattern "?*/": matches every path`,
+		},
+		{
+			name:           "star with a name accepted",
+			body:           "[[session.removal.disposable]]\npattern = \"**/*.log\"\nreview = \"r\"\n",
+			wantDisposable: 1,
+		},
 	}
 
 	for _, tc := range tests {

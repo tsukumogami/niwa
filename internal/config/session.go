@@ -422,7 +422,10 @@ func checkRemovalValue(field, value string) error {
 }
 
 // checkDisposablePattern reports why pattern is not a usable disposable glob,
-// or nil when it is. One trailing "/" is allowed and marks a directory.
+// or nil when it is. One trailing "/" is allowed and marks a directory. A
+// pattern none of whose segments holds a character other than "*" and "?"
+// counts as matching every path and is refused: it would make everything in
+// a unit disposable.
 func checkDisposablePattern(pattern string) error {
 	if strings.Contains(pattern, `\`) {
 		return fmt.Errorf("must not contain a backslash; separate segments with \"/\"")
@@ -430,7 +433,8 @@ func checkDisposablePattern(pattern string) error {
 	if strings.HasPrefix(pattern, "/") {
 		return fmt.Errorf("must be relative, not start with \"/\"")
 	}
-	for _, seg := range strings.Split(strings.TrimSuffix(pattern, "/"), "/") {
+	segs := strings.Split(strings.TrimSuffix(pattern, "/"), "/")
+	for _, seg := range segs {
 		switch seg {
 		case "":
 			return fmt.Errorf("has an empty segment")
@@ -443,7 +447,12 @@ func checkDisposablePattern(pattern string) error {
 			return fmt.Errorf("segment %q is not a valid glob", seg)
 		}
 	}
-	return nil
+	for _, seg := range segs {
+		if strings.Trim(seg, "*?") != "" {
+			return nil
+		}
+	}
+	return errors.New("matches every path")
 }
 
 // checkTimeout refuses a timeout that is set but doesn't parse as a duration,

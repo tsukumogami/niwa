@@ -54,6 +54,7 @@ func TestPass_InvalidRemovalSettingsRemoveNothing(t *testing.T) {
 	for name, extra := range map[string]string{
 		"build_trees": "build_trees = [\"target/*\"]\n",
 		"disposable":  "\n[session.removal]\ndisposable = [{ pattern = \"*.orig\" }]\n",
+		"catch-all":   "\n[session.removal]\ndisposable = [{ pattern = \"*\", review = \"r\" }]\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newPassFixture(t)
@@ -73,6 +74,9 @@ func TestPass_InvalidRemovalSettingsRemoveNothing(t *testing.T) {
 			}
 			if out := f.stderr.String(); !strings.Contains(out, "removed nothing") {
 				t.Fatalf("output %q; want the refusal named", out)
+			}
+			if out := f.stderr.String(); name == "catch-all" && !strings.Contains(out, `pattern "*": matches every path`) {
+				t.Fatalf("output %q; want the catch-all pattern named", out)
 			}
 		})
 	}

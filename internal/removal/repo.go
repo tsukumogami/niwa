@@ -593,7 +593,9 @@ func listWorktreeHeads(ctx context.Context, e *Env, r repoDirs, o callOpts) ([]w
 
 // parseWorktreeList reads git worktree list --porcelain -z output: each
 // worktree is a run of NUL-terminated "<label> [<value>]" fields starting
-// with "worktree <path>", and an empty field ends it.
+// with "worktree <path>", and an empty field ends it. Every record but a
+// bare one must carry a HEAD line: a worktree whose HEAD git didn't list is
+// one the rule can't judge, so the listing fails rather than drop it.
 func parseWorktreeList(out []byte) ([]worktreeHead, error) {
 	if len(out) == 0 {
 		return nil, errors.New("worktree listing is empty")
@@ -609,6 +611,7 @@ func parseWorktreeList(out []byte) ([]worktreeHead, error) {
 			return nil, fmt.Errorf("worktree listing has a record that does not parse: %q", block)
 		}
 		h := worktreeHead{Path: path, Main: i == 0}
+		sawHead, bare := false, false
 		for _, f := range fields[1:] {
 			label, value, _ := strings.Cut(f, " ")
 			switch label {
@@ -617,10 +620,16 @@ func parseWorktreeList(out []byte) ([]worktreeHead, error) {
 					return nil, fmt.Errorf("worktree listing has a HEAD that does not parse: %q", f)
 				}
 				h.OID = value
-			case "branch", "detached", "bare", "locked", "prunable":
+				sawHead = true
+			case "bare":
+				bare = true
+			case "branch", "detached", "locked", "prunable":
 			default:
 				return nil, fmt.Errorf("worktree listing has a field that does not parse: %q", f)
 			}
+		}
+		if !sawHead && !bare {
+			return nil, fmt.Errorf("worktree listing has a record with no HEAD: %q", block)
 		}
 		if h.OID != "" && strings.Trim(h.OID, "0") != "" {
 			heads = append(heads, h)
