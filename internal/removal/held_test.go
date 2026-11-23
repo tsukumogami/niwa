@@ -324,6 +324,30 @@ func TestHeldJudgesABareRepositoryByTheCloneURLItsRemoteEquals(t *testing.T) {
 	keepWith(t, v, "keep.git: ", "commits the clone URL does not show", "branch local-only")
 }
 
+// TestHeldKeepsABareRepositoryHoldingAnUnpushedStash pins how a repository
+// with no work tree is judged: git stash list isn't run there, and its
+// refs/stash is judged as a ref, so a stash no proof remote shows keeps.
+func TestHeldKeepsABareRepositoryHoldingAnUnpushedStash(t *testing.T) {
+	h := newHeldFixture(t)
+	bare := filepath.Join(h.instance, "keep.git")
+	gitRun(t, h.instance, "clone", "-q", "--bare", h.remoteURL, bare)
+	writeFile(t, filepath.Join(h.clone, "README"), "stashed work\n")
+	gitRun(t, h.clone, "stash", "push", "-q")
+	// A push refuses to create refs/stash, so the stash goes over under
+	// another name and is moved there in the bare repository.
+	stash := gitRun(t, h.clone, "rev-parse", "refs/stash")
+	gitRun(t, h.clone, "push", "-q", bare, "refs/stash:refs/carry/stash")
+	gitRun(t, h.instance, "--git-dir="+bare, "update-ref", "refs/stash", stash)
+	gitRun(t, h.instance, "--git-dir="+bare, "update-ref", "-d", "refs/carry/stash")
+	gitRun(t, h.clone, "stash", "drop", "-q")
+	p := h.policy(t)
+	p.CloneURLs = []string{h.remoteURL}
+	v := Evaluate(context.Background(), h.unit(), p)
+	keepWith(t, v, "keep.git: ", "commits the clone URL does not show", "refs/stash")
+	noKeepWith(t, v, "listing stashes")
+	noKeepWith(t, v, "tools/app: ")
+}
+
 func TestHeldNeverContactsARePointedOrigin(t *testing.T) {
 	h := newHeldFixture(t)
 	// The agent points origin at a remote it controls, which holds the
