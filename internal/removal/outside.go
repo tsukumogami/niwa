@@ -339,19 +339,15 @@ func underBase(p string, bases []string) (string, string, bool) {
 
 // checkOutside is the outside check: every path outside the repositories
 // the walk found, in the instance and in the unit's job directory, gets one
-// class, and a unique one keeps the unit. Paths inside a judged clone are
-// the repository check's; a .git the rule doesn't judge yet keeps there.
+// class, and a unique one keeps the unit. Every work tree and git
+// directory the walk found is the repository check's, and a directory on
+// another filesystem is kept by the walk; this check leaves all of them
+// alone. It makes no walk of its own for repositories: without the
+// repository check's walk it skips nothing, so everything counts here.
 func checkOutside(ctx context.Context, u Unit, p Policy, s *evalState) []Check {
-	if s.walk == nil {
-		f := walkInstance(ctx, u.InstancePath, p.CloneURL)
-		s.walk = &f
-	}
 	skip := map[string]bool{}
-	for _, c := range s.walk.clones {
-		skip[c.WorkTree] = true
-	}
-	for _, rel := range s.walk.unjudged {
-		skip[filepath.Join(u.InstancePath, filepath.Dir(rel))] = true
+	if s.walk != nil {
+		skip = s.walk.skip
 	}
 	pats := append(append([]string(nil), ShippedDisposable...), p.Disposable...)
 	gen := s.generated(u.InstancePath)
@@ -386,7 +382,8 @@ func checkOutside(ctx context.Context, u Unit, p Policy, s *evalState) []Check {
 			return filepath.SkipDir
 		}
 		if d.Name() == ".git" {
-			// Classed and kept by the repository check.
+			// Judged by the repository check, or kept by one of the
+			// walk's rules.
 			if isDir {
 				return filepath.SkipDir
 			}
@@ -458,15 +455,17 @@ func checkOutside(ctx context.Context, u Unit, p Policy, s *evalState) []Check {
 	if len(unique) > 0 {
 		keeps = append(keeps, Check{Paths: unique, Evidence: "files outside every repository: " + nameSome(unique)})
 	}
-	return append(keeps, checkJobDir(ctx, u, p, pats, s)...)
+	return append(keeps, checkJobDir(ctx, u, p, pats, s, skip)...)
 }
 
 // checkJobDir classes everything in the unit's job directory: Claude Code's
 // own state files and empty directories are generated, a pattern makes a
 // path disposable, and any other file is job scratch, disposable with the
 // job scratch notice unless the workspace counts job scratch as unique. A
-// job directory that is a link, or isn't a directory, keeps the unit.
-func checkJobDir(ctx context.Context, u Unit, p Policy, pats []string, s *evalState) []Check {
+// job directory that is a link, or isn't a directory, keeps the unit. A
+// repository in the job directory is the repository check's, and a
+// directory on another filesystem the walk's: skip holds both.
+func checkJobDir(ctx context.Context, u Unit, p Policy, pats []string, s *evalState, skip map[string]bool) []Check {
 	if u.JobDir == "" {
 		return nil
 	}
@@ -514,9 +513,12 @@ func checkJobDir(ctx context.Context, u Unit, p Policy, pats []string, s *evalSt
 			return nil
 		}
 		isDir := d.IsDir()
+		if isDir && skip[path] {
+			return filepath.SkipDir
+		}
 		if d.Name() == ".git" {
-			s.classes.add(name, ClassUnique, "")
-			unique = append(unique, name)
+			// Judged by the repository check, or kept by one of the
+			// walk's rules.
 			if isDir {
 				return filepath.SkipDir
 			}

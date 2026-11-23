@@ -16,46 +16,97 @@ import (
 // the rest are counted.
 const maxNamed = 5
 
-// checkRepositories is the repository check: every clone in the instance is
-// judged, in path order, and every .git entry it doesn't judge keeps the
-// unit. The walk it makes is kept for the outside check.
+// checkRepositories is the repository check. The walk finds every
+// repository in the instance and the job directory, and each one is judged
+// on its own, in path order. What the walk's own rules keep on (another
+// filesystem, an external git directory, an unreadable git file, a
+// worktree outside the instance) keeps the unit here too. The walk is kept
+// for the outside check.
 func checkRepositories(ctx context.Context, u Unit, p Policy, s *evalState) []Check {
-	f := walkInstance(ctx, u.InstancePath, p.CloneURL)
+	f := walkUnit(ctx, u, p)
 	s.walk = &f
 	keeps := append([]Check(nil), f.errs...)
-	for _, rel := range f.unjudged {
-		keeps = append(keeps, Check{Paths: []string{rel}, Evidence: fmt.Sprintf("a git entry the rule does not judge yet: %s", rel)})
-		s.classes.add(filepath.ToSlash(rel), ClassUnique, "")
+	for _, k := range f.keeps {
+		keeps = append(keeps, k)
+		for _, path := range k.Paths {
+			s.classes.add(path, ClassUnique, "")
+		}
 	}
-	sort.Slice(f.clones, func(i, j int) bool { return f.clones[i].Rel < f.clones[j].Rel })
+	sort.SliceStable(f.repos, func(i, j int) bool { return f.repos[i].Rel < f.repos[j].Rel })
 	gen := s.generated(u.InstancePath)
-	for _, c := range f.clones {
+	seen := map[string]bool{}
+	for _, k := range keeps {
+		seen[k.Evidence] = true
+	}
+	for _, r := range f.repos {
 		if p.ConfigError != nil {
-			keeps = append(keeps, Check{Paths: []string{c.Rel}, Evidence: fmt.Sprintf("%s: configuration unreadable: %v", c.Rel, p.ConfigError)})
-			s.classes.add(dirPath(filepath.ToSlash(c.Rel)), ClassUnique, "")
+			keeps = append(keeps, Check{Paths: []string{r.Rel}, Evidence: fmt.Sprintf("%s: configuration unreadable: %v", r.Rel, p.ConfigError)})
+			s.classes.add(dirPath(filepath.ToSlash(r.Rel)), ClassUnique, "")
 			continue
 		}
 		var trees []string
-		if p.BuildTrees != nil {
-			trees = p.BuildTrees(c.Repo)
+		if p.BuildTrees != nil && r.Repo != "" && !r.Linked {
+			trees = p.BuildTrees(r.Repo)
 		}
 		res := p.Env.checkRepo(ctx, repoTarget{
-			Rel:        c.Rel,
-			Base:       u.InstancePath,
-			Dirs:       repoDirs{GitDir: c.GitDir, WorkTree: c.WorkTree},
-			URL:        c.URL,
+			Rel:        r.Rel,
+			Base:       r.Base,
+			Dirs:       r.dirs(),
+			URL:        r.URL,
 			BuildTrees: trees,
-			wtInfo:     c.wtInfo,
-			gitInfo:    c.gitInfo,
+			wtInfo:     r.wtInfo,
+			gitInfo:    r.gitInfo,
+			walk:       &f,
+			repo:       r,
 		}, repoPolicy{
 			ignoredUnique: p.IgnoredUnique,
 			disposable:    append(append([]string(nil), ShippedDisposable...), p.Disposable...),
 			generated:     gen,
 		})
-		keeps = append(keeps, res.keeps...)
+		repoKeeps := res.keeps
+		if res.configRead && r.Prunable {
+			repoKeeps = append(repoKeeps, p.Env.checkPrunedIndex(ctx, r)...)
+		}
+		if res.listed && !r.Linked {
+			repoKeeps = append(repoKeeps, f.reach(r, res.worktrees)...)
+		}
+		for _, k := range repoKeeps {
+			if seen[k.Evidence] {
+				continue
+			}
+			seen[k.Evidence] = true
+			keeps = append(keeps, k)
+		}
 		s.classes.paths = append(s.classes.paths, res.classes...)
 	}
 	return keeps
+}
+
+// checkPrunedIndex reads the index of a worktree whose working tree is gone,
+// through its admin directory: a staged entry that differs from its HEAD,
+// or a read that fails, keeps the unit.
+func (e *Env) checkPrunedIndex(ctx context.Context, r foundRepo) []Check {
+	keep := func(evidence string) []Check {
+		return []Check{{Paths: []string{r.Rel}, Evidence: r.Rel + ": " + evidence}}
+	}
+	cmd, err := e.gitCommand(ctx, repoDirs{GitDir: r.GitDir}, callOpts{}, "diff-index", "--cached", "--name-only", "-z", "HEAD")
+	if err != nil {
+		return keep(err.Error())
+	}
+	out, err := run(cmd)
+	if err != nil {
+		return keep("reading the index of a worktree whose working tree is gone: " + err.Error())
+	}
+	var staged []string
+	for _, name := range strings.Split(string(out), "\x00") {
+		if name != "" {
+			staged = append(staged, name)
+		}
+	}
+	if len(staged) > 0 {
+		return keep("staged changes in a worktree whose working tree is gone: " + nameSome(staged))
+	}
+	return nil
 }
 
 // repoTarget is one repository the rule judges, wherever the walk found it.
@@ -74,6 +125,48 @@ type repoTarget struct {
 	// wtInfo and gitInfo are the walk's view of its directories; nil skips
 	// the identity check for that directory.
 	wtInfo, gitInfo fs.FileInfo
+	// walk and repo are the walk that found the repository and what it
+	// found, nil and zero for a repository judged apart from a walk.
+	walk *found
+	repo foundRepo
+}
+
+// display names a path in evidence: relative to the instance or
+// "job:"-prefixed when the walk covers it, as given otherwise.
+func (t repoTarget) display(p string) string {
+	if t.walk == nil {
+		return p
+	}
+	return t.walk.label(p)
+}
+
+// checkWorkTreeConfig checks the work tree the repository's own
+// configuration names against the walk. A core.worktree outside the
+// instance and the job directory keeps, and so does one inside that isn't
+// the work tree the walk found; a store with no work tree may name one
+// inside. A git directory found by its structure that isn't bare, isn't a
+// submodule store, names no work tree and that no .git file names has its
+// work tree somewhere the walk can't see (git init --separate-git-dir), and
+// keeps too.
+func (t repoTarget) checkWorkTreeConfig(rc repoConfig) string {
+	if t.walk == nil {
+		return ""
+	}
+	if rc.worktree != "" {
+		wt := resolveFrom(t.Dirs.GitDir, rc.worktree)
+		switch {
+		case !t.walk.inside(wt):
+			return "work tree outside the instance: " + wt
+		case t.Dirs.WorkTree != "" && !t.walk.samePath(wt, t.Dirs.WorkTree):
+			return "configured work tree is not the one the walk found: " + t.display(wt)
+		}
+		return ""
+	}
+	r := t.repo
+	if r.Structural && !r.InModules && !r.ViaFile && !r.Linked && !rc.bare {
+		return "work tree outside the instance: " + r.GitDir
+	}
+	return ""
 }
 
 // repoPolicy is what the classes of a repository's paths depend on.
@@ -90,6 +183,13 @@ type repoPolicy struct {
 type repoResult struct {
 	keeps   []Check
 	classes []PathClass
+	// configRead is true once the configuration read passed: the identity
+	// check held, no key names a program and the work tree it names is the
+	// walk's.
+	configRead bool
+	// worktrees is git's worktree listing, and listed says it was read.
+	worktrees []worktreeEntry
+	listed    bool
 }
 
 // checkRepo runs the per-repository check sequence. The identity check and
@@ -125,6 +225,10 @@ func (e *Env) checkRepo(ctx context.Context, t repoTarget, rp repoPolicy) repoRe
 	if rc.programKey != "" {
 		return stop("repository configuration names a program: " + rc.programKey)
 	}
+	if why := t.checkWorkTreeConfig(rc); why != "" {
+		return stop(why)
+	}
+	res.configRead = true
 	opts := callOpts{excludesUnset: rc.excludesUnset}
 
 	var errs, refKeeps, stashKeeps, modKeeps, flagKeeps, untrackedKeeps []Check
@@ -150,13 +254,15 @@ func (e *Env) checkRepo(ctx context.Context, t repoTarget, rp repoPolicy) repoRe
 		}
 		// Every worktree's HEAD counts like a ref, a detached one included,
 		// so a commit that only HEAD reaches is judged too.
-		heads, headErr := listWorktreeHeads(ctx, e, t.Dirs, opts)
+		entries, headErr := listWorktrees(ctx, e, t.Dirs, opts)
 		if headErr != nil {
 			keepAt(&errs, headErr.Error())
 			gitDirClass = ClassUnique
+		} else {
+			res.worktrees, res.listed = entries, true
 		}
-		for _, h := range heads {
-			refs = append(refs, ref{OID: h.OID, Name: h.label(t.Dirs.WorkTree)})
+		for _, h := range headsOf(entries) {
+			refs = append(refs, ref{OID: h.OID, Name: t.headLabel(h)})
 		}
 		var unheld []string
 		if len(refs) > 0 {
@@ -314,6 +420,11 @@ func (t repoTarget) workTreeChecks(ctx context.Context, e *Env, opts callOpts, r
 			modPaths = append(modPaths, inst(p))
 			w.classes = append(w.classes, PathClass{Path: inst(p), Class: ClassUnique})
 		case "untracked", "ignored":
+			if isDir && t.walk != nil && t.walk.skip[filepath.Join(t.Dirs.WorkTree, filepath.FromSlash(p))] {
+				// A repository the walk found here, or a directory on
+				// another filesystem, is judged on its own.
+				continue
+			}
 			ignored := en.Kind == "ignored"
 			class, notice, at := t.classifyLoose(p, isDir, ignored, rp)
 			w.classes = append(w.classes, PathClass{Path: inst(at), Class: class, Notice: notice})
@@ -485,10 +596,45 @@ func (h worktreeHead) label(workTree string) string {
 	return "HEAD of worktree " + h.Path
 }
 
-// listWorktreeHeads runs worktree list --porcelain -z and returns every
-// worktree's HEAD that names a commit. A HEAD on an unborn branch names
-// none. A listing that fails or doesn't parse is an error, which keeps.
-func listWorktreeHeads(ctx context.Context, e *Env, r repoDirs, o callOpts) ([]worktreeHead, error) {
+// headLabel names a worktree's HEAD in evidence, with a worktree inside the
+// instance or job directory named by its path there. The main entry is
+// "HEAD" only for the repository whose own work tree it is: a linked
+// worktree's listing names the main work tree's HEAD by its path.
+func (t repoTarget) headLabel(h worktreeHead) string {
+	if t.repo.Linked && h.Main {
+		return "HEAD of worktree " + t.display(h.Path)
+	}
+	if h.Main || (t.Dirs.WorkTree != "" && filepath.Clean(h.Path) == filepath.Clean(t.Dirs.WorkTree)) {
+		return "HEAD"
+	}
+	return "HEAD of worktree " + t.display(h.Path)
+}
+
+// worktreeEntry is one record of git worktree list: its path, its HEAD
+// when it names a commit, and its flags.
+type worktreeEntry struct {
+	Path     string
+	OID      string
+	Main     bool
+	Bare     bool
+	Prunable bool
+}
+
+// headsOf returns every entry's HEAD that names a commit. A HEAD on an
+// unborn branch names none.
+func headsOf(entries []worktreeEntry) []worktreeHead {
+	var heads []worktreeHead
+	for _, e := range entries {
+		if e.OID != "" && strings.Trim(e.OID, "0") != "" {
+			heads = append(heads, worktreeHead{Path: e.Path, OID: e.OID, Main: e.Main})
+		}
+	}
+	return heads
+}
+
+// listWorktrees runs worktree list --porcelain -z and returns every
+// record. A listing that fails or doesn't parse is an error, which keeps.
+func listWorktrees(ctx context.Context, e *Env, r repoDirs, o callOpts) ([]worktreeEntry, error) {
 	cmd, err := e.gitCommand(ctx, r, o, "worktree", "list", "--porcelain", "-z")
 	if err != nil {
 		return nil, err
@@ -497,30 +643,40 @@ func listWorktreeHeads(ctx context.Context, e *Env, r repoDirs, o callOpts) ([]w
 	if err != nil {
 		return nil, fmt.Errorf("listing worktrees: %v", err)
 	}
-	return parseWorktreeList(out)
+	return parseWorktreeEntries(out)
 }
 
-// parseWorktreeList reads git worktree list --porcelain -z output: each
+// parseWorktreeList reads git worktree list --porcelain -z output and
+// returns every worktree's HEAD that names a commit.
+func parseWorktreeList(out []byte) ([]worktreeHead, error) {
+	entries, err := parseWorktreeEntries(out)
+	if err != nil {
+		return nil, err
+	}
+	return headsOf(entries), nil
+}
+
+// parseWorktreeEntries reads git worktree list --porcelain -z output: each
 // worktree is a run of NUL-terminated "<label> [<value>]" fields starting
 // with "worktree <path>", and an empty field ends it. Every record but a
 // bare one must carry a HEAD line: a worktree whose HEAD git didn't list is
 // one the rule can't judge, so the listing fails rather than drop it.
-func parseWorktreeList(out []byte) ([]worktreeHead, error) {
+func parseWorktreeEntries(out []byte) ([]worktreeEntry, error) {
 	if len(out) == 0 {
 		return nil, errors.New("worktree listing is empty")
 	}
 	if !bytes.HasSuffix(out, []byte("\x00\x00")) {
 		return nil, errors.New("worktree listing does not end a record")
 	}
-	var heads []worktreeHead
+	var entries []worktreeEntry
 	for i, block := range strings.Split(string(out[:len(out)-2]), "\x00\x00") {
 		fields := strings.Split(block, "\x00")
 		path, ok := strings.CutPrefix(fields[0], "worktree ")
 		if !ok || path == "" {
 			return nil, fmt.Errorf("worktree listing has a record that does not parse: %q", block)
 		}
-		h := worktreeHead{Path: path, Main: i == 0}
-		sawHead, bare := false, false
+		en := worktreeEntry{Path: path, Main: i == 0}
+		sawHead := false
 		for _, f := range fields[1:] {
 			label, value, _ := strings.Cut(f, " ")
 			switch label {
@@ -528,23 +684,23 @@ func parseWorktreeList(out []byte) ([]worktreeHead, error) {
 				if !isObjectID(value) {
 					return nil, fmt.Errorf("worktree listing has a HEAD that does not parse: %q", f)
 				}
-				h.OID = value
+				en.OID = value
 				sawHead = true
 			case "bare":
-				bare = true
-			case "branch", "detached", "locked", "prunable":
+				en.Bare = true
+			case "prunable":
+				en.Prunable = true
+			case "branch", "detached", "locked":
 			default:
 				return nil, fmt.Errorf("worktree listing has a field that does not parse: %q", f)
 			}
 		}
-		if !sawHead && !bare {
+		if !sawHead && !en.Bare {
 			return nil, fmt.Errorf("worktree listing has a record with no HEAD: %q", block)
 		}
-		if h.OID != "" && strings.Trim(h.OID, "0") != "" {
-			heads = append(heads, h)
-		}
+		entries = append(entries, en)
 	}
-	return heads, nil
+	return entries, nil
 }
 
 // listStashes runs stash list and returns each entry's name.

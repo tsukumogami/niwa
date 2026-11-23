@@ -225,7 +225,7 @@ func TestOutsideKeepsAnEntryThatTurnedUnreadableAfterTheFirstWalk(t *testing.T) 
 	notes := filepath.Join(f.instance, "notes")
 	writeFile(t, filepath.Join(notes, "a.txt"), "a")
 	p := f.policy(t)
-	w := walkInstance(context.Background(), f.instance, p.CloneURL)
+	w := walkUnit(context.Background(), f.unit(), p)
 	if len(w.errs) != 0 {
 		t.Fatalf("first walk errors %+v", w.errs)
 	}
@@ -274,8 +274,8 @@ func TestIndexFlagsKeepASkipWorktreeEntryAndASparseCheckout(t *testing.T) {
 func TestCheckRepoKeepsACloneSwappedForASymlinkAfterTheWalk(t *testing.T) {
 	f := newFixture(t)
 	p := f.policy(t)
-	w := walkInstance(context.Background(), f.instance, p.CloneURL)
-	if len(w.clones) != 1 {
+	w := walkUnit(context.Background(), f.unit(), p)
+	if len(w.repos) != 1 {
 		t.Fatalf("walk found %+v", w)
 	}
 	// A clean clone elsewhere takes the walked clone's place.
@@ -287,7 +287,7 @@ func TestCheckRepoKeepsACloneSwappedForASymlinkAfterTheWalk(t *testing.T) {
 	if err := os.Symlink(other, f.clone); err != nil {
 		t.Fatal(err)
 	}
-	c := w.clones[0]
+	c := w.repos[0]
 	res := p.Env.checkRepo(context.Background(), repoTarget{
 		Rel: c.Rel, Base: f.instance, Dirs: repoDirs{GitDir: c.GitDir, WorkTree: c.WorkTree},
 		URL: c.URL, wtInfo: c.wtInfo, gitInfo: c.gitInfo,

@@ -114,12 +114,16 @@ remove them yourself with niwa destroy. Sparing an instance nobody is using
 costs a directory; the other mistake costs the work inside it.
 
 A session being gone isn't enough on its own. Before reap removes a mapped
-instance, it checks each clone in it against the clone URL the workspace
-configuration gives that repository: a branch or other ref whose commit the
-URL doesn't show (git ls-remote), any uncommitted or untracked file, a git
-error, an unreachable URL, a repository configuration that names a program,
-or a .git entry reap doesn't judge yet keeps the instance, and reap prints
-one "niwa: kept <instance>: <check> check: ..." line naming what it found.
+instance, it checks every repository in it and in its session's job
+directory (each clone, nested, bare or build-tree repository, submodule
+store and worktree) against the clone URL the workspace configuration gives
+that clone: a branch or other ref whose commit the URL doesn't show (git
+ls-remote), a commit in a repository the configuration gives no URL, any
+uncommitted or untracked file, a git error, an unreachable URL, a
+repository configuration that names a program, a worktree or work tree
+outside the instance, a .git file naming a git directory outside it, or a
+directory on another filesystem keeps the instance, and reap prints one
+"niwa: kept <instance>: <check> check: ..." line naming what it found.
 git runs there with a fixed environment and every repository-named program
 turned off, and the instance is left exactly as it was. One reap takes at
 most 30 seconds over these checks; an instance it doesn't reach in time is

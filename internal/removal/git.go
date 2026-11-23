@@ -469,6 +469,10 @@ type repoConfig struct {
 	// sparse is true when the repository's own configuration turns on a
 	// sparse checkout.
 	sparse bool
+	// bare is the repository's own core.bare, and worktree its
+	// core.worktree, empty when it names none.
+	bare     bool
+	worktree string
 }
 
 // readConfig runs the configuration read, the first git call in every
@@ -503,6 +507,12 @@ func (e *Env) readConfig(ctx context.Context, r repoDirs) (repoConfig, error) {
 		}
 		if strings.EqualFold(en.Key, "core.sparseCheckout") && gitTrue(en.Value) {
 			rc.sparse = true
+		}
+		if strings.EqualFold(en.Key, "core.bare") {
+			rc.bare = gitTrue(en.Value)
+		}
+		if strings.EqualFold(en.Key, "core.worktree") {
+			rc.worktree = en.Value
 		}
 		if rc.programKey == "" && namesProgram(en.Key, en.Value) {
 			rc.programKey = en.Key

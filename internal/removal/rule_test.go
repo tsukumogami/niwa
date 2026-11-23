@@ -156,15 +156,16 @@ func TestEvaluateKeepsARepositoryWithoutACloneURL(t *testing.T) {
 	p.CloneURL = func(string) (string, bool) { return "", false }
 	v := Evaluate(context.Background(), f.unit(), p)
 	first, _ := v.First()
-	if v.Kind != Keep || first.Paths[0] != filepath.Join("tools", "app", ".git") {
-		t.Fatalf("verdict %s %+v; want keep naming the .git path", v.Kind, v.Checks)
+	if v.Kind != Keep || first.Paths[0] != "tools/app" || !strings.Contains(first.Evidence, "no clone URL for this repository") {
+		t.Fatalf("verdict %s %+v; want keep naming the repository and its missing clone URL", v.Kind, v.Checks)
 	}
 }
 
-func TestEvaluateKeepsAGitEntryItDoesNotJudge(t *testing.T) {
+func TestEvaluateJudgesEveryGitEntry(t *testing.T) {
 	f := newFixture(t)
 	nested := filepath.Join(f.clone, "vendor", "lib")
 	gitRun(t, f.clone, "init", "-q", nested)
+	gitRun(t, nested, "commit", "-q", "--allow-empty", "-m", "nested work")
 	// The outer clone ignores the nested repository, so its status is clean
 	// and only the walk can find it.
 	if err := os.WriteFile(filepath.Join(f.clone, ".git", "info", "exclude"), []byte("vendor/\n"), 0o644); err != nil {
@@ -180,8 +181,11 @@ func TestEvaluateKeepsAGitEntryItDoesNotJudge(t *testing.T) {
 	var named []string
 	for _, c := range v.Checks {
 		named = append(named, c.Paths...)
+		if strings.Contains(c.Evidence, "does not judge") {
+			t.Errorf("a git entry went unjudged: %+v", c)
+		}
 	}
-	for _, want := range []string{".git", filepath.Join("tools", "app", "vendor", "lib", ".git")} {
+	for _, want := range []string{".git", "tools/app/vendor/lib"} {
 		found := false
 		for _, n := range named {
 			if n == want {
