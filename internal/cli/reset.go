@@ -123,7 +123,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 	cfg := result.Config
 
 	// Destroy the instance.
-	if err := workspace.DestroyInstance(instanceDir,
+	if err := workspace.DestroyInstance(workspaceRoot, instanceDir,
 		workspace.WithDestroyReporter(workspace.NewReporter(cmd.ErrOrStderr()))); err != nil {
 		return err
 	}

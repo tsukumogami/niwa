@@ -346,7 +346,7 @@ func TestDestroyInstance_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := DestroyInstance(inst); err != nil {
+	if err := DestroyInstance(filepath.Dir(inst), inst); err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
 
@@ -358,7 +358,7 @@ func TestDestroyInstance_Success(t *testing.T) {
 func TestDestroyInstance_RejectsNonInstance(t *testing.T) {
 	dir := t.TempDir()
 
-	err := DestroyInstance(dir)
+	err := DestroyInstance(filepath.Dir(dir), dir)
 	if err == nil {
 		t.Fatal("expected error when destroying non-instance directory")
 	}
@@ -381,7 +381,7 @@ func TestDestroyInstance_RejectsWorkspaceRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := DestroyInstance(root)
+	err := DestroyInstance(filepath.Dir(root), root)
 	if err == nil {
 		t.Fatal("expected error when destroying workspace root")
 	}
@@ -489,7 +489,7 @@ func TestDestroyInstance_PrunesOwnedRecords(t *testing.T) {
 		filepath.Join(sibling, "repo"),
 	)
 
-	if err := DestroyInstance(target, WithPluginRecordBaseDir(base)); err != nil {
+	if err := DestroyInstance(filepath.Dir(target), target, WithPluginRecordBaseDir(base)); err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
 
@@ -519,7 +519,7 @@ func TestDestroyInstance_FailSafeAbsentRegistry(t *testing.T) {
 
 	base := registryBaseDir(t) // no registry seeded
 
-	if err := DestroyInstance(inst, WithPluginRecordBaseDir(base)); err != nil {
+	if err := DestroyInstance(filepath.Dir(inst), inst, WithPluginRecordBaseDir(base)); err != nil {
 		t.Fatalf("DestroyInstance should succeed with absent registry: %v", err)
 	}
 	if _, err := os.Stat(inst); !os.IsNotExist(err) {
@@ -544,7 +544,7 @@ func TestDestroyInstance_FailSafeMalformedRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := DestroyInstance(inst, WithPluginRecordBaseDir(base)); err != nil {
+	if err := DestroyInstance(filepath.Dir(inst), inst, WithPluginRecordBaseDir(base)); err != nil {
 		t.Fatalf("DestroyInstance should succeed with malformed registry: %v", err)
 	}
 	if _, err := os.Stat(inst); !os.IsNotExist(err) {

@@ -21,7 +21,16 @@ func TestDestroyInstanceWarningTo(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 
-	inst := filepath.Join(t.TempDir(), "doomed")
+	// The instance sits directly under a workspace root, which the teardown
+	// finds by its .niwa/workspace.toml and destroys the instance under.
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".niwa"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".niwa", "workspace.toml"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inst := filepath.Join(root, "doomed")
 	if err := os.MkdirAll(inst, 0o755); err != nil {
 		t.Fatal(err)
 	}

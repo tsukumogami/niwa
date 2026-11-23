@@ -415,6 +415,11 @@ func DiscoverInstance(startPath string) (string, error) {
 // .niwa/instance.json markers and returns the directories that contain them.
 // Entries with names containing ASCII controls or Unicode Cf/Zl/Zp codepoints
 // are filtered out; see ValidName for the full rationale.
+//
+// .niwa and every name starting with ".niwa-" are niwa's own and never an
+// instance. A tombstone (.niwa-tombstone-<instance>-<hex>) still holds
+// .niwa/instance.json, and without the skip it would be listed, and judged
+// or acted on, as an instance.
 func EnumerateInstances(workspaceRoot string) ([]string, error) {
 	entries, err := os.ReadDir(workspaceRoot)
 	if err != nil {
@@ -424,6 +429,9 @@ func EnumerateInstances(workspaceRoot string) ([]string, error) {
 	var instances []string
 	for _, entry := range entries {
 		if !entry.IsDir() {
+			continue
+		}
+		if name := entry.Name(); name == StateDir || strings.HasPrefix(name, StateDir+"-") {
 			continue
 		}
 		if !ValidName(entry.Name()) {

@@ -430,7 +430,7 @@ func TestClaudeTrustRepos_DestroyWithdrawsAll(t *testing.T) {
 	}
 
 	f.freshOutput()
-	if err := DestroyInstance(f.instanceRoot, WithDestroyReporter(f.applier.Reporter), WithPluginRecordBaseDir(f.home)); err != nil {
+	if err := DestroyInstance(filepath.Dir(f.instanceRoot), f.instanceRoot, WithDestroyReporter(f.applier.Reporter), WithPluginRecordBaseDir(f.home)); err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
 	if strings.Contains(f.out.String(), "warning") {
@@ -484,7 +484,7 @@ func TestClaudeTrustRepos_DestroyRefusesCraftedPaths(t *testing.T) {
 	recordRepoClaudeTrust(t, inst, grants)
 
 	var buf bytes.Buffer
-	if err := DestroyInstance(inst, WithDestroyReporter(NewReporterWithTTY(&buf, false))); err != nil {
+	if err := DestroyInstance(filepath.Dir(inst), inst, WithDestroyReporter(NewReporterWithTTY(&buf, false))); err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
 	out := buf.String()

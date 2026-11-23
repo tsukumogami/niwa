@@ -237,7 +237,7 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingP
 		removeOwningSessionsListed(reporter, workspaceRoot, []string{instanceDir}, listSessions)
 	}
 
-	if err := workspace.DestroyInstance(instanceDir,
+	if err := workspace.DestroyInstance(workspaceRoot, instanceDir,
 		workspace.WithDestroyReporter(reporter)); err != nil {
 		return err
 	}

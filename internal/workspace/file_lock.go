@@ -4,8 +4,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"path/filepath"
+	"strings"
 
 	"github.com/tsukumogami/niwa/internal/filelock"
+	"github.com/tsukumogami/niwa/internal/hostdir"
 )
 
 // ErrLockHeld is returned by TryFileLock when another holder has the lock. It
@@ -21,6 +23,24 @@ var ErrLockUnsupported = filelock.ErrLockUnsupported
 // without importing this package; see filelock.TryFileLock for the contract.
 func TryFileLock(path, holder string) (func(), error) {
 	return filelock.TryFileLock(path, holder)
+}
+
+// TryFileLockShared takes a shared advisory lock on path without waiting; see
+// filelock.TryFileLockShared for the contract.
+func TryFileLockShared(path string) (func(), error) {
+	return filelock.TryFileLockShared(path)
+}
+
+// TombstoneLockPath returns the workspace's tombstone lock, in niwa's own
+// lock directory under home: ~/.niwa/locks/t-<32 hex>.lock, where the hex
+// is the 32 digits hostdir.WorkspaceKey puts after its "w-". A pass holds it
+// shared from the rename of an instance to its tombstone until the
+// tombstone is removed or renamed back, and recovery of a tombstone an
+// interrupted pass left takes it exclusively, so recovery never touches a
+// tombstone a live pass holds.
+func TombstoneLockPath(home, workspaceRoot string) string {
+	key := strings.TrimPrefix(hostdir.WorkspaceKey(workspaceRoot), "w-")
+	return filepath.Join(home, ".niwa", "locks", "t-"+key+".lock")
 }
 
 // InstanceLockPath returns the per-instance lock file for instancePath, in
