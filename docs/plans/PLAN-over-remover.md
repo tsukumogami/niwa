@@ -303,7 +303,7 @@ Walk rules:
 
 The jobs root:
 - [ ] One resolver in `internal/removal` gives the jobs root as Claude Code resolves it: `$CLAUDE_CONFIG_DIR/jobs` when the variable is set, `~/.claude/jobs` otherwise. The reap pass and `niwa reap --verdict-only` resolve it once per pass, and that one root feeds both the liveness reads and the job directory (`jobDirFor`) in `runPass`. `defaultJobsDir()`'s other callers (list, watch, the hooks) are unchanged in this issue, and Issue 10's vet uses the same resolver.
-- [ ] With `CLAUDE_CONFIG_DIR` set to another absolute, clean directory, the walk reads that directory's `jobs/` rather than `~/.claude/jobs/`.
+- [ ] With `CLAUDE_CONFIG_DIR` set to another absolute, clean directory, the walk reads that directory's `jobs/` rather than `~/.claude/jobs/`: a session whose job entry is there reads as live, and a session whose entry is gone has its job directory found and judged there. Tests pin both, in reap and in verdict-only.
 - [ ] With `CLAUDE_CONFIG_DIR` set to a relative value, every unit in the pass is kept, with the reason naming the variable, and nothing is removed.
 - [ ] With `CLAUDE_CONFIG_DIR` set to an absolute value that isn't already clean (one containing `..`, `.`, or a repeated or trailing separator), every unit in the pass is kept the same way. `~` in it is never expanded.
 
