@@ -112,6 +112,7 @@ Feature: The mirror's network calls keep the user's remote-access settings
     And no line the probe holds names "remote.origin.prune"
     And every network line the probe holds carries "GIT_TERMINAL_PROMPT" = "0"
     And no line the probe holds carries a GIT variable niwa didn't set itself or keep for the network
+    And nothing mirror-related exists outside the sandbox home
 
   # The repo's URL names a host under .invalid, which only the wrapper can
   # reach; niwa's own clones of it reach it the same way. The SessionStart
@@ -196,6 +197,7 @@ Feature: The mirror's network calls keep the user's remote-access settings
     And no local line the probe gained carries "GIT_DIR"
     And no local line the probe gained carries "GIT_ALTERNATE_OBJECT_DIRECTORIES"
     And every ref of each borrower of "app" reads to the root and fsck is clean
+    And nothing mirror-related exists outside the sandbox home
 
   Scenario: No environment value reaches the mirror log, which notes what was honoured
     Given a config repo "myws" exists with body:
@@ -235,3 +237,4 @@ Feature: The mirror's network calls keep the user's remote-access settings
     And the mirror log gained a check line and a restore line for "app" with fault "missing" and result "restored" from command "apply"
     And every restore and refresh line the mirror log gained carries the network notes "ssl-no-verify,proxy-command"
     And the mirror log holds none of "niwa-sentinel-ssh-command,niwa-sentinel-askpass,niwa-sentinel-proxy-command,niwa-sentinel-no-verify,niwa-sentinel-config-value"
+    And nothing mirror-related exists outside the sandbox home
