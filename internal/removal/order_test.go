@@ -136,6 +136,103 @@ func TestCheckRepoKeepsInTheRuleOrder(t *testing.T) {
 	}
 }
 
+func TestEvaluateKeepsACommitOnlyADetachedHeadReaches(t *testing.T) {
+	f := checkedOut(t)
+	gitRun(t, f.clone, "checkout", "-q", "--detach")
+	gitRun(t, f.clone, "commit", "-q", "--allow-empty", "-m", "detached work")
+	v := Evaluate(context.Background(), f.unit(), f.policy(t))
+	first, _ := v.First()
+	if v.Kind != Keep || first.Name != CheckRepository || !strings.Contains(first.Evidence, "commits the clone URL does not show: HEAD") {
+		t.Fatalf("verdict %s %+v; want the repository check naming HEAD", v.Kind, v.Checks)
+	}
+	wantClass(t, v, "tools/app/.git/", ClassUnique, "")
+}
+
+func TestEvaluateReapsAPushedDetachedHead(t *testing.T) {
+	f := checkedOut(t)
+	gitRun(t, f.clone, "checkout", "-q", "--detach")
+	if v := Evaluate(context.Background(), f.unit(), f.policy(t)); v.Kind != Reap {
+		t.Fatalf("verdict %s %+v; want a detached HEAD at a pushed commit reaped", v.Kind, v.Checks)
+	}
+}
+
+func TestParseWorktreeList(t *testing.T) {
+	oid := strings.Repeat("a", 40)
+	other := strings.Repeat("b", 40)
+	out := "worktree /i/app\x00HEAD " + oid + "\x00branch refs/heads/main\x00\x00" +
+		"worktree /tmp/w\x00HEAD " + other + "\x00detached\x00locked\x00\x00" +
+		"worktree /i/new\x00HEAD " + strings.Repeat("0", 40) + "\x00branch refs/heads/unborn\x00\x00"
+	heads, err := parseWorktreeList([]byte(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(heads) != 2 || !heads[0].Main || heads[0].OID != oid || heads[1].Main || heads[1].OID != other {
+		t.Fatalf("heads %+v", heads)
+	}
+	if got := heads[1].label("/i/app"); got != "HEAD of worktree /tmp/w" {
+		t.Fatalf("label %q", got)
+	}
+	for _, bad := range []string{
+		"",
+		"worktree /i/app\x00HEAD " + oid + "\x00",
+		"HEAD " + oid + "\x00\x00",
+		"worktree /i/app\x00HEAD nothex\x00\x00",
+		"worktree /i/app\x00HEAD " + oid + "\x00surprise field\x00\x00",
+	} {
+		if _, err := parseWorktreeList([]byte(bad)); err == nil {
+			t.Errorf("parseWorktreeList(%q) parsed", bad)
+		}
+	}
+}
+
+func TestAcceptLsofTakesExitOneOnlyWhenTheOutputParsesInFull(t *testing.T) {
+	good := []byte("p10\x00R1\x00\nfcwd\x00n/w\x00\n")
+	if procs, err := acceptLsof(1, good); err != nil || len(procs) != 1 || procs[0].Cwd != "/w" {
+		t.Fatalf("exit 1 with a full listing: %+v, %v", procs, err)
+	}
+	for _, out := range [][]byte{
+		[]byte("p10\x00R1\x00\nfcwd\x00n/w"),
+		[]byte("p10\x00R1\x00\nfcwd\x00\n"),
+		{},
+	} {
+		if _, err := acceptLsof(1, out); err == nil {
+			t.Errorf("exit 1 with %q was accepted", out)
+		}
+	}
+	if _, err := acceptLsof(2, good); err == nil {
+		t.Error("exit 2 was accepted")
+	}
+	if _, err := acceptLsof(0, good); err != nil {
+		t.Errorf("exit 0: %v", err)
+	}
+}
+
+func TestOutsideKeepsAnEntryThatTurnedUnreadableAfterTheFirstWalk(t *testing.T) {
+	f := newFixture(t)
+	notes := filepath.Join(f.instance, "notes")
+	writeFile(t, filepath.Join(notes, "a.txt"), "a")
+	p := f.policy(t)
+	w := walkInstance(context.Background(), f.instance, p.CloneURL)
+	if len(w.errs) != 0 {
+		t.Fatalf("first walk errors %+v", w.errs)
+	}
+	if err := os.Chmod(notes, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(notes, 0o755) })
+	s := &evalState{walk: &w}
+	keeps := checkOutside(context.Background(), f.unit(), p, s)
+	found := false
+	for _, k := range keeps {
+		if strings.Contains(k.Evidence, "unreadable: notes: permission denied") && len(k.Paths) == 1 && k.Paths[0] == "notes" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("outside keeps %+v; want the unreadable directory named with its error", keeps)
+	}
+}
+
 func TestEvaluateKeepsABrokenRefInACleanClone(t *testing.T) {
 	f := newFixture(t)
 	writeFile(t, filepath.Join(f.clone, ".git", "refs", "heads", "broken"), "0000\n")

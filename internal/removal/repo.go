@@ -241,6 +241,16 @@ func (e *Env) checkRepo(ctx context.Context, t repoTarget, rp repoPolicy) repoRe
 			keepAt(&errs, "the ref listing reported a problem: "+warn)
 			gitDirClass = ClassUnique
 		}
+		// Every worktree's HEAD counts like a ref, a detached one included,
+		// so a commit that only HEAD reaches is judged too.
+		heads, headErr := listWorktreeHeads(ctx, e, t.Dirs, opts)
+		if headErr != nil {
+			keepAt(&errs, headErr.Error())
+			gitDirClass = ClassUnique
+		}
+		for _, h := range heads {
+			refs = append(refs, ref{OID: h.OID, Name: h.label(t.Dirs.WorkTree)})
+		}
 		var unheld []string
 		if len(refs) > 0 {
 			tips, err := e.liveTips(ctx, t.URL)
@@ -547,6 +557,76 @@ func listRefs(ctx context.Context, e *Env, r repoDirs, o callOpts) ([]ref, strin
 	}
 	refs, err := parseRefs(out)
 	return refs, warn, err
+}
+
+// worktreeHead is one worktree's HEAD from git worktree list.
+type worktreeHead struct {
+	Path string
+	OID  string
+	// Main is the first entry git lists, the repository's own work tree.
+	Main bool
+}
+
+// label names a worktree's HEAD in evidence: "HEAD" for the repository's own
+// work tree, "HEAD of worktree <path>" for any other.
+func (h worktreeHead) label(workTree string) string {
+	if h.Main || (workTree != "" && filepath.Clean(h.Path) == filepath.Clean(workTree)) {
+		return "HEAD"
+	}
+	return "HEAD of worktree " + h.Path
+}
+
+// listWorktreeHeads runs worktree list --porcelain -z and returns every
+// worktree's HEAD that names a commit. A HEAD on an unborn branch names
+// none. A listing that fails or doesn't parse is an error, which keeps.
+func listWorktreeHeads(ctx context.Context, e *Env, r repoDirs, o callOpts) ([]worktreeHead, error) {
+	cmd, err := e.gitCommand(ctx, r, o, "worktree", "list", "--porcelain", "-z")
+	if err != nil {
+		return nil, err
+	}
+	out, err := run(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("listing worktrees: %v", err)
+	}
+	return parseWorktreeList(out)
+}
+
+// parseWorktreeList reads git worktree list --porcelain -z output: each
+// worktree is a run of NUL-terminated "<label> [<value>]" fields starting
+// with "worktree <path>", and an empty field ends it.
+func parseWorktreeList(out []byte) ([]worktreeHead, error) {
+	if len(out) == 0 {
+		return nil, errors.New("worktree listing is empty")
+	}
+	if !bytes.HasSuffix(out, []byte("\x00\x00")) {
+		return nil, errors.New("worktree listing does not end a record")
+	}
+	var heads []worktreeHead
+	for i, block := range strings.Split(string(out[:len(out)-2]), "\x00\x00") {
+		fields := strings.Split(block, "\x00")
+		path, ok := strings.CutPrefix(fields[0], "worktree ")
+		if !ok || path == "" {
+			return nil, fmt.Errorf("worktree listing has a record that does not parse: %q", block)
+		}
+		h := worktreeHead{Path: path, Main: i == 0}
+		for _, f := range fields[1:] {
+			label, value, _ := strings.Cut(f, " ")
+			switch label {
+			case "HEAD":
+				if !isObjectID(value) {
+					return nil, fmt.Errorf("worktree listing has a HEAD that does not parse: %q", f)
+				}
+				h.OID = value
+			case "branch", "detached", "bare", "locked", "prunable":
+			default:
+				return nil, fmt.Errorf("worktree listing has a field that does not parse: %q", f)
+			}
+		}
+		if h.OID != "" && strings.Trim(h.OID, "0") != "" {
+			heads = append(heads, h)
+		}
+	}
+	return heads, nil
 }
 
 // listStashes runs stash list and returns each entry's name.

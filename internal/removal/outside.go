@@ -166,6 +166,7 @@ func checkOutside(ctx context.Context, u Unit, p Policy, s *evalState) []Check {
 	gen := s.generated(u.InstancePath)
 
 	var unique []string
+	var unreadable []Check
 	err := filepath.WalkDir(u.InstancePath, func(path string, d fs.DirEntry, err error) error {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
@@ -179,9 +180,11 @@ func checkOutside(ctx context.Context, u Unit, p Policy, s *evalState) []Check {
 		}
 		slash := filepath.ToSlash(rel)
 		if err != nil {
-			// The repository check's walk read the same entry and keeps
-			// the unit with the error; here it is only classed.
+			// An entry this walk can't read keeps the unit here, whatever
+			// the repository check's walk saw: it may have turned
+			// unreadable between the two.
 			s.classes.add(slash, ClassUnique, "")
+			unreadable = append(unreadable, Check{Paths: []string{slash}, Evidence: fmt.Sprintf("unreadable: %s: %s", slash, errText(err))})
 			if d != nil && d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -252,6 +255,7 @@ func checkOutside(ctx context.Context, u Unit, p Policy, s *evalState) []Check {
 	if err != nil {
 		keeps = append(keeps, Check{Evidence: fmt.Sprintf("the walk outside the repositories stopped: %v", err)})
 	}
+	keeps = append(keeps, unreadable...)
 	if len(unique) > 0 {
 		keeps = append(keeps, Check{Paths: unique, Evidence: "files outside every repository: " + nameSome(unique)})
 	}

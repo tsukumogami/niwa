@@ -227,6 +227,26 @@ func parseID(s string) (int, error) {
 	return strconv.Atoi(s)
 }
 
+// acceptLsof decides whether an lsof run gave a listing. Exit 0 is a listing
+// when its output parses. lsof exits 1 when it couldn't list some files and
+// still prints what it could; that is accepted only when the output parses
+// in full, every set complete, and otherwise the listing failed. Any other
+// exit is no listing.
+func acceptLsof(code int, out []byte) ([]Process, error) {
+	switch code {
+	case 0:
+		return parseLsof(out)
+	case 1:
+		procs, err := parseLsof(out)
+		if err != nil {
+			return nil, fmt.Errorf("lsof exited 1 and its output does not parse in full: %v", err)
+		}
+		return procs, nil
+	default:
+		return nil, fmt.Errorf("lsof exited %d", code)
+	}
+}
+
 // parseLsof reads lsof -n -P -w -F 0pRn output. With -F0 every field ends in
 // NUL and every set ends in a newline after its last field. A process set is
 // exactly p<pid> then R<ppid>; each file set after it is exactly f<fd> then

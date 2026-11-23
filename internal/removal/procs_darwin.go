@@ -55,19 +55,19 @@ func (e *Env) readProcesses(ctx context.Context) ([]Process, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	code := 0
 	if err := cmd.Run(); err != nil {
-		// lsof exits 1 when some files couldn't be listed and still prints
-		// everything it could; any other failure is no listing.
 		var ee *exec.ExitError
-		if ctx.Err() != nil || !errors.As(err, &ee) || ee.ExitCode() != 1 || stdout.Len() == 0 {
+		if ctx.Err() != nil || !errors.As(err, &ee) || ee.ExitCode() != 1 {
 			msg := lastLine(stderr.String())
 			if msg == "" {
 				msg = err.Error()
 			}
 			return nil, fmt.Errorf("lsof: %s", msg)
 		}
+		code = 1
 	}
-	procs, err := parseLsof(stdout.Bytes())
+	procs, err := acceptLsof(code, stdout.Bytes())
 	if err != nil {
 		return nil, err
 	}
