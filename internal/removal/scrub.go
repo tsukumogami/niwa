@@ -165,6 +165,10 @@ func stripEscapes(s string) string {
 	return b.String()
 }
 
+// secretKey is a key that names a secret: any word holding token, secret,
+// password, passwd, key, auth or credential.
+const secretKey = `[A-Za-z0-9_.-]*(?:token|secret|password|passwd|key|auth|credential)[A-Za-z0-9_.-]*`
+
 var (
 	// urlUserinfo is a URL's userinfo, up to the last @ before the host.
 	urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/?#\s]*@`)
@@ -190,10 +194,18 @@ var (
 	// bearerValue is the word after Bearer.
 	bearerValue = regexp.MustCompile(`(?i)\b(bearer\s+)[^\s,;"']+`)
 
+	// secretQuoted is a pair whose key names a secret and whose value is
+	// quoted: key="value", key = 'value', "key": "value", "key":"value".
+	// The whole quoted value goes, white space and all, and a quote that
+	// is never closed takes the rest of the text with it. With a quoted
+	// value a colon needs no white space after it.
+	secretQuoted = regexp.MustCompile(`(?i)(` + secretKey + `)(["']?\s*[=:]\s*)("[^"]*(?:"|$)|'[^']*(?:'|$))`)
+
 	// secretPair is a key=value or key: value pair whose key names a
-	// secret. A colon counts only when white space follows it, so the
+	// secret, with or without white space around the = or before the
+	// colon. A colon counts only when white space follows it, so the
 	// scheme of a URL in a configuration key isn't read as a pair.
-	secretPair = regexp.MustCompile(`(?i)([A-Za-z0-9_.-]*(?:token|secret|password|passwd|key|auth|credential)[A-Za-z0-9_.-]*)(=|:\s+)([^\s&;,"']+)`)
+	secretPair = regexp.MustCompile(`(?i)(` + secretKey + `)(\s*=\s*|\s*:\s+)([^\s&;,"']+)`)
 
 	// base64Run is a run of base64 characters long enough to be a key. The
 	// alphabet leaves out / and . so an ordinary path breaks into short
@@ -210,10 +222,20 @@ func scrubSecrets(s string) string {
 	s = skToken.ReplaceAllString(s, "${1}"+Redacted)
 	s = authorizationValue.ReplaceAllString(s, "${1}${2}"+Redacted)
 	s = bearerValue.ReplaceAllString(s, "${1}"+Redacted)
+	s = secretQuoted.ReplaceAllStringFunc(s, func(m string) string {
+		sub := secretQuoted.FindStringSubmatch(m)
+		value := sub[3]
+		quote := value[:1]
+		if len(value) > 1 && strings.HasSuffix(value, quote) {
+			return sub[1] + sub[2] + quote + Redacted + quote
+		}
+		return sub[1] + sub[2] + quote + Redacted
+	})
 	s = secretPair.ReplaceAllStringFunc(s, func(m string) string {
 		sub := secretPair.FindStringSubmatch(m)
-		if strings.HasSuffix(strings.ToLower(sub[1]), "authorization") {
-			// Already scrubbed above, with its scheme kept.
+		if strings.Contains(sub[2], ":") && strings.HasSuffix(strings.ToLower(sub[1]), "authorization") {
+			// An Authorization header, already scrubbed above with its
+			// scheme kept. Written with = it is a plain pair, and goes.
 			return m
 		}
 		return sub[1] + sub[2] + Redacted

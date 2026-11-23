@@ -112,6 +112,77 @@ func TestScrubEvidenceRedactsSecretNamedPairs(t *testing.T) {
 	}
 }
 
+func TestScrubEvidenceRedactsAnAuthorizationPairWrittenWithEquals(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"authorization=secret", "authorization=[redacted]"},
+		{"Authorization=secret rest", "Authorization=[redacted] rest"},
+		{"https://host/r?authorization=secret&x=1", "https://host/r?authorization=[redacted]&x=1"},
+		{"proxy_authorization = secret", "proxy_authorization = [redacted]"},
+		// The colon form is the header, scrubbed with its scheme kept.
+		{"Authorization: Bearer abc", "Authorization: Bearer [redacted]"},
+		{"authorization: basic xyz", "authorization: basic [redacted]"},
+		{"authorization : opaque", "authorization : [redacted]"},
+	} {
+		got := ScrubEvidence(tc.in, 400)
+		if got != tc.want {
+			t.Errorf("ScrubEvidence(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		for _, secret := range []string{"secret", "abc", "xyz", "opaque"} {
+			if strings.Contains(got, secret) {
+				t.Errorf("ScrubEvidence(%q) = %q; it keeps %q", tc.in, got, secret)
+			}
+		}
+	}
+}
+
+func TestScrubEvidenceRedactsSecretPairsWithSpacesQuotesAndJSON(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		// White space around = and before the colon.
+		{"token = abc", "token = [redacted]"},
+		{"token =abc", "token =[redacted]"},
+		{"password : abc", "password : [redacted]"},
+		{"api_key= abc rest", "api_key= [redacted] rest"},
+		// A quoted value goes whole, white space and all.
+		{`token="abc"`, `token="[redacted]"`},
+		{`token='abc'`, `token='[redacted]'`},
+		{`secret: "abc def"`, `secret: "[redacted]"`},
+		{`password = 'hunter two' rest`, `password = '[redacted]' rest`},
+		{`token="never closed and more`, `token="[redacted]`},
+		// The JSON form, with or without white space after the colon.
+		{`"token": "value"`, `"token": "[redacted]"`},
+		{`{"api_key":"value","x":1}`, `{"api_key":"[redacted]","x":1}`},
+		{`{'secret': 'value'}`, `{'secret': '[redacted]'}`},
+		{`"authorization": "Bearer abc"`, `"authorization": "[redacted]"`},
+	} {
+		got := ScrubEvidence(tc.in, 400)
+		if got != tc.want {
+			t.Errorf("ScrubEvidence(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		for _, secret := range []string{"abc", "def", "value", "hunter", "never closed"} {
+			if strings.Contains(got, secret) {
+				t.Errorf("ScrubEvidence(%q) = %q; it keeps %q", tc.in, got, secret)
+			}
+		}
+	}
+	sha1 := "0f3a9c41b7e2d58a6c0b91e4f27d3a8c5e6b1d09"
+	for _, keep := range []string{
+		"key points",
+		"monkey business",
+		"the key points are these",
+		"a monkey business plan",
+		"HEAD at " + sha1,
+		`commit "` + sha1 + `"`,
+		"repository configuration names a program: credential.https://example.com.helper",
+		"credential.https://example.com",
+		`a "quoted" word`,
+		"name = value",
+	} {
+		if got := ScrubEvidence(keep, 400); got != keep {
+			t.Errorf("ScrubEvidence(%q) = %q; want it unchanged", keep, got)
+		}
+	}
+}
+
 func TestScrubEvidenceRedactsLongMixedBase64(t *testing.T) {
 	mixed32 := "aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW"
 	if len(mixed32) != 32 {
