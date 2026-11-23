@@ -1,4 +1,4 @@
-.PHONY: build test build-test test-functional test-functional-critical test-functional-claude-integration test-authority test-install test-live clean
+.PHONY: build test build-test test-functional test-functional-critical test-functional-claude-integration test-functional-mirror-repair test-functional-plugin-release-hold test-authority test-install test-live clean
 
 # Build the niwa binary.
 build:
@@ -47,6 +47,24 @@ test-functional-critical: build-test
 # it uses the CLI's existing login; under CI it also requires ANTHROPIC_API_KEY.
 test-functional-claude-integration: build-test
 	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_TAGS=@claude-integration go test -v -timeout $(FUNCTIONAL_TIMEOUT) ./test/functional/... $(LOCK_HELD)
+
+# Run the mirror-repair features: a deleted host mirror restored by an
+# ordinary command, with borrowers niwa create makes in the test build,
+# a mirror whose repo URL changes spelling or remote, the old stores a
+# restore keeps until no clone on disk names them, and the mirror's network
+# calls keeping the user's remote-access variables (a remote reached only
+# through GIT_SSH_COMMAND among them). The full suite runs them too; this is
+# the reviewer's one-line check.
+test-functional-mirror-repair: build-test
+	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_PATHS=features/mirror-repair.feature:features/mirror-remote-identity.feature:features/mirror-retention.feature:features/mirror-network-env.feature \
+	go test -v -count=1 -timeout $(FUNCTIONAL_TIMEOUT) -run TestFeatures ./test/functional/... $(LOCK_HELD)
+
+# Run the plugin-release-hold feature: each github marketplace release held
+# once per workspace on the host, instances linking to it. The full suite runs
+# it too; this is the reviewer's one-line check.
+test-functional-plugin-release-hold: build-test
+	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_PATHS=features/plugin-release-hold.feature \
+	go test -v -count=1 -timeout $(FUNCTIONAL_TIMEOUT) -run TestFeatures ./test/functional/... $(LOCK_HELD)
 
 # Run the authority tests: the internal/authority package in full, the
 # authority tests of the packages that call it (and the static checks on

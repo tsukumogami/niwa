@@ -14,9 +14,14 @@ package workspace
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+
+	"github.com/tsukumogami/niwa/internal/hostdir"
+	"github.com/tsukumogami/niwa/internal/mirror"
+	"github.com/tsukumogami/niwa/internal/pluginstore"
 )
 
 // DestroyWorkspaceOpts configures the workspace-wipe operation.
@@ -48,6 +53,17 @@ type DestroyWorkspaceOpts struct {
 	// immediately before the workspace root is removed. An error keeps the
 	// root and is returned.
 	BeforeRootRemoval func() error
+
+	// Home is the developer's home, where the workspace's host plugin store
+	// lives. When set, the store is removed with the workspace unless a kept
+	// instance still links into it. Empty leaves everything under ~/.niwa
+	// alone.
+	Home string
+
+	// StoreOut, if set, receives the line saying the plugin store was kept
+	// for the kept instances, with its path, and a line for each mirror kept
+	// and each store directory left, with its path and why.
+	StoreOut io.Writer
 }
 
 // UnlistedInstance returns the name of an instance under workspaceRoot whose
@@ -85,6 +101,11 @@ func UnlistedInstance(workspaceRoot string, listed []string) (string, error) {
 //     withdraw the recorded Claude trust grant → RemoveAll(instanceDir).
 //  4. After all instances are removed, refuse if an unlisted instance is
 //     now on disk, run opts.BeforeRootRemoval, then RemoveAll(workspaceRoot).
+//  5. With opts.Home set, remove each of the workspace's mirrors unless a
+//     kept instance borrows from it, its lock is held or kept/ can't be read
+//     (each kept mirror is reported on opts.StoreOut with its path and why),
+//     then the plugin store unless a kept instance remains, then the key
+//     directory if that leaves it empty.
 //
 // Per-instance synchronous ordering preserves resumability on partial
 // failure: if step 3 panics or returns an error mid-loop, the
@@ -101,6 +122,15 @@ func DestroyWorkspace(workspaceRoot string, opts DestroyWorkspaceOpts) error {
 	}
 	if _, err := os.Stat(abs); err != nil {
 		return fmt.Errorf("workspace root: %w", err)
+	}
+	// The store's key comes from the root's canonical path, which can't be
+	// worked out once the root is gone.
+	var keyDir, storeDir string
+	var mirrors mirror.Teardown
+	if opts.Home != "" {
+		keyDir = hostdir.WorkspaceDir(opts.Home, abs)
+		storeDir = pluginstore.Dir(opts.Home, abs)
+		mirrors = mirror.NewTeardown(opts.Home, abs)
 	}
 
 	var instances []string
@@ -176,9 +206,49 @@ func DestroyWorkspace(workspaceRoot string, opts DestroyWorkspaceOpts) error {
 		return fmt.Errorf("removing workspace root: %w", err)
 	}
 
+	if keyDir != "" {
+		// The mirrors go before the plugin store, whose removal ends by
+		// removing the key directory when it's empty: the kept instances
+		// are the only borrowers left, so the strict walk of kept/ decides.
+		mirrors.Remove(func() ([]string, error) { return hostdir.StrictKeptClones(keyDir) }, opts.StoreOut)
+		if err := removeWorkspacePluginStore(keyDir, storeDir, opts.StoreOut); err != nil {
+			return err
+		}
+	}
+
 	if opts.ProgressOut != nil {
 		fmt.Fprintf(opts.ProgressOut, "Destroyed workspace: %s\n", abs)
 	}
 
+	return nil
+}
+
+// removeWorkspacePluginStore removes the workspace's plugin store once its
+// root is gone, when ~/.niwa/w-<key>/kept/ is absent or empty: no instance
+// on disk can link into it then. With kept instances, or a kept/ that can't
+// be read, the store stays and out is told where. The key directory is then
+// removed only if nothing else is left in it, so the mirrors beside the
+// store stay.
+func removeWorkspacePluginStore(keyDir, storeDir string, out io.Writer) error {
+	if _, err := os.Lstat(storeDir); err == nil {
+		kept, err := os.ReadDir(filepath.Join(keyDir, hostdir.KeptDirName))
+		if (err == nil && len(kept) == 0) || os.IsNotExist(err) {
+			// A held release is read-only; its directories get their write
+			// bits back first.
+			_ = filepath.WalkDir(storeDir, func(p string, d fs.DirEntry, err error) error {
+				if err == nil && d.IsDir() {
+					_ = os.Chmod(p, 0o700)
+				}
+				return nil
+			})
+			if err := os.RemoveAll(storeDir); err != nil {
+				return fmt.Errorf("removing the plugin store %s: %w", storeDir, err)
+			}
+		} else if out != nil {
+			fmt.Fprintf(out, "kept the plugin store at %s: kept instances still link into it\n", storeDir)
+		}
+	}
+	// This fails, harmlessly, unless the directory is empty.
+	_ = os.Remove(keyDir)
 	return nil
 }

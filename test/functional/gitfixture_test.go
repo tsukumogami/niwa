@@ -70,6 +70,12 @@ func fixtureGitEnv() []string {
 // when non-nil, adds the GIT_DIR/GIT_WORK_TREE (and identity) vars that the
 // scoped variants need; it receives the already-resolved directory.
 func runFixtureGit(dir string, pinEnv func(absDir string) []string, args ...string) ([]byte, error) {
+	return runFixtureGitStdin(dir, pinEnv, "", args...)
+}
+
+// runFixtureGitStdin is runFixtureGit with stdin given to git, for the few
+// commands that read their input there.
+func runFixtureGitStdin(dir string, pinEnv func(absDir string) []string, stdin string, args ...string) ([]byte, error) {
 	absDir, err := sandboxPath(dir)
 	if err != nil {
 		return nil, err
@@ -80,6 +86,7 @@ func runFixtureGit(dir string, pinEnv func(absDir string) []string, args ...stri
 	if pinEnv != nil {
 		cmd.Env = append(cmd.Env, pinEnv(absDir)...)
 	}
+	cmd.Stdin = strings.NewReader(stdin)
 	return cmd.CombinedOutput()
 }
 
@@ -121,4 +128,12 @@ func workTreeEnv(absDir string) []string {
 		"GIT_DIR=" + filepath.Join(absDir, ".git"),
 		"GIT_WORK_TREE=" + absDir,
 	}
+}
+
+// fixtureGitBareStdin is fixtureGitBare with stdin given to git, such as an
+// ordered object list for git pack-objects.
+func fixtureGitBareStdin(repoPath, stdin string, args ...string) ([]byte, error) {
+	return runFixtureGitStdin(repoPath, func(absDir string) []string {
+		return []string{"GIT_DIR=" + absDir}
+	}, stdin, args...)
 }

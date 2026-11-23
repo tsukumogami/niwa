@@ -126,6 +126,7 @@ func deepCopyRepos(in map[string]config.RepoOverride) map[string]config.RepoOver
 			SetupDir:         ov.SetupDir,
 			ReadEnvExample:   ov.ReadEnvExample,
 			WorktreeSetup:    ov.WorktreeSetup,
+			ShareGitHistory:  cloneBoolPtr(ov.ShareGitHistory),
 			EnvExamplePolicy: deepCopyEnvExamplePolicy(ov.EnvExamplePolicy),
 			EnvOutput:        deepCopyEnvOutput(ov.EnvOutput),
 		}
@@ -305,4 +306,15 @@ func cloneHooks(in config.HooksConfig) config.HooksConfig {
 		out[event] = cp
 	}
 	return out
+}
+
+// cloneBoolPtr returns a new pointer holding *in, or nil. share_git_history
+// is copied through it rather than by pointer so a change to the copy's value
+// can't reach the caller's config, which the resolver never mutates.
+func cloneBoolPtr(in *bool) *bool {
+	if in == nil {
+		return nil
+	}
+	v := *in
+	return &v
 }

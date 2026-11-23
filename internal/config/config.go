@@ -2,7 +2,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -445,6 +447,50 @@ type WorkspaceMeta struct {
 	// would put it inside a table overlays do merge into, and the guarantee
 	// would then rest on a check someone could later forget.
 	StrictSecrets *bool `toml:"strict_secrets,omitempty"`
+	// SharePluginReleases controls whether the workspace's new instances link
+	// their github marketplaces to releases held once per workspace root.
+	// nil means on. With it set to false, a marketplace an instance does not
+	// hold yet is fetched into the instance at its ref, as niwa did before the
+	// shared store. It governs placement and linking of new marketplaces
+	// only: an instance that already links into the store keeps its link and
+	// keeps being repaired, and the sweep of unlinked releases still runs. It
+	// lives on [workspace], which the overlay merge never assigns, so only the
+	// workspace's own config sets it.
+	SharePluginReleases *bool `toml:"share_plugin_releases,omitempty"`
+	// ShareGitHistory controls whether the workspace's new clones borrow
+	// objects from the host's per-repo mirror instead of copying the whole
+	// history. nil means on. A repo's own RepoOverride.ShareGitHistory wins
+	// over this value in both directions; ShareGitHistoryEnabled is the
+	// cascade. The setting parses in every build, but no release build
+	// borrows yet: internal/workspace's borrowEnabled ANDs the cascade with a
+	// build-tag constant that is false outside the functional suite's test
+	// build, whatever this says.
+	ShareGitHistory *bool `toml:"share_git_history,omitempty"`
+}
+
+// SharePluginReleasesEnabled reports whether new instances link their github
+// marketplaces into the shared store: true unless share_plugin_releases is
+// set to false.
+func (w WorkspaceMeta) SharePluginReleasesEnabled() bool {
+	return w.SharePluginReleases == nil || *w.SharePluginReleases
+}
+
+// ShareGitHistoryEnabled reports whether the named repo's new clones should
+// borrow objects from the host mirror: the repo's share_git_history when it
+// is set, else the workspace's, else true. A nil config has neither set and
+// answers true. Callers in internal/workspace go through borrowEnabled,
+// which also holds borrowing off in every release build until it ships.
+func (c *WorkspaceConfig) ShareGitHistoryEnabled(repo string) bool {
+	if c == nil {
+		return true
+	}
+	if override, ok := c.Repos[repo]; ok && override.ShareGitHistory != nil {
+		return *override.ShareGitHistory
+	}
+	if c.Workspace.ShareGitHistory != nil {
+		return *c.Workspace.ShareGitHistory
+	}
+	return true
 }
 
 // ResolveStrictSecrets decides whether a run fails on a shortfall, from the
@@ -602,6 +648,11 @@ type RepoOverride struct {
 	// to gate itself, which is what lets one scripts/setup/ directory hold both
 	// a per-tree dependency install and a shared-state git-hooks installer.
 	WorktreeSetup *bool `toml:"worktree_setup,omitempty"`
+	// ShareGitHistory overrides the workspace-level share_git_history
+	// setting for this repo, in both directions. nil means inherit from
+	// WorkspaceMeta.ShareGitHistory. A repo set to false gets a full clone
+	// and no mirror is seeded for it.
+	ShareGitHistory *bool `toml:"share_git_history,omitempty"`
 	// EnvExamplePolicy is the per-repo .env.example failure policy. nil means
 	// inherit from the workspace policy. This is a project-scope position: its
 	// Vars sub-table is honored.
@@ -650,13 +701,38 @@ type RepoContentEntry struct {
 
 // Load parses a workspace.toml file at the given path and returns the config
 // along with any non-fatal warnings (e.g., unknown fields).
+//
+// A file that's missing may only be missing for a moment: a config refresh
+// renames the directory holding it out of the way before it renames the new
+// snapshot in. When the directory has a snapshot lock beside it, so a refresh
+// has run there, Load waits for the lock and reads once more. It never creates
+// a lock file, and a second miss is reported as the plain not-exist error.
 func Load(path string) (*ParseResult, error) {
 	data, err := os.ReadFile(path)
+	if err != nil && errors.Is(err, fs.ErrNotExist) {
+		data, err = readAfterSnapshotSwap(path, err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)
 	}
 
 	return Parse(data)
+}
+
+// readAfterSnapshotSwap waits for any refresh holding the snapshot lock of
+// path's directory and reads path again. Without a lock file beside the
+// directory no refresh has ever run there, so it returns missErr unchanged.
+func readAfterSnapshotSwap(path string, missErr error) ([]byte, error) {
+	dir := filepath.Dir(path)
+	if _, err := os.Lstat(SnapshotLockPath(dir)); err != nil {
+		return nil, missErr
+	}
+	release, err := AcquireSnapshotLock(dir)
+	if err != nil {
+		return nil, err
+	}
+	release()
+	return os.ReadFile(path)
 }
 
 // Parse decodes TOML bytes into a WorkspaceConfig and validates it.

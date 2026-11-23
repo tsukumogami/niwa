@@ -67,9 +67,10 @@ type Declaration struct {
 // The Codex column states what niwa delivers today and nothing more. Directory
 // trust is the first row it delivers: the entry that makes every later
 // trust-gated row possible arrives with the writer that produces it, in the
-// same change. Fifteen Codex rows are implemented and twelve are unavailable:
-// ten inherent to the agent, and two, rows 26 and 27, carrying the not-built
-// kind -- the rows where niwa owes this column something a route exists for.
+// same change. Fifteen Codex rows are implemented and thirteen are unavailable:
+// ten inherent to the agent, and three, rows 26, 27 and 28, carrying the
+// not-built kind -- the rows where niwa owes this column something a route
+// exists for.
 // Every implemented row flipped in the change that delivered it, never before:
 // writing a future state down early would make the table a plan rather than a
 // record, which is the failure this contract exists to prevent.
@@ -397,7 +398,19 @@ var declarations = []Declaration{
 		Reason: "A Codex launch has no settings document to carry the attributes, and whether its telemetry reads them from the launch environment is unverified.",
 	},
 
-	// Row 27: a dispatched worker launched with a named profile applied. The
+	// Row 27: a dispatched worker held to its brief's declared first read.
+	// The delivery is a PreToolUse hook in the launch settings document niwa
+	// dispatch already builds, so it exists only where niwa launches the
+	// worker, which is the edge to row 22.
+	{Capability: DispatchFirstReadGuard, Agent: agent.AgentClaude, State: StateImplemented, Requires: []Capability{DispatchLaunch}},
+	{
+		Capability: DispatchFirstReadGuard, Agent: agent.AgentCodex,
+		State:  StateUnavailable,
+		Kind:   ReasonNotBuilt,
+		Reason: "A Codex launch has no settings document to carry the guard's hook.",
+	},
+
+	// Row 28: a dispatched worker launched with a named profile applied. The
 	// delivery is the deny list, the bundled-skills switch and the connectors
 	// env value in the launch settings document niwa dispatch already builds,
 	// so it exists only where niwa launches the worker, which is the edge to

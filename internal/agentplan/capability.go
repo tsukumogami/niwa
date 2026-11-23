@@ -146,10 +146,14 @@ const (
 	// developer's own settings set (row 26).
 	DispatchResourceAttributes
 
+	// DispatchFirstReadGuard is a dispatched background worker held to its
+	// brief's declared first read by a PreToolUse guard (row 27).
+	DispatchFirstReadGuard
+
 	// DispatchProfile is a dispatched background worker launched with a named
 	// profile from the workspace config applied: tools denied by name, bundled
 	// skills off and the account's connectors left unloaded, so the worker
-	// starts with less in its context (row 27).
+	// starts with less in its context (row 28).
 	DispatchProfile
 )
 
@@ -213,6 +217,7 @@ var catalog = []capabilityRow{
 	{GitExcludeBookkeeping, "git-exclude-bookkeeping", RouteProcedure},
 	{DispatchInboundAcceptance, "dispatch-inbound-acceptance", RouteLaunch},
 	{DispatchResourceAttributes, "dispatch-resource-attributes", RouteLaunch},
+	{DispatchFirstReadGuard, "dispatch-first-read-guard", RouteLaunch},
 	{DispatchProfile, "dispatch-profile", RouteLaunch},
 }
 

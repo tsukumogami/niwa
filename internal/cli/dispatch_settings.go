@@ -29,7 +29,7 @@ import (
 // settings files, so anything a caller could influence here would let that
 // caller rewrite the worker's configuration.
 //
-// Three values are exceptions, and they are named here so they stay the only
+// Four values are exceptions, and they are named here so they stay the only
 // ones. The first is the launch environment contributor's "env" key, a
 // launchEnv (dispatch_env.go) that can marshal to nothing but a JSON object of
 // string values. Its keys come from these places and no others:
@@ -66,7 +66,14 @@ import (
 // maxLaunchMCPServers are sent, so a hand-edited state file can't push a
 // key-like or instruction-like string into the document.
 //
-// The third is a dispatch profile's permissions key, a profileDenyList that
+// The third exception is the first-read guard's hooks key
+// (firstReadGuardHooks), whose one non-constant value is the hook command's
+// fallback path: niwa's own os.Executable(), single-quoted by
+// guardedNiwaHookCommand. The brief's path and line count never enter the
+// document; the dispatch records them in the instance, where the guard reads
+// them.
+//
+// The fourth is a dispatch profile's permissions key, a profileDenyList that
 // can marshal to nothing but {"deny":[...]}. Its names come from the
 // workspace config's [session.dispatch_profiles], which config load accepted
 // only as names passing config.ValidateProfileToolName, and the list checks

@@ -91,6 +91,7 @@ var gapSubjects = map[Capability]string{
 	GitExcludeBookkeeping:      "Git-exclude coverage for the files niwa writes into a repository",
 	DispatchInboundAcceptance:  "Accepting messages from other sessions without an approval prompt",
 	DispatchResourceAttributes: "Lineage resource attributes on a dispatched worker's telemetry",
+	DispatchFirstReadGuard:     "A guard holding a dispatched worker to its brief's declared first read",
 	DispatchProfile:            "Dispatch profiles that trim a dispatched worker's tools, skills and connectors",
 }
 

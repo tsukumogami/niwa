@@ -188,6 +188,9 @@ func resetDispatchFlags(t *testing.T) {
 	dispatchBrief = ""
 	dispatchSkill = ""
 	dispatchProfile = ""
+	prevFirstRead := dispatchFirstRead
+	dispatchFirstRead = 0
+	t.Cleanup(func() { dispatchFirstRead = prevFirstRead })
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "")
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")

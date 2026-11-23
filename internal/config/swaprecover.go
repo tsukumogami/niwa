@@ -25,11 +25,10 @@ var restoreNoticeOut io.Writer = os.Stderr
 // real directory (a symlink is never followed or moved).
 //
 // It never deletes anything, so calling it from a path that only reads, such
-// as Discover, is safe. If another process is between its two renames at that
-// moment, the restore puts the previous snapshot back under it: this side
-// reports a restore of a swap that wasn't really dead, and the other side's
-// second rename fails, its rollback fails too, and it returns an error naming
-// both. The previous snapshot stays in place and nothing is lost.
+// as Discover, is safe. It can't tell a dead swap from one another process is
+// still doing, so every caller holds the directory's snapshot lock (see
+// AcquireSnapshotLock): a live swap holds the same lock, and the caller only
+// gets here once that swap has finished or its process has died.
 func RestoreInterruptedSwap(dir string) (bool, error) {
 	if _, err := os.Lstat(dir); err == nil {
 		return false, nil

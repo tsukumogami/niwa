@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/config"
 )
 
 // sessionUUIDRe validates Claude session IDs against the canonical UUID
@@ -165,11 +167,31 @@ func sessionMappingPath(workspaceRoot, sessionID string) (string, error) {
 	return filepath.Join(sessionsDir(workspaceRoot), sessionID+".json"), nil
 }
 
+// LockSessionStore takes the lock that guards the session mapping store under
+// workspaceRoot and returns its release. The store lives inside the workspace
+// config dir (.niwa), which a config refresh copies into its staging directory
+// and then swaps out whole, so the store is guarded by that config dir's
+// snapshot lock, <root>/.niwa.lock. Holding it means no refresh is between its
+// copy and its swap. workspaceRoot must exist.
+//
+// A process holding a snapshot lock must not call this (or any mapping writer)
+// for the same root: the second acquisition would wait on the first.
+func LockSessionStore(workspaceRoot string) (func(), error) {
+	release, err := config.AcquireSnapshotLock(filepath.Join(workspaceRoot, StateDir))
+	if err != nil {
+		return nil, fmt.Errorf("locking the session mapping store: %w", err)
+	}
+	return release, nil
+}
+
 // WriteSessionMapping persists m under the workspace root at
 // .niwa/sessions/<session_id>.json. The session id is validated against the
 // UUID format before any path is constructed; an invalid id is rejected
 // without writing. The write is atomic (write-temp-then-rename). When
 // m.Created is zero it is stamped to now (UTC).
+//
+// The write holds the session store lock (LockSessionStore), so it waits for
+// a config refresh in progress and lands in the .niwa that refresh leaves.
 func WriteSessionMapping(workspaceRoot string, m SessionMapping) error {
 	target, err := sessionMappingPath(workspaceRoot, m.SessionID)
 	if err != nil {
@@ -178,6 +200,18 @@ func WriteSessionMapping(workspaceRoot string, m SessionMapping) error {
 	if m.Created.IsZero() {
 		m.Created = time.Now().UTC()
 	}
+
+	// The lock file sits in workspaceRoot. Creating the root here keeps a
+	// write to a root that doesn't exist yet working as before, when the
+	// MkdirAll below created it.
+	if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
+		return fmt.Errorf("creating sessions directory: %w", err)
+	}
+	release, err := LockSessionStore(workspaceRoot)
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	if err := os.MkdirAll(sessionsDir(workspaceRoot), 0o700); err != nil {
 		return fmt.Errorf("creating sessions directory: %w", err)
@@ -295,11 +329,24 @@ func NewestMappingPerInstance(mappings []SessionMapping) map[string]SessionMappi
 // root. The session id is validated before any path is constructed.
 // Removing a mapping that does not exist is not an error, so teardown and
 // the reaper can both call it without racing on who deletes first.
+//
+// The delete holds the session store lock (LockSessionStore): without it, a
+// mapping removed after a refresh copied the store would come back with the
+// swap.
 func DeleteSessionMapping(workspaceRoot, sessionID string) error {
 	path, err := sessionMappingPath(workspaceRoot, sessionID)
 	if err != nil {
 		return err
 	}
+	if _, err := os.Lstat(workspaceRoot); os.IsNotExist(err) {
+		// No workspace, so no mapping and nothing a refresh could restore.
+		return nil
+	}
+	release, err := LockSessionStore(workspaceRoot)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("deleting session mapping %s: %w", sessionID, err)
 	}

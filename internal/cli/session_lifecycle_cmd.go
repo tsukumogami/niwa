@@ -8,12 +8,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/cli/sessionattach"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/hostdir"
+	"github.com/tsukumogami/niwa/internal/mirror"
 	"github.com/tsukumogami/niwa/internal/workspace"
 	"github.com/tsukumogami/niwa/internal/worktree"
 )
@@ -188,6 +191,11 @@ func runSessionCreate(cmd *cobra.Command, args []string) error {
 	if len(args) >= 2 {
 		purpose = args[1]
 	}
+
+	// The repo's host mirror is checked before `git worktree add` runs: a
+	// clone that borrows from a deleted mirror has no objects to check the
+	// worktree out from. Whatever the check finds, the worktree is attempted.
+	checkWorktreeMirror(cmd.Context(), instanceRoot, repo, cmd.ErrOrStderr())
 
 	sessionID, worktreePath, branch, err := worktree.CreateSession(context.Background(), worktree.CreateSessionParams{
 		InstanceRoot: instanceRoot,
@@ -917,3 +925,48 @@ func resolveWorktreeDelegation(instanceRoot string) (*workspace.WorktreeDelegati
 // worktree paths. The probe is a single fast subprocess; this is a hang guard,
 // not a performance budget.
 const worktreeProbeTimeout = 5 * time.Second
+
+// checkWorktreeMirror checks repo's host mirror for `niwa worktree create`,
+// restoring it when it's broken, and warns on stderr about a result other
+// than healthy in the form every mirror check prints. Whether the repo has a
+// mirror at all is told from the instance's own clone of repo; once it has
+// one, the borrowers the check and probe look at are every clone on disk
+// (hostdir.Clones), since a restore here replaces the store every instance
+// reads, and the strict walk (hostdir.StrictClones) is the scan that alone
+// can authorize removing a retired store. The workspace root is the
+// instance's parent, as for the pipeline's check. A repo with no mirror, or
+// a clone or home it can't find, checks nothing and writes nothing.
+func checkWorktreeMirror(ctx context.Context, instanceRoot, repo string, stderr io.Writer) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return
+	}
+	clone, err := findRepoDir(instanceRoot, repo)
+	if err != nil {
+		return
+	}
+	workspaceRoot := filepath.Dir(instanceRoot)
+	// The config is read for the URL only once the repo turns out to have a
+	// mirror; most worktrees are of repos that have none.
+	if len(mirror.Mirrored(home, workspaceRoot, []string{clone}, []mirror.Repo{{ID: repo}})) == 0 {
+		return
+	}
+	clones := hostdir.Clones(home, workspaceRoot)
+	if !slices.Contains(clones, clone) {
+		clones = append(clones, clone)
+	}
+	opts := mirror.Options{
+		Home:          home,
+		WorkspaceRoot: workspaceRoot,
+		Instances:     clones,
+		Scan:          func() ([]string, error) { return hostdir.StrictClones(home, workspaceRoot) },
+		Command:       mirrorCommandWorktree,
+	}
+	reporter := workspace.NewReporter(stderr)
+	for _, res := range mirror.EnsureHealthy(ctx, opts, mirrorRepos(workspaceRoot, []string{instanceRoot}, []string{repo})) {
+		workspace.ReportMirrorResult(reporter, res)
+	}
+}

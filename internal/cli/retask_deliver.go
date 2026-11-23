@@ -50,6 +50,10 @@ func (d resumeWakeDeliverer) Accepts(state workerState, callerKind string) bool 
 	if callerKind != retaskCallerCLI && callerKind != retaskCallerWatch {
 		return false
 	}
+	if state == liveBusy {
+		// Only the CLI's --interrupt stops a worker mid-turn.
+		return callerKind == retaskCallerCLI
+	}
 	return state == liveIdle || state == stoppedWithEntry
 }
 

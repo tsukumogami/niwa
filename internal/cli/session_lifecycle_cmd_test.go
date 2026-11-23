@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/cli/sessionattach"
+	"github.com/tsukumogami/niwa/internal/mirror"
 	"github.com/tsukumogami/niwa/internal/worktree"
 )
 
@@ -368,5 +370,103 @@ func TestSessionCommands_HaveCompletion(t *testing.T) {
 		if c.fn == nil {
 			t.Errorf("%s: ValidArgsFunction is nil, want a completion function", c.name)
 		}
+	}
+}
+
+// TestCheckWorktreeMirror_RestoresADeletedMirror: `niwa worktree create`'s
+// check finds the repo's mirror deleted, restores it from the URL the
+// instance's state records, logs as worktree, and warns once on stderr.
+func TestCheckWorktreeMirror_RestoresADeletedMirror(t *testing.T) {
+	h := setupHookMirror(t, true)
+	stable := mirror.StablePath(h.home, h.root, "app")
+	target, err := os.Readlink(stable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(stable); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(filepath.Dir(stable), target)); err != nil {
+		t.Fatal(err)
+	}
+	before := len(h.logLines(t))
+
+	var stderr bytes.Buffer
+	checkWorktreeMirror(context.Background(), filepath.Join(h.root, "inst"), "app", &stderr)
+
+	if got, err := os.Readlink(stable); err != nil || got == target {
+		t.Fatalf("the stable path after the check = %q (%v), want a link to a new store", got, err)
+	}
+	added := h.logLines(t)[before:]
+	if len(added) != 2 {
+		t.Fatalf("log lines added = %v, want a check and a restore line", added)
+	}
+	for _, line := range added {
+		if line["command"] != "worktree" || line["fault"] != "missing" || line["result"] != "restored" {
+			t.Fatalf("log line %v, want worktree, missing, restored", line)
+		}
+	}
+	if got := strings.TrimSpace(stderr.String()); strings.Count(got, "\n") != 0 || !strings.HasSuffix(got, "warning: mirror app: fault missing, result restored") {
+		t.Fatalf("stderr = %q, want one restore warning", got)
+	}
+}
+
+// TestCheckWorktreeMirror_NeverFetches: `niwa worktree create` only checks a
+// healthy mirror; it never brings it up to date from the remote.
+func TestCheckWorktreeMirror_NeverFetches(t *testing.T) {
+	h := setupHookMirror(t, true)
+	refs := h.mirrorRefs(t)
+	h.pushCommit(t)
+	before := len(h.logLines(t))
+
+	var stderr bytes.Buffer
+	checkWorktreeMirror(context.Background(), filepath.Join(h.root, "inst"), "app", &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want nothing", stderr.String())
+	}
+	if got := h.mirrorRefs(t); got != refs {
+		t.Fatalf("the check fetched: refs\n%s\nwere\n%s", got, refs)
+	}
+	h.requireOnlyAHealthyCheck(t, before, "worktree")
+}
+
+// TestCheckWorktreeMirror_NoMirrorWritesNothing: a repo nobody borrows for
+// gets no check, no log and no mirror directory.
+func TestCheckWorktreeMirror_NoMirrorWritesNothing(t *testing.T) {
+	h := setupHookMirror(t, false)
+	var stderr bytes.Buffer
+	checkWorktreeMirror(context.Background(), filepath.Join(h.root, "inst"), "app", &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want nothing", stderr.String())
+	}
+	if found, _ := filepath.Glob(filepath.Join(h.home, ".niwa", "w-*")); len(found) != 0 {
+		t.Fatalf("a repo with no mirror got %v", found)
+	}
+}
+
+// TestCheckWorktreeMirror_WarnsWhenTheLogCantBeWritten: a healthy mirror
+// whose log can't be written gets one warning on stderr; with a working log
+// the check prints nothing.
+func TestCheckWorktreeMirror_WarnsWhenTheLogCantBeWritten(t *testing.T) {
+	h := setupHookMirror(t, true)
+	path := h.replaceLogWithADirectory(t)
+
+	var stderr bytes.Buffer
+	checkWorktreeMirror(context.Background(), filepath.Join(h.root, "inst"), "app", &stderr)
+	got := strings.TrimSpace(stderr.String())
+	if strings.Count(got, "\n") != 0 || !strings.HasPrefix(got, "warning: mirror app: writing the mirror log failed:") {
+		t.Fatalf("stderr = %q, want one log-failed warning", got)
+	}
+	if info, err := os.Lstat(path); err != nil || !info.IsDir() {
+		t.Fatalf("the directory at the log's path was moved or removed: %v (%v)", info, err)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	stderr.Reset()
+	checkWorktreeMirror(context.Background(), filepath.Join(h.root, "inst"), "app", &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr with a working log = %q, want nothing", stderr.String())
 	}
 }

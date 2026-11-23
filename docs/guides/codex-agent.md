@@ -411,6 +411,8 @@ debt, and it's the one group that can shrink without the agent changing.
 - **Lineage resource attributes on a dispatched worker's telemetry.** A Codex
   launch has no settings document to carry the attributes, and whether its
   telemetry reads them from the launch environment is unverified.
+- **A guard holding a dispatched worker to its brief's declared first read.**
+  A Codex launch has no settings document to carry the guard's hook.
 - **Dispatch profiles that trim a dispatched worker's tools, skills and
   connectors.** A profile is spelled in Claude Code's tool names and
   connectors switch; a Codex profile needs its own spelling and its own
