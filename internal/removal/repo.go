@@ -111,8 +111,11 @@ func (e *Env) checkPrunedIndex(ctx context.Context, r foundRepo) []Check {
 
 // repoTarget is one repository the rule judges, wherever the walk found it.
 type repoTarget struct {
-	// Rel is the repository's path relative to Base, the instance.
-	Rel  string
+	// Rel names the repository in evidence: its path relative to the
+	// instance, or "job:"-prefixed in the job directory.
+	Rel string
+	// Base is the root the repository was found under, the instance or the
+	// job directory; the identity check looks for a link below it.
 	Base string
 	// Dirs is where its git calls run. An empty WorkTree judges a
 	// repository with no work tree, with --git-dir alone.

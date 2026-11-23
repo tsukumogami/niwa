@@ -754,12 +754,21 @@ func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 	return res.Reaped, err
 }
 
+// passHomeDir is the home directory a pass resolves the jobs root from. A
+// variable so a test can make it fail.
+var passHomeDir = os.UserHomeDir
+
 // passJobsRoot resolves a pass's jobs root once, as Claude Code resolves
 // it: under CLAUDE_CONFIG_DIR when the variable is set, ~/.claude/jobs
 // otherwise. The pass reads liveness and finds each unit's job directory
-// under this one root.
+// under this one root. A home directory that can't be resolved is an
+// error whatever the variable says, so the pass keeps every unit with the
+// reason named rather than guess where Claude Code keeps its sessions.
 func passJobsRoot() (string, error) {
-	home, _ := os.UserHomeDir()
+	home, err := passHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("the home directory can't be resolved: %v", err)
+	}
 	return removal.ResolveJobsRoot(os.LookupEnv, home)
 }
 

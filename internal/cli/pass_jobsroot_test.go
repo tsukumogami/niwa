@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -90,6 +91,47 @@ func TestPassJobsRoot_JudgesAGoneSessionsJobDirectoryUnderTheConfigDir(t *testin
 	out := f.stderr.String()
 	if !strings.Contains(out, "niwa: kept test-ws-pass:") || !strings.Contains(out, "job:notes.txt") || strings.Contains(out, "decoy") {
 		t.Errorf("reap output %q; want the kept line naming job:notes.txt", out)
+	}
+}
+
+func TestPassJobsRoot_KeepsEveryUnitWhenTheHomeDirectoryCantBeResolved(t *testing.T) {
+	// The error carries a token, which no output may show.
+	const token = "AKIAABCDEFGHIJKLMNOP"
+	for _, cfg := range []string{"", "set"} {
+		t.Run("config dir "+cfg, func(t *testing.T) {
+			f := newPassFixture(t)
+			if cfg == "set" {
+				t.Setenv(removal.ConfigDirVar, canonicalTempDir(t))
+			} else {
+				t.Setenv(removal.ConfigDirVar, "")
+			}
+			prev := passHomeDir
+			passHomeDir = func() (string, error) { return "", errors.New("$HOME is not defined " + token) }
+			t.Cleanup(func() { passHomeDir = prev })
+
+			text, _, err := runReapCommand(t, f.root, "--verdict-only")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(text, "test-ws-pass: keep\n") || !strings.Contains(text, "home directory can't be resolved") {
+				t.Errorf("verdict-only output:\n%s\nwant the unit kept, naming the home directory", text)
+			}
+			n, err := reapWorkspaceResolved(f.root, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			reapOpportunistically(f.root)
+			if n != 0 || len(*f.destroyed) != 0 {
+				t.Fatalf("reaped %d, destroyed %v; a home directory that can't be resolved removes nothing", n, *f.destroyed)
+			}
+			out := f.stderr.String()
+			if !strings.Contains(out, "niwa: kept test-ws-pass: liveness check:") || !strings.Contains(out, "home directory can't be resolved") {
+				t.Errorf("reap output %q; want a kept line naming the home directory", out)
+			}
+			if strings.Contains(text+out, token) {
+				t.Errorf("the token in the error reached the output:\n%s\n%s", text, out)
+			}
+		})
 	}
 }
 
