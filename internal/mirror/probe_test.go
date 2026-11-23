@@ -357,6 +357,121 @@ func TestRecover_TheFetchRunsUnderTheLockAfterTheSwap(t *testing.T) {
 	}
 }
 
+// requireHeld reports, with t.Errorf since it runs inside the probe and fetch
+// hooks, unless store is still on disk and the store record lists it as
+// linked and not retired. when names the hook in the report.
+func requireHeld(t *testing.T, f fixture, store, when string) {
+	t.Helper()
+	name := filepath.Base(store)
+	if _, err := os.Lstat(filepath.Join(f.mdir(), ".store", name, "objects")); err != nil {
+		t.Errorf("%s: the replaced store %s is gone (%v)", when, name, err)
+	}
+	rec, ok := readStores(f.mdir(), "app")
+	if !ok {
+		t.Errorf("%s: there's no readable store record", when)
+		return
+	}
+	i := rec.index(name)
+	if i < 0 {
+		t.Errorf("%s: the store record lists %+v, not %s", when, rec.Stores, name)
+		return
+	}
+	if e := rec.Stores[i]; !e.Linked || e.RetiredAt != "" {
+		t.Errorf("%s: the record's entry for %s = %+v, want linked and not yet retired", when, name, e)
+	}
+}
+
+// The store a restore replaces stays on disk, recorded as linked and not
+// retired, until the probe of the borrowers and the recovery by id are over;
+// only then is it retired, and only a later sweep removes it. The order isn't
+// visible from the outside: the probe reads the new store and the fetch the
+// remote, and a restore's store lines are logged after its restore line
+// whenever the store went. So the hooks look at the old store while the
+// probe and the fetch run.
+func TestRecover_TheReplacedStoreOutlivesTheProbeAndRecovery(t *testing.T) {
+	t.Run("rebuild", func(t *testing.T) {
+		f := newLostFixture(t, lostSetup{})
+		old := f.linkTarget(t)
+		damageHEAD(t, f.fixture)
+		probes := 0
+		setProbeHook(t, func(string) {
+			probes++
+			if target, err := os.Readlink(StablePath(f.home, f.root, "app")); err != nil || target == old {
+				t.Errorf("the probe ran before the swap: link %q (%v), old store %s", target, err, old)
+			}
+			requireHeld(t, f.fixture, old, "as the probe started")
+		})
+		res := f.ensure(t, f.opts())
+		if res.Outcome != OutcomeRestored || res.Err != nil || len(res.Unrecoverable) != 0 || probes != 1 {
+			t.Fatalf("result = %+v after %d probes, want restored with one probe and nothing lost", res, probes)
+		}
+		requireKeptRetired(t, f.fixture, old)
+	})
+
+	t.Run("rebuild whose probe finds a lost ref", func(t *testing.T) {
+		f := newLostFixture(t, lostSetup{})
+		old := f.linkTarget(t)
+		damageHEAD(t, f.fixture)
+		missing := randomID(t)
+		writeRef(t, f.b, "refs/heads/lost", missing)
+		probes, fetches := 0, 0
+		setProbeHook(t, func(string) {
+			probes++
+			requireHeld(t, f.fixture, old, "as the probe started")
+		})
+		setFetchHook(t, func(_ context.Context, _, _ string, ids []string) error {
+			fetches++
+			if !slices.Contains(ids, missing) {
+				t.Errorf("the fetch asked for %v, not the lost ref's %s", ids, missing)
+			}
+			requireHeld(t, f.fixture, old, "while the recovery fetched")
+			return nil
+		})
+		res := f.ensure(t, f.opts())
+		if res.Outcome != OutcomeRestored || res.Err != nil || probes != 1 || fetches == 0 {
+			t.Fatalf("result = %+v after %d probes and %d fetches, want restored with one probe and a fetch", res, probes, fetches)
+		}
+		if len(res.Unrecoverable) != 1 || res.Unrecoverable[0].Instance != f.b ||
+			res.Unrecoverable[0].Ref != "refs/heads/lost" || res.Unrecoverable[0].MissingCommit != missing {
+			t.Fatalf("unrecoverable = %+v, want refs/heads/lost in %s on %s", res.Unrecoverable, f.b, missing)
+		}
+		requireKeptRetired(t, f.fixture, old)
+	})
+
+	t.Run("relink", func(t *testing.T) {
+		// A restore whose last record write failed leaves the store it
+		// replaced linked and not retired beside the new one; a relink of the
+		// new one retires the old one, after its probe.
+		f := newLostFixture(t, lostSetup{})
+		old := f.linkTarget(t)
+		damageHEAD(t, f.fixture)
+		if res := f.ensure(t, f.opts()); res.Outcome != OutcomeRestored || res.Err != nil {
+			t.Fatalf("first restore = %+v", res)
+		}
+		current := f.linkTarget(t)
+		rec := recordOf(t, f.fixture)
+		rec.Stores[rec.index(filepath.Base(old))].RetiredAt = ""
+		writeRecord(t, f.fixture, rec)
+		if err := os.Remove(StablePath(f.home, f.root, "app")); err != nil {
+			t.Fatal(err)
+		}
+
+		probes := 0
+		setProbeHook(t, func(string) {
+			probes++
+			requireHeld(t, f.fixture, old, "as the relink's probe started")
+		})
+		res := f.ensure(t, f.opts())
+		if res.Outcome != OutcomeRestored || res.Err != nil || len(res.Unrecoverable) != 0 || probes != 1 {
+			t.Fatalf("result = %+v after %d probes, want a relink with one probe and nothing lost", res, probes)
+		}
+		if got := f.linkTarget(t); got != current {
+			t.Fatalf("link = %q, want a relink to %q", got, current)
+		}
+		requireKeptRetired(t, f.fixture, old)
+	})
+}
+
 func TestRecover_ARestoreThatFailsBeforeTheSwapProbesNothing(t *testing.T) {
 	for _, stage := range []string{stageClone, stageState, stageStore, stageLink, stageSwap} {
 		t.Run(stage, func(t *testing.T) {
