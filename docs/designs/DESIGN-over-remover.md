@@ -128,6 +128,29 @@ this design already says. `-z` separates the values with NUL bytes so a
 helper value can't be misread across a line break. Review found the
 literal command differed from the text here.
 
+### 2026-11-23 — A takeover has landed when the migration finished
+
+**What changed.** Decision 3 no longer reads a takeover as landed from
+koto's fence and `koto/superseded-carry-complete` alone. It has landed when
+the migration finished: every koto session of the unit is anchored outside
+the predecessor's instance (rebound into the successor's own worktree with
+its publish location rewritten, or superseded by a successor anchored
+elsewhere that holds the carry key), and nothing unique to the unit is left
+there, meaning no unpushed commit, no dirty tree and no file only that
+instance holds. The fence-and-key reading moves to the alternatives, and
+the summary and the open-question entry follow.
+
+**Why.** On 2026-11-23 the project owner ruled that a continuation is
+self-contained and a succession is a migration: the successor moves the
+unit's worktrees and koto sessions into its own instance and depends on
+nothing left in the predecessor's. A successor that continues by rebind
+writes no fence, and a finished carry says nothing about a session still
+anchored in the old instance or a branch only it holds, so the earlier
+reading could let the predecessor go with work the successor still needs.
+The condition is read from several places today; tsukumogami/koto#739 (a
+locked rebind) and tsukumogami/niwa#566 (an adopt verb) are the follow-ups
+that make it mechanical.
+
 ## Context and Problem Statement
 
 A unit of work in niwa is a session, the instance it runs in, its Claude Code
@@ -1050,32 +1073,49 @@ to the shirabe command's later work (R5). niwa itself never reads the key;
 naming it is about the contract a plugin's command follows. The earlier
 remover reads no such key.
 
-koto already has the two pieces. `koto init SUCC --continues PRED --supersede`
-appends a `session_superseded` event naming the successor to the
-predecessor's log (the fence), creates the successor, copies every key under
-each `--carry` prefix into it, and only then writes
+A takeover is a migration. The successor runs in its own instance and moves
+the unit's work there: each koto session the unit runs moves into the
+successor's own worktrees, and the branches and files the unit holds move
+with it. koto has two ways a session moves. `koto session rebind <name>`, run
+from the successor's checkout, moves the session's execution anchor there and
+records an `execution_anchor_rebound` event; the successor then rewrites the
+session's `workflows/publish-location` key to its own directory. `koto init
+SUCC --continues PRED --supersede` appends a `session_superseded` event naming
+the successor to the predecessor's log (the fence), creates the successor,
+copies every key under each `--carry` prefix into it, and only then writes
 `koto/superseded-carry-complete` in the successor (koto's
-`src/cli/init_supersede.rs`, `CARRY_COMPLETE_KEY`). A re-run that finds the key
-carries nothing, and a carry that stops leaves it unwritten.
+`src/cli/init_supersede.rs`, `CARRY_COMPLETE_KEY`).
 
 Key assumptions:
-- `koto/superseded-carry-complete` stays koto's marker for a finished carry.
-  It has been read from koto's source, not yet seen in a live run, so the seam
-  documentation's example is checked by a functional test of the over seam
-  against a real `koto init --supersede`.
+- koto's session list reports each session's execution directory, and a
+  rebind changes it. `koto/superseded-carry-complete` stays koto's marker for
+  a finished carry.
 - A unit with no koto run has no takeover to find, so its command answers
   unknown with "no takeover found".
+- Until tsukumogami/koto#739 (a rebind that locks the session while it moves)
+  and tsukumogami/niwa#566 (a verb that adopts a unit into the successor's
+  instance) land, the condition below is read from several places rather
+  than from one key. Those two make it mechanical.
 
-#### Chosen: the predecessor's fence naming a successor that holds `koto/superseded-carry-complete`
+#### Chosen: the takeover has landed when the migration finished
 
 The seam documentation, a new `docs/guides/over-command.md`, defines a
-takeover as landed when both hold: the unit's own koto session carries a
-`session_superseded` fence naming a successor, and that successor's context
-holds `koto/superseded-carry-complete`. Only then may an over command answer
-over for a unit on the grounds that it was replaced. A fence without the key
-is a takeover in progress and answers not over; no fence answers on the
-unit's own run. The guide carries the exit contract, the environment, the
-reason line and this key in one place.
+takeover as landed when both hold:
+
+- Every koto session of the unit is anchored outside the predecessor's
+  instance: each one whose execution directory was under the instance has
+  been rebound into the successor's own worktree, with its publish location
+  rewritten, or superseded by a successor anchored elsewhere that holds
+  `koto/superseded-carry-complete`.
+- Nothing unique to the unit is left in the predecessor's instance: no
+  unpushed commit, no dirty tree, and no file only that instance holds.
+
+Only then may an over command answer over for a unit on the grounds that it
+was replaced. A session still anchored in the instance, a fence without the
+carry key, or anything unique left there is a takeover in progress and
+answers not over; a unit no successor touched answers on its own run. The
+guide carries the exit contract, the environment, the reason line and this
+condition in one place.
 
 #### Alternatives Considered
 
@@ -1089,6 +1129,13 @@ the point the PRD names.
 because the fence is written before the carry, so a successor that crashed
 mid-carry would let the predecessor's unit go with keys the successor never
 received, which is the case the PRD's "finished taking over" excludes.
+
+**The fence and the carry key alone.** One koto read, and the choice this
+design first made. Rejected because a successor that continues a unit by
+rebind writes no fence, and because a carry can finish while the
+predecessor's instance still holds a session anchored there or the only
+copy of a branch, so the predecessor would go with work the successor still
+reads from.
 
 ### Decision 4: The records a unit carries, and who writes them
 
@@ -2166,8 +2213,9 @@ marked unit is tested at every pass and reaped only when the rule passes it,
 the same pass included. Later session activity or a moved branch head voids
 a mark. A person retires a unit with `niwa retire`, which needs
 `--override-not-over` only when the last answer was not over. An over command
-that answers for a replaced unit reads koto's fence and
-`koto/superseded-carry-complete` to know the successor finished taking over.
+answers over for a replaced unit only once the migration finished: every
+koto session of the unit anchored outside its instance and nothing unique
+to the unit left there (Decision 3).
 
 Removal is never forced. Once the rule passes a unit and the gate allows it,
 niwa re-reads the sessions, processes and git state and keeps the unit when
@@ -3657,10 +3705,13 @@ the change rather than settling the point on its own.
    brief lets its scratch go by the project owner's default, and a workspace
    that wants it kept sets `job_scratch = "unique"`.
 10. **The takeover key.** Current position: that remover reads no key saying a
-    successor took over. Settled here by Decision 3: the fence naming a
-    successor that holds `koto/superseded-carry-complete`. Open only in that
-    the key has been read from koto's source and not yet seen in a live run,
-    which the seam's functional test closes.
+    successor took over. Settled here by Decision 3: the takeover has landed
+    when the migration finished, every koto session of the unit anchored
+    outside the predecessor's instance and nothing unique to the unit left
+    there. Open only in that tsukumogami/koto#739 and tsukumogami/niwa#566
+    will make the condition mechanical; until then it's read from koto's
+    session list and records and from git, which the seam's functional test
+    exercises.
 11. **Linked worktrees inside the unit.** Current position: the earlier
     remover always keeps linked worktrees, clean or not, and removes none.
     Settled by that work's acting step as it merges. niwa's side: a clean
