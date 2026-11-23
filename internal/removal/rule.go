@@ -155,6 +155,16 @@ type Policy struct {
 	// repository, read from the workspace root and never from anything inside
 	// an instance. A repository it gives no URL for keeps its unit.
 	CloneURL func(repo string) (string, bool)
+	// CloneURLs are every clone URL the configuration gives a repository it
+	// names. A repository it doesn't name (a nested, bare, submodule-store or
+	// outside repository) whose remote equals one of them, or the one
+	// CloneURL gives for the remote's last path segment, is judged against
+	// that clone URL.
+	CloneURLs []string
+	// ProofRemotes are the [session.removal] proof_remotes prefixes: a
+	// remote under one, on the whole authority and whole path segments,
+	// counts as a proof remote beside the clone URL.
+	ProofRemotes []string
 	// ConfigError, when set, is why the workspace configuration couldn't be
 	// read; every repository found then keeps its unit with it as evidence.
 	ConfigError error

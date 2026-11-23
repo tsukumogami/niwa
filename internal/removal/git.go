@@ -90,12 +90,24 @@ type Env struct {
 	// allowFile admits file remotes; only the functional suite's test build
 	// ever sets it, so its offline fixtures can stand in for a forge.
 	allowFile bool
+	// caFile is a CA bundle git trusts on network calls; only the functional
+	// suite's test build ever sets it, for its https git server.
+	caFile string
+
+	// credHelpers are the person's own credential helpers, read once per
+	// pass before any unit is judged and passed only on network calls to
+	// proof remotes. credErr is why the read failed; it keeps every unit.
+	credHelpers []string
+	credErr     error
 
 	mu       sync.Mutex
 	lsRemote map[string]lsRemoteResult
 }
 
+// lsRemoteResult is one URL's ls-remote answer, cached for the pass: the
+// refs it listed, by name, and the set of ids they name.
 type lsRemoteResult struct {
+	refs []lsRef
 	tips map[string]bool
 	err  error
 }
@@ -109,9 +121,11 @@ type EnvOption func(*Env)
 func WithFileRemotes() EnvOption { return func(e *Env) { e.allowFile = true } }
 
 // NewEnv resolves the pass's environment: the PATH filtered against root,
-// git, lsof and claude on it, and a fresh scratch directory under home. A
-// scratch directory that can't be made is recorded rather than returned as
-// an error, so a unit that never needs it can still be judged.
+// git, lsof and claude on it, a fresh scratch directory under home, and the
+// person's credential helpers. A scratch directory that can't be made is
+// recorded rather than returned as an error, so a unit that never needs it
+// can still be judged; with none, the credential-helper read doesn't run,
+// since no network call can.
 func NewEnv(root, home, pathEnv string, opts ...EnvOption) *Env {
 	canonRoot := canonical(root)
 	dirs := filterPATH(pathEnv, canonRoot)
@@ -123,12 +137,16 @@ func NewEnv(root, home, pathEnv string, opts ...EnvOption) *Env {
 		Lsof:      lookIn(dirs, "lsof", canonRoot),
 		Claude:    lookIn(dirs, "claude", canonRoot),
 		allowFile: testhook.RemovalFileRemotes(),
+		caFile:    testhook.RemovalCAFile(),
 		lsRemote:  map[string]lsRemoteResult{},
 	}
 	for _, o := range opts {
 		o(e)
 	}
 	e.Scratch, e.ScratchErr = NewScratch(home, canonRoot)
+	if e.Scratch != nil {
+		e.credHelpers, e.credErr = e.readCredentialHelpers(context.Background())
+	}
 	return e
 }
 
@@ -219,6 +237,9 @@ type callOpts struct {
 	// repository, which runs from an empty directory under the scratch
 	// directory.
 	dir string
+	// config are -c settings added after the fixed overrides: a network
+	// call's credential helpers and redirect setting.
+	config []string
 }
 
 // gitEnv is the whole environment a git call gets. Nothing is inherited
@@ -232,7 +253,7 @@ func (e *Env) gitEnv() []string {
 	if e.Scratch != nil {
 		ceiling += string(os.PathListSeparator) + e.Scratch.Dir
 	}
-	return []string{
+	env := []string{
 		"PATH=" + e.PATH,
 		"HOME=" + e.Home,
 		"LANG=C",
@@ -249,6 +270,23 @@ func (e *Env) gitEnv() []string {
 		"GIT_GRAFT_FILE=/dev/null",
 		"GIT_CEILING_DIRECTORIES=" + ceiling,
 	}
+	if e.caFile != "" {
+		env = append(env, "GIT_SSL_CAINFO="+e.caFile)
+	}
+	return env
+}
+
+// networkConfig are the -c settings every network call to a proof remote
+// adds after the fixed overrides: redirects off, so a proof host can't hand
+// the call to another host whose refs would then count as its own, and the
+// person's credential helpers after the reset the overrides make, so no
+// other helper runs.
+func (e *Env) networkConfig() []string {
+	out := []string{"http.followRedirects=false"}
+	for _, h := range e.credHelpers {
+		out = append(out, "credential.helper="+h)
+	}
+	return out
 }
 
 // gitCommand builds a git call on niwa's removal path. It is the only
@@ -281,6 +319,9 @@ func (e *Env) gitCommand(ctx context.Context, r repoDirs, o callOpts, args ...st
 	}
 	if o.excludesUnset {
 		argv = append(argv, "-c", "core.excludesFile=")
+	}
+	for _, kv := range o.config {
+		argv = append(argv, "-c", kv)
 	}
 	argv = append(argv, args...)
 	switch {
@@ -473,6 +514,30 @@ type repoConfig struct {
 	// core.worktree, empty when it names none.
 	bare     bool
 	worktree string
+	// remotes are the repository's remote.<name>.url values in the order
+	// git listed them. They decide which remotes are proof remotes; the
+	// URL a network call contacts is never one of these strings.
+	remotes []remoteEntry
+}
+
+// remoteEntry is one remote.<name>.url value.
+type remoteEntry struct {
+	Name, URL string
+}
+
+// remoteURLKey splits a configuration key of the form remote.<name>.url,
+// matched as git config --list prints it (section and variable in
+// lowercase, the remote's name as written), and returns the name.
+func remoteURLKey(key string) (string, bool) {
+	rest, ok := strings.CutPrefix(key, "remote.")
+	if !ok {
+		return "", false
+	}
+	name, ok := strings.CutSuffix(rest, ".url")
+	if !ok || name == "" {
+		return "", false
+	}
+	return name, true
 }
 
 // readConfig runs the configuration read, the first git call in every
@@ -513,6 +578,9 @@ func (e *Env) readConfig(ctx context.Context, r repoDirs) (repoConfig, error) {
 		}
 		if strings.EqualFold(en.Key, "core.worktree") {
 			rc.worktree = en.Value
+		}
+		if name, ok := remoteURLKey(en.Key); ok {
+			rc.remotes = append(rc.remotes, remoteEntry{Name: name, URL: en.Value})
 		}
 		if rc.programKey == "" && namesProgram(en.Key, en.Value) {
 			rc.programKey = en.Key
@@ -589,40 +657,83 @@ func parseLsRemote(out []byte) (map[string]bool, error) {
 	return tips, nil
 }
 
-// liveTips asks the clone URL for every ref it holds, once per URL per
-// pass. The call runs in no repository: from an empty directory under the
-// scratch directory, checked empty before each use, with an explicit
-// --git-dir that doesn't exist, so git discovers no repository there or
-// above it and reads no repository's configuration (its insteadOf,
-// uploadpack, credential or proxy settings).
-func (e *Env) liveTips(ctx context.Context, url string) (map[string]bool, error) {
+// lsRef is one line of ls-remote output: an id and the ref name the remote
+// lists it under, a peeled tag's "^{}" suffix included.
+type lsRef struct {
+	OID, Name string
+}
+
+// parseLsRemoteRefs reads ls-remote output like parseLsRemote, keeping each
+// line's ref name, so a remote's HEAD and its tags can be read by name.
+func parseLsRemoteRefs(out []byte) ([]lsRef, error) {
+	var refs []lsRef
+	for _, line := range strings.Split(strings.TrimSuffix(string(out), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		oid, name, ok := strings.Cut(line, "\t")
+		if !ok || !isObjectID(oid) || name == "" || strings.Contains(name, "\t") {
+			return nil, fmt.Errorf("remote ref listing has a line that does not parse: %q", line)
+		}
+		refs = append(refs, lsRef{OID: oid, Name: name})
+	}
+	return refs, nil
+}
+
+// tipSet is the set of ids refs name.
+func tipSet(refs []lsRef) map[string]bool {
+	tips := make(map[string]bool, len(refs))
+	for _, r := range refs {
+		tips[r.OID] = true
+	}
+	return tips
+}
+
+// cachedLsRemote returns the pass's answer for url, made once per URL per
+// pass by call and shared by every evaluation in the pass, the tombstone
+// re-check's included.
+func (e *Env) cachedLsRemote(ctx context.Context, url string, call func() ([]lsRef, error)) lsRemoteResult {
 	e.mu.Lock()
 	if res, ok := e.lsRemote[url]; ok {
 		e.mu.Unlock()
-		return res.tips, res.err
+		return res
 	}
 	e.mu.Unlock()
 
-	tips, err := e.lsRemoteOnce(ctx, url)
+	refs, err := call()
+	res := lsRemoteResult{refs: refs, tips: tipSet(refs), err: err}
+	if err != nil {
+		res.refs, res.tips = nil, nil
+	}
 	if ctx.Err() == nil {
 		// A call cut short by the pass's deadline isn't an answer about the
 		// URL, so it isn't remembered.
 		e.mu.Lock()
-		e.lsRemote[url] = lsRemoteResult{tips: tips, err: err}
+		e.lsRemote[url] = res
 		e.mu.Unlock()
 	}
-	return tips, err
+	return res
 }
 
-func (e *Env) lsRemoteOnce(ctx context.Context, url string) (map[string]bool, error) {
-	if strings.HasPrefix(url, "-") {
-		return nil, fmt.Errorf("clone URL not allowed: it starts with -")
-	}
-	dir, err := e.scratchDir(scratchNet)
-	if err != nil {
-		return nil, err
-	}
-	return e.lsRemoteFrom(ctx, dir, url)
+// liveTips asks url for every ref it holds, once per URL per pass, in no
+// repository: from an empty directory under the scratch directory, checked
+// empty before each use, with an explicit --git-dir that doesn't exist, so
+// git discovers no repository there or above it and reads no repository's
+// configuration (its insteadOf, uploadpack, credential or proxy settings).
+// The rule's own reads go through a scratch store instead (remoteRefs); this
+// one remains for the checks that need no store.
+func (e *Env) liveTips(ctx context.Context, url string) (map[string]bool, error) {
+	res := e.cachedLsRemote(ctx, url, func() ([]lsRef, error) {
+		if strings.HasPrefix(url, "-") {
+			return nil, fmt.Errorf("clone URL not allowed: it starts with -")
+		}
+		dir, err := e.scratchDir(scratchNet)
+		if err != nil {
+			return nil, err
+		}
+		return e.lsRemoteRefs(ctx, repoDirs{GitDir: filepath.Join(dir, noRepository)}, dir, url)
+	})
+	return res.tips, res.err
 }
 
 // noRepository is the --git-dir every call in no repository names: a path
@@ -632,9 +743,20 @@ const noRepository = "no-repository"
 
 // lsRemoteFrom runs ls-remote for url from dir, in no repository.
 func (e *Env) lsRemoteFrom(ctx context.Context, dir, url string) (map[string]bool, error) {
+	refs, err := e.lsRemoteRefs(ctx, repoDirs{GitDir: filepath.Join(dir, noRepository)}, dir, url)
+	if err != nil {
+		return nil, err
+	}
+	return tipSet(refs), nil
+}
+
+// lsRemoteRefs runs ls-remote for url from dir with r as its git directory,
+// under the network timeout and with the network settings, and returns
+// every ref it lists.
+func (e *Env) lsRemoteRefs(ctx context.Context, r repoDirs, dir, url string) ([]lsRef, error) {
 	ctx, cancel := context.WithTimeout(ctx, networkTimeout)
 	defer cancel()
-	cmd, err := e.gitCommand(ctx, repoDirs{GitDir: filepath.Join(dir, noRepository)}, callOpts{dir: dir}, "ls-remote", "--", url)
+	cmd, err := e.gitCommand(ctx, r, callOpts{dir: dir, config: e.networkConfig()}, "ls-remote", "--", url)
 	if err != nil {
 		return nil, err
 	}
@@ -642,7 +764,7 @@ func (e *Env) lsRemoteFrom(ctx context.Context, dir, url string) (map[string]boo
 	if err != nil {
 		return nil, err
 	}
-	return parseLsRemote(out)
+	return parseLsRemoteRefs(out)
 }
 
 // statusEntry is one git status --porcelain=v2 entry: its kind and path.

@@ -34,6 +34,13 @@ func checkRepositories(ctx context.Context, u Unit, p Policy, s *evalState) []Ch
 	}
 	sort.SliceStable(f.repos, func(i, j int) bool { return f.repos[i].Rel < f.repos[j].Rel })
 	gen := s.generated(u.InstancePath)
+	proof := proofPolicy{cloneURLs: p.CloneURLs, cloneURLOf: p.CloneURL, prefixes: p.ProofRemotes}
+	if p.Env != nil && p.Env.credErr != nil {
+		// Without the person's credential helpers no network call to a
+		// proof remote can be made as they would make it, so every unit
+		// keeps, with the reason named.
+		keeps = append(keeps, Check{Evidence: "the credential-helper read failed: " + p.Env.credErr.Error()})
+	}
 	seen := map[string]bool{}
 	for _, k := range keeps {
 		seen[k.Evidence] = true
@@ -62,6 +69,7 @@ func checkRepositories(ctx context.Context, u Unit, p Policy, s *evalState) []Ch
 			ignoredUnique: p.IgnoredUnique,
 			disposable:    append(append([]string(nil), ShippedDisposable...), p.Disposable...),
 			generated:     gen,
+			proof:         proof,
 		})
 		repoKeeps := res.keeps
 		read := RepoRead{
@@ -203,6 +211,8 @@ type repoPolicy struct {
 	// generated reports whether a path, relative to the instance, is a
 	// file niwa wrote and still holds what niwa wrote.
 	generated func(rel string) bool
+	// proof decides which of the repository's remotes are proof remotes.
+	proof proofPolicy
 }
 
 // repoResult is one repository's keeping results, in the order the rule
@@ -228,9 +238,10 @@ type repoResult struct {
 // checkRepo runs the per-repository check sequence. The identity check and
 // the configuration read come first, and either one failing stops
 // everything else there. Then every read runs, and the keeping results come
-// out in the rule's order: git errors and an unreachable clone URL, then
-// commits and refs the clone URL doesn't hold, then stashes, then modified
-// tracked files, then index flags, then untracked files.
+// out in the rule's order: git errors and an unreachable proof remote, then
+// remotes that aren't proof remotes and the commits and tags no proof remote
+// holds (checkHeld), then stashes, then modified tracked files, then index
+// flags, then untracked files.
 func (e *Env) checkRepo(ctx context.Context, t repoTarget, rp repoPolicy) repoResult {
 	rel := filepath.ToSlash(t.Rel)
 	var res repoResult
@@ -267,7 +278,14 @@ func (e *Env) checkRepo(ctx context.Context, t repoTarget, rp repoPolicy) repoRe
 	var errs, refKeeps, stashKeeps, modKeeps, flagKeeps, untrackedKeeps []Check
 	gitDirClass := ClassPushed
 
-	stashes, stashErr := listStashes(ctx, e, t.Dirs, opts)
+	// git stash list refuses to run without a work tree, so a repository
+	// with none (a bare one, a submodule store) isn't asked; a refs/stash it
+	// holds is then judged below like any other ref.
+	var stashes []string
+	var stashErr error
+	if t.Dirs.WorkTree != "" {
+		stashes, stashErr = listStashes(ctx, e, t.Dirs, opts)
+	}
 	if stashErr != nil {
 		keepAt(&errs, stashErr.Error())
 	} else if len(stashes) > 0 {
@@ -297,29 +315,23 @@ func (e *Env) checkRepo(ctx context.Context, t repoTarget, rp repoPolicy) repoRe
 		for _, h := range headsOf(entries) {
 			refs = append(refs, ref{OID: h.OID, Name: t.headLabel(h)})
 		}
-		var unheld []string
-		if len(refs) > 0 {
-			tips, err := e.liveTips(ctx, t.URL)
-			if t.URL == "" {
-				err = errors.New("no clone URL for this repository")
+		var judged []ref
+		for _, rf := range refs {
+			if rf.Name == "refs/stash" && stashErr == nil && len(stashes) > 0 {
+				// Named as stashes above, from the stash list.
+				continue
 			}
-			if err != nil {
-				keepAt(&errs, "clone URL unreachable: "+err.Error())
-				gitDirClass = ClassUnique
-			} else {
-				for _, rf := range refs {
-					if rf.Name == "refs/stash" && stashErr == nil && len(stashes) > 0 {
-						// Named as stashes above, from the stash list.
-						continue
-					}
-					if !tips[rf.OID] {
-						unheld = append(unheld, refLabel(rf.Name))
-					}
-				}
-			}
+			judged = append(judged, rf)
 		}
-		if len(unheld) > 0 {
-			keepAt(&refKeeps, "commits the clone URL does not show: "+nameSome(unheld))
+		ps := selectProofs(rc.remotes, t.URL, rp.proof, e.allowFile)
+		held := e.checkHeld(ctx, t, opts, judged, ps)
+		for _, ev := range held.errs {
+			keepAt(&errs, ev)
+		}
+		for _, ev := range held.keeps {
+			keepAt(&refKeeps, ev)
+		}
+		if len(held.errs) > 0 || len(held.keeps) > 0 {
 			gitDirClass = ClassUnique
 		}
 	}

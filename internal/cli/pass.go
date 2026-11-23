@@ -8,6 +8,8 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -520,13 +522,14 @@ var listProcessesFunc = func(ctx context.Context, env *removal.Env) *removal.Lis
 // configuration at the root: the environment, each repository's clone URL
 // and declared build trees, and the [session.removal] settings.
 func removalPolicy(cfg *config.WorkspaceConfig, env *removal.Env) removal.Policy {
-	p := removal.Policy{Env: env, CloneURL: cloneURLsFromConfig(cfg)}
+	p := removal.Policy{Env: env, CloneURL: cloneURLsFromConfig(cfg), CloneURLs: cloneURLListFromConfig(cfg)}
 	if cfg == nil {
 		return p
 	}
 	r := cfg.Session.Removal
 	p.IgnoredUnique = r.IgnoredUnique()
 	p.JobScratchUnique = r.JobScratchUnique()
+	p.ProofRemotes = append([]string(nil), r.ProofRemotes...)
 	for _, d := range r.Disposable {
 		p.Disposable = append(p.Disposable, d.Pattern)
 	}
@@ -619,4 +622,38 @@ func cloneURLsFromConfig(cfg *config.WorkspaceConfig) func(string) (string, bool
 		}
 		return "", false
 	}
+}
+
+// cloneURLListFromConfig returns every clone URL the workspace configuration
+// gives a repository it names, by an explicit [repos.<name>] url or a
+// source's repos list, in a stable order. A repository a discovering source
+// would supply isn't named, so it isn't listed; the rule finds its URL
+// through cloneURLsFromConfig by the remote's last path segment.
+func cloneURLListFromConfig(cfg *config.WorkspaceConfig) []string {
+	if cfg == nil {
+		return nil
+	}
+	of := cloneURLsFromConfig(cfg)
+	names := map[string]bool{}
+	for name, o := range cfg.Repos {
+		if o.URL != "" {
+			names[name] = true
+		}
+	}
+	for _, s := range cfg.Sources {
+		if s.Org == "" {
+			continue
+		}
+		for _, name := range s.Repos {
+			names[name] = true
+		}
+	}
+	var urls []string
+	for name := range names {
+		if u, ok := of(name); ok && u != "" {
+			urls = append(urls, u)
+		}
+	}
+	sort.Strings(urls)
+	return slices.Compact(urls)
 }
