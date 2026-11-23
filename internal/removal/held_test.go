@@ -225,9 +225,16 @@ func writeLooseObject(t *testing.T, dir, id string, body []byte) {
 // directory objects.
 func writeObjectIn(t *testing.T, objects, id string, body []byte) {
 	t.Helper()
+	writeKindIn(t, objects, id, "commit", body)
+}
+
+// writeKindIn writes body as a loose object of kind under id in the object
+// directory objects.
+func writeKindIn(t *testing.T, objects, id, kind string, body []byte) {
+	t.Helper()
 	var buf bytes.Buffer
 	z := zlib.NewWriter(&buf)
-	fmt.Fprintf(z, "commit %d\x00", len(body))
+	fmt.Fprintf(z, "%s %d\x00", kind, len(body))
 	z.Write(body)
 	z.Close()
 	p := filepath.Join(objects, id[:2], id[2:])
@@ -488,6 +495,53 @@ func TestHeldKeepsWhenTheStoreIsTamperedWith(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHeldRehashesTheObjectsTheAncestryWalkReads plants, in the scratch store
+// right after niwa lays it out, a forged object under the id of the proof
+// remote's tip whose parent is the unit's unpushed commit, and that commit
+// itself. A fetch never overwrites an object the store already holds, so the
+// walk reads the forgery; the commit must still keep, because every object
+// the walk rests on is re-hashed and the forgery doesn't hash to its name.
+func TestHeldRehashesTheObjectsTheAncestryWalkReads(t *testing.T) {
+	h := newHeldFixture(t)
+	gitRun(t, h.clone, "checkout", "-q", "-b", "feature")
+	unpushed := commitFile(t, h.clone, "feature.txt", "f\n", "feature work")
+	// git checks the hash of the commits it is handed by name, so the
+	// forgery sits one commit below the remote's tip, where only a walk
+	// reads it.
+	inner := commitFile(t, h.other, "other.txt", "o\n", "someone else's work")
+	commitFile(t, h.other, "more.txt", "m\n", "more of it")
+	gitRun(t, h.other, "push", "-q", "origin", "main")
+	// The unpushed commit's own objects go in genuine, so the forgery's
+	// history is complete and the fetch's connectivity check passes.
+	type object struct {
+		id, kind string
+		body     []byte
+	}
+	var genuine []object
+	for _, id := range strings.Fields(gitRun(t, h.clone, "rev-list", "--objects", "--no-object-names", unpushed, "^origin/main")) {
+		kind := gitRun(t, h.clone, "cat-file", "-t", id)
+		cmd := exec.Command("git", "cat-file", kind, id)
+		cmd.Dir = h.clone
+		body, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		genuine = append(genuine, object{id, kind, body})
+	}
+	forged := forgedCommitBody(t, h.clone, unpushed)
+	afterStoreLayout = func(dir string) {
+		objects := filepath.Join(dir, "objects")
+		for _, o := range genuine {
+			writeKindIn(t, objects, o.id, o.kind, o.body)
+		}
+		writeObjectIn(t, objects, inner, forged)
+	}
+	t.Cleanup(func() { afterStoreLayout = nil })
+	v := Evaluate(context.Background(), h.unit(), h.policy(t))
+	keepWith(t, v, "commits the clone URL does not show", "branch feature")
+	keepWith(t, v, "does not hash to its id")
 }
 
 func TestHeldKeepsWhenTheStoreGrowsPastItsCap(t *testing.T) {

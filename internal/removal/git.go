@@ -720,8 +720,10 @@ func (e *Env) cachedLsRemote(ctx context.Context, url string, call func() ([]lsR
 // empty before each use, with an explicit --git-dir that doesn't exist, so
 // git discovers no repository there or above it and reads no repository's
 // configuration (its insteadOf, uploadpack, credential or proxy settings).
-// The rule's own reads go through a scratch store instead (remoteRefs); this
-// one remains for the checks that need no store.
+// No production code calls it any more: the rule reads a proof remote
+// through a scratch store (remoteRefs). Only tests call it, and
+// lsRemoteFrom, to pin how a call in no repository behaves; removing both
+// is left to a later change.
 func (e *Env) liveTips(ctx context.Context, url string) (map[string]bool, error) {
 	res := e.cachedLsRemote(ctx, url, func() ([]lsRef, error) {
 		if strings.HasPrefix(url, "-") {

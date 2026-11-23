@@ -3,11 +3,15 @@ package removal
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -449,10 +453,97 @@ func (st *store) isAncestorOfSome(ctx context.Context, c string, tips []string) 
 			return false, err
 		}
 		if code == 0 {
+			// The answer rests on the commits from tip down to c; each is
+			// re-hashed before it counts (verifyObjects).
+			chain, err := st.ancestryPath(ctx, c, tip)
+			if err != nil {
+				return false, err
+			}
+			if err := st.verifyObjects(ctx, append(chain, c)); err != nil {
+				return false, err
+			}
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// ancestryPath lists the commits on a path from tip down to c, c excluded:
+// every commit that descends from c and that tip reaches.
+func (st *store) ancestryPath(ctx context.Context, c, tip string) ([]string, error) {
+	cmd, err := st.storeCall(ctx, false, callOpts{}, "rev-list", "--ancestry-path", c+".."+tip)
+	if err != nil {
+		return nil, err
+	}
+	out, err := run(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("walking the proof remote's history: %v", err)
+	}
+	var ids []string
+	for _, id := range strings.Fields(string(out)) {
+		if !isObjectID(id) {
+			return nil, fmt.Errorf("walking the proof remote's history: a line does not parse: %q", id)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// verifyObjects reads each object's raw content from the store and hashes
+// it, refusing one whose content doesn't hash to its name. git checks the
+// hash of a commit it is handed by name, but a walk reads each parent by
+// the id its child names without checking it, so an object planted in the
+// store under a real commit's id would otherwise be believed. The store is
+// checked before each use against the same person-level tampering; the
+// objects a decision rests on are checked here the same way.
+func (st *store) verifyObjects(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	cmd, err := st.storeCall(ctx, false, callOpts{}, "cat-file", "--batch")
+	if err != nil {
+		return err
+	}
+	cmd.Stdin = strings.NewReader(strings.Join(ids, "\n") + "\n")
+	out, err := run(cmd)
+	if err != nil {
+		return fmt.Errorf("reading objects to verify: %v", err)
+	}
+	for _, id := range ids {
+		header, rest, ok := bytes.Cut(out, []byte("\n"))
+		if !ok {
+			return errors.New("reading objects to verify: the listing ended early")
+		}
+		fields := strings.Fields(string(header))
+		if len(fields) != 3 || fields[0] != id {
+			return fmt.Errorf("reading objects to verify: %s is missing or unreadable", id)
+		}
+		size, err := strconv.Atoi(fields[2])
+		if err != nil || size < 0 || size+1 > len(rest) || rest[size] != '\n' {
+			return fmt.Errorf("reading objects to verify: %s does not parse", id)
+		}
+		if got := objectHash(len(id), fields[1], rest[:size]); got != id {
+			return fmt.Errorf("an object in the scratch store does not hash to its id: %s", id)
+		}
+		out = rest[size+1:]
+	}
+	return nil
+}
+
+// objectHash is git's id for an object of kind with body: SHA-1 or SHA-256
+// of "<kind> <size>\0<body>", picked by the id's length.
+func objectHash(idLen int, kind string, body []byte) string {
+	header := fmt.Sprintf("%s %d\x00", kind, len(body))
+	if idLen == 64 {
+		h := sha256.New()
+		h.Write([]byte(header))
+		h.Write(body)
+		return hex.EncodeToString(h.Sum(nil))
+	}
+	h := sha1.New()
+	h.Write([]byte(header))
+	h.Write(body)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // exitOf runs a store call whose answer is its exit status: 0 yes, 1 no.
@@ -566,7 +657,35 @@ func (e *Env) unitHasCommit(ctx context.Context, t repoTarget, o callOpts, id st
 // branch's tip d and commit c, in the store, exits 0 and yields d's own tree:
 // what a squash merge of c leaves. The trees it writes land in the store.
 func (st *store) mergedByContent(ctx context.Context, d, c string) (bool, error) {
-	cmd, err := st.storeCall(ctx, false, callOpts{}, "merge-tree", "--write-tree", d, c)
+	// merge-tree finds its merge bases by walking both histories, so the
+	// commits from each base up to d and to c are re-hashed first, as the
+	// ancestry check's are. Histories with no base aren't merged anyway.
+	cmd, err := st.storeCall(ctx, false, callOpts{}, "merge-base", "--all", d, c)
+	if err != nil {
+		return false, err
+	}
+	out, err := run(cmd)
+	if err != nil {
+		return false, nil
+	}
+	verify := []string{d, c}
+	for _, base := range strings.Fields(string(out)) {
+		if !isObjectID(base) {
+			return false, fmt.Errorf("finding the merge base: a line does not parse: %q", base)
+		}
+		verify = append(verify, base)
+		for _, end := range []string{d, c} {
+			chain, err := st.ancestryPath(ctx, base, end)
+			if err != nil {
+				return false, err
+			}
+			verify = append(verify, chain...)
+		}
+	}
+	if err := st.verifyObjects(ctx, verify); err != nil {
+		return false, err
+	}
+	cmd, err = st.storeCall(ctx, false, callOpts{}, "merge-tree", "--write-tree", d, c)
 	if err != nil {
 		return false, err
 	}
@@ -585,7 +704,7 @@ func (st *store) mergedByContent(ctx context.Context, d, c string) (bool, error)
 	if err != nil {
 		return false, err
 	}
-	out, err := run(cmd)
+	out, err = run(cmd)
 	if err != nil {
 		return false, fmt.Errorf("reading the default branch's tree: %v", err)
 	}
