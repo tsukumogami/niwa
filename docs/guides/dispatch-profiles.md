@@ -309,6 +309,42 @@ servers connected:
   held either variable, and the plain dispatch's settings document carried no
   `permissions` or `disableBundledSkills` key.
 
+The first two checks ran again on Claude Code 2.1.330, every dispatch on
+`--model opus`, from a scratch workspace that declares no repos and only the
+coordinator profile above. Account connectors and user-scope plugins load in
+any workspace, but the MCP servers and hooks of the workspace behind the
+2.1.325 run didn't load here, so the 2.1.330 figures compare with each other
+and not with the ones above. The build was a clean tree at the branch head
+plus the stamp a release build adds through its ldflags, since Go's own VCS
+stamp doesn't work in a niwa-managed worktree. Every prompt started with a
+leading plugin slash skill.
+
+- Two profiled coordinators read 18,367 and 18,863 tokens at turn 0. In
+  both, the leading slash command expanded with Skill denied. AskUserQuestion,
+  Skill, EnterWorktree and every account connector tool were missing from the
+  tool list, and the session went on without calling EnterWorktree. Their
+  environment held `NIWA_DISPATCH_PROFILE=coordinator` and
+  `ENABLE_CLAUDEAI_MCP_SERVERS=false`, the launch record named the profile,
+  and `niwa list` showed it. In the second, ToolSearch loaded
+  SendMessage, CronCreate, CronList, CronDelete and TaskStop, and each call
+  returned without an error: the message arrived, a cron was created, listed
+  and deleted, and a background command was stopped.
+- Without the profile, a dispatch from the previous niwa read 49,284 tokens,
+  one from this build in a plain shell read 49,288, and one from inside the
+  second profiled coordinator, through its own Bash tool, read 49,279. All
+  three listed the same tools, AskUserQuestion, Skill and the account
+  connectors' tools among them. None held either variable, and the settings
+  documents of this build's two dispatches carried no `permissions` or
+  `disableBundledSkills` key.
+- A retask of the first profiled coordinator failed on 2.1.330, for reasons
+  in Claude Code's job state and wake rather than in the profile. After its
+  turn ended, the job state stayed "working", so a plain retask refused it as
+  busy. `--interrupt` stopped it, and the flagless wake started a copy
+  instead of continuing the session, which retask removed. A plain retask of
+  the stopped worker then refused it. The profile held throughout, and
+  `niwa list` showed it before and after. Retask of a profiled worker hasn't
+  passed on 2.1.330.
+
 The third check is still open. It's run by hand by the workspace owner and
 tracked separately from the first two. It still has to show that a session
 started by hand keeps its full tools: AskUserQuestion and Skill, the account
