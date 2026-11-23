@@ -117,35 +117,44 @@ func (s *evalState) generated(instance string) func(rel string) bool {
 const instanceOpenFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC
 
 // readManagedFile reads the managed file mf for its hash. ResolveRecorded
-// checked its path, but a directory on the way can be swapped for a link
-// after that check, so the read doesn't go by name: it starts from a
+// checked its path, but a directory on the way can be swapped for a link or
+// a mount after that check, so the read doesn't go by name: it starts from a
 // descriptor for the instance, or for the .niwa the evaluation opened when
 // the file is under .niwa, and opens each directory on the way relative to
-// the one before it without following a link. The file itself goes through
-// the shared reader.
+// the one before it without following a link. Everything it opens, the .niwa
+// included, must be on the instance's device, the one device ResolveRecorded
+// allows. The file itself goes through the shared reader.
 func (s *evalState) readManagedFile(mf managedFile) ([]byte, error) {
-	parts := strings.Split(mf.rel, "/")
-	if len(parts) > 1 && parts[0] == niwaDirName {
-		if err := s.niwa.usable(); err != nil {
-			return nil, err
-		}
-		return readUnder(s.niwa.fd, niwaDirName, parts[1:], maxManagedBytes)
-	}
 	fd, err := retryEINTR(func() (int, error) { return unix.Open(mf.base, instanceOpenFlags, 0) })
 	if err != nil {
 		return nil, fmt.Errorf("the instance can't be opened: %v", err)
 	}
 	defer unix.Close(fd)
-	return readUnder(fd, "", parts, maxManagedBytes)
+	dev, err := fdDevice(fd)
+	if err != nil {
+		return nil, fmt.Errorf("the instance's device can't be read: %v", err)
+	}
+	parts := strings.Split(mf.rel, "/")
+	if len(parts) > 1 && parts[0] == niwaDirName {
+		if err := s.niwa.usable(); err != nil {
+			return nil, err
+		}
+		if err := onDevice(s.niwa.fd, niwaDirName, dev); err != nil {
+			return nil, err
+		}
+		return readUnder(s.niwa.fd, niwaDirName, parts[1:], maxManagedBytes, dev)
+	}
+	return readUnder(fd, "", parts, maxManagedBytes, dev)
 }
 
 // readUnder reads the file parts names under the directory open at dirfd,
 // which is named prefix in errors. Each directory on the way is opened
 // relative to the one before it with O_DIRECTORY|O_NOFOLLOW, so a link at
-// any of them is refused, and the last component goes through the shared
-// reader: not a link, not a FIFO, a regular file of the current user's, no
-// larger than max. dirfd stays open.
-func readUnder(dirfd int, prefix string, parts []string, max int64) ([]byte, error) {
+// any of them is refused, and each must be on device dev, as must the file.
+// The last component goes through the shared reader: not a link, not a
+// FIFO, a regular file of the current user's, no larger than max. dirfd
+// stays open.
+func readUnder(dirfd int, prefix string, parts []string, max int64, dev uint64) ([]byte, error) {
 	if len(parts) == 0 {
 		return nil, errors.New("the path names no file")
 	}
@@ -165,8 +174,46 @@ func readUnder(dirfd int, prefix string, parts []string, max int64) ([]byte, err
 		}
 		closeCur()
 		cur = next
+		if err := onDevice(cur, shown, dev); err != nil {
+			return nil, err
+		}
 	}
-	return readCappedAt(cur, parts[len(parts)-1], max)
+	name := parts[len(parts)-1]
+	fd, err := retryEINTR(func() (int, error) { return unix.Openat(cur, name, readOpenFlags, 0) })
+	if err != nil {
+		return nil, openError(name, err)
+	}
+	if err := onDevice(fd, path.Join(shown, name), dev); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+	return readFD(fd, name, max)
+}
+
+// statDevice is the device a stat names. A variable so a test can put a
+// directory or file on another device without mounting one.
+var statDevice = func(st *unix.Stat_t) uint64 { return uint64(st.Dev) }
+
+// fdDevice is the device of the file open at fd.
+func fdDevice(fd int) (uint64, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return 0, err
+	}
+	return statDevice(&st), nil
+}
+
+// onDevice refuses the file open at fd, named shown, unless it is on device
+// dev, in the words ResolveRecorded uses.
+func onDevice(fd int, shown string, dev uint64) error {
+	d, err := fdDevice(fd)
+	if err != nil {
+		return fmt.Errorf("%s: its device can't be read: %v", shown, err)
+	}
+	if d != dev {
+		return fmt.Errorf("%s is on another device", shown)
+	}
+	return nil
 }
 
 // refuse records that the managed file rel couldn't be read for its hash,
