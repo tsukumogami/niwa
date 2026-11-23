@@ -14,8 +14,8 @@ import (
 	"github.com/tsukumogami/niwa/internal/mirror"
 )
 
-// offRepoConfig turns borrowing off for app, so the tests below hold in the
-// test build too, where borrowReleased is true.
+// offRepoConfig turns borrowing off for app, which borrowing would otherwise
+// cover by default.
 func offRepoConfig() *config.WorkspaceConfig {
 	off := false
 	return &config.WorkspaceConfig{Repos: map[string]config.RepoOverride{"app": {ShareGitHistory: &off}}}

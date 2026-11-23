@@ -55,8 +55,18 @@ type borrowCreate struct {
 
 // create runs Applier.Create for a fresh workspace root and developer home,
 // with the [workspace] and [repos.*] lines extra adds to the config. The
-// clones are real: each repo is cloned from its bare remote.
+// clones are real: each repo is cloned from its bare remote. The root holds
+// .niwa/workspace.toml, as every root niwa init makes does, so it counts as
+// a workspace root (workspaceRootHoldsState).
 func (sb borrowSandbox) create(t *testing.T, extra string) borrowCreate {
+	t.Helper()
+	return sb.createIn(t, extra, true)
+}
+
+// createIn is create, with rooted false making the layout one with no
+// workspace root: the directory above the instance has a .niwa directory
+// but no workspace.toml in it.
+func (sb borrowSandbox) createIn(t *testing.T, extra string, rooted bool) borrowCreate {
 	t.Helper()
 	base := t.TempDir()
 	c := borrowCreate{
@@ -81,19 +91,29 @@ visibility = "public"
 		t.Fatalf("parsing the sandbox config: %v\n%s", err, body)
 	}
 	c.cfg = res.Config
+	if rooted {
+		if err := os.WriteFile(filepath.Join(niwaDir, WorkspaceConfigFile), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
+	c.instanceRoot, c.err = sb.applier(c.home).Create(context.Background(), c.cfg, niwaDir, c.workspaceRoot, "inst")
+	return c
+}
+
+// applier is an Applier that serves the sandbox's repos from their bare
+// remotes, with home as the developer home.
+func (sb borrowSandbox) applier(home string) *Applier {
 	var repos []github.Repo
 	for _, name := range borrowRepos {
 		repos = append(repos, github.Repo{Name: name, Visibility: "public", CloneURL: "file://" + sb.remotes[name]})
 	}
 	applier := NewApplier(&mockGitHubClient{repos: map[string][]github.Repo{"testorg": repos}})
 	applier.Cloner = &Cloner{}
-	applier.DeveloperHome = c.home
+	applier.DeveloperHome = home
 	var out bytes.Buffer
 	applier.Reporter = NewReporterWithTTY(&out, false)
-
-	c.instanceRoot, c.err = applier.Create(context.Background(), c.cfg, niwaDir, c.workspaceRoot, "inst")
-	return c
+	return applier
 }
 
 // clones maps each clone under the instance, by its path relative to the

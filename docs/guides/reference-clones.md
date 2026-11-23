@@ -6,9 +6,13 @@ This guide says where the mirrors live, how to turn borrowing off, how to make
 an instance independent of the mirrors with `niwa dissociate`, and how to purge
 a commit that must not stay on the host.
 
-Borrowing ships turned off: release builds clone every repo in full until it's
-turned on. The setting and the command below already work, and the setting
-takes effect once borrowing ships.
+Borrowing is on by default wherever a workspace root exists: instances that
+live in their own directories under a workspace root, the layout `niwa create`
+makes, borrow with no config change. A single-instance layout, where the
+instance is itself the root and there's no workspace root above it, keeps
+making full clones. Clones made
+before borrowing was turned on stay full clones; only clones made after it
+borrow.
 
 ## Where the mirrors live
 
@@ -49,7 +53,9 @@ share_git_history = false     # this repo never borrows and gets no mirror
 The repo's value wins over the workspace's in both directions. With the
 workspace off and a repo on, only that repo borrows. With the workspace on
 and a repo off, that repo gets a full clone with no alternates file, and niwa
-seeds no mirror for it. Leaving both unset means on.
+seeds no mirror for it. Leaving both unset means on. To turn borrowing off
+for one repo and keep it for the rest, set only that repo's
+`share_git_history = false`.
 
 The setting governs clones made after it changes. Clones that already borrow
 keep borrowing. A repo you turn off while an instance still borrows from its

@@ -461,10 +461,8 @@ type WorkspaceMeta struct {
 	// objects from the host's per-repo mirror instead of copying the whole
 	// history. nil means on. A repo's own RepoOverride.ShareGitHistory wins
 	// over this value in both directions; ShareGitHistoryEnabled is the
-	// cascade. The setting parses in every build, but no release build
-	// borrows yet: internal/workspace's borrowEnabled ANDs the cascade with a
-	// build-tag constant that is false outside the functional suite's test
-	// build, whatever this says.
+	// cascade. A layout with no workspace root makes full clones whatever
+	// this says.
 	ShareGitHistory *bool `toml:"share_git_history,omitempty"`
 }
 
@@ -478,8 +476,7 @@ func (w WorkspaceMeta) SharePluginReleasesEnabled() bool {
 // ShareGitHistoryEnabled reports whether the named repo's new clones should
 // borrow objects from the host mirror: the repo's share_git_history when it
 // is set, else the workspace's, else true. A nil config has neither set and
-// answers true. Callers in internal/workspace go through borrowEnabled,
-// which also holds borrowing off in every release build until it ships.
+// answers true. Callers in internal/workspace go through borrowEnabled.
 func (c *WorkspaceConfig) ShareGitHistoryEnabled(repo string) bool {
 	if c == nil {
 		return true
