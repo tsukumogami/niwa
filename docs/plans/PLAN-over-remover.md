@@ -172,6 +172,10 @@ Skeleton and downstream:
 - [ ] E2E flow still works (do not break the skeleton): a deleted session's instance holding an unpushed commit is still kept and named by `niwa reap`, and a clean one is still removed.
 - [ ] Must deliver: a verdict-only `runPass` mode and a text and `niwa.verdicts/v1` JSON output with a place for each unit's over answer and the mark it would write, plus `ScrubEvidence` for stored answers (required by <<ISSUE:17>>).
 
+Rule hardening found after the path classes landed:
+- [ ] A `[session.removal] disposable` pattern that would match every path (such as `*`, `**` or `*/**`) is a configuration error that ends the pass with nothing removed, with the pattern named; a unit test covers each of those three forms.
+- [ ] `parseWorktreeList` (`internal/removal`) fails on a non-bare `git worktree list --porcelain -z` record that has no `HEAD` line, rather than dropping it, so the commits-and-refs check keeps the unit with the record named; a unit test feeds such a record.
+
 **Dependencies**: Blocked by <<ISSUE:1>>, <<ISSUE:2>>
 
 **Repo**: tsukumogami/niwa
