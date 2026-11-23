@@ -71,6 +71,22 @@ process by process, and the pid records `niwa helper` writes match a live
 process by pid and start time so a reused pid never matches. Both need the
 parent pid and the start time, so the listing has to carry them.
 
+### 2026-11-23 — `walk.go` holds the walk, repository discovery and size
+
+**What changed.** The `walk.go` bullet under Components no longer lists
+path classes, build-tree detection or generated paths. Path classes are in
+`classes.go`, build-tree detection in `repo.go` beside the per-repository
+check, and generated paths in `outside.go` beside the outside check.
+`walk.go` holds the walk of the instance and job directory, repository
+discovery and size, under the same walk rules as before.
+
+**Why.** The first parts of the rule landed path classes, build-tree
+detection and generated paths in the files that use them, and the walk
+itself started out in `repo.go`. The walk moves into `walk.go` as the
+repository discovery grows. Moving the other three as well would shift
+code that is already written and tested for no change in behavior. This
+records where the code lives; the requirements are unchanged.
+
 ## Context and Problem Statement
 
 A unit of work in niwa is a session, the instance it runs in, its Claude Code
@@ -2235,13 +2251,14 @@ again right before every status and unforced worktree removal, and
 - `walk.go`: the walk of the instance and job directory, repository
   discovery (`.git` entries, and git directories recognized by `HEAD`,
   `objects/` and `refs/`, bare ones and those under `modules/` included,
-  inside build trees too), path classes, build-tree detection, generated
-  paths, size; it
-  `Lstat`s every entry, follows no symlink, stays on one filesystem, and
-  keeps on a `.git` file whose git directory lies outside the unit, on a
-  worktree entry it didn't reach (the main entry reached only at the work
-  tree the walk found for that git directory) and on a git directory whose
-  work tree lies outside the instance.
+  inside build trees too), and size; it `Lstat`s every entry, follows no
+  symlink, stays on one filesystem, and keeps on a `.git` file whose git
+  directory lies outside the unit, on a worktree entry it didn't reach (the
+  main entry reached only at the work tree the walk found for that git
+  directory) and on a git directory whose work tree lies outside the
+  instance. Path classes live in `classes.go`, build-tree detection in
+  `repo.go` beside the per-repository check, and generated paths in
+  `outside.go` beside the outside check.
 - `git.go`: `gitCommand`, the only builder of git commands, with the fixed
   environment and overrides of Decision 8, and a `GitInvoker` and a scan
   command builder made from it for the worktree and workspace packages; the
