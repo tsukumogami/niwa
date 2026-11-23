@@ -20,6 +20,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/firstread"
 	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/promptcapture"
+	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/testfault"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -116,8 +117,9 @@ const (
 	// The contents are the reason, in the words a developer needs to decide
 	// what to do with the directory. The sweep spares any instance carrying
 	// this file and says so, which is the same treatment an instance whose
-	// liveness cannot be read already gets.
-	dispatchRetainMarker = ".niwa/dispatch-retain"
+	// liveness cannot be read already gets. The removal rule reads the same
+	// path as its hold, so the one literal lives in internal/removal.
+	dispatchRetainMarker = removal.DispatchRetainMarker
 
 	// dispatchCaptureTimeout bounds the jobs-dir cwd-correlation poll that
 	// recovers the worker's session UUID. Exhaustion is a capture failure that

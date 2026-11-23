@@ -255,8 +255,10 @@ func (e *Env) gitEnv() []string {
 // builder of git commands there: git starts by the absolute path resolved
 // from the filtered PATH, with the fixed environment and the overrides
 // above, --git-dir and --work-tree from niwa's walk rather than discovery,
-// and --ignore-submodules=all and --untracked-files=all on every status, so
-// git never starts a status of its own inside a submodule.
+// --ignore-submodules=all and --untracked-files=all on every status, so git
+// never starts a status of its own inside a submodule, and
+// --no-show-signature on every log-family call, so no signature check runs
+// gpg.program.
 //
 // The process runs in its own group, and the context's end kills the whole
 // group, so nothing a call started outlives the pass.
@@ -281,8 +283,11 @@ func (e *Env) gitCommand(ctx context.Context, r repoDirs, o callOpts, args ...st
 		argv = append(argv, "-c", "core.excludesFile=")
 	}
 	argv = append(argv, args...)
-	if args[0] == "status" {
+	switch {
+	case args[0] == "status":
 		argv = append(argv, "--ignore-submodules=all", "--untracked-files=all")
+	case args[0] == "log", args[0] == "stash" && len(args) > 1 && args[1] == "list":
+		argv = append(argv, "--no-show-signature")
 	}
 
 	cmd := exec.CommandContext(ctx, e.Git, argv...)
@@ -341,6 +346,38 @@ func run(cmd *exec.Cmd) ([]byte, error) {
 		return nil, errors.New(msg)
 	}
 	return stdout.Bytes(), nil
+}
+
+// runWarn runs cmd like run, and also returns the last line git wrote to
+// standard error when it exited 0: a warning such as a broken ref that git
+// skipped, which a caller keeps on rather than reads past.
+func runWarn(cmd *exec.Cmd) ([]byte, string, error) {
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := lastLine(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, "", errors.New(msg)
+	}
+	return stdout.Bytes(), lastWarning(stderr.String()), nil
+}
+
+// lastWarning is the last line of standard error that isn't one of git's
+// advice hints, which say how to silence a message rather than report a
+// problem (the graft-file deprecation hint every history read prints under
+// GIT_GRAFT_FILE among them).
+func lastWarning(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := strings.TrimSpace(lines[i])
+		if l != "" && !strings.HasPrefix(l, "hint:") {
+			return l
+		}
+	}
+	return ""
 }
 
 func lastLine(s string) string {
@@ -429,6 +466,9 @@ type repoConfig struct {
 	// excludesUnset is true when the repository's own configuration names
 	// no core.excludesFile.
 	excludesUnset bool
+	// sparse is true when the repository's own configuration turns on a
+	// sparse checkout.
+	sparse bool
 }
 
 // readConfig runs the configuration read, the first git call in every
@@ -461,11 +501,24 @@ func (e *Env) readConfig(ctx context.Context, r repoDirs) (repoConfig, error) {
 		if strings.EqualFold(en.Key, "core.excludesFile") {
 			rc.excludesUnset = false
 		}
+		if strings.EqualFold(en.Key, "core.sparseCheckout") && gitTrue(en.Value) {
+			rc.sparse = true
+		}
 		if rc.programKey == "" && namesProgram(en.Key, en.Value) {
 			rc.programKey = en.Key
 		}
 	}
 	return rc, nil
+}
+
+// gitTrue reports whether a configuration value is one git reads as true.
+// A key with no value is true.
+func gitTrue(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "true", "yes", "on", "1":
+		return true
+	}
+	return false
 }
 
 // ref is one ref for-each-ref lists.
@@ -527,9 +580,11 @@ func parseLsRemote(out []byte) (map[string]bool, error) {
 }
 
 // liveTips asks the clone URL for every ref it holds, once per URL per
-// pass. The call runs in no repository, from an empty directory under the
-// scratch directory, so nothing in the unit's repository (its insteadOf,
-// uploadpack, credential or proxy settings) applies to it.
+// pass. The call runs in no repository: from an empty directory under the
+// scratch directory, checked empty before each use, with an explicit
+// --git-dir that doesn't exist, so git discovers no repository there or
+// above it and reads no repository's configuration (its insteadOf,
+// uploadpack, credential or proxy settings).
 func (e *Env) liveTips(ctx context.Context, url string) (map[string]bool, error) {
 	e.mu.Lock()
 	if res, ok := e.lsRemote[url]; ok {
@@ -557,9 +612,19 @@ func (e *Env) lsRemoteOnce(ctx context.Context, url string) (map[string]bool, er
 	if err != nil {
 		return nil, err
 	}
+	return e.lsRemoteFrom(ctx, dir, url)
+}
+
+// noRepository is the --git-dir every call in no repository names: a path
+// under the empty directory the call runs from, which doesn't exist, so git
+// runs as it does outside any repository and never looks for one.
+const noRepository = "no-repository"
+
+// lsRemoteFrom runs ls-remote for url from dir, in no repository.
+func (e *Env) lsRemoteFrom(ctx context.Context, dir, url string) (map[string]bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, networkTimeout)
 	defer cancel()
-	cmd, err := e.gitCommand(ctx, repoDirs{}, callOpts{dir: dir}, "ls-remote", "--", url)
+	cmd, err := e.gitCommand(ctx, repoDirs{GitDir: filepath.Join(dir, noRepository)}, callOpts{dir: dir}, "ls-remote", "--", url)
 	if err != nil {
 		return nil, err
 	}
@@ -572,14 +637,12 @@ func (e *Env) lsRemoteOnce(ctx context.Context, url string) (map[string]bool, er
 
 // statusEntry is one git status --porcelain=v2 entry: its kind and path.
 type statusEntry struct {
-	Kind string // "changed" or "untracked"
+	Kind string // "changed", "renamed", "unmerged" or "untracked"
 	Path string
 }
 
-// parseStatus reads git status --porcelain=v2 -z output. Any entry keeps the
-// unit, so it records ordinary changed, untracked and ignored entries and
-// treats every other record, a rename or an unmerged entry among them, as
-// one that doesn't parse, which keeps as well.
+// parseStatus reads git status --porcelain=v2 -z output. A record that
+// doesn't parse is an error, which keeps.
 func parseStatus(out []byte) ([]statusEntry, error) {
 	if len(out) == 0 {
 		return nil, nil
@@ -599,6 +662,10 @@ func parseStatus(out []byte) ([]statusEntry, error) {
 		switch rec[0] {
 		case '1':
 			fields, kind = 8, "changed"
+		case '2':
+			fields, kind = 9, "renamed"
+		case 'u':
+			fields, kind = 10, "unmerged"
 		case '?':
 			fields, kind = 1, "untracked"
 		case '!':
@@ -611,6 +678,13 @@ func parseStatus(out []byte) ([]statusEntry, error) {
 			return nil, fmt.Errorf("status has a record that does not parse: %q", rec)
 		}
 		entries = append(entries, statusEntry{Kind: kind, Path: parts[fields]})
+		if rec[0] == '2' {
+			// A rename's original path is the next NUL-terminated field.
+			i++
+			if i >= len(recs) || recs[i] == "" {
+				return nil, errors.New("status has a rename with no original path")
+			}
+		}
 	}
 	return entries, nil
 }

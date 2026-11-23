@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/tsukumogami/niwa/internal/hostdir"
 )
@@ -81,7 +83,10 @@ func NewScratch(home, root string) (*Scratch, error) {
 }
 
 // Use checks the pass directory, its parent and the named empty directory
-// under it, and returns that directory's path.
+// under it, owner, mode and that it is still empty, and returns that
+// directory's path. An entry found there, a .git among them, is something
+// niwa didn't put there, and a program run from the directory could read
+// it.
 func (s *Scratch) Use(name string) (string, error) {
 	if err := s.check(); err != nil {
 		return "", err
@@ -90,7 +95,27 @@ func (s *Scratch) Use(name string) (string, error) {
 	if err := checkPrivateDir(dir); err != nil {
 		return "", err
 	}
+	if err := checkEmptyDir(dir); err != nil {
+		return "", err
+	}
 	return dir, nil
+}
+
+// checkEmptyDir refuses a directory that holds any entry.
+func checkEmptyDir(dir string) error {
+	f, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		return fmt.Errorf("scratch directory check: %w", err)
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(1)
+	if len(names) > 0 {
+		return fmt.Errorf("scratch directory check: %s is not empty", dir)
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("scratch directory check: %w", err)
+	}
+	return nil
 }
 
 // check is the owner and mode check on the pass directory and its parent.

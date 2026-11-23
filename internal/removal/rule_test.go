@@ -72,7 +72,8 @@ func (f fixture) policy(t *testing.T) Policy {
 	e := NewEnv(f.root, f.home, os.Getenv("PATH"), WithFileRemotes())
 	t.Cleanup(e.Close)
 	return Policy{
-		Env: e,
+		Env:       e,
+		Processes: &Listing{},
 		CloneURL: func(name string) (string, bool) {
 			if name == "app" {
 				return f.remoteURL, true

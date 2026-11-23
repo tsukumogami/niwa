@@ -14,6 +14,9 @@ package removal
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
+	"strings"
 )
 
 // CheckName names one check of the rule. The constants below are the rule's
@@ -74,11 +77,13 @@ type Check struct {
 	Evidence string
 }
 
-// Verdict is the rule's answer for one unit: the decision and every keeping
-// check, in rule order.
+// Verdict is the rule's answer for one unit: the decision, every keeping
+// check in rule order, and the class of every path the rule judged, in path
+// order. A caller can render all of it without running a check again.
 type Verdict struct {
 	Kind   Kind
 	Checks []Check
+	Paths  []PathClass
 }
 
 // First returns the first keeping check, the one that decided the verdict.
@@ -116,10 +121,28 @@ type Unit struct {
 	// it isn't LivenessGone.
 	Liveness       Liveness
 	LivenessReason string
+	// JobDir is the unit's job directory, empty when it has none. The rule
+	// judges what is in it as it judges the instance.
+	JobDir string
 }
 
 // Policy is what the workspace and the pass give the rule.
 type Policy struct {
+	// Processes is the pass's one process listing. A nil listing, or one
+	// that failed, keeps every unit it would have cleared.
+	Processes *Listing
+	// IgnoredUnique counts a git-ignored path outside a build tree as
+	// unique rather than disposable ([session.removal] ignored_files).
+	IgnoredUnique bool
+	// JobScratchUnique counts job scratch in a unit with no handoff brief as
+	// unique rather than disposable ([session.removal] job_scratch).
+	JobScratchUnique bool
+	// Disposable are the workspace's own disposable patterns, matched
+	// beside the shipped ones.
+	Disposable []string
+	// BuildTrees returns the build trees the workspace declares for a
+	// repository, as paths relative to its root ending in "/".
+	BuildTrees func(repo string) []string
 	// Env runs every git call. A nil Env can't run git, so any repository
 	// found keeps its unit.
 	Env *Env
@@ -132,46 +155,56 @@ type Policy struct {
 	ConfigError error
 }
 
+// evalState is what one evaluation's checks share: the walk of the instance,
+// made once by the repository check and read by the outside check, and the
+// classes every check gives.
+type evalState struct {
+	walk    *found
+	classes classes
+}
+
 // checkFunc is one check: the keeping results it found, none when it keeps
 // nothing.
-type checkFunc func(ctx context.Context, u Unit, p Policy) []Check
+type checkFunc func(ctx context.Context, u Unit, p Policy, s *evalState) []Check
 
 // Evaluate runs the rule over one unit and returns its verdict. It reads and
 // never writes. Every check runs even after one keeps, and the verdict lists
-// every keeping check in rule order.
+// every keeping check in rule order and every judged path with its class.
 func Evaluate(ctx context.Context, u Unit, p Policy) Verdict {
 	checks := map[CheckName]checkFunc{
 		CheckLiveness:   checkLiveness,
-		CheckHold:       noCheckYet,
+		CheckHold:       checkHold,
 		CheckRecords:    noCheckYet,
 		CheckRepository: checkRepositories,
-		CheckOutside:    noCheckYet,
+		CheckOutside:    checkOutside,
 		CheckNamedFiles: noCheckYet,
 	}
+	s := &evalState{}
 	var v Verdict
 	for _, name := range checkOrder {
-		for _, c := range checks[name](ctx, u, p) {
+		for _, c := range checks[name](ctx, u, p, s) {
 			c.Name = name
 			v.Checks = append(v.Checks, c)
 		}
 	}
+	v.Paths = s.classes.sorted()
 	if len(v.Checks) == 0 {
 		v.Kind = Reap
 	}
 	return v
 }
 
-// noCheckYet is a check whose records and paths the rule doesn't read yet.
-// It keeps nothing, which removes nothing an earlier reap would have kept:
-// that reap read none of them either.
-func noCheckYet(context.Context, Unit, Policy) []Check { return nil }
+// noCheckYet is a check whose records the rule doesn't read yet. It keeps
+// nothing, which removes nothing an earlier reap would have kept: that reap
+// read none of them either.
+func noCheckYet(context.Context, Unit, Policy, *evalState) []Check { return nil }
 
-// checkLiveness carries the caller's session verdict: anything but a session
-// proven gone keeps.
-func checkLiveness(_ context.Context, u Unit, _ Policy) []Check {
+// checkLiveness keeps a unit whose session isn't proven gone, and one with a
+// live process whose working directory is inside the instance. A process
+// listing that is missing or failed keeps every unit it would have cleared.
+func checkLiveness(_ context.Context, u Unit, p Policy, _ *evalState) []Check {
 	switch u.Liveness {
 	case LivenessGone:
-		return nil
 	case LivenessLive:
 		return []Check{{Evidence: "its session is still there"}}
 	default:
@@ -181,4 +214,31 @@ func checkLiveness(_ context.Context, u Unit, _ Policy) []Check {
 		}
 		return []Check{{Evidence: reason}}
 	}
+	if p.Processes == nil {
+		return []Check{{Evidence: "no process listing was taken"}}
+	}
+	if p.Processes.Err != nil {
+		return []Check{{Evidence: "the process listing failed: " + p.Processes.Err.Error()}}
+	}
+	var keeps []Check
+	for _, pr := range p.Processes.CwdWithin(u.InstancePath) {
+		keeps = append(keeps, Check{
+			Paths:    []string{relOrSelf(u.InstancePath, pr.Cwd)},
+			Evidence: fmt.Sprintf("a live process has its working directory in the instance: pid %d in %s", pr.PID, relOrSelf(u.InstancePath, pr.Cwd)),
+		})
+	}
+	return keeps
+}
+
+// relOrSelf is p relative to base, or p itself when it isn't under base.
+func relOrSelf(base, p string) string {
+	if rel, err := filepath.Rel(base, p); err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
+		return rel
+	}
+	if rb, err := filepath.EvalSymlinks(base); err == nil {
+		if rel, err := filepath.Rel(rb, p); err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
+			return rel
+		}
+	}
+	return p
 }

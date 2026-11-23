@@ -65,15 +65,22 @@ func TestGitCommandEnvironmentAndArguments(t *testing.T) {
 func TestGitCommandOptionalArguments(t *testing.T) {
 	e := &Env{Root: "/ws", Home: "/h", PATH: "/usr/bin", Git: "/usr/bin/git"}
 	r := repoDirs{GitDir: "/g", WorkTree: "/w"}
-	cmd, err := e.gitCommand(context.Background(), r, callOpts{}, "for-each-ref")
+	cmd, err := e.gitCommand(context.Background(), r, callOpts{}, "stash", "list")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !slices.Contains(cmd.Args, "--no-show-signature") {
+		t.Errorf("stash list without --no-show-signature: %q", cmd.Args)
 	}
 	if slices.Contains(cmd.Args, "core.excludesFile=") {
 		t.Errorf("excludes override added for a repository that names an excludes file: %q", cmd.Args)
 	}
-	if slices.Contains(cmd.Args, "--ignore-submodules=all") {
-		t.Errorf("status flags on for-each-ref: %q", cmd.Args)
+	cmd, err = e.gitCommand(context.Background(), r, callOpts{}, "for-each-ref")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(cmd.Args, "--ignore-submodules=all") || slices.Contains(cmd.Args, "--no-show-signature") {
+		t.Errorf("status or log flags on for-each-ref: %q", cmd.Args)
 	}
 
 	if _, err := e.gitCommand(context.Background(), repoDirs{}, callOpts{}, "ls-remote", "x"); err == nil {
@@ -278,19 +285,21 @@ func TestParseRefs(t *testing.T) {
 
 func TestParseStatus(t *testing.T) {
 	out := "1 .M N... 100644 100644 100644 " + strings.Repeat("a", 40) + " " + strings.Repeat("a", 40) + " src/a b.go\x00" +
+		"2 R. N... 100644 100644 100644 " + strings.Repeat("a", 40) + " " + strings.Repeat("a", 40) + " R100 new.go\x00old.go\x00" +
 		"? notes\ntxt\x00"
 	got, err := parseStatus([]byte(out))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []statusEntry{{"changed", "src/a b.go"}, {"untracked", "notes\ntxt"}}
+	want := []statusEntry{{"changed", "src/a b.go"}, {"renamed", "new.go"}, {"untracked", "notes\ntxt"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("parseStatus = %+v, want %+v", got, want)
 	}
 	for _, bad := range []string{
-		"? notes.txt",     // no terminator
-		"x notes.txt\x00", // unknown kind
-		"1 .M N...\x00",   // too few fields
+		"? notes.txt",                         // no terminator
+		"x notes.txt\x00",                     // unknown kind
+		"1 .M N...\x00",                       // too few fields
+		"2 R. N... 1 1 1 a a R100 new.go\x00", // rename with no original
 	} {
 		if _, err := parseStatus([]byte(bad)); err == nil {
 			t.Errorf("parseStatus(%q) parsed", bad)

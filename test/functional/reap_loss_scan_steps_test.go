@@ -23,6 +23,7 @@ func registerReapLossScanSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the dispatch instance's contents are unchanged$`, theDispatchInstancesContentsAreUnchanged)
 	ctx.Step(`^the error output names the dispatch instance$`, theErrorOutputNamesTheDispatchInstance)
 	ctx.Step(`^the first dispatch instance still exists$`, theFirstDispatchInstanceStillExists)
+	registerReapPathClassSteps(ctx)
 }
 
 func theFirstDispatchInstanceStillExists(ctx context.Context) error {

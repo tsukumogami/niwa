@@ -629,6 +629,52 @@ type RepoOverride struct {
 	// declaration for this repo. Empty means inherit from
 	// WorkspaceMeta.EnvOutput.
 	EnvOutput OutputTargets `toml:"env_output,omitempty"`
+	// BuildTrees lists directories in this repository that hold build output,
+	// as exact paths relative to the repository root, each ending in "/", with
+	// no wildcards. The removal rule counts them as build trees.
+	BuildTrees []string `toml:"build_trees,omitempty"`
+}
+
+// validateBuildTrees reports why an entry of a repo's build_trees is refused,
+// naming it as <field>[<i>], or nil when every entry is an exact relative
+// directory path.
+func validateBuildTrees(field string, trees []string) error {
+	for i, t := range trees {
+		if reason := buildTreeProblem(t); reason != "" {
+			return fmt.Errorf("%s[%d]: %s", field, i, reason)
+		}
+	}
+	return nil
+}
+
+// buildTreeProblem returns why t is not a usable build_trees entry, or "".
+func buildTreeProblem(t string) string {
+	switch {
+	case t == "":
+		return "must not be empty"
+	case t == "/":
+		return `must name a directory, not just "/"`
+	case strings.HasPrefix(t, "/") || filepath.IsAbs(t):
+		return fmt.Sprintf("%q must be relative to the repository root", t)
+	case !strings.HasSuffix(t, "/"):
+		return fmt.Sprintf("%q must end in \"/\"", t)
+	case strings.ContainsAny(t, `*?[]{}\`):
+		return fmt.Sprintf("%q must be an exact path, without wildcards or backslashes", t)
+	}
+	for _, r := range t {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Sprintf("%q contains a control character", t)
+		}
+	}
+	for _, seg := range strings.Split(strings.TrimSuffix(t, "/"), "/") {
+		switch seg {
+		case "":
+			return fmt.Sprintf("%q has an empty segment", t)
+		case ".", "..":
+			return fmt.Sprintf("%q has a %q segment", t, seg)
+		}
+	}
+	return ""
 }
 
 // ContentConfig declares the CLAUDE.md content hierarchy.
@@ -863,6 +909,9 @@ func validate(cfg *WorkspaceConfig) error {
 		// clone URL override for discovered repos).
 		if override.Group != "" && override.URL == "" {
 			return fmt.Errorf("repo %q has group but no url: explicit repos require both url and group", name)
+		}
+		if err := validateBuildTrees(fmt.Sprintf("repos.%s.build_trees", name), override.BuildTrees); err != nil {
+			return &RemovalSettingsError{Err: err}
 		}
 	}
 

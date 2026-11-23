@@ -114,7 +114,7 @@ func TestAPassWithoutAScratchDirectoryStillReapsAUnitWithNoRepository(t *testing
 	if e.Scratch != nil || e.ScratchErr == nil {
 		t.Fatal("a scratch directory was made under a relative home")
 	}
-	v := Evaluate(context.Background(), Unit{InstancePath: instance, Liveness: LivenessGone}, Policy{Env: e})
+	v := Evaluate(context.Background(), Unit{InstancePath: instance, Liveness: LivenessGone}, Policy{Env: e, Processes: &Listing{}})
 	if v.Kind != Reap {
 		t.Fatalf("verdict %s %+v; want reap", v.Kind, v.Checks)
 	}

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -82,6 +83,19 @@ func runPass(ctx context.Context, workspaceRoot string, mode passMode, scope pas
 	ctx, cancel := context.WithTimeout(ctx, passDeadline)
 	defer cancel()
 
+	// The workspace configuration says what the rule counts as disposable
+	// and where build trees are. An invalid [session.removal] or build_trees
+	// ends the pass before anything is removed: the rule can't say what a
+	// unit holds without them. A configuration that can't be read at all is
+	// handed to the rule, which keeps every unit holding a clone.
+	cfg, cfgErr := loadWorkspaceConfig(workspaceRoot)
+	var settingsErr *config.RemovalSettingsError
+	if errors.As(cfgErr, &settingsErr) {
+		fmt.Fprintf(reapStderr, "niwa: removed nothing: the workspace's removal settings are invalid: %s\n",
+			sanitizeRemovalGateText(cfgErr.Error(), 400))
+		return res, nil
+	}
+
 	jobsDir, now := scope.JobsDir, scope.Now
 	targets, unreadable, err := selectReapTargets(workspaceRoot, jobsDir, now)
 	if err != nil {
@@ -93,14 +107,22 @@ func runPass(ctx context.Context, workspaceRoot string, mode passMode, scope pas
 	}
 	reportSparedInstances(os.Stderr, unreadable)
 
-	// The rule's environment is resolved once for the pass, and only when
-	// there is a unit to judge, so a pass with nothing to do makes no scratch
-	// directory.
+	// The rule's environment and the process listing are taken once for the
+	// pass, and only when there is a unit to judge, so a pass with nothing to
+	// do makes no scratch directory and lists no processes.
 	var policy removal.Policy
 	if len(targets) > 0 {
 		env := newRemovalEnv(workspaceRoot, userHomeDir(), os.Getenv("PATH"))
 		defer env.Close()
-		policy = removalPolicy(workspaceRoot, env)
+		policy = removalPolicy(cfg, env)
+		policy.ConfigError = cfgErr
+		procs := listProcessesFunc(ctx, env)
+		instances := make([]string, 0, len(targets))
+		for _, t := range targets {
+			instances = append(instances, t.InstancePath)
+		}
+		procs.Attribute(instances, nil)
+		policy.Processes = procs
 	}
 	rand.Shuffle(len(targets), func(i, j int) { targets[i], targets[j] = targets[j], targets[i] })
 
@@ -153,17 +175,21 @@ func runPass(ctx context.Context, workspaceRoot string, mode passMode, scope pas
 			unit := removal.Unit{
 				Name:         reapTargetName(t),
 				InstancePath: t.InstancePath,
+				JobDir:       jobDirFor(jobsDir, t.SessionID),
 			}
 			unit.Liveness, unit.LivenessReason = rereadLiveness(t, jobsDir, time.Now())
 			verdict := removal.Evaluate(ctx, unit, policy)
 			if verdict.Kind != removal.Reap {
 				first, _ := verdict.First()
-				if first.Name == removal.CheckLiveness {
+				if first.Name == removal.CheckLiveness && unit.Liveness != removal.LivenessGone {
 					// A session that came back between selection and this
 					// re-read is a live session, not a kept unit: it is left
 					// alone without a word, as selection leaves it. A
 					// liveness the re-read couldn't read is left the same
 					// way, silently, as the reap before the rule left it.
+					// A liveness keep for a session read as gone names a
+					// live process, or a process listing that failed, and
+					// is printed like any other keep.
 					return false, nil
 				}
 				return false, &keptUnit{Name: unit.Name, Check: first}
@@ -278,19 +304,58 @@ func reportKeptUnit(w io.Writer, k keptUnit) {
 		sanitizeRemovalGateText(k.Check.Evidence, 400))
 }
 
-// removalPolicy builds the rule's policy for a pass: the environment, and
-// each repository's clone URL from the workspace configuration at the root.
-// A configuration that can't be read leaves every repository without a URL,
-// which keeps any unit holding one.
-func removalPolicy(workspaceRoot string, env *removal.Env) removal.Policy {
-	p := removal.Policy{Env: env}
-	cfg, err := loadWorkspaceConfig(workspaceRoot)
-	if err != nil {
-		p.ConfigError = err
+// listProcessesFunc takes the pass's process listing. A variable so a test
+// can hand the pass a listing of its own.
+var listProcessesFunc = func(ctx context.Context, env *removal.Env) *removal.Listing {
+	return env.ListProcesses(ctx)
+}
+
+// removalPolicy builds the rule's policy for a pass from the workspace
+// configuration at the root: the environment, each repository's clone URL
+// and declared build trees, and the [session.removal] settings.
+func removalPolicy(cfg *config.WorkspaceConfig, env *removal.Env) removal.Policy {
+	p := removal.Policy{Env: env, CloneURL: cloneURLsFromConfig(cfg)}
+	if cfg == nil {
 		return p
 	}
-	p.CloneURL = cloneURLsFromConfig(cfg)
+	r := cfg.Session.Removal
+	p.IgnoredUnique = r.IgnoredUnique()
+	p.JobScratchUnique = r.JobScratchUnique()
+	for _, d := range r.Disposable {
+		p.Disposable = append(p.Disposable, d.Pattern)
+	}
+	trees := map[string][]string{}
+	for name, o := range cfg.Repos {
+		if len(o.BuildTrees) > 0 {
+			trees[name] = append([]string(nil), o.BuildTrees...)
+		}
+	}
+	p.BuildTrees = func(repo string) []string { return trees[repo] }
 	return p
+}
+
+// jobDirFor is the job directory of a session under jobsDir: the directory
+// named by its full id, or else the one whose name is a leading slice of the
+// id, the layout Claude Code writes. Empty when the session has none.
+func jobDirFor(jobsDir, sessionID string) string {
+	if jobsDir == "" || sessionID == "" || strings.ContainsAny(sessionID, `/\`) {
+		return ""
+	}
+	full := filepath.Join(jobsDir, sessionID)
+	if _, err := os.Lstat(full); err == nil {
+		return full
+	}
+	entries, err := os.ReadDir(jobsDir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if len(name) >= 8 && len(name) <= len(sessionID) && sessionID[:len(name)] == name {
+			return filepath.Join(jobsDir, name)
+		}
+	}
+	return ""
 }
 
 // cloneURLsFromConfig returns the clone URL the workspace configuration
