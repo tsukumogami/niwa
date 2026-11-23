@@ -81,6 +81,7 @@ func TestWalkKeepsADeinitializedSubmoduleStore(t *testing.T) {
 	commitRepo(t, src)
 	store := filepath.Join(f.clone, ".git", "modules", "sub")
 	gitRun(t, f.clone, "clone", "-q", "--bare", src, store)
+	gitRun(t, f.clone, "--git-dir="+store, "remote", "remove", "origin")
 	gitRun(t, f.clone, "--git-dir="+store, "config", "core.bare", "false")
 	gitRun(t, f.clone, "--git-dir="+store, "config", "core.worktree", "../../../sub")
 	if err := os.MkdirAll(filepath.Join(f.clone, "sub"), 0o755); err != nil {
@@ -96,6 +97,7 @@ func TestWalkKeepsABareRepositoryHoldingACommit(t *testing.T) {
 	src := filepath.Join(outsideDir(t), "src")
 	commitRepo(t, src)
 	gitRun(t, f.instance, "clone", "-q", "--bare", src, filepath.Join(f.instance, "keep.git"))
+	gitRun(t, f.instance, "--git-dir="+filepath.Join(f.instance, "keep.git"), "remote", "remove", "origin")
 
 	v := Evaluate(context.Background(), f.unit(), f.policy(t))
 	keepWith(t, v, "keep.git: ", "no clone URL for this repository")

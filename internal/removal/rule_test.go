@@ -130,6 +130,7 @@ func TestEvaluateKeepsWhenTheCloneURLIsUnreachable(t *testing.T) {
 	f := newFixture(t)
 	p := f.policy(t)
 	p.CloneURL = func(string) (string, bool) { return "file:///nonexistent/app.git", true }
+	gitRun(t, f.clone, "remote", "set-url", "origin", "file:///nonexistent/app.git")
 	v := Evaluate(context.Background(), f.unit(), p)
 	first, _ := v.First()
 	if v.Kind != Keep || !strings.Contains(first.Evidence, "clone URL unreachable") {
@@ -145,8 +146,8 @@ func TestEvaluateRefusesAFileRemoteWithoutTheTestOption(t *testing.T) {
 	p.Env = e
 	v := Evaluate(context.Background(), f.unit(), p)
 	first, _ := v.First()
-	if v.Kind != Keep || !strings.Contains(first.Evidence, "clone URL unreachable") {
-		t.Fatalf("verdict %s %+v; want keep: git refuses the file transport", v.Kind, v.Checks)
+	if v.Kind != Keep || !strings.Contains(first.Evidence, "remote URL not allowed") {
+		t.Fatalf("verdict %s %+v; want keep: the file transport is refused", v.Kind, v.Checks)
 	}
 }
 
@@ -154,6 +155,8 @@ func TestEvaluateKeepsARepositoryWithoutACloneURL(t *testing.T) {
 	f := newFixture(t)
 	p := f.policy(t)
 	p.CloneURL = func(string) (string, bool) { return "", false }
+	// Only the remote's URL goes: its remote-tracking refs stay to be judged.
+	gitRun(t, f.clone, "config", "--unset", "remote.origin.url")
 	v := Evaluate(context.Background(), f.unit(), p)
 	first, _ := v.First()
 	if v.Kind != Keep || first.Paths[0] != "tools/app" || !strings.Contains(first.Evidence, "no clone URL for this repository") {
