@@ -36,8 +36,17 @@ type Options struct {
 	// WorkspaceRoot keys the mirrors: each workspace has its own.
 	WorkspaceRoot string
 	// Instances are the instance clone paths that may borrow, listed by the
-	// caller so this package never enumerates instances itself.
+	// caller so this package never enumerates instances itself: every clone
+	// on disk (hostdir.Clones), kept and half-created instances included.
+	// The check, the restore's probe and Recorded read it; nothing is ever
+	// removed on its strength.
 	Instances []string
+	// Scan is the strict walk of every clone on disk (hostdir.StrictClones),
+	// called under the mirror's lock at the moment a store's removal is
+	// decided, so its answer is never older than the lock. It's the only
+	// list that can authorize removing a retired store. A nil Scan removes
+	// nothing that was ever linked, and an error from it removes nothing.
+	Scan func() ([]string, error)
 	// LockWait bounds the wait for a mirror's lock; zero means
 	// DefaultLockWait.
 	LockWait time.Duration
@@ -193,12 +202,18 @@ var storeIDPattern = regexp.MustCompile(`^(.+)-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$`)
 
 // Recorded lists the repo ids that have a mirror or should, found from what's
 // on disk alone, for a caller that has no repo list of its own: a state file
-// in .meta/, an entry at a stable path, a store directory in .store/, or a
-// stable path that the alternates of one of clones names. Only ids
-// ValidRepoID accepts are returned, sorted. It only reads: a workspace with no
-// mirror directory gets nothing returned and nothing written.
+// or a store record in .meta/, an entry at a stable path, a store directory
+// in .store/, or a stable path that the alternates of one of clones names.
+// Only ids ValidRepoID accepts are returned, sorted. It only reads: a
+// workspace with no mirror directory gets nothing returned and nothing
+// written.
 func Recorded(home, workspaceRoot string, clones []string) []string {
-	mdir := mirrorsDir(home, workspaceRoot)
+	return recordedIn(mirrorsDir(home, workspaceRoot), clones)
+}
+
+// recordedIn is Recorded for the mirrors directory mdir, so the teardown can
+// list ids once the workspace root its path came from is gone.
+func recordedIn(mdir string, clones []string) []string {
 	found := map[string]bool{}
 	add := func(id string) {
 		if ValidRepoID(id) {
@@ -208,9 +223,13 @@ func Recorded(home, workspaceRoot string, clones []string) []string {
 
 	if entries, err := os.ReadDir(metaDir(mdir)); err == nil {
 		for _, e := range entries {
-			// A leftover temporary state file is ".<id>.json-<rand>", which
-			// has no ".json" suffix and starts with a dot ValidRepoID rejects.
+			// A leftover temporary state file or record is
+			// ".<id>.json-<rand>" or ".<id>.stores-<rand>", which has neither
+			// suffix and starts with a dot ValidRepoID rejects.
 			if id, ok := strings.CutSuffix(e.Name(), ".json"); ok {
+				add(id)
+			}
+			if id, ok := strings.CutSuffix(e.Name(), ".stores"); ok {
 				add(id)
 			}
 		}
@@ -394,8 +413,10 @@ func Seed(ctx context.Context, opts Options, repo Repo) Result {
 // lock, that another command had already fixed the mirror restored nothing
 // and logs no restore line: its check line says the fault it saw and
 // "healthy". Each borrower ref the restore left unrecoverable gets an
-// unrecoverable line after the restore line. A failed log write is kept as
-// the Result's LogErr and changes nothing else in it.
+// unrecoverable line after the restore line. The restore line lists the
+// borrowers the restore's probe read (probed), and each store the restore
+// removed or kept on the way gets a store line after the rest. A failed log
+// write is kept as the Result's LogErr and changes nothing else in it.
 //
 // A mirror the check finds healthy is refreshed when opts.Refresh is set,
 // once its check line is written (see refresh). A mirror this call restored
@@ -411,7 +432,29 @@ func Seed(ctx context.Context, opts Options, repo Repo) Result {
 // (tightenModes). An empty-hooks directory that can't be made safe isn't an
 // error here: gitRun checks it again on every call and refuses to run git,
 // so the check finds the store unreadable and the restore can't clone.
+//
+// Last, for every outcome but busy, it sweeps the mirror's retired stores
+// (sweep) and logs what the sweep removed or kept after the call's other
+// lines, so a store line never comes before the restore line whose probe it
+// followed.
 func ensureOne(ctx context.Context, opts Options, r Repo) Result {
+	res := checkAndRestore(ctx, opts, r)
+	if res.Outcome == OutcomeBusy {
+		return res
+	}
+	mdir := mirrorsDir(opts.Home, opts.WorkspaceRoot)
+	base := logLine{Command: opts.Command, Mirror: r.ID}
+	if lines := sweep(opts, mdir, r, base); len(lines) > 0 {
+		if err := appendLog(mdir, lines...); err != nil && res.LogErr == nil {
+			res.LogErr = err
+		}
+	}
+	return res
+}
+
+// checkAndRestore is ensureOne's check, restore and refresh of one mirror,
+// before the sweep.
+func checkAndRestore(ctx context.Context, opts Options, r Repo) Result {
 	_ = prepareEmptyHooks(opts.Home)
 	ctx = withEmptyHooks(ctx, emptyHooksDir(opts.Home))
 	ctx = withNetworkNotes(ctx)
@@ -447,8 +490,8 @@ func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 	}
 	restoreStart := time.Now()
 	tookStart := elapsedNow()
-	var salvaged []string
-	res.Outcome, res.Unrecoverable, salvaged, res.Err = restore(ctx, opts, r)
+	rb := restore(ctx, opts, r)
+	res.Outcome, res.Unrecoverable, res.Err = rb.outcome, rb.lost, rb.err
 	took := elapsedNow().Sub(tookStart).Milliseconds()
 	checkLine.Result = res.Outcome
 	if res.Outcome == OutcomeHealthy {
@@ -459,9 +502,11 @@ func ensureOne(ctx context.Context, opts Options, r Repo) Result {
 	restoreLine.Time = logTime(restoreStart)
 	restoreLine.Event = eventRestore
 	restoreLine.TookMs = &took
-	restoreLine.SalvagedFrom = salvaged
+	restoreLine.SalvagedFrom = rb.salvaged
 	restoreLine.NetworkNotes = networkNotesFrom(ctx)
+	restoreLine.Probed = rb.probed
 	lines := []any{checkLine, restoreLine}
-	logged(appendLog(mdir, append(lines, unrecoverableLines(restoreLine, res.Unrecoverable)...)...))
+	lines = append(lines, unrecoverableLines(restoreLine, res.Unrecoverable)...)
+	logged(appendLog(mdir, append(lines, storeLines(restoreLine, rb.events)...)...))
 	return res
 }

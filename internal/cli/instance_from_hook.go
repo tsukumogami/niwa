@@ -16,6 +16,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/fallbacknotice"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/hostdir"
 	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/mirror"
 	"github.com/tsukumogami/niwa/internal/workspace"
@@ -778,11 +779,13 @@ func writeHookMirrorNotices(cmd *cobra.Command, workspaceRoot string) error {
 
 // checkRecordedMirrors checks and restores the mirrors mirror.Recorded finds
 // for workspaceRoot, logging as the hook with the hook's lock wait. With no
-// repo list to start from, the borrowers it looks at are every directory two
-// levels under each instance (<group>/<repo>), and each repo's URL comes from
-// mirrorRepos. Every result comes back, healthy ones included, so the caller
-// sees a healthy mirror whose log write failed. A home it can't resolve
-// checks nothing.
+// repo list to start from, the borrowers it looks at are every clone on disk
+// (hostdir.Clones: two levels under each instance at the root and in kept/,
+// half-created ones included), the strict walk (hostdir.StrictClones) is the
+// scan that alone can authorize removing a retired store, and each repo's URL
+// comes from mirrorRepos. Every result comes back, healthy ones included, so
+// the caller sees a healthy mirror whose log write failed. A home it can't
+// resolve checks nothing.
 func checkRecordedMirrors(ctx context.Context, workspaceRoot string) []mirror.Result {
 	if ctx == nil {
 		ctx = context.Background()
@@ -791,8 +794,7 @@ func checkRecordedMirrors(ctx context.Context, workspaceRoot string) []mirror.Re
 	if err != nil || home == "" {
 		return nil
 	}
-	instances, _ := workspace.EnumerateInstances(workspaceRoot)
-	clones := instanceClones(instances)
+	clones := hostdir.Clones(home, workspaceRoot)
 	ids := mirror.Recorded(home, workspaceRoot, clones)
 	if len(ids) == 0 {
 		return nil
@@ -801,38 +803,14 @@ func checkRecordedMirrors(ctx context.Context, workspaceRoot string) []mirror.Re
 		Home:          home,
 		WorkspaceRoot: workspaceRoot,
 		Instances:     clones,
+		Scan:          func() ([]string, error) { return hostdir.StrictClones(home, workspaceRoot) },
 		LockWait:      hookMirrorLockWait,
 		Command:       mirrorCommandHook,
 	}
+	// The instances with a state file are read only for a URL the config
+	// doesn't give.
+	instances, _ := workspace.EnumerateInstances(workspaceRoot)
 	return mirror.EnsureHealthy(ctx, opts, mirrorRepos(workspaceRoot, instances, ids))
-}
-
-// instanceClones lists the directories two levels under each instance, where
-// an instance keeps its clones as <group>/<repo>. Entries starting with a dot
-// (.niwa, .claude) are skipped at both levels.
-func instanceClones(instances []string) []string {
-	var clones []string
-	for _, inst := range instances {
-		groups, err := os.ReadDir(inst)
-		if err != nil {
-			continue
-		}
-		for _, g := range groups {
-			if !g.IsDir() || strings.HasPrefix(g.Name(), ".") {
-				continue
-			}
-			repos, err := os.ReadDir(filepath.Join(inst, g.Name()))
-			if err != nil {
-				continue
-			}
-			for _, r := range repos {
-				if r.IsDir() && !strings.HasPrefix(r.Name(), ".") {
-					clones = append(clones, filepath.Join(inst, g.Name(), r.Name()))
-				}
-			}
-		}
-	}
-	return clones
 }
 
 // mirrorRepos gives each of ids the URL a restore clones it from, for a

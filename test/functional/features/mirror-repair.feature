@@ -118,7 +118,7 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     And the mirror of "app" is a link into its store
     And the state file of "app" records the linked store and its packs
     And the mirror of "app" has the remote URL of source repo "app"
-    And only the linked store of "app" remains
+    And the store "app" replaced is kept and recorded as retired
     And every ref of each borrower of "app" reads to the root and fsck is clean
     And the borrowers of "app" match their snapshot
     And the unpushed commit and uncommitted edit are intact
@@ -214,7 +214,7 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     And the error output carries exactly the mirror warning "mirror app: fault pack-changed, result restored"
     And the mirror link of "app" moved to a new store
     And the mirror of "app" is a link into its store
-    And only the linked store of "app" remains
+    And the store "app" replaced is kept and recorded as retired
     And every ref of each borrower of "app" reads to the root and fsck is clean
     And the borrowers of "app" match their snapshot
     And the unpushed commit and uncommitted edit are intact

@@ -18,6 +18,10 @@ const (
 	eventRestore       = "restore"
 	eventRefresh       = "refresh"
 	eventUnrecoverable = "unrecoverable"
+	// eventRemove and eventKeep are a store line's events: a store removed,
+	// or a store a removal would have taken that was kept, with the reason.
+	eventRemove = "remove"
+	eventKeep   = "keep"
 )
 
 // logMax is the size at which the mirror log rotates: a line is never
@@ -33,7 +37,10 @@ const logMax = 1 << 20
 // NetworkNotes, on a restore or refresh line only, names what the event's
 // network calls honoured from the user's environment that weakens or
 // reroutes the connection (noteSSLNoVerify, noteProxyCommand). It carries
-// names only: no environment value ever reaches the log.
+// names only: no environment value ever reaches the log. Probed, on a
+// restore line only, lists the borrower clones the restore's probe read, in
+// the order it read them, so a reader can tell which instances a restore
+// looked at, kept and half-created ones included.
 type logLine struct {
 	Time         string   `json:"time"`
 	Command      string   `json:"command"`
@@ -45,6 +52,7 @@ type logLine struct {
 	TookMs       *int64   `json:"took_ms,omitempty"`
 	SalvagedFrom []string `json:"salvaged_from,omitempty"`
 	NetworkNotes []string `json:"network_notes,omitempty"`
+	Probed       []string `json:"probed,omitempty"`
 }
 
 // cut returns l with every string a caller, a remote or a person could have
@@ -62,6 +70,34 @@ func (l logLine) cut() logLine {
 		}
 		l.SalvagedFrom = from
 	}
+	if l.Probed != nil {
+		probed := make([]string, len(l.Probed))
+		for i, name := range l.Probed {
+			probed[i] = cleanName(name)
+		}
+		l.Probed = probed
+	}
+	return l
+}
+
+// storeLine is the line logged when a store is removed (eventRemove) or a
+// store a removal considered is kept (eventKeep): the call's time, command
+// and mirror, the store as ".store/<name>", and why. Most removals and
+// every keep are logged by a later command than the restore that retired
+// the store, after that command's own check, restore and unrecoverable
+// lines.
+type storeLine struct {
+	logLine
+	Store  string `json:"store"`
+	Reason string `json:"reason"`
+}
+
+// cut returns l with every string cut as logLine.cut does, the store's name
+// included: a record can hold any name.
+func (l storeLine) cut() storeLine {
+	l.logLine = l.logLine.cut()
+	l.Store = cleanName(l.Store)
+	l.Reason = cleanName(l.Reason)
 	return l
 }
 
@@ -109,6 +145,7 @@ func unrecoverableLines(restoreLine logLine, lost []LostRef) []any {
 		base.TookMs = nil
 		base.SalvagedFrom = nil
 		base.NetworkNotes = nil
+		base.Probed = nil
 		lines = append(lines, unrecoverableLine{
 			logLine:        base,
 			Instance:       l.Instance,
@@ -125,8 +162,8 @@ func unrecoverableLines(restoreLine logLine, lost []LostRef) []any {
 // logPath is the mirror log of a workspace's mirrors.
 func logPath(mdir string) string { return filepath.Join(metaDir(mdir), "mirror.log") }
 
-// encodeLogLine cuts and encodes one line, a logLine or an unrecoverableLine;
-// any other type is refused. This is the one place the log's strings are
+// encodeLogLine cuts and encodes one line, a logLine, an unrecoverableLine
+// or a storeLine; any other type is refused. This is the one place the log's strings are
 // cut, so no caller can write a line that breaks the one-line-per-event
 // form, whatever names it carries.
 func encodeLogLine(line any) ([]byte, error) {
@@ -135,6 +172,8 @@ func encodeLogLine(line any) ([]byte, error) {
 	case logLine:
 		v = l.cut()
 	case unrecoverableLine:
+		v = l.cut()
+	case storeLine:
 		v = l.cut()
 	default:
 		return nil, fmt.Errorf("mirror log: refusing a line of type %T", line)
@@ -146,8 +185,8 @@ func encodeLogLine(line any) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-// appendLog writes each line, a logLine or an unrecoverableLine, to the
-// mirror log. Every line is encoded before anything is written, so a line of
+// appendLog writes each line, a logLine, an unrecoverableLine or a
+// storeLine, to the mirror log. Every line is encoded before anything is written, so a line of
 // any other type fails the call with nothing written. Each line is one write
 // to a file opened O_APPEND, so it lands whole beside another command's
 // lines, and before each one the log rotates once it reaches logMax (see

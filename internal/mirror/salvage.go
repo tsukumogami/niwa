@@ -40,9 +40,11 @@ func oldStores(mdir, repoID string) []string {
 
 // salvage copies into the new store at dst every object of the old stores
 // at srcs (each a store directory's path) that is still good: a pack with its
-// .idx when git verify-pack passes, and a loose object whose content hashes
+// .idx when git verify-pack passes, every object that can still be read from
+// a pack it refuses (recoverPack), and a loose object whose content hashes
 // to its name. The fresh clone holds what the remote serves; salvage keeps
 // what only the old store held, such as commits the remote has since deleted.
+// mdir and repoID name the mirror, whose .tmp/ the recovery works in.
 //
 // Only regular files are read, each found by Lstat: no link is followed, and
 // nothing but objects is copied, so a config, hook, alternates file or ref
@@ -50,13 +52,13 @@ func oldStores(mdir, repoID string) []string {
 // the new store is left as the clone wrote it. A file that can't be copied
 // is skipped, never fatal: the clone alone is a usable mirror. A directory
 // it makes in the new store is 0700 (mkdirPrivate).
-func salvage(ctx context.Context, srcs []string, dst string) {
+func salvage(ctx context.Context, mdir, repoID string, srcs []string, dst string) {
 	for _, store := range srcs {
 		src := filepath.Join(store, "objects")
 		if fi, err := os.Lstat(src); err != nil || !fi.IsDir() {
 			continue
 		}
-		salvagePacks(ctx, filepath.Join(src, "pack"), filepath.Join(dst, "objects", "pack"))
+		salvagePacks(ctx, mdir, repoID, filepath.Join(src, "pack"), filepath.Join(dst, "objects", "pack"))
 		salvageLoose(src, filepath.Join(dst, "objects"))
 	}
 }
@@ -203,8 +205,10 @@ func unreachedFrom(ctx context.Context, dst string, ids []string) (map[string]bo
 
 // salvagePacks copies each pack in srcDir whose .idx is beside it and passes
 // git verify-pack. The .idx is copied before the .pack and both keep their
-// names, so git never sees a pack without its index.
-func salvagePacks(ctx context.Context, srcDir, dstDir string) {
+// names, so git never sees a pack without its index. A pack verify-pack
+// refuses isn't copied; recoverPack takes what can still be read from it
+// into dstDir's objects directory as loose objects instead.
+func salvagePacks(ctx context.Context, mdir, repoID, srcDir, dstDir string) {
 	if fi, err := os.Lstat(srcDir); err != nil || !fi.IsDir() {
 		return
 	}
@@ -225,6 +229,7 @@ func salvagePacks(ctx context.Context, srcDir, dstDir string) {
 			continue
 		}
 		if verifyPack(ctx, idx) != nil {
+			recoverPack(ctx, mdir, repoID, pack, filepath.Dir(dstDir))
 			continue
 		}
 		if err := mkdirPrivate(dstDir); err != nil {

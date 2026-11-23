@@ -20,6 +20,7 @@ import (
 	"sort"
 
 	"github.com/tsukumogami/niwa/internal/hostdir"
+	"github.com/tsukumogami/niwa/internal/mirror"
 	"github.com/tsukumogami/niwa/internal/pluginstore"
 )
 
@@ -60,7 +61,8 @@ type DestroyWorkspaceOpts struct {
 	Home string
 
 	// StoreOut, if set, receives the line saying the plugin store was kept
-	// for the kept instances, with its path.
+	// for the kept instances, with its path, and a line for each mirror kept
+	// and each store directory left, with its path and why.
 	StoreOut io.Writer
 }
 
@@ -99,8 +101,11 @@ func UnlistedInstance(workspaceRoot string, listed []string) (string, error) {
 //     withdraw the recorded Claude trust grant → RemoveAll(instanceDir).
 //  4. After all instances are removed, refuse if an unlisted instance is
 //     now on disk, run opts.BeforeRootRemoval, then RemoveAll(workspaceRoot).
-//  5. With opts.Home set, remove the workspace's plugin store unless a kept
-//     instance remains, then the key directory if that leaves it empty.
+//  5. With opts.Home set, remove each of the workspace's mirrors unless a
+//     kept instance borrows from it, its lock is held or kept/ can't be read
+//     (each kept mirror is reported on opts.StoreOut with its path and why),
+//     then the plugin store unless a kept instance remains, then the key
+//     directory if that leaves it empty.
 //
 // Per-instance synchronous ordering preserves resumability on partial
 // failure: if step 3 panics or returns an error mid-loop, the
@@ -121,9 +126,11 @@ func DestroyWorkspace(workspaceRoot string, opts DestroyWorkspaceOpts) error {
 	// The store's key comes from the root's canonical path, which can't be
 	// worked out once the root is gone.
 	var keyDir, storeDir string
+	var mirrors mirror.Teardown
 	if opts.Home != "" {
 		keyDir = hostdir.WorkspaceDir(opts.Home, abs)
 		storeDir = pluginstore.Dir(opts.Home, abs)
+		mirrors = mirror.NewTeardown(opts.Home, abs)
 	}
 
 	var instances []string
@@ -200,6 +207,10 @@ func DestroyWorkspace(workspaceRoot string, opts DestroyWorkspaceOpts) error {
 	}
 
 	if keyDir != "" {
+		// The mirrors go before the plugin store, whose removal ends by
+		// removing the key directory when it's empty: the kept instances
+		// are the only borrowers left, so the strict walk of kept/ decides.
+		mirrors.Remove(func() ([]string, error) { return hostdir.StrictKeptClones(keyDir) }, opts.StoreOut)
 		if err := removeWorkspacePluginStore(keyDir, storeDir, opts.StoreOut); err != nil {
 			return err
 		}

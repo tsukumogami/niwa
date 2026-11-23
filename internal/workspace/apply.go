@@ -21,6 +21,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/gitexclude"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/guardrail"
+	"github.com/tsukumogami/niwa/internal/hostdir"
 	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/mirror"
 	"github.com/tsukumogami/niwa/internal/pluginrecord"
@@ -3270,8 +3271,12 @@ func repoAlreadyCloned(dir string) bool {
 // or that a clone in any of the workspace's instances borrows from, restores
 // a broken one and refreshes a healthy one from its remote, pruning nothing
 // (every command that reaches here builds instances, so each brings its
-// mirrors up to date once). The clone paths of every instance are passed, not
-// just this one's, because a mirror serves the whole workspace. Every result
+// mirrors up to date once). Every clone on disk is passed, not just this
+// instance's, because a mirror serves the whole workspace: the lenient walk
+// (hostdir.Clones), with kept and half-created instances and repos the config
+// doesn't name, for the check and the probe, and the strict walk
+// (hostdir.StrictClones) as the scan that alone can authorize removing a
+// retired store. Every result
 // that isn't a healthy mirror, and a healthy one whose refresh or mirror log
 // write failed, becomes a warning (ReportMirrorResult); none fails the
 // command, which carries on whatever the result.
@@ -3290,20 +3295,25 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 		return
 	}
 	workspaceRoot := filepath.Dir(instanceRoot)
-	// A root that can't be listed still has this instance; its clones are
-	// enough to find a borrower here, and the next command lists the rest.
-	instances, _ := EnumerateInstances(workspaceRoot)
-	if !slices.Contains(instances, instanceRoot) {
-		instances = append(instances, instanceRoot)
+	home := a.DeveloperHome
+	// Every clone on disk, kept and half-created instances and repos the
+	// config no longer names included, not the config's repos in the
+	// instances with a state file: a borrower the config can't see still
+	// breaks when its mirror does. A root that can't be listed still has this
+	// instance, whose clones are added so a borrower here is found.
+	clones := hostdir.Clones(home, workspaceRoot)
+	for _, c := range hostdir.InstanceClones(instanceRoot) {
+		if !slices.Contains(clones, c) {
+			clones = append(clones, c)
+		}
 	}
 
 	if a.mirrorsChecked == nil {
 		a.mirrorsChecked = map[string]bool{}
 	}
 	repos := make([]mirror.Repo, 0, len(classified))
-	var clones []string
 	for _, cr := range classified {
-		stable := mirror.StablePath(a.DeveloperHome, workspaceRoot, cr.Repo.Name)
+		stable := mirror.StablePath(home, workspaceRoot, cr.Repo.Name)
 		if a.mirrorsChecked[stable] {
 			continue
 		}
@@ -3311,18 +3321,16 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 			ID:  cr.Repo.Name,
 			URL: RepoCloneURL(cfg, cr.Repo.Name, cr.Repo.SSHURL, cr.Repo.CloneURL),
 		})
-		for _, inst := range instances {
-			clones = append(clones, filepath.Join(inst, cr.Group, cr.Repo.Name))
-		}
 	}
 
 	if a.MirrorCommand != "" {
 		command = a.MirrorCommand
 	}
 	opts := mirror.Options{
-		Home:          a.DeveloperHome,
+		Home:          home,
 		WorkspaceRoot: workspaceRoot,
 		Instances:     clones,
+		Scan:          func() ([]string, error) { return hostdir.StrictClones(home, workspaceRoot) },
 		LockWait:      a.MirrorLockWait,
 		Command:       command,
 		Refresh:       true,
