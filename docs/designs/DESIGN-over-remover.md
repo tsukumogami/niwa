@@ -114,6 +114,20 @@ under Data loss gives. A store that reads only packs niwa's own
 `index-pack` wrote is the way to close the gap; tsukumogami/niwa#564
 tracks it.
 
+### 2026-11-23 — The credential-helper read names --no-includes and -z
+
+**What changed.** The credential-helper read in Security Considerations
+and in the list of calls outside gitCommand now names the command niwa
+runs, `git config --global --no-includes --get-all -z credential.helper`,
+in place of `git config --global --get-all credential.helper`.
+
+**Why.** The behavior is the same, written exactly. git doesn't follow
+`include.*` for a read scoped to `--global`, so `--no-includes` only makes
+explicit that a helper set only in an included file isn't found, which
+this design already says. `-z` separates the values with NUL bytes so a
+helper value can't be misread across a line break. Review found the
+literal command differed from the text here.
+
 ## Context and Problem Statement
 
 A unit of work in niwa is a session, the instance it runs in, its Claude Code
@@ -1970,7 +1984,7 @@ differs by a byte from what niwa wrote (Decision 1). A remote the agent added is
 so it can't vouch for a commit, can't turn `ls-remote` into a request to an
 internal address of the agent's choosing, and is never offered the person's
 ssh keys. For a proof remote, niwa adds the person's own credential helpers,
-read beforehand with `git config --global --get-all credential.helper`, as
+read beforehand with `git config --global --no-includes --get-all -z credential.helper`, as
 `-c credential.helper=<value>` after the reset; no other helper runs.
 Network calls also pass `-c http.followRedirects=false`, beside the fixed
 `-c http.proxy=` and `-c http.sslVerify=true`. Git's default
@@ -2776,7 +2790,7 @@ keep without running: from any scope but command (local, worktree, any included 
   merge.*.driver, credential.*.helper, gpg.program, gpg.ssh.program, gpg.x509.program,
   core.fsmonitor naming a hook, or any other *.program, *.command, *Command or *.helper
   key, in any repository under the unit, a submodule included
-the one call outside gitCommand: git config --global --get-all credential.helper,
+the one call outside gitCommand: git config --global --no-includes --get-all -z credential.helper,
   once per pass, from an empty directory under ~/.niwa/w-<key>/scratch/<pass>/,
   checked for owner and mode first, 10-second context
 ```
