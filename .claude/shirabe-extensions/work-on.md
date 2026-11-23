@@ -59,7 +59,7 @@ Claude integration), the tsuku network install and the macOS leg are left out on
   (CI's checkout tripwire around the functional suite; CI also runs the suite under the
   sentinel `HOME` and `XDG_STATE_HOME` and checks them afterwards, which this line doesn't; "another functional test run holds" the
   lock means a run is already going in this checkout: rerun it, the change is not at fault.
-  It runs on macOS as well as Linux; CI runs it on Linux only. The JSON file gives it a
+  It runs on macOS as well as Linux, and CI runs it on both. The JSON file gives it a
   one-hour deadline, and it and `go test -race` a 1024-process bound.
   Unlike CI, three tags are skipped, for two different reasons. `@codex-live` and
   `@claude-integration` stay out for good: with a Codex login or `ANTHROPIC_API_KEY` they make
