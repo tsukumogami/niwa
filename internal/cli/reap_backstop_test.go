@@ -411,6 +411,7 @@ func TestBackstop_RetainedInstance_Spared(t *testing.T) {
 	}
 
 	destroyed := stubDestroyAll(t)
+	out := captureReapStderr(t)
 
 	n, err := reapBackstop(root, t.TempDir(), now)
 	if err != nil {
@@ -422,16 +423,11 @@ func TestBackstop_RetainedInstance_Spared(t *testing.T) {
 
 	// And the developer is told, because nothing will ever reclaim it on its
 	// own and an instance that accumulates silently is the other half of this
-	// failure.
-	_, spared, err := selectBackstopTargets(root, t.TempDir(), now)
-	if err != nil {
-		t.Fatalf("selectBackstopTargets error: %v", err)
-	}
-	if len(spared) != 1 {
-		t.Fatalf("spared %d instance(s), want 1", len(spared))
-	}
-	if spared[0].Reason != reason {
-		t.Errorf("spared reason = %q, want the marker's own words %q", spared[0].Reason, reason)
+	// failure. The removal rule's hold check keeps it, and the pass prints
+	// the kept line with the marker's own words.
+	want := "niwa: kept " + dispInstOld + ": hold check: held by .niwa/dispatch-retain: " + reason
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("no kept line %q:\n%s", want, out.String())
 	}
 }
 
