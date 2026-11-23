@@ -1,6 +1,6 @@
 ---
 schema: prd/v1
-status: In Progress
+status: Done
 problem: |
   Every niwa instance clones each repo's full history, so a host with several
   instances of a workspace downloads and writes the same history once per
@@ -23,7 +23,7 @@ absorbed:
 
 ## Status
 
-In Progress
+Done
 
 Absorbed [BRIEF-reference-clones](docs/briefs/BRIEF-reference-clones.md); carried in Absorbed Brief.
 
