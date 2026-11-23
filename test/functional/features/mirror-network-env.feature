@@ -144,6 +144,7 @@ Feature: The mirror's network calls keep the user's remote-access settings
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
+    And the mirror of "app" has the remote URL of source repo "app-ssh"
     When I delete the mirror of "app" and its store
     And I count the mirror log lines
     And I count the ssh wrapper calls
