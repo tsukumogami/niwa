@@ -538,21 +538,22 @@ Feature: niwa reap keeps a deleted session's instance that holds unpushed work
     And a dispatch instance was created with a well-formed instance file
     When the dispatch session "b4b4b4b4-b4b4-4b4b-8b4b-b4b4b4b4b4b4" is deleted from the Agent View
     And the workspace configuration's URL for repo "myapp" points at a refused local address with "user:secret" and query ""
+    And repo "tools/myapp" of the dispatch instance has its origin at the workspace configuration's URL for repo "myapp"
     And I run "niwa reap --verdict-only" from the workspace root
     Then the exit code is 0
     And the output gives the dispatch instance the verdict "keep"
-    And the output contains "clone URL unreachable"
+    And the output contains "remote URL not allowed: the URL carries userinfo"
     And no output contains "secret"
     When I run "niwa reap --verdict-only --json" from the workspace root
     Then the exit code is 0
     And the output is a niwa.verdicts/v1 document giving the dispatch instance the verdict "keep"
-    And the output contains "clone URL unreachable"
+    And the output contains "remote URL not allowed: the URL carries userinfo"
     And no output contains "secret"
     When I run niwa reap from the workspace root
     Then the exit code is 0
     And the dispatch instance still exists
     And the error output names the dispatch instance
-    And the error output contains "clone URL unreachable"
+    And the error output contains "remote URL not allowed: the URL carries userinfo"
     And no output contains "secret"
 
   @critical
@@ -580,6 +581,7 @@ Feature: niwa reap keeps a deleted session's instance that holds unpushed work
     And a dispatch instance was created with a well-formed instance file
     When the dispatch session "b5b5b5b5-b5b5-4b5b-8b5b-b5b5b5b5b5b5" is deleted from the Agent View
     And the workspace configuration's URL for repo "myapp" points at a refused local address with "" and query "?access_token=tq7Rv2Lx9Wp"
+    And repo "tools/myapp" of the dispatch instance has its origin at the workspace configuration's URL for repo "myapp"
     And I run "niwa reap --verdict-only" from the workspace root
     Then the exit code is 0
     And the output gives the dispatch instance the verdict "keep"
@@ -814,7 +816,7 @@ Feature: niwa reap keeps a deleted session's instance that holds unpushed work
     And a dispatch instance was created with a well-formed instance file
     When the workspace configuration declares the on-reap command:
       """
-      git -C "$NIWA_INSTANCE_PATH/tools/myapp" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m late
+      R="$NIWA_INSTANCE_PATH/tools/myapp" && B=$(printf 'late\n' | git -C "$R" hash-object -w --stdin) && T=$(printf '100644 blob %s\tlate.txt\n' "$B" | git -C "$R" mktree) && C=$(git -C "$R" -c user.name=t -c user.email=t@example.com commit-tree "$T" -p HEAD -m late) && git -C "$R" update-ref refs/heads/late "$C"
       """
     And the dispatch session "a2a2a2a2-a2a2-4a2a-8a2a-a2a2a2a2a2a2" is deleted from the Agent View
     And I run niwa reap from the workspace root

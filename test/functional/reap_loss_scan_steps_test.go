@@ -42,6 +42,7 @@ func registerReapLossScanSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the output is a niwa\.verdicts/v1 document giving the (first dispatch instance|dispatch instance) the verdict "(keep|reap)"$`, theOutputIsAVerdictsDocumentGiving)
 	registerReapPathClassSteps(ctx)
 	registerReapTombstoneSteps(ctx)
+	registerReapProofRemoteSteps(ctx)
 }
 
 func theFirstDispatchInstanceStillExists(ctx context.Context) error {
@@ -84,9 +85,15 @@ func aCommitIsMadeInTheDispatchInstance(ctx context.Context, branch, repo string
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
 		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
 		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com")
+	// The commit changes a file: an empty commit leaves the default
+	// branch's own tree, which the rule counts as merged by content.
+	if err := os.WriteFile(filepath.Join(clone, "unpushed-work.txt"), []byte(branch+"\n"), 0o644); err != nil {
+		return ctx, err
+	}
 	for _, args := range [][]string{
 		{"checkout", "-q", "-b", branch},
-		{"commit", "-q", "--allow-empty", "-m", "work nobody pushed"},
+		{"add", "unpushed-work.txt"},
+		{"commit", "-q", "-m", "work nobody pushed"},
 	} {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = clone
@@ -121,8 +128,16 @@ func aLinkedWorktreeHoldsACommit(ctx context.Context, name, repo, branch string)
 		args []string
 	}{
 		{clone, []string{"worktree", "add", "-q", "-b", branch, wt}},
-		{wt, []string{"commit", "-q", "--allow-empty", "-m", "worktree work nobody pushed"}},
+		{wt, []string{"add", "worktree-work.txt"}},
+		{wt, []string{"commit", "-q", "-m", "worktree work nobody pushed"}},
 	} {
+		if step.args[0] == "add" {
+			// The commit changes a file: an empty commit leaves the
+			// default branch's own tree, which counts as merged by content.
+			if err := os.WriteFile(filepath.Join(wt, "worktree-work.txt"), []byte(branch+"\n"), 0o644); err != nil {
+				return ctx, err
+			}
+		}
 		cmd := exec.Command("git", step.args...)
 		cmd.Dir = step.dir
 		cmd.Env = env
