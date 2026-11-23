@@ -64,9 +64,21 @@ func checkRepositories(ctx context.Context, u Unit, p Policy, s *evalState) []Ch
 			generated:     gen,
 		})
 		repoKeeps := res.keeps
-		if res.configRead && r.Prunable {
-			repoKeeps = append(repoKeeps, p.Env.checkPrunedIndex(ctx, r)...)
+		read := RepoRead{
+			Rel: r.Rel, dirs: r.dirs(), base: r.Base,
+			inInstance: r.Base == f.roots[0].given || r.Base == f.roots[0].real,
+			linked:     r.Linked, prunable: r.Prunable,
+			wtInfo: r.wtInfo, gitInfo: r.gitInfo,
+			read:   res.configRead && res.workTreeRead,
+			status: res.status, index: res.index,
 		}
+		if res.configRead && r.Prunable {
+			staged, keeps := p.Env.checkPrunedIndex(ctx, r)
+			repoKeeps = append(repoKeeps, keeps...)
+			read.staged = staged
+			read.read = read.read && len(keeps) == 0
+		}
+		s.reads = append(s.reads, read)
 		if res.listed && !r.Linked {
 			repoKeeps = append(repoKeeps, f.reach(r, res.worktrees)...)
 		}
@@ -84,18 +96,33 @@ func checkRepositories(ctx context.Context, u Unit, p Policy, s *evalState) []Ch
 
 // checkPrunedIndex reads the index of a worktree whose working tree is gone,
 // through its admin directory: a staged entry that differs from its HEAD,
-// or a read that fails, keeps the unit.
-func (e *Env) checkPrunedIndex(ctx context.Context, r foundRepo) []Check {
+// or a read that fails, keeps the unit. It returns what it read with the
+// keeps.
+func (e *Env) checkPrunedIndex(ctx context.Context, r foundRepo) ([]string, []Check) {
 	keep := func(evidence string) []Check {
 		return []Check{{Paths: []string{r.Rel}, Evidence: r.Rel + ": " + evidence}}
 	}
-	cmd, err := e.gitCommand(ctx, repoDirs{GitDir: r.GitDir}, callOpts{}, "diff-index", "--cached", "--name-only", "-z", "HEAD")
+	staged, err := e.readPrunedIndex(ctx, r.GitDir)
 	if err != nil {
-		return keep(err.Error())
+		return nil, keep(err.Error())
+	}
+	if len(staged) > 0 {
+		return staged, keep("staged changes in a worktree whose working tree is gone: " + nameSome(staged))
+	}
+	return nil, nil
+}
+
+// readPrunedIndex runs git diff-index --cached against HEAD in the admin
+// directory gitDir of a worktree whose working tree is gone, and returns
+// every staged path.
+func (e *Env) readPrunedIndex(ctx context.Context, gitDir string) ([]string, error) {
+	cmd, err := e.gitCommand(ctx, repoDirs{GitDir: gitDir}, callOpts{}, "diff-index", "--cached", "--name-only", "-z", "HEAD")
+	if err != nil {
+		return nil, err
 	}
 	out, err := run(cmd)
 	if err != nil {
-		return keep("reading the index of a worktree whose working tree is gone: " + err.Error())
+		return nil, fmt.Errorf("reading the index of a worktree whose working tree is gone: %v", err)
 	}
 	var staged []string
 	for _, name := range strings.Split(string(out), "\x00") {
@@ -103,10 +130,7 @@ func (e *Env) checkPrunedIndex(ctx context.Context, r foundRepo) []Check {
 			staged = append(staged, name)
 		}
 	}
-	if len(staged) > 0 {
-		return keep("staged changes in a worktree whose working tree is gone: " + nameSome(staged))
-	}
-	return nil
+	return staged, nil
 }
 
 // repoTarget is one repository the rule judges, wherever the walk found it.
@@ -193,6 +217,12 @@ type repoResult struct {
 	// worktrees is git's worktree listing, and listed says it was read.
 	worktrees []worktreeEntry
 	listed    bool
+	// status and index are what the status and index reads returned, and
+	// workTreeRead says both ran without an error; a repository with no
+	// work tree has neither, and workTreeRead true.
+	status       []statusEntry
+	index        []indexEntry
+	workTreeRead bool
 }
 
 // checkRepo runs the per-repository check sequence. The identity check and
@@ -302,11 +332,13 @@ func (e *Env) checkRepo(ctx context.Context, t repoTarget, rp repoPolicy) repoRe
 	}
 	res.classes = append(res.classes, PathClass{Path: gitRel, Class: gitDirClass})
 
+	res.workTreeRead = true
 	if t.Dirs.WorkTree != "" {
 		c := t.workTreeChecks(ctx, e, opts, rc, rp)
 		errs = append(errs, c.errs...)
 		modKeeps, flagKeeps, untrackedKeeps = c.modified, c.flags, c.untracked
 		res.classes = append(res.classes, c.classes...)
+		res.status, res.index, res.workTreeRead = c.status, c.index, c.read
 	}
 
 	for _, bucket := range [][]Check{errs, refKeeps, stashKeeps, modKeeps, flagKeeps, untrackedKeeps} {
@@ -380,6 +412,11 @@ func (t repoTarget) relOf(p string) string {
 type workTreeResult struct {
 	errs, modified, flags, untracked []Check
 	classes                          []PathClass
+	// status and index are what the reads returned; read says both ran
+	// without an error or a warning.
+	status []statusEntry
+	index  []indexEntry
+	read   bool
 }
 
 // workTreeChecks runs the status and index reads of a repository with a
@@ -410,6 +447,8 @@ func (t repoTarget) workTreeChecks(ctx context.Context, e *Env, opts callOpts, r
 	if indexErr != nil {
 		keepAt(&w.errs, indexErr.Error(), nil)
 	}
+	w.status, w.index = entries, index
+	w.read = statusErr == nil && warn == "" && indexErr == nil
 
 	modified := map[string]bool{}
 	var modShown, modPaths, untrackedShown, untrackedPaths, ignoredShown, ignoredPaths []string

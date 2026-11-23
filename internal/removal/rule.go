@@ -84,6 +84,11 @@ type Verdict struct {
 	Kind   Kind
 	Checks []Check
 	Paths  []PathClass
+	// Repos is every repository the walk found, in path order, each with
+	// what the rule read in it. The re-read before removal and the check on
+	// the tombstone read these same repositories and compare, so the unit
+	// is never walked a second time.
+	Repos []RepoRead
 }
 
 // First returns the first keeping check, the one that decided the verdict.
@@ -168,6 +173,7 @@ type evalState struct {
 	niwa    niwaDir
 	managed *managedRead
 	classes classes
+	reads   []RepoRead
 }
 
 // checkFunc is one check: the keeping results it found, none when it keeps
@@ -204,6 +210,7 @@ func Evaluate(ctx context.Context, u Unit, p Policy) Verdict {
 		}
 	}
 	v.Paths = s.classes.sorted()
+	v.Repos = s.reads
 	if len(v.Checks) == 0 {
 		v.Kind = Reap
 	}

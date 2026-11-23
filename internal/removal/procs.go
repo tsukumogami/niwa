@@ -173,6 +173,62 @@ func (l *Listing) CwdWithin(dir string) []Process {
 	return out
 }
 
+// Within returns the processes whose working directory, or one of whose open
+// files, is dir or lies under it.
+func (l *Listing) Within(dir string) []Process {
+	if l == nil {
+		return nil
+	}
+	d, ok := formsOf(dir)
+	if !ok {
+		return nil
+	}
+	var out []Process
+	for _, p := range l.Procs {
+		if d.contains(p.Cwd) || d.containsAny(p.Files) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// NewWithin returns the processes the later listing finds within laterDir
+// (the working directory or an open file there) that the earlier listing
+// didn't find within any of earlierDirs, told apart by PID and start time.
+// The directories are the same unit before and after a rename: a process
+// the earlier listing found in the instance and the later one finds in its
+// tombstone is the same process and not new. earlierDirs names the
+// instance in every form the earlier listing could report it in (as given
+// and with its links resolved), since once it is renamed its resolved form
+// can no longer be read. A later listing that is missing or failed is an
+// error, and so is an earlier one: no process can be said to be absent
+// from it.
+func NewWithin(earlier *Listing, earlierDirs []string, later *Listing, laterDir string) ([]Process, error) {
+	switch {
+	case earlier == nil:
+		return nil, errors.New("no earlier process listing was taken")
+	case earlier.Err != nil:
+		return nil, fmt.Errorf("the earlier process listing failed: %v", earlier.Err)
+	case later == nil:
+		return nil, errors.New("no process listing was taken")
+	case later.Err != nil:
+		return nil, fmt.Errorf("the process listing failed: %v", later.Err)
+	}
+	seen := map[procKey]bool{}
+	for _, dir := range earlierDirs {
+		for _, p := range earlier.Within(dir) {
+			seen[keyOf(p)] = true
+		}
+	}
+	var out []Process
+	for _, p := range later.Within(laterDir) {
+		if !seen[keyOf(p)] {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
 // procKey identifies one process across listings: a PID reused by a later
 // process has a different start.
 type procKey struct {
