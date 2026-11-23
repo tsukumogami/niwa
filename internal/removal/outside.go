@@ -92,27 +92,33 @@ const maxEmptyDepth = 64
 func (s *evalState) generated(instance string) func(rel string) bool {
 	managed := s.managedFiles(instance).files
 	return func(rel string) bool {
-		want, ok := managed[filepath.ToSlash(rel)]
+		mf, ok := managed[filepath.ToSlash(rel)]
 		if !ok {
 			return false
 		}
-		b, err := readCapped(filepath.Join(instance, filepath.FromSlash(rel)), maxManagedBytes)
+		b, err := readCapped(mf.path, maxManagedBytes)
 		if err != nil {
 			return false
 		}
 		sum := sha256.Sum256(b)
-		return want == "sha256:"+hex.EncodeToString(sum[:])
+		return mf.hash == "sha256:"+hex.EncodeToString(sum[:])
 	}
 }
 
 // instanceStateRecord is the instance's state file under .niwa.
 const instanceStateRecord = "instance.json"
 
-// managedRead is what one evaluation read of managed_files: each path,
-// relative to the instance, with its recorded hash, and the keeping checks
-// for what couldn't be read.
+// managedFile is one managed_files entry that ResolveRecorded accepted: the
+// hash niwa recorded and the path on disk it resolved to.
+type managedFile struct {
+	hash, path string
+}
+
+// managedRead is what one evaluation read of managed_files: each entry
+// ResolveRecorded accepted, by its path relative to the instance, and the
+// keeping checks for what couldn't be read or resolved.
 type managedRead struct {
-	files    map[string]string
+	files    map[string]managedFile
 	failures []Check
 }
 
@@ -131,8 +137,13 @@ func (s *evalState) managedFiles(instance string) *managedRead {
 // link, a FIFO, another user's file, one over its cap) is a failure the
 // outside check keeps the unit on. instance.json is niwa's own file, so its
 // decode stays lenient.
+//
+// Every entry under the instance goes through ResolveRecorded before the
+// rule hashes it. An entry it refuses (a "..", a link on the way, another
+// device) is a failure named under the outside check; an entry whose file
+// is gone is dropped; an entry outside the instance isn't the rule's.
 func (s *evalState) readManaged(instance string) *managedRead {
-	m := &managedRead{files: map[string]string{}}
+	m := &managedRead{files: map[string]managedFile{}}
 	if s.niwa.absent || s.niwa.usable() != nil {
 		// A .niwa the rule can't use keeps through the hold and records
 		// checks.
@@ -169,16 +180,36 @@ func (s *evalState) readManaged(instance string) *managedRead {
 		if !filepath.IsAbs(mf.Path) || mf.Hash == "" {
 			continue
 		}
-		for _, base := range bases {
-			rel, err := filepath.Rel(base, filepath.Clean(mf.Path))
-			if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				continue
-			}
-			out[filepath.ToSlash(rel)] = mf.Hash
-			break
+		// The instance prefix is stripped as text, without cleaning first,
+		// so a "..", "." or empty component reaches ResolveRecorded to be
+		// refused rather than being cleaned into another path.
+		base, rel, ok := underBase(mf.Path, bases)
+		if !ok {
+			continue
 		}
+		resolved, err := ResolveRecorded(Base{Instance: base}, rel)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			// A generated file the agent deleted loses nothing.
+			continue
+		case err != nil:
+			m.failures = append(m.failures, Check{Paths: []string{rel}, Evidence: "unreadable: managed file " + err.Error()})
+			continue
+		}
+		out[rel] = managedFile{hash: mf.Hash, path: resolved}
 	}
 	return m
+}
+
+// underBase strips the first of bases that prefixes p, as text, and
+// returns that base and the rest of p.
+func underBase(p string, bases []string) (string, string, bool) {
+	for _, base := range bases {
+		if rel, ok := strings.CutPrefix(p, strings.TrimSuffix(base, "/")+"/"); ok {
+			return base, rel, true
+		}
+	}
+	return "", "", false
 }
 
 // checkOutside is the outside check: every path outside the repositories
