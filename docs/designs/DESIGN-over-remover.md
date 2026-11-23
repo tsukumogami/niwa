@@ -54,6 +54,23 @@ decision_provenance: inline-resolved
 
 Planned
 
+## Amendments
+
+### 2026-11-23 — The process listing reads each process's parent pid and start time
+
+**What changed.** On macOS the process listing reads
+`lsof -n -P -w -F 0pRn` rather than `-F 0pn`, adding each process's parent
+pid, and takes each process's start time from the kernel process table
+(`sysctl` `kern.proc.pid`). On Linux both come from `/proc/<pid>/stat`.
+The Processes bullet under Considered Options and the lsof note under
+Security Considerations say so.
+
+**Why.** `-F 0pn` gives only the pid and the file names. The re-read and
+the tombstone check compare a later listing with the pass's first one
+process by process, and the pid records `niwa helper` writes match a live
+process by pid and start time so a reused pid never matches. Both need the
+parent pid and the start time, so the listing has to carry them.
+
 ## Context and Problem Statement
 
 A unit of work in niwa is a session, the instance it runs in, its Claude Code
@@ -568,10 +585,13 @@ The package also settles the mechanics the PRD left to the design:
   draft, `watch-review-draft.md` at the instance root, and anything else the
   review agent wrote are ordinary unit content, judged by the rule like any
   other path.
-- **Processes** come from one listing per pass: `/proc/<pid>/cwd` and
-  `/proc/<pid>/fd` on Linux, `lsof -n -P -w -F 0pn` on macOS, whose fields
-  end in NUL rather than a newline so a crafted file name can't forge a
-  field. A failed listing is undecidable and keeps every unit it would have
+- **Processes** come from one listing per pass: on Linux `/proc/<pid>/cwd`,
+  `/proc/<pid>/fd` and `/proc/<pid>/stat` (for each process's parent pid and
+  start time); on macOS `lsof -n -P -w -F 0pRn` (`R` adds the parent pid),
+  whose fields end in NUL rather than a newline so a crafted file name can't
+  forge a field, with each process's start time taken from the kernel
+  process table (`sysctl` `kern.proc.pid`). A failed listing is undecidable
+  and keeps every unit it would have
   cleared. A `claude agents` call that fails, times out, exits non-zero or
   prints output that doesn't decode strictly is undecidable the same way and
   keeps every unit; only a listing that decodes counts a session as gone.
@@ -4187,7 +4207,7 @@ Git, `lsof` and `claude` are resolved once per pass to absolute paths from a
 resolves, through symlinks, inside the workspace root removed, so an
 instance can't put a binary in front of them; session commands run under
 `/bin/sh` by absolute path with that same `PATH`. `lsof`'s output is read
-with NUL-terminated fields (`-F 0pn`), so a file name carrying a newline
+with NUL-terminated fields (`-F 0pRn`), so a file name carrying a newline
 can't forge a pid or path field in the process listing. That is a narrow control: it
 covers binaries planted in the workspace, not a directory elsewhere on the
 person's `PATH` that the agent can write as the person. An older git makes
