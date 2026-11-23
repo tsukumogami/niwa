@@ -22,6 +22,7 @@ import (
 // every byte where it was.
 func registerReapLossScanSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^a commit is made on branch "([^"]*)" in repo "([^"]*)" of the dispatch instance$`, aCommitIsMadeInTheDispatchInstance)
+	ctx.Step(`^a linked worktree "([^"]*)" of repo "([^"]*)" holds a commit on branch "([^"]*)" in the dispatch instance$`, aLinkedWorktreeHoldsACommit)
 	ctx.Step(`^the dispatch instance's contents are recorded$`, theDispatchInstancesContentsAreRecorded)
 	ctx.Step(`^the dispatch instance's contents are unchanged$`, theDispatchInstancesContentsAreUnchanged)
 	ctx.Step(`^the error output names the dispatch instance$`, theErrorOutputNamesTheDispatchInstance)
@@ -91,6 +92,41 @@ func aCommitIsMadeInTheDispatchInstance(ctx context.Context, branch, repo string
 		cmd.Env = env
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return ctx, fmt.Errorf("git %v in %s: %v\n%s", args, clone, err, out)
+		}
+	}
+	return ctx, nil
+}
+
+// aLinkedWorktreeHoldsACommit adds a linked worktree of a clone at the top
+// of the dispatch instance, on a new branch, and commits there, so the
+// commit is held only by a ref the worktree made and its own HEAD.
+func aLinkedWorktreeHoldsACommit(ctx context.Context, name, repo, branch string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	inst, err := dispatchInstanceForStep(s)
+	if err != nil {
+		return ctx, err
+	}
+	clone := filepath.Join(inst, filepath.FromSlash(repo))
+	wt := filepath.Join(inst, name)
+	env := append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com")
+	for _, step := range []struct {
+		dir  string
+		args []string
+	}{
+		{clone, []string{"worktree", "add", "-q", "-b", branch, wt}},
+		{wt, []string{"commit", "-q", "--allow-empty", "-m", "worktree work nobody pushed"}},
+	} {
+		cmd := exec.Command("git", step.args...)
+		cmd.Dir = step.dir
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return ctx, fmt.Errorf("git %v in %s: %v\n%s", step.args, step.dir, err, out)
 		}
 	}
 	return ctx, nil

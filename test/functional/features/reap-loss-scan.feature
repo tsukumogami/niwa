@@ -50,6 +50,41 @@ Feature: niwa reap keeps a deleted session's instance that holds unpushed work
     And the error output contains "branch unpushed-work"
 
   @critical
+  Scenario: niwa reap keeps a deleted session's instance whose linked worktree holds an unpushed commit
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists with a commit
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given I set env "NIWA_TEST_REMOVAL_FILE_REMOTES" to "1"
+    And a fake claude for dispatch with session "c1c1c1c1-c1c1-4c1c-8c1c-c1c1c1c1c1c1"
+    When I run "niwa dispatch keep-my-worktree --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When a linked worktree "wt-feature" of repo "tools/myapp" holds a commit on branch "worktree-work" in the dispatch instance
+    And the dispatch session "c1c1c1c1-c1c1-4c1c-8c1c-c1c1c1c1c1c1" is deleted from the Agent View
+    And the dispatch instance's contents are recorded
+    And I run niwa reap from the workspace root
+    Then the exit code is 0
+    And the dispatch instance still exists
+    And the dispatch instance's contents are unchanged
+    And the error output names the dispatch instance
+    And the error output contains "repository check"
+    And the error output contains "wt-feature"
+    And the error output contains "branch worktree-work"
+
+  @critical
   Scenario: niwa reap removes a deleted session's instance whose clone holds nothing unpushed
     Given a clean niwa environment
     And a local git server is set up
