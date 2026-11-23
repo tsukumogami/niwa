@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/workspace"
 	"github.com/tsukumogami/niwa/internal/worktree"
 )
@@ -85,11 +86,16 @@ func sweepHookWorktreesIn(workspaceRoot string, instances []string, jobsDir stri
 			if !gate.ask(st.WorktreePath, ids) {
 				continue
 			}
+			// The worktree path is read from the instance's session record
+			// and git's error text can quote the worktree, so both pass
+			// removal.ScrubEvidence.
 			if _, err := worktree.DestroySession(ctx, instance, st.SessionID, false /* force */, worktree.StdGitInvoker{}); err != nil {
-				fmt.Fprintf(stderr, "niwa: warning: removing unchanged worktree %s: %v\n", st.WorktreePath, err)
+				fmt.Fprintf(stderr, "niwa: warning: removing unchanged worktree %s: %s\n",
+					removal.ScrubEvidence(st.WorktreePath, 400), removal.ScrubEvidence(err.Error(), 400))
 				continue
 			}
-			fmt.Fprintf(stderr, "niwa: removed unchanged worktree %s: the Claude Code session that asked for it has ended\n", st.WorktreePath)
+			fmt.Fprintf(stderr, "niwa: removed unchanged worktree %s: the Claude Code session that asked for it has ended\n",
+				removal.ScrubEvidence(st.WorktreePath, 400))
 			removed++
 		}
 	}

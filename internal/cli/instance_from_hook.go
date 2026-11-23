@@ -881,7 +881,12 @@ func mirrorRepos(workspaceRoot string, instances, ids []string) []mirror.Repo {
 // validates the directory is a destroyable instance (not a workspace root)
 // first. It is wired into destroyInstanceFunc; tests override that variable.
 func realDestroyInstance(instancePath string) error {
-	return destroyInstanceWarningTo(instancePath, os.Stderr)
+	// The warnings name trust entries and paths read from the instance's own
+	// state, which its agent can write, so each line passes
+	// removal.ScrubEvidence on its way to stderr.
+	w := newScrubLineWriter(os.Stderr, 400)
+	defer w.Flush()
+	return destroyInstanceWarningTo(instancePath, w)
 }
 
 // destroyInstanceWarningTo is realDestroyInstance writing to w. Plugin-record

@@ -175,7 +175,28 @@ non-zero. An <instance> argument and --json are accepted only with
 	Args:          reapArgs,
 	SilenceErrors: true,
 	SilenceUsage:  true,
-	RunE:          runReap,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return scrubReapError(runReap(cmd, args))
+	},
+}
+
+// scrubbedError is an error reap returns, whose text passes
+// removal.ScrubEvidence: an error from enumerating instances or reading a
+// unit's records can quote a path or a record's contents, and the command's
+// caller prints the text. Unwrap keeps the wrapped error, an exit status
+// included, visible to errors.As.
+type scrubbedError struct{ err error }
+
+func (e *scrubbedError) Error() string { return removal.ScrubEvidence(e.err.Error(), 400) }
+
+func (e *scrubbedError) Unwrap() error { return e.err }
+
+// scrubReapError wraps a non-nil err in scrubbedError.
+func scrubReapError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &scrubbedError{err: err}
 }
 
 // reapVerdictOnly and reapJSON are reap's --verdict-only and --json.
@@ -355,7 +376,9 @@ func reportSparedInstances(w io.Writer, spared []sparedInstance) {
 		return
 	}
 	// Names and reasons come from the instances and the records in them, so
-	// each passes removal.ScrubEvidence before it is grouped and printed.
+	// each passes removal.ScrubEvidence: a reason before it is grouped, so
+	// two that differ only in what scrubbing removes share a line, and
+	// again, unchanged, where it is printed; a name where it is printed.
 	byReason := map[string][]string{}
 	var order []string
 	for _, s := range spared {
@@ -363,7 +386,7 @@ func reportSparedInstances(w io.Writer, spared []sparedInstance) {
 		if _, seen := byReason[reason]; !seen {
 			order = append(order, reason)
 		}
-		byReason[reason] = append(byReason[reason], removal.ScrubEvidence(s.Name, 80))
+		byReason[reason] = append(byReason[reason], s.Name)
 	}
 	for _, reason := range order {
 		names := byReason[reason]
@@ -374,10 +397,20 @@ func reportSparedInstances(w io.Writer, spared []sparedInstance) {
 			suffix = fmt.Sprintf(" and %d more", len(names)-maxSparedNamesListed)
 		}
 		fmt.Fprintf(w, "niwa: kept %d instance(s) this sweep would not reclaim (%s%s): %s\n",
-			len(names), strings.Join(listed, ", "), suffix, reason)
+			len(names), scrubJoined(listed, 80), suffix, removal.ScrubEvidence(reason, 200))
 	}
 	// The name rather than the path, because that is what the command takes.
 	fmt.Fprintf(w, "niwa: reclaim one with `niwa destroy <name>` when you are done with its session\n")
+}
+
+// scrubJoined joins names with ", ", each through removal.ScrubEvidence cut
+// to max characters.
+func scrubJoined(names []string, max int) string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = removal.ScrubEvidence(n, max)
+	}
+	return strings.Join(out, ", ")
 }
 
 // sparedInstance is an instance the sweep left alone -- because it could not

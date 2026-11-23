@@ -64,11 +64,11 @@ func printVerdictsText(w io.Writer, vs []unitVerdict) {
 		}
 		fmt.Fprintf(w, "  paths:\n")
 		for _, pc := range paths {
-			line := removal.ScrubEvidence(pc.Path, verdictPathMax) + " " + string(pc.Class)
+			notice := ""
 			if pc.Notice != "" {
-				line += " (" + string(pc.Notice) + ")"
+				notice = " (" + string(pc.Notice) + ")"
 			}
-			fmt.Fprintf(w, "    %s\n", line)
+			fmt.Fprintf(w, "    %s %s%s\n", removal.ScrubEvidence(pc.Path, verdictPathMax), pc.Class, notice)
 		}
 	}
 }

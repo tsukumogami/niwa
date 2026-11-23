@@ -129,7 +129,8 @@ func (g *removalGate) check(path string, sessionIDs []string) (allowed bool, rea
 		return true, ""
 	}
 	if g.cfgErr != nil {
-		return false, fmt.Sprintf("could not read [session.before_remove] from %s: %v", workspaceConfigPath(g.workspaceRoot), g.cfgErr)
+		return false, fmt.Sprintf("could not read [session.before_remove] from %s: %s",
+			scrubGateText(workspaceConfigPath(g.workspaceRoot), 400), scrubGateText(g.cfgErr.Error(), 400))
 	}
 
 	if g.started.IsZero() {
@@ -156,11 +157,15 @@ func (g *removalGate) check(path string, sessionIDs []string) (allowed bool, rea
 }
 
 // ask is check for a caller that only needs the answer: when the path is
-// kept it prints the one spare line naming the instance and why.
+// kept it prints the one spare line naming the instance and why. The name
+// passes scrubGateText here; the reason is niwa's own words with every part
+// that came from the command or the configuration scrubbed where check built
+// it, since scrubbing the whole reason again would reach into the quoted
+// line.
 func (g *removalGate) ask(path string, sessionIDs []string) bool {
 	allowed, reason := g.check(path, sessionIDs)
 	if !allowed {
-		fmt.Fprintf(g.out, "niwa: kept %s: %s\n", sanitizeRemovalGateText(filepath.Base(path), 80), reason)
+		fmt.Fprintf(g.out, "niwa: kept %s: %s\n", scrubGateText(filepath.Base(path), 80), reason)
 	}
 	return allowed
 }
@@ -204,11 +209,11 @@ func (g *removalGate) exec(command string, timeout time.Duration, path string, s
 		return true, ""
 	case errors.As(err, &exitErr):
 		if line := lastLine(output.String()); line != "" {
-			return false, "reason from before_remove: " + strconv.Quote(sanitizeRemovalGateText(line, maxRemovalGateReasonBytes))
+			return false, "reason from before_remove: " + strconv.Quote(scrubGateText(line, maxRemovalGateReasonBytes))
 		}
 		return false, fmt.Sprintf("before_remove exited with status %d", exitErr.ExitCode())
 	default:
-		return false, "before_remove could not start: " + sanitizeRemovalGateText(err.Error(), maxRemovalGateReasonBytes)
+		return false, "before_remove could not start: " + scrubGateText(err.Error(), maxRemovalGateReasonBytes)
 	}
 }
 
@@ -257,6 +262,14 @@ func removalGateEnv(declared []string, path, step string, sessionIDs []string) [
 // one removal.ScrubEvidence uses, so the two can't drift.
 func sanitizeRemovalGateText(text string, max int) string {
 	return removal.CutText(removal.StripControls(removal.StripBidi(text)), max)
+}
+
+// scrubGateText is what the gate prints of a unit-sourced string: whole
+// escape sequences and credentials removed by removal.ScrubEvidence, then
+// sanitizeRemovalGateText's byte bound, so a line stays within max bytes as
+// well as max characters.
+func scrubGateText(text string, max int) string {
+	return sanitizeRemovalGateText(removal.ScrubEvidence(text, max), max)
 }
 
 // sessionIDsByInstance groups the workspace's mapped session ids by instance
