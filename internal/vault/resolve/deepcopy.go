@@ -172,6 +172,7 @@ func deepCopySession(in config.SessionConfig) config.SessionConfig {
 			IgnoredFiles: in.Removal.IgnoredFiles,
 			JobScratch:   in.Removal.JobScratch,
 			Disposable:   slices.Clone(in.Removal.Disposable),
+			ProofRemotes: slices.Clone(in.Removal.ProofRemotes),
 		},
 	}
 }

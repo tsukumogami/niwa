@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/remoteurl"
 )
 
 // The agent-neutral session declaration.
@@ -64,10 +66,17 @@ const (
 // entry needs a non-empty review naming the review that added the pattern.
 // That field is an audit trail, not a control: niwa checks only that it is
 // there.
+//
+// ProofRemotes are URL prefixes, each an https:// or ssh:// URL ending in "/"
+// with a host and at least one path segment, under which a repository's
+// remote counts as proof that a commit exists elsewhere, beside the clone URL
+// the configuration gives it (for people who push to forks). Empty by
+// default; a prefix that doesn't parse is a configuration error.
 type SessionRemovalConfig struct {
 	IgnoredFiles string              `toml:"ignored_files,omitempty"`
 	JobScratch   string              `toml:"job_scratch,omitempty"`
 	Disposable   []DisposablePattern `toml:"disposable,omitempty"`
+	ProofRemotes []string            `toml:"proof_remotes,omitempty"`
 }
 
 // DisposablePattern is one [[session.removal.disposable]] entry: a relative,
@@ -406,6 +415,13 @@ func validateSessionRemoval(r SessionRemovalConfig) error {
 		}
 		if err := checkDisposablePattern(d.Pattern); err != nil {
 			return fmt.Errorf("%s: pattern %q: %w", field, d.Pattern, err)
+		}
+	}
+	for i, p := range r.ProofRemotes {
+		// The reason never repeats the prefix: one carrying userinfo could
+		// hold a credential.
+		if _, err := remoteurl.ParsePrefix(p); err != nil {
+			return fmt.Errorf("session.removal.proof_remotes[%d]: %w", i, err)
 		}
 	}
 	return nil
