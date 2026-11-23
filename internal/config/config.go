@@ -461,8 +461,9 @@ type WorkspaceMeta struct {
 	// objects from the host's per-repo mirror instead of copying the whole
 	// history. nil means on. A repo's own RepoOverride.ShareGitHistory wins
 	// over this value in both directions; ShareGitHistoryEnabled is the
-	// cascade. A layout with no workspace root makes full clones whatever
-	// this says.
+	// cascade. The cascade knows nothing of the layout: in one with no
+	// workspace root it still answers on, and internal/workspace's
+	// planBorrowing makes the clones full there.
 	ShareGitHistory *bool `toml:"share_git_history,omitempty"`
 }
 

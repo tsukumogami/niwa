@@ -1,8 +1,8 @@
 @mirror-repair
 Feature: niwa restores a deleted or damaged host mirror by itself
   A workspace's clones borrow git objects from one bare mirror per repo under
-  ~/.niwa, through their alternates file. In the test build niwa create makes
-  each new clone borrow, so the borrowers here come from niwa create: each
+  ~/.niwa, through their alternates file. niwa create makes each new clone
+  borrow by default, so the borrowers here come from niwa create: each
   scenario checks that both hold the one stable-path alternates line and no
   pack the mirror holds, then takes the mirror away or damages it and runs an
   ordinary command. Only niwa writes the mirror and the alternates files.

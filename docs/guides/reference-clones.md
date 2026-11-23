@@ -10,9 +10,8 @@ Borrowing is on by default wherever a workspace root exists: instances that
 live in their own directories under a workspace root, the layout `niwa create`
 makes, borrow with no config change. A single-instance layout, where the
 instance is itself the root and there's no workspace root above it, keeps
-making full clones. Clones made
-before borrowing was turned on stay full clones; only clones made after it
-borrow.
+making full clones. Clones made before borrowing was turned on stay full
+clones; only clones made after it borrow.
 
 ## Where the mirrors live
 

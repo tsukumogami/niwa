@@ -20,7 +20,8 @@ import (
 // turns it off. Every borrowing entry point asks this one function. A layout
 // with no workspace root makes full clones whatever it says; planBorrowing
 // applies that rule, since it depends on the instance's place on disk and not
-// on the config.
+// on the config. ensureMirrors still checks, and restores, a mirror that
+// already exists under such a layout's key, as ensureMirrors explains.
 func borrowEnabled(cfg *config.WorkspaceConfig, repo string) bool {
 	return cfg.ShareGitHistoryEnabled(repo)
 }

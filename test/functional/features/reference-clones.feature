@@ -1,7 +1,8 @@
 @reference-clones
 Feature: new clones borrow git objects from the host mirror
-  In the test build a new clone of a repo borrows objects from the repo's
-  host mirror under ~/.niwa, seeding the mirror first when there is none.
+  Wherever a workspace root exists, a new clone of a repo borrows objects
+  from the repo's host mirror under ~/.niwa, seeding the mirror first when
+  there is none.
   Its alternates file holds one line, the mirror's stable path and
   "/objects", never the store the stable path links to. Whenever borrowing
   can't happen the repo is cloned in full and the command prints a warning

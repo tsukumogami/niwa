@@ -3312,6 +3312,14 @@ func repoAlreadyCloned(dir string) bool {
 // clone borrows (planBorrowing), seeding the mirror of a borrowing repo that
 // has none, and returns the choices by repo name.
 //
+// A layout with no workspace root still runs the check, keyed by the
+// directory above the instance; only planBorrowing stops it borrowing or
+// seeding. That is deliberate. With nothing under that key the check only
+// reads (mirror.Mirrored finds no mirror and no borrower) and creates
+// nothing. A mirror that is there, such as one an older clone still borrows
+// from, keeps being checked and restored, so that clone keeps reading its
+// history.
+//
 // The mirrors live under the developer's home, so an Applier without
 // DeveloperHome (the unit suites) skips the check rather than reach the real
 // one, and every clone is full. A root-level apply reaches this once per

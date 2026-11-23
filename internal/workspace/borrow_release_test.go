@@ -11,9 +11,9 @@ import (
 	"github.com/tsukumogami/niwa/internal/testhook"
 )
 
-// The three test-build variables do nothing in a release build: a create
-// with them set makes the same clones, borrowing as they do without them,
-// and succeeds as one without them, and writes no probe file.
+// The three test-build variables do nothing in a release build. A create
+// with them set succeeds, makes the same clones as a create without them,
+// borrows just as that one does, and writes no probe file.
 func TestReleaseBuild_TheTestHookVariablesDoNotChangeACreate(t *testing.T) {
 	sb := newBorrowSandbox(t)
 	extra := "share_git_history = true\n"
