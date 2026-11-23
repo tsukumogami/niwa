@@ -153,6 +153,10 @@ type Policy struct {
 	// ConfigError, when set, is why the workspace configuration couldn't be
 	// read; every repository found then keeps its unit with it as evidence.
 	ConfigError error
+	// JobsRoot is the pass's jobs root, the directory every unit's job
+	// directory sits in. The walk of a job directory compares devices with
+	// it.
+	JobsRoot string
 }
 
 // evalState is what one evaluation's checks share: the walk of the instance,

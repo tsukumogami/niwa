@@ -40,8 +40,15 @@ const (
 
 // passScope is what a pass covers and the readings it is given.
 type passScope struct {
-	// JobsDir is the jobs directory liveness is read from.
+	// JobsDir is the jobs root: the directory liveness is read from and the
+	// one each unit's job directory is found under. The pass uses this one
+	// root for both, so a live session's entry is never looked for where
+	// Claude Code didn't write it.
 	JobsDir string
+	// JobsErr, when set, is why the jobs root couldn't be resolved. The pass
+	// then can't tell a live session from a gone one, so it keeps every
+	// unit with this as the reason and removes nothing.
+	JobsErr error
 	// Now is the time selection reads liveness at.
 	Now time.Time
 	// Instance, when set, is the one instance a verdict-only pass judges,
@@ -130,12 +137,27 @@ func runPass(ctx context.Context, workspaceRoot string, mode passMode, scope pas
 	}
 
 	jobsDir, now := scope.JobsDir, scope.Now
+	if scope.JobsErr != nil {
+		jobsDir = ""
+		if !verdictOnly {
+			return keepAllOnJobsRoot(workspaceRoot, scope.JobsErr)
+		}
+	}
 	var targets []passUnit
 	var stored []workspace.SessionMapping
 	if verdictOnly {
 		units, err := selectVerdictUnits(workspaceRoot, scope.Instance)
 		if err != nil {
 			return res, err
+		}
+		if scope.JobsErr != nil {
+			// With no jobs root no session's liveness can be read: every
+			// unit keeps on liveness, its later checks still listed.
+			for i := range units {
+				if units[i].never == "" {
+					units[i].never = jobsRootReason(scope.JobsErr)
+				}
+			}
 		}
 		targets = units
 	} else {
@@ -162,6 +184,7 @@ func runPass(ctx context.Context, workspaceRoot string, mode passMode, scope pas
 		defer env.Close()
 		policy = removalPolicy(cfg, env)
 		policy.ConfigError = cfgErr
+		policy.JobsRoot = jobsDir
 		procs := listProcessesFunc(ctx, env)
 		instances := make([]string, 0, len(targets))
 		for _, t := range targets {
@@ -347,6 +370,37 @@ func runPass(ctx context.Context, workspaceRoot string, mode passMode, scope pas
 		return res, err
 	}
 	res.Reaped += n
+	return res, nil
+}
+
+// jobsRootReason is the liveness reason every unit keeps with when the jobs
+// root can't be resolved.
+func jobsRootReason(err error) string {
+	return "the jobs root can't be resolved: " + err.Error()
+}
+
+// keepAllOnJobsRoot is an act-mode pass whose jobs root couldn't be
+// resolved. No session's liveness can be read, so the pass removes nothing:
+// it prints one kept line for each mapped ephemeral unit, records each in
+// res.Kept, and stops before the stored mappings, the launch records and
+// the backstop, which all read liveness from the same root.
+func keepAllOnJobsRoot(workspaceRoot string, jobsErr error) (passResult, error) {
+	var res passResult
+	units, err := selectVerdictUnits(workspaceRoot, "")
+	if err != nil {
+		return res, err
+	}
+	for _, u := range units {
+		if u.never != "" {
+			continue
+		}
+		k := keptUnit{
+			Name:  reapTargetName(u.reapTarget),
+			Check: removal.Check{Name: removal.CheckLiveness, Evidence: jobsRootReason(jobsErr)},
+		}
+		res.Kept = append(res.Kept, k)
+		reportKeptUnit(reapStderr, k)
+	}
 	return res, nil
 }
 

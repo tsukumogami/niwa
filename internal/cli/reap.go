@@ -254,7 +254,7 @@ func runReap(cmd *cobra.Command, args []string) error {
 		return runReapVerdicts(cmd, class.WorkspaceRoot, instance)
 	}
 
-	n, err := reapWorkspace(class.WorkspaceRoot, defaultJobsDir(), time.Now())
+	n, err := reapWorkspaceResolved(class.WorkspaceRoot, time.Now())
 	if err != nil {
 		return err
 	}
@@ -289,8 +289,9 @@ func runReapVerdicts(cmd *cobra.Command, workspaceRoot, instance string) error {
 			return fmt.Errorf("no instance named %q in this workspace", instance)
 		}
 	}
+	jobsDir, jobsErr := passJobsRoot()
 	res, err := runPass(context.Background(), workspaceRoot, passVerdictOnly,
-		passScope{JobsDir: defaultJobsDir(), Now: time.Now(), Instance: instance})
+		passScope{JobsDir: jobsDir, JobsErr: jobsErr, Now: time.Now(), Instance: instance})
 	if err != nil {
 		return err
 	}
@@ -749,6 +750,24 @@ func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
 	return res.Reaped, err
 }
 
+// passJobsRoot resolves a pass's jobs root once, as Claude Code resolves
+// it: under CLAUDE_CONFIG_DIR when the variable is set, ~/.claude/jobs
+// otherwise. The pass reads liveness and finds each unit's job directory
+// under this one root.
+func passJobsRoot() (string, error) {
+	home, _ := os.UserHomeDir()
+	return removal.ResolveJobsRoot(os.LookupEnv, home)
+}
+
+// reapWorkspaceResolved is reapWorkspace with the jobs root resolved for
+// the pass. A root that can't be resolved keeps every unit and removes
+// nothing.
+func reapWorkspaceResolved(workspaceRoot string, now time.Time) (int, error) {
+	jobsDir, jobsErr := passJobsRoot()
+	res, err := runPass(context.Background(), workspaceRoot, passActAll, passScope{JobsDir: jobsDir, JobsErr: jobsErr, Now: now})
+	return res.Reaped, err
+}
+
 // backstopTarget is an instance the marker+TTL backstop has selected. Unlike a
 // reapTarget it carries no session id: a backstop target is by definition
 // unmapped, so there is no mapping entry to delete after the destroy.
@@ -1020,7 +1039,7 @@ func reapOpportunistically(workspaceRoot string) {
 	if workspaceRoot == "" {
 		return
 	}
-	n, err := reapWorkspace(workspaceRoot, defaultJobsDir(), time.Now())
+	n, err := reapWorkspaceResolved(workspaceRoot, time.Now())
 	if err == nil && n > 0 {
 		fmt.Fprintf(os.Stderr, "niwa: reaped %d orphaned ephemeral instance(s)\n", n)
 	}
