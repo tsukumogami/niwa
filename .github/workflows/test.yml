@@ -45,10 +45,11 @@ jobs:
     # PID-recycle detection. Both were invisible to CI and loud on every
     # macOS developer's machine.
     #
-    # Steps below the unit suite stay Linux-only, each for its own reason --
-    # see the comment on each. fail-fast is off so one platform's failure
-    # does not hide the other's result, which is the whole point of testing
-    # two platforms.
+    # The functional suite also runs on both, inside the same sentinels,
+    # snapshot and checkout tripwire. The other steps below the unit suite
+    # stay Linux-only, each for its own reason -- see the comment on each.
+    # fail-fast is off so one platform's failure does not hide the other's
+    # result, which is the whole point of testing two platforms.
     #
     # Except on a draft pull request, which runs only the Linux leg: hosted
     # macOS runners are a small pool shared with release runs across the
@@ -120,21 +121,22 @@ jobs:
         if: matrix.os != 'ubuntu-latest'
         run: go test -race ./...
 
-      # On Linux the unit and functional suites run with HOME and
-      # XDG_STATE_HOME pointing at two directories that don't exist, and the
-      # step after the functional suite fails if either one appeared. niwa
-      # keeps a store of last-resolved secret values under XDG_STATE_HOME,
-      # and no test may read or write the developer's store or home
-      # directory; a test that forgets to isolate itself shows up here as a
-      # sentinel that got created. Go's own caches are pinned to where they
-      # already are, and XDG_CONFIG_HOME to a scratch directory for Go's
-      # telemetry files, so the toolchain itself never touches HOME; niwa's
-      # own config directory must not appear there either. macOS
-      # keeps its config directory under HOME with no override, so it runs
-      # the plain step above. The Infisical CLI is only installed further
-      # down, so no infisical binary is on PATH here; the step checks that.
+      # The functional suite runs with HOME and XDG_STATE_HOME pointing at two
+      # directories that don't exist, on both platforms, and on Linux the unit
+      # suite does too; the steps after the functional suite fail if either
+      # one appeared. niwa keeps a store of last-resolved secret values under
+      # XDG_STATE_HOME, and no test may read or write the developer's store
+      # or home directory; a test that forgets to isolate itself shows up
+      # here as a sentinel that got created. Go's own caches are pinned to
+      # where they already are, and XDG_CONFIG_HOME to a scratch directory
+      # for Go's telemetry files; niwa's own config directory must not appear
+      # there either. On Linux that keeps the toolchain out of HOME entirely.
+      # On macOS Go keeps its telemetry under HOME whatever XDG_CONFIG_HOME
+      # says, so the macOS check allows that one directory (see the step).
+      # macOS's unit suite runs the plain step above. The Infisical CLI is
+      # only installed further down, so no infisical binary is on PATH here;
+      # the step checks that.
       - name: Point HOME and XDG_STATE_HOME at sentinels
-        if: matrix.os == 'ubuntu-latest'
         run: |
           if command -v infisical >/dev/null 2>&1; then
             echo "::error::an infisical binary is on PATH before the suites run: $(command -v infisical)"
@@ -160,18 +162,16 @@ jobs:
       # symbolic-ref guard would be red on every run for no reason.
       # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
       - name: Snapshot repository state
-        if: matrix.os == 'ubuntu-latest'
         id: repo-before
         run: |
           echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           git status --porcelain > /tmp/repo-status-before.txt
 
-      # Linux-only for now. The suite also passes on macOS (tsukumogami/niwa#372
-      # made the harness portable), but no macOS leg runs it here yet; adding
-      # one is follow-up work under tsukumogami/niwa#243.
+      # Both platforms, under the sentinels above. The suite drives real git,
+      # BSD and GNU userland and the platform's path canonicalization, so a
+      # regression on one platform is invisible from the other.
       # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
       - name: Functional tests
-        if: matrix.os == 'ubuntu-latest'
         run: HOME="$SENTINEL_HOME" XDG_STATE_HOME="$SENTINEL_STATE" XDG_CONFIG_HOME="$SENTINEL_CONFIG" make test-functional
 
       - name: Verify the suites left the sentinels alone
@@ -186,6 +186,40 @@ jobs:
           done
           echo "OK: neither sentinel directory exists, and nothing wrote niwa config"
 
+      # The same check on macOS, with one allowance. Go keeps its telemetry
+      # under os.UserConfigDir, which on macOS is $HOME/Library/Application
+      # Support and ignores XDG_CONFIG_HOME, and GOTELEMETRY=off in the
+      # environment doesn't stop it: run with HOME at an empty directory,
+      # `go list` creates Library/Application Support/go/telemetry there and
+      # nothing else. So the sentinel HOME may hold that path and its parents,
+      # and anything else in it fails the step, as does the XDG_STATE_HOME
+      # sentinel or niwa's config directory appearing at all.
+      - name: Verify the suite left the sentinels alone (macOS)
+        if: always() && matrix.os == 'macos-latest' && env.SENTINEL_HOME != ''
+        run: |
+          for d in "$SENTINEL_STATE" "$SENTINEL_CONFIG/niwa"; do
+            if [ -e "$d" ]; then
+              find "$d" -maxdepth 4 | head -50
+              echo "::error::$d exists: something wrote under XDG_STATE_HOME or niwa's config directory instead of its own sandbox"
+              exit 1
+            fi
+          done
+          if [ -e "$SENTINEL_HOME" ]; then
+            go_dir="$SENTINEL_HOME/Library/Application Support/go"
+            stray=$(find "$SENTINEL_HOME" -mindepth 1 \
+              ! -path "$SENTINEL_HOME/Library" \
+              ! -path "$SENTINEL_HOME/Library/Application Support" \
+              ! -path "$go_dir" \
+              ! -path "$go_dir/telemetry" \
+              ! -path "$go_dir/telemetry/*")
+            if [ -n "$stray" ]; then
+              printf '%s\n' "$stray" | head -50
+              echo "::error::$SENTINEL_HOME holds more than Go's telemetry directory: something wrote under HOME instead of its own sandbox"
+              exit 1
+            fi
+          fi
+          echo "OK: the sentinel HOME holds nothing but Go's telemetry directory, the XDG_STATE_HOME sentinel doesn't exist, and nothing wrote niwa config"
+
       # The tripwire. The suite allocates its sandboxes outside the checkout, so
       # a run that moved HEAD or dirtied the working tree reached something it
       # should not have. This catches the shape of tsukumogami/niwa#249 without
@@ -194,7 +228,7 @@ jobs:
       # itself failed, which is exactly when an escape is most likely.
       # Copied into .claude/shirabe-extensions/work-on.md (the /work-on verification map), with any deliberate differences noted there; change both together.
       - name: Verify the suite left the checkout alone
-        if: always() && matrix.os == 'ubuntu-latest' && steps.repo-before.outcome == 'success'
+        if: always() && steps.repo-before.outcome == 'success'
         run: |
           after_head=$(git rev-parse HEAD)
           if [ "$after_head" != "${{ steps.repo-before.outputs.head }}" ]; then
