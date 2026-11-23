@@ -85,7 +85,12 @@ detection and generated paths in the files that use them, and the walk
 itself started out in `repo.go`. The walk moves into `walk.go` as the
 repository discovery grows. Moving the other three as well would shift
 code that is already written and tested for no change in behavior. This
-records where the code lives; the requirements are unchanged.
+records where the code lives; the requirements are unchanged. The jobs
+root the walk resolves once per pass also feeds that pass's liveness
+reads, as Data Flow now says: a liveness read on a different root than
+the walk's would look for a live session's job entry where Claude Code
+didn't write it, and read the session as gone, which is the unsafe
+direction for a remover.
 
 ## Context and Problem Statement
 
@@ -2952,8 +2957,9 @@ An all-unit pass, before a dispatch:
    listing gives it (step 2), the same id `claude rm` takes, never a value
    read from the instance or the job directory. niwa resolves the jobs root
    once per pass as Claude Code does, from `CLAUDE_CONFIG_DIR` when the
-   person sets it and `~/.claude` otherwise, and the rule's walk and the
-   vet both use that one root, written `~/.claude/jobs/` here. niwa uses
+   person sets it and `~/.claude` otherwise, and the rule's walk, the
+   pass's liveness reads and the vet all use that one root, written
+   `~/.claude/jobs/` here. niwa uses
    the variable's value only when it's an absolute path that already
    equals its cleaned form, and never expands `~` in it; any other value,
    a relative one or one holding a `..`, a `.` or a repeated or trailing
