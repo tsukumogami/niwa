@@ -156,10 +156,13 @@ type Policy struct {
 }
 
 // evalState is what one evaluation's checks share: the walk of the instance,
-// made once by the repository check and read by the outside check, and the
-// classes every check gives.
+// made once by the repository check and read by the outside check, the
+// instance's .niwa held open for every read under it, the managed files read
+// from instance.json once, and the classes every check gives.
 type evalState struct {
 	walk    *found
+	niwa    niwaDir
+	managed *managedRead
 	classes classes
 }
 
@@ -174,7 +177,7 @@ func Evaluate(ctx context.Context, u Unit, p Policy) Verdict {
 	checks := map[CheckName]checkFunc{
 		CheckLiveness:   checkLiveness,
 		CheckHold:       checkHold,
-		CheckRecords:    noCheckYet,
+		CheckRecords:    checkRecords,
 		CheckRepository: checkRepositories,
 		CheckOutside:    checkOutside,
 		CheckNamedFiles: noCheckYet,
@@ -187,7 +190,8 @@ func Evaluate(ctx context.Context, u Unit, p Policy) Verdict {
 		p.IgnoredUnique, p.JobScratchUnique = true, true
 		p.Disposable, p.BuildTrees = nil, nil
 	}
-	s := &evalState{}
+	s := &evalState{niwa: openNiwaDir(u.InstancePath)}
+	defer s.niwa.close()
 	var v Verdict
 	for _, name := range checkOrder {
 		for _, c := range checks[name](ctx, u, p, s) {

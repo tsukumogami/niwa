@@ -523,13 +523,15 @@ func underDeclared(p string, isDir bool, declared []string) (string, bool) {
 const cacheDirSignature = "Signature: 8a477f597d28d172789f06886806bc55"
 
 // hasCacheDirTag reports whether dir, a real directory and not a link,
-// holds a regular CACHEDIR.TAG that starts with the standard signature.
+// holds a regular CACHEDIR.TAG of the user's that starts with the standard
+// signature. A tag the shared reader refuses (a link, a FIFO, another
+// user's file, one over its cap) makes no build tree.
 func hasCacheDirTag(dir string) bool {
 	info, err := os.Lstat(dir)
 	if err != nil || !info.IsDir() {
 		return false
 	}
-	b, err := readRegular(filepath.Join(dir, "CACHEDIR.TAG"), 4096)
+	b, err := readCapped(filepath.Join(dir, "CACHEDIR.TAG"), maxCacheTagBytes)
 	return err == nil && bytes.HasPrefix(b, []byte(cacheDirSignature))
 }
 

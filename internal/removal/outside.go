@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -56,7 +57,7 @@ const maxIgnoreBytes = 4096
 // line empty or a single word. A file with prose in it is something someone
 // wrote, and keeps.
 func patternsOnly(p string) bool {
-	b, err := readRegular(p, maxIgnoreBytes)
+	b, err := readCapped(p, maxIgnoreBytes)
 	if err != nil {
 		return false
 	}
@@ -89,13 +90,13 @@ const maxEmptyDepth = 64
 // managed_files and whose content still has the hash recorded there. A file
 // edited since, or one the state can't be read for, is not generated.
 func (s *evalState) generated(instance string) func(rel string) bool {
-	managed := readManaged(instance)
+	managed := s.managedFiles(instance).files
 	return func(rel string) bool {
 		want, ok := managed[filepath.ToSlash(rel)]
 		if !ok {
 			return false
 		}
-		b, err := readRegular(filepath.Join(instance, filepath.FromSlash(rel)), maxManagedBytes)
+		b, err := readCapped(filepath.Join(instance, filepath.FromSlash(rel)), maxManagedBytes)
 		if err != nil {
 			return false
 		}
@@ -104,19 +105,53 @@ func (s *evalState) generated(instance string) func(rel string) bool {
 	}
 }
 
-// readManaged reads managed_files from the instance's state: each path,
-// relative to the instance, with its recorded hash. A state that can't be
-// read gives none.
-func readManaged(instance string) map[string]string {
-	out := map[string]string{}
-	niwaDir := filepath.Join(instance, ".niwa")
-	if info, err := os.Lstat(niwaDir); err != nil || !info.IsDir() {
-		return out
+// instanceStateRecord is the instance's state file under .niwa.
+const instanceStateRecord = "instance.json"
+
+// managedRead is what one evaluation read of managed_files: each path,
+// relative to the instance, with its recorded hash, and the keeping checks
+// for what couldn't be read.
+type managedRead struct {
+	files    map[string]string
+	failures []Check
+}
+
+// managedFiles reads managed_files once per evaluation, so the repository
+// check and the outside check share one read and a failure is named once.
+func (s *evalState) managedFiles(instance string) *managedRead {
+	if s.managed == nil {
+		s.managed = s.readManaged(instance)
 	}
-	b, err := readRegular(filepath.Join(niwaDir, "instance.json"), maxStateBytes)
+	return s.managed
+}
+
+// readManaged reads managed_files from the instance's state, relative to
+// the .niwa the evaluation opened. An absent state, or one that doesn't
+// parse, gives no managed files. A state that is present but refused (a
+// link, a FIFO, another user's file, one over its cap) is a failure the
+// outside check keeps the unit on. instance.json is niwa's own file, so its
+// decode stays lenient.
+func (s *evalState) readManaged(instance string) *managedRead {
+	m := &managedRead{files: map[string]string{}}
+	if s.niwa.absent || s.niwa.usable() != nil {
+		// A .niwa the rule can't use keeps through the hold and records
+		// checks.
+		return m
+	}
+	present, err := s.niwa.present(instanceStateRecord)
+	if !present {
+		return m
+	}
+	var b []byte
+	if err == nil {
+		b, err = s.niwa.read(instanceStateRecord, maxStateBytes)
+	}
 	if err != nil {
-		return out
+		rel := niwaDirName + "/" + instanceStateRecord
+		m.failures = append(m.failures, Check{Paths: []string{rel}, Evidence: "unreadable: " + rel + ": " + errText(err)})
+		return m
 	}
+	out := m.files
 	var st struct {
 		ManagedFiles []struct {
 			Path string `json:"path"`
@@ -124,7 +159,7 @@ func readManaged(instance string) map[string]string {
 		} `json:"managed_files"`
 	}
 	if json.Unmarshal(b, &st) != nil {
-		return out
+		return m
 	}
 	bases := []string{instance}
 	if r, err := filepath.EvalSymlinks(instance); err == nil && r != instance {
@@ -143,7 +178,7 @@ func readManaged(instance string) map[string]string {
 			break
 		}
 	}
-	return out
+	return m
 }
 
 // checkOutside is the outside check: every path outside the repositories
@@ -256,6 +291,14 @@ func checkOutside(ctx context.Context, u Unit, p Policy, s *evalState) []Check {
 		keeps = append(keeps, Check{Evidence: fmt.Sprintf("the walk outside the repositories stopped: %v", err)})
 	}
 	keeps = append(keeps, unreadable...)
+	// A managed-files record the rule couldn't read keeps the unit here,
+	// named, and the path it names counts as unique.
+	for _, c := range s.managedFiles(u.InstancePath).failures {
+		for _, p := range c.Paths {
+			s.classes.add(p, ClassUnique, "")
+		}
+		keeps = append(keeps, c)
+	}
 	if len(unique) > 0 {
 		keeps = append(keeps, Check{Paths: unique, Evidence: "files outside every repository: " + nameSome(unique)})
 	}
@@ -289,7 +332,7 @@ func checkJobDir(ctx context.Context, u Unit, p Policy, pats []string, s *evalSt
 	switch {
 	case p.ConfigError != nil:
 		scratchUnique, why = true, " (configuration unreadable)"
-	case briefPossible(u.InstancePath):
+	case briefPossible(s):
 		scratchUnique, why = true, " (a handoff brief may be present: "+keepRecord+")"
 	}
 	var unique, unreadable []string
@@ -366,17 +409,15 @@ const keepRecord = ".niwa/keep.json"
 
 // briefPossible reports whether the unit may have a handoff brief: its keep
 // record is present, or the rule can't tell, because .niwa or the record
-// can't be read or .niwa isn't a real directory.
-func briefPossible(instance string) bool {
-	info, err := os.Lstat(filepath.Join(instance, ".niwa"))
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
+// can't be read or .niwa isn't a real directory of the user's. The keep
+// record is looked for relative to the .niwa the evaluation opened, without
+// following a link.
+func briefPossible(s *evalState) bool {
+	if s.niwa.absent {
 		return false
-	case err != nil || !info.IsDir():
-		return true
 	}
-	_, err = os.Lstat(filepath.Join(instance, keepRecord))
-	return !errors.Is(err, fs.ErrNotExist)
+	present, _ := s.niwa.present(path.Base(keepRecord))
+	return present
 }
 
 // emptyTree reports whether dir is a real directory with no entries, or
