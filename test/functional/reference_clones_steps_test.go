@@ -246,10 +246,9 @@ func theCloneDoesNotBorrow(ctx context.Context, groupRepo, inst string) error {
 	return cloneIsFull(filepath.Join(s.workspaceRoot, inst, groupRepo))
 }
 
-// theClonesWereMadeBorrowing is the create-made counterpart of the step that
-// writes alternates by hand: it checks that niwa create made both clones
-// borrow from the mirror and records them as its borrowers for the mirror
-// steps that follow.
+// theClonesWereMadeBorrowing is how the mirror features get their borrowers:
+// it checks that niwa create made both clones borrow from the mirror, and
+// records them as its borrowers for the mirror steps that follow.
 func theClonesWereMadeBorrowing(ctx context.Context, groupRepo, inst1, inst2, repoID string) (context.Context, error) {
 	s, m, err := mirrorState(ctx)
 	if err != nil {
@@ -769,6 +768,24 @@ func iRunNiwaDispatchForReferenceClones(ctx context.Context) (context.Context, e
 	return ctx, runNiwa(s, s.workspaceRoot, "niwa dispatch borrow-task --detach")
 }
 
+// mirrorStorePacks returns the name of every file in the pack directory of
+// every store of the workspace's mirrors.
+func mirrorStorePacks(s *testState) (map[string]bool, error) {
+	dir, err := mirrorsDirOf(s)
+	if err != nil {
+		return nil, err
+	}
+	storePacks, err := filepath.Glob(filepath.Join(dir, ".store", "*", "objects", "pack", "*"))
+	if err != nil {
+		return nil, err
+	}
+	held := map[string]bool{}
+	for _, p := range storePacks {
+		held[filepath.Base(p)] = true
+	}
+	return held, nil
+}
+
 // noCloneHoldsAMirrorPack checks every clone of inst against every store of
 // the workspace's mirrors: no pack file name in the clone is one a store
 // holds, and the clone's local config has no gc. or maintenance. key.
@@ -777,17 +794,9 @@ func noCloneHoldsAMirrorPack(ctx context.Context, inst string) error {
 	if err != nil {
 		return err
 	}
-	dir, err := mirrorsDirOf(s)
+	held, err := mirrorStorePacks(s)
 	if err != nil {
 		return err
-	}
-	storePacks, err := filepath.Glob(filepath.Join(dir, ".store", "*", "objects", "pack", "*"))
-	if err != nil {
-		return err
-	}
-	held := map[string]bool{}
-	for _, p := range storePacks {
-		held[filepath.Base(p)] = true
 	}
 	clones, err := instanceClones(s, inst)
 	if err != nil {

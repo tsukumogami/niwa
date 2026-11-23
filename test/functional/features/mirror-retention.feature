@@ -6,8 +6,9 @@ Feature: niwa keeps an old mirror store until no clone on disk names it
   store only once a strict scan of every clone on disk, kept and
   half-created instances included, finds no alternates line naming it. A
   workspace destroy keeps a mirror a kept instance still borrows from. As in
-  mirror-repair.feature, the scenarios turn niwa's own clones into
-  borrowers the way a reference clone would.
+  mirror-repair.feature, the borrowers are the clones niwa create makes in
+  the test build, each checked for the one stable-path alternates line and
+  for holding no pack the mirror holds.
 
   Background:
     Given a clean niwa environment
@@ -36,7 +37,8 @@ Feature: niwa keeps an old mirror store until no clone on disk names it
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -64,7 +66,8 @@ Feature: niwa keeps an old mirror store until no clone on disk names it
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -95,7 +98,8 @@ Feature: niwa keeps an old mirror store until no clone on disk names it
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -133,7 +137,8 @@ Feature: niwa keeps an old mirror store until no clone on disk names it
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -167,7 +172,8 @@ Feature: niwa keeps an old mirror store until no clone on disk names it
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -198,7 +204,8 @@ Feature: niwa keeps an old mirror store until no clone on disk names it
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -212,7 +219,8 @@ Feature: niwa keeps an old mirror store until no clone on disk names it
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -228,7 +236,8 @@ Feature: niwa keeps an old mirror store until no clone on disk names it
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -243,7 +252,8 @@ Feature: niwa keeps an old mirror store until no clone on disk names it
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store

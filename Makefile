@@ -49,7 +49,7 @@ test-functional-claude-integration: build-test
 	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_TAGS=@claude-integration go test -v -timeout $(FUNCTIONAL_TIMEOUT) ./test/functional/... $(LOCK_HELD)
 
 # Run the mirror-repair features: a deleted host mirror restored by an
-# ordinary command, with borrowers the scenarios build from niwa's own clones,
+# ordinary command, with borrowers niwa create makes in the test build,
 # a mirror whose repo URL changes spelling or remote, and the old stores a
 # restore keeps until no clone on disk names them. The full suite runs them
 # too; this is the reviewer's one-line check.
