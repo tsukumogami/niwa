@@ -136,6 +136,9 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 		dispatchAttach = prevAttach
 		destroyInstanceFunc = prevDestroy
 	})
+	// The reap a dispatch runs first takes a process listing; none of these
+	// tests starts a process in an instance, so an empty one stands in.
+	stubProcessListing(t)
 
 	return f
 }

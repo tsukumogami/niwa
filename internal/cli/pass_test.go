@@ -261,6 +261,8 @@ func TestPass_OpportunisticReapKeepsTheUnitAndNeverFails(t *testing.T) {
 
 func TestPass_LeavesNoProcessRunning(t *testing.T) {
 	f := newPassFixture(t)
+	// The real listing runs lsof, a process this test must see gone too.
+	realProcessListing(t)
 	f.commitUnpushed(t, "never-pushed")
 	if _, err := runPass(context.Background(), f.root, passActAll, passScope{JobsDir: f.jobsDir, Now: time.Now()}); err != nil {
 		t.Fatal(err)
