@@ -771,12 +771,18 @@ func onReapWarnings(out string) []string {
 }
 
 // stubDestroyRemoving installs a destroyInstanceFunc that really removes the
-// directory, so the next reap finds the instance gone.
+// directory, so the next reap finds the instance gone. The reap removes an
+// instance through its tombstone, so the stub removes the tombstone there.
 func stubDestroyRemoving(t *testing.T) {
 	t.Helper()
 	prev := destroyInstanceFunc
 	destroyInstanceFunc = func(path string) error { return os.RemoveAll(path) }
-	t.Cleanup(func() { destroyInstanceFunc = prev })
+	prevTomb := removeTombstoneFunc
+	removeTombstoneFunc = func(_ *workspace.DestroyPlan, tomb string) error { return os.RemoveAll(tomb) }
+	t.Cleanup(func() {
+		destroyInstanceFunc = prev
+		removeTombstoneFunc = prevTomb
+	})
 }
 
 // TestOnReap_FixedEnvironment: the command sees PATH, HOME, the three values

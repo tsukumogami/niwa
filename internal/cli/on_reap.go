@@ -285,7 +285,17 @@ func onReapEnv(declared []string, r removedSession) []string {
 // when it doesn't, and dropped with a final warning once the count reaches
 // onReapFailureLimit.
 func (s *onReapStep) settle(m workspace.SessionMapping) {
-	if s.run(removedSession{SessionID: m.SessionID, ReapKey: reapKeyFor(m), InstancePath: m.InstancePath}) {
+	s.settleMapping(m, s.run(removedSession{SessionID: m.SessionID, ReapKey: reapKeyFor(m), InstancePath: m.InstancePath}))
+}
+
+// settleMapping settles a removed session's mapping once its on-reap run
+// is known: deleted when ran is true, kept with its failure count raised
+// when it isn't, and dropped with a final warning once the count reaches
+// onReapFailureLimit. The pass runs the command before it removes the
+// instance and settles the mapping only after the removal, so a unit kept
+// on the way leaves its mapping exactly as it was.
+func (s *onReapStep) settleMapping(m workspace.SessionMapping, ran bool) {
+	if ran {
 		s.deleteMapping(m.SessionID)
 		return
 	}

@@ -41,6 +41,7 @@ func registerReapLossScanSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the output gives no verdict for the first dispatch instance$`, theOutputGivesNoVerdictForTheFirst)
 	ctx.Step(`^the output is a niwa\.verdicts/v1 document giving the (first dispatch instance|dispatch instance) the verdict "(keep|reap)"$`, theOutputIsAVerdictsDocumentGiving)
 	registerReapPathClassSteps(ctx)
+	registerReapTombstoneSteps(ctx)
 }
 
 func theFirstDispatchInstanceStillExists(ctx context.Context) error {

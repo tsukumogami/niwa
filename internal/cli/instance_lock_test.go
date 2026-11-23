@@ -1126,8 +1126,10 @@ func TestReap_StoredMapping_ResumeBetweenSelectionAndSettle_Spared(t *testing.T)
 	f := newStoredMappingFixture(t)
 	captureReapStderr(t)
 	var resumed workspace.SessionMapping
-	prev := destroyInstanceFunc
-	destroyInstanceFunc = func(path string) error {
+	// The reap removes an instance through its tombstone, so the stand-in
+	// for the destroy removes the tombstone.
+	prev := removeTombstoneFunc
+	removeTombstoneFunc = func(_ *workspace.DestroyPlan, path string) error {
 		if err := os.RemoveAll(path); err != nil {
 			return err
 		}
@@ -1147,7 +1149,7 @@ func TestReap_StoredMapping_ResumeBetweenSelectionAndSettle_Spared(t *testing.T)
 		}
 		return workspace.WriteSessionMapping(f.root, resumed)
 	}
-	t.Cleanup(func() { destroyInstanceFunc = prev })
+	t.Cleanup(func() { removeTombstoneFunc = prev })
 
 	if _, err := reapWorkspace(f.root, f.jobsDir, time.Now()); err != nil {
 		t.Fatalf("reapWorkspace: %v", err)

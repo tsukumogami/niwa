@@ -23,6 +23,7 @@ import (
 // this package.
 var printScrubFiles = []string{
 	"pass.go",
+	"pass_act.go",
 	"reap.go",
 	"removal_gate.go",
 	"on_reap.go",

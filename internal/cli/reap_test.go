@@ -77,6 +77,11 @@ func writeJobEntry(t *testing.T, jobsDir, sessionID string) {
 // stubDestroyAll installs a fake destroyInstanceFunc that records every path it
 // was asked to destroy, without touching the filesystem. It restores the
 // original on cleanup and returns a pointer to the recorded slice.
+//
+// The reap removes an instance through its tombstone rather than through
+// destroyInstanceFunc, so the stub stands in for that removal too: it
+// records the instance's own path and renames the tombstone back, leaving
+// the filesystem as a destroy that did nothing would.
 func stubDestroyAll(t *testing.T) *[]string {
 	t.Helper()
 	var destroyed []string
@@ -85,7 +90,16 @@ func stubDestroyAll(t *testing.T) *[]string {
 		destroyed = append(destroyed, path)
 		return nil
 	}
-	t.Cleanup(func() { destroyInstanceFunc = prev })
+	prevTomb := removeTombstoneFunc
+	removeTombstoneFunc = func(p *workspace.DestroyPlan, tomb string) error {
+		destroyed = append(destroyed, p.Dir())
+		_, err := workspace.UntombstoneInstance(p.Root(), tomb)
+		return err
+	}
+	t.Cleanup(func() {
+		destroyInstanceFunc = prev
+		removeTombstoneFunc = prevTomb
+	})
 	return &destroyed
 }
 

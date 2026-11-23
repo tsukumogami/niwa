@@ -601,11 +601,11 @@ func TestPass_KeptLineCarriesNoCredentialHelperUserinfo(t *testing.T) {
 
 func TestPass_ReclaimedAndReapingWarningLinesAreScrubbed(t *testing.T) {
 	f := newPassFixture(t)
-	prev := destroyInstanceFunc
-	destroyInstanceFunc = func(string) error {
+	prev := removeTombstoneFunc
+	removeTombstoneFunc = func(*workspace.DestroyPlan, string) error {
 		return errors.New("rm failed for https://user:hunter2@example.com/x \x1b[31m")
 	}
-	t.Cleanup(func() { destroyInstanceFunc = prev })
+	t.Cleanup(func() { removeTombstoneFunc = prev })
 	var err error
 	stderr := captureOSStderr(t, func() {
 		_, err = runPass(context.Background(), f.root, passActAll, passScope{JobsDir: f.jobsDir, Now: time.Now()})
@@ -613,8 +613,14 @@ func TestPass_ReclaimedAndReapingWarningLinesAreScrubbed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stderr, "niwa: warning: reaping instance") || strings.Contains(stderr, "hunter2") || strings.Contains(stderr, "\x1b") {
-		t.Fatalf("warning line %q; want it printed with the userinfo and escape gone", stderr)
+	// A removal that fails keeps the unit with a kept line; the instance is
+	// renamed back under its own name.
+	kept := f.stderr.String()
+	if !strings.Contains(kept, "niwa: kept test-ws-pass: removing it failed: ") || strings.Contains(kept+stderr, "hunter2") || strings.Contains(kept+stderr, "\x1b") {
+		t.Fatalf("kept line %q (stderr %q); want it printed with the userinfo and escape gone", kept, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(f.inst, ".niwa", "instance.json")); err != nil {
+		t.Fatalf("the instance isn't back under its own name: %v", err)
 	}
 }
 

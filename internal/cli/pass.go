@@ -58,16 +58,23 @@ type passScope struct {
 
 // passUnit is one unit a pass takes in turn. never, when set, says why the
 // act mode would never target the instance; a verdict-only pass judges it
-// anyway, with its liveness unreadable for that reason.
+// anyway, with its liveness unreadable for that reason. backstop marks an
+// unmapped dispatch instance the age backstop found: its liveness is read
+// from the two rooted-worker guards, and it has no session to run the
+// on-reap command for.
 type passUnit struct {
 	reapTarget
-	never string
+	never    string
+	backstop bool
 }
 
-// keptUnit is a unit the rule kept, with the check that decided it.
+// keptUnit is a unit the pass kept: by the rule, with the check that decided
+// it, or by a refusal in one of the acting steps after the rule let it go,
+// with the reason.
 type keptUnit struct {
-	Name  string
-	Check removal.Check
+	Name   string
+	Check  removal.Check
+	Reason string
 }
 
 // passResult is what a pass did.
@@ -91,7 +98,10 @@ type passResult struct {
 // It gathers the mapped units whose session is gone, takes them in a fresh
 // random order, and for each, under the instance's lock, re-reads liveness
 // and asks removal.Evaluate for a verdict. Only a unit the rule lets go goes
-// on to the workspace's [session.before_remove] gate and DestroyInstance.
+// on to the workspace's [session.before_remove] gate and the acting steps
+// pass_act.go describes: the re-read, the on-reap command, the rename to a
+// tombstone and the check there, and the removal. A tombstone an
+// interrupted pass left is renamed back first, when no pass holds it.
 //
 // The whole pass runs under one deadline. A unit the pass can't reach before
 // it is left in place, and the next pass asks again; the random order keeps
@@ -128,10 +138,7 @@ func runPass(ctx context.Context, workspaceRoot string, mode passMode, scope pas
 	// unit holds without them. A configuration that can't be read at all is
 	// handed to the rule, which keeps every unit holding a clone.
 	cfg, cfgErr := loadWorkspaceConfig(workspaceRoot)
-	var settingsErr *config.RemovalSettingsError
-	if errors.As(cfgErr, &settingsErr) {
-		fmt.Fprintf(reapStderr, "niwa: removed nothing: the workspace's removal settings are invalid: %s\n",
-			removal.ScrubEvidence(cfgErr.Error(), 400))
+	if removalSettingsInvalid(cfgErr) {
 		res.SettingsInvalid = true
 		return res, nil
 	}
@@ -142,6 +149,12 @@ func runPass(ctx context.Context, workspaceRoot string, mode passMode, scope pas
 		if !verdictOnly {
 			return keepAllOnJobsRoot(workspaceRoot, scope.JobsErr)
 		}
+	}
+	if !verdictOnly {
+		// A tombstone an interrupted pass left goes back under its
+		// instance's name before selection, so the pass judges it as usual.
+		// The verdict-only mode leaves it where it is.
+		recoverTombstones(workspaceRoot, &res)
 	}
 	var targets []passUnit
 	var stored []workspace.SessionMapping
@@ -178,20 +191,17 @@ func runPass(ctx context.Context, workspaceRoot string, mode passMode, scope pas
 	// The rule's environment and the process listing are taken once for the
 	// pass, and only when there is a unit to judge, so a pass with nothing to
 	// do makes no scratch directory and lists no processes.
-	var policy removal.Policy
+	a := &passActor{ctx: ctx, root: workspaceRoot, jobsDir: jobsDir, verdictOnly: verdictOnly, cfg: cfg, cfgErr: cfgErr, lockHolder: "reap"}
+	defer a.close()
+	if verdictOnly {
+		a.lockHolder = "reap --verdict-only"
+	}
 	if len(targets) > 0 {
-		env := newRemovalEnv(workspaceRoot, userHomeDir(), os.Getenv("PATH"))
-		defer env.Close()
-		policy = removalPolicy(cfg, env)
-		policy.ConfigError = cfgErr
-		policy.JobsRoot = jobsDir
-		procs := listProcessesFunc(ctx, env)
 		instances := make([]string, 0, len(targets))
 		for _, t := range targets {
 			instances = append(instances, t.InstancePath)
 		}
-		procs.Attribute(instances, nil)
-		policy.Processes = procs
+		a.setup(ctx, instances)
 	}
 	rand.Shuffle(len(targets), func(i, j int) { targets[i], targets[j] = targets[j], targets[i] })
 
@@ -200,21 +210,18 @@ func runPass(ctx context.Context, workspaceRoot string, mode passMode, scope pas
 	// verdict-only pass sets up neither: no unit goes on to them.
 	deadline, _ := ctx.Deadline()
 	var onReap *onReapStep
-	var gate *removalGate
-	var sessionIDs map[string][]string
-	lockHolder := "reap"
-	if verdictOnly {
-		lockHolder = "reap --verdict-only"
-	} else {
+	var steps unitSteps
+	if !verdictOnly {
 		onReap = newOnReapStep(workspaceRoot, reapStderr)
 		onReap.deadline = deadline
 		// The workspace's pre-removal command gets the last word on each
 		// target, after the rule. Its spare lines go where the on-reap
 		// command's warnings go.
-		gate = newRemovalGate(workspaceRoot, removeStepReap, reapStderr)
+		gate := newRemovalGate(workspaceRoot, removeStepReap, reapStderr)
 		gate.deadline = deadline
+		steps = unitSteps{gate: gate, onReap: onReap}
 		if gate.active() {
-			sessionIDs = sessionIDsByInstance(workspaceRoot)
+			steps.sessionIDs = sessionIDsByInstance(workspaceRoot)
 		}
 	}
 	for i, t := range targets {
@@ -238,9 +245,10 @@ func runPass(ctx context.Context, workspaceRoot string, mode passMode, scope pas
 		// every agent and not only one whose liveness is read from activity,
 		// and the two guards that spare an instance a worker is rooted in.
 		// The rule runs under the same lock, and the lock is held through the
-		// removal gate, the destroy and the mapping's settlement, so no other
-		// niwa command can act on the instance between the rule's verdict and
-		// the instance being gone.
+		// removal gate, the re-read, the on-reap command, the tombstone and
+		// its removal and the mapping's settlement, so no other niwa command
+		// can act on the instance between the rule's verdict and the
+		// instance being gone.
 		//
 		// A held lock spares the instance for this sweep, with one "niwa:
 		// kept" line naming the holder, and the next sweep asks again. A kept
@@ -249,79 +257,19 @@ func runPass(ctx context.Context, workspaceRoot string, mode passMode, scope pas
 		//
 		// A verdict-only pass takes the same lock and makes the same re-read
 		// and evaluation, records the verdict, and stops there.
-		reclaimed, kept, judged := func() (bool, *keptUnit, *unitVerdict) {
-			release, err := takeInstanceLock(t.InstancePath, lockHolder)
-			if err != nil {
-				reportInstanceLockKept(reapStderr, t.InstancePath, err)
-				if verdictOnly {
-					return false, nil, &unitVerdict{Name: reapTargetName(t.reapTarget)}
-				}
-				return false, nil, nil
-			}
-			defer release()
-
-			unit := removal.Unit{
-				Name:         reapTargetName(t.reapTarget),
-				InstancePath: t.InstancePath,
-				JobDir:       jobDirFor(jobsDir, t.SessionID),
-			}
-			if t.never != "" {
-				unit.Liveness, unit.LivenessReason = removal.LivenessUnreadable, t.never
-			} else {
-				unit.Liveness, unit.LivenessReason = rereadLiveness(t.reapTarget, jobsDir, time.Now())
-			}
-			verdict := removal.Evaluate(ctx, unit, policy)
-			if verdictOnly {
-				// A unit the deadline cut short mid-evaluation has a verdict
-				// built from checks that didn't finish: it counts as not
-				// reached.
-				return false, nil, &unitVerdict{Name: unit.Name, Reached: ctx.Err() == nil, Verdict: verdict}
-			}
-			if verdict.Kind != removal.Reap {
-				first, _ := verdict.First()
-				if first.Name == removal.CheckLiveness && unit.Liveness != removal.LivenessGone {
-					// A session that came back between selection and this
-					// re-read is a live session, not a kept unit: it is left
-					// alone without a word, as selection leaves it. A
-					// liveness the re-read couldn't read is left the same
-					// way, silently, as the reap before the rule left it.
-					// A liveness keep for a session read as gone names a
-					// live process, or a process listing that failed, and
-					// is printed like any other keep.
-					return false, nil, nil
-				}
-				return false, &keptUnit{Name: unit.Name, Check: first}, nil
-			}
-			if !gate.ask(t.InstancePath, sessionIDs[t.InstancePath]) {
-				return false, nil, nil
-			}
-			if err := destroyInstanceFunc(t.InstancePath); err != nil {
-				fmt.Fprintf(os.Stderr, "niwa: warning: reaping instance %s: %s\n",
-					removal.ScrubEvidence(t.InstancePath, 400), removal.ScrubEvidence(err.Error(), 400))
-				// Leave the mapping in place so a later reap retries this
-				// target rather than orphaning the mapping for a
-				// still-present instance.
-				return false, nil, nil
-			}
-			// The session is gone and so is its instance. The mapping goes
-			// once the on-reap command has run for it; a failed run keeps it
-			// for the next reap. Both happen before the lock is released, so
-			// the next command to take it finds neither.
-			onReap.settle(t.Mapping)
-			// Printed after the destroy rather than before it, so the line is
-			// a report of something that happened rather than of something
-			// intended: a destroy that fails above says nothing here.
-			if t.Notice.Reason != "" {
-				fmt.Fprintf(os.Stderr, "niwa: reclaimed %s: %s\n",
-					removal.ScrubEvidence(t.Notice.Name, 80), removal.ScrubEvidence(t.Notice.Reason, 200))
-			}
-			return true, nil, nil
-		}()
+		reclaimed, kept, judged := a.takeUnit(t, steps)
 		if judged != nil {
 			res.Verdicts = append(res.Verdicts, *judged)
 		}
 		if reclaimed {
 			res.Reaped++
+			// Printed after the removal rather than before it, so the line
+			// is a report of something that happened rather than of
+			// something intended: a unit kept on the way says nothing here.
+			if t.Notice.Reason != "" {
+				fmt.Fprintf(os.Stderr, "niwa: reclaimed %s: %s\n",
+					removal.ScrubEvidence(t.Notice.Name, 80), removal.ScrubEvidence(t.Notice.Reason, 200))
+			}
 		}
 		if kept != nil {
 			res.Kept = append(res.Kept, *kept)
@@ -364,13 +312,77 @@ func runPass(ctx context.Context, workspaceRoot string, mode passMode, scope pas
 	// under its own gates (dispatch instance name, no mapping, age past the TTL).
 	// It runs after the primary reclamation so the existing sweep keeps ownership
 	// of every mapped instance (DESIGN Decision 4). It starts only while the
-	// pass has time left.
-	n, err := reapBackstop(workspaceRoot, jobsDir, now)
-	if err != nil {
+	// pass has time left, and each candidate goes through the same lock,
+	// rule, gate, re-read, tombstone and removal as a mapped unit.
+	if err := a.backstop(now, &res); err != nil {
 		return res, err
 	}
-	res.Reaped += n
 	return res, nil
+}
+
+// backstopTargetDeadline bounds the work on one backstop candidate: its
+// evaluation, re-read, tombstone check and removal. A variable so a test can
+// shorten it.
+var backstopTargetDeadline = 30 * time.Second
+
+// backstop gathers the unmapped dispatch instances past the age backstop
+// and takes each through the rule under its instance's lock, with its
+// liveness read from the two rooted-worker guards, then through the gate
+// under step reap-backstop, the re-read, the tombstone and the removal. An
+// unmapped instance has no session, so no on-reap command runs and no
+// mapping is settled.
+//
+// The backstop starts only while the pass has time left, and once started
+// it takes no pass deadline, as before it went through the rule: each
+// candidate gets its own bound instead, so one slow candidate can't hold
+// the rest, and the gate keeps its own budget across them.
+func (a *passActor) backstop(now time.Time, res *passResult) error {
+	targets, spared, err := selectBackstopTargets(a.root, a.jobsDir, now)
+	if err != nil {
+		return err
+	}
+	reportSparedInstances(os.Stderr, spared)
+	if len(targets) == 0 {
+		return nil
+	}
+	instances := make([]string, 0, len(targets))
+	for _, t := range targets {
+		instances = append(instances, t.InstancePath)
+	}
+	base := context.WithoutCancel(a.ctx)
+	a.setup(base, instances)
+	// An unmapped instance has no session ids to hand the command; its path
+	// is the whole question. The gate keeps its own budget.
+	steps := unitSteps{gate: newRemovalGate(a.root, removeStepReapBackstop, reapStderr)}
+	for _, t := range targets {
+		ctx, cancel := context.WithTimeout(base, backstopTargetDeadline)
+		b := *a
+		b.ctx = ctx
+		u := passUnit{reapTarget: reapTarget{InstancePath: t.InstancePath}, backstop: true}
+		reclaimed, kept, _ := b.takeUnit(u, steps)
+		cancel()
+		if reclaimed {
+			res.Reaped++
+		}
+		if kept != nil {
+			res.Kept = append(res.Kept, *kept)
+			reportKeptUnit(reapStderr, *kept)
+		}
+	}
+	return nil
+}
+
+// removalSettingsInvalid reports whether cfgErr says the workspace's
+// [session.removal] or build_trees settings are invalid, and when they are,
+// prints the line saying the pass removed nothing.
+func removalSettingsInvalid(cfgErr error) bool {
+	var settingsErr *config.RemovalSettingsError
+	if !errors.As(cfgErr, &settingsErr) {
+		return false
+	}
+	fmt.Fprintf(reapStderr, "niwa: removed nothing: the workspace's removal settings are invalid: %s\n",
+		removal.ScrubEvidence(cfgErr.Error(), 400))
+	return true
 }
 
 // jobsRootReason is the liveness reason every unit keeps with when the jobs
@@ -432,12 +444,19 @@ func rereadLiveness(t reapTarget, jobsDir string, at time.Time) (removal.Livenes
 	return removal.LivenessGone, ""
 }
 
-// reportKeptUnit prints one line for a unit the rule kept, naming the
-// instance, the first keeping check and what it saw. The instance's
-// contents are agent-written, so the name and the evidence pass through
+// reportKeptUnit prints one line for a unit the pass kept, naming the
+// instance and either the first keeping check and what it saw, or the
+// reason an acting step refused. The instance's contents are agent-written,
+// so the name, the evidence and the reason pass through
 // removal.ScrubEvidence: terminal control sequences and credentials removed,
 // and the result bounded.
 func reportKeptUnit(w io.Writer, k keptUnit) {
+	if k.Reason != "" {
+		fmt.Fprintf(w, "niwa: kept %s: %s\n",
+			removal.ScrubEvidence(k.Name, 80),
+			removal.ScrubEvidence(k.Reason, 400))
+		return
+	}
 	fmt.Fprintf(w, "niwa: kept %s: %s check: %s\n",
 		removal.ScrubEvidence(k.Name, 80),
 		k.Check.Name,

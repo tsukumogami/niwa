@@ -746,3 +746,219 @@ Feature: niwa reap keeps a deleted session's instance that holds unpushed work
     And the error output contains ": its codex session had gone 24h0m0s without being worked in, and nothing was writing to it"
     And no output contains "ghp_"
     And no output contains "r8x2k7m4q9w3e6t1y5u0i2o8p4a6s3"
+
+  # The re-read before removal and the check on the tombstone. The on-reap
+  # command runs after the re-read and before the rename to the tombstone, so
+  # a command that writes into the unit stands in for a writer that arrives
+  # in between.
+
+  @critical
+  Scenario: a file written into a repository after the re-read renames the tombstone back and keeps the unit
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists with a commit
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given I set env "NIWA_TEST_REMOVAL_FILE_REMOTES" to "1"
+    And a fake claude for dispatch with session "a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1"
+    When I run "niwa dispatch late-writer --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When the workspace configuration declares the on-reap command:
+      """
+      echo late > "$NIWA_INSTANCE_PATH/tools/myapp/late.txt"
+      """
+    And the dispatch session "a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1" is deleted from the Agent View
+    And I run niwa reap from the workspace root
+    Then the exit code is 0
+    And the dispatch instance still exists
+    And the file "tools/myapp/late.txt" still exists in the dispatch instance
+    And the error output names the dispatch instance
+    And the error output contains "changed during the pass: tools/myapp/late.txt"
+    And no tombstone remains in the workspace root
+    And a dispatch-origin mapping exists for session "a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1"
+
+  @critical
+  Scenario: a commit made after the re-read that leaves git status clean renames the tombstone back and keeps the unit
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists with a commit
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given I set env "NIWA_TEST_REMOVAL_FILE_REMOTES" to "1"
+    And a fake claude for dispatch with session "a2a2a2a2-a2a2-4a2a-8a2a-a2a2a2a2a2a2"
+    When I run "niwa dispatch late-committer --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When the workspace configuration declares the on-reap command:
+      """
+      git -C "$NIWA_INSTANCE_PATH/tools/myapp" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m late
+      """
+    And the dispatch session "a2a2a2a2-a2a2-4a2a-8a2a-a2a2a2a2a2a2" is deleted from the Agent View
+    And I run niwa reap from the workspace root
+    Then the exit code is 0
+    And the dispatch instance still exists
+    And the error output names the dispatch instance
+    And the error output contains "changed during the pass: ref refs/heads/"
+    And no tombstone remains in the workspace root
+    And a dispatch-origin mapping exists for session "a2a2a2a2-a2a2-4a2a-8a2a-a2a2a2a2a2a2"
+    When I run niwa reap "--verdict-only" naming the dispatch instance from the workspace root
+    Then the exit code is 0
+    And the output gives the dispatch instance the verdict "keep"
+
+  @critical
+  Scenario: niwa reap skips a unit whose instance lock another process holds, without failing
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists with a commit
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given I set env "NIWA_TEST_REMOVAL_FILE_REMOTES" to "1"
+    And a fake claude for dispatch with session "a3a3a3a3-a3a3-4a3a-8a3a-a3a3a3a3a3a3"
+    When I run "niwa dispatch held-elsewhere --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When the dispatch session "a3a3a3a3-a3a3-4a3a-8a3a-a3a3a3a3a3a3" is deleted from the Agent View
+    And the instance lock of the dispatch instance is held by the test
+    And I run niwa reap from the workspace root
+    Then the exit code is 0
+    And the dispatch instance still exists
+    And the error output contains "another niwa command is acting on it"
+    And a dispatch-origin mapping exists for session "a3a3a3a3-a3a3-4a3a-8a3a-a3a3a3a3a3a3"
+    When the test releases its locks
+    And I run niwa reap from the workspace root
+    Then the exit code is 0
+    And no dispatch instance remains
+
+  @critical
+  Scenario: two reaps started together remove each clean unit once and leave no tombstone
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists with a commit
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given I set env "NIWA_TEST_REMOVAL_FILE_REMOTES" to "1"
+    And a fake claude for dispatch that mints a new session per launch
+    When I run "niwa dispatch first-task --detach" from the workspace root
+    Then the exit code is 0
+    When I run "niwa dispatch second-task --detach" from the workspace root
+    Then the exit code is 0
+    When every dispatch session is deleted from the Agent View
+    And I run two niwa reaps together from the workspace root
+    Then both reaps exited 0 and printed no error or warning
+    And no dispatch instance remains
+    And no dispatch-origin mapping remains
+    And no tombstone remains in the workspace root
+
+  @critical
+  Scenario: a second reap leaves alone a tombstone a live pass holds
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists with a commit
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given I set env "NIWA_TEST_REMOVAL_FILE_REMOTES" to "1"
+    And a fake claude for dispatch with session "a4a4a4a4-a4a4-4a4a-8a4a-a4a4a4a4a4a4"
+    When I run "niwa dispatch mid-removal --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When the dispatch session "a4a4a4a4-a4a4-4a4a-8a4a-a4a4a4a4a4a4" is deleted from the Agent View
+    And the dispatch instance is renamed to a tombstone
+    And the tombstone lock is held shared by the test
+    And I run niwa reap from the workspace root
+    Then the exit code is 0
+    And the tombstone still exists
+    And the dispatch instance's own name is free
+    When the test releases its locks
+
+  @critical
+  Scenario: a tombstone an interrupted pass left is left by the verdict-only mode and renamed back by the next reap
+    Given a clean niwa environment
+    And a local git server is set up
+    And a source repo "myapp" exists with a commit
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [groups.tools]
+
+      [repos.myapp]
+      url = "{repo:myapp}"
+      group = "tools"
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given I set env "NIWA_TEST_REMOVAL_FILE_REMOTES" to "1"
+    And a fake claude for dispatch with session "a5a5a5a5-a5a5-4a5a-8a5a-a5a5a5a5a5a5"
+    When I run "niwa dispatch interrupted --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When a commit is made on branch "unpushed-work" in repo "tools/myapp" of the dispatch instance
+    And the dispatch session "a5a5a5a5-a5a5-4a5a-8a5a-a5a5a5a5a5a5" is deleted from the Agent View
+    And the dispatch instance is renamed to a tombstone
+    And I run "niwa reap --verdict-only" from the workspace root
+    Then the exit code is 0
+    And the tombstone still exists
+    And the dispatch instance's own name is free
+    When I run niwa reap from the workspace root
+    Then the exit code is 0
+    And the dispatch instance still exists
+    And no tombstone remains in the workspace root
+    And the error output names the dispatch instance
+    And the error output contains "branch unpushed-work"
