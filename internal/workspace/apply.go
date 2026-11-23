@@ -3391,6 +3391,13 @@ func (a *Applier) ensureMirrors(ctx context.Context, cfg *config.WorkspaceConfig
 // alternates file or the one a dissociate sets aside (mirror.BorrowsFrom):
 // that clone still breaks when the mirror does. After its last borrower is
 // dissociated, this check leaves the mirror alone until the user deletes it.
+//
+// Only this check, the one every instance-building command runs, applies the
+// rule. The SessionStart hook's check when it provisions nothing
+// (checkRecordedMirrors) and niwa worktree create's (checkWorktreeMirror)
+// still check any mirror they find on disk. They build no instance and seed
+// no mirror, so keeping an off repo's mirror there costs a check, never a
+// new mirror, and erring that way can't leave a borrower without one.
 func checksMirrorOf(on bool, clones []string, home, workspaceRoot, repo string) bool {
 	return on || mirror.BorrowsFrom(clones, home, workspaceRoot, repo)
 }

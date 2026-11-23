@@ -100,6 +100,11 @@ func runDissociate(cmd *cobra.Command, args []string) error {
 	})
 
 	out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
+	// A clone borrowing from outside this workspace's mirrors is a warning,
+	// not a failure. What it names isn't a store niwa keeps or retires, so
+	// once every other clone is freed the instance depends on none of niwa's
+	// stores, which is all this command promises. Failing would also make
+	// every rerun fail on a clone it will never change.
 	for _, o := range rep.Outside {
 		fmt.Fprintf(errOut, "warning: %s borrows from %s, outside this workspace's mirrors; left as it is\n",
 			mirror.CleanText(o.Clone), mirror.CleanText(o.Line))
