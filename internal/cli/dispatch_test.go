@@ -1064,7 +1064,9 @@ func TestDispatch_EnvDeclaredButAbsent(t *testing.T) {
 // TestDispatch_OnReapInItsReap: the reap a dispatch runs first runs the
 // on-reap command for a session it removes; a command that exits 1 or sleeps
 // past its timeout leaves the dispatch's outcome unchanged and prints one
-// warning line, within the timeout plus one second.
+// warning line, within the timeout plus three seconds. The extra seconds are
+// the reap's own cost, its re-read and tombstone check, which the race
+// detector slows; the timeout still caps the wait well short of a 10s sleep.
 func TestDispatch_OnReapInItsReap(t *testing.T) {
 	for _, command := range []string{"exit 1", "sleep 10"} {
 		t.Run(command, func(t *testing.T) {
@@ -1082,7 +1084,7 @@ func TestDispatch_OnReapInItsReap(t *testing.T) {
 			if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
 				t.Fatalf("a failing on-reap command failed the dispatch: %v", err)
 			}
-			if elapsed := time.Since(start); elapsed > 2*time.Second {
+			if elapsed := time.Since(start); elapsed > 4*time.Second {
 				t.Errorf("dispatch took %s", elapsed)
 			}
 			if w := onReapWarnings(stderr.String()); len(w) != 1 || !strings.Contains(w[0], reapDeadSessionID) {
