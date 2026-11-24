@@ -201,3 +201,25 @@ func TestCreate_AnUnmirrorableNameClonesInFull(t *testing.T) {
 		t.Fatalf("the output names %q:\n%s", bad, c.stderr)
 	}
 }
+
+// A repo named .github fails the repo-id pattern only by its leading dot, so
+// it is cloned in full and the warning names it with that cause.
+func TestCreate_ADotLedNameClonesInFullAndIsNamed(t *testing.T) {
+	sb := newBorrowSandbox(t)
+	c := createWithSetting(t, sb, "", ".github", "lib")
+	if c.err != nil {
+		t.Fatalf("Create: %v", c.err)
+	}
+	c.requireFull(t, ".github")
+	c.requireBorrows(t, "lib")
+	if c.hasMirror(".github") {
+		t.Fatal(".github got a mirror")
+	}
+	want := `warning: .github was cloned in full instead of borrowing from the host mirror (invalid-repo-id: a mirror name can't start with ".")`
+	if !strings.Contains(c.stderr, want) {
+		t.Fatalf("the output lacks %q:\n%s", want, c.stderr)
+	}
+	if strings.Contains(c.stderr, "a repo whose name niwa can't mirror") {
+		t.Fatalf("the output uses the placeholder for .github:\n%s", c.stderr)
+	}
+}

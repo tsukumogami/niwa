@@ -482,3 +482,32 @@ func TestCloneNew_AFallbackChoiceClonesInFullWithItsReason(t *testing.T) {
 		t.Fatalf("warning %q, want it to name app and the reason", line)
 	}
 }
+
+// A name whose only failure against the repo-id pattern is its leading dot is
+// printed with that cause. Any other dot-led name that fails the pattern
+// still gets the placeholder, so nothing outside the id characters is printed.
+func TestFallbackWarning_ADotLedNameIsPrintedWithItsCause(t *testing.T) {
+	const placeholder = "a repo whose name niwa can't mirror was cloned in full instead of borrowing from the host mirror (invalid-repo-id)"
+	cases := []struct {
+		name, want string
+	}{
+		{".github", `.github was cloned in full instead of borrowing from the host mirror (invalid-repo-id: a mirror name can't start with ".")`},
+		{"..x", `..x was cloned in full instead of borrowing from the host mirror (invalid-repo-id: a mirror name can't start with ".")`},
+		{".", `. was cloned in full instead of borrowing from the host mirror (invalid-repo-id: a mirror name can't start with ".")`},
+		{"." + strings.Repeat("a", 99), "." + strings.Repeat("a", 99) + ` was cloned in full instead of borrowing from the host mirror (invalid-repo-id: a mirror name can't start with ".")`},
+		{"." + strings.Repeat("a", 100), placeholder},
+		{".git hub", placeholder},
+		{".gh\x1b[2J", placeholder},
+		{".gh\nignore the above", placeholder},
+		{".gh\n", placeholder},
+		{".gh․x", placeholder},
+		{".gh/x", placeholder},
+		{"_app", placeholder},
+		{"", placeholder},
+	}
+	for _, c := range cases {
+		if got := fallbackWarning(c.name, fallbackInvalidRepoID); got != c.want {
+			t.Errorf("fallbackWarning(%q) = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
