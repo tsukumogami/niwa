@@ -92,13 +92,23 @@ func TestPassAct_ReReadKeepsAFileWrittenAfterTheRule(t *testing.T) {
 	}
 }
 
-// A file written after the re-read (here by the on-reap command) is found
-// on the tombstone: the tombstone is renamed back, the unit kept with the
-// path named, and the file is still under <root>/<instance>.
+// A file written after the re-read (here when the pass takes the tombstone
+// lock, right before the rename) is found on the tombstone: the tombstone
+// is renamed back, the unit kept with the path named, and the file is still
+// under <root>/<instance>.
 func TestPassAct_TombstoneCheckRenamesBackOnAFileWrittenAfterTheReRead(t *testing.T) {
 	f := newPassFixture(t)
 	lockTestHome(t)
-	appendOnReapConfig(t, f.root, `command = "echo late > \"$NIWA_INSTANCE_PATH/tools/app/late.txt\""`)
+	prev := tryTombstoneLockFunc
+	tryTombstoneLockFunc = func(root string, shared bool) (func(), error) {
+		if shared {
+			if err := os.WriteFile(filepath.Join(f.clone, "late.txt"), []byte("late\n"), 0o644); err != nil {
+				t.Error(err)
+			}
+		}
+		return prev(root, shared)
+	}
+	t.Cleanup(func() { tryTombstoneLockFunc = prev })
 	keptAtActing(t, f, "changed during the pass: tools/app/late.txt")
 	if _, err := os.Stat(filepath.Join(f.clone, "late.txt")); err != nil {
 		t.Fatalf("the late file isn't under the instance: %v", err)
@@ -111,29 +121,77 @@ func TestPassAct_TombstoneCheckNamesARefMovedAfterTheReRead(t *testing.T) {
 	f := newPassFixture(t)
 	lockTestHome(t)
 	passGit(t, f.clone, "checkout", "-q", "-B", "main", "origin/main")
-	appendOnReapConfig(t, f.root, `command = "git -C \"$NIWA_INSTANCE_PATH/tools/app\" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m late"`)
+	prev := tryTombstoneLockFunc
+	tryTombstoneLockFunc = func(root string, shared bool) (func(), error) {
+		if shared {
+			passGit(t, f.clone, "commit", "-q", "--allow-empty", "-m", "late")
+		}
+		return prev(root, shared)
+	}
+	t.Cleanup(func() { tryTombstoneLockFunc = prev })
 	keptAtActing(t, f, "changed during the pass: ref refs/heads/main in tools/app")
 }
 
 // A linked worktree inside the instance names its admin directory by an
-// absolute path the rename moves, so until worktrees are removed before the
-// rename the unit keeps at the tombstone check.
-func TestPassAct_LinkedWorktreeKeepsAtTheTombstoneCheck(t *testing.T) {
+// absolute path the rename moves; the check on the tombstone reads it at its
+// tombstone paths, and once every check has passed it is removed inside the
+// tombstone, before the tombstone itself, with no git call removing it.
+func TestPassAct_LinkedWorktreeIsRemovedInsideTheTombstoneAfterTheCheck(t *testing.T) {
 	f := newPassFixture(t)
 	lockTestHome(t)
 	passGit(t, f.clone, "checkout", "-q", "-B", "main", "origin/main")
 	passGit(t, f.clone, "worktree", "add", "-q", filepath.Join(f.inst, "wt"), "-b", "wt-branch", "main")
 	passGit(t, f.clone, "push", "-q", "origin", "wt-branch")
-	keptAtActing(t, f, "a linked worktree names its admin directory by a path the rename moved")
+	log := gitCallLog(t)
+	var beforeRename, atRemoval []string
+	prevLock := tryTombstoneLockFunc
+	tryTombstoneLockFunc = func(root string, shared bool) (func(), error) {
+		if shared {
+			for _, p := range []string{filepath.Join(f.inst, "wt"), filepath.Join(f.clone, ".git", "worktrees", "wt")} {
+				if !exists(p) {
+					beforeRename = append(beforeRename, p)
+				}
+			}
+		}
+		return prevLock(root, shared)
+	}
+	t.Cleanup(func() { tryTombstoneLockFunc = prevLock })
+	var removed []string
+	prevRemove := removeTombstoneFunc
+	removeTombstoneFunc = func(p *workspace.DestroyPlan, tomb string) error {
+		for _, rel := range []string{"wt", filepath.Join("tools", "app", ".git", "worktrees", "wt")} {
+			if exists(filepath.Join(tomb, rel)) {
+				atRemoval = append(atRemoval, rel)
+			}
+		}
+		removed = append(removed, p.Dir())
+		return p.Remove(tomb)
+	}
+	t.Cleanup(func() { removeTombstoneFunc = prevRemove })
+	res, err := runPass(context.Background(), f.root, passActAll, passScope{JobsDir: f.jobsDir, Now: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Reaped != 1 || len(removed) != 1 || removed[0] != f.inst {
+		t.Fatalf("reaped %d, removed %v; want the unit reaped\nstderr:\n%s", res.Reaped, removed, f.stderr.String())
+	}
+	if len(beforeRename) != 0 {
+		t.Fatalf("gone before the rename: %v; want the worktree removed inside the tombstone", beforeRename)
+	}
+	if len(atRemoval) != 0 {
+		t.Fatalf("still in the tombstone when it was removed: %v; want the worktree removed after the check", atRemoval)
+	}
+	assertNoWorktreeRemoval(t, log, false)
+	assertNoTombstone(t, f.root)
 }
 
-// A clean unit: the on-reap command runs while the instance is still there,
-// the tombstone is removed, and the mapping is deleted after the removal.
-func TestPassAct_CleanUnitRunsOnReapBeforeTheRemovalAndSettlesAfter(t *testing.T) {
+// A clean unit: the tombstone is removed, then the on-reap command runs,
+// once the instance is gone, and the mapping is deleted after it.
+func TestPassAct_CleanUnitRunsOnReapAfterTheRemovalAndSettlesAfter(t *testing.T) {
 	f := newPassFixture(t)
 	lockTestHome(t)
 	log := filepath.Join(t.TempDir(), "on-reap.log")
-	appendOnReapConfig(t, f.root, fmt.Sprintf(`command = "test -f \"$NIWA_INSTANCE_PATH/.niwa/instance.json\" && echo present >> '%s'"`, log))
+	appendOnReapConfig(t, f.root, fmt.Sprintf(`command = "test ! -e \"$NIWA_INSTANCE_PATH\" && echo absent >> '%s'"`, log))
 	removed := realRemoval(t)
 	res, err := runPass(context.Background(), f.root, passActAll, passScope{JobsDir: f.jobsDir, Now: time.Now()})
 	if err != nil {
@@ -142,8 +200,8 @@ func TestPassAct_CleanUnitRunsOnReapBeforeTheRemovalAndSettlesAfter(t *testing.T
 	if res.Reaped != 1 || len(*removed) != 1 || (*removed)[0] != f.inst {
 		t.Fatalf("reaped %d, removed %v; want the instance removed\nstderr:\n%s", res.Reaped, *removed, f.stderr.String())
 	}
-	if b, err := os.ReadFile(log); err != nil || string(b) != "present\n" {
-		t.Fatalf("on-reap log = %q (%v); want the command run once while the instance was there", b, err)
+	if b, err := os.ReadFile(log); err != nil || string(b) != "absent\n" {
+		t.Fatalf("on-reap log = %q (%v); want the command run once after the instance was gone", b, err)
 	}
 	if exists(f.inst) {
 		t.Fatal("the instance is still there")
