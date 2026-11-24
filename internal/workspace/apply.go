@@ -1202,14 +1202,15 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		//
 		// The personal global config has its own file convention — see
 		// GlobalConfigOverrideFile = "niwa.toml" below — that pre-dates
-		// the workspace-config-sources discovery model. Pass an empty
-		// MarkerSet to skip probing and clone the entire repo verbatim,
+		// the workspace-config-sources discovery model.
+		// EnsureGlobalConfigSnapshot passes an empty MarkerSet to skip
+		// probing and clone the entire repo verbatim,
 		// matching the pre-PR-#139 behaviour. Migrating this path into
 		// the rank-1/rank-2 model is tracked separately; this PR is
 		// scoped to the workspace overlay.
 		a.Reporter.Status("syncing config...")
 		fetcher, _ := a.GitHubClient.(FetchClient)
-		converted, _, syncErr := EnsureConfigSnapshotWithStatus(ctx, a.GlobalConfigDir, config.MarkerSet{}, fetcher, a.Reporter)
+		converted, syncErr := EnsureGlobalConfigSnapshot(ctx, a.GlobalConfigDir, fetcher, a.Reporter)
 		if syncErr != nil {
 			a.Reporter.Warn("could not sync config: %v", syncErr)
 			return nil, fmt.Errorf("syncing global config: %w", syncErr)

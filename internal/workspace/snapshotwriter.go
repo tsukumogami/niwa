@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
+	"github.com/tsukumogami/niwa/internal/mirror"
 	"github.com/tsukumogami/niwa/internal/source"
 )
 
@@ -95,6 +97,34 @@ func EnsureConfigSnapshot(ctx context.Context, configDir string, fetcher FetchCl
 // <configDir>.lock, and a parent directory the user can't write to stays
 // usable, as it was before the lock existed.
 func EnsureConfigSnapshotWithStatus(ctx context.Context, configDir string, markers config.MarkerSet, fetcher FetchClient, reporter *Reporter) (converted bool, rank int, err error) {
+	return ensureConfigSnapshot(ctx, configDir, markers, otherLayer, fetcher, reporter)
+}
+
+// EnsureGlobalConfigSnapshot maintains the snapshot of the personal global
+// config, the repo `[global_config]` registers (`niwa config set global`). It
+// behaves as EnsureConfigSnapshotWithStatus with an empty MarkerSet, the whole
+// repo taken verbatim, except that a drift check answered 404 gets a warning
+// that names the global config layer and where it is set, since that source
+// looks gone rather than unreachable. It returns whether a legacy working tree
+// was converted to a snapshot during the call.
+func EnsureGlobalConfigSnapshot(ctx context.Context, configDir string, fetcher FetchClient, reporter *Reporter) (converted bool, err error) {
+	converted, _, err = ensureConfigSnapshot(ctx, configDir, config.MarkerSet{}, globalLayer, fetcher, reporter)
+	return converted, err
+}
+
+// snapshotLayer says which config layer a snapshot belongs to. Only the drift
+// warning reads it: the global layer's 404 points at the `[global_config]` key
+// that set it, and every other layer keeps the generic text.
+type snapshotLayer int
+
+const (
+	otherLayer snapshotLayer = iota
+	globalLayer
+)
+
+// ensureConfigSnapshot is EnsureConfigSnapshotWithStatus with the snapshot's
+// layer passed down to the drift warning.
+func ensureConfigSnapshot(ctx context.Context, configDir string, markers config.MarkerSet, layer snapshotLayer, fetcher FetchClient, reporter *Reporter) (converted bool, rank int, err error) {
 	if configDir == "" {
 		return false, 0, errors.New("EnsureConfigSnapshot: configDir is empty")
 	}
@@ -109,14 +139,14 @@ func EnsureConfigSnapshotWithStatus(ctx context.Context, configDir string, marke
 		return false, 0, fmt.Errorf("EnsureConfigSnapshot: %w", err)
 	}
 	defer release()
-	return ensureConfigSnapshotLocked(ctx, configDir, markers, fetcher, reporter)
+	return ensureConfigSnapshotLocked(ctx, configDir, markers, layer, fetcher, reporter)
 }
 
 // ensureConfigSnapshotLocked is EnsureConfigSnapshotWithStatus for a caller
 // that already holds configDir's snapshot lock. It must not take the lock
 // again: flock contends per open file description, so a second acquisition in
 // the same process would wait on itself.
-func ensureConfigSnapshotLocked(ctx context.Context, configDir string, markers config.MarkerSet, fetcher FetchClient, reporter *Reporter) (converted bool, rank int, err error) {
+func ensureConfigSnapshotLocked(ctx context.Context, configDir string, markers config.MarkerSet, layer snapshotLayer, fetcher FetchClient, reporter *Reporter) (converted bool, rank int, err error) {
 	if err := restoreInterruptedSwap(configDir, reporter); err != nil {
 		return false, 0, fmt.Errorf("EnsureConfigSnapshot: %w", err)
 	}
@@ -130,7 +160,7 @@ func ensureConfigSnapshotLocked(ctx context.Context, configDir string, markers c
 		// decides whether nil fetcher is acceptable based on whether
 		// the marker's source is GitHub (needs fetcher) or anything
 		// else (uses git-clone fallback).
-		refreshRank, refreshErr := refreshSnapshot(ctx, configDir, markers, fetcher, reporter)
+		refreshRank, refreshErr := refreshSnapshot(ctx, configDir, markers, layer, fetcher, reporter)
 		return false, refreshRank, refreshErr
 	case hasGit:
 		// Case 2: legacy working tree. R28 lazy conversion. Same
@@ -175,7 +205,7 @@ func dotGitExists(dir string) bool {
 // Returns the rank reflected by the refreshed snapshot (derived from
 // the provenance subpath: empty → 2, non-empty → 1) so callers can
 // emit the one-time deprecation notice.
-func refreshSnapshot(ctx context.Context, configDir string, markers config.MarkerSet, fetcher FetchClient, reporter *Reporter) (int, error) {
+func refreshSnapshot(ctx context.Context, configDir string, markers config.MarkerSet, layer snapshotLayer, fetcher FetchClient, reporter *Reporter) (int, error) {
 	prov, err := ReadProvenance(configDir)
 	if err != nil {
 		return 0, fmt.Errorf("EnsureConfigSnapshot: %w", err)
@@ -218,8 +248,12 @@ func refreshSnapshot(ctx context.Context, configDir string, markers config.Marke
 		// Network error or similar: per PRD R21, continue with cached
 		// snapshot and warn.
 		if reporter != nil {
-			reporter.Warn("could not refresh config snapshot for %s: %v; using cached snapshot fetched at %s",
-				prov.SourceURL, err, prov.FetchedAt.Format(time.RFC3339))
+			if layer == globalLayer && status == http.StatusNotFound {
+				reporter.Warn("%s", globalSourceGoneWarning(prov, time.Now()))
+			} else {
+				reporter.Warn("could not refresh config snapshot for %s: %v; using cached snapshot fetched at %s",
+					prov.SourceURL, err, prov.FetchedAt.Format(time.RFC3339))
+			}
 		}
 		return priorRank, nil
 	}
@@ -236,6 +270,30 @@ func refreshSnapshot(ctx context.Context, configDir string, markers config.Marke
 	// Drift detected: fetch fresh, materialize, swap.
 	_, err = materializeAndSwap(ctx, configDir, src, prov.SourceURL, markers, fetcher, reporter)
 	return priorRank, err
+}
+
+// globalSourceGoneWarning is the drift warning for a global config snapshot
+// whose source answered 404: the layer, the source, the cached snapshot's time
+// and age, and the config file and key that set it, with the commands that
+// repoint or remove it. The owner, repo and config path come from the
+// provenance marker and the environment and reach a terminal or hook context,
+// so each is passed through mirror.CleanText: printable ASCII, every other
+// byte escaped, at most 256 bytes.
+func globalSourceGoneWarning(prov Provenance, now time.Time) string {
+	path := "your niwa config file"
+	if p, err := config.GlobalConfigPath(); err == nil {
+		path = mirror.CleanText(p)
+	}
+	age := now.Sub(prov.FetchedAt)
+	if age < 0 {
+		age = 0
+	}
+	hours := int64(age / time.Hour)
+	return fmt.Sprintf("the global config source %s/%s returned 404 on the drift check, so it looks gone rather than unreachable. "+
+		"Using the cached global config snapshot fetched at %s (%dd%dh ago). "+
+		"It's set by [global_config] repo in %s: repoint it with \"niwa config set global <repo>\" or remove it with \"niwa config unset global\".",
+		mirror.CleanText(prov.Owner), mirror.CleanText(prov.Repo),
+		prov.FetchedAt.Format(time.RFC3339), hours/24, hours%24, path)
 }
 
 // isTransientDriftError classifies a HeadCommit error as transient
