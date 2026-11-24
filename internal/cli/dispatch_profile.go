@@ -10,16 +10,48 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 )
 
-// A dispatch profile trims one launch: `niwa dispatch --profile <name>` looks
-// the name up in [session.dispatch_profiles], asks agentplan how the launched
-// agent spells its drops, and adds the result to that launch's settings
-// document and environment. Nothing else changes, so a dispatch without the
-// flag launches exactly what it did before profiles existed.
+// A dispatch profile shapes one launch: `niwa dispatch --profile <name>`, or
+// a dispatch that names none in a workspace with [session]
+// default_dispatch_profile, looks the name up in [session.dispatch_profiles],
+// asks agentplan how the launched agent spells its drops and its compaction
+// window, and adds the result to that launch's settings document and
+// environment. A dispatch that resolves to no profile launches the argv and
+// settings document it did before profiles existed; the one change to it is
+// that an inherited CLAUDE_CODE_AUTO_COMPACT_WINDOW is removed from its
+// process environment.
 
 // dispatchProfile is the --profile flag's value, "" when it wasn't given.
 var dispatchProfile string
 
-const dispatchProfileFlagUsage = "a [session.dispatch_profiles] name to launch the worker with: the tools it names are denied, and bundled skills and the account's connectors are left out when it says so. It applies to this launch only and refuses, before anything is provisioned, for an unknown name, an agent with no profile support, or a profile that drops a tool the dispatch path needs"
+const dispatchProfileFlagUsage = "a [session.dispatch_profiles] name to launch the worker with, in place of [session] default_dispatch_profile: the tools it names are denied, bundled skills and the account's connectors are left out when it says so, and its auto_compact_window sets the worker's Claude Code compaction window. It applies to this launch only and refuses, before anything is provisioned, for an unknown name, an agent with no profile support, or a profile that drops a tool the dispatch path needs"
+
+// resolveDispatchLaunchProfile resolves the profile a `niwa dispatch` of ag
+// launches with: the --profile name when one was given, otherwise the
+// workspace's default_dispatch_profile. An explicit name that ag can't take
+// refuses, as resolveDispatchProfile does. A default that ag can't take is
+// skipped instead: the dispatch launches with no profile and skipped holds the
+// default's name, for the caller's one notice.
+func resolveDispatchLaunchProfile(flag string, cfg *config.WorkspaceConfig, ag agent.Agent) (profile dispatchLaunchProfile, skipped string, err error) {
+	name := flag
+	if name == "" && cfg != nil && cfg.Session.DefaultDispatchProfile != "" {
+		decl, err := agentplan.Lookup(agentplan.DispatchProfile, ag)
+		if err != nil {
+			return dispatchLaunchProfile{}, "", err
+		}
+		if decl.State != agentplan.StateImplemented {
+			return dispatchLaunchProfile{}, cfg.Session.DefaultDispatchProfile, nil
+		}
+		name = cfg.Session.DefaultDispatchProfile
+	}
+	profile, err = resolveDispatchProfile(name, cfg, ag)
+	return profile, "", err
+}
+
+// skippedDefaultProfileLine is the one line a dispatch prints when it skipped
+// the workspace's default profile for an agent with no profile support.
+func skippedDefaultProfileLine(name string, ag agent.Agent) string {
+	return fmt.Sprintf("niwa dispatch: skipped the default dispatch profile %q: the %q agent has no dispatch profile support, so the worker launches with no profile", name, ag)
+}
 
 // dispatchLaunchProfile is a profile resolved for one launch: its name, the
 // settings keys it adds to the launch document, and the env values it sets.
@@ -69,10 +101,15 @@ func resolveDispatchProfile(name string, cfg *config.WorkspaceConfig, ag agent.A
 			return dispatchLaunchProfile{}, fmt.Errorf("dispatch profile %q drops %s, which a dispatched %q worker needs; remove it from drop_tools", name, required, ag)
 		}
 	}
+	window, ok := declared.AutoCompactWindow.Value()
+	if declared.AutoCompactWindow.IsSet() && !ok {
+		return dispatchLaunchProfile{}, fmt.Errorf("internal: dispatch profile %q holds an auto_compact_window config load should have refused", name)
+	}
 	keys, env, err := agentplan.ProfileSettings(ag, agentplan.ProfileDrops{
 		Tools:             declared.DropTools,
 		BundledSkills:     declared.DropBundledSkills,
 		AccountConnectors: declared.DropAccountConnectors,
+		AutoCompactWindow: window,
 	})
 	if err != nil {
 		return dispatchLaunchProfile{}, err

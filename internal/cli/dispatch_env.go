@@ -59,9 +59,17 @@ type launchEnvShape struct {
 	// Profile is the dispatch profile's name, set as NIWA_DISPATCH_PROFILE,
 	// "" for a launch without one. ProfileEnv is the profile's env values, the
 	// agent's spelling from agentplan.ProfileSettings. Both go into the
-	// process environment and the settings env, after the identity entries.
+	// process environment and the settings env, after the identity entries,
+	// with one exception: a name agentplan.SettingsOnlyProfileEnvNames lists
+	// (the compaction window) goes into the settings env only.
 	Profile    string
 	ProfileEnv map[string]string
+}
+
+// settingsOnlyEnvName reports whether name is set only in a launch's settings
+// env, never in its process environment or its launch record's Env.
+func settingsOnlyEnvName(name string) bool {
+	return slices.Contains(agentplan.SettingsOnlyProfileEnvNames(), name)
 }
 
 // dispatchEnvLists reads [session.dispatch_env] from a loaded workspace
@@ -95,8 +103,9 @@ func loadDispatchEnvLists(workspaceRoot string) (passthrough, unset []string) {
 // gets the process environment only.
 //
 // The process environment is base with every Unset name, any inherited
-// NIWA_REAP_KEY, NIWA_DISPATCH_ID and NIWA_WORKSPACE and, when a lineage value
-// is composed, the inherited OTEL_RESOURCE_ATTRIBUTES removed; then the
+// NIWA_REAP_KEY, NIWA_DISPATCH_ID, NIWA_WORKSPACE and
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW, and, when a lineage value is composed, the
+// inherited OTEL_RESOURCE_ATTRIBUTES removed; then the
 // lineage value, the reap key and the dispatch identity are appended. Passthrough names need nothing here: base is niwa's own
 // environment, so a declared name that is set is already in it.
 //
@@ -119,15 +128,20 @@ func applyLaunchEnv(spec agentplan.LaunchSpec, settings map[string]any, base []s
 }
 
 // launchEnvValues returns the names and values applyLaunchEnv sets for the
-// worker from the same base and shape, for the launch record.
+// worker from the same base and shape, for the launch record. A settings-only
+// name is left out: the record keeps it in its settings document alone, and a
+// resume exports the record's Env into the worker's process environment.
 func launchEnvValues(base []string, shape launchEnvShape) map[string]string {
 	_, env := shapeLaunchEnv(base, shape)
-	if env.Len() == 0 {
-		return nil
-	}
 	values := make(map[string]string, env.Len())
 	for _, k := range env.keys {
+		if settingsOnlyEnvName(k) {
+			continue
+		}
 		values[k] = env.values[k]
+	}
+	if len(values) == 0 {
+		return nil
 	}
 	return values
 }
@@ -136,6 +150,13 @@ func launchEnvValues(base []string, shape launchEnvShape) map[string]string {
 func shapeLaunchEnv(base []string, shape launchEnvShape) ([]string, launchEnv) {
 	drop := map[string]bool{config.ReapKeyEnv: true, config.DispatchIDEnv: true, config.WorkspaceEnv: true}
 	for _, n := range shape.Unset {
+		drop[n] = true
+	}
+	// A settings-only name is never inherited, by any launch and whatever its
+	// profile: the compaction window a worker runs with comes from the
+	// profile its dispatch resolved to, or from its launch record, and from
+	// nothing the launching shell exports.
+	for _, n := range agentplan.SettingsOnlyProfileEnvNames() {
 		drop[n] = true
 	}
 	if shape.Lineage != "" {
@@ -201,7 +222,11 @@ func shapeLaunchEnv(base []string, shape launchEnvShape) ([]string, launchEnv) {
 		}
 		slices.Sort(names)
 		for _, n := range names {
-			proc = append(proc, n+"="+shape.ProfileEnv[n])
+			// The one deliberate exception to "both places": a settings-only
+			// name reaches the worker through its settings document alone.
+			if !settingsOnlyEnvName(n) {
+				proc = append(proc, n+"="+shape.ProfileEnv[n])
+			}
 			env.Set(n, shape.ProfileEnv[n])
 		}
 		proc = append(proc, config.DispatchProfileEnv+"="+shape.Profile)
