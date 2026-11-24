@@ -571,3 +571,13 @@ func TestFailureLine(t *testing.T) {
 		}
 	}
 }
+
+// A failed ls-remote follows its fatal line with git's access-rights advice.
+// The kept line is the fatal one, not the advice that ends standard error.
+func TestFailureLineKeepsTheFatalLineOfAnAccessRightsFailure(t *testing.T) {
+	in := "fatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n"
+	want := "fatal: Could not read from remote repository."
+	if got := failureLine(in); got != want {
+		t.Errorf("failureLine(%q) = %q, want %q", in, got, want)
+	}
+}
