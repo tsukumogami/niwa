@@ -43,6 +43,7 @@ func registerReapLossScanSteps(ctx *godog.ScenarioContext) {
 	registerReapPathClassSteps(ctx)
 	registerReapTombstoneSteps(ctx)
 	registerReapProofRemoteSteps(ctx)
+	registerReapConfigSteps(ctx)
 }
 
 func theFirstDispatchInstanceStillExists(ctx context.Context) error {
