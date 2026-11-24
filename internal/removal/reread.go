@@ -20,15 +20,19 @@ import (
 // The re-read before removal and the check on the tombstone.
 //
 // The rule's verdict is read once, early in a pass, and a unit is removed
-// seconds later: after the gate, the on-reap command and the rename to its
-// tombstone. A writer that arrives in between could change a repository or
-// a record and have that change deleted unseen. So after the gate allows a
-// removal the pass reads every repository the walk found again (a fresh
-// configuration check, git status, the index flags and a prunable
-// worktree's staged entries), compares that with what the rule read, and
-// records a snapshot of each repository's refs, HEADs and stashes and a
-// hash of every record under .niwa. On the tombstone it takes the same
-// snapshot again and compares the two. Any difference keeps the unit.
+// seconds later: after the gate, the reads of each worktree inside the
+// instance, the rename to its tombstone and the checks there. A writer that
+// arrives in between could change a repository or a record and have that
+// change deleted unseen. So after the gate allows a removal the pass reads
+// every repository the walk found again (a fresh configuration check, git
+// status, the index flags and a prunable worktree's staged entries),
+// compares that with what the rule read, and records a snapshot of each
+// repository's refs, HEADs and stashes and a hash of every record under
+// .niwa. On the tombstone it takes the same snapshot again, reading each
+// worktree by explicit --git-dir and --work-tree on its tombstone paths, and
+// compares the two. Any difference keeps the unit, and nothing is removed
+// before that check has passed. The on-reap command runs last, once the
+// tombstone is gone.
 //
 // Every entry is keyed by its path relative to the instance root, or
 // "job:"-prefixed in the job directory, so the same repository read under

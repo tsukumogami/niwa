@@ -373,24 +373,34 @@ only the judged one. A listing that fails, a listed session that is still
 running, an id niwa won't pass to a command, a job directory that fails niwa's
 checks or a `claude rm` that fails keeps the unit. That differs from
 `niwa destroy`, which warns on a failed `claude rm` and still removes the
-instance. The step runs after every check that can still keep the unit: the
-removal of the worktrees inside the instance, `PrepareDestroy`, the rename to
-the tombstone and the tombstone re-check. So a unit any of those keeps has no
-session removed, and a `claude rm` that fails renames the tombstone back. The
-on-reap command runs last, once the instance is gone.
+instance. The reap decides first and removes after. Every check that can
+still keep the unit runs before anything is removed: the reads of each
+worktree inside the instance, `PrepareDestroy`, the tombstone lock, the rename
+to the tombstone, the tombstone re-check, a last read of each worktree's
+repository configuration, and one last listing of Claude Code's sessions with
+every job directory vetted again. A unit any of those keeps is renamed back
+with nothing removed: no worktree, no session, and no on-reap run. Only then
+are the worktrees removed inside the tombstone, followed by the `claude rm`
+calls, each of which lists and vets its session once more right before it
+runs. A `claude rm` that fails keeps the unit and renames back what is left.
+Then the tombstone is removed, and the on-reap command runs last, once the
+instance is gone.
 
-**The worktrees inside the instance.** Before anything else moves, the reap
-removes each linked worktree niwa's walk found inside the instance, and
-`niwa destroy` does the same before its `claude rm`. A worktree goes only
-after its repository's configuration is read again, its HEAD and refs match
-what the re-read saw and its `git status` reports nothing; any difference
-keeps the unit. The removal opens one directory at a time relative to the one
-before it, never follows a link and runs no git, so a directory swapped for a
-link mid-removal stops it with "changed during the pass" and the path named,
-and nothing the link points to is touched. A locked worktree, or one holding
-another repository, keeps the reap's unit; `niwa destroy` lists it with its
-scan's findings, and once the instance name is confirmed it goes with the
-instance directory.
+**The worktrees inside the instance.** Before the rename, the reap reads each
+linked worktree niwa's walk found inside the instance: its repository's
+configuration is read again, its HEAD and refs must match what the re-read
+saw, and its `git status` must report nothing. On the tombstone it reads each
+one again by its new paths, and any difference keeps the unit. The removal
+comes after every check, inside the tombstone. It opens one directory at a
+time relative to the one before it, never follows a link and runs no git, so
+a directory swapped for a link mid-removal stops it with "changed during the
+pass" and the path named, and nothing the link points to is touched. A locked
+worktree, or one holding another repository, keeps the reap's unit.
+`niwa destroy` reads every worktree's configuration and status after its scan
+and vet, before it removes the first one, then removes them the same way
+before its `claude rm`. It lists a locked worktree, or one holding another
+repository, with its scan's findings, and once the instance name is confirmed
+that worktree goes with the instance directory.
 
 So a finished session you haven't looked at yet keeps its Agent View entry and
 its instance until you delete it, unless the reap takes its instance through
@@ -877,7 +887,8 @@ idle-grace reclaim, and the reaps `niwa dispatch`, `niwa create` and
 `niwa watch` run), the backstop (`reap-backstop`) and the worktree sweep
 (`worktree-sweep`). In a reap pass it runs after niwa's own checks (the
 ephemeral marker, the liveness rule and the removal rule) and before the
-re-read, the worktree removal, the tombstone check, the `claude rm` step and
+re-read, the worktree reads, the rename and the tombstone check, and before
+anything is removed: the worktrees, the `claude rm` step, the tombstone and
 the on-reap command. In
 the worktree sweep it runs after the unchanged check, right before the
 worktree is removed. `niwa destroy` asks it
