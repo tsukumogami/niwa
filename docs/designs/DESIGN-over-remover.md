@@ -227,10 +227,10 @@ niwa's binary replaces the reap itself.
 ### 2026-11-24 — No session goes before the unit's keep checks pass
 
 **What changed.** Phase 2 now also delivers the rule that the reap removes
-no Claude session until the unit's keep checks (the on-reap command,
-`PrepareDestroy`, the tombstone re-check) have all passed. The pass's
-`claude rm` step moves after them. Until then, Data Flow step 7's order is
-the one the code runs: `claude rm`, then on-reap, then the tombstone.
+no Claude session until the unit's keep checks (`PrepareDestroy`, the
+tombstone lock and rename, the tombstone re-check) have all passed. The
+pass's `claude rm` step moves after them. Until then, Data Flow step 7's
+order is the one the code runs: `claude rm`, then on-reap, then the tombstone.
 
 **Why.** A check of the guide against the code found that the pass's
 `claude rm` step reaches every stopped Claude session Claude Code still
@@ -239,6 +239,24 @@ that it runs before the on-reap command, `PrepareDestroy` and the tombstone
 re-check. A unit one of those later checks keeps can therefore be left with
 its session already removed. Moving the step after them means a kept unit
 keeps its sessions too.
+
+### 2026-11-24 — The on-reap command moves after the keep checks too
+
+**What changed.** The entry above named the on-reap command as one of the
+unit's keep checks. It isn't one: a failed run prints its warning and leaves
+the mapping for the next reap, and the unit is removed anyway. The keep
+checks that can follow `claude rm` are `PrepareDestroy`, the tombstone lock
+and rename, and the tombstone re-check, and that entry now names them. The
+on-reap run moves after them with the `claude rm` step, so the command still
+runs only after the session is removed and never for a unit a later check
+keeps. It keeps getting the instance's original path, as the record of where
+the instance was, though by then the instance has been renamed to its
+tombstone and nothing is left at that path.
+
+**Why.** The text named the on-reap command as a keep check, which the code
+never treated as one. The command is told about a session that has already
+been removed, so leaving it before the keep checks would run it for units
+the reap then keeps.
 
 ## Context and Problem Statement
 
@@ -3409,10 +3427,12 @@ Deliverables:
   in `runDestroyInstance` by niwa's own removal (Data Flow step 7), with the
   status before each one built by `gitCommand`; `rmtree.go`'s no-follow walk
   ships here, and the trim reuses it in Phase 4.
-- No Claude session removed until the unit's keep checks (the on-reap
-  command, `PrepareDestroy`, the tombstone re-check) have all passed: the
-  pass's `claude rm` step, which reaches every listed, stopped Claude session
-  any mapping names for the instance, moves after them.
+- No Claude session removed and no on-reap command run until the unit's
+  keep checks (`PrepareDestroy`, the tombstone lock and rename, the tombstone
+  re-check) have all passed: the pass's `claude rm` step, which reaches every
+  listed, stopped Claude session any mapping names for the instance, and the
+  on-reap run, which keeps the instance's original path, both move after
+  them.
 - The job-directory vet in `realRemoveClaudeSession`, the function
   `removeClaudeSessionFunc` points to, so every `claude rm` niwa makes goes
   through it: the pass, `removeOwningSessionsListed` in destroy, and
