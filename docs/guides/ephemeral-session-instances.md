@@ -594,10 +594,10 @@ Bash gets past it.
   person during a reap, `niwa destroy` or `niwa reset`. The sweep runs in
   `niwa reap` and in the reaps `niwa create`, `niwa dispatch` and
   `niwa watch` run first. The agent can write its own instance's
-  repositories, so no entry on this list stops it, and a sandbox doesn't
-  keep an agent from making these commands run a program as you until they
-  move onto the removal pass's git (niwa#577 for the sweep and the destroy
-  scan). Reading an instance's repository configuration and hooks before you
+  repositories, so no entry on this list stops it, and today a sandbox
+  doesn't keep an agent from making these commands run a program as you;
+  niwa#577 tracks moving the sweep and the destroy scan onto the removal
+  pass's git. Reading an instance's repository configuration and hooks before you
   run them narrows this but doesn't close it: an agent that is still running
   can change them after you look.
   Separately, the sweep reads job entries from `~/.claude/jobs/` whatever
