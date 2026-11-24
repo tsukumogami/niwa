@@ -312,8 +312,8 @@ func (e *Env) checkRepo(ctx context.Context, t repoTarget, rp repoPolicy) repoRe
 // modified tracked files, then index flags, then untracked files. The
 // identity check runs again first, since other repositories' configuration
 // reads can come between this one's and its reads, and on a git older than
-// 2.45 so does the partial-clone refusal, before any call that reads an
-// object.
+// 2.45 so does the configuration refusal, for a key that names a program and
+// for a partial clone, before any call that reads an object.
 func (e *Env) readRepo(ctx context.Context, t repoTarget, rp repoPolicy, rc repoConfig) repoResult {
 	rel := filepath.ToSlash(t.Rel)
 	if err := t.checkIdentity(); err != nil {
@@ -324,8 +324,8 @@ func (e *Env) readRepo(ctx context.Context, t repoTarget, rp repoPolicy, rc repo
 		if err != nil {
 			return t.stopRepo(err.Error())
 		}
-		if again.partialKey != "" {
-			return t.stopRepo("partial clone needs git 2.45: " + again.partialKey)
+		if _, why := e.refusal(again); why != "" {
+			return t.stopRepo(why)
 		}
 	}
 	res := repoResult{configRead: true}

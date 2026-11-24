@@ -667,6 +667,31 @@ func TestPartialCloneRefusalRunsAgainBeforeTheReadsOnAnOlderGit(t *testing.T) {
 	}
 }
 
+// TestRepeatedReadOnAnOlderGitKeepsAProgramKey fakes an older git and plants
+// a key that names a program after the repository's first configuration
+// read, and checks the repeated read keeps the unit with the key named, the
+// way the first read does, before any later call in it.
+func TestRepeatedReadOnAnOlderGitKeepsAProgramKey(t *testing.T) {
+	f := checkedOut(t)
+	script, marker := markerScript(t)
+	gitDir := filepath.Join(f.clone, ".git")
+	p := f.policy(t)
+	p.Env.gitVersion = gitVersion{2, 44}
+	var log callLog
+	log.before = func(c gitCall, _ int) {
+		if c.gitDir == gitDir && c.args[0] == "config" && len(log.in(gitDir)) == 2 {
+			gitRun(t, f.clone, "config", "credential.helper", script)
+		}
+	}
+	log.attach(p.Env)
+	v := Evaluate(context.Background(), f.unit(), p)
+	keepWith(t, v, "tools/app: repository configuration names a program: credential.helper")
+	if got := log.in(gitDir); strings.Join(got, ",") != "config,config" {
+		t.Errorf("git calls in the repository %v; want the two configuration reads alone", got)
+	}
+	assertNoMarker(t, marker)
+}
+
 // fakeGit writes a git on its own PATH directory that runs body first and
 // then hands every call it doesn't answer to the real git, logging each
 // call's arguments to log.
