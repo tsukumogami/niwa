@@ -224,15 +224,16 @@ func (cc *claudeCalls) close() {
 	cc.env.Close()
 }
 
-// vet runs the job-directory vet on session id's own job directory under
-// its own 10-second context, cut shorter by ctx's deadline.
-func (cc *claudeCalls) vet(ctx context.Context, id string) error {
+// vet runs the job-directory vet on the job directory of the session with
+// full id sessionID, which claude rm is given as rmID, under its own
+// 10-second context, cut shorter by ctx's deadline.
+func (cc *claudeCalls) vet(ctx context.Context, sessionID, rmID string) error {
 	if cc.jobsErr != nil {
 		return cc.jobsErr
 	}
 	ctx, cancel := context.WithTimeout(ctx, claudeVetTimeout)
 	defer cancel()
-	return removal.VetJobDir(ctx, cc.jobsRoot, cc.home, id)
+	return removal.VetJobDir(ctx, cc.jobsRoot, cc.home, sessionID, rmID)
 }
 
 // realListClaudeSessions reads every background session Claude Code knows
@@ -329,8 +330,9 @@ func realRemoveClaudeSession(ctx context.Context, id string) (string, error) {
 		return "", err
 	}
 	// The job directory is found by the full session id, the id the rule's
-	// walk uses, not by the short id claude rm takes.
-	if err := cc.vet(ctx, row.SessionID); err != nil {
+	// walk uses; the vet then checks that the path the short id claude rm
+	// takes names that same directory.
+	if err := cc.vet(ctx, row.SessionID, id); err != nil {
 		return "", err
 	}
 	ctx, cancel := context.WithTimeout(ctx, claudeRemoveTimeout)
@@ -417,10 +419,11 @@ func listedRemovals(owners []workspace.SessionMapping, rows []claudeSessionRow) 
 // vetBeforeRemoval is the job-directory vet of every session a removal will
 // pass to claude rm, run before its first removal step. It returns the
 // first failure, naming the session and the path. Each job directory is
-// found by the full session id, as the rule's walk finds it.
+// found by the full session id, as the rule's walk finds it, and must be the
+// one the short id claude rm takes names.
 func vetBeforeRemoval(ctx context.Context, cc *claudeCalls, sessions []claudeSessionRow) error {
 	for _, s := range sessions {
-		if err := cc.vet(ctx, s.SessionID); err != nil {
+		if err := cc.vet(ctx, s.SessionID, s.ID); err != nil {
 			return fmt.Errorf("the job directory of Claude session %s failed its check: %w", s.ID, err)
 		}
 	}

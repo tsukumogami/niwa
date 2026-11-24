@@ -73,19 +73,19 @@ func vetErr(t *testing.T, err error) *VetError {
 
 func TestVetJobDirPassesAPlainJobDirectory(t *testing.T) {
 	f := newVetFixture(t)
-	if err := VetJobDir(context.Background(), f.jobs, f.home, f.id); err != nil {
+	if err := VetJobDir(context.Background(), f.jobs, f.home, f.id, f.id); err != nil {
 		t.Fatalf("the vet failed on a plain job directory: %v", err)
 	}
 	// The full session id finds the leading-slice directory Claude Code
 	// writes.
-	if err := VetJobDir(context.Background(), f.jobs, f.home, f.id+"-3456-4789-8abc-def012345678"); err != nil {
+	if err := VetJobDir(context.Background(), f.jobs, f.home, f.id+"-3456-4789-8abc-def012345678", f.id); err != nil {
 		t.Fatalf("the vet failed on the leading-slice layout: %v", err)
 	}
 }
 
 func TestVetJobDirNamesAMissingJobDirectory(t *testing.T) {
 	f := newVetFixture(t)
-	ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, "99999999"))
+	ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, "99999999", "99999999"))
 	if want := filepath.Join(f.jobs, "99999999"); ve.Path != want || !strings.Contains(ve.Reason, want) {
 		t.Fatalf("missing job directory named %q (%s); want %q", ve.Path, ve.Reason, want)
 	}
@@ -105,7 +105,7 @@ func TestVetJobDirRefusesAnAmbiguousLeadingSlice(t *testing.T) {
 		t.Fatal(err)
 	}
 	full := f.id + "3456-4789-8abc-def012345678"
-	ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, full))
+	ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, full, f.id))
 	if ve.Path != f.jobs || !strings.Contains(ve.Reason, "more than one job directory") {
 		t.Fatalf("an ambiguous leading slice: %q (%s); want the jobs root named", ve.Path, ve.Reason)
 	}
@@ -122,21 +122,28 @@ func TestVetJobDirRefusesAnAmbiguousLeadingSlice(t *testing.T) {
 	if err := os.Chmod(exact, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ve = vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, full))
+	ve = vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, full, f.id))
 	if ve.Path != f.jobs || !strings.Contains(ve.Reason, "more than one job directory") {
 		t.Fatalf("a full id's directory beside two leading slices: %q (%s); want the jobs root named", ve.Path, ve.Reason)
 	}
 	if got := JobDirFor(f.jobs, full); got != exact {
 		t.Fatalf("JobDirFor changed: %q; want %q", got, exact)
 	}
-	// Alone, the directory under the full id is the one, as for the rule.
+	// Alone, the directory under the full id is the one, as for the rule,
+	// but claude rm given the short id acts on jobs/<short id>, which is now
+	// missing, so the vet keeps naming that path. Given the full id, claude
+	// rm acts on the directory the vet checked, and the vet passes.
 	for _, d := range []string{f.jobDir, second} {
 		if err := os.RemoveAll(d); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := VetJobDir(context.Background(), f.jobs, f.home, full); err != nil {
-		t.Fatalf("the vet with only a directory under the full id: %v", err)
+	ve = vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, full, f.id))
+	if ve.Path != f.jobDir || !strings.Contains(ve.Reason, f.jobDir+", where claude rm "+f.id+" acts, is missing") {
+		t.Fatalf("only a directory under the full id, claude rm given the short id: %q (%s); want %s named missing", ve.Path, ve.Reason, f.jobDir)
+	}
+	if err := VetJobDir(context.Background(), f.jobs, f.home, full, full); err != nil {
+		t.Fatalf("the vet with only a directory under the full id, claude rm given it: %v", err)
 	}
 }
 
@@ -163,7 +170,7 @@ func TestVetJobDirRefusesAFullIDDirectoryBesideTheShortIDOne(t *testing.T) {
 	if err := os.Chmod(decoy, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, full))
+	ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, full, f.id))
 	if ve.Path != f.jobs || !strings.Contains(ve.Reason, "more than one job directory") || !strings.Contains(ve.Reason, f.id+", "+full) {
 		t.Fatalf("an empty full id's directory beside the short id's: %q (%s); want the jobs root and both names", ve.Path, ve.Reason)
 	}
@@ -172,11 +179,149 @@ func TestVetJobDirRefusesAFullIDDirectoryBesideTheShortIDOne(t *testing.T) {
 	}
 }
 
+// The path claude rm acts on, jobs/<short id>, must be the directory the
+// vet checked, by device and inode. A stat seam makes the second Lstat of
+// the job directory, the one that confirms it, read another inode or
+// another device, and the vet keeps naming that path. On a real tree, a
+// short id that names a directory other than the full id's keeps the same
+// way, with no change to the directory it names.
+func TestVetJobDirRefusesWhenClaudeRmsPathIsAnotherDirectory(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		change func(*syscall.Stat_t)
+	}{
+		{"another inode", func(st *syscall.Stat_t) { st.Ino++ }},
+		{"another device", func(st *syscall.Stat_t) { st.Dev++ }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newVetFixture(t)
+			v := defaultJobDirVet()
+			reads := 0
+			v.lstat = func(p string) (os.FileInfo, error) {
+				info, err := os.Lstat(p)
+				if err != nil || p != f.jobDir {
+					return info, err
+				}
+				reads++
+				if reads == 1 {
+					return info, nil
+				}
+				st := *info.Sys().(*syscall.Stat_t)
+				c.change(&st)
+				return statOverride{FileInfo: info, st: st}, nil
+			}
+			ve := vetErr(t, v.run(context.Background(), f.jobs, f.home, f.id+"-0000-4000-8000-000000000000", f.id))
+			if ve.Path != f.jobDir || !strings.Contains(ve.Reason, "isn't the job directory the vet checked") {
+				t.Fatalf("vet named %q (%s); want %s named as not the checked directory", ve.Path, ve.Reason, f.jobDir)
+			}
+			if reads != 2 {
+				t.Fatalf("the job directory was read %d times; want 2", reads)
+			}
+		})
+	}
+
+	t.Run("a confirming Lstat that fails", func(t *testing.T) {
+		f := newVetFixture(t)
+		v := defaultJobDirVet()
+		reads := 0
+		v.lstat = func(p string) (os.FileInfo, error) {
+			if p == f.jobDir {
+				reads++
+				if reads > 1 {
+					return nil, errors.New("input/output error")
+				}
+			}
+			return os.Lstat(p)
+		}
+		ve := vetErr(t, v.run(context.Background(), f.jobs, f.home, f.id, f.id))
+		if ve.Path != f.jobDir || !strings.Contains(ve.Reason, "input/output error") {
+			t.Fatalf("vet named %q (%s); want %s named with the error", ve.Path, ve.Reason, f.jobDir)
+		}
+	})
+
+	t.Run("a short id naming another directory", func(t *testing.T) {
+		f := newVetFixture(t)
+		other := filepath.Join(f.jobs, "zzzzzzzz")
+		if err := os.Mkdir(other, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(other, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		outside := f.outside(t, "outside")
+		if err := os.Symlink(outside, filepath.Join(other, "out")); err != nil {
+			t.Fatal(err)
+		}
+		ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, f.id+"-0000-4000-8000-000000000000", "zzzzzzzz"))
+		if ve.Path != other || !strings.Contains(ve.Reason, "isn't the job directory the vet checked, "+f.jobDir) {
+			t.Fatalf("vet named %q (%s); want %s named as not the checked directory", ve.Path, ve.Reason, other)
+		}
+		if _, err := os.Stat(filepath.Join(outside, "marker")); err != nil {
+			t.Fatalf("the link's target changed: %v", err)
+		}
+	})
+}
+
+// caseFolds reports whether the volume holding dir resolves a name that
+// differs from an entry's only in case to that entry.
+func caseFolds(t *testing.T, dir string) bool {
+	t.Helper()
+	probe := filepath.Join(dir, "CaseProbe")
+	if err := os.WriteFile(probe, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(probe)
+	_, err := os.Lstat(filepath.Join(dir, "caseprobe"))
+	return err == nil
+}
+
+// On a volume that folds case, the macOS default, a short-id directory
+// renamed to differ from the short id only in case isn't counted by the
+// vet's name match, so it would pass a lone, empty directory under the full
+// id while claude rm, resolving the short id, removes the renamed one, here
+// holding a link. The vet keeps, naming the path claude rm acts on.
+func TestVetJobDirRefusesACaseOnlyRenamedShortIDDirectory(t *testing.T) {
+	f := newVetFixture(t)
+	if !caseFolds(t, f.base) {
+		t.Skipf("the temp directory %s is case-sensitive: a short-id directory differing only in case is a different path, which claude rm given the short id doesn't reach", f.base)
+	}
+	renamed := filepath.Join(f.jobs, strings.ToUpper(f.id))
+	if err := os.Rename(f.jobDir, renamed); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(renamed, "scratch", "out")
+	if err := os.Remove(out); err != nil {
+		t.Fatal(err)
+	}
+	outside := f.outside(t, "outside")
+	if err := os.Symlink(outside, out); err != nil {
+		t.Fatal(err)
+	}
+	full := f.id + "-0000-4000-8000-000000000000"
+	decoy := filepath.Join(f.jobs, full)
+	if err := os.Mkdir(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, full, f.id))
+	if ve.Path != f.jobDir || !strings.Contains(ve.Reason, "isn't the job directory the vet checked, "+decoy) {
+		t.Fatalf("a case-only renamed short-id directory: %q (%s); want %s named as not the checked directory", ve.Path, ve.Reason, f.jobDir)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "marker")); err != nil {
+		t.Fatalf("the link's target changed: %v", err)
+	}
+}
+
 func TestVetJobDirRefusesAnIDThatIsAPath(t *testing.T) {
 	f := newVetFixture(t)
 	for _, id := range []string{"", ".", "..", "../abcdef12", "a/b", "a\x00b"} {
-		if err := VetJobDir(context.Background(), f.jobs, f.home, id); err == nil {
+		if err := VetJobDir(context.Background(), f.jobs, f.home, id, id); err == nil {
 			t.Errorf("the vet passed id %q", id)
+		}
+		if err := VetJobDir(context.Background(), f.jobs, f.home, f.id, id); err == nil {
+			t.Errorf("the vet passed claude rm's id %q", id)
 		}
 	}
 }
@@ -206,7 +351,7 @@ func TestVetJobDirRefusesALinkAtEachLevel(t *testing.T) {
 			if err := os.Symlink(target, at); err != nil {
 				t.Fatal(err)
 			}
-			ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, f.id))
+			ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, f.id, f.id))
 			if ve.Path != at || !strings.Contains(ve.Reason, "symbolic link") {
 				t.Fatalf("vet named %q (%s); want the link at %s", ve.Path, ve.Reason, at)
 			}
@@ -223,7 +368,7 @@ func TestVetJobDirAllowsAHomeThatIsALink(t *testing.T) {
 	if err := os.Symlink(f.home, linked); err != nil {
 		t.Fatal(err)
 	}
-	if err := VetJobDir(context.Background(), filepath.Join(linked, ".claude", "jobs"), linked, f.id); err != nil {
+	if err := VetJobDir(context.Background(), filepath.Join(linked, ".claude", "jobs"), linked, f.id, f.id); err != nil {
 		t.Fatalf("a home reached through a link failed the vet: %v", err)
 	}
 }
@@ -235,14 +380,14 @@ func TestVetJobDirChecksAConfigDirectoryOutsideTheHomeFromItsOwnRoot(t *testing.
 		t.Fatal(err)
 	}
 	jobs := filepath.Join(cfg, "jobs")
-	if err := VetJobDir(context.Background(), jobs, f.home, f.id); err != nil {
+	if err := VetJobDir(context.Background(), jobs, f.home, f.id, f.id); err != nil {
 		t.Fatalf("a real config directory outside the home failed the vet: %v", err)
 	}
 	linked := filepath.Join(f.base, "cfg-link")
 	if err := os.Symlink(cfg, linked); err != nil {
 		t.Fatal(err)
 	}
-	ve := vetErr(t, VetJobDir(context.Background(), filepath.Join(linked, "jobs"), f.home, f.id))
+	ve := vetErr(t, VetJobDir(context.Background(), filepath.Join(linked, "jobs"), f.home, f.id, f.id))
 	if ve.Path != linked {
 		t.Fatalf("vet named %q (%s); want the linked config directory %s", ve.Path, ve.Reason, linked)
 	}
@@ -259,7 +404,7 @@ func TestVetJobDirRefusesGroupOrOtherWrite(t *testing.T) {
 			if err := os.Chmod(at, mode); err != nil {
 				t.Fatal(err)
 			}
-			ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, f.id))
+			ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, f.id, f.id))
 			if ve.Path != at || !strings.Contains(ve.Reason, "writable by group or others") {
 				t.Errorf("%s at mode %o: vet named %q (%s)", level, mode, ve.Path, ve.Reason)
 			}
@@ -275,7 +420,7 @@ func TestVetJobDirRefusesAJobsRootThatIsNotADirectory(t *testing.T) {
 	if err := os.WriteFile(f.jobs, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, f.id))
+	ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, f.id, f.id))
 	if ve.Path != f.jobs {
 		t.Fatalf("vet named %q (%s); want %s", ve.Path, ve.Reason, f.jobs)
 	}
@@ -310,7 +455,7 @@ func TestVetJobDirKeepsAJobDirectoryOfAnotherUID(t *testing.T) {
 	f := newVetFixture(t)
 	for _, at := range []string{f.jobs, f.jobDir} {
 		v := vetWithOverride(at, func(st *syscall.Stat_t) { st.Uid++ })
-		ve := vetErr(t, v.run(context.Background(), f.jobs, f.home, f.id))
+		ve := vetErr(t, v.run(context.Background(), f.jobs, f.home, f.id, f.id))
 		if ve.Path != at || !strings.Contains(ve.Reason, "owned by uid") {
 			t.Errorf("another uid at %s: vet named %q (%s)", at, ve.Path, ve.Reason)
 		}
@@ -322,7 +467,7 @@ func TestVetJobDirKeepsAJobDirectoryOnAnotherDevice(t *testing.T) {
 	nested := filepath.Join(f.jobDir, "scratch")
 	for _, at := range []string{f.jobDir, nested, filepath.Join(nested, "out")} {
 		v := vetWithOverride(at, func(st *syscall.Stat_t) { st.Dev++ })
-		ve := vetErr(t, v.run(context.Background(), f.jobs, f.home, f.id))
+		ve := vetErr(t, v.run(context.Background(), f.jobs, f.home, f.id, f.id))
 		if ve.Path != at || ve.Reason != "another filesystem at "+at {
 			t.Errorf("another device at %s: vet named %q (%s)", at, ve.Path, ve.Reason)
 		}
@@ -352,7 +497,7 @@ func TestVetJobDirKeepsOnEveryNonRegularEntry(t *testing.T) {
 				}
 				return modeOverride{FileInfo: info, mode: c.mode | 0o600}, nil
 			}
-			ve := vetErr(t, v.run(context.Background(), f.jobs, f.home, f.id))
+			ve := vetErr(t, v.run(context.Background(), f.jobs, f.home, f.id, f.id))
 			if ve.Path != at || ve.Reason != c.want+" at "+at {
 				t.Fatalf("vet named %q (%s); want %s at %s", ve.Path, ve.Reason, c.want, at)
 			}
@@ -379,7 +524,7 @@ func TestVetJobDirKeepsOnARealLinkAndPipeInside(t *testing.T) {
 	if err := os.Symlink(outside, out); err != nil {
 		t.Fatal(err)
 	}
-	ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, f.id))
+	ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, f.id, f.id))
 	if ve.Path != out || ve.Reason != "a symbolic link at "+out {
 		t.Fatalf("vet named %q (%s); want the link at %s", ve.Path, ve.Reason, out)
 	}
@@ -389,7 +534,7 @@ func TestVetJobDirKeepsOnARealLinkAndPipeInside(t *testing.T) {
 	if err := syscall.Mkfifo(out, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ve = vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, f.id))
+	ve = vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, f.id, f.id))
 	if ve.Path != out || ve.Reason != "a named pipe at "+out {
 		t.Fatalf("vet named %q (%s); want the pipe at %s", ve.Path, ve.Reason, out)
 	}
@@ -405,7 +550,7 @@ func TestVetJobDirNamesTheFirstEntryByNameOnEveryRun(t *testing.T) {
 	}
 	want := filepath.Join(f.jobDir, "aa-link")
 	for i := 0; i < 5; i++ {
-		ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, f.id))
+		ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, f.id, f.id))
 		if ve.Path != want {
 			t.Fatalf("run %d named %q; want %s", i, ve.Path, want)
 		}
@@ -423,7 +568,7 @@ func TestVetJobDirKeepsOnAFailingReadOrLstat(t *testing.T) {
 		}
 		return vetDirNames(dir, want)
 	}
-	ve := vetErr(t, v.run(context.Background(), f.jobs, f.home, f.id))
+	ve := vetErr(t, v.run(context.Background(), f.jobs, f.home, f.id, f.id))
 	if ve.Path != nested || !strings.Contains(ve.Reason, "permission denied") {
 		t.Fatalf("a failing read: vet named %q (%s)", ve.Path, ve.Reason)
 	}
@@ -436,7 +581,7 @@ func TestVetJobDirKeepsOnAFailingReadOrLstat(t *testing.T) {
 		}
 		return os.Lstat(p)
 	}
-	ve = vetErr(t, v.run(context.Background(), f.jobs, f.home, f.id))
+	ve = vetErr(t, v.run(context.Background(), f.jobs, f.home, f.id, f.id))
 	if ve.Path != file || !strings.Contains(ve.Reason, "input/output error") {
 		t.Fatalf("a failing Lstat: vet named %q (%s)", ve.Path, ve.Reason)
 	}
@@ -447,7 +592,7 @@ func TestVetJobDirKeepsOnAFailingReadOrLstat(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(nested, 0o700) })
 	if os.Getuid() != 0 {
-		ve = vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, f.id))
+		ve = vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, f.id, f.id))
 		if ve.Path != nested {
 			t.Fatalf("an unreadable directory: vet named %q (%s)", ve.Path, ve.Reason)
 		}
@@ -458,7 +603,7 @@ func TestVetJobDirKeepsWhenItsContextEnds(t *testing.T) {
 	f := newVetFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	ve := vetErr(t, VetJobDir(ctx, f.jobs, f.home, f.id))
+	ve := vetErr(t, VetJobDir(ctx, f.jobs, f.home, f.id, f.id))
 	if !strings.Contains(ve.Reason, "ran out of time") {
 		t.Fatalf("an ended context: %s", ve.Reason)
 	}
@@ -473,7 +618,7 @@ func TestVetJobDirKeepsWhenItsContextEnds(t *testing.T) {
 		}
 		return os.Lstat(p)
 	}
-	ve = vetErr(t, v.run(ctx, f.jobs, f.home, f.id))
+	ve = vetErr(t, v.run(ctx, f.jobs, f.home, f.id, f.id))
 	if !strings.Contains(ve.Reason, "ran out of time") {
 		t.Fatalf("a deadline mid-walk: %s", ve.Reason)
 	}
@@ -482,7 +627,7 @@ func TestVetJobDirKeepsWhenItsContextEnds(t *testing.T) {
 func TestVetJobDirRefusesAJobsRootThatIsNotClean(t *testing.T) {
 	f := newVetFixture(t)
 	for _, root := range []string{"", "relative/jobs", f.jobs + "/", f.home + "/./.claude/jobs"} {
-		if err := VetJobDir(context.Background(), root, f.home, f.id); err == nil {
+		if err := VetJobDir(context.Background(), root, f.home, f.id, f.id); err == nil {
 			t.Errorf("the vet passed jobs root %q", root)
 		}
 	}

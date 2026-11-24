@@ -155,13 +155,13 @@ func (e *VetError) Error() string { return e.Reason }
 // directory is checked first and a failure means no call is made.
 //
 // jobsRoot is the jobs root removal.ResolveJobsRoot gives, home the person's
-// home directory, and id the session's full id as claude agents --json --all
-// lists it (sessionId), the id the rule's walk finds the job directory by.
-// The vet:
+// home directory, id the session's full id as claude agents --json --all
+// lists it (sessionId), the id the rule's walk finds the job directory by,
+// and rmID the id claude rm is given (the listing's short id). The vet:
 //
-//   - finds the job directory as JobDirFor does, and fails naming the path
-//     it looked for when there is none, and naming the jobs root when more
-//     than one directory's name is the id or a leading slice of it;
+//   - finds the one directory whose name is the id or a leading slice of it
+//     (vetJobDirFor), and fails naming the path it looked for when there is
+//     none, and naming the jobs root when there is more than one;
 //   - checks the chain to the jobs root: below the home directory, which may
 //     itself be a link, no component may be a link, and a jobs root outside
 //     the home is checked the same way from its config directory down;
@@ -173,12 +173,19 @@ func (e *VetError) Error() string { return e.Reason }
 //     directory's entries sorted by name, and fails on the first entry that
 //     is neither a regular file nor a directory, on an entry on another
 //     device ("another filesystem at <path>"), and on any Lstat or directory
-//     read that fails.
+//     read that fails;
+//   - last, Lstats jobsRoot/<rmID>, the path claude rm acts on, and fails
+//     naming it unless it is the job directory the vet checked (same device
+//     and inode). The file system resolves that name, folding case where the
+//     volume does, so a directory whose name differs from the id's only in
+//     case, which the vet's own name match doesn't count, fails here. A
+//     path that is missing or can't be read fails too, as a missing job
+//     directory does.
 //
 // A context that ends before the vet does fails it too. Every failure is a
 // *VetError.
-func VetJobDir(ctx context.Context, jobsRoot, home, id string) error {
-	return defaultJobDirVet().run(ctx, jobsRoot, home, id)
+func VetJobDir(ctx context.Context, jobsRoot, home, id, rmID string) error {
+	return defaultJobDirVet().run(ctx, jobsRoot, home, id, rmID)
 }
 
 // jobDirVet is the vet with its file-system reads as seams, so a test can
@@ -246,7 +253,7 @@ func vetFail(path, format string, args ...any) error {
 	return &VetError{Path: path, Reason: fmt.Sprintf(format, args...)}
 }
 
-func (v jobDirVet) run(ctx context.Context, jobsRoot, home, id string) error {
+func (v jobDirVet) run(ctx context.Context, jobsRoot, home, id, rmID string) error {
 	if jobsRoot == "" || !filepath.IsAbs(jobsRoot) || filepath.Clean(jobsRoot) != jobsRoot {
 		return vetFail(jobsRoot, "the jobs root %q isn't a clean absolute path", jobsRoot)
 	}
@@ -274,8 +281,10 @@ func (v jobDirVet) run(ctx context.Context, jobsRoot, home, id string) error {
 		return err
 	}
 
-	if !validJobID(id) {
-		return vetFail(filepath.Join(jobsRoot, id), "the session id %q can't name a job directory", id)
+	for _, s := range []string{id, rmID} {
+		if !validJobID(s) {
+			return vetFail(filepath.Join(jobsRoot, s), "the session id %q can't name a job directory", s)
+		}
 	}
 	jobDir, err := vetJobDirFor(jobsRoot, id)
 	if err != nil {
@@ -296,7 +305,31 @@ func (v jobDirVet) run(ctx context.Context, jobsRoot, home, id string) error {
 	if dev != rootDev {
 		return vetFail(jobDir, "another filesystem at %s", jobDir)
 	}
-	return v.walk(ctx, jobDir, info, rootDev)
+	if err := v.walk(ctx, jobDir, info, rootDev); err != nil {
+		return err
+	}
+	return v.removedIsVetted(jobsRoot, rmID, jobDir, info)
+}
+
+// removedIsVetted fails unless jobsRoot/<rmID>, the path claude rm acts on,
+// is the job directory the vet checked, by device and inode. The file
+// system resolves the name, folding case where the volume does, so this
+// catches a directory the vet's case-sensitive name match didn't count. A
+// path that is missing or can't be read fails, as a missing job directory
+// does.
+func (v jobDirVet) removedIsVetted(jobsRoot, rmID, jobDir string, vetted os.FileInfo) error {
+	p := filepath.Join(jobsRoot, rmID)
+	info, err := v.lstat(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return vetFail(p, "no job directory for session %s: %s, where claude rm %s acts, is missing", rmID, p, rmID)
+	}
+	if err != nil {
+		return vetFail(p, "the job directory can't be read at %s, where claude rm %s acts: %s", p, rmID, errText(err))
+	}
+	if !sameInode(info, vetted) {
+		return vetFail(p, "%s, where claude rm %s acts, isn't the job directory the vet checked, %s", p, rmID, jobDir)
+	}
+	return nil
 }
 
 // expired fails the vet, naming where it stopped, once ctx has ended.

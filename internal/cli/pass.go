@@ -546,7 +546,9 @@ func removalPolicy(cfg *config.WorkspaceConfig, env *removal.Env) removal.Policy
 // jobDirFor is the job directory of a session under jobsDir: the directory
 // named by its full id, or else the one whose name is a leading slice of the
 // id, the layout Claude Code writes. Empty when the session has none. The
-// job-directory vet finds a session's directory the same way.
+// job-directory vet doesn't use it: it vets the same directory only when
+// exactly one name matches, refuses when more than one does, and also
+// refuses unless the path claude rm acts on is that directory.
 func jobDirFor(jobsDir, sessionID string) string {
 	return removal.JobDirFor(jobsDir, sessionID)
 }

@@ -360,6 +360,58 @@ func TestTheVetRefusesAFullIDDirectoryBesideTheShortIDOne(t *testing.T) {
 	}
 }
 
+// On a volume that folds case, the macOS default, a short-id directory
+// renamed to differ from the short id only in case, holding a link, beside
+// an empty directory under the full id: the vet's name match counts only
+// the full id's, but claude rm abcdef12 would resolve to the renamed one.
+// Both vets keep, naming the path claude rm acts on, with no claude call.
+func TestTheVetRefusesACaseOnlyRenamedShortIDDirectory(t *testing.T) {
+	_, jobs, short := vetHome(t, "abcdef12")
+	probe := filepath.Join(jobs, "CaseProbe")
+	if err := os.WriteFile(probe, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, foldErr := os.Lstat(filepath.Join(jobs, "caseprobe"))
+	if err := os.Remove(probe); err != nil {
+		t.Fatal(err)
+	}
+	if foldErr != nil {
+		t.Skipf("the temp directory %s is case-sensitive: a short-id directory differing only in case is a different path, which claude rm given the short id doesn't reach", jobs)
+	}
+	renamed := filepath.Join(jobs, "ABCDEF12")
+	if err := os.Rename(short, renamed); err != nil {
+		t.Fatal(err)
+	}
+	_, marker := innerLink(t, renamed)
+	decoy := filepath.Join(jobs, abcdefSID)
+	if err := os.Mkdir(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	row := claudeSessionRow{ID: "abcdef12", SessionID: abcdefSID}
+	listedForRemoval(t, nil, row)
+	log := loggingClaude(t, "removed", 0)
+	cc := newClaudeCalls(canonicalTempDir(t))
+	defer cc.close()
+	ctx := withRemovalSession(withClaudeCalls(context.Background(), cc), abcdefSID)
+
+	const want = "isn't the job directory the vet checked"
+	if err := vetBeforeRemoval(ctx, cc, []claudeSessionRow{row}); err == nil || !strings.Contains(err.Error(), want) || !names(err.Error(), short) {
+		t.Fatalf("the vet before removal: %v; want %s named", err, short)
+	}
+	if _, err := realRemoveClaudeSession(ctx, "abcdef12"); err == nil || !strings.Contains(err.Error(), want) || !names(err.Error(), short) {
+		t.Fatalf("realRemoveClaudeSession: %v; want %s named", err, short)
+	}
+	if got := claudeLog(t, log); got != nil {
+		t.Fatalf("claude ran: %q", got)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("the link's target changed: %v", err)
+	}
+}
+
 // Right before claude rm, the fresh row listed under the short id must
 // carry the full session id the caller chose; a row under another full id,
 // and a call that names no full id, refuse with no claude call, though the
@@ -403,7 +455,7 @@ func TestClaudeCallsVetKeepsWhenItsContextEnds(t *testing.T) {
 	defer cc.close()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := cc.vet(ctx, "abcdef12"); err == nil || !strings.Contains(err.Error(), "ran out of time") {
+	if err := cc.vet(ctx, "abcdef12", "abcdef12"); err == nil || !strings.Contains(err.Error(), "ran out of time") {
 		t.Fatalf("a vet under an ended context: %v", err)
 	}
 	// Its own bound is ten seconds, whatever the caller's.
@@ -415,7 +467,7 @@ func TestClaudeCallsVetKeepsWhenItsContextEnds(t *testing.T) {
 func TestNewClaudeCallsMakesNoScratchDirectoryWithoutAClaudeCall(t *testing.T) {
 	home, _, _ := vetHome(t, "abcdef12")
 	cc := newClaudeCalls(canonicalTempDir(t))
-	if err := cc.vet(context.Background(), "abcdef12"); err != nil {
+	if err := cc.vet(context.Background(), "abcdef12", "abcdef12"); err != nil {
 		t.Fatal(err)
 	}
 	cc.close()
@@ -526,7 +578,7 @@ func TestPassSessionStep_RemovesEachListedSessionThroughTheVettedCall(t *testing
 		if cc == nil {
 			return "", errors.New("no claude calls on the context")
 		}
-		if err := cc.vet(ctx, id); err != nil {
+		if err := cc.vet(ctx, id, id); err != nil {
 			return "", err
 		}
 		vetted = append(vetted, id)
