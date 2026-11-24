@@ -63,8 +63,9 @@ agent cd's into the instance and works there in isolation
       v
 niwa reap  (on demand, or when niwa dispatch, create or watch runs)
            sees the job entry gone, checks the instance for work found
-           nowhere else, runs the on-reap command (if declared), removes
-           the instance, deletes the mapping once the command succeeds
+           nowhere else, removes the instance and its session, runs the
+           on-reap command (if declared), deletes the mapping once the
+           command succeeds
 ```
 
 The reaper is the single automatic teardown path; `niwa destroy` is the manual one
@@ -372,10 +373,24 @@ only the judged one. A listing that fails, a listed session that is still
 running, an id niwa won't pass to a command, a job directory that fails niwa's
 checks or a `claude rm` that fails keeps the unit. That differs from
 `niwa destroy`, which warns on a failed `claude rm` and still removes the
-instance. Today this step runs before the on-reap command, `PrepareDestroy`
-and the tombstone re-check, so a unit one of those later checks keeps can be
-left with its session already removed, until a later change in this release
-moves the step after them.
+instance. The step runs after every check that can still keep the unit: the
+removal of the worktrees inside the instance, `PrepareDestroy`, the rename to
+the tombstone and the tombstone re-check. So a unit any of those keeps has no
+session removed, and a `claude rm` that fails renames the tombstone back. The
+on-reap command runs last, once the instance is gone.
+
+**The worktrees inside the instance.** Before anything else moves, the reap
+removes each linked worktree niwa's walk found inside the instance, and
+`niwa destroy` does the same before its `claude rm`. A worktree goes only
+after its repository's configuration is read again, its HEAD and refs match
+what the re-read saw and its `git status` reports nothing; any difference
+keeps the unit. The removal opens one directory at a time relative to the one
+before it, never follows a link and runs no git, so a directory swapped for a
+link mid-removal stops it with "changed during the pass" and the path named,
+and nothing the link points to is touched. A locked worktree, or one holding
+another repository, keeps the reap's unit; `niwa destroy` lists it with its
+scan's findings, and once the instance name is confirmed it goes with the
+instance directory.
 
 So a finished session you haven't looked at yet keeps its Agent View entry and
 its instance until you delete it, unless the reap takes its instance through
@@ -677,7 +692,9 @@ startup files and niwa's binary are denied too.
 A workspace can ask niwa to run a command each time it removes a session, so
 that state some other tool keeps per session can be closed when the session
 goes. Two pieces make that work: a key every session niwa starts carries, and
-the command itself.
+the command itself. In a reap the command runs last, after the session and the
+instance are both gone, and never for a unit a check keeps; the instance path
+it's given names the instance's former location.
 
 ### `NIWA_REAP_KEY`
 
@@ -723,7 +740,10 @@ instance may already be gone), in its own process group, with stdin at
 - `PATH` and `HOME` from niwa's environment;
 - `NIWA_REAP_KEY`, the recomputed key;
 - `NIWA_SESSION_ID`, the removed session's id;
-- `NIWA_INSTANCE_PATH`, the instance it ran in;
+- `NIWA_INSTANCE_PATH`, the instance the session ran in, by its original
+  path: a record of where the instance was, not a directory to work in. A
+  reap runs the command after the instance is removed, so the path names its
+  former location;
 - each name in `env` that is set in niwa's environment.
 
 The `env` list reaches only the command, never a command line, so a name may
@@ -787,8 +807,10 @@ mappings are kept until the file is fixed (or ten reaps go by).
 
 ## The pre-removal command
 
-`[session.on_reap]` runs after a session is removed. `[session.before_remove]`
-runs before, and decides whether the removal happens. It is how something
+`[session.on_reap]` runs after a session is removed, and in a reap after its
+instance is gone too, so the instance path it gets names the instance's former
+location. `[session.before_remove]` runs before, and decides whether the
+removal happens. It is how something
 outside niwa that knows a path is still needed, a workflow engine with a run
 bound under the instance, keeps that instance on disk, without niwa knowing
 anything about the engine.
@@ -855,7 +877,8 @@ idle-grace reclaim, and the reaps `niwa dispatch`, `niwa create` and
 `niwa watch` run), the backstop (`reap-backstop`) and the worktree sweep
 (`worktree-sweep`). In a reap pass it runs after niwa's own checks (the
 ephemeral marker, the liveness rule and the removal rule) and before the
-re-read, the `claude rm` step, the on-reap command and the tombstone check. In
+re-read, the worktree removal, the tombstone check, the `claude rm` step and
+the on-reap command. In
 the worktree sweep it runs after the unchanged check, right before the
 worktree is removed. `niwa destroy` asks it
 once per instance before any prompt, and lists its reason with every other one

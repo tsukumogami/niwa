@@ -482,8 +482,10 @@ func vetDestroySessions(ctx context.Context, cc *claudeCalls, workspaceRoot stri
 // plugin-record and trust cleanup: by the time this runs the user has asked
 // for the instance to go and niwa's unpushed-work check has passed, so a
 // leftover session never blocks the teardown. Callers run it before the
-// instance directory is removed, while Claude Code can still inspect any
-// worktree the session made inside it.
+// instance directory is removed. Destroying one instance runs it after the
+// worktrees inside the instance are removed: they go first, through the
+// no-follow walk, so a session is never removed ahead of a worktree removal
+// that could still stop the destroy.
 func removeOwningSessions(reporter *workspace.Reporter, workspaceRoot string, instanceDirs []string) {
 	removeOwningSessionsListed(context.Background(), reporter, workspaceRoot, instanceDirs, listClaudeSessionsFunc)
 }
