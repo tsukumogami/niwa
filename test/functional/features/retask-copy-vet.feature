@@ -24,6 +24,7 @@ Feature: niwa retask vets a copy's job directory before it removes the copy
     When I dispatch the retask worker with "niwa dispatch --detach TASK-ONE"
     Given an outside directory holds a marker
     And a copy the wake starts holds a link to the outside directory
+    And the claude call log is cleared
     When I retask the worker by instance name with "FOLLOW-UP-ONE"
     Then the exit code is not 0
     And the error output contains "scratch/out"

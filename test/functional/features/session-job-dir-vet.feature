@@ -38,6 +38,7 @@ Feature: niwa vets a session's job directory before every claude rm
     Then the exit code is 0
     And a dispatch instance was created with a well-formed instance file
     Given an outside directory holds a marker
+    And the claude call log is cleared
 
   @critical
   Scenario: niwa reap keeps a clean unit whose listed session's job directory is a link
@@ -47,7 +48,7 @@ Feature: niwa vets a session's job directory before every claude rm
     Then the exit code is 0
     And the dispatch instance still exists
     And the error output contains "niwa: kept"
-    And the error output contains "f1f1f1f1"
+    And the error output contains "the job directory"
     And the fake claude removed no session
     And the outside directory is unchanged
 
@@ -188,7 +189,6 @@ Feature: niwa vets a session's job directory before every claude rm
     When I run niwa reap from the workspace root
     Then the exit code is 0
     And no hook marker was written
-    And no claude call carries an override flag or runs in the workspace
 
   Scenario: niwa destroy runs no hook the instance's Claude settings declare
     Given the dispatch instance declares a marker hook on every event

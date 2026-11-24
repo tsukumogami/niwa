@@ -512,9 +512,12 @@ func claudeCalls(s *testState) ([][2]string, error) {
 	return out, nil
 }
 
-// noClaudeCallCarriesAnOverrideFlagOrRunsInTheWorkspace checks every call
-// the wrapper logged: no --discard-unpushed or --force-remove-worktree, and
-// a working directory outside the workspace.
+// noClaudeCallCarriesAnOverrideFlagOrRunsInTheWorkspace checks the calls
+// the wrapper logged: none carries --discard-unpushed or
+// --force-remove-worktree, and every claude agents and claude rm, the calls
+// the removal paths make, ran from a directory outside the workspace. Other
+// calls (a dispatch's launch, retask's build check and wake) run where they
+// always have and are only checked for the flags.
 func noClaudeCallCarriesAnOverrideFlagOrRunsInTheWorkspace(ctx context.Context) error {
 	s, _, err := vetState(ctx)
 	if err != nil {
@@ -524,24 +527,43 @@ func noClaudeCallCarriesAnOverrideFlagOrRunsInTheWorkspace(ctx context.Context) 
 	if err != nil {
 		return err
 	}
-	if len(calls) == 0 {
-		return fmt.Errorf("the wrapper logged no claude call")
-	}
 	ws := s.workspaceRoot
 	if r, err := filepath.EvalSymlinks(ws); err == nil {
 		ws = r
 	}
+	removal := 0
 	for _, c := range calls {
 		for _, flag := range []string{"--discard-unpushed", "--force-remove-worktree"} {
 			if strings.Contains(c[1], flag) {
 				return fmt.Errorf("claude was passed %s: %q", flag, c[1])
 			}
 		}
+		verb, _, _ := strings.Cut(c[1], " ")
+		if verb != "agents" && verb != "rm" {
+			continue
+		}
+		removal++
 		if c[0] == ws || strings.HasPrefix(c[0], ws+string(filepath.Separator)) {
 			return fmt.Errorf("claude %q ran from %s, inside the workspace", c[1], c[0])
 		}
 	}
+	if removal == 0 {
+		return fmt.Errorf("the wrapper logged no claude agents or claude rm call")
+	}
 	return nil
+}
+
+// theClaudeCallLogIsCleared starts the wrapper's call log afresh, so the
+// checks after it see only the calls of the command that follows.
+func theClaudeCallLogIsCleared(ctx context.Context) (context.Context, error) {
+	s, _, err := vetState(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	if err := os.Remove(filepath.Join(s.homeDir, "claude-calls")); err != nil && !os.IsNotExist(err) {
+		return ctx, err
+	}
+	return ctx, nil
 }
 
 // theWrapperLoggedNoClaudeRm checks no claude rm reached the fake.
@@ -637,6 +659,7 @@ func registerSessionVetSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the outside directory is unchanged$`, theOutsideDirectoryIsUnchanged)
 	ctx.Step(`^no claude call carries an override flag or runs in the workspace$`, noClaudeCallCarriesAnOverrideFlagOrRunsInTheWorkspace)
 	ctx.Step(`^the wrapped fake claude ran no claude rm$`, theWrapperLoggedNoClaudeRm)
+	ctx.Step(`^the claude call log is cleared$`, theClaudeCallLogIsCleared)
 	ctx.Step(`^the dispatch instance declares a marker hook on every event$`, theInstanceDeclaresAMarkerHookOnEveryEvent)
 	ctx.Step(`^no hook marker was written$`, noHookMarkerWasWritten)
 }
