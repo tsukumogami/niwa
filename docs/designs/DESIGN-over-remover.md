@@ -183,6 +183,31 @@ entry makes that session's resumable instance reapable. Both are places
 outside the instance whose contents drive removal, which is what the list
 is for.
 
+### 2026-11-24 — The deny list widens to the inputs the reap and remove trust
+
+**What changed.** The deny-write list in Security Considerations, and the
+guide's, now also name: the root `workspace.toml`'s other removal settings,
+`build_trees` and `[session.before_remove]` command; the session mappings
+as what picks a unit's session and agent, with a deleted mapping handing
+its instance to the backstop; the workspace root directory itself and
+sibling instances' TTL clocks; git's global and system attributes files;
+the files the `PATH` programs link to and git's libexec directory; niwa's
+whole `PATH` for the on-reap and pre-removal commands; rewritten job
+entries and their `cwd` guard; `~/.claude/jobs/` whatever
+`CLAUDE_CONFIG_DIR` says; the Codex session store; Claude Code's
+transcripts; and a niwa the agent starts, which takes its environment,
+`NIWA_REAP_IDLE_GRACE` included, from the agent. The list also notes that
+the reap's worktree sweep and `niwa destroy`'s scan read the raw `PATH` and
+the full git configuration until Phase 2 moves them onto the removal
+pass's git (tsukumogami/niwa#577).
+
+**Why.** A docs review of the list against the code found it missed
+inputs the reap and remove paths trust: it said a reap acts only on mapped
+instances when the backstop also takes unmapped ones, and it missed that
+the workspace's two commands search niwa's unfiltered `PATH`. An audit of
+both paths found the rest. Each one is a place outside the instance whose
+contents drive removal or that niwa runs, which is what the list is for.
+
 ## Context and Problem Statement
 
 A unit of work in niwa is a session, the instance it runs in, its Claude Code
@@ -4243,18 +4268,43 @@ niwa runs, and tells workspaces to deny the agent writes to them:
 that holds the scratch object store and the empty directories `claude`
 and the credential-helper read run from); in the workspace root
 `.niwa/` (whose `workspace.toml` holds the clone URLs, the `proof_remotes`
-prefixes and the over command), `.niwa-launch/` and `.niwa-tombstone-*`;
-`~/.gitconfig` and `~/.config/git/config`; the whole `~/.ssh/`
+prefixes, the rest of the `[session.removal]` settings and each
+repository's `build_trees`, which decide what counts as disposable, the
+over command, and the `[session.on_reap]` and `[session.before_remove]`
+commands; and whose session mappings say which session and which agent's
+records answer a unit's liveness, while deleting one makes its instance a
+candidate for the name-and-TTL backstop, which acts on unmapped
+dispatch-named instances), `.niwa-launch/` and `.niwa-tombstone-*`; the
+workspace root directory itself and every instance in it other than the
+agent's own, since an instance's directory name decides whether the
+backstop may take it and its `.niwa/dispatch-pending` and directory mtime
+are the backstop's TTL clock; `~/.gitconfig` and `~/.config/git/config`;
+git's global and system attributes files, which the removal pass's git
+doesn't set aside and whose reach is unclear; the whole `~/.ssh/`
 directory, with any file outside it that an `Include` in `~/.ssh/config`
 names, since ssh follows `Include` while the credential-helper read
 doesn't follow git's includes; any script or library those files name that
 the agent could write (a credential helper's script, a `ProxyCommand` or
 `Match exec` target, a `PKCS11Provider` library); every directory niwa's
 filtered `PATH` searches, with the programs found there (`git` and git's
-libexec, `ssh`, `claude`, `lsof`, any `git-credential-*` helper), since
-the filter drops only entries under the workspace root; Claude Code's jobs
-root, `jobs/` in the resolved config directory, since a session's
-liveness is its job entry's presence; Claude Code's user
+libexec, `ssh`, `claude`, `lsof`, any `git-credential-*` helper), the files
+those programs link to and git's libexec directory itself, which is
+usually not on `PATH`, since the filter drops only entries under the
+workspace root; every directory on niwa's whole `PATH` when the workspace
+sets an on-reap or pre-removal command, since both run under `/bin/sh -c`
+from the workspace root with niwa's unfiltered `PATH`, relative and
+in-root entries included (or the commands name each program by absolute
+path), and a replaced pre-removal program can approve a removal the check
+would refuse; Claude Code's jobs root, `jobs/` in the resolved config
+directory, since a session's liveness is its job entry's presence, a
+rewritten entry reads as gone as a deleted one does, and the entries'
+`cwd` fields are the rooted-worker guard the backstop relies on;
+`~/.claude/jobs/` whatever `CLAUDE_CONFIG_DIR` says, since the worktree
+sweep reads it; the Codex session store (`$CODEX_HOME` or `~/.codex/`, its
+rollouts and writer locks), which answers a Codex mapping's liveness and
+the rooted-worker guard for every instance; Claude Code's transcripts,
+`projects/` in the resolved config directory, which the worktree sweep
+reads to tell an ended session; Claude Code's user
 settings with the user-scope plugins, which can define hooks or programs
 `claude` runs, in the config directory niwa resolves as Claude Code does
 (Data Flow step 7), which every `claude` call niwa makes reads, hooks
@@ -4263,7 +4313,19 @@ restore window; and Claude Code's user-scope MCP file, which can name
 programs `claude` runs too: `.claude.json` in the home directory when
 `CLAUDE_CONFIG_DIR` is unset, beside the default config directory rather
 than inside it, and `.claude.json` inside the directory the variable names
-when it's set. Later hardening would pass a hooks-off flag on niwa's
+when it's set. Until Phase 2 moves them onto the removal pass's git
+(tsukumogami/niwa#577), the reap's worktree sweep and `niwa destroy`'s scan
+run bare `git`, and destroy's pull-request lookups bare `gh`, by the first
+match on niwa's raw `PATH` with niwa's whole environment and the full
+global and system git configuration, includes and `~/.config/git/`
+included, so the guide names those as deny targets too. A niwa the agent
+starts (`niwa dispatch`, `create` and `watch` reap as they run, and the
+agent can run `niwa reap`) takes `PATH`, `HOME`, `CLAUDE_CONFIG_DIR`,
+`CODEX_HOME` and `NIWA_REAP_IDLE_GRACE` from the agent, so no deny binds
+its reap, and `NIWA_REAP_IDLE_GRACE` accepts any positive duration, so a
+smaller value shortens the window; the guide says the reap the list
+protects runs with the person's environment, outside the agent's reach.
+Later hardening would pass a hooks-off flag on niwa's
 `claude` calls, once Claude Code offers one. The implementer confirms once
 whether the `claude` subcommands niwa runs (`claude agents`, `claude rm`)
 start MCP servers. An agent that can write the
