@@ -157,7 +157,7 @@ that make it mechanical.
 right before every `git status` now sits in `repoStatus`, the one status
 path on the removal side, rather than in the invoker `gitCommand` builds.
 The two passages that placed it in that invoker now say so. The re-check is also
-callable on its own, as the last read before the worktree removals, which
+callable on its own, as the last git read before the worktree removals, which
 start no git process.
 
 **Why.** The effect is the same, since every `git status` niwa starts on
@@ -270,16 +270,27 @@ removed; then come `PrepareDestroy`, the tombstone lock, the rename and
 the tombstone check, which reads each worktree again with an explicit
 `--git-dir` and `--work-tree` on its tombstone paths and compares it with
 the earlier read. One configuration re-check on every worktree's
-repository at its tombstone path is the last read. Any keep up to there
-renames the instance back with nothing removed. The worktrees then go
+repository at its tombstone path is the last git read, and right after it
+one full job-directory vet and session re-listing is the last read before
+the first worktree removal; a change there keeps the unit with nothing
+removed. Any keep up to there leaves every worktree in place, and one from
+the rename on renames the instance back. The worktrees then go
 inside the tombstone by the no-follow walk alone, with no git call, each
 worktree's `.git` file and admin directory matched against the instance's
 original path, and then come `claude rm`, the tombstone's removal, the
 lock's release, on-reap and the mapping. No read that can keep the unit
-runs between the first removal and the tombstone's removal. A destructive
-step that fails (the walk stopping, a `claude rm` or the tombstone's
-removal failing) still keeps the unit and renames back what is left,
-touching nothing outside it. `runDestroyInstance` has no rename, so it
+runs between the first worktree removal and the tombstone's removal,
+except the destructive steps' own guards: the re-listing and job-directory
+vet right before each `claude rm` stay where they are, as the guard
+against a job directory changed between the check and the call, and are
+part of the `claude rm` step. A destructive step that fails (the walk
+stopping, that guard or a `claude rm` failing, the tombstone's removal
+failing) still keeps the unit and renames back what is left, touching
+nothing outside it. A session that appears after the last full vet and
+before its `claude rm` therefore keeps the unit after its worktrees are
+gone. Those worktrees were clean, checked and removed unforced, so nothing
+uncommitted is lost, but it is a partial removal of a kept unit, and the
+residual under Permission scope says so. `runDestroyInstance` has no rename, so it
 runs every worktree's re-check and a fresh status after the scan and the
 vet and before its first removal, then the removals, then the sessions.
 Data Flow step 7, Decision 1's tombstone passage, the Phase 2 deliverable
@@ -298,7 +309,11 @@ tombstone's descriptors and touches nothing outside. One re-check after
 the rename covers the window: the rename fences the unit at its original
 path, so nothing new can enter it there, and a re-check run per removal,
 after the first removal, is exactly the keep-after-partial-removal this
-change removes.
+change removes. The same holds for the sessions: one full vet and
+re-listing as the last read catches a changed job directory or a new
+session before anything goes, while the per-call guard stays because
+Claude Code deletes the job directory by its own means, and a directory
+swapped between the check and the call must still stop that call.
 
 ## Context and Problem Statement
 
@@ -584,7 +599,7 @@ The package also settles the mechanics the PRD left to the design:
   status path (`repoStatus`, which every `git status` on the removal side
   goes through) runs the check again on a repository, its common
   directory's configuration and its `config.worktree` included, right before
-  it starts every `git status` there and once more, as the last read,
+  it starts every `git status` there and once more, as the last git read,
   before niwa removes the first worktree of a unit: the rule's status in
   each repository, the re-read's, each worktree's status in the pass before
   the rename and on the tombstone and the last re-check of every worktree's
@@ -932,13 +947,14 @@ the tombstone's removal, given the instance's original path, and settles
 the mapping only after that (Data Flow step 7). The removal itself
 gains two guards. `workspace.DestroyInstance` `Lstat`s the instance directory,
 refuses a symlink, and refuses any path that isn't a direct child of the
-resolved workspace root. And the last step before it renames the instance to a
+resolved workspace root. And before it the pass renames the instance to a
 tombstone and checks again, so a writer that arrives after the re-read finds
-no path to write to.
+no path to write to; the worktree removals and `claude rm` then run inside
+the tombstone, between that check and `DestroyInstance`.
 
 The tombstone closes most of the gap between the last check and the delete.
-The re-read comes before seconds of worktree removal, `claude rm`, on-reap
-and `os.RemoveAll`, and the instance lock binds only niwa, so a process the
+The re-read comes before seconds of worktree removal, `claude rm` and
+`os.RemoveAll`, with on-reap after them, and the instance lock binds only niwa, so a process the
 listing missed or a helper that starts late could otherwise change a
 repository or a record after the re-read and have that change deleted
 unseen. After every worktree has been read on the instance's own path and
@@ -983,7 +999,7 @@ that is new, has moved or is gone, a new stash entry, or a HEAD or worktree
 HEAD that points elsewhere counts as a difference, with "changed during the
 pass: ref <name>" as evidence. A linked worktree's `.git` file and its
 admin directory name each other by the instance's original absolute path,
-so there each worktree is read with an explicit `--git-dir` and
+so on the tombstone each worktree is read with an explicit `--git-dir` and
 `--work-tree` on its tombstone paths (HEAD, per-worktree refs, status) and
 compared with the read before the rename, and the finding that those
 files name a path the rename moved is accepted only for the worktrees that
@@ -994,11 +1010,17 @@ Any difference renames it back with
 pass", left as the delete-then-reap path leaves one, its sessions and
 worktrees still in place and the unit listed. Otherwise niwa runs the
 configuration check once more on every worktree's repository at its
-tombstone path, the last read; a flagged key renames back and keeps the
-same way. Only then are the worktrees removed inside the tombstone, by
-niwa's walk alone with no git call, and the sessions after them; no read
-that can keep the unit runs between the first removal and the tombstone's
-removal. `DestroyInstance` then removes the tombstone, which is a direct
+tombstone path, the last git read, and then re-lists the sessions and runs
+the full job-directory vet of every session it will pass to `claude rm`,
+the last read of all; a flagged key or a change the vet or the listing
+finds renames back and keeps the same way, with nothing removed. Only then
+are the worktrees removed inside the tombstone, by niwa's walk alone with
+no git call, and the sessions after them; no read that can keep the unit
+runs between the first worktree removal and the tombstone's removal,
+except the destructive steps' own guards: the re-listing and vet right
+before each `claude rm`, which are part of that step, so that their
+failure, like a failed `claude rm`, keeps the unit and renames back what is
+left. `DestroyInstance` then removes the tombstone, which is a direct
 child of the root and passes its checks. Its plugin-record prune and Claude trust withdrawal key on the path
 they are given (`pluginrecord.InstanceOwned` matches records under it, and
 the trust keys are that path resolved), and the records and grants name the
@@ -2150,8 +2172,9 @@ there, because status is the call that can start a filter and seconds can
 pass between the first read and it. The statuses niwa runs on a unit's
 worktrees before removing them are among these; the removals that follow
 start no git process, and the read runs once more on every worktree's
-repository after the last other read and before the first removal (in the
-pass, at its tombstone path after the tombstone check), so a key written in
+repository after the last other git read and before the first removal (in
+the pass, at its tombstone path after the tombstone check, with only the
+last full job-directory vet after it), so a key written in
 between keeps the unit there as well, before any worktree goes. A key found
 then keeps the unit with "changed during the pass: repository configuration
 names a program: <key>" and the call isn't started. `ls-files -v`,
@@ -2394,7 +2417,8 @@ does, so a failing job directory keeps the unit with nothing moved or removed.
 Otherwise it moves named and discarded files into the kept set, reads every
 worktree inside the instance (its status clean, its refs unchanged),
 renames the instance to a tombstone and checks it again, worktrees
-included, and only then removes the worktrees inside the tombstone itself,
+included, vets every session's job directory once more against a fresh
+listing, and only then removes the worktrees inside the tombstone itself,
 with the same descriptor-relative no-follow walk the trim uses and no git
 call, runs
 `claude rm` on each session without either override flag, only after a vet
@@ -2499,8 +2523,8 @@ entry in the unit's ledger outside the instance, and every git call under
 `niwa destroy` goes through `gitCommand`, with the program-naming
 configuration check run on every repository under the unit, submodules and
 nested repositories included, before the first other git call in any, and
-again right before every status and, as the last read, before the first
-unforced worktree removal, and
+again right before every status and, as the last git read, before the
+first unforced worktree removal, and
 `--ignore-submodules=all` and `--untracked-files=all` on every status.
 
 ### Components
@@ -2599,7 +2623,8 @@ and `selectBackstopTargets`), the acting steps (`actReap`, `actTrim`), the
 re-read before removal, the read of each worktree's HEAD and per-worktree
 refs, its configuration check and its status before the rename and again
 on the tombstone, the last configuration check of every worktree's
-repository after the tombstone check, the removal of worktrees inside the
+repository after the tombstone check and the last full job-directory vet
+after it, the removal of worktrees inside the
 tombstone and of trimmed trees through `rmtree.go`'s
 no-follow walk, which stops, and keeps the rest of the tree, at any `.git`
 entry or git directory it meets other than a worktree's own top-level
@@ -3155,7 +3180,9 @@ An all-unit pass, before a dispatch:
    `claude agents` listing,
    before its first removal step, as destroy does: before the kept-set move
    and the worktree removal, and a failing vet keeps the unit with nothing
-   moved or removed; the vet right before each `claude rm` still runs. Then
+   moved or removed. A second full vet runs as the last read before the
+   first worktree removal, below, and the vet right before each
+   `claude rm` still runs as part of that step. Then
    move named
    files, discarded paths and a discard patch into the kept set (regular
    files only, one link, opened component by component, hashed from the
@@ -3179,15 +3206,21 @@ An all-unit pass, before a dispatch:
    admin directory name a path the rename moved is accepted only for the
    worktrees that earlier read checked, and a path the kept-set move took
    out may read as gone or deleted, while anything found at such a path
-   again counts as a change). Last, run the configuration check once more
-   on every worktree's repository at its tombstone path, with no git call
-   after it. Any keep up to here keeps the unit with nothing removed, and
-   one from the rename on renames the tombstone back. Then remove each
+   again counts as a change). Then run the configuration check once more
+   on every worktree's repository at its tombstone path, the last git
+   read, with no git call after it. Last, list the sessions again with
+   `claude agents --json --all` and run the full vet below on the job
+   directory of every session the pass will pass to `claude rm`: a session
+   newly listed or running, or a vet that fails, keeps the unit. Any keep
+   up to here keeps the unit with nothing removed, and one from the rename
+   on renames the tombstone back. Then remove each
    worktree inside the tombstone by niwa's own removal below, the walk
-   alone with no git call, `claude rm` each
-   session from the same empty directory, checked again first, and only
-   after the vet below passes on that session's own job directory, its
-   root chain and every entry under it, run `DestroyInstance` on the
+   alone with no git call, then the `claude rm` step: each
+   session from the same empty directory, the listing taken again and the
+   vet below run again right before each call, as the guard against a job
+   directory changed between the last full vet and the call, on that
+   session's own job directory, its
+   root chain and every entry under it; then run `DestroyInstance` on the
    tombstone, its plugin-record prune and trust withdrawal on the original
    path (Decision 1), release the lock, run on-reap with the instance's
    original path, remove the ledger, settle
@@ -3195,11 +3228,13 @@ An all-unit pass, before a dispatch:
    the unit's launch record when it has one, whichever of the three made it
    a candidate; a unit with no kept-set entry gets the first two and no
    `kept_entry`. No read that can keep the unit runs between the first
-   worktree removal and the tombstone's removal. Any refusal is a
+   worktree removal and the tombstone's removal, except the destructive
+   steps' own guards: the listing and vet right before each `claude rm`,
+   which are part of that step. Any refusal is a
    disagreement, kept and named with its message scrubbed. A destructive
-   step that fails itself (the walk stopping, a `claude rm` or the
-   tombstone's removal failing) still keeps the unit and renames back what
-   is left, touching nothing outside the instance.
+   step that fails itself (the walk stopping, a `claude rm` or its guard
+   failing, the tombstone's removal failing) still keeps the unit and
+   renames back what is left, touching nothing outside the instance.
 
    niwa removes a worktree itself, never through `git worktree remove`,
    whose recursive delete goes by full path strings and so follows a
@@ -3237,7 +3272,10 @@ An all-unit pass, before a dispatch:
 
    `claude rm` takes a session id, not a path, and Claude Code deletes the
    session's job directory by its own means, which niwa can't see. So right
-   before each call niwa vets that session's own job directory. `<id>` is
+   before each call niwa vets that session's own job directory, as part of
+   the `claude rm` step, besides the two full vets (before the first
+   removal step, and as the last read before the first worktree removal).
+   `<id>` is
    the session's id as Claude Code's own `claude agents --json --all`
    listing gives it (step 2), the same id `claude rm` takes, never a value
    read from the instance or the job directory. niwa resolves the jobs root
@@ -3270,8 +3308,9 @@ An all-unit pass, before a dispatch:
    keeps. Any mismatch keeps the unit with the path named
    in the evidence, and niwa makes no `claude rm` call for it. A unit whose
    job directory legitimately holds a link keeps; the person retires it by
-   hand after removing the link. The vet that runs before the first
-   removal step runs under the pass's deadline, and one the deadline cuts
+   hand after removing the link. The full vets that run before the first
+   removal step and before the first worktree removal run under the pass's
+   deadline, and one the deadline cuts
    short leaves the unit not reached; in a retire, `niwa destroy` or a
    retask, which have no all-unit deadline, it runs under its own
    10-second context and keeps when that expires. The vet lives in
@@ -3519,11 +3558,15 @@ Deliverables:
   every worktree's status built by `gitCommand` and read, with one last
   configuration re-check, before the first removal; `rmtree.go`'s no-follow
   walk ships here, and the trim reuses it in Phase 4. In the pass the
-  worktrees go only after every keep check, the tombstone check and that
-  re-check included: inside the tombstone, by the walk alone with no git
-  call, each worktree's `.git` file and admin directory matched against the
+  worktrees go only after every keep check, the tombstone check, that
+  re-check and a last full job-directory vet and session re-listing
+  included: inside the tombstone, by the walk alone with no git call, each
+  worktree's `.git` file and admin directory matched against the
   instance's original path, and no read that can keep the unit runs between
-  the first removal and the tombstone's removal.
+  the first worktree removal and the tombstone's removal, except the
+  destructive steps' own guards (the listing and vet right before each
+  `claude rm`, part of that step, whose failure keeps the unit and renames
+  back what is left).
 - No Claude session removed and no on-reap command run until the unit's
   keep checks (`PrepareDestroy`, the tombstone lock and rename, the tombstone
   re-check) have all passed: the pass's `claude rm` step, which reaches every
@@ -3537,7 +3580,8 @@ Deliverables:
   session's own job directory, and the pass vets every session it will
   pass to `claude rm`, those in the decoded `claude agents` listing, before
   its first removal step, as destroy does with every mapped session the
-  listing holds, removing nothing when one fails.
+  listing holds, removing nothing when one fails, and again, against a
+  fresh listing, as the last read before its first worktree removal.
 - Failed-dispatch cleanup, the watch's discard and the watch's failed-stage
   rollback (`stageReview`'s deferred cleanup) calling `removal.Evaluate`
   before `destroyInstanceFunc`, with a review instance's `pr-clone` judged
@@ -3587,8 +3631,8 @@ Deliverables:
   before that worktree's status or the last re-check before the removals in
   a reap, before
   `DestroySession`'s status or removal in the hook worktree sweep, and before
-  the scan's status or an unforced worktree removal's status in
-  `niwa destroy`, keeps the unit (the worktree, in the sweep; an unforced
+  the scan's status or the fresh worktree status that precedes the first
+  unforced worktree removal in `niwa destroy`, keeps the unit (the worktree, in the sweep; an unforced
   destroy refuses) with the key named, and the driver never runs.
 - Security scenario for the worktree removal, run through a reap, the hook
   worktree sweep (by `niwa dispatch`), `niwa destroy` and
@@ -4069,8 +4113,8 @@ under a unit, each submodule, gitlink and nested repository included, found
 by niwa's own walk, before the first other git call in any of them. It
 isn't a single gate: the invoker runs it again on a repository right before
 every `git status` there, the worktree statuses read before the removals
-included, and once more on every worktree's repository as the last read
-before the first worktree removal, since a process still alive in the
+included, and once more on every worktree's repository as the last git
+read before the first worktree removal, since a process still alive in the
 instance could add a key in the seconds between the first check and those
 calls, and a key found then keeps the unit with
 "changed during the pass" and the key named. The
@@ -4374,9 +4418,12 @@ only for the worktrees the read before the rename checked, and lets a path
 the kept-set move took out read as missing or deleted, while anything
 found at such a path again counts as a change. The configuration check
 then runs once more on every worktree's repository at its tombstone path,
-the last read, and the worktrees go inside the tombstone by the walk
-alone, with no git call; no read that can keep the unit runs between the
-first removal and the tombstone's removal.
+the last git read, a full job-directory vet against a fresh session
+listing follows as the last read of all, and the worktrees go inside the
+tombstone by the walk alone, with no git call; no read that can keep the
+unit runs between the first worktree removal and the tombstone's removal,
+except the destructive steps' own guards, the listing and vet right before
+each `claude rm`.
 Lock files in `~/.niwa/locks/` are created 0600 with `O_NOFOLLOW`, and the
 mark clean-up after an over answer runs under the instance lock. niwa uses no
 sudo, opens no listener and passes no force flag to `claude`; in the pass,
@@ -4537,6 +4584,14 @@ The vet covers `~/.claude/jobs/<id>` under the resolved config directory
 and nothing else; whatever else `claude rm` removes is Claude Code's own
 and outside the vet. The implementer confirms once what `claude rm`
 removes and whether its delete follows links.
+The full vet and session re-listing that run as the last read before the
+first worktree removal can't see what changes after them. A session that
+appears after that vet and before its `claude rm`, or a job directory that
+changes in that gap, fails the per-call guard and keeps the unit after its
+worktrees are gone. Those worktrees were clean, checked and removed
+unforced, so nothing uncommitted is lost, but it is a partial removal of a
+kept unit: the pass renames back what is left, and the unit is listed
+without its worktrees.
 The trim has the same gap in a smaller form: its removal
 walk stops at a repository it meets, but a plain file written into a build
 tree after the trim's checks is removed with the tree. Later
@@ -4545,7 +4600,8 @@ paths outside every repository and for the job directory during the
 evaluation, compare it at the tombstone, and re-check the job directory
 against it before `claude rm`. A commit or a file written in the instant
 between a worktree's last reads (its refs and status on the tombstone,
-then the last configuration check) and niwa removing it, by a writer
+then the last configuration check and the last full vet) and niwa
+removing it, by a writer
 already inside the tombstone, is lost the same way. The removal doesn't
 widen that: it works through descriptors, not paths, so a writer racing it
 can lose its own write but can't send the delete outside the instance. A
@@ -4752,8 +4808,9 @@ scratch and loose root files older than it.
 
 A reap that stops after the kept-set move, because a later read keeps (a
 worktree's read before the rename, `PrepareDestroy`, the tombstone check,
-the last configuration re-check) or a later destructive step fails (the
-worktree walk, `claude rm`, the tombstone's removal),
+the last configuration re-check, the last full job-directory vet) or a
+later destructive step fails (the worktree walk, `claude rm` or its guard,
+the tombstone's removal),
 leaves the unit listed with its named and discarded files already in a
 kept-set entry no launch record points at, and that entry's parts still
 leave on their due dates. A named file tracked in a linked worktree makes that worktree
@@ -4763,7 +4820,7 @@ with no race at all. The loss isn't silent, since the entry is listed and
 shown due a day before it leaves, but files a person asked to keep can
 expire while their unit stays. Later hardening would move the files back,
 which were hashed on the way out, when a reap stops, or do the kept-set
-move last, once the last configuration re-check on the tombstone has
+move last, once the last full job-directory vet on the tombstone has
 passed.
 
 A kept-set entry has no size cap, and the move doesn't gate which kinds of
