@@ -368,7 +368,16 @@ Bash gets past it.
 - **The workspace root's `.niwa/`.** Its `workspace.toml` holds the clone
   URLs and the `[session.removal]` `proof_remotes` prefixes, which decide
   which hosts count as proof that a commit is pushed and which hosts get the
-  person's credential helper. An agent that can write it chooses both.
+  person's credential helper. An agent that can write it chooses both. The
+  same file holds the `[session.on_reap]` command, which a reap runs as the
+  person, under `/bin/sh -c` from the workspace root, before it removes a
+  session's instance. The session mapping store,
+  `.niwa/sessions/<session id>.json`, lives here too. A reap acts only on
+  instances an ephemeral mapping names and reads each one's liveness from the
+  session id that mapping records, so an agent that can write a mapping
+  chooses which instances a reap considers and which session it asks about.
+  Each mapping also carries the count of failed on-reap runs that decides
+  whether a later reap runs the command again or drops the mapping.
 - **The root's `.niwa-tombstone-*` entries.** A pass renames an instance to
   `<root>/.niwa-tombstone-<instance>-<8 hex>`, checks it again there and only
   then deletes it. A later pass recovers a tombstone an interrupted pass left.
@@ -390,11 +399,27 @@ Bash gets past it.
   could write.** A credential helper's script, a `ProxyCommand` or
   `Match exec` target, a `PKCS11Provider` library: each runs as the person
   during a reap.
+- **Every directory niwa's filtered `PATH` searches, and the programs found
+  there.** niwa starts `git`, `claude` and, on macOS, `lsof` by the first
+  match on that `PATH`, and git in turn finds `ssh` and any
+  `git-credential-*` helper through it, along with the helpers in git's own
+  libexec directory. The filter drops only empty and relative entries,
+  entries that don't resolve, and entries that resolve inside the workspace
+  root. A directory outside the root that the agent can write, such as
+  `~/.local/bin`, a native `claude` install or a user-owned Homebrew prefix,
+  lets it replace the program that decides what is pushed and which sessions
+  are live.
+- **Claude Code's jobs root**, `jobs/` in Claude Code's config directory.
+  A session is live exactly while its job entry there is present, so an
+  agent that deletes another session's job entry makes that session read as
+  gone, and its instance becomes reapable while the session is still
+  resumable.
 - **Claude Code's user settings and user-scope plugins.** Every `claude` call
   on the removal path (`claude agents`, `claude rm`) runs with the person's
   environment, so it reads the user settings and plugins, and both can
-  define hooks or programs `claude` runs. They live in Claude Code's config
-  directory, resolved the way niwa resolves the jobs root (below).
+  define hooks or programs `claude` runs. They live in the same config
+  directory as the jobs root; "Where the Claude Code files are" says where
+  that is.
 - **Claude Code's user-scope MCP file**, which can name programs `claude`
   runs, and the legacy `.config.json` in the resolved config directory,
   which Claude Code reads in place of `.claude.json` when it exists.
@@ -402,12 +427,12 @@ Bash gets past it.
 **Where the Claude Code files are.** niwa resolves the config directory once
 per pass, as Claude Code does:
 
-- With `CLAUDE_CONFIG_DIR` unset, the settings and plugins are in
-  `~/.claude/`, and the MCP file is `~/.claude.json` in the home directory. It
-  sits beside the default config directory, not inside it. The legacy file
-  is `~/.claude/.config.json`.
+- With `CLAUDE_CONFIG_DIR` unset, the jobs root is `~/.claude/jobs/`, the
+  settings and plugins are in `~/.claude/`, and the MCP file is
+  `~/.claude.json` in the home directory. It sits beside the default config
+  directory, not inside it. The legacy file is `~/.claude/.config.json`.
 - With `CLAUDE_CONFIG_DIR` set to an absolute, clean directory, deny that
-  directory's settings and plugins rather than `~/.claude/`, and
+  directory's `jobs/`, settings and plugins rather than `~/.claude/`, and
   `.claude.json` inside that directory rather than `~/.claude.json`. The
   legacy file is `.config.json` in that directory.
 - A relative value, one starting with `~`, or one that isn't already in its
