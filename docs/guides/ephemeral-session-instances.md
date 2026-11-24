@@ -406,11 +406,11 @@ inside the instance, where the removal pass treats everything as the agent's:
 it keeps a unit whose repository configuration names a program, and its own git
 calls also override several of those settings and set the hooks directory
 aside. The reap's worktree sweep, `niwa destroy`'s scan and `niwa reset`'s check
-for uncommitted changes don't do either yet, so for them a repository's own
+for uncommitted changes do neither, so for them a repository's own
 configuration and hooks inside the instance aren't harmless, and no entry on
 this list makes them so; the bullet on the sweep and the destroy scan below
-says what that means until it changes. Some of what the reap reads isn't inside the instance
-at all: the reap trusts files outside the instance to say what counts
+says what that means today. Some of what the reap reads isn't inside the
+instance at all: the reap trusts files outside the instance to say what counts
 as pushed, which instances it may act on and which sessions are live, and it
 runs programs that the person's own git, ssh and Claude Code configuration,
 and the workspace's own commands, name. niwa runs as the person, and so does
@@ -647,9 +647,10 @@ read doesn't follow git's includes, and reads only the plain
 `credential.<url>.helper` key, isn't read: the remote it was needed for reads
 as unreachable, and the unit is kept. In the removal pass, a helper set in a
 repository's own configuration keeps the unit too, since `credential.helper`
-there is a key that names a program. The worktree sweep and `niwa destroy`'s
-scan make no such check yet: they read a repository's own configuration as
-git does, as the bullet on them above says.
+there is a key that names a program. The worktree sweep, `niwa destroy`'s
+scan and `niwa reset`'s check make no such check: they read a repository's own
+configuration as git does, as the bullet on the sweep and the destroy scan
+above says.
 
 **Without a sandbox there's no boundary.** These places are all outside the
 agent's working directory, but that's only where they are; it doesn't stop a
