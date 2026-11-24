@@ -304,7 +304,7 @@ What a reap decides depends on files outside the instance it's judging, and on
 programs those files name. A workspace whose agents could write them should
 deny that; [What to deny the agent writes to](#what-to-deny-the-agent-writes-to)
 lists each place and why it matters, and says where a repository inside the
-instance can still make a reap run a program until niwa#577 lands.
+instance can still make a reap run a program (tracked in niwa#577).
 
 ### The liveness rule
 
@@ -589,15 +589,12 @@ Bash gets past it.
   include) and the hooks in its hooks directory, as git does, with none of
   the removal pass's overrides and without its check for keys that name a
   program. So do the bare `git status` calls `niwa reset` makes in each of
-  the instance's repositories when it runs without `--force`. A key such as
-  `core.fsmonitor`, or a hook script, can make git run a program as the
-  person during a reap, `niwa destroy` or `niwa reset`. The sweep runs in
-  `niwa reap` and in the reaps `niwa create`, `niwa dispatch` and
-  `niwa watch` run first. The agent can write its own instance's
-  repositories, so no entry on this list stops it, and today a sandbox
-  doesn't keep an agent from making these commands run a program as you;
-  niwa#577 tracks moving the sweep and the destroy scan onto the removal
-  pass's git. Reading an instance's repository configuration and hooks before you
+  the instance's repositories when it runs without `--force`. A repository
+  setting or hook that names a program can make these git calls run it as
+  the person. The agent can write its own instance's repositories, so no
+  entry on this list stops it, and today a sandbox doesn't keep an agent
+  from doing so; niwa#577 tracks moving the sweep and the destroy scan onto
+  the removal pass's git. Reading an instance's repository configuration and hooks before you
   run them narrows this but doesn't close it: an agent that is still running
   can change them after you look.
   Separately, the sweep reads job entries from `~/.claude/jobs/` whatever
