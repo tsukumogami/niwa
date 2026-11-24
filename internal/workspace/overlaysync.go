@@ -56,7 +56,7 @@ func EnsureOverlaySnapshot(ctx context.Context, urlSlug, dir string, fetcher Fet
 	if provenanceMarkerExists(dir) || dotGitExists(dir) {
 		// Existing snapshot or legacy working tree: refresh / R28 lazy
 		// conversion via the standard pipeline.
-		_, refreshRank, refreshErr := ensureConfigSnapshotLocked(ctx, dir, markers, fetcher, reporter)
+		_, refreshRank, refreshErr := ensureConfigSnapshotLocked(ctx, dir, markers, otherLayer, fetcher, reporter)
 		return false, refreshRank, refreshErr
 	}
 

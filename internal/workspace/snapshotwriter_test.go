@@ -642,3 +642,139 @@ func mustWriteMarker(t *testing.T, dir string, p Provenance) {
 		t.Fatal(err)
 	}
 }
+
+// globalSourceGoneText is a fragment only the global layer's 404 warning
+// carries; the generic drift warning never does.
+const globalSourceGoneText = "the global config source"
+
+func TestEnsureGlobalConfigSnapshot_A404NamesTheLayerTheFileAndTheAge(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	dir := filepath.Join(t.TempDir(), "global")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteMarker(t, dir, Provenance{
+		SourceURL: "someone/dot-niwa", Owner: "someone", Repo: "dot-niwa",
+		ResolvedCommit: "cached-oid", FetchedAt: time.Now().Add(-(77*time.Hour + 10*time.Minute)),
+		FetchMechanism: "github-tarball",
+	})
+	if err := os.WriteFile(filepath.Join(dir, GlobalConfigOverrideFile), []byte("cached"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := ReadProvenance(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fetcher := &fakeFetcher{
+		headErrs:     []error{&github.StatusError{StatusCode: 404, Message: "github: HeadCommit returned 404"}},
+		headStatuses: []int{404},
+	}
+	var buf bytes.Buffer
+	reporter := NewReporterWithTTY(&buf, false)
+	if _, err := EnsureGlobalConfigSnapshot(context.Background(), dir, fetcher, reporter); err != nil {
+		t.Fatalf("a 404 should fall back to the cached snapshot, got error: %v", err)
+	}
+
+	if fetcher.headCalls != 1 {
+		t.Errorf("headCalls = %d, want 1 (a 404 is not retried)", fetcher.headCalls)
+	}
+	out := buf.String()
+	if n := strings.Count(out, "warning: "); n != 1 {
+		t.Errorf("warning lines = %d, want 1\noutput:\n%s", n, out)
+	}
+	wantPath := filepath.Join(xdg, "niwa", "config.toml")
+	for _, want := range []string{
+		"warning: the global config source someone/dot-niwa returned 404 on the drift check, so it looks gone rather than unreachable.",
+		"Using the cached global config snapshot fetched at " + before.FetchedAt.Format(time.RFC3339) + " (3d5h ago).",
+		"It's set by [global_config] repo in " + wantPath + ":",
+		`repoint it with "niwa config set global <repo>"`,
+		`remove it with "niwa config unset global"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("warning is missing %q\noutput:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "could not refresh config snapshot") {
+		t.Errorf("the global layer's 404 printed the generic warning too:\n%s", out)
+	}
+
+	got, _ := os.ReadFile(filepath.Join(dir, GlobalConfigOverrideFile))
+	if string(got) != "cached" {
+		t.Errorf("cached snapshot lost: %q", got)
+	}
+	after, err := ReadProvenance(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.FetchedAt.Equal(before.FetchedAt) {
+		t.Errorf("fetched_at moved on a failed drift check: before %s, after %s", before.FetchedAt, after.FetchedAt)
+	}
+}
+
+func TestEnsureConfigSnapshot_AWorkspaceLayer404KeepsTheGenericWarning(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), ".niwa")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteMarker(t, dir, Provenance{
+		SourceURL: "org/repo", Owner: "org", Repo: "repo",
+		ResolvedCommit: "cached-oid", FetchedAt: time.Now(), FetchMechanism: "github-tarball",
+	})
+
+	fetcher := &fakeFetcher{
+		headErrs:     []error{&github.StatusError{StatusCode: 404, Message: "github: HeadCommit returned 404"}},
+		headStatuses: []int{404},
+	}
+	var buf bytes.Buffer
+	reporter := NewReporterWithTTY(&buf, false)
+	if err := EnsureConfigSnapshot(context.Background(), dir, fetcher, reporter); err != nil {
+		t.Errorf("a 404 should fall back to the cached snapshot, got error: %v", err)
+	}
+
+	if fetcher.headCalls != 1 {
+		t.Errorf("headCalls = %d, want 1", fetcher.headCalls)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "could not refresh config snapshot for org/repo: github: HeadCommit returned 404; using cached snapshot fetched at") {
+		t.Errorf("workspace layer's 404 warning changed:\n%s", out)
+	}
+	if strings.Contains(out, globalSourceGoneText) || strings.Contains(out, "[global_config]") {
+		t.Errorf("workspace layer's 404 printed the global layer's warning:\n%s", out)
+	}
+}
+
+func TestEnsureGlobalConfigSnapshot_A503KeepsTheGenericWarningAndItsRetries(t *testing.T) {
+	withFastDriftBackoff(t)
+	dir := filepath.Join(t.TempDir(), "global")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteMarker(t, dir, Provenance{
+		SourceURL: "someone/dot-niwa", Owner: "someone", Repo: "dot-niwa",
+		ResolvedCommit: "cached-oid", FetchedAt: time.Now(), FetchMechanism: "github-tarball",
+	})
+
+	headErr := &github.StatusError{StatusCode: 503, Message: "github: HeadCommit returned 503"}
+	fetcher := &fakeFetcher{
+		headErrs:     []error{headErr, headErr, headErr, headErr},
+		headStatuses: []int{503, 503, 503, 503},
+	}
+	var buf bytes.Buffer
+	reporter := NewReporterWithTTY(&buf, false)
+	if _, err := EnsureGlobalConfigSnapshot(context.Background(), dir, fetcher, reporter); err != nil {
+		t.Errorf("transient errors should not propagate: %v", err)
+	}
+
+	if want := len(driftCheckBackoff) + 1; fetcher.headCalls != want {
+		t.Errorf("headCalls = %d, want %d (1 initial + %d retries)", fetcher.headCalls, want, len(driftCheckBackoff))
+	}
+	out := buf.String()
+	if !strings.Contains(out, "could not refresh config snapshot for someone/dot-niwa: github: HeadCommit returned 503") {
+		t.Errorf("global layer's 503 warning changed:\n%s", out)
+	}
+	if strings.Contains(out, globalSourceGoneText) {
+		t.Errorf("a 503 printed the 404 warning:\n%s", out)
+	}
+}

@@ -1209,7 +1209,7 @@ func (a *Applier) runPipeline(ctx context.Context, cfg *config.WorkspaceConfig, 
 		// scoped to the workspace overlay.
 		a.Reporter.Status("syncing config...")
 		fetcher, _ := a.GitHubClient.(FetchClient)
-		converted, _, syncErr := EnsureConfigSnapshotWithStatus(ctx, a.GlobalConfigDir, config.MarkerSet{}, fetcher, a.Reporter)
+		converted, syncErr := EnsureGlobalConfigSnapshot(ctx, a.GlobalConfigDir, fetcher, a.Reporter)
 		if syncErr != nil {
 			a.Reporter.Warn("could not sync config: %v", syncErr)
 			return nil, fmt.Errorf("syncing global config: %w", syncErr)
