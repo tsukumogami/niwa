@@ -269,6 +269,11 @@ gone, and when the workspace declares an on-reap command, it runs it for each
 removed session and keeps the mapping until it succeeds (see
 [The reap key and the on-reap command](#the-reap-key-and-the-on-reap-command)).
 
+What a reap decides depends on files outside every instance, and on programs
+those files name. A workspace whose agents could write them should deny that;
+[What to deny the agent writes to](#what-to-deny-the-agent-writes-to) lists
+each place and why it matters.
+
 ### The liveness rule
 
 A session is **live** as long as its Claude Code job entry at
@@ -329,6 +334,103 @@ are noted on stderr.
 > accepts. If this ever bites you, re-run the session's work in a fresh dispatch; a
 > longer-lived safety-net TTL for genuinely abandoned instances is a possible future
 > addition.
+
+### What to deny the agent writes to
+
+A reap checks each unit for work that exists nowhere else before it removes
+anything, and keeps the unit when it can't tell. Most of what it reads sits
+inside the instance, where niwa can treat everything as the agent's. Some of it
+doesn't: the reap also trusts a few files outside every instance to say what
+counts as pushed and which sessions are live, and it runs programs that the
+person's own git, ssh and Claude Code configuration name. niwa runs as the
+person, and so does the agent, so niwa can't stop the agent from writing those
+files. Whether it can is up to the sandbox the agent runs under.
+
+**The mechanism.** Deny the agent writes to every place below with sandbox
+write restrictions that also cover Bash: Claude Code's sandbox, or an
+operating-system equivalent. A path deny rule in Claude Code's permission
+settings isn't enough on its own. It covers Claude Code's file tools, not a
+shell command that writes the same path, so `echo ... >> ~/.gitconfig` from
+Bash gets past it.
+
+**The list.**
+
+- **`~/.niwa/`, all of it.** This is niwa's own state. It holds the
+  instance and tombstone locks (`~/.niwa/locks/`) and the scratch directory,
+  `~/.niwa/w-<key>/scratch/`. Each pass makes a fresh directory there, mode
+  0700, holding the scratch object stores the network reads land in and the
+  empty directories that git's network calls, git's version read, every
+  `claude` call and the credential-helper read run from. niwa checks the
+  owner and mode before each use and keeps the unit when a check fails, but
+  an agent that can write there can plant a store or a file between checks.
+  The record ledger and the kept set that later releases add live under
+  `~/.niwa/` too.
+- **The workspace root's `.niwa/`.** Its `workspace.toml` holds the clone
+  URLs and the `[session.removal]` `proof_remotes` prefixes, which decide
+  which hosts count as proof that a commit is pushed and which hosts get the
+  person's credential helper. An agent that can write it chooses both.
+- **The root's `.niwa-tombstone-*` entries.** A pass renames an instance to
+  `<root>/.niwa-tombstone-<instance>-<8 hex>`, checks it again there and only
+  then deletes it. A later pass recovers a tombstone an interrupted pass left.
+  An agent that can create or swap one controls what that recovery finds.
+- **`~/.gitconfig` and `~/.config/git/config`.** niwa reads the person's
+  `credential.helper` from these two files once per pass, and that helper is
+  the program its proof-remote network calls run. The read is
+  `git config --global --no-includes`, and niwa's environment for it carries
+  no `XDG_CONFIG_HOME`, so it reads `~/.config/git/config` even when your
+  shell's `XDG_CONFIG_HOME` points elsewhere. Every other git call the removal
+  pass makes ignores both files (`GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_CONFIG_NOSYSTEM=1`).
+- **The whole `~/.ssh/` directory, and every file outside it that an
+  `Include` in `~/.ssh/config` names.** Network calls to an ssh remote run
+  ssh as `ssh -o BatchMode=yes -o ForwardAgent=no`, which reads the person's
+  ssh configuration and known hosts. That configuration decides which host
+  answers and can name programs ssh runs.
+- **Any script or library those configuration files point at that the agent
+  could write.** A credential helper's script, a `ProxyCommand` or
+  `Match exec` target, a `PKCS11Provider` library: each runs as the person
+  during a reap.
+- **Claude Code's user settings and user-scope plugins.** Every `claude` call
+  on the removal path (`claude agents`, `claude rm`) runs with the person's
+  environment, so it reads the user settings and plugins, and both can
+  define hooks or programs `claude` runs. They live in Claude Code's config
+  directory, resolved the way niwa resolves the jobs root (below).
+- **Claude Code's user-scope MCP file**, which can name programs `claude`
+  runs, and the legacy `.config.json` in the resolved config directory,
+  which Claude Code reads in place of `.claude.json` when it exists.
+
+**Where the Claude Code files are.** niwa resolves the config directory once
+per pass, as Claude Code does:
+
+- With `CLAUDE_CONFIG_DIR` unset, the settings and plugins are in
+  `~/.claude/`, and the MCP file is `~/.claude.json` in the home directory. It
+  sits beside the default config directory, not inside it. The legacy file
+  is `~/.claude/.config.json`.
+- With `CLAUDE_CONFIG_DIR` set to an absolute, clean directory, deny that
+  directory's settings and plugins rather than `~/.claude/`, and
+  `.claude.json` inside that directory rather than `~/.claude.json`. The
+  legacy file is `.config.json` in that directory.
+- A relative value, one starting with `~`, or one that isn't already in its
+  clean form (a `..`, a `.`, or a repeated or trailing separator) makes niwa
+  keep every unit, since it can't tell which sessions are live.
+
+**What isn't read.** ssh follows `Include`, so an included file is as much a
+part of the configuration as `~/.ssh/config` itself. niwa's credential-helper
+read doesn't follow git's includes, and reads only the plain
+`credential.helper` key. A helper set only in an included file, or under a
+`credential.<url>.helper` key, isn't read: the remote it was needed for reads
+as unreachable, and the unit is kept. A helper set in a repository's own
+configuration keeps the unit too, since `credential.helper` there is a key
+that names a program.
+
+**Without a sandbox there's no boundary.** These places are all outside the
+agent's working directory, but that's only where they are; it doesn't stop a
+write. A worker that runs without sandbox write restrictions like the ones
+above can write every one of them, and nothing in this list protects it. Run
+niwa inside the agent's sandbox, never as a command the sandbox lets out: niwa
+takes the home directory from `HOME`, so a process that starts niwa outside
+the sandbox with a `HOME` of its choosing points the scratch directory and the
+credential-helper read at files it wrote.
 
 ## The reap key and the on-reap command
 
