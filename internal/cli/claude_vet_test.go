@@ -50,6 +50,32 @@ func vetHome(t *testing.T, id string) (home, jobs, jobDir string) {
 	return home, jobs, jobDir
 }
 
+// sessionJobDir creates the job directory of the session Claude Code lists
+// under short, 0700, under the jobs root the test's HOME and
+// CLAUDE_CONFIG_DIR give, as Claude Code keeps one for every listed
+// session. destroy vets it before it passes the session to claude rm.
+func sessionJobDir(t *testing.T, short string) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := removal.ResolveJobsRoot(os.LookupEnv, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(jobs, short)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{jobs, dir} {
+		if err := os.Chmod(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
 // innerLink replaces jobDir/scratch/out with a link to a directory outside
 // the home holding a marker file, and returns the link's path and the
 // marker's.

@@ -358,6 +358,7 @@ func TestDestroy_HoldsInstanceLockThroughRemoval(t *testing.T) {
 		chdirTo(t, root)
 		quietDestroyCmd()
 		setDestroyFlags(t, false, false, "")
+		sessionJobDir(t, ownerSID[:8])
 
 		if err := runDestroy(destroyCmd, []string{"alpha"}); err != nil {
 			t.Fatalf("destroy: %v", err)
@@ -830,6 +831,7 @@ func lockPathCases() []lockPathCase {
 			chdirTo(t, root)
 			stderr := quietDestroyCmd()
 			setDestroyFlags(t, false, false, "")
+			sessionJobDir(t, ownerSID[:8])
 			err := runDestroy(destroyCmd, []string{"alpha"})
 			return err, stderr.String(), len(fake.removed) == 1 && !exists(instance)
 		}},
