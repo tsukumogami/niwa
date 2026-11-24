@@ -303,7 +303,8 @@ removed session and keeps the mapping until it succeeds (see
 What a reap decides depends on files outside the instance it's judging, and on
 programs those files name. A workspace whose agents could write them should
 deny that; [What to deny the agent writes to](#what-to-deny-the-agent-writes-to)
-lists each place and why it matters.
+lists each place and why it matters, and says where a repository inside the
+instance can still make a reap run a program until niwa#577 lands.
 
 ### The liveness rule
 
@@ -401,8 +402,15 @@ warnings.
 
 A reap checks each unit for work that exists nowhere else before it removes
 anything, and keeps the unit when it can't tell. Most of what it reads sits
-inside the instance, where niwa can treat everything as the agent's. Some of it
-doesn't: the reap also trusts files outside the instance to say what counts
+inside the instance, where the removal pass treats everything as the agent's:
+it keeps a unit whose repository configuration names a program, and its own git
+calls also override several of those settings and set the hooks directory
+aside. The reap's worktree sweep, `niwa destroy`'s scan and `niwa reset`'s check
+for uncommitted changes don't do either yet, so for them a repository's own
+configuration and hooks inside the instance aren't harmless, and no entry on
+this list makes them so; the bullet on the sweep and the destroy scan below
+says what that means until it changes. Some of what the reap reads isn't inside the instance
+at all: the reap trusts files outside the instance to say what counts
 as pushed, which instances it may act on and which sessions are live, and it
 runs programs that the person's own git, ssh and Claude Code configuration,
 and the workspace's own commands, name. niwa runs as the person, and so does
@@ -575,11 +583,27 @@ Bash gets past it.
   `core.fsmonitor`, that make git run a program. Deny writes to every
   directory on that `PATH`, entries inside the workspace root included, to
   those configuration files and every file they include, and to `gh`'s own
-  configuration (`~/.config/gh/`, or `$GH_CONFIG_DIR` when set). The sweep
-  also reads job entries from `~/.claude/jobs/` whatever `CLAUDE_CONFIG_DIR`
-  says, so deny `~/.claude/jobs/` even when that variable is set, creating
-  it included: a listing there with no entry for a worktree's session reads
-  that session as ended.
+  configuration (`~/.config/gh/`, or `$GH_CONFIG_DIR` when set).
+  These git calls also use each repository's own configuration (its
+  `.git/config`, a worktree's `config.worktree`, and every file those
+  include) and the hooks in its hooks directory, as git does, with none of
+  the removal pass's overrides and without its check for keys that name a
+  program. So do the bare `git status` calls `niwa reset` makes in each of
+  the instance's repositories when it runs without `--force`. A key such as
+  `core.fsmonitor`, or a hook script, can make git run a program as the
+  person during a reap, `niwa destroy` or `niwa reset`. The sweep runs in
+  `niwa reap` and in the reaps `niwa create`, `niwa dispatch` and
+  `niwa watch` run first. The agent can write its own instance's
+  repositories, so no entry on this list stops it, and a sandbox doesn't
+  keep an agent from making these commands run a program as you until they
+  move onto the removal pass's git (niwa#577 for the sweep and the destroy
+  scan). Reading an instance's repository configuration and hooks before you
+  run them narrows this but doesn't close it: an agent that is still running
+  can change them after you look.
+  Separately, the sweep reads job entries from `~/.claude/jobs/` whatever
+  `CLAUDE_CONFIG_DIR` says, so deny `~/.claude/jobs/` even when that variable
+  is set, creating it included: a listing there with no entry for a
+  worktree's session reads that session as ended.
 - **The shell startup files, and niwa itself.** A reap the person runs takes
   `PATH`, `HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and
   `NIWA_REAP_IDLE_GRACE` from the shell that starts niwa, and that shell
@@ -621,9 +645,11 @@ part of the configuration as `~/.ssh/config` itself. niwa's credential-helper
 read doesn't follow git's includes, and reads only the plain
 `credential.helper` key. A helper set only in an included file, or under a
 `credential.<url>.helper` key, isn't read: the remote it was needed for reads
-as unreachable, and the unit is kept. A helper set in a repository's own
-configuration keeps the unit too, since `credential.helper` there is a key
-that names a program.
+as unreachable, and the unit is kept. In the removal pass, a helper set in a
+repository's own configuration keeps the unit too, since `credential.helper`
+there is a key that names a program. The worktree sweep and `niwa destroy`'s
+scan make no such check yet: they read a repository's own configuration as
+git does, as the bullet on them above says.
 
 **Without a sandbox there's no boundary.** These places are all outside the
 agent's working directory, but that's only where they are; it doesn't stop a
