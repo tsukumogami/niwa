@@ -224,6 +224,22 @@ person runs takes `PATH`, `HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and
 edits a startup file sets them for every later reap, and one that replaces
 niwa's binary replaces the reap itself.
 
+### 2026-11-24 — No session goes before the unit's keep checks pass
+
+**What changed.** Phase 2 now also delivers the rule that the reap removes
+no Claude session until the unit's keep checks (the on-reap command,
+`PrepareDestroy`, the tombstone re-check) have all passed. The pass's
+`claude rm` step moves after them. Until then, Data Flow step 7's order is
+the one the code runs: `claude rm`, then on-reap, then the tombstone.
+
+**Why.** A check of the guide against the code found that the pass's
+`claude rm` step reaches every stopped Claude session Claude Code still
+lists that any mapping names for the instance, not only the judged one, and
+that it runs before the on-reap command, `PrepareDestroy` and the tombstone
+re-check. A unit one of those later checks keeps can therefore be left with
+its session already removed. Moving the step after them means a kept unit
+keeps its sessions too.
+
 ## Context and Problem Statement
 
 A unit of work in niwa is a session, the instance it runs in, its Claude Code
@@ -3393,6 +3409,10 @@ Deliverables:
   in `runDestroyInstance` by niwa's own removal (Data Flow step 7), with the
   status before each one built by `gitCommand`; `rmtree.go`'s no-follow walk
   ships here, and the trim reuses it in Phase 4.
+- No Claude session removed until the unit's keep checks (the on-reap
+  command, `PrepareDestroy`, the tombstone re-check) have all passed: the
+  pass's `claude rm` step, which reaches every listed, stopped Claude session
+  any mapping names for the instance, moves after them.
 - The job-directory vet in `realRemoveClaudeSession`, the function
   `removeClaudeSessionFunc` points to, so every `claude rm` niwa makes goes
   through it: the pass, `removeOwningSessionsListed` in destroy, and
