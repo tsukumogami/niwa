@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -463,6 +464,49 @@ func TestStatusTakesTheExcludesFileFromTheRecheck(t *testing.T) {
 
 	v := Evaluate(context.Background(), f.unit(), p)
 	keepWith(t, v, "tools/app: untracked files: secret.txt")
+}
+
+// TestReadRepoRepeatsTheIdentityCheck swaps a clone for a symlink after its
+// configuration read passed and before its other reads, and checks readRepo
+// keeps it exactly as the first identity check keeps the same swap, with no
+// git call after the configuration read.
+func TestReadRepoRepeatsTheIdentityCheck(t *testing.T) {
+	f := newFixture(t)
+	p := f.policy(t)
+	w := walkUnit(context.Background(), f.unit(), p)
+	if len(w.repos) != 1 {
+		t.Fatalf("walk found %+v", w)
+	}
+	c := w.repos[0]
+	target := repoTarget{
+		Rel: c.Rel, Base: f.instance, Dirs: repoDirs{GitDir: c.GitDir, WorkTree: c.WorkTree},
+		URL: c.URL, wtInfo: c.wtInfo, gitInfo: c.gitInfo,
+	}
+	var log callLog
+	log.attach(p.Env)
+	rc, _, ok := p.Env.openRepo(context.Background(), target)
+	if !ok {
+		t.Fatal("the configuration read of a clean clone didn't pass")
+	}
+	other := filepath.Join(t.TempDir(), "app")
+	gitRun(t, t.TempDir(), "clone", "-q", f.remoteURL, other)
+	if err := os.Rename(f.clone, f.clone+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, f.clone); err != nil {
+		t.Fatal(err)
+	}
+	got := p.Env.readRepo(context.Background(), target, repoPolicy{}, rc)
+	if calls := log.in(c.GitDir); strings.Join(calls, ",") != "config" {
+		t.Errorf("git calls in the repository %v; want the configuration read alone", calls)
+	}
+	want := p.Env.checkRepo(context.Background(), target, repoPolicy{})
+	if len(got.keeps) != 1 || !strings.Contains(got.keeps[0].Evidence, "changed since the walk") {
+		t.Fatalf("keeps %+v; want the swapped clone kept", got.keeps)
+	}
+	if !reflect.DeepEqual(got.keeps, want.keeps) || !reflect.DeepEqual(got.classes, want.classes) || got.configRead != want.configRead {
+		t.Fatalf("readRepo kept %+v %+v; the first identity check keeps %+v %+v", got.keeps, got.classes, want.keeps, want.classes)
+	}
 }
 
 func TestRecheckConfig(t *testing.T) {
