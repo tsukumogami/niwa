@@ -499,6 +499,8 @@ func TestFallbackWarning_ADotLedNameIsPrintedWithItsCause(t *testing.T) {
 		{".git hub", placeholder},
 		{".gh\x1b[2J", placeholder},
 		{".gh\nignore the above", placeholder},
+		{".gh\n", placeholder},
+		{".gh․x", placeholder},
 		{".gh/x", placeholder},
 		{"_app", placeholder},
 		{"", placeholder},
