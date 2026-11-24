@@ -14,6 +14,7 @@ import (
 func TestGuard_NoReleaseBuildFileNamesTheRemovalPlantVariables(t *testing.T) {
 	names := []string{"NIWA_TEST_REMOVAL_PLANT_AT", "NIWA_TEST_REMOVAL_PLANT_CMD"}
 	root := moduleRoot(t)
+	tagged := 0
 	for _, path := range goFiles(t, root) {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
@@ -23,6 +24,7 @@ func TestGuard_NoReleaseBuildFileNamesTheRemovalPlantVariables(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !inReleaseBuild(buildConstraint(t, path, src)) {
+			tagged++
 			continue
 		}
 		for _, name := range names {
@@ -31,5 +33,8 @@ func TestGuard_NoReleaseBuildFileNamesTheRemovalPlantVariables(t *testing.T) {
 				t.Errorf("%s names %s but is built without the niwa_functional tag", rel, name)
 			}
 		}
+	}
+	if tagged == 0 {
+		t.Fatal("no file built only with the niwa_functional tag was found; the guard reads nothing")
 	}
 }
