@@ -54,6 +54,24 @@ Feature: niwa reap refuses repository configuration that names a program
     And no marker-writing script ran
 
   @critical
+  Scenario: niwa reap and its verdicts run neither the hooks nor the pager a repository names on their own
+    Given a fake claude for dispatch with session "c7c7c7c7-c7c7-4c7c-8c7c-c7c7c7c7c712"
+    When I run "niwa dispatch config-hooks-pager --detach" from the workspace root
+    Then the exit code is 0
+    And a dispatch instance was created with a well-formed instance file
+    When repo "tools/myapp" of the dispatch instance sets "core.hooksPath" to a marker-writing script
+    And repo "tools/myapp" of the dispatch instance sets "core.pager" to a marker-writing script
+    And the dispatch session "c7c7c7c7-c7c7-4c7c-8c7c-c7c7c7c7c712" is deleted from the Agent View
+    And I run "niwa reap --verdict-only" from the workspace root
+    Then the exit code is 0
+    And the output gives the dispatch instance the verdict "reap"
+    And no marker-writing script ran
+    When I run niwa reap from the workspace root
+    Then the exit code is 0
+    And the dispatch instance no longer exists
+    And no marker-writing script ran
+
+  @critical
   Scenario: a filter driver in a repository's configuration keeps the unit with the key named
     Given a fake claude for dispatch with session "c7c7c7c7-c7c7-4c7c-8c7c-c7c7c7c7c702"
     When I run "niwa dispatch config-filter --detach" from the workspace root
