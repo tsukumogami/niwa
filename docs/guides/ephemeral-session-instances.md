@@ -592,11 +592,12 @@ Bash gets past it.
   the instance's repositories when it runs without `--force`. A repository
   setting or hook that names a program can make these git calls run it as
   the person. The agent can write its own instance's repositories, so no
-  entry on this list stops it, and today a sandbox doesn't keep an agent
-  from doing so; niwa#577 tracks moving the sweep and the destroy scan onto
-  the removal pass's git. Reading an instance's repository configuration and hooks before you
-  run them narrows this but doesn't close it: an agent that is still running
-  can change them after you look.
+  entry on this list stops it from planting one, and today a sandbox doesn't
+  either; niwa#577 tracks moving the sweep and the destroy scan onto the
+  removal pass's git. Reading an instance's repository configuration and
+  hooks before you run a reap, `niwa destroy` or `niwa reset` narrows this
+  but doesn't close it: an agent that is still running can change them after
+  you look.
   Separately, the sweep reads job entries from `~/.claude/jobs/` whatever
   `CLAUDE_CONFIG_DIR` says, so deny `~/.claude/jobs/` even when that variable
   is set, creating it included: a listing there with no entry for a
