@@ -1,16 +1,21 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tsukumogami/niwa/internal/agent"
+	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/watch"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -81,8 +86,9 @@ type claudeSessionLister func(context.Context) ([]claudeSessionRow, error)
 
 // listClaudeSessionsOnce returns a lister that asks listClaudeSessionsFunc on
 // its first call and hands every later call the same answer, error included,
-// so one destroy lists Claude Code's sessions at most once.
-func listClaudeSessionsOnce() claudeSessionLister {
+// so one destroy lists Claude Code's sessions at most once. The call carries
+// cc, so claude runs from cc's checked empty directory.
+func listClaudeSessionsOnce(cc *claudeCalls) claudeSessionLister {
 	var (
 		done bool
 		rows []claudeSessionRow
@@ -91,6 +97,9 @@ func listClaudeSessionsOnce() claudeSessionLister {
 	return func(ctx context.Context) ([]claudeSessionRow, error) {
 		if !done {
 			done = true
+			if cc != nil {
+				ctx = withClaudeCalls(ctx, cc)
+			}
 			rows, err = listClaudeSessionsFunc(ctx)
 		}
 		return rows, err
@@ -100,41 +109,274 @@ func listClaudeSessionsOnce() claudeSessionLister {
 const (
 	claudeListTimeout   = 30 * time.Second
 	claudeRemoveTimeout = 60 * time.Second
+	// claudeVetTimeout bounds one job-directory vet. A caller's earlier
+	// deadline, the pass's, bounds it further.
+	claudeVetTimeout = 10 * time.Second
 )
 
-// realListClaudeSessions reads every background session Claude Code knows
-// about, finished ones included.
-func realListClaudeSessions(ctx context.Context) ([]claudeSessionRow, error) {
-	bin, err := exec.LookPath("claude")
-	if err != nil {
-		return nil, errors.New("claude binary not found in PATH")
+// claudeCalls is what the claude calls on the removal paths (the pass,
+// destroy and retask) run with: the environment that resolves claude from
+// the filtered PATH and gives the checked empty directory each call runs
+// from, and the jobs root removal.ResolveJobsRoot gives, which the
+// job-directory vet checks.
+//
+// It travels on the context, so the two claude seams keep their signatures:
+// a call whose context carries none lists the old way (resume and the watch
+// read the listing outside the removal paths) and removes nothing.
+type claudeCalls struct {
+	home     string
+	jobsRoot string
+	// jobsErr is why the jobs root couldn't be resolved; every vet fails
+	// with it.
+	jobsErr error
+
+	// root is the workspace root newClaudeCalls was given; its environment
+	// is made on the first claude call, so a command that makes none
+	// creates no scratch directory.
+	root    string
+	envOnce sync.Once
+	env     *removal.Env
+	// owned is set when close should remove env's scratch directory.
+	owned bool
+}
+
+type claudeCallsKey struct{}
+
+// withClaudeCalls returns ctx carrying cc.
+func withClaudeCalls(ctx context.Context, cc *claudeCalls) context.Context {
+	return context.WithValue(ctx, claudeCallsKey{}, cc)
+}
+
+// claudeCallsFrom returns the claudeCalls ctx carries, nil when none.
+func claudeCallsFrom(ctx context.Context) *claudeCalls {
+	cc, _ := ctx.Value(claudeCallsKey{}).(*claudeCalls)
+	return cc
+}
+
+// newClaudeEnvFunc resolves the claude environment for destroy and retask.
+// A variable so a test can point it at a fake claude.
+var newClaudeEnvFunc = func(root, home, pathEnv string) *removal.Env {
+	return removal.NewClaudeEnv(root, home, pathEnv)
+}
+
+// newClaudeCalls makes the claudeCalls for one destroy or retask in the
+// workspace at root: the jobs root resolved once through
+// removal.ResolveJobsRoot, and, on the first claude call, its own scratch
+// directory under ~/.niwa/w-<key>/scratch/. close removes that directory.
+func newClaudeCalls(root string) *claudeCalls {
+	home, homeErr := os.UserHomeDir()
+	cc := &claudeCalls{home: home, root: root, owned: true}
+	if homeErr != nil {
+		cc.jobsErr = fmt.Errorf("the home directory can't be resolved: %v", homeErr)
+	} else {
+		cc.jobsRoot, cc.jobsErr = removal.ResolveJobsRoot(os.LookupEnv, home)
 	}
+	return cc
+}
+
+// passClaudeCalls is the pass's claudeCalls: its environment and its jobs
+// root, both already resolved for the pass, which closes the environment
+// itself.
+func passClaudeCalls(env *removal.Env, jobsRoot string) *claudeCalls {
+	cc := &claudeCalls{env: env, home: userHomeDir(), jobsRoot: jobsRoot}
+	cc.envOnce.Do(func() {})
+	return cc
+}
+
+// environment returns the environment claude calls run with, making it on
+// the first call.
+func (cc *claudeCalls) environment() *removal.Env {
+	cc.envOnce.Do(func() {
+		cc.env = newClaudeEnvFunc(cc.root, cc.home, os.Getenv("PATH"))
+	})
+	return cc.env
+}
+
+// command builds one claude call through the environment.
+func (cc *claudeCalls) command(ctx context.Context, args ...string) (*exec.Cmd, error) {
+	return cc.environment().ClaudeCommand(ctx, args...)
+}
+
+// close removes the scratch directory newClaudeCalls made, when a claude
+// call made one.
+func (cc *claudeCalls) close() {
+	if cc == nil || !cc.owned {
+		return
+	}
+	cc.envOnce.Do(func() {})
+	cc.env.Close()
+}
+
+// vet runs the job-directory vet on session id's own job directory under
+// its own 10-second context, cut shorter by ctx's deadline.
+func (cc *claudeCalls) vet(ctx context.Context, id string) error {
+	if cc.jobsErr != nil {
+		return cc.jobsErr
+	}
+	ctx, cancel := context.WithTimeout(ctx, claudeVetTimeout)
+	defer cancel()
+	return removal.VetJobDir(ctx, cc.jobsRoot, cc.home, id)
+}
+
+// realListClaudeSessions reads every background session Claude Code knows
+// about, finished ones included. With claudeCalls on ctx, claude runs by
+// its absolute path from the filtered PATH, from the checked empty
+// directory; without, as found on PATH from niwa's own directory.
+func realListClaudeSessions(ctx context.Context) ([]claudeSessionRow, error) {
 	ctx, cancel := context.WithTimeout(ctx, claudeListTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, bin, "agents", "--json", "--all").Output()
+	var cmd *exec.Cmd
+	if cc := claudeCallsFrom(ctx); cc != nil {
+		c, err := cc.command(ctx, "agents", "--json", "--all")
+		if err != nil {
+			return nil, fmt.Errorf("claude agents: %w", err)
+		}
+		cmd = c
+	} else {
+		bin, err := exec.LookPath("claude")
+		if err != nil {
+			return nil, errors.New("claude binary not found in PATH")
+		}
+		cmd = exec.CommandContext(ctx, bin, "agents", "--json", "--all")
+	}
+	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("claude agents timed out after %s", claudeListTimeout)
+		}
 		return nil, fmt.Errorf("claude agents: %w", err)
 	}
-	var rows []claudeSessionRow
-	if err := json.Unmarshal(out, &rows); err != nil {
+	return decodeClaudeRows(out)
+}
+
+// decodeClaudeRows decodes claude agents --json --all output strictly: one
+// JSON array of objects, no null row, nothing after it, and every field
+// niwa reads of its expected type. Anything else is an error, which no
+// caller reads as an empty listing.
+func decodeClaudeRows(out []byte) ([]claudeSessionRow, error) {
+	dec := json.NewDecoder(bytes.NewReader(out))
+	var raw []json.RawMessage
+	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("reading claude agents output: %w", err)
+	}
+	if raw == nil {
+		return nil, errors.New("reading claude agents output: not a list")
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("reading claude agents output: more after the list")
+	}
+	rows := make([]claudeSessionRow, 0, len(raw))
+	for i, r := range raw {
+		if t := bytes.TrimSpace(r); len(t) == 0 || t[0] != '{' {
+			return nil, fmt.Errorf("reading claude agents output: row %d is not an object", i)
+		}
+		var row claudeSessionRow
+		if err := json.Unmarshal(r, &row); err != nil {
+			return nil, fmt.Errorf("reading claude agents output: row %d: %w", i, err)
+		}
+		rows = append(rows, row)
 	}
 	return rows, nil
 }
 
 // realRemoveClaudeSession runs `claude rm <id>` and returns its combined
-// output. It never passes --discard-unpushed or --force-remove-worktree: when
-// Claude Code refuses to delete a session's worktree, that refusal stands and
-// is reported, rather than niwa overriding it.
+// output. It is the only place niwa issues claude rm, and it runs only with
+// claudeCalls on ctx: right before the call it vets the session's own job
+// directory, and on a failure makes no call and returns the failing path as
+// the reason. claude runs by its absolute path from the filtered PATH, from
+// the checked empty directory. It never passes --discard-unpushed or
+// --force-remove-worktree: when Claude Code refuses to delete a session's
+// worktree, that refusal stands and is reported, rather than niwa
+// overriding it. A call that exits non-zero or times out returns an error
+// with Claude Code's message, and the caller keeps what it would have
+// removed.
 func realRemoveClaudeSession(ctx context.Context, id string) (string, error) {
-	bin, err := exec.LookPath("claude")
-	if err != nil {
-		return "", errors.New("claude binary not found in PATH")
+	cc := claudeCallsFrom(ctx)
+	if cc == nil {
+		return "", errors.New("no checked directory to run claude rm from")
+	}
+	if !watch.IsSafeHandle(id) {
+		return "", fmt.Errorf("claude reported an unusable id %q", id)
+	}
+	if err := cc.vet(ctx, id); err != nil {
+		return "", err
 	}
 	ctx, cancel := context.WithTimeout(ctx, claudeRemoveTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, bin, "rm", id).CombinedOutput()
-	return string(out), err
+	cmd, err := cc.command(ctx, "rm", id)
+	if err != nil {
+		return "", err
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := firstLine(string(out), err)
+		if ctx.Err() != nil {
+			msg = fmt.Sprintf("timed out after %s", claudeRemoveTimeout)
+		}
+		return string(out), fmt.Errorf("claude rm %s: %s", id, msg)
+	}
+	return string(out), nil
+}
+
+// listedRemovals is the sessions among owners that a removal will pass to
+// claude rm: each one rows lists, by its full session id. A listed session
+// that is running, or that Claude Code lists under an id niwa won't pass to
+// a command, is returned in refused with why, and is passed to no claude
+// rm. A session absent from the listing is in neither.
+func listedRemovals(owners []workspace.SessionMapping, rows []claudeSessionRow) (remove []claudeSessionRow, refused []string) {
+	byID := make(map[string]claudeSessionRow, len(rows))
+	for _, r := range rows {
+		if r.SessionID != "" {
+			byID[r.SessionID] = r
+		}
+	}
+	seen := map[string]bool{}
+	for _, m := range owners {
+		row, listed := byID[m.SessionID]
+		if !listed || seen[m.SessionID] {
+			continue
+		}
+		seen[m.SessionID] = true
+		switch {
+		case !watch.IsSafeHandle(row.ID):
+			refused = append(refused, fmt.Sprintf("Claude session %s: claude reported an unusable id %q", m.SessionID, row.ID))
+		case row.running():
+			refused = append(refused, fmt.Sprintf("Claude session %s is still running", row.ID))
+		default:
+			remove = append(remove, row)
+		}
+	}
+	return remove, refused
+}
+
+// vetBeforeRemoval is the job-directory vet of every session a removal will
+// pass to claude rm, run before its first removal step. It returns the
+// first failure, naming the session and the path.
+func vetBeforeRemoval(ctx context.Context, cc *claudeCalls, sessions []claudeSessionRow) error {
+	for _, s := range sessions {
+		if err := cc.vet(ctx, s.ID); err != nil {
+			return fmt.Errorf("the job directory of Claude session %s failed its check: %w", s.ID, err)
+		}
+	}
+	return nil
+}
+
+// vetDestroySessions is destroy's vet before its first removal step: every
+// mapped Claude session of instanceDirs that the listing holds and that
+// removeOwningSessionsListed will pass to claude rm has its job directory
+// vetted. A listing or a session store that can't be read passes no session
+// to claude rm, so it vets none; removeOwningSessionsListed reports it.
+func vetDestroySessions(ctx context.Context, cc *claudeCalls, workspaceRoot string, instanceDirs []string, list claudeSessionLister) error {
+	owners := owningClaudeMappings(workspace.NewReporter(io.Discard), workspaceRoot, instanceDirs)
+	if len(owners) == 0 {
+		return nil
+	}
+	rows, err := list(ctx)
+	if err != nil {
+		return nil
+	}
+	remove, _ := listedRemovals(owners, rows)
+	return vetBeforeRemoval(ctx, cc, remove)
 }
 
 // removeOwningSessions removes the Claude Code background sessions that own
@@ -174,19 +416,21 @@ func realRemoveClaudeSession(ctx context.Context, id string) (string, error) {
 // instance directory is removed, while Claude Code can still inspect any
 // worktree the session made inside it.
 func removeOwningSessions(reporter *workspace.Reporter, workspaceRoot string, instanceDirs []string) {
-	removeOwningSessionsListed(reporter, workspaceRoot, instanceDirs, listClaudeSessionsFunc)
+	removeOwningSessionsListed(context.Background(), reporter, workspaceRoot, instanceDirs, listClaudeSessionsFunc)
 }
 
 // removeOwningSessionsListed is removeOwningSessions reading the sessions
 // through list, so a destroy whose preflight already listed them doesn't ask
-// Claude Code twice.
-func removeOwningSessionsListed(reporter *workspace.Reporter, workspaceRoot string, instanceDirs []string, list claudeSessionLister) {
+// Claude Code twice. Each claude rm gets ctx, which carries the claudeCalls
+// it runs with; a failure, the job-directory vet's included, is reported
+// with its reason scrubbed and keeps the session and its mapping.
+func removeOwningSessionsListed(ctx context.Context, reporter *workspace.Reporter, workspaceRoot string, instanceDirs []string, list claudeSessionLister) {
 	owners := owningClaudeMappings(reporter, workspaceRoot, instanceDirs)
 	if len(owners) == 0 {
 		return
 	}
 
-	rows, err := list(context.Background())
+	rows, err := list(ctx)
 	if err != nil {
 		reporter.Warn("could not check the Claude sessions these instances own (%v); left them in place", err)
 		return
@@ -220,9 +464,9 @@ func removeOwningSessionsListed(reporter *workspace.Reporter, workspaceRoot stri
 			reporter.Log("kept Claude session %s: it is still running; once it stops (claude stop %s), remove it with claude rm %s", row.ID, row.ID, row.ID)
 			continue
 		}
-		out, err := removeClaudeSessionFunc(context.Background(), row.ID)
+		out, err := removeClaudeSessionFunc(ctx, row.ID)
 		if err != nil {
-			reporter.Warn("could not remove Claude session %s: %s; remove it with claude rm %s", row.ID, firstLine(out, err), row.ID)
+			reporter.Warn("could not remove Claude session %s: %s; remove it with claude rm %s", row.ID, removal.ScrubEvidence(firstLine(out, err), 400), row.ID)
 			continue
 		}
 		reporter.Log("removed Claude session %s; its transcript is kept: claude --resume %s", row.ID, m.SessionID)
@@ -239,6 +483,12 @@ func owningClaudeMappings(reporter *workspace.Reporter, workspaceRoot string, in
 		reporter.Warn("could not read the session store (%v); left any Claude sessions these instances own in place", err)
 		return nil
 	}
+	return claudeOwners(mappings, instanceDirs)
+}
+
+// claudeOwners returns the Claude session mappings among mappings that name
+// one of instanceDirs.
+func claudeOwners(mappings []workspace.SessionMapping, instanceDirs []string) []workspace.SessionMapping {
 	dirs := make(map[string]bool, len(instanceDirs))
 	for _, d := range instanceDirs {
 		dirs[filepath.Clean(d)] = true

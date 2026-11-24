@@ -26,11 +26,18 @@ import (
 //     repository the walk found read again and compared with what the rule
 //     read, then a snapshot of each one's refs, HEADs and stashes and a
 //     hash of every record under .niwa;
+//     Then the sessions the pass will pass to claude rm: the unit's mapped
+//     Claude sessions that the pass's one claude agents listing holds. A
+//     listing that failed, a listed session that is still running, or a
+//     job directory that fails its vet keeps the unit, before anything is
+//     moved or removed;
 //  3. the worktrees inside the instance (none are removed yet: a later
 //     change removes them here, each after a fresh read of its HEAD and
 //     refs matches the snapshot, and names them to the tombstone check);
-//  4. the sessions (none are removed yet: the point right before each
-//     claude rm, where a check can still keep the unit, is here);
+//  4. the sessions: claude rm on each, through removeClaudeSessionFunc,
+//     which vets the session's job directory again right before the call.
+//     A session absent from the listing gets no call. Any failure keeps the
+//     unit;
 //  5. the on-reap command, for a mapped unit, its result held;
 //  6. the destroy prepared on the instance's own path;
 //  7. the tombstone lock, taken shared without blocking;
@@ -41,8 +48,9 @@ import (
 //  11. the release of the tombstone lock, then the mapping's settlement.
 //
 // A refusal at any step keeps the unit with one "niwa: kept" line naming
-// the step and why. Nothing is moved or removed before step 8, and a kept
-// unit's mapping is left exactly as it was.
+// the step and why. Nothing in the instance is moved or removed before step
+// 8, nothing at all before step 4, and a kept unit's mapping is left
+// exactly as it was.
 
 // removeTombstoneFunc removes a unit's tombstone through the destroy the
 // pass prepared on the instance's own path. A variable so a test can stand
@@ -107,6 +115,20 @@ type passActor struct {
 	// attributed is every instance a setup call named, the ones the
 	// listing is attributed to.
 	attributed []string
+
+	// claude is what the pass's claude calls run with: its environment and
+	// its jobs root. sessions is the pass's one claude agents listing,
+	// shared by every copy of the actor.
+	claude   *claudeCalls
+	sessions *passSessions
+}
+
+// passSessions is a pass's one `claude agents --json --all` listing, taken
+// when the first unit with a mapped Claude session reaches its session step.
+type passSessions struct {
+	listed bool
+	rows   []claudeSessionRow
+	err    error
 }
 
 // setup prepares the units of one stage of the pass. The rule's environment
@@ -125,6 +147,8 @@ func (a *passActor) setup(ctx context.Context, instances []string) {
 		a.policy.ConfigError = a.cfgErr
 		a.policy.JobsRoot = a.jobsDir
 		a.policy.Processes = listProcessesFunc(ctx, a.env)
+		a.claude = passClaudeCalls(a.env, a.jobsDir)
+		a.sessions = &passSessions{}
 	}
 	a.policy.Processes.Attribute(a.attributed, nil)
 }
@@ -230,13 +254,26 @@ func (a *passActor) actReap(t passUnit, unit removal.Unit, v removal.Verdict, st
 		return keep(changedReason(diffs))
 	}
 
+	// The sessions the pass will pass to claude rm, each one's job directory
+	// vetted before the first removal step, the worktrees below.
+	sessions, reason := a.sessionsToRemove(t)
+	if reason != "" {
+		return keep(reason)
+	}
+
 	// The worktrees inside the instance. None are removed yet; the ones a
 	// later change removes here are named in lost, the entries the
 	// tombstone check lets be gone.
 	var lost []string
 
-	// The sessions. The reap removes none yet; the point right before each
-	// claude rm, where a check can still keep the unit, is here.
+	// The sessions. Each claude rm goes through removeClaudeSessionFunc,
+	// which vets the session's job directory again right before the call
+	// and makes none when that fails.
+	for _, s := range sessions {
+		if out, err := removeClaudeSessionFunc(withClaudeCalls(a.ctx, a.claude), s.ID); err != nil {
+			return keep(fmt.Sprintf("Claude session %s was not removed: %s", s.ID, firstLine(out, err)))
+		}
+	}
 
 	// The on-reap command, for a mapped unit. A failed run isn't a refusal:
 	// it has printed its warning, and the mapping settled after the removal
@@ -335,6 +372,48 @@ func (a *passActor) reread(t passUnit, v removal.Verdict) (removal.Snapshot, []s
 	snap := a.env.TakeSnapshot(a.ctx, v, t.InstancePath, t.InstancePath, nil)
 	diffs = append(diffs, snap.RuleDifferences(v)...)
 	return snap, diffs
+}
+
+// sessionsToRemove is the unit's session step up to its claude rm calls: the
+// unit's mapped Claude sessions, read from the session store now, that the
+// pass's one claude agents listing holds, each with its job directory
+// vetted under the pass's deadline. It returns those sessions, or the reason
+// the unit keeps: a store or listing that can't be read, a listed session
+// that is still running or listed under an unusable id, or a vet that
+// fails. A unit with no mapped Claude session has none to remove and asks
+// for no listing.
+func (a *passActor) sessionsToRemove(t passUnit) ([]claudeSessionRow, string) {
+	mappings, err := workspace.ListSessionMappings(a.root)
+	if err != nil {
+		return nil, "the session store can't be read, so the sessions to remove are unknown: " + err.Error()
+	}
+	owners := claudeOwners(mappings, []string{t.InstancePath})
+	if len(owners) == 0 {
+		return nil, ""
+	}
+	rows, err := a.claudeListing()
+	if err != nil {
+		return nil, "Claude Code's sessions could not be listed: " + err.Error()
+	}
+	remove, refused := listedRemovals(owners, rows)
+	if len(refused) > 0 {
+		return nil, refused[0]
+	}
+	if err := vetBeforeRemoval(a.ctx, a.claude, remove); err != nil {
+		return nil, err.Error()
+	}
+	return remove, ""
+}
+
+// claudeListing is the pass's one claude agents listing, taken on the first
+// call and handed, error included, to every later one.
+func (a *passActor) claudeListing() ([]claudeSessionRow, error) {
+	s := a.sessions
+	if !s.listed {
+		s.listed = true
+		s.rows, s.err = listClaudeSessionsFunc(withClaudeCalls(a.ctx, a.claude))
+	}
+	return s.rows, s.err
 }
 
 // instanceForms is the instance's path as given and, when it differs, with

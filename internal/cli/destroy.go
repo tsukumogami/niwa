@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/tui"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -74,6 +76,16 @@ owns it (the one niwa recorded when it provisioned or dispatched into the
 instance), with ` + "`claude rm`" + `. Claude Code keeps the session's transcript, so
 ` + "`claude --resume <session-id>`" + ` still opens it. Use --keep-session to keep the
 session.
+
+Before it removes anything, destroy checks the job directory of every session
+it will pass to claude rm, under the jobs root Claude Code uses
+($CLAUDE_CONFIG_DIR/jobs, or ~/.claude/jobs): the jobs root and the job
+directory must be real directories you own, with no group or other write
+permission, on one device and reached through no link below your home
+directory, and nothing in the job directory may be a link, pipe, socket or
+device. Any failure, an invalid CLAUDE_CONFIG_DIR included, stops destroy
+with the path named and removes nothing; --force doesn't skip it. Every
+claude call destroy makes runs from an empty directory under ~/.niwa.
 
 Before any prompt, destroy refuses an instance something still needs: a
 session niwa mapped to it that Claude Code lists as running, or the
@@ -200,9 +212,16 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingP
 	}
 	defer release()
 
+	// Every claude call destroy makes runs from an empty directory under
+	// ~/.niwa/w-<key>/scratch/, and every claude rm waits on the vet of the
+	// session's job directory under the jobs root ResolveJobsRoot gives.
+	cc := newClaudeCalls(workspaceRoot)
+	defer cc.close()
+	ctx := withClaudeCalls(context.Background(), cc)
+
 	// Before any prompt: a running session or the pre-removal command keeps
 	// the instance unless --force overrides them, and then each is named.
-	listSessions := listClaudeSessionsOnce()
+	listSessions := listClaudeSessionsOnce(cc)
 	if kept := destroyPreflight(workspaceRoot, []string{instanceDir}, removeStepDestroy, listSessions); len(kept) > 0 {
 		reportDestroyKept(cmd.ErrOrStderr(), kept, force)
 		if !force {
@@ -232,9 +251,19 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingP
 		}
 	}
 
+	// Before the first removal step, the job directory of every session
+	// destroy will pass to claude rm is vetted; a failure stops destroy with
+	// the instance and every session in place. --force doesn't skip it: what
+	// it guards lies outside the instance. --keep-session passes no session.
+	if !destroyKeepSession {
+		if err := vetDestroySessions(ctx, cc, workspaceRoot, []string{instanceDir}, listSessions); err != nil {
+			return fmt.Errorf("nothing was destroyed: %s", removal.ScrubEvidence(err.Error(), 400))
+		}
+	}
+
 	reporter := workspace.NewReporter(cmd.ErrOrStderr())
 	if !destroyKeepSession {
-		removeOwningSessionsListed(reporter, workspaceRoot, []string{instanceDir}, listSessions)
+		removeOwningSessionsListed(ctx, reporter, workspaceRoot, []string{instanceDir}, listSessions)
 	}
 
 	if err := workspace.DestroyInstance(workspaceRoot, instanceDir,
@@ -464,7 +493,10 @@ func runDestroyWorkspace(cmd *cobra.Command, workspaceRoot, confirm string) erro
 	// Before the scan and any prompt: the workspace goes whole or not at all,
 	// so one instance something still needs refuses all of it. --workspace
 	// takes no --force, so there is nothing to override this with.
-	listSessions := listClaudeSessionsOnce()
+	cc := newClaudeCalls(workspaceRoot)
+	defer cc.close()
+	ctx := withClaudeCalls(context.Background(), cc)
+	listSessions := listClaudeSessionsOnce(cc)
 	if kept := destroyPreflight(workspaceRoot, instances, removeStepDestroyWorkspace, listSessions); len(kept) > 0 {
 		reportDestroyKept(cmd.ErrOrStderr(), kept, false)
 		return fmt.Errorf("nothing was destroyed; %d instance(s) are still needed (destroy the others by name, or run niwa destroy --workspace again once nothing needs them)", len(kept))
@@ -520,9 +552,17 @@ func runDestroyWorkspace(cmd *cobra.Command, workspaceRoot, confirm string) erro
 		return fmt.Errorf("nothing was destroyed: %v; run niwa destroy --workspace again once it is done", err)
 	}
 
+	// Every instance's sessions are vetted before the first removal step; a
+	// failure on any stops the whole destroy with nothing removed.
+	if !destroyKeepSession {
+		if err := vetDestroySessions(ctx, cc, workspaceRoot, instances, listSessions); err != nil {
+			return fmt.Errorf("nothing was destroyed: %s", removal.ScrubEvidence(err.Error(), 400))
+		}
+	}
+
 	reporter := workspace.NewReporter(cmd.ErrOrStderr())
 	if !destroyKeepSession {
-		removeOwningSessionsListed(reporter, workspaceRoot, instances, listSessions)
+		removeOwningSessionsListed(ctx, reporter, workspaceRoot, instances, listSessions)
 	}
 
 	// Only the locked, checked list is removed, and the root stays while

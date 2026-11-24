@@ -545,26 +545,10 @@ func removalPolicy(cfg *config.WorkspaceConfig, env *removal.Env) removal.Policy
 
 // jobDirFor is the job directory of a session under jobsDir: the directory
 // named by its full id, or else the one whose name is a leading slice of the
-// id, the layout Claude Code writes. Empty when the session has none.
+// id, the layout Claude Code writes. Empty when the session has none. The
+// job-directory vet finds a session's directory the same way.
 func jobDirFor(jobsDir, sessionID string) string {
-	if jobsDir == "" || sessionID == "" || strings.ContainsAny(sessionID, `/\`) {
-		return ""
-	}
-	full := filepath.Join(jobsDir, sessionID)
-	if _, err := os.Lstat(full); err == nil {
-		return full
-	}
-	entries, err := os.ReadDir(jobsDir)
-	if err != nil {
-		return ""
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if len(name) >= 8 && len(name) <= len(sessionID) && sessionID[:len(name)] == name {
-			return filepath.Join(jobsDir, name)
-		}
-	}
-	return ""
+	return removal.JobDirFor(jobsDir, sessionID)
 }
 
 // cloneURLsFromConfig returns the clone URL the workspace configuration

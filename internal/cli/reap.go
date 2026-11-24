@@ -129,6 +129,14 @@ turned off, and the instance is left exactly as it was. One reap takes at
 most 30 seconds over these checks; an instance it doesn't reach in time is
 left for the next one.
 
+A mapped Claude session that Claude Code still lists (claude agents, read
+once per reap) goes with its instance, through claude rm. Before anything is
+removed, each such session's job directory under the jobs root
+($CLAUDE_CONFIG_DIR/jobs, or ~/.claude/jobs) is checked the way niwa destroy
+checks it, and again right before its claude rm; a failure, a session still
+running, or a listing that fails keeps the instance with the reason named.
+Every claude call runs from an empty directory under ~/.niwa.
+
 An instance that passes is checked again right before it goes: reap reads
 its session, its processes and every repository again, renames the
 instance to <root>/.niwa-tombstone-<instance>-<hex>, and repeats the
