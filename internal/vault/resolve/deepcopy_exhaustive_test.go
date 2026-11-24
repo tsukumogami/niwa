@@ -187,3 +187,36 @@ func TestDeepCopySession_DispatchProfilesAreIndependent(t *testing.T) {
 		t.Error("a config with no profiles came back with a non-nil map")
 	}
 }
+
+// TestDeepCopySession_WindowAndDefaultAreCopied: the resolver's copy of
+// [session] keeps a profile's auto_compact_window and the
+// default_dispatch_profile, and changing either on the copy leaves the
+// original alone.
+func TestDeepCopySession_WindowAndDefaultAreCopied(t *testing.T) {
+	in := config.SessionConfig{
+		DefaultDispatchProfile: "worker",
+		DispatchProfiles: map[string]config.SessionDispatchProfile{
+			"worker": {AutoCompactWindow: config.NewAutoCompactWindow(400000)},
+		},
+	}
+
+	out := deepCopySession(in)
+
+	if out.DefaultDispatchProfile != "worker" {
+		t.Errorf("DefaultDispatchProfile = %q, want worker", out.DefaultDispatchProfile)
+	}
+	if got, ok := out.DispatchProfiles["worker"].AutoCompactWindow.Value(); !ok || got != 400000 {
+		t.Fatalf("copied window = %d, %v; want 400000", got, ok)
+	}
+
+	p := out.DispatchProfiles["worker"]
+	p.AutoCompactWindow = config.NewAutoCompactWindow(200000)
+	out.DispatchProfiles["worker"] = p
+	out.DefaultDispatchProfile = "other"
+	if got, _ := in.DispatchProfiles["worker"].AutoCompactWindow.Value(); got != 400000 {
+		t.Errorf("changing the copy's window changed the original to %d", got)
+	}
+	if in.DefaultDispatchProfile != "worker" {
+		t.Errorf("changing the copy's default changed the original to %q", in.DefaultDispatchProfile)
+	}
+}
