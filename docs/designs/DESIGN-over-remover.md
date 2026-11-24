@@ -286,11 +286,13 @@ against a job directory changed between the check and the call, and are
 part of the `claude rm` step. A destructive step that fails (the walk
 stopping, that guard or a `claude rm` failing, the tombstone's removal
 failing) still keeps the unit and renames back what is left, touching
-nothing outside it. A session that appears after the last full vet and
-before its `claude rm` therefore keeps the unit after its worktrees are
-gone. Those worktrees were clean, checked and removed unforced, so nothing
-uncommitted is lost, but it is a partial removal of a kept unit, and the
-residual under Permission scope says so. `runDestroyInstance` has no rename, so it
+nothing outside it. A session the pass is about to remove that starts
+running, or whose job directory changes, after the last full vet therefore
+keeps the unit after its worktrees are gone. Those worktrees were clean,
+checked and removed unforced, so nothing uncommitted is lost, but it is a
+partial removal of a kept unit. A session that appears under another id in
+that gap isn't seen by the per-call guard, which checks only the session it
+removes; the residual under Permission scope says what happens to it. `runDestroyInstance` has no rename, so it
 runs every worktree's re-check and a fresh status after the scan and the
 vet and before its first removal, then the removals, then the sessions.
 Data Flow step 7, Decision 1's tombstone passage, the Phase 2 deliverable
@@ -4585,14 +4587,25 @@ and nothing else; whatever else `claude rm` removes is Claude Code's own
 and outside the vet. The implementer confirms once what `claude rm`
 removes and whether its delete follows links.
 The full vet and session re-listing that run as the last read before the
-first worktree removal can't see what changes after them. A session that
-appears after that vet and before its `claude rm`, or a job directory that
-changes in that gap, fails the per-call guard and keeps the unit after its
-worktrees are gone. Those worktrees were clean, checked and removed
+first worktree removal can't see what changes after them. A session the
+pass is about to remove that starts running in that gap, or whose job
+directory changes there, fails the per-call guard and keeps the unit after
+its worktrees are gone. Those worktrees were clean, checked and removed
 unforced, so nothing uncommitted is lost, but it is a partial removal of a
 kept unit: the pass renames back what is left, and the unit is listed
-without its worktrees.
-The trim has the same gap in a smaller form: its removal
+without its worktrees. A session that appears under another id after the
+last full vet isn't seen by the per-call guard, which checks only the
+session it removes. By then the rename has moved the instance off its
+original path, so such a session isn't the unit's: the pass takes a unit's
+sessions from the mappings in the workspace's session store whose recorded
+instance path is the unit's original path, and the SessionStart hook and
+`niwa dispatch` write a mapping only for an instance they have just
+provisioned, and `niwa resume` only for one it provisions at its recorded
+path, so none of them maps a session to the tombstone. Whatever such a
+session leaves is for a later pass.
+The trim has the late-write gap the tombstone check leaves, above (a plain
+file written outside every repository after the checks), in a smaller
+form: its removal
 walk stops at a repository it meets, but a plain file written into a build
 tree after the trim's checks is removed with the tree. Later
 hardening would record a manifest of path, size, mtime and ctime for the
