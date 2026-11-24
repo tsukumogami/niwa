@@ -162,8 +162,28 @@ func TestRealRemoveClaudeSessionRefusesWithoutItsCheckedDirectory(t *testing.T) 
 	}
 }
 
+// abcdefSID is the full session id of the session Claude Code lists as
+// abcdef12.
+const abcdefSID = "abcdef12-0000-4000-8000-000000000000"
+
+// listedForRemoval stands in for the listing realRemoveClaudeSession takes
+// right before claude rm: it returns rows, or err, and fails the test when
+// the call carries no checked directory.
+func listedForRemoval(t *testing.T, err error, rows ...claudeSessionRow) {
+	t.Helper()
+	prev := listClaudeSessionsFunc
+	listClaudeSessionsFunc = func(ctx context.Context) ([]claudeSessionRow, error) {
+		if claudeCallsFrom(ctx) == nil {
+			t.Error("the sessions were listed without the checked directory")
+		}
+		return rows, err
+	}
+	t.Cleanup(func() { listClaudeSessionsFunc = prev })
+}
+
 func TestRealRemoveClaudeSessionVetsThenRunsFromTheScratchDirectory(t *testing.T) {
 	home, _, jobDir := vetHome(t, "abcdef12")
+	listedForRemoval(t, nil, claudeSessionRow{ID: "abcdef12", SessionID: abcdefSID})
 	log := loggingClaude(t, "removed", 0)
 	root := canonicalTempDir(t)
 	cc := newClaudeCalls(root)
@@ -200,6 +220,7 @@ func TestRealRemoveClaudeSessionVetsThenRunsFromTheScratchDirectory(t *testing.T
 
 func TestRealRemoveClaudeSessionReportsClaudesMessage(t *testing.T) {
 	vetHome(t, "abcdef12")
+	listedForRemoval(t, nil, claudeSessionRow{ID: "abcdef12", SessionID: abcdefSID})
 	loggingClaude(t, "error: the worktree of the session holds changes", 1)
 	cc := newClaudeCalls(canonicalTempDir(t))
 	defer cc.close()
@@ -223,6 +244,47 @@ func TestRealRemoveClaudeSessionRefusesAnInvalidConfigDirectory(t *testing.T) {
 	}
 	if got := claudeLog(t, log); got != nil {
 		t.Fatalf("claude ran: %q", got)
+	}
+}
+
+// Right before claude rm, realRemoveClaudeSession lists the sessions again:
+// a session that now reads running, one the listing no longer holds, one
+// listed twice under its id, and a listing that can't be read each refuse,
+// with no claude call, though the job directory is clean.
+func TestRealRemoveClaudeSessionChecksTheListingAgainRightBeforeClaudeRm(t *testing.T) {
+	stopped := claudeSessionRow{ID: "abcdef12", SessionID: abcdefSID}
+	running := stopped
+	running.PID = 4242
+	resumed := stopped
+	resumed.Status = "busy"
+	other := claudeSessionRow{ID: "abcdef12", SessionID: "abcdef12-1111-4111-8111-111111111111"}
+	cases := []struct {
+		name string
+		rows []claudeSessionRow
+		err  error
+		want string
+	}{
+		{"a live pid", []claudeSessionRow{running}, nil, "still running"},
+		{"a status", []claudeSessionRow{resumed}, nil, "still running"},
+		{"gone from the listing", nil, nil, "no longer lists"},
+		{"listed twice under its id", []claudeSessionRow{stopped, other}, nil, "more than one session"},
+		{"a listing that fails", nil, errors.New("claude agents: exit status 2"), "could not be listed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vetHome(t, "abcdef12")
+			listedForRemoval(t, tc.err, tc.rows...)
+			log := loggingClaude(t, "removed", 0)
+			cc := newClaudeCalls(canonicalTempDir(t))
+			defer cc.close()
+			_, err := realRemoveClaudeSession(withClaudeCalls(context.Background(), cc), "abcdef12")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v; want it to say %q", err, tc.want)
+			}
+			if got := claudeLog(t, log); got != nil {
+				t.Fatalf("claude ran: %q", got)
+			}
+		})
 	}
 }
 

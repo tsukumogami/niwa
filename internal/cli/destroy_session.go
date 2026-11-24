@@ -281,7 +281,11 @@ func decodeClaudeRows(out []byte) ([]claudeSessionRow, error) {
 
 // realRemoveClaudeSession runs `claude rm <id>` and returns its combined
 // output. It is the only place niwa issues claude rm, and it runs only with
-// claudeCalls on ctx: right before the call it vets the session's own job
+// claudeCalls on ctx. Right before the call it lists Claude Code's sessions
+// again and refuses a session that now reads running, one the listing no
+// longer holds or holds more than once under id, and any listing that can't
+// be read, since an earlier listing can be stale by then (destroy's waits
+// on its confirmation prompt). It then vets the session's own job
 // directory, and on a failure makes no call and returns the failing path as
 // the reason. claude runs by its absolute path from the filtered PATH, from
 // the checked empty directory. It never passes --discard-unpushed or
@@ -297,6 +301,12 @@ func realRemoveClaudeSession(ctx context.Context, id string) (string, error) {
 	}
 	if !watch.IsSafeHandle(id) {
 		return "", fmt.Errorf("claude reported an unusable id %q", id)
+	}
+	if cc.jobsErr != nil {
+		return "", cc.jobsErr
+	}
+	if _, err := stoppedSessionRow(ctx, id); err != nil {
+		return "", err
 	}
 	if err := cc.vet(ctx, id); err != nil {
 		return "", err
@@ -316,6 +326,32 @@ func realRemoveClaudeSession(ctx context.Context, id string) (string, error) {
 		return string(out), fmt.Errorf("claude rm %s: %s", id, msg)
 	}
 	return string(out), nil
+}
+
+// stoppedSessionRow lists Claude Code's sessions through ctx's claudeCalls
+// and returns the one row listed under id, refusing when the listing can't
+// be read, holds no row or more than one under id, or the row reads
+// running.
+func stoppedSessionRow(ctx context.Context, id string) (claudeSessionRow, error) {
+	rows, err := listClaudeSessionsFunc(ctx)
+	if err != nil {
+		return claudeSessionRow{}, fmt.Errorf("Claude session %s: Claude Code's sessions could not be listed right before claude rm: %v", id, err)
+	}
+	var found []claudeSessionRow
+	for _, r := range rows {
+		if r.ID == id {
+			found = append(found, r)
+		}
+	}
+	switch {
+	case len(found) == 0:
+		return claudeSessionRow{}, fmt.Errorf("Claude Code no longer lists session %s right before claude rm", id)
+	case len(found) > 1:
+		return claudeSessionRow{}, fmt.Errorf("Claude Code lists more than one session under %s right before claude rm", id)
+	case found[0].running():
+		return claudeSessionRow{}, fmt.Errorf("Claude session %s is still running right before claude rm", id)
+	}
+	return found[0], nil
 }
 
 // listedRemovals is the sessions among owners that a removal will pass to
