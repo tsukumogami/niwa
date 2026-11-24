@@ -30,6 +30,17 @@ type GitInvoker interface {
 	CommandContext(ctx context.Context, args ...string) *exec.Cmd
 }
 
+// WorktreeRemover removes a linked worktree inside an instance without git:
+// its work tree, then its admin directory. It is the structural equivalent
+// of the removal package's no-follow walk (removal.NoFollowRemover), which
+// opens every directory relative to its parent without following a link and
+// stops, with the path named, on a link swapped in, another filesystem, a
+// repository inside the tree or a locked worktree. A local interface here
+// keeps this package from importing internal/removal.
+type WorktreeRemover interface {
+	RemoveWorktree(instance, workTree, adminDir string) error
+}
+
 // CreateSessionParams collects the inputs to CreateSession. The struct is
 // what the CLI builds for the `session/<sid>` default and what RunBootstrap
 // builds for the `niwa-bootstrap/<sid>` prefix.
