@@ -724,7 +724,9 @@ func (e *Env) readConfig(ctx context.Context, r repoDirs) (repoConfig, error) {
 
 // partialCloneKey reports whether a setting makes the repository a partial
 // clone: extensions.partialClone naming a remote, or a remote.<name>.promisor
-// that is true.
+// set to any value git doesn't read as false. git reads a nonzero integer
+// such as 2 as true, so only gitFalse's values leave the promisor unset; an
+// empty value counts as set, which is stricter than git.
 func partialCloneKey(key, value string) bool {
 	key = canonicalKey(key)
 	if key == "extensions.partialclone" {
@@ -732,10 +734,33 @@ func partialCloneKey(key, value string) bool {
 	}
 	if rest, ok := strings.CutPrefix(key, "remote."); ok {
 		if name, ok := strings.CutSuffix(rest, ".promisor"); ok && name != "" {
-			return gitTrue(value)
+			return !gitFalse(value)
 		}
 	}
 	return false
+}
+
+// gitFalse reports whether git reads a configuration value as false: false,
+// no or off in any case, or an integer zero, with an optional sign, a 0x
+// prefix and a k, m or g unit. Any other value, an empty one or one with
+// spaces included, isn't false here, so a caller that keeps on a set value
+// keeps on it.
+func gitFalse(v string) bool {
+	s := strings.ToLower(v)
+	switch s {
+	case "false", "no", "off":
+		return true
+	}
+	if s != "" && (s[0] == '+' || s[0] == '-') {
+		s = s[1:]
+	}
+	if s != "" && strings.ContainsRune("kmg", rune(s[len(s)-1])) {
+		s = s[:len(s)-1]
+	}
+	if rest, ok := strings.CutPrefix(s, "0x"); ok {
+		s = rest
+	}
+	return s != "" && strings.Trim(s, "0") == ""
 }
 
 // refusal says why the configuration read keeps a repository, with the key

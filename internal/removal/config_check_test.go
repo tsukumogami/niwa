@@ -638,6 +638,38 @@ func TestPartialCloneKeepsOnAnOlderGit(t *testing.T) {
 	}
 }
 
+// TestAPromisorValueGitDoesNotReadAsFalseKeepsOnAnOlderGit checks that a
+// remote.<name>.promisor set to any value git doesn't read as false makes the
+// repository a partial clone, so it keeps on a git older than 2.45: git reads
+// a nonzero integer such as 2 as true. Only false, no, off and an integer
+// zero leave it unset. An empty value counts as set, which is stricter than
+// git.
+func TestAPromisorValueGitDoesNotReadAsFalseKeepsOnAnOlderGit(t *testing.T) {
+	for _, value := range []string{"2", "-1", "10k", "true", "yes", "on", "", "maybe", "0x", " 0", "0 "} {
+		if !partialCloneKey("remote.origin.promisor", value) {
+			t.Errorf("remote.origin.promisor=%q reads as unset; want set", value)
+		}
+	}
+	for _, value := range []string{"false", "FALSE", "No", "off", "0", "00", "-0", "+0", "0x0", "0X00", "0k", "0M", "0g"} {
+		if partialCloneKey("remote.origin.promisor", value) {
+			t.Errorf("remote.origin.promisor=%q reads as set; want unset", value)
+		}
+	}
+
+	f := checkedOut(t)
+	gitRun(t, f.clone, "config", "remote.origin.promisor", "2")
+	gitDir := filepath.Join(f.clone, ".git")
+	p := f.policy(t)
+	p.Env.gitVersion = gitVersion{2, 44}
+	var log callLog
+	log.attach(p.Env)
+	v := Evaluate(context.Background(), f.unit(), p)
+	keepWith(t, v, "tools/app: partial clone needs git 2.45: remote.origin.promisor")
+	if got := log.in(gitDir); strings.Join(got, ",") != "config" {
+		t.Errorf("git calls in the repository %v; want the configuration read alone", got)
+	}
+}
+
 // TestPartialCloneRefusalRunsAgainBeforeTheReadsOnAnOlderGit fakes an older
 // git and plants a partial-clone key after the repository's first
 // configuration read, and checks the unit keeps before any later call in it.
