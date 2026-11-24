@@ -409,6 +409,38 @@ func TestRecheckBeforeTheSnapshotsStatusKeepsAKeyPlantedAfterItsOwnRead(t *testi
 	assertNoMarker(t, marker)
 }
 
+// TestReadAfterTheStatusKeepsAKeyPlantedDuringIt plants a key after the
+// rule's status and before the configuration read right after it, and checks
+// the unit keeps with the key named and nothing past that read runs.
+func TestReadAfterTheStatusKeepsAKeyPlantedDuringIt(t *testing.T) {
+	f := checkedOut(t)
+	script, marker := markerScript(t)
+	p := f.policy(t)
+	gitDir := filepath.Join(f.clone, ".git")
+	var log callLog
+	sawStatus := false
+	var once sync.Once
+	log.before = func(c gitCall, _ int) {
+		if c.gitDir != gitDir {
+			return
+		}
+		if c.args[0] == "status" {
+			sawStatus = true
+		} else if sawStatus && c.args[0] == "config" {
+			once.Do(func() { gitRun(t, f.clone, "config", "credential.helper", script) })
+		}
+	}
+	log.attach(p.Env)
+
+	v := Evaluate(context.Background(), f.unit(), p)
+	keepWith(t, v, "tools/app: changed during the pass: repository configuration names a program: credential.helper")
+	calls := strings.Join(log.in(gitDir), ",")
+	if !strings.HasSuffix(calls, ",status,config") {
+		t.Fatalf("git calls in the repository %v; want the status followed by the configuration read alone", calls)
+	}
+	assertNoMarker(t, marker)
+}
+
 func TestRecheckConfig(t *testing.T) {
 	f := checkedOut(t)
 	p := f.policy(t)

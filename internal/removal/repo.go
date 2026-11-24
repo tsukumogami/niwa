@@ -909,6 +909,9 @@ func (e *Env) RepoStatus(ctx context.Context, gitDir, workTree string, excludesU
 // first: status is the call that can start a filter, and a process still
 // alive in the instance can write a key in the seconds since the first read.
 // A key that keeps returns a *configRefused, and the status isn't started.
+// The re-check and the status are separate processes, so the configuration
+// is read once more right after the status too, and a key that keeps there
+// returns a *configRefused in place of what the status printed.
 func repoStatus(ctx context.Context, e *Env, r repoDirs, o callOpts) ([]statusEntry, string, error) {
 	if e == nil {
 		return nil, "", errors.New("git can't be run for this pass")
@@ -923,6 +926,9 @@ func repoStatus(ctx context.Context, e *Env, r repoDirs, o callOpts) ([]statusEn
 	out, warn, err := runWarn(cmd)
 	if err != nil {
 		return nil, "", fmt.Errorf("reading status: %v", err)
+	}
+	if err := e.recheckConfig(ctx, r); err != nil {
+		return nil, "", err
 	}
 	entries, err := parseStatus(out)
 	return entries, warn, err
