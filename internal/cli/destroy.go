@@ -68,6 +68,13 @@ Behavior depends on where you run it from and which arguments are provided:
 
 By default, destroy refuses to proceed if any cloned repository has
 uncommitted changes. Use --force <name> to skip this check for one instance.
+
+Linked worktrees inside the instance are removed before its session, one
+directory at a time without following a link and without git. Without
+--force, each one's git status is listed with the scan, a locked worktree or
+one holding a repository is listed as left to go with the instance
+directory, and a repository configuration that names a program, or a change
+the listing didn't show, stops destroy with the path named.
 --force never wipes the workspace: without an instance name at the workspace
 root it refuses and points at --workspace.
 
@@ -229,11 +236,23 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingP
 		}
 	}
 
+	// The linked worktrees inside the instance, found by niwa's walk. They
+	// are removed through the no-follow walk before the sessions, never by
+	// git; unforced, each one's configuration and status are read with the
+	// scan.
+	worktrees := newDestroyWorktrees(ctx, workspaceRoot, instanceDir, force)
+	defer worktrees.close()
+
 	if !force {
 		scan, err := workspace.ScanInstance(instanceDir, workspace.WithForge(newDestroyForge()))
 		if err != nil {
 			return fmt.Errorf("scanning instance for unpushed work: %w", err)
 		}
+		findings, err := worktrees.scan(ctx)
+		if err != nil {
+			return err
+		}
+		scan.Repos = append(scan.Repos, findings...)
 		if scan.HasLoss() {
 			workspace.FormatScans([]workspace.InstanceScan{scan}, cmd.ErrOrStderr(), scan.InstanceName)
 
@@ -259,6 +278,13 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingP
 		if err := vetDestroySessions(ctx, cc, workspaceRoot, []string{instanceDir}, listSessions); err != nil {
 			return fmt.Errorf("nothing was destroyed: %s", removal.ScrubEvidence(err.Error(), 400))
 		}
+	}
+
+	// The worktrees, before the sessions: each through the no-follow walk,
+	// unforced after its configuration and a fresh status are read again. A
+	// worktree the walk won't remove goes with the instance directory.
+	if err := worktrees.remove(ctx); err != nil {
+		return err
 	}
 
 	reporter := workspace.NewReporter(cmd.ErrOrStderr())
