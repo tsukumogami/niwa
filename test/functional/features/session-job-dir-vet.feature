@@ -49,8 +49,7 @@ Feature: niwa vets a session's job directory before every claude rm
     And the dispatch instance still exists
     And the error output contains "niwa: kept"
     And the error output contains "the job directory"
-    And the error output contains "a symbolic link at"
-    And the error output contains ".claude/jobs/f1f1f1f1"
+    And the error output contains "the job directory is not a directory"
     And the fake claude removed no session
     And the outside directory is unchanged
 
