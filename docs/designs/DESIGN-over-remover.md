@@ -4600,8 +4600,9 @@ original path, so such a session isn't the unit's: the pass takes a unit's
 sessions from the mappings in the workspace's session store whose recorded
 instance path is the unit's original path, and the SessionStart hook and
 `niwa dispatch` write a mapping only for an instance they have just
-provisioned, and `niwa resume` only for one it provisions at its recorded
-path, so none of them maps a session to the tombstone. Whatever such a
+provisioned, and `niwa resume` only for the instance at its recorded path,
+`<root>/<instance name>`, which it provisions when the instance is gone, so
+none of them maps a session to the tombstone. Whatever such a
 session leaves is for a later pass.
 The trim has the late-write gap the tombstone check leaves, above (a plain
 file written outside every repository after the checks), in a smaller
