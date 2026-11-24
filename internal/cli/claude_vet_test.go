@@ -597,8 +597,12 @@ func TestPassSessionStep_RemovesEachListedSessionThroughTheVettedCall(t *testing
 	if len(vetted) != 1 || vetted[0] != passSessionID[:8] {
 		t.Fatalf("claude rm calls %q; want one for %s", vetted, passSessionID[:8])
 	}
-	if listCalls != 1 {
-		t.Fatalf("listed %d times; want once per pass", listCalls)
+	// Two listings, no more: the session step's, which picks the sessions
+	// and vets their job directories, and the last full vet's, the pass's
+	// last read before the first worktree removal. The re-listing inside
+	// each claude rm belongs to removeClaudeSessionFunc, faked here.
+	if listCalls != 2 {
+		t.Fatalf("listed %d times; want twice: the session step's and the last full vet's before the removals", listCalls)
 	}
 }
 
