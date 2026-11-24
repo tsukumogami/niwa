@@ -779,7 +779,8 @@ func (e *Env) recheckConfig(ctx context.Context, r repoDirs) (repoConfig, error)
 // with workTree as its work tree (empty for a repository with none), under
 // the same 10-second bound as the pass's first read. A caller runs it right
 // before a step that starts no git process of its own but that a planted
-// key would still make unsafe, such as removing a worktree.
+// key would still make unsafe, such as removing a worktree. It runs no
+// identity check, so its caller checks the directories itself.
 //
 // key is the key that keeps the repository, and reason the keep reason,
 // "changed during the pass: repository configuration names a program:
