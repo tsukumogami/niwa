@@ -208,6 +208,22 @@ the workspace's two commands search niwa's unfiltered `PATH`. An audit of
 both paths found the rest. Each one is a place outside the instance whose
 contents drive removal or that niwa runs, which is what the list is for.
 
+### 2026-11-24 — The deny list adds the shell startup files and niwa's binary
+
+**What changed.** The deny-write list in Security Considerations, and the
+guide's, now also name the login and interactive shell startup files, for
+`/bin/sh` and for every shell the person uses, and niwa's own binary with
+its install directory and link target. The guide's sentence that the
+protected reap runs with the person's environment, outside the agent's
+reach, now says that holds only while these are denied too.
+
+**Why.** A read-only check of the widened list found that nothing on it
+kept the person's own environment out of the agent's reach. A reap the
+person runs takes `PATH`, `HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and
+`NIWA_REAP_IDLE_GRACE` from the shell that starts niwa, so an agent that
+edits a startup file sets them for every later reap, and one that replaces
+niwa's binary replaces the reap itself.
+
 ## Context and Problem Statement
 
 A unit of work in niwa is a session, the instance it runs in, its Claude Code
@@ -4304,7 +4320,10 @@ sweep reads it; the Codex session store (`$CODEX_HOME` or `~/.codex/`, its
 rollouts and writer locks), which answers a Codex mapping's liveness and
 the rooted-worker guard for every instance; Claude Code's transcripts,
 `projects/` in the resolved config directory, which the worktree sweep
-reads to tell an ended session; Claude Code's user
+reads to tell an ended session; the login and interactive startup files of
+`/bin/sh` and of every shell the person uses, and niwa's own binary with its
+install directory and link target, since they build the environment of, or
+replace, every reap the person runs; Claude Code's user
 settings with the user-scope plugins, which can define hooks or programs
 `claude` runs, in the config directory niwa resolves as Claude Code does
 (Data Flow step 7), which every `claude` call niwa makes reads, hooks
