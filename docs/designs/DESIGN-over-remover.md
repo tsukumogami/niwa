@@ -166,6 +166,23 @@ the removal side goes through `repoStatus`. Putting the read inside
 process while building it. Keeping it on the status path leaves
 `gitCommand` a builder that starts nothing.
 
+### 2026-11-24 — The deny list names the PATH programs and the jobs root
+
+**What changed.** The guide's deny-write list now also names the
+directories niwa's filtered `PATH` searches, with the programs found there
+(`git` and git's libexec, `ssh`, `claude`, `lsof`, any `git-credential-*`
+helper), and Claude Code's jobs root, `jobs/` in the config directory niwa
+resolves as Claude Code does.
+
+**Why.** The filtered `PATH` drops only entries under the workspace root, so
+an agent that can write a directory on it, such as `~/.local/bin`, a native
+`claude` install or a user-owned Homebrew prefix, replaces the program that
+decides what is pushed and which sessions are live. A session's liveness is
+its job entry's presence, so an agent that can delete another session's job
+entry makes that session's resumable instance reapable. Both are places
+outside the instance whose contents drive removal, which is what the list
+is for.
+
 ## Context and Problem Statement
 
 A unit of work in niwa is a session, the instance it runs in, its Claude Code
@@ -4232,7 +4249,12 @@ directory, with any file outside it that an `Include` in `~/.ssh/config`
 names, since ssh follows `Include` while the credential-helper read
 doesn't follow git's includes; any script or library those files name that
 the agent could write (a credential helper's script, a `ProxyCommand` or
-`Match exec` target, a `PKCS11Provider` library); Claude Code's user
+`Match exec` target, a `PKCS11Provider` library); every directory niwa's
+filtered `PATH` searches, with the programs found there (`git` and git's
+libexec, `ssh`, `claude`, `lsof`, any `git-credential-*` helper), since
+the filter drops only entries under the workspace root; Claude Code's jobs
+root, `jobs/` in the resolved config directory, since a session's
+liveness is its job entry's presence; Claude Code's user
 settings with the user-scope plugins, which can define hooks or programs
 `claude` runs, in the config directory niwa resolves as Claude Code does
 (Data Flow step 7), which every `claude` call niwa makes reads, hooks
