@@ -133,10 +133,11 @@ func TestNoDeclarationResolvesToNothing(t *testing.T) {
 	}
 }
 
-// TestDispatchTimeListsProduceNoApplyEnv holds [session.dispatch_env] and
-// [session.on_reap] env to dispatch and reap time: a workspace that declares
-// only those lists gets no session environment at apply, so no generated env
-// block, and the Claude env resolution sees nothing from them either.
+// TestDispatchTimeListsProduceNoApplyEnv holds [session.dispatch_env],
+// [session.dispatch_profiles] and [session.on_reap] env to dispatch and reap
+// time: a workspace that declares only those tables gets no session
+// environment at apply, so no generated env block, and the Claude env
+// resolution sees nothing from them either.
 func TestDispatchTimeListsProduceNoApplyEnv(t *testing.T) {
 	t.Setenv("PASSED_NAME", "from-shell")
 	t.Setenv("DROPPED_NAME", "from-shell")
@@ -146,6 +147,11 @@ func TestDispatchTimeListsProduceNoApplyEnv(t *testing.T) {
 			Unset:       []string{"DROPPED_NAME"},
 		},
 		OnReap: config.SessionOnReapConfig{Command: "true", Env: []string{"PASSED_NAME"}},
+		// A dispatch profile is dispatch-time too: its connectors switch
+		// must never reach an env block apply writes.
+		DispatchProfiles: map[string]config.SessionDispatchProfile{
+			"coordinator": {DropTools: []string{"Skill"}, DropBundledSkills: true, DropAccountConnectors: true},
+		},
 	}}
 	vars, sources, err := SessionEnvVars(cfg, EffectiveConfig{}, t.TempDir())
 	if err != nil {

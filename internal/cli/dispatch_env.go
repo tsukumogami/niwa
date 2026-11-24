@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/tsukumogami/niwa/internal/agentplan"
@@ -55,6 +56,12 @@ type launchEnvShape struct {
 	// either way, so a launch that isn't a dispatch never carries one.
 	DispatchID string
 	Workspace  string
+	// Profile is the dispatch profile's name, set as NIWA_DISPATCH_PROFILE,
+	// "" for a launch without one. ProfileEnv is the profile's env values, the
+	// agent's spelling from agentplan.ProfileSettings. Both go into the
+	// process environment and the settings env, after the identity entries.
+	Profile    string
+	ProfileEnv map[string]string
 }
 
 // dispatchEnvLists reads [session.dispatch_env] from a loaded workspace
@@ -134,6 +141,24 @@ func shapeLaunchEnv(base []string, shape launchEnvShape) ([]string, launchEnv) {
 	if shape.Lineage != "" {
 		drop["OTEL_RESOURCE_ATTRIBUTES"] = true
 	}
+	// A profile stops at the session it was asked for. An inherited marker
+	// means the dispatcher itself runs under a profile, so its profile's env
+	// values are removed with the marker, for every agent's names at once:
+	// which agent launched the dispatcher isn't known here. Without the
+	// marker nothing is removed, so a switch the developer exported keeps
+	// working. A profiled launch also drops the names it is about to set.
+	for _, kv := range base {
+		if name, _, _ := strings.Cut(kv, "="); name == config.DispatchProfileEnv {
+			drop[config.DispatchProfileEnv] = true
+			for _, n := range agentplan.AllProfileEnvNames() {
+				drop[n] = true
+			}
+			break
+		}
+	}
+	for n := range shape.ProfileEnv {
+		drop[n] = true
+	}
 
 	values := make(map[string]string, len(base))
 	proc := make([]string, 0, len(base)+2)
@@ -168,6 +193,19 @@ func shapeLaunchEnv(base []string, shape launchEnvShape) ([]string, launchEnv) {
 			proc = append(proc, id.name+"="+id.value)
 			env.Set(id.name, id.value)
 		}
+	}
+	if config.ValidProfileName(shape.Profile) {
+		names := make([]string, 0, len(shape.ProfileEnv))
+		for n := range shape.ProfileEnv {
+			names = append(names, n)
+		}
+		slices.Sort(names)
+		for _, n := range names {
+			proc = append(proc, n+"="+shape.ProfileEnv[n])
+			env.Set(n, shape.ProfileEnv[n])
+		}
+		proc = append(proc, config.DispatchProfileEnv+"="+shape.Profile)
+		env.Set(config.DispatchProfileEnv, shape.Profile)
 	}
 	return proc, env
 }

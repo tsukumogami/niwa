@@ -10,6 +10,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
 	"github.com/tsukumogami/niwa/internal/authority"
+	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -129,6 +130,9 @@ func runList(cmd *cobra.Command, args []string) error {
 		if r.SessionName != "" {
 			fmt.Fprintf(cmd.OutOrStdout(), "  session name: %s\n", r.SessionName)
 		}
+		if r.DispatchProfile != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "  dispatch profile: %s\n", r.DispatchProfile)
+		}
 		// A dispatched session's handle is printed once, by the dispatch that
 		// created it, and then lives in scrollback. For an agent that will not
 		// hand over a session mid-turn the terminal never attached in the first
@@ -222,6 +226,9 @@ func annotateFromSessionMappings(records []workspace.InstanceRecord, workspaceRo
 			}
 			if authority.ValidSessionID(m.ParentSessionID) {
 				records[i].ParentSessionID = m.ParentSessionID
+			}
+			if config.ValidProfileName(m.DispatchProfile) {
+				records[i].DispatchProfile = m.DispatchProfile
 			}
 		}
 	}

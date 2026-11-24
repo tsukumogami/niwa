@@ -608,6 +608,9 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 	// in front of the launched worker ---
 	registerSessionMessageSteps(ctx)
 
+	// --- dispatch profiles: what --profile put into the launch settings ---
+	registerDispatchProfileSteps(ctx)
+
 	// --- permission posture: the host config a posture scenario needs and the
 	// settings documents a declared posture reaches ---
 	registerPostureSteps(ctx)

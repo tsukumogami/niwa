@@ -1135,6 +1135,53 @@ func TestRetaskWakeArgv(t *testing.T) {
 	}
 }
 
+// TestRetaskProfiledWorker: a worker a profiled dispatch launched passes the
+// saved-options check, since Claude Code saved the recorded settings document,
+// and its wake adds no flag. With the recorded profile removed from the config
+// or its drop_tools changed, retask refuses naming the profile, before any
+// stop or wake, through the same launch-record check resume makes.
+func TestRetaskProfiledWorker(t *testing.T) {
+	profiled := profiledDispatchRecord(t)
+	changedDecl := strings.Replace(coordinatorProfileDecl, `, "Skill"]`, `]`, 1)
+	for _, c := range []struct {
+		name, decl, want string
+	}{
+		{name: "profile unchanged", decl: coordinatorProfileDecl},
+		{name: "profile removed", decl: "", want: "unknown dispatch profile"},
+		{name: "profile drop_tools changed", decl: changedDecl, want: "drop_tools"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rf := newRetaskFixture(t, func(rf *retaskFixture, s *retaskSetup) {
+				appendWorkspaceConfig(t, rf.root, c.decl)
+				s.Record = profiled
+				s.Mapping.DispatchProfile = profiled.DispatchProfile
+			})
+			_, stderr, err := rf.run(t, resumeTestInstance, retaskTestPrompt)
+			if c.want != "" {
+				msg := assertRefusal(t, err, resumeTestInstance, retaskInvalidRecord)
+				for _, w := range []string{`"coordinator"`, c.want} {
+					if !strings.Contains(msg, w) {
+						t.Errorf("refusal lacks %q: %s", w, msg)
+					}
+				}
+				rf.assertNoAction(t)
+				return
+			}
+			if err != nil {
+				t.Fatalf("retask: %v\nstderr:\n%s", err, stderr)
+			}
+			wakes := wakeCalls(rf.stubCalls(t))
+			if len(wakes) != 1 {
+				t.Fatalf("%d wakes, want 1", len(wakes))
+			}
+			want := []string{"--bg", "--resume", resumeTestSessionID, "--", retaskTestPrompt}
+			if !slices.Equal(wakes[0], want) {
+				t.Errorf("wake argv %q, want %q: a profiled worker's wake adds no flag", wakes[0], want)
+			}
+		})
+	}
+}
+
 func TestRetaskPromptByteIdentical(t *testing.T) {
 	rf := newRetaskFixture(t, nil)
 	_, pwnedErr := os.Lstat("/tmp/pwned")

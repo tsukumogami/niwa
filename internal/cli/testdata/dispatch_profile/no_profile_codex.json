@@ -1,0 +1,9 @@
+[
+  "exec",
+  "--skip-git-repo-check",
+  "--json",
+  "-c",
+  "projects={\"<workspace>/test-ws+-abababab\"={trust_level=\"trusted\"}}",
+  "--",
+  "do a thing"
+]
