@@ -133,7 +133,7 @@ Feature: niwa vets a session's job directory before every claude rm
     Then the exit code is 0
     And the dispatch instance still exists
     And the error output contains "niwa: kept"
-    And the error output contains "jobs/f1f1f1f1 is missing"
+    And the error output contains "jobs/f1f1f1f1-f1f1-4f1f-8f1f-f1f1f1f1f1f1 is missing"
     And the fake claude removed no session
 
   @critical
