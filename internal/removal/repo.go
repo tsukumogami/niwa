@@ -927,9 +927,14 @@ func repoStatus(ctx context.Context, e *Env, r repoDirs, o callOpts) ([]statusEn
 	if e == nil {
 		return nil, "", errors.New("git can't be run for this pass")
 	}
-	if err := e.recheckConfig(ctx, r); err != nil {
+	rc, err := e.recheckConfig(ctx, r)
+	if err != nil {
 		return nil, "", err
 	}
+	// The re-check's read is the fresher one: an excludes file it no longer
+	// sees adds the override, and one it sees never drops an override the
+	// caller asked for.
+	o.excludesUnset = o.excludesUnset || rc.excludesUnset
 	cmd, err := e.gitCommand(ctx, r, o, "status", "--porcelain=v2", "-z", "--ignored=matching")
 	if err != nil {
 		return nil, "", err
@@ -938,7 +943,7 @@ func repoStatus(ctx context.Context, e *Env, r repoDirs, o callOpts) ([]statusEn
 	if err != nil {
 		return nil, "", fmt.Errorf("reading status: %v", err)
 	}
-	if err := e.recheckConfig(ctx, r); err != nil {
+	if _, err := e.recheckConfig(ctx, r); err != nil {
 		return nil, "", err
 	}
 	entries, err := parseStatus(out)

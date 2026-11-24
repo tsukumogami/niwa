@@ -760,18 +760,19 @@ func (c *configRefused) Error() string { return changedDuringThePass + c.why }
 
 // recheckConfig runs the configuration read on a repository again, under
 // the same bound as the first, right before a call that could start a
-// program the configuration names. It returns nil when nothing keeps, a
-// *configRefused naming the key when the configuration now keeps the
-// repository, and the read's own error when it fails, which keeps too.
-func (e *Env) recheckConfig(ctx context.Context, r repoDirs) error {
+// program the configuration names. It returns what it read and nil when
+// nothing keeps, a *configRefused naming the key when the configuration now
+// keeps the repository, and the read's own error when it fails, which keeps
+// too.
+func (e *Env) recheckConfig(ctx context.Context, r repoDirs) (repoConfig, error) {
 	rc, err := e.readConfig(ctx, r)
 	if err != nil {
-		return err
+		return rc, err
 	}
 	if key, why := e.refusal(rc); why != "" {
-		return &configRefused{key: key, why: why}
+		return rc, &configRefused{key: key, why: why}
 	}
-	return nil
+	return rc, nil
 }
 
 // RecheckConfig runs the configuration read on the repository at gitDir,
@@ -789,7 +790,7 @@ func (e *Env) RecheckConfig(ctx context.Context, gitDir, workTree string) (key, 
 	if e == nil {
 		return "", "git can't be run for this pass"
 	}
-	err := e.recheckConfig(ctx, repoDirs{GitDir: gitDir, WorkTree: workTree})
+	_, err := e.recheckConfig(ctx, repoDirs{GitDir: gitDir, WorkTree: workTree})
 	var refused *configRefused
 	switch {
 	case err == nil:

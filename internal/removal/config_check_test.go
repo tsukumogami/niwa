@@ -441,6 +441,30 @@ func TestReadAfterTheStatusKeepsAKeyPlantedDuringIt(t *testing.T) {
 	assertNoMarker(t, marker)
 }
 
+// TestStatusTakesTheExcludesFileFromTheRecheck removes the repository's
+// core.excludesFile after its first configuration read, with the person's
+// own ignore file naming an untracked file, and checks the status still runs
+// without that ignore file, so the file is kept as untracked.
+func TestStatusTakesTheExcludesFileFromTheRecheck(t *testing.T) {
+	f := checkedOut(t)
+	writeFile(t, filepath.Join(f.home, ".config", "git", "ignore"), "secret.txt\n")
+	writeFile(t, filepath.Join(f.clone, "secret.txt"), "x\n")
+	gitRun(t, f.clone, "config", "core.excludesFile", filepath.Join(outsideDir(t), "none"))
+	p := f.policy(t)
+	gitDir := filepath.Join(f.clone, ".git")
+	var log callLog
+	var once sync.Once
+	log.before = func(c gitCall, _ int) {
+		if c.gitDir == gitDir && c.args[0] != "config" {
+			once.Do(func() { gitRun(t, f.clone, "config", "--unset", "core.excludesFile") })
+		}
+	}
+	log.attach(p.Env)
+
+	v := Evaluate(context.Background(), f.unit(), p)
+	keepWith(t, v, "tools/app: untracked files: secret.txt")
+}
+
 func TestRecheckConfig(t *testing.T) {
 	f := checkedOut(t)
 	p := f.policy(t)
