@@ -20,6 +20,20 @@ type Worktree struct {
 	Rel string
 	// WorkTree and AdminDir are where the walk found them.
 	WorkTree, AdminDir string
+	// base is the instance's path in the form the walk used, when it was
+	// recorded.
+	base string
+}
+
+// Moved is the worktree with its work tree and admin directory moved from
+// under from (the instance's path) to under to, as a rename of the instance
+// from from to to moves them, whichever form of the instance's path the walk
+// used. Rel stays as it is.
+func (w Worktree) Moved(from, to string) Worktree {
+	w.WorkTree = rebase(rebase(w.WorkTree, w.base, to), from, to)
+	w.AdminDir = rebase(rebase(w.AdminDir, w.base, to), from, to)
+	w.base = to
+	return w
 }
 
 // Worktree returns the repository as a linked worktree inside the instance,
@@ -29,7 +43,7 @@ func (r RepoRead) Worktree() (Worktree, bool) {
 	if !r.linked || !r.inInstance || r.prunable || r.dirs.WorkTree == "" {
 		return Worktree{}, false
 	}
-	return Worktree{Rel: r.Rel, WorkTree: r.dirs.WorkTree, AdminDir: r.dirs.GitDir}, true
+	return Worktree{Rel: r.Rel, WorkTree: r.dirs.WorkTree, AdminDir: r.dirs.GitDir, base: r.base}, true
 }
 
 // FindWorktrees walks the instance for repositories the way the rule does,
@@ -48,7 +62,7 @@ func FindWorktrees(ctx context.Context, instance string) []Worktree {
 		if !within(r.GitDir, base) {
 			continue
 		}
-		out = append(out, Worktree{Rel: r.Rel, WorkTree: r.WorkTree, AdminDir: r.GitDir})
+		out = append(out, Worktree{Rel: r.Rel, WorkTree: r.WorkTree, AdminDir: r.GitDir, base: base})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Rel < out[j].Rel })
 	return out

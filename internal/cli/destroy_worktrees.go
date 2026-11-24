@@ -86,26 +86,32 @@ func (d *destroyWorktrees) scan(ctx context.Context) ([]workspace.RepoScan, erro
 }
 
 // remove removes each worktree through the no-follow walk, before the
-// sessions and the instance directory. Unforced, each removal waits on the
-// repository's configuration read again and a fresh status: a reason, a
-// status that can't be read, or a change the scan's listing didn't show
-// stops the destroy before that worktree goes, with the path named, and so
-// does a stop the walk makes. A worktree left to go with the instance
+// sessions and the instance directory. Unforced, every worktree's
+// repository configuration is read again and a fresh status taken, all of
+// them before the first removal: a reason, a status that can't be read, or
+// a change the scan's listing didn't show stops the destroy before any
+// worktree goes, with the path named. Then each is removed; a stop the walk
+// makes stops the destroy there. A worktree left to go with the instance
 // directory is skipped. Under --force nothing is read, and a worktree the
 // walk won't remove is left to go with the instance directory. No git call
-// removes or prunes a worktree here.
+// removes or prunes a worktree here, and none runs between the removals.
 func (d *destroyWorktrees) remove(ctx context.Context) error {
+	if d.force {
+		for _, w := range d.found {
+			_ = worktreeRemover.RemoveWorktree(d.instance, w.WorkTree, w.AdminDir)
+		}
+		return nil
+	}
 	stop := func(w removal.Worktree, why string) error {
 		return fmt.Errorf("destroy stopped before worktree %s was removed: %s; the instance and its sessions were kept", w.Rel, why)
 	}
+	var remove []removal.Worktree
 	for _, w := range d.found {
-		if d.force {
-			_ = worktreeRemover.RemoveWorktree(d.instance, w.WorkTree, w.AdminDir)
-			continue
+		if !d.leave[w.Rel] {
+			remove = append(remove, w)
 		}
-		if d.leave[w.Rel] {
-			continue
-		}
+	}
+	for _, w := range remove {
 		if _, reason := d.env.RecheckConfig(ctx, w.AdminDir, w.WorkTree); reason != "" {
 			return stop(w, reason)
 		}
@@ -116,6 +122,8 @@ func (d *destroyWorktrees) remove(ctx context.Context) error {
 		if fresh := unlisted(d.listed[w.Rel], entries); len(fresh) > 0 {
 			return stop(w, changedReason(prefixed(w.Rel, fresh)))
 		}
+	}
+	for _, w := range remove {
 		if err := worktreeRemover.RemoveWorktree(d.instance, w.WorkTree, w.AdminDir); err != nil {
 			return stop(w, err.Error())
 		}

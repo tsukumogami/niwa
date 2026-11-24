@@ -281,19 +281,32 @@ func RemoveTreeAt(rootFd int, root, rel string) error {
 // its .git file last, then the admin directory, then worktrees/ if it is
 // empty. It runs no git.
 func RemoveWorktree(instance, workTree, adminDir string) error {
-	return worktreeAt(instance, workTree, adminDir, true)
+	return worktreeAt(instance, nil, workTree, adminDir, true)
 }
 
 // CheckWorktree is RemoveWorktree's read of the worktree and its admin
 // directory with nothing removed: it returns what RemoveWorktree would stop
 // on before its first removal.
 func CheckWorktree(instance, workTree, adminDir string) error {
-	return worktreeAt(instance, workTree, adminDir, false)
+	return worktreeAt(instance, nil, workTree, adminDir, false)
+}
+
+// RemoveMovedWorktree is RemoveWorktree for an instance renamed to instance
+// (its tombstone) from any of the paths in originals, with workTree and
+// adminDir given at their paths inside instance. A worktree's .git file names
+// its admin directory by the path git wrote, which the rename didn't change,
+// so the file is matched against the admin directory under each original
+// path, mapped onto instance, as well as under instance itself. Everything
+// else is RemoveWorktree's: the same walk from a descriptor for instance, the
+// same stops, and no git.
+func RemoveMovedWorktree(instance string, originals []string, workTree, adminDir string) error {
+	return worktreeAt(instance, originals, workTree, adminDir, true)
 }
 
 // worktreeAt opens the instance and runs the worktree's removal, or only its
-// read, from that descriptor.
-func worktreeAt(instance, workTree, adminDir string, remove bool) error {
+// read, from that descriptor. originals are the paths the instance had
+// before a rename, for the .git file's match.
+func worktreeAt(instance string, originals []string, workTree, adminDir string, remove bool) error {
 	wtRel, err := relBelow(instance, workTree)
 	if err != nil {
 		return &WalkStop{Path: workTree, Reason: "the worktree is not inside the instance: " + workTree}
@@ -307,7 +320,7 @@ func worktreeAt(instance, workTree, adminDir string, remove bool) error {
 		return changed(".")
 	}
 	defer unix.Close(fd)
-	return RemoveWorktreeAt(fd, instance, wtRel, adminRel, remove)
+	return removeWorktreeAt(fd, instance, originals, wtRel, adminRel, remove)
 }
 
 // relBelow is p relative to base, as text, refused when it isn't below it.
@@ -324,6 +337,12 @@ func relBelow(base, p string) (string, error) {
 // directory named relative to it. With remove false it reads and checks
 // everything and removes nothing. rootFd stays open.
 func RemoveWorktreeAt(rootFd int, root, wtRel, adminRel string, remove bool) error {
+	return removeWorktreeAt(rootFd, root, nil, wtRel, adminRel, remove)
+}
+
+// removeWorktreeAt is RemoveWorktreeAt with the paths the instance had
+// before a rename, for the .git file's match.
+func removeWorktreeAt(rootFd int, root string, originals []string, wtRel, adminRel string, remove bool) error {
 	wtRel, err := cleanRel(wtRel)
 	if err != nil {
 		return &WalkStop{Path: wtRel, Reason: err.Error()}
@@ -382,7 +401,7 @@ func RemoveWorktreeAt(rootFd int, root, wtRel, adminRel string, remove bool) err
 	}
 	line, ok := oneLine(b)
 	target, ok2 := strings.CutPrefix(line, "gitdir: ")
-	if !ok || !ok2 || !namesAdminDir(root, wtRel, adminRel, target) {
+	if !ok || !ok2 || !namesAdminDir(root, originals, wtRel, adminRel, target) {
 		return &WalkStop{Path: gitFile, Reason: "unreadable git file: " + gitFile + " doesn't name the worktree's admin directory " + adminRel}
 	}
 
@@ -431,12 +450,20 @@ func RemoveWorktreeAt(rootFd int, root, wtRel, adminRel string, remove bool) err
 // namesAdminDir reports whether target, the path a worktree's .git file
 // names, is its admin directory: as text, resolved from the work tree, in
 // the form root was given in or with its links resolved, the form git
-// writes.
-func namesAdminDir(root, wtRel, adminRel, target string) bool {
+// writes, or under any of originals, the paths the instance at root had
+// before a rename (each in the form the caller read it in while the
+// instance was still there).
+func namesAdminDir(root string, originals []string, wtRel, adminRel, target string) bool {
 	if target == "" {
 		return false
 	}
-	for _, base := range []string{filepath.Clean(root), canonical(root)} {
+	bases := []string{filepath.Clean(root), canonical(root)}
+	for _, o := range originals {
+		if o != "" {
+			bases = append(bases, filepath.Clean(o))
+		}
+	}
+	for _, base := range bases {
 		got := resolveFrom(filepath.Join(base, filepath.FromSlash(wtRel)), target)
 		if got == filepath.Join(base, filepath.FromSlash(adminRel)) {
 			return true

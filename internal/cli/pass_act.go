@@ -20,7 +20,9 @@ import (
 // a tombstone an interrupted pass left.
 //
 // A unit the rule lets go is still in use until it is gone, so the pass
-// checks it again right before each step that can't be undone. In order:
+// decides first and removes after: every read that can keep the unit runs
+// before the first thing is removed, and once removal starts nothing but
+// the destructive steps' own guards can stop it. In order:
 //
 //  1. the gate: the workspace's [session.before_remove] command;
 //  2. the re-read: liveness again, a fresh process listing, and every
@@ -28,45 +30,62 @@ import (
 //     read, then a snapshot of each one's refs, HEADs and stashes and a
 //     hash of every record under .niwa;
 //  3. the sessions the pass will pass to claude rm: the unit's mapped
-//     Claude sessions that the pass's one claude agents listing holds. A
-//     listing that failed, a listed session that is still running, or a
-//     job directory that fails its vet keeps the unit, before anything is
-//     moved or removed;
+//     Claude sessions that the pass's one claude agents listing holds, each
+//     with its job directory vetted. A listing that failed, a listed
+//     session that is still running, or a vet that fails keeps the unit;
 //  4. the worktrees inside the instance, each linked worktree niwa's walk
-//     found there: the repository's configuration read again
-//     (Env.RecheckConfig), its HEAD and refs read again and matched with
-//     the re-read's snapshot, and a git status that reports no entry, for
-//     every one first; then each one, its configuration read again right
-//     before, removed through the no-follow walk (never forced, and never
-//     with git), its path named to the tombstone check as lost. Any
-//     difference, any configuration reason and any stop the walk makes
-//     keeps the unit;
+//     found there, read on the instance's own path with nothing removed:
+//     its repository's configuration (Env.RecheckConfig), its HEAD and
+//     refs matched with the re-read's snapshot, a git status that reports
+//     no entry, and the no-follow walk's dry run (removal.CheckWorktree);
 //  5. the destroy prepared on the instance's own path;
 //  6. the tombstone lock, taken shared without blocking;
 //  7. the rename of the instance to its tombstone;
 //  8. the check on the tombstone: the process listing and the snapshot
-//     again, compared with the re-read's;
-//  9. the sessions: claude rm on each, through removeClaudeSessionFunc,
-//     which vets the session's job directory again right before the call.
-//     A session absent from the listing gets no call. A failure renames
-//     the tombstone back and keeps the unit;
-//  10. the removal of the tombstone, then the release of the tombstone
-//     lock;
-//  11. the on-reap command, for a mapped unit, given the instance's
-//     original path as the record of where it was, its result held, then
-//     the mapping's settlement.
+//     again, compared with the re-read's, each worktree step 4 read now
+//     read at its tombstone paths by an explicit --git-dir and --work-tree
+//     (HEAD, refs, status), and the finding the rename itself makes in a
+//     worktree listing accepted only for those worktrees;
+//  9. each worktree's repository configuration read again at its tombstone
+//     path (Env.RecheckConfig): the last git call before the removal;
+//  9b. the last full read before the first removal, which starts no git:
+//     the session store read again, a fresh claude agents listing, and the
+//     job-directory vet of every session the pass will pass to claude rm.
+//     A session newly listed, now running or no longer listed, a listing
+//     or store that can't be read, or a vet that fails keeps the unit;
+//  10. each worktree removed inside the tombstone by the no-follow walk
+//     alone, with no git call: the tree with its .git file last (matched
+//     against the admin directory under the instance's original path,
+//     mapped onto the tombstone), then the admin directory, then worktrees/
+//     when it is empty;
+//  11. the sessions: claude rm on each, through removeClaudeSessionFunc,
+//     which lists the sessions again and vets the session's job directory
+//     again right before the call; those two reads are the step's own
+//     guard. A session absent from the listing gets no call;
+//  12. the removal of the tombstone;
+//  13. the release of the tombstone lock;
+//  14. the on-reap command, for a mapped unit, given the instance's
+//     original path as the record of where it was, its result held;
+//  15. the mapping's settlement.
 //
 // A refusal at any step keeps the unit with one "niwa: kept" line naming
 // the step and why, and the tombstone, once there is one, is renamed back.
-// Nothing at all is removed before step 4, nothing but the unit's own clean
-// worktrees before step 9, and no Claude session is removed and no on-reap
-// command runs until every keep check (the destroy's preparation, the
-// tombstone lock and rename, and the check on the tombstone) has passed. A
-// kept unit's mapping is left exactly as it was.
+// A keep from step 4 to step 9b removes nothing at all. A failure at steps
+// 10 to 12 (a walk that stops, a claude rm that fails, a tombstone removal
+// that fails) keeps the unit and renames back what is left; what is gone by
+// then are worktrees every read found clean and pushed. No Claude session
+// is removed and no on-reap command runs for a unit any of these keeps, and
+// a kept unit's mapping is left exactly as it was.
 
-// worktreeRemover removes a linked worktree inside a unit for the pass and
-// for niwa destroy: the removal package's no-follow walk.
+// worktreeRemover removes a linked worktree inside an instance for niwa
+// destroy: the removal package's no-follow walk.
 var worktreeRemover worktree.WorktreeRemover = removal.NoFollowRemover
+
+// removeMovedWorktreeFunc removes a linked worktree inside a unit's
+// tombstone for the pass, its .git file matched against the admin directory
+// under the instance's original paths: the removal package's no-follow walk.
+// A variable so a test can watch the removals.
+var removeMovedWorktreeFunc = removal.RemoveMovedWorktree
 
 // removeTombstoneFunc removes a unit's tombstone through the destroy the
 // pass prepared on the instance's own path. A variable so a test can stand
@@ -271,17 +290,15 @@ func (a *passActor) actReap(t passUnit, unit removal.Unit, v removal.Verdict, st
 	}
 
 	// The sessions the pass will pass to claude rm, each one's job directory
-	// vetted before the first removal step. They are removed only once every
-	// keep check below has passed.
+	// vetted. They are removed only once every keep check below has passed.
 	sessions, reason := a.sessionsToRemove(t)
 	if reason != "" {
 		return keep(reason)
 	}
 
-	// The worktrees inside the instance, removed before anything else moves.
-	// Each one removed is named in lost, the entries the tombstone check
-	// lets be gone.
-	lost, reason := a.removeWorktrees(t, v, reread)
+	// The worktrees inside the instance, read on its own path with nothing
+	// removed. They are removed inside the tombstone, after every read.
+	worktrees, reason := a.checkWorktrees(t, v, reread)
 	if reason != "" {
 		return keep(reason)
 	}
@@ -322,13 +339,38 @@ func (a *passActor) actReap(t passUnit, unit removal.Unit, v removal.Verdict, st
 		return keep(reason)
 	}
 
-	if diffs := a.tombstoneCheck(v, reread, forms, t.InstancePath, tomb, lost); len(diffs) > 0 {
+	if diffs := a.tombstoneCheck(v, reread, forms, t.InstancePath, tomb, worktrees); len(diffs) > 0 {
 		return renameBack(changedReason(diffs))
 	}
 
-	// The sessions, once every keep check has passed. Each claude rm goes
-	// through removeClaudeSessionFunc, which vets the session's job
-	// directory again right before the call and makes none when that fails.
+	// The last git call: each worktree's repository configuration, read at
+	// its tombstone path.
+	for _, w := range worktrees {
+		moved := w.Moved(t.InstancePath, tomb)
+		if _, reason := a.env.RecheckConfig(a.ctx, moved.AdminDir, moved.WorkTree); reason != "" {
+			return renameBack(worktreeConfigReason(w, reason))
+		}
+	}
+
+	// The last full read before the first removal: the sessions listed and
+	// vetted again. It starts no git.
+	if reason := a.lastSessionCheck(t, sessions); reason != "" {
+		return renameBack(reason)
+	}
+
+	// The worktrees, removed inside the tombstone by the no-follow walk
+	// alone. No read that can keep the unit runs from here to the
+	// tombstone's removal; a stop here is the walk's own.
+	for _, w := range worktrees {
+		moved := w.Moved(t.InstancePath, tomb)
+		if err := removeMovedWorktreeFunc(tomb, forms, moved.WorkTree, moved.AdminDir); err != nil {
+			return renameBack("worktree " + w.Rel + " was not removed: " + err.Error())
+		}
+	}
+
+	// The sessions. Each claude rm goes through removeClaudeSessionFunc,
+	// which lists the sessions and vets the session's job directory again
+	// right before the call and makes none when either fails.
 	for _, s := range sessions {
 		if out, err := removeClaudeSessionFunc(withRemovalSession(withClaudeCalls(a.ctx, a.claude), s.SessionID), s.ID); err != nil {
 			return renameBack(fmt.Sprintf("Claude session %s was not removed: %s", s.ID, firstLine(out, err)))
@@ -368,16 +410,13 @@ func (a *passActor) actReap(t passUnit, unit removal.Unit, v removal.Verdict, st
 	return true, nil, nil
 }
 
-// removeWorktrees is the pass's worktree step: every linked worktree niwa's
-// walk found inside the unit is read again first (its repository's
-// configuration, then its HEAD and refs against the re-read's snapshot and
-// a git status that must report no entry), and only when every one matches
-// is each removed through the no-follow walk, its configuration read again
-// right before. Nothing here is forced and no git call removes anything.
-// It returns the worktrees removed, by their path relative to the instance,
-// or the reason the unit keeps. A unit kept part-way has lost only
-// worktrees that matched every read.
-func (a *passActor) removeWorktrees(t passUnit, v removal.Verdict, snap removal.Snapshot) ([]string, string) {
+// checkWorktrees is the pass's read of the worktrees inside the unit, on the
+// instance's own path, with nothing removed: for every linked worktree
+// niwa's walk found there, its repository's configuration, its HEAD and
+// refs against the re-read's snapshot and a git status that must report no
+// entry, then the no-follow walk's dry run, which must find nothing it would
+// stop at. It returns the worktrees, or the reason the unit keeps.
+func (a *passActor) checkWorktrees(t passUnit, v removal.Verdict, snap removal.Snapshot) ([]removal.Worktree, string) {
 	var worktrees []removal.Worktree
 	for _, r := range v.Repos {
 		if w, ok := r.Worktree(); ok {
@@ -391,18 +430,62 @@ func (a *passActor) removeWorktrees(t passUnit, v removal.Verdict, snap removal.
 		if diffs := a.env.WorktreeChanges(a.ctx, v, snap, t.InstancePath, w); len(diffs) > 0 {
 			return nil, changedReason(diffs)
 		}
-	}
-	var lost []string
-	for _, w := range worktrees {
-		if _, reason := a.env.RecheckConfig(a.ctx, w.AdminDir, w.WorkTree); reason != "" {
-			return lost, worktreeConfigReason(w, reason)
+		if err := removal.CheckWorktree(t.InstancePath, w.WorkTree, w.AdminDir); err != nil {
+			return nil, "worktree " + w.Rel + " would not be removed: " + err.Error()
 		}
-		if err := worktreeRemover.RemoveWorktree(t.InstancePath, w.WorkTree, w.AdminDir); err != nil {
-			return lost, "worktree " + w.Rel + " was not removed: " + err.Error()
-		}
-		lost = append(lost, w.Rel)
 	}
-	return lost, ""
+	return worktrees, ""
+}
+
+// lastSessionCheck is the last full read before the pass's first removal:
+// the session store read again, a fresh claude agents listing, and the
+// job-directory vet of every session the pass will pass to claude rm. It
+// keeps the unit when the sessions it would remove now differ from the ones
+// sessionsToRemove chose (a session newly listed, one no longer listed, one
+// now running or listed under another id), when the store or the listing
+// can't be read, or when a vet fails. It starts no git. A unit with no
+// mapped Claude session then or now asks for no listing.
+func (a *passActor) lastSessionCheck(t passUnit, chosen []claudeSessionRow) string {
+	mappings, err := workspace.ListSessionMappings(a.root)
+	if err != nil {
+		return "the session store can't be read again before the first removal: " + err.Error()
+	}
+	owners := claudeOwners(mappings, []string{t.InstancePath})
+	if len(owners) == 0 && len(chosen) == 0 {
+		return ""
+	}
+	rows, err := listClaudeSessionsFunc(withClaudeCalls(a.ctx, a.claude))
+	if err != nil {
+		return "Claude Code's sessions could not be listed again before the first removal: " + err.Error()
+	}
+	remove, refused := listedRemovals(owners, rows)
+	if len(refused) > 0 {
+		return refused[0]
+	}
+	was := make(map[string]string, len(chosen))
+	for _, s := range chosen {
+		was[s.SessionID] = s.ID
+	}
+	now := make(map[string]bool, len(remove))
+	for _, s := range remove {
+		now[s.SessionID] = true
+		id, ok := was[s.SessionID]
+		switch {
+		case !ok:
+			return fmt.Sprintf("Claude session %s is newly listed since the pass listed the sessions", s.ID)
+		case id != s.ID:
+			return fmt.Sprintf("Claude Code lists session %s under %s now, not %s", s.SessionID, s.ID, id)
+		}
+	}
+	for _, s := range chosen {
+		if !now[s.SessionID] {
+			return fmt.Sprintf("Claude Code no longer lists session %s, which the pass listed", s.ID)
+		}
+	}
+	if err := vetBeforeRemoval(a.ctx, a.claude, remove); err != nil {
+		return err.Error()
+	}
+	return ""
 }
 
 // worktreeConfigReason is the keep reason for a configuration read that
@@ -493,11 +576,18 @@ func instanceForms(instancePath string) []string {
 // tombstoneCheck repeats the process listing and the snapshot on the
 // tombstone and compares them with the re-read's. Every git read that fails
 // there counts as a difference. forms names the instance as instanceForms
-// read it before the rename.
-func (a *passActor) tombstoneCheck(v removal.Verdict, before removal.Snapshot, forms []string, instancePath, tomb string, lost []string) []string {
+// read it before the rename. worktrees are the ones checkWorktrees read on
+// the instance's own path: each is read again at its tombstone paths, and
+// the finding the rename makes in a worktree listing is accepted for them
+// alone.
+func (a *passActor) tombstoneCheck(v removal.Verdict, before removal.Snapshot, forms []string, instancePath, tomb string, worktrees []removal.Worktree) []string {
 	diffs := a.newProcesses(forms, tomb)
-	after := a.env.TakeSnapshot(a.ctx, v, instancePath, tomb, lost)
-	return append(diffs, removal.CompareSnapshots(before, after, lost)...)
+	checked := make([]string, 0, len(worktrees))
+	for _, w := range worktrees {
+		checked = append(checked, w.Rel)
+	}
+	after := a.env.TakeMovedSnapshot(a.ctx, v, instancePath, tomb, checked)
+	return append(diffs, removal.CompareSnapshots(before, after, nil)...)
 }
 
 // newProcesses takes a fresh process listing and names every process in at

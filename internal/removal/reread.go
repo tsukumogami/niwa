@@ -131,10 +131,33 @@ const maxRecordEntries = 4096
 // every ref for-each-ref lists, each worktree's HEAD from git worktree list
 // and the stash list. It hashes every record under .niwa at at.
 func (e *Env) TakeSnapshot(ctx context.Context, v Verdict, instancePath, at string, skip []string) Snapshot {
+	return e.takeSnapshot(ctx, v, instancePath, at, skip, nil)
+}
+
+// TakeMovedSnapshot is TakeSnapshot on the instance renamed from
+// instancePath to at, its tombstone, for a pass that read each linked
+// worktree in checked (by its Rel) on the instance's own path right before
+// the rename. Every git call already names its directories by an explicit
+// --git-dir and --work-tree, so a worktree in checked is read at its
+// tombstone paths like any other repository: its HEAD, refs, status, index
+// and stashes. The one finding the rename itself makes, git listing the
+// worktree as prunable because its admin directory names the old path of
+// its work tree, is accepted for the worktrees in checked and for no other;
+// a linked worktree not in checked counts as changed, as in TakeSnapshot.
+func (e *Env) TakeMovedSnapshot(ctx context.Context, v Verdict, instancePath, at string, checked []string) Snapshot {
+	return e.takeSnapshot(ctx, v, instancePath, at, nil, checked)
+}
+
+// takeSnapshot is TakeSnapshot and TakeMovedSnapshot.
+func (e *Env) takeSnapshot(ctx context.Context, v Verdict, instancePath, at string, skip, checked []string) Snapshot {
 	s := Snapshot{repos: map[string]*repoState{}}
 	skipped := map[string]bool{}
 	for _, rel := range skip {
 		skipped[rel] = true
+	}
+	read := map[string]bool{}
+	for _, rel := range checked {
+		read[rel] = true
 	}
 	lab := newSnapshotLabeler(v, instancePath, at)
 	moved := filepath.Clean(instancePath) != filepath.Clean(at)
@@ -142,11 +165,11 @@ func (e *Env) TakeSnapshot(ctx context.Context, v Verdict, instancePath, at stri
 		if skipped[r.Rel] {
 			continue
 		}
-		if moved && r.inInstance && r.linked && !r.prunable {
+		if moved && r.inInstance && r.linked && !r.prunable && !read[r.Rel] {
 			// A linked worktree's .git file names its admin directory by
-			// absolute path, which the rename moved. Its repository can't
-			// be read the way it was until the worktree is removed before
-			// the rename, so it counts as changed.
+			// absolute path, which the rename moved. A worktree the pass
+			// didn't read right before the rename can't be told apart from
+			// one that changed, so it counts as changed.
 			s.failed = append(s.failed, r.Rel+": a linked worktree names its admin directory by a path the rename moved")
 			continue
 		}
@@ -154,6 +177,13 @@ func (e *Env) TakeSnapshot(ctx context.Context, v Verdict, instancePath, at stri
 		if err != nil {
 			s.failed = append(s.failed, r.Rel+": "+err.Error())
 			continue
+		}
+		if moved {
+			for rel := range read {
+				if val, ok := st.worktrees[rel]; ok {
+					st.worktrees[rel] = withoutMovedPath(val)
+				}
+			}
 		}
 		s.repos[r.Rel] = st
 	}
@@ -164,6 +194,21 @@ func (e *Env) TakeSnapshot(ctx context.Context, v Verdict, instancePath, at stri
 		s.records = records
 	}
 	return s
+}
+
+// withoutMovedPath drops the prunable field from one worktree's record in a
+// git worktree list read on a tombstone: git marks a worktree prunable when
+// its admin directory names a work tree that isn't there, which is what the
+// rename does to every linked worktree inside the instance.
+func withoutMovedPath(record string) string {
+	var kept []string
+	for _, field := range strings.Split(record, "; ") {
+		if field == "prunable" || strings.HasPrefix(field, "prunable ") {
+			continue
+		}
+		kept = append(kept, field)
+	}
+	return strings.Join(kept, "; ")
 }
 
 // rebase moves p from under from to under to, when it sits under from.
@@ -438,10 +483,10 @@ func (s Snapshot) RuleDifferences(v Verdict) []string {
 // under .niwa that is new, changed or gone, and every read the later
 // snapshot couldn't make is a difference.
 //
-// lost names the repositories a pass removed in between (the worktrees it
-// removes before the rename); their entries may be gone from the later
-// snapshot, as repositories and as entries in another repository's
-// worktree listing. It is empty until the pass removes worktrees.
+// lost names the repositories a caller removed in between; their entries
+// may be gone from the later snapshot, as repositories and as entries in
+// another repository's worktree listing. The pass removes nothing before
+// its check on the tombstone, so it passes none.
 func CompareSnapshots(before, after Snapshot, lost []string) []string {
 	gone := map[string]bool{}
 	for _, rel := range lost {
