@@ -32,6 +32,10 @@ const scratchHelperRead = "helper-read"
 // runs from, so no instance's project settings or hooks apply to it.
 const scratchClaude = "claude"
 
+// scratchVersion is the empty directory the pass's one read of git's
+// version runs from.
+const scratchVersion = "version"
+
 // leftoverAge is how long a pass directory must have gone unchanged before
 // another pass takes it for one an interrupted pass left. A younger one may
 // belong to a pass that made it and hasn't locked it yet.
@@ -102,7 +106,7 @@ func NewScratch(home, root string) (*Scratch, error) {
 		return nil, fmt.Errorf("locking %s: %w", s.Dir, err)
 	}
 	s.lock = lock
-	subs := []string{scratchNet, scratchHelperRead, scratchClaude}
+	subs := []string{scratchNet, scratchHelperRead, scratchClaude, scratchVersion}
 	for _, sub := range subs {
 		if err := os.Mkdir(filepath.Join(s.Dir, sub), 0o700); err != nil {
 			s.Remove()

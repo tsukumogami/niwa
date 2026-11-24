@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/tsukumogami/niwa/internal/testhook"
 )
 
 // The re-read before removal and the check on the tombstone.
@@ -77,8 +79,13 @@ func (r RepoRead) Prunable() bool { return r.prunable }
 
 // repoState is one repository as one snapshot read it.
 type repoState struct {
-	workTree  bool
-	program   string
+	workTree bool
+	// program is the key the snapshot's own configuration read flagged.
+	program string
+	// rechecked is why the configuration read right before the snapshot's
+	// status kept the repository, a key written after the snapshot's own
+	// read; the status wasn't started.
+	rechecked string
 	status    []string
 	index     []string
 	staged    []string
@@ -211,15 +218,25 @@ func (e *Env) readRepoState(ctx context.Context, r RepoRead, instancePath, at st
 	if err != nil {
 		return nil, err
 	}
-	st := &repoState{workTree: dirs.WorkTree != "", program: rc.programKey}
-	if rc.programKey != "" {
+	key, _ := e.refusal(rc)
+	st := &repoState{workTree: dirs.WorkTree != "", program: key}
+	if key != "" {
 		// Nothing else runs in a repository whose configuration names a
 		// program; the flagged key is the difference.
 		return st, nil
 	}
 	opts := callOpts{excludesUnset: rc.excludesUnset}
 	if dirs.WorkTree != "" {
+		testhook.RemovalBeforeStatus(testhook.StageReread, dirs.GitDir, dirs.WorkTree)
 		entries, warn, err := repoStatus(ctx, e, dirs, opts)
+		var refused *configRefused
+		if errors.As(err, &refused) {
+			// The re-check right before the status found a key written
+			// since this read's own configuration read: the status wasn't
+			// started, and the reason is the difference.
+			st.rechecked = refused.why
+			return st, nil
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -402,6 +419,10 @@ func (s Snapshot) RuleDifferences(v Verdict) []string {
 			out = append(out, "key "+st.program+" in "+r.Rel)
 			continue
 		}
+		if st.rechecked != "" {
+			out = append(out, st.rechecked+" in "+r.Rel)
+			continue
+		}
 		out = append(out, pathDiffs(r.Rel, statusKeys(r.status), st.status)...)
 		out = append(out, pathDiffs(r.Rel, indexKeys(r.index), st.index)...)
 		out = append(out, pathDiffs(r.Rel, sortedCopy(r.staged), st.staged)...)
@@ -444,6 +465,10 @@ func CompareSnapshots(before, after Snapshot, lost []string) []string {
 		}
 		if a.program != "" {
 			out = append(out, "key "+a.program+" in "+rel)
+			continue
+		}
+		if a.rechecked != "" {
+			out = append(out, a.rechecked+" in "+rel)
 			continue
 		}
 		out = append(out, pathDiffs(rel, b.status, a.status)...)

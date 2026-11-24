@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -100,6 +101,17 @@ type Env struct {
 	credHelpers []string
 	credErr     error
 
+	// gitVersion is git's version, read once per pass before the first
+	// configuration read. A version that wasn't read or doesn't parse is the
+	// zero value, which counts as older than every version.
+	gitVersion gitVersion
+
+	// observe, when set, is told of every git call gitCommand builds, in the
+	// order they're built, with the directories the call names. It is a seam
+	// for tests, which record the calls to check their order; nothing else
+	// sets it.
+	observe func(r repoDirs, args []string)
+
 	mu       sync.Mutex
 	lsRemote map[string]lsRemoteResult
 }
@@ -121,11 +133,12 @@ type EnvOption func(*Env)
 func WithFileRemotes() EnvOption { return func(e *Env) { e.allowFile = true } }
 
 // NewEnv resolves the pass's environment: the PATH filtered against root,
-// git, lsof and claude on it, a fresh scratch directory under home, and the
-// person's credential helpers. A scratch directory that can't be made is
-// recorded rather than returned as an error, so a unit that never needs it
-// can still be judged; with none, the credential-helper read doesn't run,
-// since no network call can.
+// git, lsof and claude on it, a fresh scratch directory under home, git's
+// version and the person's credential helpers. A scratch directory that
+// can't be made is recorded rather than returned as an error, so a unit that
+// never needs it can still be judged; with none, the version and
+// credential-helper reads don't run, since no network call can, and a
+// version that wasn't read counts as older than 2.45.
 func NewEnv(root, home, pathEnv string, opts ...EnvOption) *Env {
 	canonRoot := canonical(root)
 	dirs := filterPATH(pathEnv, canonRoot)
@@ -145,9 +158,73 @@ func NewEnv(root, home, pathEnv string, opts ...EnvOption) *Env {
 	}
 	e.Scratch, e.ScratchErr = NewScratch(home, canonRoot)
 	if e.Scratch != nil {
+		e.gitVersion = e.readGitVersion(context.Background())
 		e.credHelpers, e.credErr = e.readCredentialHelpers(context.Background())
 	}
 	return e
+}
+
+// gitVersion is a git version's major and minor numbers.
+type gitVersion struct {
+	major, minor int
+}
+
+// atLeast reports whether v is major.minor or later.
+func (v gitVersion) atLeast(major, minor int) bool {
+	return v.major > major || (v.major == major && v.minor >= minor)
+}
+
+// lazyFetchOffVersion is the first git version that honors
+// GIT_NO_LAZY_FETCH. An older git can fetch a partial clone's missing
+// objects from its promisor remote in the middle of any call that reads an
+// object.
+var lazyFetchOffVersion = gitVersion{2, 45}
+
+// versionReadTimeout bounds the version read.
+const versionReadTimeout = 10 * time.Second
+
+// readGitVersion runs git version once, in no repository, from an empty
+// directory under the scratch directory, and parses what it prints. A read
+// that fails or doesn't parse gives the zero version.
+func (e *Env) readGitVersion(ctx context.Context) gitVersion {
+	dir, err := e.scratchDir(scratchVersion)
+	if err != nil {
+		return gitVersion{}
+	}
+	ctx, cancel := context.WithTimeout(ctx, versionReadTimeout)
+	defer cancel()
+	cmd, err := e.gitCommand(ctx, repoDirs{GitDir: filepath.Join(dir, noRepository)}, callOpts{dir: dir}, "version")
+	if err != nil {
+		return gitVersion{}
+	}
+	out, err := run(cmd)
+	if err != nil {
+		return gitVersion{}
+	}
+	return parseGitVersion(string(out))
+}
+
+// parseGitVersion reads "git version <major>.<minor>[.<rest>]" and returns
+// the major and minor numbers, or the zero version when the line isn't in
+// that form.
+func parseGitVersion(s string) gitVersion {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(s), "git version ")
+	if !ok {
+		return gitVersion{}
+	}
+	if i := strings.IndexByte(rest, ' '); i >= 0 {
+		rest = rest[:i]
+	}
+	parts := strings.Split(rest, ".")
+	if len(parts) < 2 {
+		return gitVersion{}
+	}
+	major, err1 := strconv.Atoi(parts[0])
+	minor, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil || major < 0 || minor < 0 {
+		return gitVersion{}
+	}
+	return gitVersion{major, minor}
 }
 
 // Close removes the pass's scratch directory.
@@ -331,6 +408,9 @@ func (e *Env) gitCommand(ctx context.Context, r repoDirs, o callOpts, args ...st
 		argv = append(argv, "--no-show-signature")
 	}
 
+	if e.observe != nil {
+		e.observe(r, args)
+	}
 	cmd := exec.CommandContext(ctx, e.Git, argv...)
 	cmd.Env = e.gitEnv()
 	switch {
@@ -373,14 +453,14 @@ func (e *Env) scratchDir(name string) (string, error) {
 	return e.Scratch.Use(name)
 }
 
-// run runs cmd and returns its standard output, or an error carrying the
-// last line git wrote to standard error.
+// run runs cmd and returns its standard output, or an error carrying git's
+// refusal line from standard error (see failureLine).
 func run(cmd *exec.Cmd) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		msg := lastLine(stderr.String())
+		msg := failureLine(stderr.String())
 		if msg == "" {
 			msg = err.Error()
 		}
@@ -397,13 +477,28 @@ func runWarn(cmd *exec.Cmd) ([]byte, string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		msg := lastLine(stderr.String())
+		msg := failureLine(stderr.String())
 		if msg == "" {
 			msg = err.Error()
 		}
 		return nil, "", errors.New(msg)
 	}
 	return stdout.Bytes(), lastWarning(stderr.String()), nil
+}
+
+// failureLine is the line a failed git call's standard error is reported
+// by: the last line git marked fatal, when there is one, and the last line
+// otherwise. git can follow its refusal with advice of its own, as it does
+// after refusing a repository for its ownership, where the last line is the
+// command that would add a safe.directory entry rather than the refusal.
+func failureLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := strings.TrimSpace(lines[i]); strings.HasPrefix(l, "fatal:") {
+			return l
+		}
+	}
+	return lastLine(s)
 }
 
 // lastWarning is the last line of standard error that isn't one of git's
@@ -474,14 +569,36 @@ var fsmonitorBooleans = map[string]bool{
 	"on": true, "off": true, "1": true, "0": true,
 }
 
-// namesProgram reports whether a setting names a program git might run
-// during the rule's calls: a filter, diff or merge driver, a credential
-// helper or an fsmonitor hook. Keys are matched as git config --list prints
-// them, with section and variable names in lowercase.
+// canonicalKey returns a configuration key as git reads it: the section and
+// variable names in lowercase, a subsection between them as written. git
+// config --list already prints keys this way; a key that reaches the rule
+// some other way is compared in the same form.
+func canonicalKey(key string) string {
+	first := strings.Index(key, ".")
+	last := strings.LastIndex(key, ".")
+	if first < 0 {
+		return strings.ToLower(key)
+	}
+	if first == last {
+		return strings.ToLower(key)
+	}
+	return strings.ToLower(key[:first]) + key[first:last] + strings.ToLower(key[last:])
+}
+
+// namesProgram reports whether a setting names a program git might run: a
+// filter, diff or merge driver, a credential helper, a signing program, an
+// fsmonitor hook, or any key whose name says it names a program (a variable
+// named program or helper, or one ending in command, which covers both
+// *.command and *Command). Section and variable names compare
+// case-insensitively and a subsection as written.
 func namesProgram(key, value string) bool {
+	key = canonicalKey(key)
 	section, _, _ := strings.Cut(key, ".")
 	variable := key[strings.LastIndex(key, ".")+1:]
 	hasSubsection := strings.Count(key, ".") >= 2
+	if section == "" || variable == "" || !strings.Contains(key, ".") {
+		return false
+	}
 	switch {
 	case section == "filter" && hasSubsection && (variable == "clean" || variable == "smudge" || variable == "process"):
 		return true
@@ -493,8 +610,12 @@ func namesProgram(key, value string) bool {
 		return true
 	case section == "credential" && variable == "helper":
 		return true
+	case key == "gpg.program", key == "gpg.ssh.program", key == "gpg.x509.program":
+		return true
 	case key == "core.fsmonitor":
 		return !fsmonitorBooleans[strings.ToLower(strings.TrimSpace(value))]
+	case variable == "program", variable == "helper", strings.HasSuffix(variable, "command"):
+		return true
 	}
 	return false
 }
@@ -502,8 +623,11 @@ func namesProgram(key, value string) bool {
 // repoConfig is what the configuration read says about one repository.
 type repoConfig struct {
 	// programKey is the first key from a scope other than command that
-	// names a program, empty when there is none.
+	// names a program, in its canonical form, empty when there is none.
 	programKey string
+	// partialKey is the first key that makes the repository a partial
+	// clone, empty when there is none.
+	partialKey string
 	// excludesUnset is true when the repository's own configuration names
 	// no core.excludesFile.
 	excludesUnset bool
@@ -583,10 +707,98 @@ func (e *Env) readConfig(ctx context.Context, r repoDirs) (repoConfig, error) {
 			rc.remotes = append(rc.remotes, remoteEntry{Name: name, URL: en.Value})
 		}
 		if rc.programKey == "" && namesProgram(en.Key, en.Value) {
-			rc.programKey = en.Key
+			rc.programKey = canonicalKey(en.Key)
+		}
+		if rc.partialKey == "" && partialCloneKey(en.Key, en.Value) {
+			rc.partialKey = canonicalKey(en.Key)
 		}
 	}
 	return rc, nil
+}
+
+// partialCloneKey reports whether a setting makes the repository a partial
+// clone: extensions.partialClone naming a remote, or a remote.<name>.promisor
+// that is true.
+func partialCloneKey(key, value string) bool {
+	key = canonicalKey(key)
+	if key == "extensions.partialclone" {
+		return strings.TrimSpace(value) != ""
+	}
+	if rest, ok := strings.CutPrefix(key, "remote."); ok {
+		if name, ok := strings.CutSuffix(rest, ".promisor"); ok && name != "" {
+			return gitTrue(value)
+		}
+	}
+	return false
+}
+
+// refusal says why the configuration read keeps a repository, with the key
+// it names: a key that names a program, or, with a git older than 2.45, a
+// partial clone, since that git would fetch a missing object from the
+// promisor remote in the middle of any call that reads one. Both are empty
+// when the repository's configuration keeps nothing.
+func (e *Env) refusal(rc repoConfig) (key, why string) {
+	if rc.programKey != "" {
+		return rc.programKey, "repository configuration names a program: " + rc.programKey
+	}
+	if rc.partialKey != "" && !e.gitVersion.atLeast(lazyFetchOffVersion.major, lazyFetchOffVersion.minor) {
+		return rc.partialKey, "partial clone needs git 2.45: " + rc.partialKey
+	}
+	return "", ""
+}
+
+// changedDuringThePass prefixes what a re-check found during the pass.
+const changedDuringThePass = "changed during the pass: "
+
+// configRefused is the error a status call returns when the configuration
+// read right before it keeps the repository: the call isn't started.
+type configRefused struct {
+	key, why string
+}
+
+func (c *configRefused) Error() string { return changedDuringThePass + c.why }
+
+// recheckConfig runs the configuration read on a repository again, under
+// the same bound as the first, right before a call that could start a
+// program the configuration names. It returns nil when nothing keeps, a
+// *configRefused naming the key when the configuration now keeps the
+// repository, and the read's own error when it fails, which keeps too.
+func (e *Env) recheckConfig(ctx context.Context, r repoDirs) error {
+	rc, err := e.readConfig(ctx, r)
+	if err != nil {
+		return err
+	}
+	if key, why := e.refusal(rc); why != "" {
+		return &configRefused{key: key, why: why}
+	}
+	return nil
+}
+
+// RecheckConfig runs the configuration read on the repository at gitDir,
+// with workTree as its work tree (empty for a repository with none), under
+// the same 10-second bound as the pass's first read. A caller runs it right
+// before a step that starts no git process of its own but that a planted
+// key would still make unsafe, such as removing a worktree.
+//
+// key is the key that keeps the repository, and reason the keep reason,
+// "changed during the pass: repository configuration names a program:
+// <key>" (or the partial-clone reason on a git older than 2.45). A read that
+// fails gives an empty key and the failure as the reason. Both are empty
+// when nothing keeps.
+func (e *Env) RecheckConfig(ctx context.Context, gitDir, workTree string) (key, reason string) {
+	if e == nil {
+		return "", "git can't be run for this pass"
+	}
+	err := e.recheckConfig(ctx, repoDirs{GitDir: gitDir, WorkTree: workTree})
+	var refused *configRefused
+	switch {
+	case err == nil:
+		return "", ""
+	case errors.As(err, &refused):
+		return refused.key, refused.Error()
+	default:
+		return "", err.Error()
+	}
 }
 
 // gitTrue reports whether a configuration value is one git reads as true.

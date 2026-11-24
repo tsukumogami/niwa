@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/tsukumogami/niwa/internal/testhook"
 )
 
 // maxNamed bounds how many paths or refs one check names in its evidence;
@@ -45,6 +47,26 @@ func checkRepositories(ctx context.Context, u Unit, p Policy, s *evalState) []Ch
 	for _, k := range keeps {
 		seen[k.Evidence] = true
 	}
+	rp := repoPolicy{
+		ignoredUnique: p.IgnoredUnique,
+		disposable:    append(append([]string(nil), ShippedDisposable...), p.Disposable...),
+		generated:     gen,
+		proof:         proof,
+	}
+
+	// The configuration read is the first git call in every repository, and
+	// it runs on all of them before any other git call in any of them: a
+	// repository whose configuration names a program keeps the unit before
+	// anything else could start that program, wherever it sits in the
+	// walk's order.
+	type opened struct {
+		r   foundRepo
+		t   repoTarget
+		rc  repoConfig
+		res repoResult
+		ok  bool
+	}
+	var repos []opened
 	for _, r := range f.repos {
 		if p.ConfigError != nil {
 			keeps = append(keeps, Check{Paths: []string{r.Rel}, Evidence: fmt.Sprintf("%s: configuration unreadable: %v", r.Rel, p.ConfigError)})
@@ -55,7 +77,7 @@ func checkRepositories(ctx context.Context, u Unit, p Policy, s *evalState) []Ch
 		if p.BuildTrees != nil && r.Repo != "" && !r.Linked {
 			trees = p.BuildTrees(r.Repo)
 		}
-		res := p.Env.checkRepo(ctx, repoTarget{
+		t := repoTarget{
 			Rel:        r.Rel,
 			Base:       r.Base,
 			Dirs:       r.dirs(),
@@ -65,12 +87,16 @@ func checkRepositories(ctx context.Context, u Unit, p Policy, s *evalState) []Ch
 			gitInfo:    r.gitInfo,
 			walk:       &f,
 			repo:       r,
-		}, repoPolicy{
-			ignoredUnique: p.IgnoredUnique,
-			disposable:    append(append([]string(nil), ShippedDisposable...), p.Disposable...),
-			generated:     gen,
-			proof:         proof,
-		})
+		}
+		rc, res, ok := p.Env.openRepo(ctx, t)
+		repos = append(repos, opened{r: r, t: t, rc: rc, res: res, ok: ok})
+	}
+
+	for _, o := range repos {
+		r, res := o.r, o.res
+		if o.ok {
+			res = p.Env.readRepo(ctx, o.t, rp, o.rc)
+		}
 		repoKeeps := res.keeps
 		read := RepoRead{
 			Rel: r.Rel, dirs: r.dirs(), base: r.Base,
@@ -235,44 +261,69 @@ type repoResult struct {
 	workTreeRead bool
 }
 
-// checkRepo runs the per-repository check sequence. The identity check and
-// the configuration read come first, and either one failing stops
-// everything else there. Then every read runs, and the keeping results come
-// out in the rule's order: git errors and an unreachable proof remote, then
-// remotes that aren't proof remotes and the commits and tags no proof remote
-// holds (checkHeld), then stashes, then modified tracked files, then index
-// flags, then untracked files.
+// stopRepo is a repository's whole result when a check before its reads
+// keeps it: the one keep, and the repository classed unique.
+func (t repoTarget) stopRepo(evidence string) repoResult {
+	return repoResult{
+		keeps:   []Check{{Paths: []string{t.Rel}, Evidence: t.Rel + ": " + evidence}},
+		classes: []PathClass{{Path: dirPath(filepath.ToSlash(t.Rel)), Class: ClassUnique}},
+	}
+}
+
+// openRepo runs the identity check and the configuration read, the first
+// git call in the repository. It returns the configuration, or, with ok
+// false, the repository's whole result when either keeps it: nothing more
+// runs there. A key that names a program keeps, and so does a partial clone
+// on a git older than 2.45, before any call that could read an object.
+func (e *Env) openRepo(ctx context.Context, t repoTarget) (rc repoConfig, res repoResult, ok bool) {
+	if e == nil {
+		return rc, t.stopRepo("git can't be run for this pass"), false
+	}
+	if err := t.checkIdentity(); err != nil {
+		return rc, t.stopRepo("changed since the walk: " + err.Error()), false
+	}
+	rc, err := e.readConfig(ctx, t.Dirs)
+	if err != nil {
+		return rc, t.stopRepo(err.Error()), false
+	}
+	if _, why := e.refusal(rc); why != "" {
+		return rc, t.stopRepo(why), false
+	}
+	if why := t.checkWorkTreeConfig(rc); why != "" {
+		return rc, t.stopRepo(why), false
+	}
+	return rc, repoResult{configRead: true}, true
+}
+
+// checkRepo runs the per-repository check sequence on one repository:
+// openRepo, then readRepo.
 func (e *Env) checkRepo(ctx context.Context, t repoTarget, rp repoPolicy) repoResult {
+	rc, res, ok := e.openRepo(ctx, t)
+	if !ok {
+		return res
+	}
+	return e.readRepo(ctx, t, rp, rc)
+}
+
+// readRepo runs every read in a repository whose configuration read passed,
+// and the keeping results come out in the rule's order: git errors and an
+// unreachable proof remote, then remotes that aren't proof remotes and the
+// commits and tags no proof remote holds (checkHeld), then stashes, then
+// modified tracked files, then index flags, then untracked files. The
+// identity check runs again first, since other repositories' configuration
+// reads can come between this one's and its reads.
+func (e *Env) readRepo(ctx context.Context, t repoTarget, rp repoPolicy, rc repoConfig) repoResult {
 	rel := filepath.ToSlash(t.Rel)
-	var res repoResult
+	if err := t.checkIdentity(); err != nil {
+		return t.stopRepo("changed since the walk: " + err.Error())
+	}
+	res := repoResult{configRead: true}
 	keepAt := func(bucket *[]Check, evidence string, paths ...string) {
 		if len(paths) == 0 {
 			paths = []string{t.Rel}
 		}
 		*bucket = append(*bucket, Check{Paths: paths, Evidence: t.Rel + ": " + evidence})
 	}
-	stop := func(evidence string) repoResult {
-		keepAt(&res.keeps, evidence)
-		res.classes = append(res.classes, PathClass{Path: dirPath(rel), Class: ClassUnique})
-		return res
-	}
-	if e == nil {
-		return stop("git can't be run for this pass")
-	}
-	if err := t.checkIdentity(); err != nil {
-		return stop("changed since the walk: " + err.Error())
-	}
-	rc, err := e.readConfig(ctx, t.Dirs)
-	if err != nil {
-		return stop(err.Error())
-	}
-	if rc.programKey != "" {
-		return stop("repository configuration names a program: " + rc.programKey)
-	}
-	if why := t.checkWorkTreeConfig(rc); why != "" {
-		return stop(why)
-	}
-	res.configRead = true
 	opts := callOpts{excludesUnset: rc.excludesUnset}
 
 	var errs, refKeeps, stashKeeps, modKeeps, flagKeeps, untrackedKeeps []Check
@@ -452,7 +503,16 @@ func (t repoTarget) workTreeChecks(ctx context.Context, e *Env, opts callOpts, r
 		*bucket = append(*bucket, Check{Paths: paths, Evidence: t.Rel + ": " + evidence})
 	}
 
+	testhook.RemovalBeforeStatus(testhook.StageRule, t.Dirs.GitDir, t.Dirs.WorkTree)
 	entries, warn, statusErr := repoStatus(ctx, e, t.Dirs, opts)
+	var refused *configRefused
+	if errors.As(statusErr, &refused) {
+		// The re-check right before the status found a key that keeps: the
+		// status wasn't started, and nothing more runs here.
+		keepAt(&w.errs, statusErr.Error(), nil)
+		w.classes = append(w.classes, PathClass{Path: dirPath(rel), Class: ClassUnique})
+		return w
+	}
 	if statusErr != nil {
 		keepAt(&w.errs, statusErr.Error(), nil)
 	} else if warn != "" {
@@ -834,7 +894,8 @@ func parseStashes(out []byte) ([]string, error) {
 
 // RepoStatus is the status read of a repository with a work tree: every
 // modified, untracked and git-ignored entry, in its NUL-terminated form. The
-// re-read and the tombstone check repeat it and compare.
+// re-read and the tombstone check repeat it and compare. Like every status,
+// it runs the configuration read again first (see repoStatus).
 func (e *Env) RepoStatus(ctx context.Context, gitDir, workTree string, excludesUnset bool) ([]statusEntry, string, error) {
 	return repoStatus(ctx, e, repoDirs{GitDir: gitDir, WorkTree: workTree}, callOpts{excludesUnset: excludesUnset})
 }
@@ -842,7 +903,19 @@ func (e *Env) RepoStatus(ctx context.Context, gitDir, workTree string, excludesU
 // repoStatus runs git status in its NUL-terminated form, git-ignored paths
 // included, a directory an ignore pattern matches reported once. Anything git
 // writes to standard error on a zero exit comes back as warn.
+//
+// It is the only place a status on the removal path is started, and it runs
+// the configuration read again right before it, under the same bound as the
+// first: status is the call that can start a filter, and a process still
+// alive in the instance can write a key in the seconds since the first read.
+// A key that keeps returns a *configRefused, and the status isn't started.
 func repoStatus(ctx context.Context, e *Env, r repoDirs, o callOpts) ([]statusEntry, string, error) {
+	if e == nil {
+		return nil, "", errors.New("git can't be run for this pass")
+	}
+	if err := e.recheckConfig(ctx, r); err != nil {
+		return nil, "", err
+	}
 	cmd, err := e.gitCommand(ctx, r, o, "status", "--porcelain=v2", "-z", "--ignored=matching")
 	if err != nil {
 		return nil, "", err
