@@ -151,6 +151,21 @@ The condition is read from several places today; tsukumogami/koto#739 (a
 locked rebind) and tsukumogami/niwa#566 (an adopt verb) are the follow-ups
 that make it mechanical.
 
+### 2026-11-24 — The configuration re-check runs on the status path
+
+**What changed.** The program-naming configuration check that runs again
+right before every `git status` now sits in `repoStatus`, the one status
+path on the removal side, rather than in the invoker `gitCommand` builds.
+The two passages that placed it in that invoker now say so. The re-check is also
+callable on its own, right before a worktree removal that starts no git
+process.
+
+**Why.** The effect is the same, since every `git status` niwa starts on
+the removal side goes through `repoStatus`. Putting the read inside
+`gitCommand` would make a function that only builds a command start a git
+process while building it. Keeping it on the status path leaves
+`gitCommand` a builder that starts nothing.
+
 ## Context and Problem Statement
 
 A unit of work in niwa is a session, the instance it runs in, its Claude Code
@@ -431,7 +446,8 @@ The package also settles the mechanics the PRD left to the design:
   and a later call in the same repository (the network calls and local pack
   before a repository's status, the gate, the kept-set move), and a process
   still alive in the instance can write configuration in between, so the
-  `gitCommand` invoker runs the check again on a repository, its common
+  status path (`repoStatus`, which every `git status` on the removal side
+  goes through) runs the check again on a repository, its common
   directory's configuration and its `config.worktree` included, right before
   it starts every `git status` there and right before niwa removes a
   worktree of it: the rule's status in each repository, the re-read's, the
@@ -1978,8 +1994,10 @@ repository under the unit before the first other git call in any of them:
 each clone and worktree and each submodule, gitlink and nested repository
 under them, all found by niwa's own walk rather than by git, a submodule's
 configuration under `.git/modules/` included. It isn't only the first call.
-The invoker `gitCommand` builds runs the same read again on a repository,
-under the same 10-second context, right before it starts any `git status`
+The status path, `repoStatus`, which every `git status` on the removal side
+goes through, runs the same read again on a repository, so `gitCommand`
+stays a builder that starts nothing. It runs the read under the same
+10-second context, right before it starts any `git status`
 there, because status is the call that can start a filter and seconds can
 pass between the first read and it. The status niwa runs on a worktree
 right before removing it is one of these; the removal that follows starts
