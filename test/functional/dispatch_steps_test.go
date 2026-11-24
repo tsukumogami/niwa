@@ -44,7 +44,9 @@ var dispatchInstanceNameRe = regexp.MustCompile(`\+[a-z0-9_]*-[0-9a-f]{8}$`)
 //     failure that must roll the instance back).
 //
 // Every --bg also records its OTEL_RESOURCE_ATTRIBUTES, when it has one, at
-// $HOME/dispatch-launch-otel, for the lineage scenarios.
+// $HOME/dispatch-launch-otel, for the lineage scenarios, and its
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW, when it has one, at
+// $HOME/dispatch-launch-compact-window, for the dispatch-profile scenarios.
 //
 // Every --bg also records the launch argv twice: the joined line at
 // $HOME/dispatch-launch-argv, which the substring steps read, and the same
@@ -100,6 +102,7 @@ func dispatchFakeClaudeScript(behaviour string) string {
   printf '%s\n' "$*" > "$HOME/dispatch-launch-argv"
   printf '%s\0' "$@" > "$HOME/dispatch-launch-argv-elements"
   rm -f "$HOME/dispatch-launch-otel"; [ "${OTEL_RESOURCE_ATTRIBUTES+set}" = set ] && printf '%s' "$OTEL_RESOURCE_ATTRIBUTES" > "$HOME/dispatch-launch-otel"
+  rm -f "$HOME/dispatch-launch-compact-window"; [ "${CLAUDE_CODE_AUTO_COMPACT_WINDOW+set}" = set ] && printf '%s' "$CLAUDE_CODE_AUTO_COMPACT_WINDOW" > "$HOME/dispatch-launch-compact-window"
   # If the prompt is a spill pointer, resolve it from / rather than from the
   # instance dir. An instance-relative path would resolve here and must not.
   spill=$(printf '%s' "$*" | sed -n 's/^file: \(.*\)$/\1/p' | head -1)

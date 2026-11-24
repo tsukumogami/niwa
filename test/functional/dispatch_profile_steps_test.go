@@ -3,7 +3,10 @@ package functional
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -115,9 +118,51 @@ func theLaunchedClaudeSettingsEnvLacks(ctx context.Context, name string) error {
 	return nil
 }
 
+// theLaunchedClaudeProcessHasNoCompactWindow reads what the fake claude
+// recorded of its own process environment: it writes
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW to $HOME/dispatch-launch-compact-window
+// when the variable is set, and removes the file when it isn't.
+func theLaunchedClaudeProcessHasNoCompactWindow(ctx context.Context) error {
+	s := getState(ctx)
+	if s == nil {
+		return fmt.Errorf("no test state")
+	}
+	data, err := os.ReadFile(filepath.Join(s.homeDir, "dispatch-launch-compact-window"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("the launched claude's process environment holds CLAUDE_CODE_AUTO_COMPACT_WINDOW=%q", data)
+}
+
+// iRunFromWorkspaceRootWithEnv runs one command from the workspace root with
+// name set to value in its environment, and only that command: the variable
+// is gone again for the steps after it. The suite's own environment doesn't
+// carry it, so this is how a scenario stands for a shell that exports it.
+func iRunFromWorkspaceRootWithEnv(ctx context.Context, command, name, value string) (context.Context, error) {
+	s := getState(ctx)
+	if s == nil {
+		return ctx, fmt.Errorf("no test state")
+	}
+	prev, had := s.envOverrides[name]
+	s.envOverrides[name] = value
+	defer func() {
+		if had {
+			s.envOverrides[name] = prev
+		} else {
+			delete(s.envOverrides, name)
+		}
+	}()
+	return iRunFromWorkspaceRoot(ctx, command)
+}
+
 // registerDispatchProfileSteps wires the dispatch-profile steps into the
 // scenario context.
 func registerDispatchProfileSteps(ctx *godog.ScenarioContext) {
+	ctx.Step(`^the launched claude process environment has no compaction window$`, theLaunchedClaudeProcessHasNoCompactWindow)
+	ctx.Step(`^I run "([^"]*)" from the workspace root with env "([^"]*)" set to "([^"]*)"$`, iRunFromWorkspaceRootWithEnv)
 	ctx.Step(`^the launched claude settings document denies exactly "([^"]*)"$`, theLaunchedClaudeSettingsDeniesExactly)
 	ctx.Step(`^the launched claude settings document has disableBundledSkills true$`, theLaunchedClaudeSettingsDisablesBundledSkills)
 	ctx.Step(`^the launched claude settings document sets env "([^"]*)" to "([^"]*)"$`, theLaunchedClaudeSettingsSetsEnv)

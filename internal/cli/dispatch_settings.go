@@ -51,7 +51,10 @@ import (
 //   - for a profiled dispatch, NIWA_DISPATCH_PROFILE, whose value is a
 //     profile name config.ValidProfileName accepts, and the profile's own env
 //     values, the constants agentplan.ProfileSettings spells for the agent
-//     (ENABLE_CLAUDEAI_MCP_SERVERS=false for Claude).
+//     (ENABLE_CLAUDEAI_MCP_SERVERS=false for Claude), and the profile's
+//     CLAUDE_CODE_AUTO_COMPACT_WINDOW, the decimal form of an integer config
+//     load bounded to 100000 through 1000000. The window goes in this object
+//     only, never in the process environment.
 //
 // Every key and value is a JSON string inside the one "env" object, so nothing
 // in them can add a settings key outside it.

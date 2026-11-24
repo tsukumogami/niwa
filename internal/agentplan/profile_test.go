@@ -104,8 +104,52 @@ func TestProfileRequiredTools(t *testing.T) {
 }
 
 func TestAllProfileEnvNames(t *testing.T) {
-	if got, want := AllProfileEnvNames(), []string{"ENABLE_CLAUDEAI_MCP_SERVERS"}; !reflect.DeepEqual(got, want) {
+	if got, want := AllProfileEnvNames(), []string{"CLAUDE_CODE_AUTO_COMPACT_WINDOW", "ENABLE_CLAUDEAI_MCP_SERVERS"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("AllProfileEnvNames() = %v, want %v", got, want)
+	}
+}
+
+// TestSettingsOnlyProfileEnvNames: the compaction window is the one name a
+// profile sets in the settings document alone, and it is among the names any
+// profile can set, so a launch that strips an inherited profile strips it too.
+func TestSettingsOnlyProfileEnvNames(t *testing.T) {
+	got := SettingsOnlyProfileEnvNames()
+	if want := []string{"CLAUDE_CODE_AUTO_COMPACT_WINDOW"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("SettingsOnlyProfileEnvNames() = %v, want %v", got, want)
+	}
+	for _, n := range got {
+		if !slices.Contains(AllProfileEnvNames(), n) {
+			t.Errorf("%s is settings-only but AllProfileEnvNames() doesn't list it", n)
+		}
+	}
+}
+
+// TestProfileSettingsSpellsTheWindow: a window becomes the decimal string of
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW in the env values and adds no settings key;
+// a profile with no window sets no such name; Codex still refuses.
+func TestProfileSettingsSpellsTheWindow(t *testing.T) {
+	keys, env, err := ProfileSettings(agent.AgentClaude, ProfileDrops{AutoCompactWindow: 400000})
+	if err != nil {
+		t.Fatalf("window only: %v", err)
+	}
+	if len(keys) != 0 {
+		t.Errorf("window only: keys = %#v, want none", keys)
+	}
+	if want := map[string]string{"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "400000"}; !reflect.DeepEqual(env, want) {
+		t.Errorf("window only: env = %#v, want %#v", env, want)
+	}
+	_, env, err = ProfileSettings(agent.AgentClaude, coordinatorDrops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]; ok {
+		t.Errorf("a profile with no window set one: %#v", env)
+	}
+	if _, _, err := ProfileSettings(agent.AgentClaude, ProfileDrops{AutoCompactWindow: -1}); err == nil {
+		t.Error("a negative window was spelled")
+	}
+	if _, _, err := ProfileSettings(agent.AgentCodex, ProfileDrops{AutoCompactWindow: 400000}); err == nil {
+		t.Error("ProfileSettings(codex) spelled a window")
 	}
 }
 
@@ -115,8 +159,10 @@ func TestAllProfileEnvNames(t *testing.T) {
 // session into every launch below it.
 func TestProfileEnvStaysInsideAllProfileEnvNames(t *testing.T) {
 	union := AllProfileEnvNames()
+	everything := coordinatorDrops
+	everything.AutoCompactWindow = 400000
 	for _, ag := range agent.All() {
-		_, env, err := ProfileSettings(ag, coordinatorDrops)
+		_, env, err := ProfileSettings(ag, everything)
 		if err != nil {
 			continue
 		}

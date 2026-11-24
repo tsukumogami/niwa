@@ -166,7 +166,8 @@ func deepCopySession(in config.SessionConfig) config.SessionConfig {
 			Timeout: in.BeforeRemove.Timeout,
 			Env:     slices.Clone(in.BeforeRemove.Env),
 		},
-		DispatchProfiles: deepCopyDispatchProfiles(in.DispatchProfiles),
+		DispatchProfiles:       deepCopyDispatchProfiles(in.DispatchProfiles),
+		DefaultDispatchProfile: in.DefaultDispatchProfile,
 	}
 }
 
@@ -183,6 +184,9 @@ func deepCopyDispatchProfiles(in map[string]config.SessionDispatchProfile) map[s
 			DropTools:             slices.Clone(p.DropTools),
 			DropBundledSkills:     p.DropBundledSkills,
 			DropAccountConnectors: p.DropAccountConnectors,
+			// A value type holding one scalar after load, so the copy is
+			// independent of the original.
+			AutoCompactWindow: p.AutoCompactWindow,
 		}
 	}
 	return out

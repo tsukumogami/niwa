@@ -3,19 +3,22 @@ package agentplan
 import (
 	"fmt"
 	"slices"
+	"strconv"
 
 	"github.com/tsukumogami/niwa/internal/agent"
 )
 
 // This file is the agent side of a dispatch profile: how one agent spells the
-// three things a profile can drop, which tools a profile may never drop on that
-// agent, and which environment names any profile can set. The profile itself
+// three things a profile can drop and the compaction window it can set, which
+// tools a profile may never drop on that agent, and which environment names
+// any profile can set. The profile itself
 // is declared in the workspace config; the caller hands its drops over as a
 // plain ProfileDrops value so this package keeps internal/agent as its one
 // dependency and never imports internal/config.
 
-// ProfileDrops is what one dispatch profile removes from a launched session.
-// It mirrors the three fields of a declared profile.
+// ProfileDrops is what one dispatch profile removes from a launched session,
+// and the compaction window it sets. It mirrors the fields of a declared
+// profile.
 type ProfileDrops struct {
 	// Tools are whole tool names to deny, in the order the profile declares
 	// them.
@@ -24,6 +27,9 @@ type ProfileDrops struct {
 	BundledSkills bool
 	// AccountConnectors leaves the account's connectors unloaded.
 	AccountConnectors bool
+	// AutoCompactWindow is the compaction window the profile sets, 0 for
+	// none. The caller passes a value config load already bounded.
+	AutoCompactWindow int64
 }
 
 // profileSpelling is one agent's vocabulary for a profile. Only an agent whose
@@ -33,6 +39,10 @@ type profileSpelling struct {
 	// connectors off, set to connectorsOff.
 	connectorsEnv string
 	connectorsOff string
+	// compactWindowEnv is the environment name that sets the compaction
+	// window. It is written only into the settings document's env object,
+	// never into the process environment (see SettingsOnlyProfileEnvNames).
+	compactWindowEnv string
 	// requiredTools are tools the agent's dispatch path depends on, so a
 	// profile may not drop them.
 	requiredTools []string
@@ -40,15 +50,17 @@ type profileSpelling struct {
 
 // profileSpellings holds the spelling for each agent that has one. Claude
 // Code drops a tool through a permissions deny rule, drops its bundled skills
-// with disableBundledSkills, and leaves the account's connectors unloaded when
-// ENABLE_CLAUDEAI_MCP_SERVERS is false. Its dispatch path needs ToolSearch,
-// since no deferred tool can load without it, and CronCreate, since niwa's
+// with disableBundledSkills, leaves the account's connectors unloaded when
+// ENABLE_CLAUDEAI_MCP_SERVERS is false, and reads its compaction window from
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW. Its dispatch path needs ToolSearch, since
+// no deferred tool can load without it, and CronCreate, since niwa's
 // keep-alive is a recurring session cron.
 var profileSpellings = map[agent.Agent]profileSpelling{
 	agent.AgentClaude: {
-		connectorsEnv: "ENABLE_CLAUDEAI_MCP_SERVERS",
-		connectorsOff: "false",
-		requiredTools: []string{"ToolSearch", "CronCreate"},
+		connectorsEnv:    "ENABLE_CLAUDEAI_MCP_SERVERS",
+		connectorsOff:    "false",
+		compactWindowEnv: "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+		requiredTools:    []string{"ToolSearch", "CronCreate"},
 	},
 }
 
@@ -58,10 +70,11 @@ var profileSpellings = map[agent.Agent]profileSpelling{
 // with only tools to drop returns no env entry.
 //
 // For Claude the keys are permissions (a map holding deny, the tool names as a
-// plain list in declared order) and disableBundledSkills, and the env value is
-// ENABLE_CLAUDEAI_MCP_SERVERS=false. For an agent whose DispatchProfile row
-// isn't implemented it returns an error naming the row and its reason, never
-// an empty spelling: a profile asked for and silently not applied would leave
+// plain list in declared order) and disableBundledSkills, and the env values
+// are ENABLE_CLAUDEAI_MCP_SERVERS=false and CLAUDE_CODE_AUTO_COMPACT_WINDOW
+// set to the window in decimal. For an agent whose DispatchProfile row isn't
+// implemented it returns an error naming the row and its reason, never an
+// empty spelling: a profile asked for and silently not applied would leave
 // the session at full context with nobody told.
 func ProfileSettings(ag agent.Agent, drops ProfileDrops) (map[string]any, map[string]string, error) {
 	spelling, err := profileSpellingFor(ag)
@@ -79,7 +92,33 @@ func ProfileSettings(ag agent.Agent, drops ProfileDrops) (map[string]any, map[st
 	if drops.AccountConnectors {
 		env[spelling.connectorsEnv] = spelling.connectorsOff
 	}
+	if drops.AutoCompactWindow != 0 {
+		if spelling.compactWindowEnv == "" {
+			return nil, nil, fmt.Errorf("agentplan: %s has no spelling for a compaction window", ag)
+		}
+		if drops.AutoCompactWindow < 0 {
+			return nil, nil, fmt.Errorf("agentplan: a compaction window can't be negative")
+		}
+		env[spelling.compactWindowEnv] = strconv.FormatInt(drops.AutoCompactWindow, 10)
+	}
 	return keys, env, nil
+}
+
+// SettingsOnlyProfileEnvNames returns the environment names a profile sets
+// only in the launch settings document's env object, across every agent,
+// sorted: today the compaction window. Every launch removes these from the
+// environment it starts from, whatever its profile, so the window a worker
+// runs with is the one its profile or its launch record gives and never one
+// it inherits.
+func SettingsOnlyProfileEnvNames() []string {
+	var names []string
+	for _, spelling := range profileSpellings {
+		if spelling.compactWindowEnv != "" && !slices.Contains(names, spelling.compactWindowEnv) {
+			names = append(names, spelling.compactWindowEnv)
+		}
+	}
+	slices.Sort(names)
+	return names
 }
 
 // ProfileRequiredTools returns the tools a profile may not drop for ag. An
@@ -100,8 +139,10 @@ func ProfileRequiredTools(ag agent.Agent) []string {
 func AllProfileEnvNames() []string {
 	var names []string
 	for _, spelling := range profileSpellings {
-		if spelling.connectorsEnv != "" && !slices.Contains(names, spelling.connectorsEnv) {
-			names = append(names, spelling.connectorsEnv)
+		for _, n := range []string{spelling.connectorsEnv, spelling.compactWindowEnv} {
+			if n != "" && !slices.Contains(names, n) {
+				names = append(names, n)
+			}
 		}
 	}
 	slices.Sort(names)

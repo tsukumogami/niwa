@@ -1,10 +1,15 @@
 # Dispatch profiles
 
-A dispatch profile trims one dispatched worker's context. It names tools to
-deny, and can switch off Claude Code's bundled skills and the account's
-connectors. `niwa dispatch --profile <name>` applies it to that one launch and
-nothing else: every dispatch without the flag, every interactive session and
-every other launch path starts exactly as it did before profiles existed.
+A dispatch profile shapes one dispatched worker's context. It names tools to
+deny, can switch off Claude Code's bundled skills and the account's
+connectors, and can set the worker's Claude Code compaction window.
+`niwa dispatch --profile <name>` applies it to that one launch, and
+`[session] default_dispatch_profile` names the profile a dispatch takes when
+it names none. A dispatch that resolves to no profile launches the argv and
+settings document it did before profiles existed. The one change it sees is
+that an inherited `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is removed from its
+process environment (see [The compaction window](#the-compaction-window)).
+Interactive sessions and `niwa watch`'s launches never take a profile.
 
 The case it was built for is a coordinator, a long-running session that hands
 work to other sessions and implements nothing itself. A coordinator pays for
@@ -28,7 +33,7 @@ drop_bundled_skills = true
 drop_account_connectors = true
 ```
 
-The three keys say what's removed, not how the agent spells it:
+The keys say what's removed or set, not how the agent spells it:
 
 - `drop_tools` lists tool names to deny. A name is either a built-in tool,
   starting with an upper-case letter and holding only letters and digits
@@ -37,9 +42,36 @@ The three keys say what's removed, not how the agent spells it:
 - `drop_bundled_skills = true` leaves out the skills that ship with the agent.
 - `drop_account_connectors = true` leaves out the connectors attached to the
   account, while the workspace's and plugins' MCP servers stay.
+- `auto_compact_window` sets the worker's Claude Code compaction window, the
+  Claude Code setting `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. It's an integer from
+  100,000 to 1,000,000. See [The compaction window](#the-compaction-window).
+
+A profile has to declare at least one of them. One that sets only a window is
+a profile:
+
+```toml
+[session.dispatch_profiles.worker]
+auto_compact_window = 400000
+```
 
 A profile name uses lowercase letters, digits and `-`, starting with a letter
 or digit.
+
+### The default profile
+
+`default_dispatch_profile` in `[session]` names the profile a `niwa dispatch`
+takes when it names none:
+
+```toml
+[session]
+default_dispatch_profile = "worker"
+```
+
+A dispatch without `--profile` then resolves to `worker` and applies every
+key it sets, and the launch record, the audit line and `niwa list` name it.
+`--profile` wins over the default. The default applies to `niwa dispatch`
+only: `niwa watch`'s launches never take it, and `niwa resume` and
+`niwa retask` take the profile from the launch record, not from the default.
 
 That example is the coordinator profile. Each item it drops was never called
 across 17 coordinator tenures, except AskUserQuestion and Skill, which only a
@@ -55,11 +87,26 @@ A workspace config with any of these doesn't load, and every command that
 reads it says why:
 
 - a profile name outside the name grammar;
-- a profile that drops nothing (no `drop_tools`, and neither switch set);
+- a profile that drops and sets nothing (no `drop_tools`, neither switch set
+  and no `auto_compact_window`);
 - a `drop_tools` name outside the tool-name grammar, or one listed twice;
+- an `auto_compact_window` that isn't an integer from 100,000 to 1,000,000:
+  99,999, 1,000,001, 0, a negative number, a float such as `400000.0` and a
+  string such as `"400000"` are all refused, with the message naming the
+  profile and the key (`session.dispatch_profiles.worker.auto_compact_window`);
+- a `default_dispatch_profile` that names no declared profile;
 - `ENABLE_CLAUDEAI_MCP_SERVERS` in `[session.dispatch_env]`, as a passthrough
   or an unset name, in any case. The profile owns that variable (see
   [Upgrading](#upgrading));
+- `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in `[session.dispatch_env]`. Like every
+  name starting `CLAUDE_`, it's reserved there;
+- once any profile sets `auto_compact_window`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`,
+  in any case, in any table that renders into Claude Code's settings `env`:
+  `[claude.env]`, `[instance.claude.env]` and every `[repos.<name>.claude.env]`,
+  in `promote` and in `vars` and `secrets` with their `required`,
+  `recommended` and `optional` sub-tables, and `[session.env]` in `promote`,
+  `vars` and the `vars` sub-tables. The message names the table. A workspace
+  whose profiles set no window keeps loading with the name in those tables;
 - `NIWA_DISPATCH_PROFILE` in `[session.dispatch_env]`. It's one of the names
   niwa sets itself.
 
@@ -76,7 +123,10 @@ document, beside every other key the launch already carries:
 - `disableBundledSkills: true` when the profile drops bundled skills;
 - `ENABLE_CLAUDEAI_MCP_SERVERS=false` in the document's `env` object and in
   the worker's process environment, when the profile drops account
-  connectors.
+  connectors;
+- `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in the document's `env` object only, set
+  to the window as a decimal string (`"400000"`), when the profile sets
+  `auto_compact_window`.
 
 The launch also sets `NIWA_DISPATCH_PROFILE` to the profile's name, in both
 places. The post-launch audit lines include
@@ -87,6 +137,34 @@ session mapping, where `niwa list` shows a `dispatch profile:` line and
 
 niwa never writes a profile into a settings file. It rides the launch only.
 
+### The compaction window
+
+`auto_compact_window` is the one profile key that sets something rather than
+removing it, and it reaches the worker one way: the launch's `--settings`
+document, as `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in its `env` object. It's a
+deliberate exception to the rule that a profile's env value goes in both the
+document and the process environment. The worker's process environment never
+carries it, and the launch record keeps it only inside the recorded settings
+document, never in its recorded environment.
+
+Every launch niwa makes removes an inherited `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
+from the environment it starts from: `niwa dispatch`, profiled or not and for
+Codex too, `niwa resume`, the wake `niwa retask` makes, and `niwa watch`'s
+launches. The window a worker runs with comes from the profile its dispatch
+resolved to, or from its launch record on resume and retask, and from nothing
+else. A dispatch from a shell that exports the name, under a profile with no
+window or under none, carries it in neither the document nor the process
+environment. For a workspace that declares no profiles this is the one
+change: a window your shell exports no longer reaches a dispatched worker. Set
+it in a profile instead.
+
+The profile is the place to set the window. Don't set
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` in the env tables of your personal global
+config, in a workspace overlay, or in the host-local `[claude.env]` of the
+machine config. Those sit outside the workspace config load that refuses the
+name, so nothing stops it there, and a value written into an instance's
+settings would reach every session started in it, profiled or not.
+
 ### What the dispatch refuses
 
 Each of these refuses before anything is provisioned, so a refused dispatch
@@ -94,10 +172,19 @@ leaves no instance behind:
 
 - an unknown profile name. The message lists the declared names;
 - a profile asked for when the workspace config didn't load;
-- a profile asked for a Codex worker. Codex has no profile spelling yet, and
-  `--profile` says so rather than launching a worker at full context with
-  nobody told;
-- a profile that drops a tool the agent's dispatch path needs.
+- a profile asked for a Codex worker with `--profile`. Codex has no profile
+  spelling yet, and `--profile` says so rather than launching a worker at full
+  context with nobody told;
+- a profile that drops a tool the agent's dispatch path needs, whether it was
+  named with `--profile` or is the default.
+
+A Codex dispatch that names no profile in a workspace with a default doesn't
+refuse. It skips the default, records no profile, and prints one line to
+stderr beside the other dispatch notices, naming the profile and the agent:
+
+```
+niwa dispatch: skipped the default dispatch profile "worker": the "codex" agent has no dispatch profile support, so the worker launches with no profile
+```
 
 ### What a profile can't drop
 
@@ -122,7 +209,9 @@ marker and every variable a profile can set before shaping the worker's
 environment. So an unprofiled dispatch from inside a profiled coordinator
 starts its worker like one dispatched from a plain shell, with its account
 connectors. Without the marker nothing is removed, so a developer who
-exported `ENABLE_CLAUDEAI_MCP_SERVERS` themselves keeps it.
+exported `ENABLE_CLAUDEAI_MCP_SERVERS` themselves keeps it. The compaction
+window is the exception: a launch removes an inherited
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` with or without the marker.
 
 Only niwa launches do this. Anything else started from a profiled worker's
 shell inherits the connectors switch: a `claude` opened by hand from inside
@@ -136,8 +225,12 @@ away from a session.
 ## A profiled coordinator
 
 The profile is optional. A workspace that declares no coordinator profile
-dispatches its coordinators exactly as before, and nothing else has to change
-for one that does.
+dispatches its coordinators with the argv and settings document they had
+before profiles existed, less an inherited compaction window (see
+[The compaction window](#the-compaction-window)), and nothing else has to
+change for one that does. A workspace with a `default_dispatch_profile`
+dispatches a coordinator under that default unless the dispatch passes
+`--profile`.
 
 Under the coordinator profile, a coordinator can't call the Skill tool, so
 its entry skill has to reach it another way. When a dispatch uses the
@@ -186,9 +279,24 @@ were made for a profile that no longer exists, and a resume never launches a
 worker under settings the current config doesn't describe. Restore the
 profile, or dispatch a fresh worker.
 
+The compaction window is the one key checked differently. A worker keeps the
+window it launched with: when the profile's `auto_compact_window` has been
+added, changed or removed since, a resume or retask relaunches with the
+recorded window, and a record with no window relaunches with none. Neither
+command takes a window or a profile argument. The recorded window is checked
+on its own instead, and a record refuses when:
+
+- its window isn't a decimal integer from 100,000 to 1,000,000;
+- it carries a window but names no profile;
+- it carries `CLAUDE_CODE_AUTO_COMPACT_WINDOW` anywhere but the settings
+  document's `env` object, such as in its recorded environment.
+
+A refusal quotes the recorded value, or doesn't print it at all.
+
 A resume relaunches with the recorded `--settings` document and environment
-as they were. When it rewrites a session mapping, for instance after a reap
-deleted it, the mapping carries the profile again.
+as they were, so a recorded window rides the document. When it rewrites a
+session mapping, for instance after a reap deleted it, the mapping carries the
+profile again.
 
 `niwa retask` adds no code of its own here. It runs the same launch-record
 check, so a changed or removed profile refuses a retask the same way. Its
@@ -196,7 +304,8 @@ wake adds no flag: Claude Code re-applies the options the job saved,
 `--settings` included, and retask's saved-options check already compares the
 saved document with the record.
 
-Records made without a profile resume and retask exactly as before.
+Records made without a profile resume and retask as before, except that an
+inherited compaction window is removed from the relaunch's environment.
 
 Name the worker by the session name niwa recorded, not the `--name` you
 dispatched it with. niwa turns `-` into `_` and adds a suffix, so
@@ -213,6 +322,12 @@ connectors, declare `drop_account_connectors = true` in a profile and
 dispatch with `--profile`. A passthrough would have fought the profile for
 the variable and let a resume accept the switch on a record that names no
 profile.
+
+After the upgrade that adds `auto_compact_window`, every launch removes an
+inherited `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. If you exported it in the shell
+you dispatch from, workers stop getting it. Put the window in a profile, and
+make that profile the `default_dispatch_profile` if every dispatch should get
+it.
 
 ## Validation
 

@@ -909,6 +909,9 @@ func validate(cfg *WorkspaceConfig) error {
 	if err := validateSessionDeclaration(cfg.Session); err != nil {
 		return err
 	}
+	if err := validateAutoCompactWindowNames(cfg); err != nil {
+		return err
+	}
 
 	// Validate content source paths don't escape the content directory.
 	// Reads from cfg.Content because Parse() migrates the deprecated

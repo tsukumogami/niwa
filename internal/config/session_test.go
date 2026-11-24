@@ -516,8 +516,8 @@ func TestDispatchProfileSingleDropLoads(t *testing.T) {
 // can't be declared in [session.dispatch_env], in either list and in any
 // letter case, and the refusal names the entry and says a profile owns it.
 func TestProfileEnvNamesRefusedInDispatchEnv(t *testing.T) {
-	if len(ProfileEnvNames) != 1 || ProfileEnvNames[0] != "ENABLE_CLAUDEAI_MCP_SERVERS" {
-		t.Fatalf("ProfileEnvNames = %v, want [ENABLE_CLAUDEAI_MCP_SERVERS]", ProfileEnvNames)
+	if want := []string{"CLAUDE_CODE_AUTO_COMPACT_WINDOW", "ENABLE_CLAUDEAI_MCP_SERVERS"}; !slices.Equal(ProfileEnvNames, want) {
+		t.Fatalf("ProfileEnvNames = %v, want %v", ProfileEnvNames, want)
 	}
 	for _, list := range []string{"passthrough", "unset"} {
 		for _, entry := range []string{"ENABLE_CLAUDEAI_MCP_SERVERS", "enable_claudeai_mcp_servers"} {

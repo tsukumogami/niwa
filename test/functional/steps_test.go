@@ -129,6 +129,9 @@ func (s *testState) buildEnv() []string {
 			// Claude Code session would otherwise point every hook scenario
 			// at the developer's own project.
 			strings.HasPrefix(kv, "CLAUDE_PROJECT_DIR=") ||
+			// A dispatch drops an inherited compaction window anyway; a
+			// scenario that wants one exported sets it for one command.
+			strings.HasPrefix(kv, "CLAUDE_CODE_AUTO_COMPACT_WINDOW=") ||
 			// ssh finds the operator's agent through this, not through HOME,
 			// so a scenario whose clone reaches ssh would otherwise wait on an
 			// agent that asks the operator to confirm each use.

@@ -599,6 +599,14 @@ func resolveRecordProfile(rec workspace.LaunchRecord, wsConfig *config.Workspace
 	if err != nil {
 		return dispatchLaunchProfile{}, fmt.Errorf("the recorded dispatch profile %q doesn't resolve in the current config: %w", rec.DispatchProfile, err)
 	}
+	// The compaction window is the one profile key a relaunch takes from the
+	// record rather than the current config: a worker keeps the window it
+	// launched with when the profile's auto_compact_window is added, changed
+	// or removed since. It leaves the comparison here, and checkResumeEnv
+	// checks the recorded value on its own.
+	for _, n := range agentplan.SettingsOnlyProfileEnvNames() {
+		delete(profile.Env, n)
+	}
 	return profile, nil
 }
 
@@ -637,7 +645,7 @@ func validateLaunchRecord(rec workspace.LaunchRecord, spec agentplan.LaunchSpec,
 	allowed := func(name string) bool {
 		return slices.Contains(config.LaunchSettingsEnvNames, name) || slices.Contains(passthrough, name)
 	}
-	if err := checkResumeEnv(rec.Env, allowed, profile); err != nil {
+	if err := checkResumeEnv(rec.Env, allowed, profile, false); err != nil {
 		return err
 	}
 	if rec.Settings != "" {
@@ -661,7 +669,13 @@ func validateLaunchRecord(rec workspace.LaunchRecord, spec agentplan.LaunchSpec,
 // to its value, and every one of them present. With the zero profile none of
 // them is admitted, so a record that names no profile can't carry a profile's
 // switch to a resumed worker.
-func checkResumeEnv(env map[string]string, allowed func(string) bool, profile dispatchLaunchProfile) error {
+//
+// The compaction window is checked apart from the profile, since a relaunch
+// keeps the recorded one whatever the profile sets now (resolveRecordProfile
+// leaves it out of profile). It is admitted only in the settings document's
+// env object (inSettings), only on a record that names a profile, and only as
+// a decimal integer config.ValidateAutoCompactWindow accepts.
+func checkResumeEnv(env map[string]string, allowed func(string) bool, profile dispatchLaunchProfile, inSettings bool) error {
 	names := make([]string, 0, len(env))
 	for n := range env {
 		names = append(names, n)
@@ -670,6 +684,16 @@ func checkResumeEnv(env map[string]string, allowed func(string) bool, profile di
 	for _, n := range names {
 		v := env[n]
 		switch {
+		case n == config.AutoCompactWindowEnv:
+			if !inSettings {
+				return fmt.Errorf("environment variable %s is in the record's environment; niwa sets it only in the settings document's env object", n)
+			}
+			if profile.Name == "" {
+				return fmt.Errorf("environment variable %s is one only a dispatch profile sets, and the record names none", n)
+			}
+			if err := config.ValidateAutoCompactWindow(v); err != nil {
+				return fmt.Errorf("environment variable %s is %q, which is %v", n, v, err)
+			}
 		case n == config.DispatchProfileEnv:
 			if profile.Name == "" {
 				return fmt.Errorf("environment variable %s is set, but the record names no dispatch profile", n)
@@ -770,7 +794,7 @@ func checkResumeSettings(doc string, allowed func(string) bool, profile dispatch
 			if err := json.Unmarshal(raw, &env); err != nil {
 				return errors.New("env must be an object of string values")
 			}
-			if err := checkResumeEnv(env, allowed, profile); err != nil {
+			if err := checkResumeEnv(env, allowed, profile, true); err != nil {
 				return err
 			}
 		case profilePermissionsKey:
@@ -919,8 +943,9 @@ func displayMode(m string) string {
 }
 
 // resumeEnv is the resumed worker's environment: the parent's, less the
-// workspace's unset names and the reap key, with the recorded names set to
-// their recorded values.
+// workspace's unset names, the reap key and an inherited compaction window,
+// with the recorded names set to their recorded values. A recorded window
+// rides the recorded settings document, never this environment.
 func resumeEnv(base, unset []string, recorded map[string]string) []string {
 	proc, _ := shapeLaunchEnv(base, launchEnvShape{Unset: unset})
 	out := make([]string, 0, len(proc)+len(recorded))

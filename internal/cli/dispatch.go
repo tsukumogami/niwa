@@ -433,11 +433,16 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// (2d') Resolve --profile once the agent is known and before anything is
 	// provisioned, so an unknown name, an agent whose dispatch-profile row
 	// isn't implemented, or a profile dropping a tool the dispatch path needs
-	// refuses with nothing left behind. Without the flag this is the zero
-	// profile, which contributes nothing below.
-	profile, err := resolveDispatchProfile(dispatchProfile, wsConfig, dispatchedAgent)
+	// refuses with nothing left behind. Without the flag the workspace's
+	// default_dispatch_profile applies, skipped with one line for an agent
+	// that has no profile support; with neither this is the zero profile,
+	// which contributes nothing below.
+	profile, skippedDefault, err := resolveDispatchLaunchProfile(dispatchProfile, wsConfig, dispatchedAgent)
 	if err != nil {
 		return fmt.Errorf("niwa: error: %w", err)
+	}
+	if skippedDefault != "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), skippedDefaultProfileLine(skippedDefault, dispatchedAgent))
 	}
 
 	// (2e) Resolve the dispatch's authority level and named grant, and read
@@ -945,8 +950,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		DispatchID:  dispatchID,
 		Workspace:   identityWorkspace,
 		// A profile's env values and its marker ride the env shape, so they
-		// reach the settings env block and the process environment alike.
-		// The shape must hold them before applyLaunchEnv consumes it.
+		// reach the settings env block and the process environment alike,
+		// except the compaction window, which goes in the settings env block
+		// only. The shape must hold them before applyLaunchEnv consumes it.
 		Profile:    profile.Name,
 		ProfileEnv: profile.Env,
 	}
