@@ -524,6 +524,35 @@ func TestPartialCloneKeepsOnAnOlderGit(t *testing.T) {
 	}
 }
 
+// TestPartialCloneRefusalRunsAgainBeforeTheReadsOnAnOlderGit fakes an older
+// git and plants a partial-clone key after the repository's first
+// configuration read, and checks the unit keeps before any later call in it.
+func TestPartialCloneRefusalRunsAgainBeforeTheReadsOnAnOlderGit(t *testing.T) {
+	for _, key := range []struct{ set, value, want string }{
+		{"remote.origin.promisor", "true", "remote.origin.promisor"},
+		{"extensions.partialClone", "origin", "extensions.partialclone"},
+	} {
+		t.Run(key.set, func(t *testing.T) {
+			f := checkedOut(t)
+			gitDir := filepath.Join(f.clone, ".git")
+			p := f.policy(t)
+			p.Env.gitVersion = gitVersion{2, 44}
+			var log callLog
+			log.before = func(c gitCall, _ int) {
+				if c.gitDir == gitDir && c.args[0] == "config" && len(log.in(gitDir)) == 2 {
+					gitRun(t, f.clone, "config", key.set, key.value)
+				}
+			}
+			log.attach(p.Env)
+			v := Evaluate(context.Background(), f.unit(), p)
+			keepWith(t, v, "tools/app: partial clone needs git 2.45: "+key.want)
+			if got := log.in(gitDir); strings.Join(got, ",") != "config,config" {
+				t.Errorf("git calls in the repository %v; want the two configuration reads alone", got)
+			}
+		})
+	}
+}
+
 // fakeGit writes a git on its own PATH directory that runs body first and
 // then hands every call it doesn't answer to the real git, logging each
 // call's arguments to log.

@@ -311,11 +311,22 @@ func (e *Env) checkRepo(ctx context.Context, t repoTarget, rp repoPolicy) repoRe
 // commits and tags no proof remote holds (checkHeld), then stashes, then
 // modified tracked files, then index flags, then untracked files. The
 // identity check runs again first, since other repositories' configuration
-// reads can come between this one's and its reads.
+// reads can come between this one's and its reads, and on a git older than
+// 2.45 so does the partial-clone refusal, before any call that reads an
+// object.
 func (e *Env) readRepo(ctx context.Context, t repoTarget, rp repoPolicy, rc repoConfig) repoResult {
 	rel := filepath.ToSlash(t.Rel)
 	if err := t.checkIdentity(); err != nil {
 		return t.stopRepo("changed since the walk: " + err.Error())
+	}
+	if !e.gitVersion.atLeast(lazyFetchOffVersion.major, lazyFetchOffVersion.minor) {
+		again, err := e.readConfig(ctx, t.Dirs)
+		if err != nil {
+			return t.stopRepo(err.Error())
+		}
+		if again.partialKey != "" {
+			return t.stopRepo("partial clone needs git 2.45: " + again.partialKey)
+		}
 	}
 	res := repoResult{configRead: true}
 	keepAt := func(bucket *[]Check, evidence string, paths ...string) {
