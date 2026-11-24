@@ -270,7 +270,7 @@ func (a *passActor) actReap(t passUnit, unit removal.Unit, v removal.Verdict, st
 	// which vets the session's job directory again right before the call
 	// and makes none when that fails.
 	for _, s := range sessions {
-		if out, err := removeClaudeSessionFunc(withClaudeCalls(a.ctx, a.claude), s.ID); err != nil {
+		if out, err := removeClaudeSessionFunc(withRemovalSession(withClaudeCalls(a.ctx, a.claude), s.SessionID), s.ID); err != nil {
 			return keep(fmt.Sprintf("Claude session %s was not removed: %s", s.ID, firstLine(out, err)))
 		}
 	}

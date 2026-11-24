@@ -972,7 +972,7 @@ func (r *retaskRun) removeCopy(cp claudeSessionRow, before map[string]bool) (boo
 		}
 	}
 	if listed {
-		if out, err := removeClaudeSessionFunc(r.ctx, cp.ID); err != nil {
+		if out, err := removeClaudeSessionFunc(withRemovalSession(r.ctx, cp.SessionID), cp.ID); err != nil {
 			// The vet's failure, which made no call, names the path; a call
 			// that failed gives Claude Code's message.
 			return false, "claude rm failed on it: " + removal.ScrubEvidence(firstLine(out, err), 400)

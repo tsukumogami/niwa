@@ -112,7 +112,9 @@ func TestVetJobDirRefusesAnAmbiguousLeadingSlice(t *testing.T) {
 	if got := JobDirFor(f.jobs, full); got != f.jobDir {
 		t.Fatalf("JobDirFor changed: %q; want %q", got, f.jobDir)
 	}
-	// A directory under the full id is the one, as for the rule.
+	// A directory under the full id beside them doesn't settle it: the vet
+	// still keeps, naming the jobs root, though JobDirFor picks the full
+	// id's.
 	exact := filepath.Join(f.jobs, full)
 	if err := os.Mkdir(exact, 0o700); err != nil {
 		t.Fatal(err)
@@ -120,8 +122,53 @@ func TestVetJobDirRefusesAnAmbiguousLeadingSlice(t *testing.T) {
 	if err := os.Chmod(exact, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	ve = vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, full))
+	if ve.Path != f.jobs || !strings.Contains(ve.Reason, "more than one job directory") {
+		t.Fatalf("a full id's directory beside two leading slices: %q (%s); want the jobs root named", ve.Path, ve.Reason)
+	}
+	if got := JobDirFor(f.jobs, full); got != exact {
+		t.Fatalf("JobDirFor changed: %q; want %q", got, exact)
+	}
+	// Alone, the directory under the full id is the one, as for the rule.
+	for _, d := range []string{f.jobDir, second} {
+		if err := os.RemoveAll(d); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := VetJobDir(context.Background(), f.jobs, f.home, full); err != nil {
-		t.Fatalf("the vet with a directory under the full id: %v", err)
+		t.Fatalf("the vet with only a directory under the full id: %v", err)
+	}
+}
+
+// Claude Code writes the job directory under the short id. An empty
+// directory under the full id beside it, which anything running as the
+// person can make, must not stand in for it: the vet keeps, naming the
+// jobs root, rather than pass the empty directory while claude rm deletes
+// the short id's, here holding a link. JobDirFor, the rule's lookup, is
+// unchanged and picks the full id's.
+func TestVetJobDirRefusesAFullIDDirectoryBesideTheShortIDOne(t *testing.T) {
+	f := newVetFixture(t)
+	out := filepath.Join(f.jobDir, "scratch", "out")
+	if err := os.Remove(out); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(f.outside(t, "outside"), out); err != nil {
+		t.Fatal(err)
+	}
+	full := f.id + "-0000-4000-8000-000000000000"
+	decoy := filepath.Join(f.jobs, full)
+	if err := os.Mkdir(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, full))
+	if ve.Path != f.jobs || !strings.Contains(ve.Reason, "more than one job directory") || !strings.Contains(ve.Reason, f.id+", "+full) {
+		t.Fatalf("an empty full id's directory beside the short id's: %q (%s); want the jobs root and both names", ve.Path, ve.Reason)
+	}
+	if got := JobDirFor(f.jobs, full); got != decoy {
+		t.Fatalf("JobDirFor changed: %q; want %q", got, decoy)
 	}
 }
 

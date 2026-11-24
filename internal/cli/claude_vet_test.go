@@ -188,7 +188,7 @@ func TestRealRemoveClaudeSessionVetsThenRunsFromTheScratchDirectory(t *testing.T
 	root := canonicalTempDir(t)
 	cc := newClaudeCalls(root)
 	defer cc.close()
-	ctx := withClaudeCalls(context.Background(), cc)
+	ctx := withRemovalSession(withClaudeCalls(context.Background(), cc), abcdefSID)
 
 	if _, err := realRemoveClaudeSession(ctx, "abcdef12"); err != nil {
 		t.Fatalf("claude rm on a clean job directory: %v", err)
@@ -224,7 +224,7 @@ func TestRealRemoveClaudeSessionReportsClaudesMessage(t *testing.T) {
 	loggingClaude(t, "error: the worktree of the session holds changes", 1)
 	cc := newClaudeCalls(canonicalTempDir(t))
 	defer cc.close()
-	_, err := realRemoveClaudeSession(withClaudeCalls(context.Background(), cc), "abcdef12")
+	_, err := realRemoveClaudeSession(withRemovalSession(withClaudeCalls(context.Background(), cc), abcdefSID), "abcdef12")
 	if err == nil || !strings.Contains(err.Error(), "the worktree of the session holds changes") {
 		t.Fatalf("a failing claude rm: %v; want Claude Code's message", err)
 	}
@@ -277,7 +277,7 @@ func TestRealRemoveClaudeSessionChecksTheListingAgainRightBeforeClaudeRm(t *test
 			log := loggingClaude(t, "removed", 0)
 			cc := newClaudeCalls(canonicalTempDir(t))
 			defer cc.close()
-			_, err := realRemoveClaudeSession(withClaudeCalls(context.Background(), cc), "abcdef12")
+			_, err := realRemoveClaudeSession(withRemovalSession(withClaudeCalls(context.Background(), cc), abcdefSID), "abcdef12")
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v; want it to say %q", err, tc.want)
 			}
@@ -289,12 +289,15 @@ func TestRealRemoveClaudeSessionChecksTheListingAgainRightBeforeClaudeRm(t *test
 }
 
 // The vet finds the job directory by the full session id, the id the rule
-// walks, not the short id claude rm takes: with a clean directory under the
-// short id and a group-writable one under the full id, both the vet before
-// the first removal step and the one inside realRemoveClaudeSession check
-// the full id's and keep, with no claude call.
+// walks, not the short id claude rm takes: with only a group-writable
+// directory under the full id, both the vet before the first removal step
+// and the one inside realRemoveClaudeSession check the full id's and keep,
+// with no claude call.
 func TestTheVetFindsTheJobDirectoryByTheFullSessionID(t *testing.T) {
-	_, jobs, _ := vetHome(t, "abcdef12")
+	_, jobs, short := vetHome(t, "abcdef12")
+	if err := os.RemoveAll(short); err != nil {
+		t.Fatal(err)
+	}
 	full := filepath.Join(jobs, abcdefSID)
 	if err := os.Mkdir(full, 0o700); err != nil {
 		t.Fatal(err)
@@ -307,7 +310,7 @@ func TestTheVetFindsTheJobDirectoryByTheFullSessionID(t *testing.T) {
 	log := loggingClaude(t, "removed", 0)
 	cc := newClaudeCalls(canonicalTempDir(t))
 	defer cc.close()
-	ctx := withClaudeCalls(context.Background(), cc)
+	ctx := withRemovalSession(withClaudeCalls(context.Background(), cc), abcdefSID)
 
 	if err := vetBeforeRemoval(ctx, cc, []claudeSessionRow{row}); err == nil || !names(err.Error(), full) {
 		t.Fatalf("the vet before removal: %v; want %s named", err, full)
@@ -317,6 +320,80 @@ func TestTheVetFindsTheJobDirectoryByTheFullSessionID(t *testing.T) {
 	}
 	if got := claudeLog(t, log); got != nil {
 		t.Fatalf("claude ran: %q", got)
+	}
+}
+
+// Claude Code writes the job directory under the short id. With a link in
+// it and an empty directory under the full id beside it, which anything
+// running as the person can make, both vets keep, naming the jobs root,
+// with no claude call, rather than pass the empty directory while claude rm
+// deletes the short id's.
+func TestTheVetRefusesAFullIDDirectoryBesideTheShortIDOne(t *testing.T) {
+	_, jobs, short := vetHome(t, "abcdef12")
+	_, marker := innerLink(t, short)
+	decoy := filepath.Join(jobs, abcdefSID)
+	if err := os.Mkdir(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	row := claudeSessionRow{ID: "abcdef12", SessionID: abcdefSID}
+	listedForRemoval(t, nil, row)
+	log := loggingClaude(t, "removed", 0)
+	cc := newClaudeCalls(canonicalTempDir(t))
+	defer cc.close()
+	ctx := withRemovalSession(withClaudeCalls(context.Background(), cc), abcdefSID)
+
+	want := "more than one job directory in " + jobs
+	if err := vetBeforeRemoval(ctx, cc, []claudeSessionRow{row}); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("the vet before removal: %v; want %q", err, want)
+	}
+	if _, err := realRemoveClaudeSession(ctx, "abcdef12"); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("realRemoveClaudeSession: %v; want %q", err, want)
+	}
+	if got := claudeLog(t, log); got != nil {
+		t.Fatalf("claude ran: %q", got)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("the link's target changed: %v", err)
+	}
+}
+
+// Right before claude rm, the fresh row listed under the short id must
+// carry the full session id the caller chose; a row under another full id,
+// and a call that names no full id, refuse with no claude call, though the
+// job directory is clean.
+func TestRealRemoveClaudeSessionConfirmsTheFullSessionID(t *testing.T) {
+	other := claudeSessionRow{ID: "abcdef12", SessionID: "abcdef12-1111-4111-8111-111111111111"}
+	cases := []struct {
+		name    string
+		rows    []claudeSessionRow
+		withSID bool
+		want    string
+	}{
+		{"listed under another full id", []claudeSessionRow{other}, true, "under full id " + other.SessionID},
+		{"no full id named", []claudeSessionRow{{ID: "abcdef12", SessionID: abcdefSID}}, false, "no full session id"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vetHome(t, "abcdef12")
+			listedForRemoval(t, nil, tc.rows...)
+			log := loggingClaude(t, "removed", 0)
+			cc := newClaudeCalls(canonicalTempDir(t))
+			defer cc.close()
+			ctx := withClaudeCalls(context.Background(), cc)
+			if tc.withSID {
+				ctx = withRemovalSession(ctx, abcdefSID)
+			}
+			_, err := realRemoveClaudeSession(ctx, "abcdef12")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v; want it to say %q", err, tc.want)
+			}
+			if got := claudeLog(t, log); got != nil {
+				t.Fatalf("claude ran: %q", got)
+			}
+		})
 	}
 }
 

@@ -153,6 +153,23 @@ func claudeCallsFrom(ctx context.Context) *claudeCalls {
 	return cc
 }
 
+type removalSessionKey struct{}
+
+// withRemovalSession returns ctx naming sessionID, the full session id of
+// the session the caller chose to pass to claude rm under its short id.
+// realRemoveClaudeSession refuses a call whose context names none, and one
+// whose fresh listing holds the short id under another full id.
+func withRemovalSession(ctx context.Context, sessionID string) context.Context {
+	return context.WithValue(ctx, removalSessionKey{}, sessionID)
+}
+
+// removalSessionFrom returns the full session id ctx names, empty when
+// none.
+func removalSessionFrom(ctx context.Context) string {
+	id, _ := ctx.Value(removalSessionKey{}).(string)
+	return id
+}
+
 // newClaudeEnvFunc resolves the claude environment for destroy and retask.
 // A variable so a test can point it at a fake claude.
 var newClaudeEnvFunc = func(root, home, pathEnv string) *removal.Env {
@@ -283,9 +300,11 @@ func decodeClaudeRows(out []byte) ([]claudeSessionRow, error) {
 // output. It is the only place niwa issues claude rm, and it runs only with
 // claudeCalls on ctx. Right before the call it lists Claude Code's sessions
 // again and refuses a session that now reads running, one the listing no
-// longer holds or holds more than once under id, and any listing that can't
-// be read, since an earlier listing can be stale by then (destroy's waits
-// on its confirmation prompt). It then vets the session's own job
+// longer holds or holds more than once under id, one it holds under a full
+// session id other than the one ctx names (withRemovalSession), a call
+// whose ctx names none, and any listing that can't be read, since an
+// earlier listing can be stale by then (destroy's waits on its
+// confirmation prompt). It then vets the session's own job
 // directory, and on a failure makes no call and returns the failing path as
 // the reason. claude runs by its absolute path from the filtered PATH, from
 // the checked empty directory. It never passes --discard-unpushed or
@@ -332,10 +351,15 @@ func realRemoveClaudeSession(ctx context.Context, id string) (string, error) {
 }
 
 // stoppedSessionRow lists Claude Code's sessions through ctx's claudeCalls
-// and returns the one row listed under id, refusing when the listing can't
-// be read, holds no row or more than one under id, or the row reads
-// running.
+// and returns the one row listed under id, refusing when ctx names no full
+// session id, the listing can't be read, holds no row or more than one
+// under id, the row reads running, or the row's full session id isn't the
+// one ctx names.
 func stoppedSessionRow(ctx context.Context, id string) (claudeSessionRow, error) {
+	want := removalSessionFrom(ctx)
+	if want == "" {
+		return claudeSessionRow{}, fmt.Errorf("Claude session %s: no full session id was given for claude rm", id)
+	}
 	rows, err := listClaudeSessionsFunc(ctx)
 	if err != nil {
 		return claudeSessionRow{}, fmt.Errorf("Claude session %s: Claude Code's sessions could not be listed right before claude rm: %v", id, err)
@@ -353,6 +377,8 @@ func stoppedSessionRow(ctx context.Context, id string) (claudeSessionRow, error)
 		return claudeSessionRow{}, fmt.Errorf("Claude Code lists more than one session under %s right before claude rm", id)
 	case found[0].running():
 		return claudeSessionRow{}, fmt.Errorf("Claude session %s is still running right before claude rm", id)
+	case found[0].SessionID != want:
+		return claudeSessionRow{}, fmt.Errorf("Claude Code lists session %s under full id %s right before claude rm, not %s", id, found[0].SessionID, want)
 	}
 	return found[0], nil
 }
@@ -504,7 +530,7 @@ func removeOwningSessionsListed(ctx context.Context, reporter *workspace.Reporte
 			reporter.Log("kept Claude session %s: it is still running; once it stops (claude stop %s), remove it with claude rm %s", row.ID, row.ID, row.ID)
 			continue
 		}
-		out, err := removeClaudeSessionFunc(ctx, row.ID)
+		out, err := removeClaudeSessionFunc(withRemovalSession(ctx, row.SessionID), row.ID)
 		if err != nil {
 			reporter.Warn("could not remove Claude session %s: %s; remove it with claude rm %s", row.ID, removal.ScrubEvidence(firstLine(out, err), 400), row.ID)
 			continue

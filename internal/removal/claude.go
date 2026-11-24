@@ -107,16 +107,16 @@ func JobDirFor(jobsRoot, id string) string {
 	return ""
 }
 
-// vetJobDirFor is JobDirFor for the vet alone: the directory named by the
-// id, or else the one directory whose name is a leading slice of the id at
-// least 8 characters long. Where JobDirFor takes the first of several such
-// directories, the vet can't tell which one Claude Code will remove, so it
-// fails naming the jobs root. Empty, with no error, when there is none.
+// vetJobDirFor is JobDirFor for the vet alone: the one directory that is
+// named by the id or whose name is a leading slice of the id at least 8
+// characters long. The exact name and every leading slice are counted
+// together. Claude Code writes the job directory under the short id and
+// claude rm removes that one, so a second directory, the full id's
+// included, means the vet can't tell that the directory it checks is the
+// one Claude Code will remove; it fails naming the jobs root. With a single
+// directory the result is the one JobDirFor gives. Empty, with no error,
+// when there is none.
 func vetJobDirFor(jobsRoot, id string) (string, error) {
-	full := filepath.Join(jobsRoot, id)
-	if _, err := os.Lstat(full); err == nil {
-		return full, nil
-	}
 	entries, err := os.ReadDir(jobsRoot)
 	if err != nil {
 		return "", vetFail(jobsRoot, "the jobs root can't be listed at %s: %s", jobsRoot, errText(err))
@@ -124,7 +124,7 @@ func vetJobDirFor(jobsRoot, id string) (string, error) {
 	var found []string
 	for _, e := range entries {
 		name := e.Name()
-		if len(name) >= 8 && len(name) <= len(id) && id[:len(name)] == name {
+		if name == id || (len(name) >= 8 && len(name) <= len(id) && id[:len(name)] == name) {
 			found = append(found, name)
 		}
 	}
@@ -161,7 +161,7 @@ func (e *VetError) Error() string { return e.Reason }
 //
 //   - finds the job directory as JobDirFor does, and fails naming the path
 //     it looked for when there is none, and naming the jobs root when more
-//     than one directory's name is a leading slice of the id;
+//     than one directory's name is the id or a leading slice of it;
 //   - checks the chain to the jobs root: below the home directory, which may
 //     itself be a link, no component may be a link, and a jobs root outside
 //     the home is checked the same way from its config directory down;
