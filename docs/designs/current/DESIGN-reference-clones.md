@@ -987,7 +987,11 @@ the workspace config, never text the remote chose. A repo name that doesn't
 match the mirror's repo-id pattern already clones in full, and its notice
 prints a fixed placeholder ("a repo whose name niwa can't mirror") instead of
 the name, since notices go to a terminal and into the hook's
-`additionalContext`, which an agent reads.
+`additionalContext`, which an agent reads. The one exception is a name whose
+only failure is a leading dot, such as `.github`: the rest of it is id
+characters within the id length, so it can't carry free text, and its notice
+names it and says a mirror name can't start with ".", so the user can tell
+which repo cloned in full.
 
 **Details the implementation holds to.**
 - The strict scan treats a clone whose `.git` is a symlink or a gitfile, or

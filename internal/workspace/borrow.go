@@ -280,12 +280,26 @@ func writeStableAlternates(clone, stable string) error {
 
 // fallbackWarning is the warning a create prints for a repo cloned in full
 // instead of borrowing: the repo's name, cleaned (mirror.CleanText), and the
-// reason. A name that can't name a mirror isn't printed at all, since it can
-// hold anything a config can.
+// reason. A name that can't name a mirror can hold anything a config can, so
+// it isn't printed, with one exception: a name whose only failure is its
+// leading dot (dotLedRepoID), such as .github, is printed with that cause.
+// Such a name holds nothing but id characters, so no free text from it
+// reaches the warning, which also goes into the hook's additionalContext.
 func fallbackWarning(repo, reason string) string {
 	name := mirror.CleanText(repo)
 	if reason == fallbackInvalidRepoID {
+		if dotLedRepoID(repo) {
+			return fmt.Sprintf("%s was cloned in full instead of borrowing from the host mirror (%s: a mirror name can't start with \".\")", repo, reason)
+		}
 		name = "a repo whose name niwa can't mirror"
 	}
 	return fmt.Sprintf("%s was cloned in full instead of borrowing from the host mirror (%s)", name, reason)
+}
+
+// dotLedRepoID reports whether name fails mirror.ValidRepoID only because it
+// starts with a dot: the rest is id characters and the whole fits the id
+// length. So ".github" and "..x" qualify, and "." followed by a space, a
+// control character or too many characters doesn't.
+func dotLedRepoID(name string) bool {
+	return strings.HasPrefix(name, ".") && mirror.ValidRepoID("x"+name[1:])
 }
