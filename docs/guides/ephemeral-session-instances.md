@@ -5,7 +5,9 @@ single Claude Code background session and reclaimed when you delete that session
 from the Agent View. The model is one-to-one: **1 Claude Code background session ==
 1 ephemeral niwa instance**. A session that finishes its task, goes idle, or is
 suspended keeps its instance — it is still listed and resumable, so you can re-open
-it into the same clone — and only an explicit delete tears the instance down. When
+it into the same clone — and for a Claude Code session only an explicit delete
+tears the instance down (a Codex session's instance goes after the idle grace,
+and the backstop takes an unmapped dispatch instance past its TTL). When
 you dispatch workers with `claude agents` from the workspace
 root, each worker gets its own isolated instance — its own clone, its own
 secrets, its own CLAUDE context — instead of all the workers sharing the one
@@ -22,10 +24,12 @@ workspace-root level, one per dispatched session.
 directory's working directory. Sessions fanned out from the workspace root all
 share that one tree, so parallel agents step on each other. The fix is to give
 each dispatched session its own instance, created on `SessionStart` and reclaimed
-by the reaper once you delete the session. Teardown is delete-only: the reaper
-keys on the session's Claude Code job entry disappearing (the proxy for deletion),
-so completed, idle, and suspended sessions keep their instances and stay
-resumable.
+by the reaper once you delete the session. For a Claude Code session, teardown
+is delete-only: the reaper keys on the session's Claude Code job entry
+disappearing (the proxy for deletion), so completed, idle, and suspended
+sessions keep their instances and stay resumable. A Codex session's instance
+is reclaimed after the idle grace instead, and the backstop takes an unmapped
+dispatch instance past its TTL.
 
 niwa already owns the analogous surface one level down — per-repo worktree
 hooks, a `.niwa/sessions/` store, non-interactive `niwa destroy --force`. This
@@ -52,16 +56,20 @@ agent cd's into the instance and works there in isolation
       | you delete the session (Ctrl+X twice in `claude agents`)
       | -> its ~/.claude/jobs/<id>/ entry disappears
       v
-niwa reap  (on demand, or at the next niwa create)
+niwa reap  (on demand, or when niwa dispatch, create or watch runs)
            sees the job entry gone, checks the instance for work found
            nowhere else, runs the on-reap command (if declared), removes
            the instance, deletes the mapping once the command succeeds
 ```
 
 The reaper is the single automatic teardown path; `niwa destroy` is the manual one
-(see [Destroying an instance by hand](#destroying-an-instance-by-hand)). It runs on demand and opportunistically at
-the next `niwa create`. Until you delete the session, its instance survives — a
-completed-but-resumable session can be re-opened into the same clone.
+(see [Destroying an instance by hand](#destroying-an-instance-by-hand)). It runs
+on demand and opportunistically when `niwa dispatch`, `niwa create` or
+`niwa watch` runs. Until you delete the session, its instance survives — a
+completed-but-resumable session can be re-opened into the same clone. The
+exceptions are in [`niwa reap`](#niwa-reap): a Codex session's instance is
+reclaimed after the idle grace, and the backstop takes an unmapped dispatch
+instance past its TTL.
 
 ## The session hooks
 
@@ -165,14 +173,19 @@ and any friendly slug is cosmetic metadata in `label`.
 
 ## Teardown
 
-Teardown is **delete-only** and driven entirely by the reaper. An ephemeral
-instance is reclaimed only when you delete its backing session from the Agent View
-(Ctrl+X twice in `claude agents`), which removes the session's
-`~/.claude/jobs/<id>/` entry — the signal the reaper keys on. A session that
-finishes its task, goes idle, or is suspended keeps its instance and stays
-resumable. That holds only while the agent can't write the files the reaper
-reads: one that can delete or rewrite the job entry, or rewrite the mapping,
-can make the reaper reclaim the instance sooner (see
+For a Claude Code session, teardown is **delete-only** and driven entirely by
+the reaper. Its ephemeral instance is reclaimed only when you delete its backing
+session from the Agent View (Ctrl+X twice in `claude agents`), which removes the
+session's `~/.claude/jobs/<id>/` entry — the signal the reaper keys on. A
+session that finishes its task, goes idle, or is suspended keeps its instance
+and stays resumable, unless a reap of its instance through another mapping
+removes it (see [`niwa reap`](#niwa-reap)). Two removals don't wait for a
+delete: a Codex session's instance goes once nobody has worked in it for the
+idle grace and no writer holds its lock, and the backstop takes an unmapped
+dispatch instance past its 30-minute TTL. All of this holds only while the
+agent can't write the files the reaper reads: one that can delete or rewrite
+the job entry, or rewrite the mapping, can make the reaper reclaim the
+instance sooner (see
 [What to deny the agent writes to](#what-to-deny-the-agent-writes-to)).
 
 `SessionEnd` is **not** a teardown trigger. It fires on idle-suspend, `/clear`,
@@ -336,19 +349,36 @@ reap is itself a live session rooted in its own instance, this guard is also wha
 stops `niwa dispatch` (which reaps opportunistically before provisioning) from
 deleting the instance it is running inside.
 
-`reap` reclaims a mapped instance only after the session's job entry is gone,
-which is what deleting the session does, and it spares any instance a job is
-still rooted in. When Claude Code still lists a session a mapping names for
-that instance, stopped, the reap removes it with `claude rm` before the
-instance goes, as `niwa destroy` does; a listed session that is still running
-keeps the instance. A finished session you haven't looked at yet keeps both its
-Agent View entry and its instance until you delete it.
+`reap` reclaims a mapped Claude Code instance only after the judged session
+reads gone (its job entry is gone, won't decode, or names another session; a
+Codex mapping goes by activity instead), and it spares any instance a job is
+still rooted in.
+
+**The `claude rm` step.** Once a unit has passed liveness (the judged mapping
+reads gone and no rooted-worker guard spares the instance), the removal rule,
+the pre-removal command and the re-read, the reap removes Claude sessions with
+`claude rm`. It takes every stopped session Claude Code still lists that any
+Claude mapping names for the instance and that still has a job directory, not
+only the judged one. A listing that fails, a listed session that is still
+running, an id niwa won't pass to a command, a job directory that fails niwa's
+checks or a `claude rm` that fails keeps the unit. That differs from
+`niwa destroy`, which warns on a failed `claude rm` and still removes the
+instance. Today this step runs before the on-reap command, `PrepareDestroy`
+and the tombstone re-check, so a unit one of those later checks keeps can be
+left with its session already removed, until a later change in this release
+moves the step after them.
+
+So a finished session you haven't looked at yet keeps its Agent View entry and
+its instance until you delete it, unless the reap takes its instance through
+another mapping that reads gone, or can't decode the session's own job entry.
+Then the reap removes that session too.
 
 `reap` runs on demand and is also invoked opportunistically at the start of
 `niwa create`, and by `niwa dispatch` and `niwa watch`, so session fan-out
 self-bounds. The opportunistic call never fails the command that runs it: a
-reap error there is swallowed, and only successful reclamations are noted on
-stderr.
+reap error there is swallowed. The reap's own lines still print on stderr: the
+instances it reclaimed, kept or spared, and the worktree sweep's removals and
+warnings.
 
 > **One known edge.** The Agent View stops a finished background session's
 > supervisor process after roughly an hour. It is not yet confirmed whether that
@@ -409,9 +439,13 @@ Bash gets past it.
   session store. An agent that can write a mapping chooses which instance a
   mapped reap acts on, a developer instance included, since a mapping's
   `instance_path` with `ephemeral` true is what marks an instance ephemeral;
-  it also chooses which session the reap asks about and where it looks.
-  Deleting a mapping makes its instance a backstop candidate, whose liveness
-  then rests only on the rooted-worker guards and the TTL. Each mapping also
+  it also chooses which session the reap asks about and where it looks. And
+  it chooses which sessions the reap removes: once a reap takes an
+  instance, it runs `claude rm` on every stopped Claude session Claude Code
+  still lists that any mapping names for that instance, so a written mapping
+  can get another stopped session removed. Deleting a mapping makes its
+  instance a backstop candidate, whose liveness then rests only on the
+  rooted-worker guards and the TTL. Each mapping also
   carries the count of failed on-reap runs that decides whether a later reap
   runs the command again or drops the mapping.
 - **The workspace root directory itself, and every instance in it other
@@ -488,8 +522,11 @@ Bash gets past it.
   and records that session, so an agent that deletes another session's job
   entry, or rewrites it so it no longer decodes or names a different
   `sessionId`, makes that session read as gone, and its instance becomes
-  reapable while the session is still resumable. The entries' `cwd` fields
-  are also the rooted-worker guard: a reap spares any instance a present
+  reapable while the session is still resumable. A reap of that instance
+  then also removes, with `claude rm`, every other stopped session Claude
+  Code still lists that a mapping names for the instance, so a write here
+  can get another session removed, not only an instance. The entries' `cwd`
+  fields are also the rooted-worker guard: a reap spares any instance a present
   job's `cwd` is at or under. For an unmapped instance the backstop could
   take, that guard and the Codex records below are the only liveness it
   has, so rewriting another job's `cwd` removes that instance's spare.
@@ -540,8 +577,9 @@ Bash gets past it.
   `NIWA_REAP_IDLE_GRACE` from the shell that starts niwa, and that shell
   builds them from its startup files. Deny writes to the login and
   interactive startup files of every shell the person uses, and to any file
-  they source: for example `~/.zshenv`, `~/.zprofile` and `~/.zshrc` for
-  zsh, `~/.bash_profile`, `~/.bash_login` and `~/.bashrc` for bash, and
+  they source: for example `~/.zshenv`, `~/.zprofile`, `~/.zshrc` and
+  `~/.zlogin` for zsh (in `$ZDOTDIR` instead of `~` when that's set),
+  `~/.bash_profile`, `~/.bash_login` and `~/.bashrc` for bash, and
   `~/.profile`, which a login `sh` reads and a login bash reads when neither
   of the first two exists. The on-reap and pre-removal commands' `/bin/sh -c`
   is neither a login nor an interactive shell, so a POSIX `sh` reads no
@@ -779,10 +817,14 @@ is spent is kept with a line saying the time ran out.
 **With nothing declared,** every removal behaves as it did before and niwa
 starts no process for it.
 
-**Where it runs.** The mapped reap: `niwa reap`, the idle-grace reclaim, and the
-reaps `niwa dispatch`, `niwa create` and `niwa watch` run first. It runs after
-niwa's own checks (the ephemeral marker, the liveness rule and the re-ask before
-a destroy), immediately before the instance is removed. `niwa destroy` asks it
+**Where it runs.** Every reap step: the mapped reap (`niwa reap`, the
+idle-grace reclaim, and the reaps `niwa dispatch`, `niwa create` and
+`niwa watch` run), the backstop (`reap-backstop`) and the worktree sweep
+(`worktree-sweep`). In a reap pass it runs after niwa's own checks (the
+ephemeral marker, the liveness rule and the removal rule) and before the
+re-read, the `claude rm` step, the on-reap command and the tombstone check. In
+the worktree sweep it runs after the unchanged check, right before the
+worktree is removed. `niwa destroy` asks it
 once per instance before any prompt, and lists its reason with every other one
 it found instead of printing the `niwa: kept` line; `--force` overrides it.
 
