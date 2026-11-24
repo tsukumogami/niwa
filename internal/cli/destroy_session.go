@@ -305,10 +305,13 @@ func realRemoveClaudeSession(ctx context.Context, id string) (string, error) {
 	if cc.jobsErr != nil {
 		return "", cc.jobsErr
 	}
-	if _, err := stoppedSessionRow(ctx, id); err != nil {
+	row, err := stoppedSessionRow(ctx, id)
+	if err != nil {
 		return "", err
 	}
-	if err := cc.vet(ctx, id); err != nil {
+	// The job directory is found by the full session id, the id the rule's
+	// walk uses, not by the short id claude rm takes.
+	if err := cc.vet(ctx, row.SessionID); err != nil {
 		return "", err
 	}
 	ctx, cancel := context.WithTimeout(ctx, claudeRemoveTimeout)
@@ -387,10 +390,11 @@ func listedRemovals(owners []workspace.SessionMapping, rows []claudeSessionRow) 
 
 // vetBeforeRemoval is the job-directory vet of every session a removal will
 // pass to claude rm, run before its first removal step. It returns the
-// first failure, naming the session and the path.
+// first failure, naming the session and the path. Each job directory is
+// found by the full session id, as the rule's walk finds it.
 func vetBeforeRemoval(ctx context.Context, cc *claudeCalls, sessions []claudeSessionRow) error {
 	for _, s := range sessions {
-		if err := cc.vet(ctx, s.ID); err != nil {
+		if err := cc.vet(ctx, s.SessionID); err != nil {
 			return fmt.Errorf("the job directory of Claude session %s failed its check: %w", s.ID, err)
 		}
 	}

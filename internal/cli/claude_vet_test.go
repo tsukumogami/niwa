@@ -288,6 +288,38 @@ func TestRealRemoveClaudeSessionChecksTheListingAgainRightBeforeClaudeRm(t *test
 	}
 }
 
+// The vet finds the job directory by the full session id, the id the rule
+// walks, not the short id claude rm takes: with a clean directory under the
+// short id and a group-writable one under the full id, both the vet before
+// the first removal step and the one inside realRemoveClaudeSession check
+// the full id's and keep, with no claude call.
+func TestTheVetFindsTheJobDirectoryByTheFullSessionID(t *testing.T) {
+	_, jobs, _ := vetHome(t, "abcdef12")
+	full := filepath.Join(jobs, abcdefSID)
+	if err := os.Mkdir(full, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(full, 0o757); err != nil {
+		t.Fatal(err)
+	}
+	row := claudeSessionRow{ID: "abcdef12", SessionID: abcdefSID}
+	listedForRemoval(t, nil, row)
+	log := loggingClaude(t, "removed", 0)
+	cc := newClaudeCalls(canonicalTempDir(t))
+	defer cc.close()
+	ctx := withClaudeCalls(context.Background(), cc)
+
+	if err := vetBeforeRemoval(ctx, cc, []claudeSessionRow{row}); err == nil || !names(err.Error(), full) {
+		t.Fatalf("the vet before removal: %v; want %s named", err, full)
+	}
+	if _, err := realRemoveClaudeSession(ctx, "abcdef12"); err == nil || !names(err.Error(), full) {
+		t.Fatalf("realRemoveClaudeSession: %v; want %s named", err, full)
+	}
+	if got := claudeLog(t, log); got != nil {
+		t.Fatalf("claude ran: %q", got)
+	}
+}
+
 func TestClaudeCallsVetKeepsWhenItsContextEnds(t *testing.T) {
 	vetHome(t, "abcdef12")
 	cc := newClaudeCalls(canonicalTempDir(t))

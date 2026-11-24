@@ -107,6 +107,36 @@ func JobDirFor(jobsRoot, id string) string {
 	return ""
 }
 
+// vetJobDirFor is JobDirFor for the vet alone: the directory named by the
+// id, or else the one directory whose name is a leading slice of the id at
+// least 8 characters long. Where JobDirFor takes the first of several such
+// directories, the vet can't tell which one Claude Code will remove, so it
+// fails naming the jobs root. Empty, with no error, when there is none.
+func vetJobDirFor(jobsRoot, id string) (string, error) {
+	full := filepath.Join(jobsRoot, id)
+	if _, err := os.Lstat(full); err == nil {
+		return full, nil
+	}
+	entries, err := os.ReadDir(jobsRoot)
+	if err != nil {
+		return "", vetFail(jobsRoot, "the jobs root can't be listed at %s: %s", jobsRoot, errText(err))
+	}
+	var found []string
+	for _, e := range entries {
+		name := e.Name()
+		if len(name) >= 8 && len(name) <= len(id) && id[:len(name)] == name {
+			found = append(found, name)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return "", nil
+	case 1:
+		return filepath.Join(jobsRoot, found[0]), nil
+	}
+	return "", vetFail(jobsRoot, "more than one job directory in %s matches session %s (%s)", jobsRoot, id, strings.Join(found, ", "))
+}
+
 func validJobID(id string) bool {
 	return id != "" && id != "." && id != ".." && !strings.ContainsAny(id, "/\\\x00")
 }
@@ -125,11 +155,13 @@ func (e *VetError) Error() string { return e.Reason }
 // directory is checked first and a failure means no call is made.
 //
 // jobsRoot is the jobs root removal.ResolveJobsRoot gives, home the person's
-// home directory, and id the session's id as claude agents --json --all
-// lists it, the id claude rm takes. The vet:
+// home directory, and id the session's full id as claude agents --json --all
+// lists it (sessionId), the id the rule's walk finds the job directory by.
+// The vet:
 //
 //   - finds the job directory as JobDirFor does, and fails naming the path
-//     it looked for when there is none;
+//     it looked for when there is none, and naming the jobs root when more
+//     than one directory's name is a leading slice of the id;
 //   - checks the chain to the jobs root: below the home directory, which may
 //     itself be a link, no component may be a link, and a jobs root outside
 //     the home is checked the same way from its config directory down;
@@ -245,7 +277,10 @@ func (v jobDirVet) run(ctx context.Context, jobsRoot, home, id string) error {
 	if !validJobID(id) {
 		return vetFail(filepath.Join(jobsRoot, id), "the session id %q can't name a job directory", id)
 	}
-	jobDir := JobDirFor(jobsRoot, id)
+	jobDir, err := vetJobDirFor(jobsRoot, id)
+	if err != nil {
+		return err
+	}
 	if jobDir == "" {
 		missing := filepath.Join(jobsRoot, id)
 		return vetFail(missing, "no job directory for session %s: %s is missing", id, missing)

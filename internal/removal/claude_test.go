@@ -91,6 +91,40 @@ func TestVetJobDirNamesAMissingJobDirectory(t *testing.T) {
 	}
 }
 
+// With no directory under the full id and more than one directory whose
+// name is a leading slice of it, the vet can't tell which one Claude Code
+// will remove, so it keeps, naming the jobs root, though JobDirFor (the
+// rule's lookup) still picks the first.
+func TestVetJobDirRefusesAnAmbiguousLeadingSlice(t *testing.T) {
+	f := newVetFixture(t)
+	second := filepath.Join(f.jobs, f.id+"3")
+	if err := os.Mkdir(second, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(second, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	full := f.id + "3456-4789-8abc-def012345678"
+	ve := vetErr(t, VetJobDir(context.Background(), f.jobs, f.home, full))
+	if ve.Path != f.jobs || !strings.Contains(ve.Reason, "more than one job directory") {
+		t.Fatalf("an ambiguous leading slice: %q (%s); want the jobs root named", ve.Path, ve.Reason)
+	}
+	if got := JobDirFor(f.jobs, full); got != f.jobDir {
+		t.Fatalf("JobDirFor changed: %q; want %q", got, f.jobDir)
+	}
+	// A directory under the full id is the one, as for the rule.
+	exact := filepath.Join(f.jobs, full)
+	if err := os.Mkdir(exact, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(exact, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := VetJobDir(context.Background(), f.jobs, f.home, full); err != nil {
+		t.Fatalf("the vet with a directory under the full id: %v", err)
+	}
+}
+
 func TestVetJobDirRefusesAnIDThatIsAPath(t *testing.T) {
 	f := newVetFixture(t)
 	for _, id := range []string{"", ".", "..", "../abcdef12", "a/b", "a\x00b"} {
