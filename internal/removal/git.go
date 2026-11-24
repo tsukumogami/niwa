@@ -588,9 +588,11 @@ func canonicalKey(key string) string {
 // namesProgram reports whether a setting names a program git might run: a
 // filter, diff or merge driver, a credential helper, a signing program, an
 // fsmonitor hook, or any key whose name says it names a program (a variable
-// named program or helper, or one ending in command, which covers both
-// *.command and *Command). Section and variable names compare
-// case-insensitively and a subsection as written.
+// named program, helper or cmd, or one ending in command, which covers both
+// *.command and *Command). It also refuses keys that name a program no niwa
+// call runs today: core.askPass, core.editor, core.gitProxy, and a remote's
+// vcs and uploadpack. Section and variable names compare case-insensitively
+// and a subsection as written.
 func namesProgram(key, value string) bool {
 	key = canonicalKey(key)
 	section, _, _ := strings.Cut(key, ".")
@@ -614,7 +616,11 @@ func namesProgram(key, value string) bool {
 		return true
 	case key == "core.fsmonitor":
 		return !fsmonitorBooleans[strings.ToLower(strings.TrimSpace(value))]
-	case variable == "program", variable == "helper", strings.HasSuffix(variable, "command"):
+	case key == "core.askpass", key == "core.editor", key == "core.gitproxy":
+		return true
+	case section == "remote" && hasSubsection && (variable == "vcs" || variable == "uploadpack"):
+		return true
+	case variable == "program", variable == "helper", variable == "cmd", strings.HasSuffix(variable, "command"):
 		return true
 	}
 	return false

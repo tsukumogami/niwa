@@ -200,6 +200,52 @@ func mixCase(key string) string {
 	return strings.ToUpper(key[:first]) + key[first:last] + strings.ToUpper(key[last:])
 }
 
+// TestEvaluateRefusesKeysThatNameAProgramNoCallRuns covers the keys that name
+// a program no niwa call runs today: one case per *.cmd section the rule
+// should catch, core.askPass, core.editor, core.gitProxy and a remote's vcs
+// and uploadpack, and some of them in mixed case. Each one keeps the unit
+// with the key named and nothing past the configuration read runs.
+func TestEvaluateRefusesKeysThatNameAProgramNoCallRuns(t *testing.T) {
+	keys := []struct{ set, want string }{
+		{"difftool.x.cmd", "difftool.x.cmd"},
+		{"mergetool.x.cmd", "mergetool.x.cmd"},
+		{"browser.x.cmd", "browser.x.cmd"},
+		{"man.x.cmd", "man.x.cmd"},
+		{"core.askPass", "core.askpass"},
+		{"core.editor", "core.editor"},
+		{"core.gitProxy", "core.gitproxy"},
+		{"remote.origin.vcs", "remote.origin.vcs"},
+		{"remote.origin.uploadpack", "remote.origin.uploadpack"},
+		{"Difftool.Vim.CMD", "difftool.Vim.cmd"},
+		{"CORE.AskPass", "core.askpass"},
+		{"Core.Editor", "core.editor"},
+		{"Core.GitProxy", "core.gitproxy"},
+		{"Remote.Origin.VCS", "remote.Origin.vcs"},
+		{"Remote.Origin.UploadPack", "remote.Origin.uploadpack"},
+	}
+	for _, k := range keys {
+		t.Run(k.set, func(t *testing.T) {
+			if !namesProgram(k.set, "x") {
+				t.Fatalf("namesProgram(%q, %q) = false, want true", k.set, "x")
+			}
+			f := checkedOut(t)
+			script, marker := markerScript(t)
+			selectFilter(t, f)
+			gitRun(t, f.clone, "config", k.set, script)
+			p := f.policy(t)
+			var log callLog
+			log.attach(p.Env)
+
+			v := Evaluate(context.Background(), f.unit(), p)
+			keepWith(t, v, "tools/app: repository configuration names a program: "+k.want)
+			if got := log.in(filepath.Join(f.clone, ".git")); strings.Join(got, ",") != "config" {
+				t.Errorf("git calls in the repository %v; want the configuration read alone", got)
+			}
+			assertNoMarker(t, marker)
+		})
+	}
+}
+
 // TestEvaluateRefusesEachProgramNamingKey sets each key on the refused list,
 // and one of each pattern, in a clone's configuration, and checks the unit
 // keeps with the key named and nothing past the configuration read runs in
