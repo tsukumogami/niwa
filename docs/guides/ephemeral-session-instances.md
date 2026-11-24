@@ -340,11 +340,12 @@ are noted on stderr.
 A reap checks each unit for work that exists nowhere else before it removes
 anything, and keeps the unit when it can't tell. Most of what it reads sits
 inside the instance, where niwa can treat everything as the agent's. Some of it
-doesn't: the reap also trusts a few files outside every instance to say what
-counts as pushed and which sessions are live, and it runs programs that the
-person's own git, ssh and Claude Code configuration name. niwa runs as the
-person, and so does the agent, so niwa can't stop the agent from writing those
-files. Whether it can is up to the sandbox the agent runs under.
+doesn't: the reap also trusts files outside the instance to say what counts
+as pushed, which instances it may act on and which sessions are live, and it
+runs programs that the person's own git, ssh and Claude Code configuration,
+and the workspace's own commands, name. niwa runs as the person, and so does
+the agent, so niwa can't stop the agent from writing those files. Whether it
+can is up to the sandbox the agent runs under.
 
 **The mechanism.** Deny the agent writes to every place below with sandbox
 write restrictions that also cover Bash: Claude Code's sandbox, or an
@@ -369,15 +370,34 @@ Bash gets past it.
   URLs and the `[session.removal]` `proof_remotes` prefixes, which decide
   which hosts count as proof that a commit is pushed and which hosts get the
   person's credential helper. An agent that can write it chooses both. The
-  same file holds the `[session.on_reap]` command, which a reap runs as the
-  person, under `/bin/sh -c` from the workspace root, before it removes a
-  session's instance. The session mapping store,
-  `.niwa/sessions/<session id>.json`, lives here too. A reap acts only on
-  instances an ephemeral mapping names and reads each one's liveness from the
-  session id that mapping records, so an agent that can write a mapping
-  chooses which instances a reap considers and which session it asks about.
-  Each mapping also carries the count of failed on-reap runs that decides
-  whether a later reap runs the command again or drops the mapping.
+  rest of `[session.removal]` (`disposable`, `ignored_files`, `job_scratch`)
+  and each repository's `build_trees` decide which files the removal rule
+  treats as disposable rather than as work. The same file holds the
+  `[session.on_reap]` command, which a reap runs as the person before it
+  removes a session's instance, and the `[session.before_remove]` command,
+  whose exit status decides whether a removal goes ahead. Both run under
+  `/bin/sh -c` from the workspace root. The session mapping store,
+  `.niwa/sessions/<session id>.json`, lives here too. A reap acts on the
+  instances an ephemeral mapping names, and through the backstop on unmapped
+  dispatch-named instances older than its 30-minute TTL. Each mapping
+  records the session id and the agent, and the agent decides where that
+  session's liveness is read from: Claude Code's jobs root, or the Codex
+  session store. An agent that can write a mapping chooses which session a
+  reap asks about and where it looks, and deleting a mapping makes its
+  instance a backstop candidate, whose liveness then rests only on the
+  rooted-worker guards and the TTL. Each mapping also carries the count of
+  failed on-reap runs that decides whether a later reap runs the command
+  again or drops the mapping.
+- **The workspace root directory itself, and every instance in it other
+  than the agent's own.** A reap lists instances by the root's directory
+  entries, and the backstop takes only an unmapped one whose name has the
+  dispatch form, `<config>+<slug>-<8 hex>`. It ages that instance by the
+  timestamp in its `.niwa/dispatch-pending`, or by the instance directory's
+  mtime when the marker is missing or can't be read. An agent that can
+  create or rename entries in the root, or write a sibling instance's marker
+  or its directory's mtime, decides which instances the backstop may take
+  and when their TTL runs out. The removal rule still keeps an instance that
+  holds work found nowhere else.
 - **The root's `.niwa-tombstone-*` entries.** A pass renames an instance to
   `<root>/.niwa-tombstone-<instance>-<8 hex>`, checks it again there and only
   then deletes it. A later pass recovers a tombstone an interrupted pass left.
@@ -388,8 +408,18 @@ Bash gets past it.
   `git config --global --no-includes`, and niwa's environment for it carries
   no `XDG_CONFIG_HOME`, so it reads `~/.config/git/config` even when your
   shell's `XDG_CONFIG_HOME` points elsewhere. Every other git call the removal
-  pass makes ignores both files (`GIT_CONFIG_GLOBAL=/dev/null`,
-  `GIT_CONFIG_NOSYSTEM=1`).
+  pass makes goes through the pass's one git builder, which ignores both
+  files and the system configuration (`GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_CONFIG_NOSYSTEM=1`). Other git calls in niwa don't: the reap's
+  worktree sweep, `niwa destroy`'s scan, clone and sync all read the full
+  global and system configuration. The bullet on the worktree sweep and the
+  destroy scan below says what that adds to this list.
+- **git's global and system attributes files**, `~/.config/git/attributes`
+  (the pass's git gets no `XDG_CONFIG_HOME`) and the `gitattributes` file in
+  git's own `etc/` directory, which for a Homebrew git sits inside a prefix
+  that is often user-owned. The removal pass's git doesn't set these aside,
+  so they apply to every status it runs. How far they can change what a
+  status reports isn't established; deny writes to them anyway.
 - **The whole `~/.ssh/` directory, and every file outside it that an
   `Include` in `~/.ssh/config` names.** Network calls to an ssh remote run
   ssh as `ssh -o BatchMode=yes -o ForwardAgent=no`, which reads the person's
@@ -399,21 +429,56 @@ Bash gets past it.
   could write.** A credential helper's script, a `ProxyCommand` or
   `Match exec` target, a `PKCS11Provider` library: each runs as the person
   during a reap.
-- **Every directory niwa's filtered `PATH` searches, and the programs found
-  there.** niwa starts `git`, `claude` and, on macOS, `lsof` by the first
-  match on that `PATH`, and git in turn finds `ssh` and any
-  `git-credential-*` helper through it, along with the helpers in git's own
-  libexec directory. The filter drops only empty and relative entries,
-  entries that don't resolve, and entries that resolve inside the workspace
-  root. A directory outside the root that the agent can write, such as
-  `~/.local/bin`, a native `claude` install or a user-owned Homebrew prefix,
-  lets it replace the program that decides what is pushed and which sessions
-  are live.
+- **Every directory niwa's filtered `PATH` searches, the programs found
+  there and the files they link to, and git's libexec directory.** niwa
+  starts `git`, `claude` and, on macOS, `lsof` by the first match on that
+  `PATH`, and git in turn finds `ssh` and any `git-credential-*` helper
+  through it. git also runs programs from its libexec directory, the exec
+  path compiled into it, which usually isn't on `PATH`: `git-remote-https`
+  and the other transport helpers the proof-remote calls use, and the
+  credential helpers git ships. niwa starts a program by its path in the
+  `PATH` directory, so when that path is a link, the file it resolves to is
+  what runs, such as a `claude` link into `~/.local/share/claude/versions/`
+  or a `git` link into a Homebrew Cellar. Deny writes to those targets too.
+  The filter drops only empty and relative entries, entries that don't
+  resolve, and entries that resolve inside the workspace root. A directory
+  outside the root that the agent can write, such as `~/.local/bin`, a
+  native `claude` install or a user-owned Homebrew prefix, lets it replace
+  the program that decides what is pushed and which sessions are live.
+- **Every directory on niwa's whole `PATH`, when the workspace sets an
+  on-reap or pre-removal command.** The `[session.on_reap]` and
+  `[session.before_remove]` commands run under `/bin/sh -c` from the
+  workspace root with niwa's own `PATH`, not the filtered one. A relative
+  entry resolves against the workspace root, and an entry inside the root is
+  searched like any other, so either can supply a program a command names.
+  Deny writes to every directory on that `PATH`, or have the commands name
+  each program by absolute path and deny writes to those programs. A
+  replaced pre-removal program can approve a removal the workspace's own
+  check would refuse.
 - **Claude Code's jobs root**, `jobs/` in Claude Code's config directory.
-  A session is live exactly while its job entry there is present, so an
-  agent that deletes another session's job entry makes that session read as
-  gone, and its instance becomes reapable while the session is still
-  resumable.
+  A Claude Code session is live exactly while its job entry there is present
+  and records that session, so an agent that deletes another session's job
+  entry, or rewrites it so it no longer decodes or names a different
+  `sessionId`, makes that session read as gone, and its instance becomes
+  reapable while the session is still resumable. The entries' `cwd` fields
+  are also the rooted-worker guard: a reap spares any instance a present
+  job's `cwd` is at or under. For an unmapped instance the backstop could
+  take, that guard and the Codex records below are the only liveness it
+  has, so rewriting another job's `cwd` removes that instance's spare.
+- **The Codex session store**, in `$CODEX_HOME` when it's set and in
+  `~/.codex/` otherwise: its `sessions/` rollouts and its
+  `thread-writer-locks/` directory. A mapping whose agent is Codex reads
+  liveness from these: the session is live while its rollout was written to
+  within the idle grace, or while a writer holds its lock. The backstop's
+  rooted-worker guard reads the rollouts' recorded `cwd` for every instance,
+  whatever agent the workspace dispatches. Backdating a rollout, removing a
+  held lock file or rewriting a rollout's `cwd` makes a live Codex session
+  read as gone or drops an instance's spare.
+- **Claude Code's transcripts**, `projects/` in the resolved config
+  directory. The reap's worktree sweep reads the session behind a worktree
+  record made without a job entry as ended once the transcript the record
+  names is gone or hasn't changed for the idle grace, and can then remove
+  the worktree if it's unchanged.
 - **Claude Code's user settings and user-scope plugins.** Every `claude` call
   on the removal path (`claude agents`, `claude rm`) runs with the person's
   environment, so it reads the user settings and plugins, and both can
@@ -423,6 +488,22 @@ Bash gets past it.
 - **Claude Code's user-scope MCP file**, which can name programs `claude`
   runs, and the legacy `.config.json` in the resolved config directory,
   which Claude Code reads in place of `.claude.json` when it exists.
+- **What the reap's worktree sweep and `niwa destroy`'s scan read today.**
+  These calls don't yet use the removal pass's git and its program lookup;
+  that hardening is tracked in
+  [niwa#577](https://github.com/tsukumogami/niwa/issues/577), which moves
+  them onto the removal pass's git. Until it lands, they run bare `git`, and
+  destroy's pull-request lookups bare `gh`, by the first match on niwa's
+  unfiltered `PATH`, with niwa's whole environment and git's full global and
+  system configuration: `~/.gitconfig` and every file its includes name, all
+  of `~/.config/git/` (or `$XDG_CONFIG_HOME/git/` when niwa's environment
+  sets it), and the system gitconfig. Those files can set keys, such as
+  `core.fsmonitor`, that make git run a program. Deny writes to every
+  directory on that `PATH`, entries inside the workspace root included, to
+  those configuration files and every file they include, and to `gh`'s own
+  configuration. The sweep also reads job entries from `~/.claude/jobs/`
+  whatever `CLAUDE_CONFIG_DIR` says, so deny `~/.claude/jobs/` even when that
+  variable is set.
 
 **Where the Claude Code files are.** niwa resolves the config directory once
 per pass, as Claude Code does:
@@ -432,9 +513,10 @@ per pass, as Claude Code does:
   `~/.claude.json` in the home directory. It sits beside the default config
   directory, not inside it. The legacy file is `~/.claude/.config.json`.
 - With `CLAUDE_CONFIG_DIR` set to an absolute, clean directory, deny that
-  directory's `jobs/`, settings and plugins rather than `~/.claude/`, and
-  `.claude.json` inside that directory rather than `~/.claude.json`. The
-  legacy file is `.config.json` in that directory.
+  directory's `jobs/`, settings and plugins, and `.claude.json` inside that
+  directory rather than `~/.claude.json`. The legacy file is `.config.json`
+  in that directory. Deny `~/.claude/jobs/` as well: the reap's worktree
+  sweep reads it whatever `CLAUDE_CONFIG_DIR` says.
 - A relative value, one starting with `~`, or one that isn't already in its
   clean form (a `..`, a `.`, or a repeated or trailing separator) makes niwa
   keep every unit, since it can't tell which sessions are live.
@@ -451,11 +533,23 @@ that names a program.
 **Without a sandbox there's no boundary.** These places are all outside the
 agent's working directory, but that's only where they are; it doesn't stop a
 write. A worker that runs without sandbox write restrictions like the ones
-above can write every one of them, and nothing in this list protects it. Run
-niwa inside the agent's sandbox, never as a command the sandbox lets out: niwa
-takes the home directory from `HOME`, so a process that starts niwa outside
-the sandbox with a `HOME` of its choosing points the scratch directory and the
-credential-helper read at files it wrote.
+above can write every one of them, and nothing in this list protects it. Keep
+any niwa the agent starts inside the agent's sandbox, never as a command the
+sandbox lets out: niwa takes the home directory from `HOME`, so a process that
+starts niwa outside the sandbox with a `HOME` of its choosing points the
+scratch directory and the credential-helper read at files it wrote.
+
+**A niwa the agent starts isn't bound by this list.** `niwa dispatch`,
+`niwa create` and `niwa watch` each reap as they run, and an agent can run
+`niwa reap` itself. That niwa takes `PATH`, `HOME`, `CLAUDE_CONFIG_DIR`,
+`CODEX_HOME` and `NIWA_REAP_IDLE_GRACE` from the agent, so the agent picks
+where its reap finds the jobs root, `~/.niwa/`, the credential-helper read,
+the Codex store and the programs it runs, and none of the denies above bind
+that reap. `NIWA_REAP_IDLE_GRACE` sets the idle grace the Codex rule and the
+worktree sweep use, 24 hours by default; niwa accepts any positive duration
+there, so a smaller value shortens the window before a session reads as gone.
+The reap this list protects is one niwa runs with the person's environment,
+outside the agent's reach.
 
 ## The reap key and the on-reap command
 
