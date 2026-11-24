@@ -6,8 +6,11 @@ from the Agent View. The model is one-to-one: **1 Claude Code background session
 1 ephemeral niwa instance**. A session that finishes its task, goes idle, or is
 suspended keeps its instance — it is still listed and resumable, so you can re-open
 it into the same clone — and for a Claude Code session only an explicit delete
-tears the instance down (a Codex session's instance goes after the idle grace,
-and the backstop takes an unmapped dispatch instance past its TTL). When
+tears the instance down, with the exceptions [`niwa reap`](#niwa-reap) lists: a
+reap through another mapping of the instance that reads gone, or a session job
+entry niwa can't decode, takes the instance and the session; a Codex session's
+instance goes after the idle grace; and the backstop takes an unmapped dispatch
+instance past its TTL. When
 you dispatch workers with `claude agents` from the workspace
 root, each worker gets its own isolated instance — its own clone, its own
 secrets, its own CLAUDE context — instead of all the workers sharing the one
@@ -27,7 +30,9 @@ each dispatched session its own instance, created on `SessionStart` and reclaime
 by the reaper once you delete the session. For a Claude Code session, teardown
 is delete-only: the reaper keys on the session's Claude Code job entry
 disappearing (the proxy for deletion), so completed, idle, and suspended
-sessions keep their instances and stay resumable. A Codex session's instance
+sessions keep their instances and stay resumable, unless another mapping of the
+instance reads gone or niwa can't decode the session's own job entry, either of
+which lets a reap take the instance and the session. A Codex session's instance
 is reclaimed after the idle grace instead, and the backstop takes an unmapped
 dispatch instance past its TTL.
 
@@ -67,9 +72,10 @@ The reaper is the single automatic teardown path; `niwa destroy` is the manual o
 on demand and opportunistically when `niwa dispatch`, `niwa create` or
 `niwa watch` runs. Until you delete the session, its instance survives — a
 completed-but-resumable session can be re-opened into the same clone. The
-exceptions are in [`niwa reap`](#niwa-reap): a Codex session's instance is
-reclaimed after the idle grace, and the backstop takes an unmapped dispatch
-instance past its TTL.
+exceptions are in [`niwa reap`](#niwa-reap): a reap through another mapping of
+the instance that reads gone, or a session job entry niwa can't decode, takes
+the instance and the session; a Codex session's instance is reclaimed after the
+idle grace; and the backstop takes an unmapped dispatch instance past its TTL.
 
 ## The session hooks
 
@@ -179,7 +185,9 @@ session from the Agent View (Ctrl+X twice in `claude agents`), which removes the
 session's `~/.claude/jobs/<id>/` entry — the signal the reaper keys on. A
 session that finishes its task, goes idle, or is suspended keeps its instance
 and stays resumable, unless a reap of its instance through another mapping
-removes it (see [`niwa reap`](#niwa-reap)). Two removals don't wait for a
+that reads gone removes it, or niwa can't decode the session's own job entry,
+which reads as gone (see [`niwa reap`](#niwa-reap)); either way the reap
+removes the session too. Two removals don't wait for a
 delete: a Codex session's instance goes once nobody has worked in it for the
 idle grace and no writer holds its lock, and the backstop takes an unmapped
 dispatch instance past its 30-minute TTL. All of this holds only while the
