@@ -91,6 +91,7 @@ func TestRootSwap_AnUnforcedDestroyRefusesAnInstanceSwappedForALinkAndRemovesNot
 	chdirTo(t, root)
 	quietDestroyCmd()
 	setDestroyFlags(t, false, false, "")
+	scanFileRemotes(t)
 	var target string
 	prev := worktreeRemover
 	worktreeRemover = rootSwapRemover{t: t, target: &target}

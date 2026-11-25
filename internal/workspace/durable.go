@@ -78,6 +78,91 @@ type ScanOption func(*scanConfig)
 type scanConfig struct {
 	forge          Forge
 	networkTimeout time.Duration
+
+	// git builds every git call the scan makes, the git version read
+	// included: nothing in the scan starts git any other way. It is the only
+	// field of its kind here.
+	git GitCommandFunc
+	// statusIgnoresSubmodules is set when the builder came from
+	// WithGitCommand, whose status ignores submodules: the scan then lists
+	// every populated submodule of a working tree as unread, since that
+	// status can't show a change inside one.
+	statusIgnoresSubmodules bool
+	// liveDefaults is set when the builder came from WithGitCommand: a
+	// remote's default branch is then judged only at the commit ls-remote
+	// read from the remote itself, never at the local remote-tracking ref,
+	// and a commit the repository lacks comes in through fetch, never by a
+	// fetch into the repository.
+	liveDefaults bool
+	// fetch brings commits from a remote into a scratch store and returns
+	// the store's objects directory (WithRemoteFetch). It is not a builder:
+	// it starts its own git and returns no command.
+	fetch RemoteFetchFunc
+	// objectEnv is what a repository's later calls add to their environment
+	// once fetch filled stores for it: GIT_ALTERNATE_OBJECT_DIRECTORIES
+	// naming those stores.
+	objectEnv []string
+	// mergeTree is this scan's own read of whether git has merge-tree
+	// --write-tree, made once through git.
+	mergeTree *mergeTreeProbe
+}
+
+// RemoteFetchFunc brings the history of ids from the remote named remote of
+// the repository at dir into a scratch store outside that repository, and
+// returns the store's objects directory. An error means nothing was brought
+// in, and the scan judges nothing landed on that remote's default branch.
+type RemoteFetchFunc func(ctx context.Context, dir, remote string, ids []string) (string, error)
+
+// WithRemoteFetch gives a scan made WithGitCommand its way to read a
+// remote's default branch when the repository lacks the commit the remote
+// names: fn fetches it into a scratch store, and the scan's later calls in
+// that repository read the store's objects as alternates. Without it, such a
+// remote's default branch is never judged.
+func WithRemoteFetch(fn RemoteFetchFunc) ScanOption {
+	return func(c *scanConfig) { c.fetch = fn }
+}
+
+// GitCommandFunc builds one git call the scan makes: git run in the working
+// tree at dir with args as its arguments, env added to the environment the
+// builder gives it, and ctx's end stopping it. An error means the call isn't
+// started, and the scan treats the check it was for as one that couldn't
+// run, which lists the repository as at risk.
+type GitCommandFunc func(ctx context.Context, dir string, env []string, args ...string) (*exec.Cmd, error)
+
+// WithGitCommand makes the scan start every git call through fn instead of
+// plain git from PATH with the inherited environment. fn adds
+// --ignore-submodules=all and --untracked-files=all to every status and
+// --no-show-signature to every log-family call itself, so the scan doesn't
+// pass them. A nil fn refuses every call, so the scan lists every repository
+// as at risk rather than falling back to plain git.
+func WithGitCommand(fn GitCommandFunc) ScanOption {
+	return func(c *scanConfig) {
+		if fn == nil {
+			fn = refuseGitCommand
+		}
+		c.git = fn
+		c.statusIgnoresSubmodules = true
+		c.liveDefaults = true
+	}
+}
+
+// refuseGitCommand is the builder WithGitCommand(nil) leaves the scan with.
+func refuseGitCommand(context.Context, string, []string, ...string) (*exec.Cmd, error) {
+	return nil, errors.New("the scan was given no git command builder")
+}
+
+// plainGitCommand is the builder a scan uses when its caller hands it none:
+// git from PATH with the inherited environment, run with -C dir. Its status
+// asks for untracked files explicitly, so a repository's
+// status.showUntrackedFiles=no can't hide them.
+func plainGitCommand(ctx context.Context, dir string, env []string, args ...string) (*exec.Cmd, error) {
+	argv := append([]string{"-C", dir}, args...)
+	if len(args) > 0 && args[0] == "status" {
+		argv = append(argv, "--untracked-files=normal")
+	}
+	cmd := exec.CommandContext(ctx, "git", argv...)
+	cmd.Env = append(os.Environ(), env...)
+	return cmd, nil
 }
 
 // DefaultScanNetworkTimeout bounds each network operation the scan makes: one
@@ -98,7 +183,7 @@ func WithNetworkTimeout(d time.Duration) ScanOption {
 }
 
 func newScanConfig(opts []ScanOption) scanConfig {
-	c := scanConfig{networkTimeout: DefaultScanNetworkTimeout}
+	c := scanConfig{networkTimeout: DefaultScanNetworkTimeout, git: plainGitCommand, mergeTree: &mergeTreeProbe{}}
 	for _, o := range opts {
 		o(&c)
 	}
@@ -124,6 +209,64 @@ type remoteInfo struct {
 	// refreshErr is set when the default branch couldn't be fetched, so the
 	// local copy of it may be behind the remote.
 	refreshErr error
+
+	// objects is the scratch store's objects directory the default branch's
+	// commit was fetched into, under liveDefaults; "" when none was needed.
+	objects string
+}
+
+// withFetchedObjects is cfg for a repository's calls after its remotes were
+// read: when any remote's default branch was fetched into a scratch store,
+// every later call names those stores as alternates, so the commit reads
+// without its objects being written into the repository.
+func (c scanConfig) withFetchedObjects(remotes []*remoteInfo) scanConfig {
+	var dirs []string
+	for _, r := range remotes {
+		if r.objects != "" {
+			dirs = append(dirs, r.objects)
+		}
+	}
+	if len(dirs) > 0 {
+		c.objectEnv = []string{"GIT_ALTERNATE_OBJECT_DIRECTORIES=" + strings.Join(dirs, string(os.PathListSeparator))}
+	}
+	return c
+}
+
+// liveDefault sets r's default ref, under liveDefaults, to the commit the
+// remote's default branch names right now, as ls-remote read it from the
+// remote itself, and never to the local remote-tracking ref, which only says
+// what the remote held at the last fetch. A remote that couldn't be read, or
+// lists no default branch, gets no default ref, so nothing is judged landed
+// on it. A commit the repository lacks is fetched into a scratch store
+// through cfg.fetch; a fetch that can't run leaves no default ref and the
+// reason on refreshErr.
+func liveDefault(cfg scanConfig, dir string, r *remoteInfo) {
+	if r.lsErr != nil {
+		r.refreshErr = r.lsErr
+		return
+	}
+	if r.defaultBranch == "" {
+		r.defaultBranch = localDefaultBranch(cfg, dir, r.name)
+	}
+	sha, live := r.heads[r.defaultBranch]
+	if r.defaultBranch == "" || !live {
+		return
+	}
+	if !hasCommit(cfg, dir, sha) {
+		if cfg.fetch == nil {
+			r.refreshErr = errors.New("the scan has no scratch store to fetch it into")
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.networkTimeout)
+		defer cancel()
+		objects, err := cfg.fetch(ctx, dir, r.name, []string{sha})
+		if err != nil {
+			r.refreshErr = err
+			return
+		}
+		r.objects = objects
+	}
+	r.defaultRef = sha
 }
 
 // repoRemotes queries every remote of the repo at dir: lists its live
@@ -131,30 +274,35 @@ type remoteInfo struct {
 // default branch. Per-remote failures are recorded on the remoteInfo, not
 // returned; the error return is for failing to list the remotes at all.
 func repoRemotes(dir string, cfg scanConfig) ([]*remoteInfo, error) {
-	out, err := gitOutput(dir, "remote")
+	out, err := gitOutput(cfg, dir, "remote")
 	if err != nil {
 		return nil, err
 	}
 	var remotes []*remoteInfo
 	for _, name := range strings.Fields(out) {
 		r := &remoteInfo{name: name}
-		if u, err := gitOutput(dir, "config", "--get", "remote."+name+".url"); err == nil {
+		if u, err := gitOutput(cfg, dir, "config", "--get", "remote."+name+".url"); err == nil {
 			r.rawURL = strings.TrimSpace(u)
 		}
-		r.heads, r.defaultBranch, r.lsErr = lsRemote(dir, name, cfg.networkTimeout)
+		r.heads, r.defaultBranch, r.lsErr = lsRemote(cfg, dir, name)
+		if cfg.liveDefaults {
+			liveDefault(cfg, dir, r)
+			remotes = append(remotes, r)
+			continue
+		}
 		if r.defaultBranch == "" {
-			r.defaultBranch = localDefaultBranch(dir, name)
+			r.defaultBranch = localDefaultBranch(cfg, dir, name)
 		}
 		if r.lsErr == nil && r.defaultBranch != "" {
 			if _, live := r.heads[r.defaultBranch]; live {
-				r.refreshErr = fetchDefault(dir, name, r.defaultBranch, cfg.networkTimeout)
+				r.refreshErr = fetchDefault(cfg, dir, name, r.defaultBranch)
 			}
 		} else if r.lsErr != nil {
 			r.refreshErr = r.lsErr
 		}
 		if r.defaultBranch != "" {
 			ref := "refs/remotes/" + name + "/" + r.defaultBranch
-			if _, err := gitOutput(dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err == nil {
+			if _, err := gitOutput(cfg, dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err == nil {
 				r.defaultRef = ref
 			}
 		}
@@ -164,8 +312,8 @@ func repoRemotes(dir string, cfg scanConfig) ([]*remoteInfo, error) {
 }
 
 // lsRemote lists the remote's branches and its HEAD symref in one call.
-func lsRemote(dir, remote string, timeout time.Duration) (map[string]string, string, error) {
-	out, err := gitNetwork(dir, timeout, "ls-remote", "--symref", remote, "HEAD", "refs/heads/*")
+func lsRemote(cfg scanConfig, dir, remote string) (map[string]string, string, error) {
+	out, err := gitNetwork(cfg, dir, "ls-remote", "--symref", remote, "HEAD", "refs/heads/*")
 	if err != nil {
 		return nil, "", err
 	}
@@ -191,8 +339,8 @@ func lsRemote(dir, remote string, timeout time.Duration) (map[string]string, str
 
 // localDefaultBranch reads refs/remotes/<remote>/HEAD, the remote's default
 // branch as of the last clone or `git remote set-head`.
-func localDefaultBranch(dir, remote string) string {
-	out, err := gitOutput(dir, "symbolic-ref", "--quiet", "refs/remotes/"+remote+"/HEAD")
+func localDefaultBranch(cfg scanConfig, dir, remote string) string {
+	out, err := gitOutput(cfg, dir, "symbolic-ref", "--quiet", "refs/remotes/"+remote+"/HEAD")
 	if err != nil {
 		return ""
 	}
@@ -202,9 +350,9 @@ func localDefaultBranch(dir, remote string) string {
 // fetchDefault updates the remote-tracking ref for the remote's default
 // branch, and nothing else. Without it, a pull request merged on the forge but
 // not yet fetched would look unmerged.
-func fetchDefault(dir, remote, branch string, timeout time.Duration) error {
+func fetchDefault(cfg scanConfig, dir, remote, branch string) error {
 	refspec := "+refs/heads/" + branch + ":refs/remotes/" + remote + "/" + branch
-	_, err := gitNetwork(dir, timeout, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, refspec)
+	_, err := gitNetwork(cfg, dir, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, refspec)
 	return err
 }
 
@@ -228,16 +376,16 @@ func judgeTip(ctx context.Context, dir, tip, branch, upstream string, remotes []
 
 	// 1. Landed by ancestry.
 	for _, r := range defaults {
-		if isAncestor(dir, tip, r.defaultRef) {
+		if isAncestor(cfg, dir, tip, r.defaultRef) {
 			return branchVerdict{durable: true}
 		}
 	}
 
 	// 2. Landed by content.
-	mergeTreeOK := supportsMergeTree()
+	mergeTreeOK := cfg.mergeTreeSupported(dir)
 	if mergeTreeOK {
 		for _, r := range defaults {
-			if landedByContent(dir, tip, r.defaultRef) {
+			if landedByContent(cfg, dir, tip, r.defaultRef) {
 				return branchVerdict{durable: true}
 			}
 		}
@@ -246,7 +394,7 @@ func judgeTip(ctx context.Context, dir, tip, branch, upstream string, remotes []
 	// 3. Held by a live remote branch the forge vouches for.
 	var notes []string
 	unverified := false
-	homes := liveHomes(dir, tip, branch, upstream, remotes)
+	homes := liveHomes(cfg, dir, tip, branch, upstream, remotes)
 	for _, h := range homes {
 		res := vouch(ctx, h, cfg)
 		if res.durable {
@@ -258,7 +406,7 @@ func judgeTip(ctx context.Context, dir, tip, branch, upstream string, remotes []
 
 	// At risk. Say how much and why.
 	v := branchVerdict{}
-	unlanded := countUnlanded(dir, tip, defaults, mergeTreeOK)
+	unlanded := countUnlanded(cfg, dir, tip, defaults, mergeTreeOK)
 	where := describeDefaults(defaults)
 	if len(homes) > 0 {
 		// On a live remote branch, but nothing vouches for it surviving.
@@ -268,7 +416,7 @@ func judgeTip(ctx context.Context, dir, tip, branch, upstream string, remotes []
 		}
 		v.reason = fmt.Sprintf("%s not on %s; %s", commits(unlanded), where, strings.Join(notes, "; "))
 	} else {
-		v.kind, v.reason = whyNoHome(dir, tip, branch, upstream, remotes, unlanded, where)
+		v.kind, v.reason = whyNoHome(cfg, dir, tip, branch, upstream, remotes, unlanded, where)
 	}
 
 	var caveats []string
@@ -301,7 +449,7 @@ type liveHome struct {
 // lists it and the tip is an ancestor of the sha ls-remote reported, which
 // must be present locally. A tip with local commits beyond the live sha has
 // unpushed work and gets no home.
-func liveHomes(dir, tip, branch, upstream string, remotes []*remoteInfo) []liveHome {
+func liveHomes(cfg scanConfig, dir, tip, branch, upstream string, remotes []*remoteInfo) []liveHome {
 	var homes []liveHome
 	for _, r := range remotes {
 		if r.heads == nil {
@@ -314,7 +462,7 @@ func liveHomes(dir, tip, branch, upstream string, remotes []*remoteInfo) []liveH
 		if up, ok := strings.CutPrefix(upstream, r.name+"/"); ok {
 			cands[up] = true
 		}
-		if out, err := gitOutput(dir, "for-each-ref", "--format=%(refname)", "--contains", tip, "refs/remotes/"+r.name+"/"); err == nil {
+		if out, err := gitOutput(cfg, dir, "for-each-ref", "--format=%(refname)", "--contains", tip, "refs/remotes/"+r.name+"/"); err == nil {
 			for _, ref := range strings.Fields(out) {
 				name := strings.TrimPrefix(ref, "refs/remotes/"+r.name+"/")
 				if name != "HEAD" {
@@ -332,7 +480,7 @@ func liveHomes(dir, tip, branch, upstream string, remotes []*remoteInfo) []liveH
 			if !live || n == r.defaultBranch {
 				continue
 			}
-			if isAncestor(dir, tip, sha) {
+			if isAncestor(cfg, dir, tip, sha) {
 				homes = append(homes, liveHome{remote: r, branch: n})
 			}
 		}
@@ -380,7 +528,7 @@ func vouch(ctx context.Context, h liveHome, cfg scanConfig) vouchResult {
 }
 
 // whyNoHome explains a tip that no live remote branch holds.
-func whyNoHome(dir, tip, branch, upstream string, remotes []*remoteInfo, unlanded int, where string) (LossKind, string) {
+func whyNoHome(cfg scanConfig, dir, tip, branch, upstream string, remotes []*remoteInfo, unlanded int, where string) (LossKind, string) {
 	base := fmt.Sprintf("%s not on %s", commits(unlanded), where)
 
 	var unreachable []string
@@ -402,7 +550,7 @@ func whyNoHome(dir, tip, branch, upstream string, remotes []*remoteInfo, unlande
 			names = append(names, up)
 		}
 		if branch != "" {
-			if _, err := gitOutput(dir, "rev-parse", "--verify", "--quiet", "refs/remotes/"+r.name+"/"+branch); err == nil {
+			if _, err := gitOutput(cfg, dir, "rev-parse", "--verify", "--quiet", "refs/remotes/"+r.name+"/"+branch); err == nil {
 				names = append(names, branch)
 			} else if _, live := r.heads[branch]; live {
 				names = append(names, branch)
@@ -411,11 +559,11 @@ func whyNoHome(dir, tip, branch, upstream string, remotes []*remoteInfo, unlande
 		for _, n := range names {
 			sha, live := r.heads[n]
 			if live {
-				if isAncestor(dir, sha, tip) {
-					ahead := countRange(dir, sha, tip)
+				if isAncestor(cfg, dir, sha, tip) {
+					ahead := countRange(cfg, dir, sha, tip)
 					return LossUnpushedCommits, fmt.Sprintf("%s; %s beyond %s/%s not pushed", base, commits(ahead), r.name, n)
 				}
-				if !hasCommit(dir, sha) {
+				if !hasCommit(cfg, dir, sha) {
 					return LossUnverified, fmt.Sprintf("%s; %s/%s has commits this clone hasn't fetched, so whether it holds these couldn't be checked", base, r.name, n)
 				}
 				return LossUnpushedCommits, fmt.Sprintf("%s; %s/%s has diverged from this branch", base, r.name, n)
@@ -440,13 +588,13 @@ func whyNoHome(dir, tip, branch, upstream string, remotes []*remoteInfo, unlande
 // Checking earlier first-parent commits, not just the tip, is what keeps a
 // squash merge recognisable after def later edits or reverts the same lines.
 // A conflict, an error, or a different tree all mean "not proven landed".
-func landedByContent(dir, tip, def string) bool {
-	mbOut, err := gitOutput(dir, "merge-base", def, tip)
+func landedByContent(cfg scanConfig, dir, tip, def string) bool {
+	mbOut, err := gitOutput(cfg, dir, "merge-base", def, tip)
 	if err != nil {
 		return false
 	}
 	mb := strings.TrimSpace(mbOut)
-	pathsOut, err := gitOutput(dir, "diff", "--name-only", "--no-renames", "-z", mb, tip)
+	pathsOut, err := gitOutput(cfg, dir, "diff", "--name-only", "--no-renames", "-z", mb, tip)
 	if err != nil {
 		return false
 	}
@@ -467,15 +615,15 @@ func landedByContent(dir, tip, def string) bool {
 		args = append(args, "--")
 		args = append(args, paths...)
 	}
-	if out, err := gitOutputEnv(dir, []string{"GIT_LITERAL_PATHSPECS=1"}, args...); err == nil {
+	if out, err := gitOutputEnv(cfg, dir, []string{"GIT_LITERAL_PATHSPECS=1"}, args...); err == nil {
 		cands = append(cands, strings.Fields(out)...)
 	}
 	for _, c := range cands {
-		treeOut, err := gitOutput(dir, "rev-parse", c+"^{tree}")
+		treeOut, err := gitOutput(cfg, dir, "rev-parse", c+"^{tree}")
 		if err != nil {
 			continue
 		}
-		merged, err := gitOutput(dir, "merge-tree", "--write-tree", "--no-messages", c, tip)
+		merged, err := gitOutput(cfg, dir, "merge-tree", "--write-tree", "--no-messages", c, tip)
 		if err != nil {
 			continue // conflict (exit 1) or error: not proven here
 		}
@@ -487,13 +635,13 @@ func landedByContent(dir, tip, def string) bool {
 	return false
 }
 
-func isAncestor(dir, a, b string) bool {
-	_, err := gitOutput(dir, "merge-base", "--is-ancestor", a, b)
+func isAncestor(cfg scanConfig, dir, a, b string) bool {
+	_, err := gitOutput(cfg, dir, "merge-base", "--is-ancestor", a, b)
 	return err == nil
 }
 
-func hasCommit(dir, sha string) bool {
-	_, err := gitOutput(dir, "cat-file", "-e", sha+"^{commit}")
+func hasCommit(cfg scanConfig, dir, sha string) bool {
+	_, err := gitOutput(cfg, dir, "cat-file", "-e", sha+"^{commit}")
 	return err == nil
 }
 
@@ -503,8 +651,8 @@ func hasCommit(dir, sha string) bool {
 // ones that did land. When merge-tree is available, the newest commit on the
 // branch's first-parent line whose content has landed is found, and only the
 // commits after it are counted.
-func countUnlanded(dir, tip string, defaults []*remoteInfo, mergeTreeOK bool) int {
-	n := countNotOn(dir, tip, defaults)
+func countUnlanded(cfg scanConfig, dir, tip string, defaults []*remoteInfo, mergeTreeOK bool) int {
+	n := countNotOn(cfg, dir, tip, defaults)
 	if !mergeTreeOK || n == 0 {
 		return n
 	}
@@ -515,14 +663,14 @@ func countUnlanded(dir, tip string, defaults []*remoteInfo, mergeTreeOK bool) in
 			args = append(args, r.defaultRef)
 		}
 	}
-	out, err := gitOutput(dir, args...)
+	out, err := gitOutput(cfg, dir, args...)
 	if err != nil {
 		return n
 	}
 	for _, c := range strings.Fields(out)[1:] {
 		for _, r := range defaults {
-			if landedByContent(dir, c, r.defaultRef) {
-				return countRange(dir, c, tip)
+			if landedByContent(cfg, dir, c, r.defaultRef) {
+				return countRange(cfg, dir, c, tip)
 			}
 		}
 	}
@@ -531,7 +679,7 @@ func countUnlanded(dir, tip string, defaults []*remoteInfo, mergeTreeOK bool) in
 
 // countNotOn counts the commits reachable from tip and from none of the
 // default branches.
-func countNotOn(dir, tip string, defaults []*remoteInfo) int {
+func countNotOn(cfg scanConfig, dir, tip string, defaults []*remoteInfo) int {
 	args := []string{"rev-list", "--count", tip}
 	if len(defaults) > 0 {
 		args = append(args, "--not")
@@ -539,7 +687,7 @@ func countNotOn(dir, tip string, defaults []*remoteInfo) int {
 			args = append(args, r.defaultRef)
 		}
 	}
-	out, err := gitOutput(dir, args...)
+	out, err := gitOutput(cfg, dir, args...)
 	if err != nil {
 		return 0
 	}
@@ -547,8 +695,8 @@ func countNotOn(dir, tip string, defaults []*remoteInfo) int {
 	return n
 }
 
-func countRange(dir, from, to string) int {
-	out, err := gitOutput(dir, "rev-list", "--count", from+".."+to)
+func countRange(cfg scanConfig, dir, from, to string) int {
+	out, err := gitOutput(cfg, dir, "rev-list", "--count", from+".."+to)
 	if err != nil {
 		return 0
 	}
@@ -595,14 +743,18 @@ func githubOwnerRepo(rawURL string) (owner, repo string, ok bool) {
 	return s.Owner, s.Repo, true
 }
 
-// gitNetwork runs a git command that talks to a remote, bounded by timeout,
-// with credential prompts disabled so it fails instead of waiting for input.
-// The error carries git's stderr so a finding can say what went wrong.
-func gitNetwork(dir string, timeout time.Duration, args ...string) (string, error) {
+// gitNetwork runs a git command that talks to a remote, built by the scan's
+// builder, bounded by the scan's network timeout, with credential prompts
+// disabled so it fails instead of waiting for input. The error carries git's
+// stderr so a finding can say what went wrong.
+func gitNetwork(cfg scanConfig, dir string, args ...string) (string, error) {
+	timeout := cfg.networkTimeout
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd, err := cfg.git(ctx, dir, []string{"GIT_TERMINAL_PROMPT=0"}, args...)
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w", args[0], err)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -618,10 +770,15 @@ func gitNetwork(dir string, timeout time.Duration, args ...string) (string, erro
 	return stdout.String(), nil
 }
 
-// gitOutputEnv is gitOutput with extra environment variables.
-func gitOutputEnv(dir string, env []string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(), env...)
+// gitOutputEnv is gitOutput with extra environment variables, which the
+// scan's builder adds to the environment it gives the call, after them the
+// repository's objectEnv.
+func gitOutputEnv(cfg scanConfig, dir string, env []string, args ...string) (string, error) {
+	env = append(append([]string(nil), env...), cfg.objectEnv...)
+	cmd, err := cfg.git(context.Background(), dir, env, args...)
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = io.Discard
@@ -631,26 +788,37 @@ func gitOutputEnv(dir string, env []string, args ...string) (string, error) {
 	return stdout.String(), nil
 }
 
-var (
-	mergeTreeOnce sync.Once
-	mergeTreeOK   bool
+// supportsMergeTree, when set, answers in place of the scan's own version
+// read. Tests set it to exercise the old-git path; nothing else does.
+var supportsMergeTree func() bool
 
-	// supportsMergeTree is swapped by tests to exercise the old-git path.
-	supportsMergeTree = gitSupportsMergeTreeWriteTree
-)
+// mergeTreeProbe is one scan's answer to whether its git has `git merge-tree
+// --write-tree` (git 2.38 and later), read once per scan.
+type mergeTreeProbe struct {
+	once sync.Once
+	ok   bool
+}
 
-// gitSupportsMergeTreeWriteTree reports whether the git on PATH has `git
-// merge-tree --write-tree` (git 2.38 and later).
-func gitSupportsMergeTreeWriteTree() bool {
-	mergeTreeOnce.Do(func() {
-		out, err := exec.Command("git", "version").Output()
+// mergeTreeSupported reports whether the scan's git has merge-tree
+// --write-tree. The first call reads `git version` through the scan's
+// builder, in dir; a read that fails or doesn't parse counts as an older git,
+// so a squash merge isn't recognised and the branch is listed.
+func (c scanConfig) mergeTreeSupported(dir string) bool {
+	if supportsMergeTree != nil {
+		return supportsMergeTree()
+	}
+	if c.mergeTree == nil {
+		return false
+	}
+	c.mergeTree.once.Do(func() {
+		out, err := gitOutput(c, dir, "version")
 		if err != nil {
 			return
 		}
-		major, minor, ok := parseGitVersion(string(out))
-		mergeTreeOK = ok && (major > 2 || (major == 2 && minor >= 38))
+		major, minor, ok := parseGitVersion(out)
+		c.mergeTree.ok = ok && (major > 2 || (major == 2 && minor >= 38))
 	})
-	return mergeTreeOK
+	return c.mergeTree.ok
 }
 
 // parseGitVersion reads "git version 2.43.0" (with any vendor suffix, such as

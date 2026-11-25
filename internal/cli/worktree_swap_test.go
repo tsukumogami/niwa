@@ -272,6 +272,7 @@ func TestWorktreeSwap_ACleanInstanceWithAWorktreeLeavesNoSessionAfterADestroy(t 
 	chdirTo(t, root)
 	quietDestroyCmd()
 	setDestroyFlags(t, false, false, "")
+	scanFileRemotes(t)
 	log := gitCallLog(t)
 	var order []string
 	prev := worktreeRemover

@@ -3028,7 +3028,7 @@ func pathUnder(dir, candidate string) bool {
 // cross-check. A failed git invocation (clone not a git repo, git absent) makes
 // the worktree undetectable; the caller defaults such cases to skip-with-warning.
 func gitRegistersWorktree(cloneDir, worktreePath string) bool {
-	entries, err := listWorktrees(cloneDir)
+	entries, err := listWorktrees(newScanConfig(nil), cloneDir)
 	if err != nil {
 		return false
 	}

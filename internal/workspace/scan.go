@@ -13,12 +13,10 @@
 package workspace
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -129,7 +127,9 @@ func (s InstanceScan) HasLoss() bool {
 //
 // The scan contacts each repo's remotes (ls-remote, and a fetch of the
 // default branch) and, through WithForge, the forge. See durable.go for the
-// test a branch has to pass.
+// test a branch has to pass. Every git call it makes, the git version read
+// included, is built by the builder WithGitCommand hands it, or by plain git
+// from PATH when it is given none.
 func ScanInstance(instanceDir string, opts ...ScanOption) (InstanceScan, error) {
 	cfg := newScanConfig(opts)
 	state, err := LoadState(instanceDir)
@@ -254,7 +254,7 @@ func scanRepo(instanceDir, primary string, cfg scanConfig) RepoScan {
 	// the repo's gitdir knows about.
 	trees := []string{primary}
 	branchPath := map[string]string{} // branch -> relative path of its worktree
-	wts, listErr := listWorktrees(primary)
+	wts, listErr := listWorktrees(cfg, primary)
 	if listErr != nil {
 		// Couldn't enumerate worktrees, so any linked worktree inside the
 		// instance goes unchecked.
@@ -288,6 +288,7 @@ func scanRepo(instanceDir, primary string, cfg scanConfig) RepoScan {
 	}
 
 	remotes, remoteErr := repoRemotes(primary, cfg)
+	cfg = cfg.withFetchedObjects(remotes)
 	if remoteErr != nil {
 		scan.Losses = append(scan.Losses, Loss{
 			Kind:   LossScanError,
@@ -302,7 +303,7 @@ func scanRepo(instanceDir, primary string, cfg scanConfig) RepoScan {
 
 	// Branches and stashes, once per repo.
 	scan.Losses = append(scan.Losses, scanBranches(primary, remotes, branchPath, cfg)...)
-	if n, err := scanStashes(primary); err != nil {
+	if n, err := scanStashes(cfg, primary); err != nil {
 		scan.Losses = append(scan.Losses, Loss{Kind: LossScanError, Detail: fmt.Sprintf("listing stashes failed: %v", err)})
 	} else if n > 0 {
 		scan.Losses = append(scan.Losses, Loss{
@@ -322,13 +323,16 @@ func scanWorkingTree(treeDir, treePath string, remotes []*remoteInfo, cfg scanCo
 	var losses []Loss
 
 	// 1. status --porcelain: dirty + untracked.
-	dirty, untracked, err := scanStatus(treeDir)
+	dirty, untracked, err := scanStatus(cfg, treeDir)
 	if err != nil {
 		losses = append(losses, Loss{
 			Kind:   LossScanError,
 			Detail: fmt.Sprintf("git status failed: %v", err),
 			Path:   treePath,
 		})
+	}
+	if cfg.statusIgnoresSubmodules {
+		losses = append(losses, unreadSubmodules(cfg, treeDir, treePath)...)
 	}
 	if dirty > 0 {
 		losses = append(losses, Loss{
@@ -361,10 +365,14 @@ func scanWorkingTree(treeDir, treePath string, remotes []*remoteInfo, cfg scanCo
 }
 
 // scanStatus parses `git status --porcelain=v1` output, counting modified/
-// staged lines and untracked lines separately. Untracked files are asked for
-// explicitly so a repo's status.showUntrackedFiles=no can't hide them.
-func scanStatus(treeDir string) (dirty, untracked int, err error) {
-	out, err := gitOutput(treeDir, "status", "--porcelain=v1", "--untracked-files=normal")
+// staged lines and untracked lines separately. The builder adds the rest of
+// the status's flags: a builder from WithGitCommand adds
+// --ignore-submodules=all and --untracked-files=all, so git never starts a
+// status of its own inside a submodule and every untracked file is listed,
+// and the plain builder asks for untracked files explicitly, so a repo's
+// status.showUntrackedFiles=no can't hide them.
+func scanStatus(cfg scanConfig, treeDir string) (dirty, untracked int, err error) {
+	out, err := gitOutput(cfg, treeDir, "status", "--porcelain=v1")
 	if err != nil {
 		return 0, 0, err
 	}
@@ -386,7 +394,7 @@ func scanStatus(treeDir string) (dirty, untracked int, err error) {
 // relative path of its worktree, so the finding points at it.
 func scanBranches(dir string, remotes []*remoteInfo, branchPath map[string]string, cfg scanConfig) []Loss {
 	const fmtSpec = "%(refname:short)|%(objectname)|%(upstream:short)"
-	out, err := gitOutput(dir, "for-each-ref", "--format="+fmtSpec, "refs/heads")
+	out, err := gitOutput(cfg, dir, "for-each-ref", "--format="+fmtSpec, "refs/heads")
 	if err != nil {
 		return []Loss{{Kind: LossScanError, Detail: fmt.Sprintf("listing branches failed: %v", err)}}
 	}
@@ -414,9 +422,10 @@ func scanBranches(dir string, remotes []*remoteInfo, branchPath map[string]strin
 	return losses
 }
 
-// scanStashes returns the count of `git stash list` entries.
-func scanStashes(treeDir string) (int, error) {
-	out, err := gitOutput(treeDir, "stash", "list")
+// scanStashes returns the count of `git stash list` entries. A builder from
+// WithGitCommand adds --no-show-signature, so no signature check runs.
+func scanStashes(cfg scanConfig, treeDir string) (int, error) {
+	out, err := gitOutput(cfg, treeDir, "stash", "list")
 	if err != nil {
 		return 0, err
 	}
@@ -431,15 +440,15 @@ func scanStashes(treeDir string) (int, error) {
 // tip. Returns nil when HEAD is on a branch or its commits are durable.
 func scanDetachedOrphan(treeDir string, remotes []*remoteInfo, cfg scanConfig) (*Loss, error) {
 	// Is HEAD detached? `symbolic-ref -q HEAD` exits 1 when detached.
-	if _, err := gitOutput(treeDir, "symbolic-ref", "-q", "HEAD"); err == nil {
+	if _, err := gitOutput(cfg, treeDir, "symbolic-ref", "-q", "HEAD"); err == nil {
 		return nil, nil // on a branch
 	}
-	headOut, err := gitOutput(treeDir, "rev-parse", "--verify", "HEAD")
+	headOut, err := gitOutput(cfg, treeDir, "rev-parse", "--verify", "HEAD")
 	if err != nil {
 		return nil, err
 	}
 	head := strings.TrimSpace(headOut)
-	out, err := gitOutput(treeDir, "rev-list", "--count", head, "--not", "--branches")
+	out, err := gitOutput(cfg, treeDir, "rev-list", "--count", head, "--not", "--branches")
 	if err != nil {
 		return nil, err
 	}
@@ -456,8 +465,8 @@ func scanDetachedOrphan(treeDir string, remotes []*remoteInfo, cfg scanConfig) (
 // listWorktrees parses `git worktree list --porcelain` and returns every
 // worktree the repo knows about (including the primary) with its checked-out
 // branch.
-func listWorktrees(primary string) ([]worktreeEntry, error) {
-	out, err := gitOutput(primary, "worktree", "list", "--porcelain")
+func listWorktrees(cfg scanConfig, primary string) ([]worktreeEntry, error) {
+	out, err := gitOutput(cfg, primary, "worktree", "list", "--porcelain")
 	if err != nil {
 		return nil, err
 	}
@@ -473,18 +482,48 @@ func listWorktrees(primary string) ([]worktreeEntry, error) {
 	return entries, nil
 }
 
-// gitOutput runs git -C treeDir <args...> and returns stdout. Combined
-// stderr is dropped; non-zero exit produces an error wrapping the exit
-// code.
-func gitOutput(treeDir string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", treeDir}, args...)...)
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+// unreadSubmodules lists every populated submodule or other gitlink of the
+// working tree at treeDir as a finding, read from the index with `git
+// ls-files --stage`. A builder from WithGitCommand gives the status
+// --ignore-submodules=all, so the status can't show a change inside one, and
+// a gitlink whose working tree holds a repository could hold work nothing
+// else here reads; it is listed as unread rather than passed as clean. One
+// with no .git checked out holds nothing local and isn't listed; one whose
+// .git can't be looked at for any other reason is listed. An index that
+// can't be read lists the working tree itself.
+func unreadSubmodules(cfg scanConfig, treeDir, treePath string) []Loss {
+	out, err := gitOutput(cfg, treeDir, "ls-files", "--stage", "-z")
+	if err != nil {
+		return []Loss{{
+			Kind:   LossScanError,
+			Detail: fmt.Sprintf("listing submodules failed: %v", err),
+			Path:   treePath,
+		}}
 	}
-	return stdout.String(), nil
+	var losses []Loss
+	for _, entry := range strings.Split(out, "\x00") {
+		meta, path, ok := strings.Cut(entry, "\t")
+		if !ok || !strings.HasPrefix(meta, "160000 ") {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(treeDir, path, ".git")); os.IsNotExist(err) {
+			continue
+		}
+		losses = append(losses, Loss{
+			Kind:   LossScanError,
+			Detail: fmt.Sprintf("submodule %s isn't read: the scan's status ignores submodules, so a change inside it can't be ruled out", path),
+			Path:   treePath,
+		})
+	}
+	return losses
+}
+
+// gitOutput runs git in treeDir with args, built by the scan's builder, and
+// returns stdout. Combined stderr is dropped; non-zero exit produces an error
+// wrapping the exit code, and a call the builder refuses an error carrying
+// the builder's reason.
+func gitOutput(cfg scanConfig, treeDir string, args ...string) (string, error) {
+	return gitOutputEnv(cfg, treeDir, nil, args...)
 }
 
 // isInside reports whether candidate is at or under root. Mixed absolute and

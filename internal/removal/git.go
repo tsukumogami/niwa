@@ -114,6 +114,11 @@ type Env struct {
 
 	mu       sync.Mutex
 	lsRemote map[string]lsRemoteResult
+
+	// scanStores are the scratch stores ScanFetch filled for niwa destroy's
+	// scan, by their objects directory: the only alternates a scan's call
+	// may name.
+	scanStores map[string]*store
 }
 
 // lsRemoteResult is one URL's ls-remote answer, cached for the pass: the
@@ -424,6 +429,251 @@ func (e *Env) gitCommand(ctx context.Context, r repoDirs, o callOpts, args ...st
 		return nil, errors.New("a git call outside a repository needs a directory to run from")
 	}
 	groupKill(cmd)
+	return cmd, nil
+}
+
+// scanEnvAllowed are the fixed environment entries ScanCommand lets a scan's
+// call add to the fixed environment: neither changes what git may run or
+// contact. The one other entry it admits is scanAlternates naming only
+// scratch stores ScanFetch made.
+var scanEnvAllowed = map[string]bool{
+	"GIT_LITERAL_PATHSPECS=1": true,
+	"GIT_TERMINAL_PROMPT=0":   true,
+}
+
+// scanAlternates is the variable a scan's local calls name the scratch
+// stores ScanFetch filled with, so they read the remote's commits without
+// those objects ever being written into the scanned repository.
+const scanAlternates = "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+
+// scanLsRemoteFlags are the only ls-remote options a scan's ls-remote may
+// carry.
+var scanLsRemoteFlags = map[string]bool{"--symref": true, "--heads": true, "--refs": true}
+
+// scanDirs is where the scan's call in the working tree at dir runs: a dir
+// whose .git is a directory names its git directory and work tree
+// explicitly; any other dir is named as the work tree, and git finds the git
+// directory from its .git file, bounded by the ceiling directories.
+func scanDirs(dir string) repoDirs {
+	r := repoDirs{WorkTree: dir}
+	if st, err := os.Lstat(filepath.Join(dir, ".git")); err == nil && st.IsDir() {
+		r.GitDir = filepath.Join(dir, ".git")
+	}
+	return r
+}
+
+// scanEnvEntry checks one environment entry a scan's call asks for: one of
+// scanEnvAllowed, or scanAlternates naming only stores ScanFetch made in this
+// pass, each of which passes the store check, its config byte for byte
+// included, right now. Anything else refuses the call.
+func (e *Env) scanEnvEntry(kv string) error {
+	if scanEnvAllowed[kv] {
+		return nil
+	}
+	key, value, _ := strings.Cut(kv, "=")
+	if key != scanAlternates || value == "" {
+		return fmt.Errorf("the scan's git call can't set %s", key)
+	}
+	for _, objects := range filepath.SplitList(value) {
+		e.mu.Lock()
+		st := e.scanStores[objects]
+		e.mu.Unlock()
+		if st == nil {
+			return fmt.Errorf("the scan's git call can't set %s to %s: not a scratch store this pass filled", key, objects)
+		}
+		if err := st.check(); err != nil {
+			return err
+		}
+		if err := st.checkConfig(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// scanRemoteURL is the URL in the repository's own remote.<name>.url, the
+// first one its configuration lists, read with the bounded configuration
+// read. It is the only URL a scan's network call contacts; insteadOf and
+// every other rewrite in the repository's configuration never apply, since
+// the call itself runs in no repository.
+func (e *Env) scanRemoteURL(ctx context.Context, r repoDirs, name string) (string, error) {
+	rc, err := e.readConfig(ctx, r)
+	if err != nil {
+		return "", err
+	}
+	for _, re := range rc.remotes {
+		if re.Name != name {
+			continue
+		}
+		if strings.HasPrefix(re.URL, "-") {
+			return "", fmt.Errorf("remote %s: clone URL not allowed: it starts with -", name)
+		}
+		return re.URL, nil
+	}
+	return "", fmt.Errorf("remote %s has no url in the repository's configuration", name)
+}
+
+// scanLsRemote builds a scan's ls-remote of the remote args names the way
+// the removal pass reads a proof remote: from the empty network directory
+// under the scratch directory, with a --git-dir that doesn't exist, so no
+// repository's configuration is read, against the URL in the repository's
+// own remote.<name>.url, with the network settings: redirects off and only
+// the person's own credential helpers.
+func (e *Env) scanLsRemote(ctx context.Context, r repoDirs, env []string, args []string) (*exec.Cmd, error) {
+	var flags, rest []string
+	name := ""
+	for _, a := range args[1:] {
+		switch {
+		case name != "":
+			rest = append(rest, a)
+		case strings.HasPrefix(a, "-"):
+			if !scanLsRemoteFlags[a] {
+				return nil, fmt.Errorf("the scan's ls-remote can't pass %s", a)
+			}
+			flags = append(flags, a)
+		default:
+			name = a
+		}
+	}
+	if name == "" {
+		return nil, errors.New("the scan's ls-remote names no remote")
+	}
+	if e.credErr != nil {
+		return nil, fmt.Errorf("reading the credential helpers failed: %v", e.credErr)
+	}
+	url, err := e.scanRemoteURL(ctx, r, name)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := e.scratchDir(scratchNet)
+	if err != nil {
+		return nil, err
+	}
+	argv := append([]string{"ls-remote"}, flags...)
+	argv = append(argv, "--", url)
+	argv = append(argv, rest...)
+	cmd, err := e.gitCommand(ctx, repoDirs{GitDir: filepath.Join(dir, noRepository)}, callOpts{dir: dir, config: e.networkConfig()}, argv...)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = append(cmd.Env, env...)
+	return cmd, nil
+}
+
+// ScanFetch brings the history of ids from the remote named remote of the
+// repository at dir into a fresh scratch store, the way the removal pass
+// fetches a proof remote's tips: from the store's empty run directory, in no
+// repository but the store, against the URL in the repository's own
+// remote.<name>.url, with the network settings, under the network timeout
+// and the store's size cap. Nothing is written into the repository at dir.
+// Each id must arrive as a commit. It returns the store's objects directory,
+// which the scan's later calls in that repository may name in
+// GIT_ALTERNATE_OBJECT_DIRECTORIES; ScanCommand admits it there and checks
+// the store again each time. Any failure is an error, which carries git's
+// refusal line, and the scan then judges nothing landed on that remote.
+func (e *Env) ScanFetch(ctx context.Context, dir, remote string, ids []string) (string, error) {
+	if !filepath.IsAbs(dir) {
+		return "", fmt.Errorf("the scan's fetch needs an absolute directory, not %q", dir)
+	}
+	if len(ids) == 0 {
+		return "", errors.New("the scan's fetch names no commit")
+	}
+	for _, id := range ids {
+		if !isObjectID(id) {
+			return "", fmt.Errorf("the scan's fetch can only ask for object ids, not %q", id)
+		}
+	}
+	if e == nil || e.Git == "" {
+		return "", errors.New("no git on the filtered PATH")
+	}
+	if e.credErr != nil {
+		return "", fmt.Errorf("reading the credential helpers failed: %v", e.credErr)
+	}
+	url, err := e.scanRemoteURL(ctx, scanDirs(dir), remote)
+	if err != nil {
+		return "", err
+	}
+	st, err := e.newStore()
+	if err != nil {
+		return "", err
+	}
+	if err := st.fetch(ctx, url, ids); err != nil {
+		st.remove()
+		return "", fmt.Errorf("fetching from %s: %v", remote, err)
+	}
+	types, err := st.objectTypes(ctx, ids)
+	if err != nil {
+		st.remove()
+		return "", err
+	}
+	for _, id := range ids {
+		if types[id] != "commit" {
+			st.remove()
+			return "", fmt.Errorf("fetching from %s: %s didn't arrive as a commit", remote, id)
+		}
+	}
+	objects := filepath.Join(st.dir, "objects")
+	e.mu.Lock()
+	if e.scanStores == nil {
+		e.scanStores = map[string]*store{}
+	}
+	e.scanStores[objects] = st
+	e.mu.Unlock()
+	return objects, nil
+}
+
+// ScanCommand builds one git call niwa destroy's scan makes in the working
+// tree at dir, through gitCommand: the git found on the filtered PATH, the
+// fixed environment and overrides, --ignore-submodules=all and
+// --untracked-files=all on a status and --no-show-signature on a log-family
+// call. scanDirs says how the call names the repository. env may only hold
+// the entries scanEnvEntry admits; any other entry refuses the call.
+//
+// An ls-remote runs in no repository, against the URL in the repository's
+// own remote.<name>.url (scanLsRemote), and a fetch is refused: the scan's
+// fetch goes into a scratch store through ScanFetch, never into the
+// repository it scans.
+//
+// Right before a status it runs the configuration check on the repository
+// again, under the same bound as every configuration read: status is the
+// call that can start a filter. A key that names a program refuses the call
+// with an error naming the key, and a read that fails refuses it too; either
+// way the status isn't started. The read also decides the status's excludes
+// override, as on the removal path.
+func (e *Env) ScanCommand(ctx context.Context, dir string, env []string, args ...string) (*exec.Cmd, error) {
+	if !filepath.IsAbs(dir) {
+		return nil, fmt.Errorf("the scan's git call needs an absolute directory, not %q", dir)
+	}
+	if e == nil {
+		return nil, errors.New("no git on the filtered PATH")
+	}
+	for _, kv := range env {
+		if err := e.scanEnvEntry(kv); err != nil {
+			return nil, err
+		}
+	}
+	r := scanDirs(dir)
+	if len(args) > 0 {
+		switch args[0] {
+		case "ls-remote":
+			return e.scanLsRemote(ctx, r, env, args)
+		case "fetch":
+			return nil, errors.New("the scan's fetch goes into a scratch store, never into the repository it scans")
+		}
+	}
+	o := callOpts{dir: dir}
+	if len(args) > 0 && args[0] == "status" {
+		rc, err := e.recheckConfig(ctx, r)
+		if err != nil {
+			return nil, err
+		}
+		o.excludesUnset = rc.excludesUnset
+	}
+	cmd, err := e.gitCommand(ctx, r, o, args...)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = append(cmd.Env, env...)
 	return cmd, nil
 }
 

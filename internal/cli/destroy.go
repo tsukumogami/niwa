@@ -246,7 +246,20 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingP
 	defer worktrees.close()
 
 	if !force {
-		scan, err := workspace.ScanInstance(instanceDir, workspace.WithForge(newDestroyForge()))
+		// The scan starts git only through the removal pass's command
+		// builder, from its own removal environment: the filtered PATH, the
+		// fixed environment and overrides, and the configuration check again
+		// right before each status. Each remote is read the way the pass
+		// reads a proof remote, in no repository against the repository's
+		// own remote.<name>.url, and a commit the repository lacks is
+		// fetched into a scratch store, never into the repository; a remote
+		// that can't be read keeps.
+		scanEnv := newRemovalEnv(workspaceRoot, userHomeDir(), os.Getenv("PATH"))
+		defer scanEnv.Close()
+		scan, err := workspace.ScanInstance(instanceDir,
+			workspace.WithForge(newDestroyForge()),
+			workspace.WithGitCommand(scanEnv.ScanCommand),
+			workspace.WithRemoteFetch(scanEnv.ScanFetch))
 		if err != nil {
 			return fmt.Errorf("scanning instance for unpushed work: %w", err)
 		}

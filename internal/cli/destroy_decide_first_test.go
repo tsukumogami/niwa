@@ -35,7 +35,7 @@ if [ -n "$plant" ]; then
 	for a in "$@"; do
 		case "$a" in
 		--work-tree=*) wt="${a#--work-tree=}" ;;
-		status) st=1 ;;
+		--porcelain=v2) st=1 ;;
 		esac
 	done
 	case "$wt" in
@@ -85,6 +85,7 @@ func TestDestroyDecideFirst_EveryWorktreeIsReadBeforeTheFirstGoes(t *testing.T) 
 		chdirTo(t, root)
 		quietDestroyCmd()
 		setDestroyFlags(t, false, false, "")
+		scanFileRemotes(t)
 		return root, wt, wt2
 	}
 	install := func(t *testing.T, log string) (*[]string, *[]int) {

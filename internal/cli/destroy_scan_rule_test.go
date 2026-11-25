@@ -111,6 +111,7 @@ func TestDestroyScanRule_AModifiedFileInASubmoduleIsLossNamingTheSubmodule(t *te
 
 func TestDestroyScanRule_TheScansStatusAndStashCallsCarryTheHardenedFlags(t *testing.T) {
 	destroyScanInstance(t, nil)
+	scanFileRemotes(t)
 	log := destroyGitWrapper(t, "")
 	stderr := quietDestroyCmd()
 
