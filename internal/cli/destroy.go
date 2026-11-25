@@ -76,6 +76,7 @@ one holding a repository is listed as left to go with the instance
 directory, and a repository configuration that names a program, or a change
 the listing didn't show, found when every worktree is read again before the
 first one goes, stops destroy with the path named.
+
 --force never wipes the workspace: without an instance name at the workspace
 root it refuses and points at --workspace.
 

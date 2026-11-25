@@ -30,9 +30,12 @@ import (
 //     read, then a snapshot of each one's refs, HEADs and stashes and a
 //     hash of every record under .niwa;
 //  3. the sessions the pass will pass to claude rm: the unit's mapped
-//     Claude sessions that the pass's one claude agents listing holds, each
-//     with its job directory vetted. A listing that failed, a listed
-//     session that is still running, or a vet that fails keeps the unit;
+//     Claude sessions that the pass's shared claude agents listing (taken
+//     once, for every unit) holds, each with its job directory vetted. A
+//     listing that failed, a listed session that is still running, or a
+//     vet that fails keeps the unit. A unit with a mapped session is
+//     listed again later, by step 9b's fresh listing and by claude rm's
+//     guard before each call in step 11;
 //  4. the worktrees inside the instance, each linked worktree niwa's walk
 //     found there, read on the instance's own path with nothing removed:
 //     its repository's configuration (Env.RecheckConfig), its HEAD and
@@ -444,7 +447,9 @@ func (a *passActor) checkWorktrees(t passUnit, v removal.Verdict, snap removal.S
 // sessionsToRemove chose (a session newly listed, one no longer listed, one
 // now running or listed under another id), when the store or the listing
 // can't be read, or when a vet fails. It starts no git. A unit with no
-// mapped Claude session then or now asks for no listing.
+// mapped Claude session then or now asks for no listing. A session mapped
+// after this read is harmless: claudeOwners keeps only mappings at the
+// unit's original path, and nothing maps a session to a tombstone.
 func (a *passActor) lastSessionCheck(t passUnit, chosen []claudeSessionRow) string {
 	mappings, err := workspace.ListSessionMappings(a.root)
 	if err != nil {
