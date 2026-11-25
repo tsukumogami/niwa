@@ -129,7 +129,8 @@ func (s InstanceScan) HasLoss() bool {
 // default branch) and, through WithForge, the forge. See durable.go for the
 // test a branch has to pass. Every git call it makes, the git version read
 // included, is built by the builder WithGitCommand hands it, or by plain git
-// from PATH when it is given none.
+// from PATH when it is given none. Given WithRepositoryWalk, the walk runs
+// before the first git call, in place of the search for .git directories.
 func ScanInstance(instanceDir string, opts ...ScanOption) (InstanceScan, error) {
 	cfg := newScanConfig(opts)
 	state, err := LoadState(instanceDir)
@@ -146,9 +147,19 @@ func ScanInstance(instanceDir string, opts ...ScanOption) (InstanceScan, error) 
 	}
 	scan.InstanceName = state.InstanceName
 
-	primaries, err := findPrimaryRepos(instanceDir)
-	if err != nil {
-		return scan, fmt.Errorf("walking %s: %w", instanceDir, err)
+	// With a walk, it runs before any git call and names every repository
+	// the scan reads, submodules and nested repositories each on their own;
+	// one it gives a reason for is listed with that reason and gets no git
+	// call here.
+	var primaries []string
+	var walked []RepoScan
+	if cfg.walk != nil {
+		primaries, walked = fromWalk(cfg.walk(context.Background(), instanceDir))
+	} else {
+		primaries, err = findPrimaryRepos(instanceDir)
+		if err != nil {
+			return scan, fmt.Errorf("walking %s: %w", instanceDir, err)
+		}
 	}
 
 	// Repos are scanned concurrently: each one waits on its remotes, so a
@@ -166,10 +177,37 @@ func ScanInstance(instanceDir string, opts ...ScanOption) (InstanceScan, error) 
 		}()
 	}
 	wg.Wait()
+	scan.Repos = append(scan.Repos, walked...)
 	sort.Slice(scan.Repos, func(i, j int) bool {
 		return scan.Repos[i].Name < scan.Repos[j].Name
 	})
 	return scan, nil
+}
+
+// fromWalk splits what a walk returned into the work trees the scan reads
+// and a RepoScan for each repository it gives a reason for, every reason a
+// scan-error loss under that repository's name. An entry with neither a
+// reason nor a work tree is listed too, rather than passed as clean.
+func fromWalk(repos []WalkedRepository) (primaries []string, listed []RepoScan) {
+	at := map[string]int{}
+	for _, r := range repos {
+		if r.Reason == "" && r.WorkTree != "" {
+			primaries = append(primaries, r.WorkTree)
+			continue
+		}
+		reason := r.Reason
+		if reason == "" {
+			reason = "the walk gave no work tree to read"
+		}
+		i, ok := at[r.Name]
+		if !ok {
+			i = len(listed)
+			at[r.Name] = i
+			listed = append(listed, RepoScan{Name: r.Name})
+		}
+		listed[i].Losses = append(listed[i].Losses, Loss{Kind: LossScanError, Detail: reason})
+	}
+	return primaries, listed
 }
 
 // findPrimaryRepos walks instanceDir looking for primary git working
@@ -331,9 +369,6 @@ func scanWorkingTree(treeDir, treePath string, remotes []*remoteInfo, cfg scanCo
 			Path:   treePath,
 		})
 	}
-	if cfg.statusIgnoresSubmodules {
-		losses = append(losses, unreadSubmodules(cfg, treeDir, treePath)...)
-	}
 	if dirty > 0 {
 		losses = append(losses, Loss{
 			Kind:   LossWorkingTreeDirty,
@@ -480,42 +515,6 @@ func listWorktrees(cfg scanConfig, primary string) ([]worktreeEntry, error) {
 		}
 	}
 	return entries, nil
-}
-
-// unreadSubmodules lists every populated submodule or other gitlink of the
-// working tree at treeDir as a finding, read from the index with `git
-// ls-files --stage`. A builder from WithGitCommand gives the status
-// --ignore-submodules=all, so the status can't show a change inside one, and
-// a gitlink whose working tree holds a repository could hold work nothing
-// else here reads; it is listed as unread rather than passed as clean. One
-// with no .git checked out holds nothing local and isn't listed; one whose
-// .git can't be looked at for any other reason is listed. An index that
-// can't be read lists the working tree itself.
-func unreadSubmodules(cfg scanConfig, treeDir, treePath string) []Loss {
-	out, err := gitOutput(cfg, treeDir, "ls-files", "--stage", "-z")
-	if err != nil {
-		return []Loss{{
-			Kind:   LossScanError,
-			Detail: fmt.Sprintf("listing submodules failed: %v", err),
-			Path:   treePath,
-		}}
-	}
-	var losses []Loss
-	for _, entry := range strings.Split(out, "\x00") {
-		meta, path, ok := strings.Cut(entry, "\t")
-		if !ok || !strings.HasPrefix(meta, "160000 ") {
-			continue
-		}
-		if _, err := os.Lstat(filepath.Join(treeDir, path, ".git")); os.IsNotExist(err) {
-			continue
-		}
-		losses = append(losses, Loss{
-			Kind:   LossScanError,
-			Detail: fmt.Sprintf("submodule %s isn't read: the scan's status ignores submodules, so a change inside it can't be ruled out", path),
-			Path:   treePath,
-		})
-	}
-	return losses
 }
 
 // gitOutput runs git in treeDir with args, built by the scan's builder, and

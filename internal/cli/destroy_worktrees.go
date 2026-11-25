@@ -49,6 +49,21 @@ func (d *destroyWorktrees) close() {
 	}
 }
 
+// destroyScanWalk is the walk an unforced destroy's scan runs before its
+// first git call: the removal walk over the instance and the configuration
+// check on every repository it finds, from env, handed to the scan in its
+// own terms.
+func destroyScanWalk(env *removal.Env) workspace.RepositoryWalkFunc {
+	return func(ctx context.Context, instanceDir string) []workspace.WalkedRepository {
+		repos := env.ScanRepositories(ctx, instanceDir)
+		out := make([]workspace.WalkedRepository, 0, len(repos))
+		for _, r := range repos {
+			out = append(out, workspace.WalkedRepository{Name: r.Rel, WorkTree: r.WorkTree, Reason: r.Reason})
+		}
+		return out
+	}
+}
+
 // scan is the worktrees' part of an unforced destroy's scan. For each
 // worktree it reads the repository's configuration, which refuses the
 // destroy on any reason, then reads the worktree the way its removal will

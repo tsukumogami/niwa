@@ -253,11 +253,17 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingP
 		// reads a proof remote, in no repository against the repository's
 		// own remote.<name>.url, and a commit the repository lacks is
 		// fetched into a scratch store, never into the repository; a remote
-		// that can't be read keeps.
+		// that can't be read keeps. Before its first git call the scan runs
+		// the removal walk over the instance and the configuration check on
+		// every repository the walk finds; a flagged repository, or one the
+		// walk keeps, gets no further git call and is listed as loss naming
+		// the key or the walk's reason, and every submodule and nested
+		// repository is read with its own status.
 		scanEnv := newRemovalEnv(workspaceRoot, userHomeDir(), os.Getenv("PATH"))
 		defer scanEnv.Close()
 		scan, err := workspace.ScanInstance(instanceDir,
 			workspace.WithForge(newDestroyForge()),
+			workspace.WithRepositoryWalk(destroyScanWalk(scanEnv)),
 			workspace.WithGitCommand(scanEnv.ScanCommand),
 			workspace.WithRemoteFetch(scanEnv.ScanFetch))
 		if err != nil {

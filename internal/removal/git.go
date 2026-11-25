@@ -634,12 +634,13 @@ func (e *Env) ScanFetch(ctx context.Context, dir, remote string, ids []string) (
 // fetch goes into a scratch store through ScanFetch, never into the
 // repository it scans.
 //
-// Right before a status it runs the configuration check on the repository
-// again, under the same bound as every configuration read: status is the
-// call that can start a filter. A key that names a program refuses the call
-// with an error naming the key, and a read that fails refuses it too; either
-// way the status isn't started. The read also decides the status's excludes
-// override, as on the removal path.
+// Right before a status or a merge-tree it runs the configuration check on
+// the repository again, under the same bound as every configuration read:
+// status is the call that can start a filter, and merge-tree a merge driver.
+// A key that names a program refuses the call with an error naming the key,
+// and a read that fails refuses it too; either way the call isn't started.
+// For a status the read also decides the excludes override, as on the
+// removal path.
 func (e *Env) ScanCommand(ctx context.Context, dir string, env []string, args ...string) (*exec.Cmd, error) {
 	if !filepath.IsAbs(dir) {
 		return nil, fmt.Errorf("the scan's git call needs an absolute directory, not %q", dir)
@@ -662,12 +663,14 @@ func (e *Env) ScanCommand(ctx context.Context, dir string, env []string, args ..
 		}
 	}
 	o := callOpts{dir: dir}
-	if len(args) > 0 && args[0] == "status" {
+	if len(args) > 0 && (args[0] == "status" || args[0] == "merge-tree") {
 		rc, err := e.recheckConfig(ctx, r)
 		if err != nil {
 			return nil, err
 		}
-		o.excludesUnset = rc.excludesUnset
+		if args[0] == "status" {
+			o.excludesUnset = rc.excludesUnset
+		}
 	}
 	cmd, err := e.gitCommand(ctx, r, o, args...)
 	if err != nil {

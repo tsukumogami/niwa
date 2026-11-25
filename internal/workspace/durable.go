@@ -83,11 +83,10 @@ type scanConfig struct {
 	// included: nothing in the scan starts git any other way. It is the only
 	// field of its kind here.
 	git GitCommandFunc
-	// statusIgnoresSubmodules is set when the builder came from
-	// WithGitCommand, whose status ignores submodules: the scan then lists
-	// every populated submodule of a working tree as unread, since that
-	// status can't show a change inside one.
-	statusIgnoresSubmodules bool
+	// walk, when set (WithRepositoryWalk), names the repositories the scan
+	// reads in place of its own search for .git directories. It is not a
+	// builder: it returns no command.
+	walk RepositoryWalkFunc
 	// liveDefaults is set when the builder came from WithGitCommand: a
 	// remote's default branch is then judged only at the commit ls-remote
 	// read from the remote itself, never at the local remote-tracking ref,
@@ -141,9 +140,36 @@ func WithGitCommand(fn GitCommandFunc) ScanOption {
 			fn = refuseGitCommand
 		}
 		c.git = fn
-		c.statusIgnoresSubmodules = true
 		c.liveDefaults = true
 	}
+}
+
+// WalkedRepository is one repository a walk of the instance found, before
+// the scan's first git call: a work tree the scan reads with its own status,
+// or one it runs no git call in.
+type WalkedRepository struct {
+	// Name is its path relative to the instance.
+	Name string
+	// WorkTree is the work tree the scan reads; empty when Reason is set.
+	WorkTree string
+	// Reason, when set, is why the scan runs no git call in it, a key that
+	// names a program named, for one. The scan lists it as a scan-error loss.
+	Reason string
+}
+
+// RepositoryWalkFunc walks the instance at instanceDir and runs the
+// configuration check on every repository it finds, and returns each one:
+// the clones, submodules, gitlinks and other nested repositories, and every
+// finding of the walk's own as a repository with a reason.
+type RepositoryWalkFunc func(ctx context.Context, instanceDir string) []WalkedRepository
+
+// WithRepositoryWalk makes the scan run fn over the instance before its
+// first git call and read exactly the work trees fn hands it, each with its
+// own status, in place of its own search for .git directories. Every
+// repository fn gives a reason for is listed as a scan-error loss carrying
+// that reason, and the scan runs no git call in it.
+func WithRepositoryWalk(fn RepositoryWalkFunc) ScanOption {
+	return func(c *scanConfig) { c.walk = fn }
 }
 
 // refuseGitCommand is the builder WithGitCommand(nil) leaves the scan with.
@@ -381,11 +407,16 @@ func judgeTip(ctx context.Context, dir, tip, branch, upstream string, remotes []
 		}
 	}
 
-	// 2. Landed by content.
+	// 2. Landed by content. A merge-tree the builder refused lists the
+	// branch with the refusal, which names the key.
 	mergeTreeOK := cfg.mergeTreeSupported(dir)
 	if mergeTreeOK {
 		for _, r := range defaults {
-			if landedByContent(cfg, dir, tip, r.defaultRef) {
+			landed, err := landedByContent(cfg, dir, tip, r.defaultRef)
+			if err != nil {
+				return branchVerdict{kind: LossScanError, reason: fmt.Sprintf("checking whether the commits landed on %s failed: %v", r.name, err)}
+			}
+			if landed {
 				return branchVerdict{durable: true}
 			}
 		}
@@ -588,15 +619,18 @@ func whyNoHome(cfg scanConfig, dir, tip, branch, upstream string, remotes []*rem
 // Checking earlier first-parent commits, not just the tip, is what keeps a
 // squash merge recognisable after def later edits or reverts the same lines.
 // A conflict, an error, or a different tree all mean "not proven landed".
-func landedByContent(cfg scanConfig, dir, tip, def string) bool {
+// A merge-tree the builder refuses to start, as when the configuration
+// check right before it finds a key that names a program, ends the check
+// with that refusal as the error, so the caller can name it.
+func landedByContent(cfg scanConfig, dir, tip, def string) (bool, error) {
 	mbOut, err := gitOutput(cfg, dir, "merge-base", def, tip)
 	if err != nil {
-		return false
+		return false, nil
 	}
 	mb := strings.TrimSpace(mbOut)
 	pathsOut, err := gitOutput(cfg, dir, "diff", "--name-only", "--no-renames", "-z", mb, tip)
 	if err != nil {
-		return false
+		return false, nil
 	}
 	var paths []string
 	for _, p := range strings.Split(pathsOut, "\x00") {
@@ -606,7 +640,7 @@ func landedByContent(cfg scanConfig, dir, tip, def string) bool {
 	}
 	if len(paths) == 0 {
 		// The branch's tree equals the merge base's, which def contains.
-		return true
+		return true, nil
 	}
 
 	cands := []string{def}
@@ -624,15 +658,19 @@ func landedByContent(cfg scanConfig, dir, tip, def string) bool {
 			continue
 		}
 		merged, err := gitOutput(cfg, dir, "merge-tree", "--write-tree", "--no-messages", c, tip)
+		var refused *notStarted
+		if errors.As(err, &refused) {
+			return false, err
+		}
 		if err != nil {
 			continue // conflict (exit 1) or error: not proven here
 		}
 		first, _, _ := strings.Cut(merged, "\n")
 		if strings.TrimSpace(first) == strings.TrimSpace(treeOut) {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func isAncestor(cfg scanConfig, dir, a, b string) bool {
@@ -669,7 +707,8 @@ func countUnlanded(cfg scanConfig, dir, tip string, defaults []*remoteInfo, merg
 	}
 	for _, c := range strings.Fields(out)[1:] {
 		for _, r := range defaults {
-			if landedByContent(cfg, dir, c, r.defaultRef) {
+			// A refused merge-tree proves nothing landed: every commit counts.
+			if landed, _ := landedByContent(cfg, dir, c, r.defaultRef); landed {
 				return countRange(cfg, dir, c, tip)
 			}
 		}
@@ -777,7 +816,7 @@ func gitOutputEnv(cfg scanConfig, dir string, env []string, args ...string) (str
 	env = append(append([]string(nil), env...), cfg.objectEnv...)
 	cmd, err := cfg.git(context.Background(), dir, env, args...)
 	if err != nil {
-		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), &notStarted{err: err})
 	}
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -787,6 +826,13 @@ func gitOutputEnv(cfg scanConfig, dir string, env []string, args ...string) (str
 	}
 	return stdout.String(), nil
 }
+
+// notStarted is the error of a git call the scan's builder refused to build,
+// so git never ran: a configuration check that now names a program, for one.
+type notStarted struct{ err error }
+
+func (n *notStarted) Error() string { return n.err.Error() }
+func (n *notStarted) Unwrap() error { return n.err }
 
 // supportsMergeTree, when set, answers in place of the scan's own version
 // read. Tests set it to exercise the old-git path; nothing else does.
