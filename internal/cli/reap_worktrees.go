@@ -32,13 +32,30 @@ import (
 // worktree-sweep and the recorded Claude session id; a refusal keeps the
 // worktree for this pass and prints the gate's line.
 //
+// Before any other git call in a worktree whose session has ended, the
+// sweep walks the instance and runs the program-naming configuration check
+// on every repository it finds under the worktree, its own and each
+// submodule, gitlink and nested repository (removal.EvaluateSweptWorktree);
+// a key that names a program, a read that fails or a walk rule's keep keeps
+// the worktree with a line naming it. The evaluation records the worktree's
+// HEAD and per-worktree refs. Every git call after it, the unchanged check's
+// and DestroySession's, is built by the removal package's gitCommand, and
+// every status runs after the configuration check again, with
+// --ignore-submodules=all and --untracked-files=all.
+//
 // The destroy is DestroySession without force, so its attach-lock and dirty
 // guards still apply on top of the unchanged check. Unlike the hook's
 // teardown it doesn't release an attach lock first: it acts for no agent, so
-// a held lock is someone else's and keeps the worktree. The check and the removal
-// aren't atomic, but a session idle for the whole grace period is not writing
-// into the worktree in between. It returns how many worktrees it removed;
-// failures are reported on stderr and skipped.
+// a held lock is someone else's and keeps the worktree. DestroySession
+// removes the worktree through the evaluation's remover, with no git
+// worktree remove or prune: right before the removal it reads HEAD and the
+// per-worktree refs again, and any change keeps the worktree with "changed
+// during the pass: ref <name>"; it runs the configuration check once more;
+// then the no-follow walk removes the work tree and the admin directory, and
+// stops, with the path named, on anything it won't remove. A removal that
+// stops leaves the session record Active, so the next sweep tries again. It
+// returns how many worktrees it removed; keeps and failures are reported on
+// stderr and skipped.
 func sweepHookWorktrees(workspaceRoot, jobsDir string, now time.Time, stderr io.Writer) int {
 	instances, err := workspace.EnumerateInstances(workspaceRoot)
 	if err != nil {
@@ -57,6 +74,9 @@ func sweepHookWorktreesIn(workspaceRoot string, instances []string, jobsDir stri
 	// One gate per sweep, so the whole sweep shares one time budget, as each
 	// reap pass does.
 	gate := newRemovalGate(workspaceRoot, removeStepWorktreeSweep, stderr)
+	// The removal environment every git call of the sweep runs in, made
+	// once, for the first worktree whose session has ended.
+	var env *removal.Env
 	removed := 0
 	for _, instance := range instances {
 		// An opted-out instance's worktrees aren't niwa's to tear down, as
@@ -75,7 +95,21 @@ func sweepHookWorktreesIn(workspaceRoot string, instances []string, jobsDir stri
 			if !hookSessionEnded(st, jobsDir, now, grace) {
 				continue
 			}
-			unchanged, _, err := worktree.WorktreeUnchanged(ctx, st, worktree.StdGitInvoker{})
+			if env == nil {
+				env = newRemovalEnv(workspaceRoot, userHomeDir(), os.Getenv("PATH"))
+				defer env.Close()
+			}
+			// The walk and the configuration check on every repository
+			// under the worktree come before any other git call there. The
+			// worktree path is read from the instance's session record and
+			// the reasons can quote it, so both pass removal.ScrubEvidence.
+			swept, keep := env.EvaluateSweptWorktree(ctx, instance, st.WorktreePath)
+			if keep != "" {
+				fmt.Fprintf(stderr, "niwa: kept worktree %s: %s\n",
+					removal.ScrubEvidence(st.WorktreePath, 400), removal.ScrubEvidence(keep, 400))
+				continue
+			}
+			unchanged, _, err := worktree.WorktreeUnchanged(ctx, st, swept)
 			if err != nil || !unchanged {
 				continue
 			}
@@ -86,11 +120,8 @@ func sweepHookWorktreesIn(workspaceRoot string, instances []string, jobsDir stri
 			if !gate.ask(st.WorktreePath, ids) {
 				continue
 			}
-			// The worktree path is read from the instance's session record
-			// and git's error text can quote the worktree, so both pass
-			// removal.ScrubEvidence.
-			if _, err := worktree.DestroySession(ctx, instance, st.SessionID, false /* force */, worktree.StdGitInvoker{},
-				worktree.DiscardingGitWorktreeRemover{Ctx: ctx, Git: worktree.StdGitInvoker{}}); err != nil {
+			// git's error text can quote the worktree too.
+			if _, err := worktree.DestroySession(ctx, instance, st.SessionID, false /* force */, swept, swept); err != nil {
 				fmt.Fprintf(stderr, "niwa: warning: removing unchanged worktree %s: %s\n",
 					removal.ScrubEvidence(st.WorktreePath, 400), removal.ScrubEvidence(err.Error(), 400))
 				continue

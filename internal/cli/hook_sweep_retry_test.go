@@ -97,13 +97,7 @@ func TestSweepRule_AStoppedRemovalLeavesTheRecordActiveAndTheNextSweepRetries(t 
 	if !strings.Contains(gitIn(t, fx.f.repoPath, "worktree", "list", "--porcelain"), filepath.Base(wt)) {
 		t.Errorf("worktree %s is no longer registered after a removal that stopped", wt)
 	}
-	named := false
-	for _, target := range targets {
-		if strings.Contains(out, target) {
-			named = true
-		}
-	}
-	if !named {
+	if !outputNamesPath(out, fx.f.root, wt) {
 		t.Errorf("sweep output does not name %s:\n%s", wt, out)
 	}
 
