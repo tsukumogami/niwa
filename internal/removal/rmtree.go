@@ -305,7 +305,10 @@ func RemoveMovedWorktree(instance string, originals []string, workTree, adminDir
 
 // worktreeAt opens the instance and runs the worktree's removal, or only its
 // read, from that descriptor. originals are the paths the instance had
-// before a rename, for the .git file's match.
+// before a rename, for the .git file's match. The instance is opened with
+// O_NOFOLLOW, like every directory the walk opens: an instance or tombstone
+// swapped for a link stops the walk with nothing removed, rather than
+// sending it into the link's target.
 func worktreeAt(instance string, originals []string, workTree, adminDir string, remove bool) error {
 	wtRel, err := relBelow(instance, workTree)
 	if err != nil {
@@ -315,7 +318,7 @@ func worktreeAt(instance string, originals []string, workTree, adminDir string, 
 	if err != nil {
 		return &WalkStop{Path: adminDir, Reason: "the worktree's admin directory is not inside the instance: " + adminDir}
 	}
-	fd, err := retryEINTR(func() (int, error) { return unix.Open(instance, instanceOpenFlags, 0) })
+	fd, err := retryEINTR(func() (int, error) { return unix.Open(instance, dirOpenFlags, 0) })
 	if err != nil {
 		return changed(".")
 	}
