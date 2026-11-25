@@ -322,9 +322,12 @@ func goneUnreadable(t *testing.T, dir string, mode os.FileMode) {
 // A branch git positively answers is absent goes on with no branch delete:
 // the record ends, the command exits 0 and says the branch was already
 // absent. Only git 2.43's show-ref --exists tells a missing branch from one
-// it can't read; with an older git the destroy keeps, record Active, since
-// the absence can't be shown.
+// it can't read, so this test skips on older git; the older-git keep is
+// pinned by the test after it.
 func TestWorktreeDestroyGone_APositivelyAbsentBranchGoesOnWithNoBranchDelete(t *testing.T) {
+	if !goneGitAtLeast(t, 2, 43) {
+		t.Skipf("git %s found: show-ref --exists needs git 2.43; older git can't tell a missing branch from an unreadable one", goneGitVersion(t))
+	}
 	for _, tc := range []struct {
 		name        string
 		removeAdmin bool
@@ -347,18 +350,6 @@ func TestWorktreeDestroyGone_APositivelyAbsentBranchGoesOnWithNoBranchDelete(t *
 			if listed := gitIn(t, f.repoPath, "branch", "--list", branch); listed != "" {
 				t.Errorf("branch %s is there after the destroy: %q", branch, listed)
 			}
-			if !goneGitAtLeast(t, 2, 43) {
-				if code := goneExitCode(err); code != 1 {
-					t.Errorf("destroyOneWorktree --force = %v; want exit 1 where git can't show the branch is absent", err)
-				}
-				if status := goneRecordStatus(t, f, st); status != worktree.SessionStatusActive {
-					t.Errorf("record is %q, want active where git can't show the branch is absent", status)
-				}
-				if !strings.Contains(stderr, "keeping branch "+branch) {
-					t.Errorf("stderr doesn't name the kept branch:\n%s", stderr)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatalf("destroyOneWorktree --force = %v; want exit 0 for an absent branch\nstderr:\n%s", err, stderr)
 			}
@@ -373,6 +364,62 @@ func TestWorktreeDestroyGone_APositivelyAbsentBranchGoesOnWithNoBranchDelete(t *
 			}
 			if !strings.Contains(stdout, "session: destroyed "+st.SessionID) {
 				t.Errorf("stdout = %q; want the destroyed line", stdout)
+			}
+		})
+	}
+}
+
+// goneGitVersion returns the version string the git on PATH prints.
+func goneGitVersion(t *testing.T) string {
+	t.Helper()
+	out, err := exec.Command(realGit(t), "version").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) < 3 {
+		t.Fatalf("git version printed %q", out)
+	}
+	return fields[2]
+}
+
+// With a git older than 2.43 an absent branch can't be told from one git
+// can't read, so the forced destroy keeps: exit 1, record Active, the branch
+// named as kept and no branch delete.
+func TestWorktreeDestroyGone_OnGitOlderThan2_43AnAbsentBranchKeeps(t *testing.T) {
+	if goneGitAtLeast(t, 2, 43) {
+		t.Skipf("git %s found: this keep applies only to git older than 2.43, where show-ref --exists is missing", goneGitVersion(t))
+	}
+	for _, tc := range []struct {
+		name        string
+		removeAdmin bool
+	}{
+		{"admin dir still present", false},
+		{"admin dir gone too", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, st := newGoneHeldFixture(t, "gone-absent")
+			branch := st.EffectiveBranchName()
+			gitIn(t, f.repoPath, "update-ref", "-d", "refs/heads/"+branch)
+
+			log := goneLoggingGit(t)
+			_, stderr, err := goneForcedDestroy(t, f, st, tc.removeAdmin)
+
+			lines := goneLogLines(t, log)
+			if goneLogHas(lines, " branch -D ") || goneLogHas(lines, " branch -d ") {
+				t.Errorf("a branch delete ran for an absent branch:\n%s", strings.Join(lines, "\n"))
+			}
+			if listed := gitIn(t, f.repoPath, "branch", "--list", branch); listed != "" {
+				t.Errorf("branch %s is there after the destroy: %q", branch, listed)
+			}
+			if code := goneExitCode(err); code != 1 {
+				t.Errorf("destroyOneWorktree --force = %v; want exit 1 where git can't show the branch is absent", err)
+			}
+			if status := goneRecordStatus(t, f, st); status != worktree.SessionStatusActive {
+				t.Errorf("record is %q, want active where git can't show the branch is absent", status)
+			}
+			if !strings.Contains(stderr, "keeping branch "+branch) {
+				t.Errorf("stderr doesn't name the kept branch:\n%s", stderr)
 			}
 		})
 	}
