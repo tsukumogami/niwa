@@ -641,7 +641,8 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 	// (7) Arm the deferred self-rollback IMMEDIATELY after create, before any
 	// other work. ANY early return after create -- and before success is set --
-	// destroys the just-created instance promptly (DESIGN Decision 4). A Go
+	// destroys the just-created instance promptly (DESIGN Decision 4), unless
+	// the removal rule keeps it (below). A Go
 	// defer does not run on SIGKILL; the name+TTL reaper backstop closes that
 	// remaining gap (the dispatch instance NAME, created atomically by provision,
 	// is the backstop's eligibility signal, so no marker is required).
@@ -654,16 +655,35 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// entry exists exactly when the dispatch keeps its instance. A foreground
 	// dispatch sets success before capture, so its entry is never removed
 	// here; a change that moves that line must keep this true.
+	//
+	// Before anything is removed the rollback asks the removal rule about the
+	// instance. The dispatch failed, so no session of its own is live there,
+	// and the rule is told so; its process listing still keeps an instance a
+	// live process works in. A keeping verdict leaves the instance, its
+	// lineage entry and the authority copy all in place and prints the first
+	// keeping check with the path it names. Only a destroy that succeeded
+	// removes the entry and the copy, so neither outlives a kept instance's
+	// record of what it was granted.
 	success := false
 	entryCreated := false
 	defer func() {
-		if !success {
-			if entryCreated {
-				_ = workspace.RemoveLineageEntry(workspaceRoot, dispatchID)
-			}
-			_ = workspace.RemoveAuthorityCopy(workspaceRoot, dispatchID)
-			_ = destroyInstanceFunc(instancePath)
+		if success {
+			return
 		}
+		if keptByRule(cmd.ErrOrStderr(), workspaceRoot, rollbackUnit{
+			Name:         res.Name,
+			InstancePath: instancePath,
+			Liveness:     removal.LivenessGone,
+		}) {
+			return
+		}
+		if err := destroyInstanceFunc(instancePath); err != nil {
+			return
+		}
+		if entryCreated {
+			_ = workspace.RemoveLineageEntry(workspaceRoot, dispatchID)
+		}
+		_ = workspace.RemoveAuthorityCopy(workspaceRoot, dispatchID)
 	}()
 
 	// (8) Drop the pending-marker carrying its own creation timestamp. This is
