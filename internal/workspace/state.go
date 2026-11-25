@@ -787,7 +787,20 @@ func HashFile(path string) (string, error) {
 		return "", fmt.Errorf("hashing file: %w", err)
 	}
 
-	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
+	return contentHash(h.Sum(nil)), nil
+}
+
+// HashBytes is HashFile's hash of b, for a caller that holds the exact bytes
+// it wrote: the SHA-256 of b with the same "sha256:" prefix, so it compares
+// equal to HashFile of a file holding those bytes.
+func HashBytes(b []byte) string {
+	sum := sha256.Sum256(b)
+	return contentHash(sum[:])
+}
+
+// contentHash formats a SHA-256 digest as a managed file's recorded hash.
+func contentHash(sum []byte) string {
+	return "sha256:" + hex.EncodeToString(sum)
 }
 
 // CheckDrift compares the current hash of a managed file against its recorded
