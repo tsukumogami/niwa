@@ -317,6 +317,22 @@ session before anything goes, while the per-call guard stays because
 Claude Code deletes the job directory by its own means, and a directory
 swapped between the check and the call must still stop that call.
 
+### 2026-11-25 — The hook sweep runs the configuration and identity checks only
+
+**What changed.** The Solution Architecture passage on the hook worktree
+sweep no longer says it evaluates a worktree's repository checks. The sweep
+runs the program-naming configuration check and the identity check on every
+repository under the worktree. The removal walk keeps the worktree whenever
+any repository is nested under it, so nothing nested is ever removed. The
+proof-remote check doesn't run on the sweep.
+
+**Why.** The sweep removes only a worktree whose HEAD and session branch sit
+at the base commit. Its refs and objects live on in the main clone, which
+stays. The full repository check would keep every worktree of a repository
+without a proof remote, though the outer repository loses nothing by the
+removal. Every nested repository already keeps by the walk, so the proof
+remote adds nothing there either.
+
 ## Context and Problem Statement
 
 A unit of work in niwa is a session, the instance it runs in, its Claude Code
@@ -2518,8 +2534,11 @@ niwa retire <instance>  ──> write mark ──> runPass(one) ───┘    
 
 Failed-dispatch cleanup, the watch's discard and the watch's failed-stage
 rollback call `removal.Evaluate` for their one instance before
-`destroyInstanceFunc`; the hook worktree sweep evaluates a worktree's repository
-checks before removing it. Both boxes write their record together with its
+`destroyInstanceFunc`; the hook worktree sweep runs the configuration and
+identity checks on every repository under a worktree and keeps the worktree
+whenever the walk finds a nested repository, with no proof-remote check, since
+a worktree at the base commit has its refs and objects in the main clone, which
+stays. Both boxes write their record together with its
 entry in the unit's ledger outside the instance, and every git call under
 `removal.Evaluate`, the acting steps, the hook worktree sweep and
 `niwa destroy` goes through `gitCommand`, with the program-naming
