@@ -493,7 +493,11 @@ func runDestroyEmptyWorkspace(cmd *cobra.Command, workspaceRoot string) error {
 // instance for non-pushed work and list any it finds, then require the
 // workspace name, typed at a prompt or passed as confirm, whether or not the
 // scan found anything. Only then destroy every instance and the workspace
-// root, landing the shell at the workspace parent.
+// root, landing the shell at the workspace parent. The scan and the order
+// are an unforced single-instance destroy's, on every instance: the walk and
+// the configuration check before the scan's first git call, and after the
+// confirmation and the vet, every worktree's re-check and fresh status
+// before the first worktree removal, then the worktrees, then the sessions.
 //
 // The confirmation is unconditional because this is the one command that
 // removes every other session's instance too; a clean scan says nothing about
@@ -551,11 +555,48 @@ func runDestroyWorkspace(cmd *cobra.Command, workspaceRoot, confirm string) erro
 	}
 
 	// Scan for non-pushed work, so whoever confirms sees what would be lost.
-	scans, scanErr := workspace.ScanInstancesParallel(workspaceRoot, instances, 0, workspace.WithForge(newDestroyForge()))
+	// The scan is an unforced single-instance destroy's, on every instance:
+	// before its first git call in an instance it runs the removal walk and
+	// the configuration check on every repository the walk finds, a flagged
+	// one getting no further git call and being listed as loss naming the
+	// key, and it starts git only through the removal pass's command builder
+	// from its own removal environment, which the parallel scan's workers
+	// share (its lazily filled parts are under its lock).
+	scanEnv := newRemovalEnv(workspaceRoot, userHomeDir(), os.Getenv("PATH"))
+	defer scanEnv.Close()
+	scans, scanErr := workspace.ScanInstancesParallel(workspaceRoot, instances, 0,
+		workspace.WithForge(newDestroyForge()),
+		workspace.WithRepositoryWalk(destroyScanWalk(scanEnv)),
+		workspace.WithGitCommand(scanEnv.ScanCommand),
+		workspace.WithRemoteFetch(scanEnv.ScanFetch))
 	if scanErr != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: scan reported errors: %v\n", scanErr)
 		// Continue — individual repo errors are surfaced in scans[*].Skipped
 		// and the confirmation below still fires.
+	}
+
+	// Each instance's linked worktrees, found by niwa's walk, are read the
+	// way an unforced single-instance destroy reads them, one instance after
+	// another once the parallel scan is done, and listed with that
+	// instance's findings. Something that changed under the walk refuses the
+	// whole destroy.
+	if len(scans) != len(instances) {
+		return fmt.Errorf("nothing was destroyed: the scan returned %d result(s) for %d instance(s)", len(scans), len(instances))
+	}
+	worktrees := make([]*destroyWorktrees, 0, len(instances))
+	defer func() {
+		for _, w := range worktrees {
+			w.close()
+		}
+	}()
+	for i, inst := range instances {
+		w := newDestroyWorktrees(ctx, workspaceRoot, inst, false)
+		worktrees = append(worktrees, w)
+		findings, err := w.scan(ctx)
+		if err != nil {
+			return err
+		}
+		scans[i].Repos = append(scans[i].Repos, findings...)
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "This destroys %d instance(s) and the workspace at %s.\n", len(instances), workspaceRoot)
 	promptName := workspaceName
@@ -605,6 +646,25 @@ func runDestroyWorkspace(cmd *cobra.Command, workspaceRoot, confirm string) erro
 	if !destroyKeepSession {
 		if err := vetDestroySessions(ctx, cc, workspaceRoot, instances, listSessions); err != nil {
 			return fmt.Errorf("nothing was destroyed: %s", removal.ScrubEvidence(err.Error(), 400))
+		}
+	}
+
+	// The worktrees, before the sessions, as an unforced single-instance
+	// destroy removes them: every worktree in every instance has its
+	// configuration read again and a fresh status taken before the first
+	// removal anywhere, so a reason, a read that fails or a change the
+	// listing didn't show, in any instance, stops the destroy with every
+	// worktree, session and instance kept. Then each instance's worktrees go
+	// through the no-follow walk with no git call in between; a worktree the
+	// walk won't remove goes with the instance directory.
+	for _, w := range worktrees {
+		if err := w.recheck(ctx); err != nil {
+			return err
+		}
+	}
+	for _, w := range worktrees {
+		if err := w.removeChecked(cmd.ErrOrStderr()); err != nil {
+			return err
 		}
 	}
 
