@@ -12,6 +12,7 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/removal"
+	"github.com/tsukumogami/niwa/internal/testhook"
 	"github.com/tsukumogami/niwa/internal/workspace"
 	"github.com/tsukumogami/niwa/internal/worktree"
 )
@@ -322,6 +323,7 @@ func (a *passActor) actReap(t passUnit, unit removal.Unit, v removal.Verdict, st
 	// the rename back returns. The instance's forms are read while it is
 	// still at its own path.
 	forms := instanceForms(t.InstancePath)
+	testhook.RemovalAtTombstoneLock(t.InstancePath)
 	releaseTomb, err := tryTombstoneLockFunc(a.root, true)
 	if err != nil {
 		return keep(tombstoneLockReason(err))

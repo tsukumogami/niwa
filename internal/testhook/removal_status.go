@@ -10,4 +10,8 @@ const (
 	// the check on the tombstone), after the snapshot's own configuration
 	// read.
 	StageReread = "reread"
+	// StageTombstoneLock is the pass taking the shared tombstone lock, after
+	// the re-read and right before the rename to the tombstone. The command
+	// gets the instance's own path as NIWA_PLANT_INSTANCE_PATH.
+	StageTombstoneLock = "tombstone-lock"
 )

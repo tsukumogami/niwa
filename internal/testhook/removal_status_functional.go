@@ -31,3 +31,17 @@ func RemovalBeforeStatus(stage, gitDir, workTree string) {
 	cmd.Env = append(os.Environ(), "NIWA_PLANT_GIT_DIR="+gitDir, "NIWA_PLANT_WORK_TREE="+workTree)
 	_ = cmd.Run()
 }
+
+// RemovalAtTombstoneLock runs the plant command when NIWA_TEST_REMOVAL_PLANT_AT
+// names StageTombstoneLock: only in the test build. The pass calls it right
+// before it takes the shared tombstone lock, after the re-read and before the
+// rename, so a scenario can stand in for a writer that lands in that window.
+func RemovalAtTombstoneLock(instancePath string) {
+	cmdText := os.Getenv(removalPlantCmdEnv)
+	if cmdText == "" || os.Getenv(removalPlantAtEnv) != StageTombstoneLock {
+		return
+	}
+	cmd := exec.Command("/bin/sh", "-c", cmdText)
+	cmd.Env = append(os.Environ(), "NIWA_PLANT_INSTANCE_PATH="+instancePath)
+	_ = cmd.Run()
+}
