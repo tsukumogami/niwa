@@ -7,8 +7,21 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/worktree"
 )
+
+// goneIsolatedHome points the home directory and the removal environment the
+// destroy builds at a temporary directory, so the test never reads the real
+// home or the person's git configuration and credential helpers.
+func goneIsolatedHome(t *testing.T) {
+	t.Helper()
+	home := canonicalTempDir(t)
+	prevHome, prevEnv := userHomeDir, newRemovalEnv
+	userHomeDir = func() string { return home }
+	newRemovalEnv = func(r, _, pathEnv string) *removal.Env { return removal.NewEnv(r, home, pathEnv) }
+	t.Cleanup(func() { userHomeDir, newRemovalEnv = prevHome, prevEnv })
+}
 
 // Red-first tests for a session whose worktree directory is already gone
 // while its record still reads Active, which happens when the Ended write
@@ -99,6 +112,7 @@ func TestWorktreeDestroyForce_GoneWorktreeKeepsAnUnpushedBranch(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newCreateFlowFixture(t)
+			goneIsolatedHome(t)
 			resetSessionCreateFlags(t)
 			t.Cleanup(func() { resetSessionCreateFlags(t) })
 			st := createViaHook(t, f, "gone")

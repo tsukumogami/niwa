@@ -654,14 +654,27 @@ func runSessionDestroy(cmd *cobra.Command, args []string) error {
 	return destroyOneWorktree(cmd, scope.instanceDir, target.worktreeID)
 }
 
-// destroyOneWorktree is the pre-existing single-worktree path, unchanged in
-// behavior and output: a worktree id or a --by-path lookup still prints the
-// bare destroyed line. Only session-resolved teardown prints the enriched one,
-// because only there does a caller need to know which worktrees of which
-// instance were removed.
+// destroyOneWorktree is the pre-existing single-worktree path: a worktree id
+// or a --by-path lookup still prints the bare destroyed line. Only
+// session-resolved teardown prints the enriched one, because only there does
+// a caller need to know which worktrees of which instance were removed.
+//
+// It passes the discarding remover, as before, except on a forced destroy of
+// an Active session whose worktree directory is already gone. There
+// judgeGoneWorktree first judges the session branch against the proof
+// remotes and keeps it, with the record Active, unless it is fully held;
+// a held branch goes on with GoneWorktreeRemover, which keeps git's exit
+// code, and a failing branch -D on that path is reported and returned.
 func destroyOneWorktree(cmd *cobra.Command, instanceRoot, sessionID string) error {
-	state, err := worktree.DestroySession(context.Background(), instanceRoot, sessionID, sessionDestroyForce, worktree.StdGitInvoker{},
-		worktree.DiscardingGitWorktreeRemover{Ctx: context.Background(), Git: worktree.StdGitInvoker{}})
+	gone, err := judgeGoneWorktree(cmd, instanceRoot, sessionID)
+	if err != nil {
+		return err
+	}
+	var remover worktree.WorktreeRemover = worktree.DiscardingGitWorktreeRemover{Ctx: context.Background(), Git: worktree.StdGitInvoker{}}
+	if gone {
+		remover = worktree.GoneWorktreeRemover{Ctx: context.Background(), Git: worktree.StdGitInvoker{}}
+	}
+	state, err := worktree.DestroySession(context.Background(), instanceRoot, sessionID, sessionDestroyForce, worktree.StdGitInvoker{}, remover)
 	if err != nil {
 		// A live attach holds the worktree and --force was not passed: surface
 		// the guard message verbatim (it carries the holder PID and recovery
@@ -680,6 +693,13 @@ func destroyOneWorktree(cmd *cobra.Command, instanceRoot, sessionID string) erro
 	}
 	if state.BranchWarning != "" {
 		fmt.Fprintln(cmd.ErrOrStderr(), "warning:", state.BranchWarning)
+	}
+	if gone && state.BranchDeleteError != "" {
+		// The gone-worktree path keeps git's exit codes: the record is ended,
+		// but the branch delete failed, and that is the command's result.
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa: error: session %s ended, but branch %s was not deleted: %s\n",
+			stripControlChars(sessionID), stripControlChars(state.EffectiveBranchName()), stripControlChars(state.BranchDeleteError))
+		return &sessionattach.ExitCodeError{Code: 1}
 	}
 
 	// Issue 10: destroy success on stdout, matching create.

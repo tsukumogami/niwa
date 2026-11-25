@@ -89,6 +89,11 @@ type SessionLifecycleState struct {
 	// CLI response for that call. The json tag is intentionally omitted
 	// so serialization cannot accidentally persist this field.
 	BranchWarning string `json:"-"`
+	// BranchDeleteError is set in the destroy response when a forced git
+	// branch -D fails, with git's last line. DestroySession still returns no
+	// error for it; the caller decides whether to report it. Never written to
+	// disk, like BranchWarning.
+	BranchDeleteError string `json:"-"`
 
 	// Attach is a computed projection of the worktree's attach.state sentinel
 	// (read at projection time, NOT persisted into <sid>.json). Set by

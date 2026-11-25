@@ -7,10 +7,12 @@
 package worktree
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,7 +42,9 @@ type GitInvoker interface {
 // repository inside the tree or a locked worktree. A local interface here
 // keeps this package from importing internal/removal. DestroySession removes
 // through one; DiscardingGitWorktreeRemover is the one its callers pass that
-// keep running a `git worktree remove --force` whose result is discarded.
+// keep running a `git worktree remove --force` whose result is discarded,
+// and GoneWorktreeRemover the one a forced destroy of an already gone
+// worktree passes, which keeps git's exit code.
 type WorktreeRemover interface {
 	RemoveWorktree(instance, workTree, adminDir string) error
 }
@@ -319,6 +323,15 @@ func findRepoInWorkspace(instanceRoot, repoName string) (string, error) {
 	return "", fmt.Errorf("repo %q not found in workspace %s", repoName, instanceRoot)
 }
 
+// FindRepoInWorkspace is the repository DestroySession removes a session's
+// worktree from and deletes its branch in: the directory named repoName two
+// levels under instanceRoot that holds a .git entry. A caller that judges
+// the session branch before DestroySession runs uses it to judge the same
+// repository.
+func FindRepoInWorkspace(instanceRoot, repoName string) (string, error) {
+	return findRepoInWorkspace(instanceRoot, repoName)
+}
+
 // CreateSession validates the role, generates a session ID, creates a git
 // worktree on a new branch, scaffolds the .niwa layout, and writes the
 // session state file. On any failure after the worktree is created the
@@ -560,11 +573,23 @@ func DestroySession(ctx context.Context, instanceRoot, sessionID string, force b
 		// option even if a future change relaxes the leading-dash rule in
 		// ValidateRecordFields.
 		branchName := state.EffectiveBranchName()
-		if err := gitInvoker.CommandContext(ctx, "-C", repoPath, "branch", branchArg, "--", branchName).Run(); err != nil && !force {
-			state.BranchWarning = fmt.Sprintf(
-				"branch %s was not deleted (unmerged commits remain); review and delete manually: git -C %s branch -D -- %s",
-				branchName, repoPath, branchName,
-			)
+		// git's standard error is kept, when the invoker left it unset, so a
+		// failing forced delete can be named; a forced failure is still no
+		// error here, and only the caller decides whether to report it.
+		branchCmd := gitInvoker.CommandContext(ctx, "-C", repoPath, "branch", branchArg, "--", branchName)
+		var branchStderr bytes.Buffer
+		if branchCmd.Stderr == nil {
+			branchCmd.Stderr = &branchStderr
+		}
+		if err := branchCmd.Run(); err != nil {
+			if !force {
+				state.BranchWarning = fmt.Sprintf(
+					"branch %s was not deleted (unmerged commits remain); review and delete manually: git -C %s branch -D -- %s",
+					branchName, repoPath, branchName,
+				)
+			} else {
+				state.BranchDeleteError = gitFailure(err, branchStderr.String())
+			}
 		}
 	}
 
@@ -644,4 +669,72 @@ func (r DiscardingGitWorktreeRemover) RemoveWorktree(instance, workTree, adminDi
 	repoPath := filepath.Dir(filepath.Dir(filepath.Dir(adminDir)))
 	_ = r.Git.CommandContext(ctx, "-C", repoPath, "worktree", "remove", "--force", workTree).Run()
 	return nil
+}
+
+// GoneWorktreeRemover is the WorktreeRemover for a forced destroy of a
+// session whose worktree directory is already gone, once the caller has
+// judged the session branch held. It keeps git's exit code: a work tree
+// that is there again stops the removal, an admin directory that is already
+// gone too leaves nothing for git worktree remove to clear and is skipped,
+// and otherwise `git -C <repo> worktree remove --force <workTree>` runs
+// through Git, with Ctx, and a failure stops the removal with git's last
+// line.
+type GoneWorktreeRemover struct {
+	Ctx context.Context
+	Git GitInvoker
+}
+
+// RemoveWorktree clears the gone worktree's admin directory through git, or
+// does nothing when that directory is gone too.
+func (r GoneWorktreeRemover) RemoveWorktree(instance, workTree, adminDir string) error {
+	if r.Git == nil {
+		return errors.New("git invoker not configured")
+	}
+	ctx := r.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, err := os.Lstat(workTree); err == nil {
+		return fmt.Errorf("worktree %s is there again; it was gone when the branch was judged", workTree)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("worktree %s can't be read: %w", workTree, err)
+	}
+	if _, err := os.Lstat(adminDir); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("admin directory %s can't be read: %w", adminDir, err)
+	}
+	repoPath := filepath.Dir(filepath.Dir(filepath.Dir(adminDir)))
+	cmd := r.Git.CommandContext(ctx, "-C", repoPath, "worktree", "remove", "--force", workTree)
+	var stderr bytes.Buffer
+	if cmd.Stderr == nil {
+		cmd.Stderr = &stderr
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git worktree remove --force: %s", gitFailure(err, stderr.String()))
+	}
+	return nil
+}
+
+// gitFailure names a failed git call by git's last fatal: or error: line,
+// else its last line on standard error, else the exit status.
+func gitFailure(err error, stderr string) string {
+	var last, fatal string
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		last = line
+		if strings.HasPrefix(line, "fatal:") || strings.HasPrefix(line, "error:") {
+			fatal = line
+		}
+	}
+	switch {
+	case fatal != "":
+		return fatal
+	case last != "":
+		return last
+	}
+	return err.Error()
 }
