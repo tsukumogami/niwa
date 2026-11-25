@@ -2535,8 +2535,9 @@ niwa retire <instance>  ──> write mark ──> runPass(one) ───┘    
 Failed-dispatch cleanup, the watch's discard and the watch's failed-stage
 rollback call `removal.Evaluate` for their one instance before
 `destroyInstanceFunc`; the hook worktree sweep runs the configuration and
-identity checks on every repository under a worktree and keeps the worktree
-whenever the walk finds a nested repository, with no proof-remote check, since
+identity checks on every repository under a worktree, and a nested repository
+keeps the worktree first at the worktree status check and then, as the
+backstop when that check passes, at the removal walk, with no proof-remote check, since
 a worktree at the base commit has its refs and objects in the main clone, which
 stays. Both boxes write their record together with its
 entry in the unit's ledger outside the instance, and every git call under
