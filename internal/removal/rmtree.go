@@ -371,12 +371,8 @@ func removeWorktreeAt(rootFd int, root string, originals []string, wtRel, adminR
 		return err
 	}
 	defer unix.Close(afd)
-	var st unix.Stat_t
-	switch err := unix.Fstatat(afd, "locked", &st, unix.AT_SYMLINK_NOFOLLOW); {
-	case err == nil:
-		return &WalkStop{Path: adminRel + "/locked", Reason: "the worktree is locked: " + adminRel + "/locked"}
-	case !errors.Is(err, unix.ENOENT):
-		return changed(adminRel + "/locked")
+	if err := lockedAt(afd, adminRel); err != nil {
+		return err
 	}
 
 	// The work tree and its .git file, read through the shared reader: a
@@ -415,6 +411,12 @@ func removeWorktreeAt(rootFd int, root string, originals []string, wtRel, adminR
 	if !remove {
 		return nil
 	}
+	// The lock is read again before anything goes, and once more right
+	// before the admin directory goes, so a lock taken while the tree is
+	// read or removed keeps the admin directory.
+	if err := lockedAt(afd, adminRel); err != nil {
+		return err
+	}
 	w.remove = true
 	if err := w.walkDir(wfd, wtRel, true); err != nil {
 		return err
@@ -424,6 +426,9 @@ func removeWorktreeAt(rootFd int, root string, originals []string, wtRel, adminR
 	}
 	if err := unix.Unlinkat(wParent, wName, unix.AT_REMOVEDIR); err != nil {
 		return changed(wtRel)
+	}
+	if err := lockedAt(afd, adminRel); err != nil {
+		return err
 	}
 	if err := w.walkDir(afd, adminRel, false); err != nil {
 		return err
@@ -443,6 +448,20 @@ func removeWorktreeAt(rootFd int, root string, originals []string, wtRel, adminR
 				return changed(trees)
 			}
 		}
+	}
+	return nil
+}
+
+// lockedAt is the stop for a locked file in the admin directory open at
+// afd, adminRel naming it: a locked worktree is kept, and a read of the
+// entry that fails is a change.
+func lockedAt(afd int, adminRel string) error {
+	var st unix.Stat_t
+	switch err := unix.Fstatat(afd, "locked", &st, unix.AT_SYMLINK_NOFOLLOW); {
+	case err == nil:
+		return &WalkStop{Path: adminRel + "/locked", Reason: "the worktree is locked: " + adminRel + "/locked"}
+	case !errors.Is(err, unix.ENOENT):
+		return changed(adminRel + "/locked")
 	}
 	return nil
 }
