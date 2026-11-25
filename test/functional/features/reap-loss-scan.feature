@@ -749,10 +749,10 @@ Feature: niwa reap keeps a deleted session's instance that holds unpushed work
     And no output contains "ghp_"
     And no output contains "r8x2k7m4q9w3e6t1y5u0i2o8p4a6s3"
 
-  # The re-read before removal and the check on the tombstone. The on-reap
-  # command runs after the re-read and before the rename to the tombstone, so
-  # a command that writes into the unit stands in for a writer that arrives
-  # in between.
+  # The re-read before removal and the check on the tombstone. The test
+  # build's tombstone-lock hook stage runs its command after the re-read and
+  # before the rename to the tombstone, so a command that writes into the unit
+  # stands in for a writer that arrives in between.
 
   @critical
   Scenario: a file written into a repository after the re-read renames the tombstone back and keeps the unit
@@ -777,10 +777,8 @@ Feature: niwa reap keeps a deleted session's instance that holds unpushed work
     When I run "niwa dispatch late-writer --detach" from the workspace root
     Then the exit code is 0
     And a dispatch instance was created with a well-formed instance file
-    When the workspace configuration declares the on-reap command:
-      """
-      echo late > "$NIWA_INSTANCE_PATH/tools/myapp/late.txt"
-      """
+    Given I set env "NIWA_TEST_REMOVAL_PLANT_AT" to "tombstone-lock"
+    And I set env "NIWA_TEST_REMOVAL_PLANT_CMD" to "echo late > $NIWA_PLANT_INSTANCE_PATH/tools/myapp/late.txt"
     And the dispatch session "a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1" is deleted from the Agent View
     And I run niwa reap from the workspace root
     Then the exit code is 0
@@ -814,10 +812,8 @@ Feature: niwa reap keeps a deleted session's instance that holds unpushed work
     When I run "niwa dispatch late-committer --detach" from the workspace root
     Then the exit code is 0
     And a dispatch instance was created with a well-formed instance file
-    When the workspace configuration declares the on-reap command:
-      """
-      R="$NIWA_INSTANCE_PATH/tools/myapp" && B=$(printf 'late\n' | git -C "$R" hash-object -w --stdin) && T=$(printf '100644 blob %s\tlate.txt\n' "$B" | git -C "$R" mktree) && C=$(git -C "$R" -c user.name=t -c user.email=t@example.com commit-tree "$T" -p HEAD -m late) && git -C "$R" update-ref refs/heads/late "$C"
-      """
+    Given I set env "NIWA_TEST_REMOVAL_PLANT_AT" to "tombstone-lock"
+    And I set env "NIWA_TEST_REMOVAL_PLANT_CMD" to "R=$NIWA_PLANT_INSTANCE_PATH/tools/myapp && B=$(printf 'late\n' | git -C $R hash-object -w --stdin) && T=$(printf '100644 blob %s\tlate.txt\n' $B | git -C $R mktree) && C=$(git -C $R -c user.name=t -c user.email=t@example.com commit-tree $T -p HEAD -m late) && git -C $R update-ref refs/heads/late $C"
     And the dispatch session "a2a2a2a2-a2a2-4a2a-8a2a-a2a2a2a2a2a2" is deleted from the Agent View
     And I run niwa reap from the workspace root
     Then the exit code is 0
