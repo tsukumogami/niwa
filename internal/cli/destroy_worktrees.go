@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -93,12 +94,15 @@ func (d *destroyWorktrees) scan(ctx context.Context) ([]workspace.RepoScan, erro
 // worktree goes, with the path named. Then each is removed; a stop the walk
 // makes stops the destroy there. A worktree left to go with the instance
 // directory is skipped. Under --force nothing is read, and a worktree the
-// walk won't remove is left to go with the instance directory. No git call
-// removes or prunes a worktree here, and none runs between the removals.
-func (d *destroyWorktrees) remove(ctx context.Context) error {
+// walk won't remove is left to go with the instance directory, with a line
+// on out naming it and the walk's reason. No git call removes or prunes a
+// worktree here, and none runs between the removals.
+func (d *destroyWorktrees) remove(ctx context.Context, out io.Writer) error {
 	if d.force {
 		for _, w := range d.found {
-			_ = worktreeRemover.RemoveWorktree(d.instance, w.WorkTree, w.AdminDir)
+			if err := worktreeRemover.RemoveWorktree(d.instance, w.WorkTree, w.AdminDir); err != nil {
+				fmt.Fprintf(out, "worktree %s goes with the instance directory: %s\n", w.Rel, err)
+			}
 		}
 		return nil
 	}

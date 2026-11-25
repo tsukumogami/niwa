@@ -285,7 +285,7 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingP
 	// and a fresh status are read again before the first removal, then each
 	// goes through the no-follow walk with no git call in between. A worktree
 	// the walk won't remove goes with the instance directory.
-	if err := worktrees.remove(ctx); err != nil {
+	if err := worktrees.remove(ctx, cmd.ErrOrStderr()); err != nil {
 		return err
 	}
 
