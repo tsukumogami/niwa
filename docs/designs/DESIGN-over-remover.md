@@ -333,6 +333,22 @@ without a proof remote, though the outer repository loses nothing by the
 removal. Every nested repository already keeps by the walk, so the proof
 remote adds nothing there either.
 
+### 2026-11-25 — A forced destroy keeps a gone worktree's unheld branch
+
+**What changed.** The passage on `DestroySession`'s other callers now says
+that `destroyOneWorktree` keeps the discarding remover except on one path.
+When `niwa worktree destroy --force` meets an Active record whose worktree
+directory is gone, it judges the session branch against the proof remotes
+first, after the configuration and identity checks. An unheld branch or a
+failed read keeps the branch and the record Active, with the reason on
+stderr. A held branch goes on to removal with git's exit codes kept.
+
+**Why.** With the Ended write moved after the removal, a failed Ended write
+leaves an Active record with its worktree gone. A forced destroy of that
+record deleted a branch with unpushed commits with no warning, because force
+skips the only check that notices the missing directory. The forced path now
+proves the branch is held before it removes anything.
+
 ## Context and Problem Statement
 
 A unit of work in niwa is a session, the instance it runs in, its Claude Code
@@ -2693,7 +2709,14 @@ internal/cli/session_lifecycle_cmd.go:663) and `destroySessionWorktrees`
 (internal/cli/worktree_destroy_resolve.go:404), keep today's remover and
 invoker: they pass `StdGitInvoker` and a remover that runs today's
 `git worktree remove --force` through it with its result discarded, so what
-they do doesn't change. The flags and the check belong to the sweep's
+they do doesn't change; `destroyOneWorktree` keeps that discarding remover
+too, except on the gone-worktree forced path. There, `niwa worktree destroy
+--force` on an Active record whose worktree directory is gone runs the
+repository's configuration and identity checks first, then judges the
+session branch against the proof remotes. A branch that holds a commit no
+proof remote holds, or a failed read, keeps it: the record stays Active and
+the reason goes to stderr. Only a fully held branch goes on to the removal,
+where git's exit codes are kept. The flags and the check belong to the sweep's
 path alone. `worktreeHasUncommittedChanges` keeps building
 `status --porcelain` for every caller, and the sweep's `gitCommand`
 invoker, which receives that call's arguments, adds
