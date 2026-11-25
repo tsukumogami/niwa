@@ -21,6 +21,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/config"
 	"github.com/tsukumogami/niwa/internal/github"
 	"github.com/tsukumogami/niwa/internal/keyreport"
+	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/watch"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -302,8 +303,11 @@ func runWatchOnce(cmd *cobra.Command, _ []string) error {
 				continue
 			}
 			if err := stageReview(cmd, root, cwd, token, client, p.PR, plan); err != nil {
-				// Fail loud; the PR was not recorded handled (see stageReview), so a
-				// later run re-attempts it.
+				// Fail loud. A failed stage whose instance the removal rule
+				// passed was destroyed and left the PR unrecorded, so a later
+				// run re-attempts it; one whose instance the rule kept recorded
+				// the PR handled at this head (see stageReview), so a later run
+				// stages it again only once its head moves.
 				return fmt.Errorf("niwa watch: staging %s/%s#%d: %w", p.PR.Owner, p.PR.Repo, p.PR.Number, err)
 			}
 			staged++
@@ -654,7 +658,7 @@ func pruneStagedRecord(ctx context.Context, out io.Writer, root, h string, rec w
 	}
 
 	if !stagedInstanceLiveFunc(jobsDir, rec.InstancePath) {
-		if discardStagedRecord(out, root, h, rec, "session no longer live", gate) {
+		if discardStagedReview(out, root, h, rec, "session no longer live", gate, false) {
 			reapDiscardedReview(onReap, root, rec)
 		}
 		return
@@ -672,9 +676,12 @@ func pruneStagedRecord(ctx context.Context, out io.Writer, root, h string, rec w
 
 	// A stale review whose session is still live is discarded without the
 	// on-reap command: its session hasn't gone anywhere. So whether the gate
-	// kept it changes nothing here, and the result is not read.
+	// kept it changes nothing here, and the result is not read. The removal
+	// rule is told the session is live, so its first keeping check is
+	// liveness: the record goes and the instance stays until its session
+	// stops.
 	if ok, reason := evalRecordFreshness(ctx, client, requested, rec); !ok {
-		discardStagedRecord(out, root, h, rec, reason, gate)
+		discardStagedReview(out, root, h, rec, reason, gate, true)
 	}
 	// live + fresh: keep the record and its session untouched.
 }
@@ -707,15 +714,34 @@ func reapDiscardedReview(onReap *onReapStep, root string, rec watch.StagedRecord
 	onReap.run(removedSession{SessionID: rec.SessionID, ReapKey: key, InstancePath: rec.InstancePath})
 }
 
-// discardStagedRecord tears down one staged review: best-effort destroy the
-// instance (so a stale session does not linger) then delete the record. The reason
-// is printed so the operator sees which condition retired the review.
+// discardStagedRecord is discardStagedReview for a caller that hasn't read
+// the review session's liveness: it reads it with stagedInstanceLiveFunc.
+// pruneStagedRecord has read it already and calls discardStagedReview with
+// what it read, so a discard reads liveness once.
+func discardStagedRecord(out io.Writer, root, handle string, rec watch.StagedRecord, reason string, gate *removalGate) bool {
+	live := rec.InstancePath != "" && stagedInstanceLiveFunc(defaultJobsDir(), rec.InstancePath)
+	return discardStagedReview(out, root, handle, rec, reason, gate, live)
+}
+
+// discardStagedReview tears down one staged review: it destroys the
+// instance when the removal rule passes it (so a stale session does not
+// linger), then deletes the record. The reason is printed so the operator
+// sees which condition retired the review.
 //
 // The workspace's pre-removal command is asked first. When it keeps the
 // instance, nothing is torn down: the instance and its record stay as they
-// were, so the next pass asks again, and it returns false. It returns true once
-// the review is discarded.
-func discardStagedRecord(out io.Writer, root, handle string, rec watch.StagedRecord, reason string, gate *removalGate) bool {
+// were, so the next pass asks again, and it returns false.
+//
+// Then the removal rule is asked about the instance, told whether the review
+// session is live (live, from the caller). When the rule keeps it, its first
+// keeping check is printed, the instance stays where it is (a unit the normal
+// lifecycle reaps later), its Claude trust grants are withdrawn as a destroy
+// would have withdrawn them, the record is still deleted, and it returns
+// false, so the caller runs no on-reap command for a review whose instance is
+// still there. It returns true once the review is discarded and its instance
+// destroyed.
+func discardStagedReview(out io.Writer, root, handle string, rec watch.StagedRecord, reason string, gate *removalGate, live bool) bool {
+	kept := false
 	if rec.InstancePath != "" {
 		var ids []string
 		if workspace.ValidSessionID(rec.SessionID) {
@@ -724,16 +750,30 @@ func discardStagedRecord(out io.Writer, root, handle string, rec watch.StagedRec
 		if !gate.ask(rec.InstancePath, ids) {
 			return false
 		}
+		u := rollbackUnit{InstancePath: rec.InstancePath, Liveness: removal.LivenessGone}
+		if live {
+			u.Liveness = removal.LivenessLive
+		}
+		if len(ids) == 1 {
+			u.SessionID = ids[0]
+		}
+		kept = keptByRule(out, root, u)
 	}
-	fmt.Fprintf(out, "niwa watch: discarding staged review for %s/%s#%d (handle %s): %s\n",
-		rec.Owner, rec.Repo, rec.Number, handle, reason)
-	if rec.InstancePath != "" {
-		_ = destroyInstanceFunc(rec.InstancePath) // best-effort: a dead instance is already gone
+	if kept {
+		withdrawKeptReviewTrust(rec.InstancePath)
+		fmt.Fprintf(out, "niwa watch: discarding staged review for %s/%s#%d (handle %s): %s; the removal rule kept its instance\n",
+			rec.Owner, rec.Repo, rec.Number, handle, reason)
+	} else {
+		fmt.Fprintf(out, "niwa watch: discarding staged review for %s/%s#%d (handle %s): %s\n",
+			rec.Owner, rec.Repo, rec.Number, handle, reason)
+		if rec.InstancePath != "" {
+			_ = destroyInstanceFunc(rec.InstancePath) // best-effort: a dead instance is already gone
+		}
 	}
 	if err := watch.DeleteStagedRecord(root, handle); err != nil {
 		fmt.Fprintf(out, "niwa watch: warning: could not delete staged record %s: %v\n", handle, err)
 	}
-	return true
+	return !kept
 }
 
 // currentHeads fetches the current head SHA of every previously-handled, in-scope
@@ -769,8 +809,12 @@ func currentHeads(ctx context.Context, client *github.APIClient, prs []github.PR
 // runs under the developer's real environment and Claude daemon so the agent can
 // read the surrounding context; when plan.sandbox is true the OS no-egress
 // sandbox stanza is applied. In both cases the post-guard ask rule is applied and
-// the agent only drafts and waits -- it never posts. The handled-set and the
-// staged-review record are written ONLY on success.
+// the agent only drafts and waits -- it never posts. The staged-review record
+// is written only on success. The handled-set is written on success, and also
+// by a failed stage whose instance the removal rule keeps: that head is not
+// staged into a new instance beside the kept one, and the PR is staged again
+// once its head moves. A failed stage whose instance the rule passes is
+// destroyed and records nothing, so a later pass re-attempts it.
 func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.APIClient, pr github.PRRef, plan reviewPlan) error {
 	ctx := cmd.Context()
 
@@ -804,13 +848,33 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	}
 	instancePath := provRes.Path
 
-	// A failed stage destroys the instance, which also withdraws the Claude trust
-	// grant its state records.
+	// A failed stage's instance is destroyed only when the removal rule passes
+	// it; the destroy also withdraws the Claude trust grant its state records.
+	// The rule is told no session is live there: whatever the agent did, the
+	// stage failed and leaves no record to continue it, and the rule's process
+	// listing still keeps an instance a live process works in. When the rule
+	// keeps the instance (a pr-clone holding the PR's commit, say), it stays,
+	// its trust grants are withdrawn as the destroy would have withdrawn them,
+	// and the PR is recorded handled at this head, so no later pass stages the
+	// same head into a new instance beside it.
 	success := false
 	defer func() {
-		if !success {
-			_ = destroyInstanceFunc(instancePath)
+		if success {
+			return
 		}
+		stderr := cmd.ErrOrStderr()
+		if !keptByRule(stderr, root, rollbackUnit{InstancePath: instancePath, Liveness: removal.LivenessGone}) {
+			_ = destroyInstanceFunc(instancePath)
+			return
+		}
+		withdrawKeptReviewTrust(instancePath)
+		if err := watch.AppendHandled(root, pr.Owner, pr.Repo, pr.Number, head.SHA); err != nil {
+			fmt.Fprintf(stderr, "niwa watch: warning: kept the failed stage's instance for %s/%s#%d, but could not record its head %s as handled, so a later pass may stage it again: %v\n",
+				pr.Owner, pr.Repo, pr.Number, head.SHA, err)
+			return
+		}
+		fmt.Fprintf(stderr, "niwa watch: kept the failed stage's instance for %s/%s#%d; its PR head %s won't be staged again until it moves\n",
+			pr.Owner, pr.Repo, pr.Number, head.SHA)
 	}()
 
 	// Mark the instance as a review instance, and take back any Claude trust
@@ -875,7 +939,12 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 	// the short id against isSafeHandle.
 	sessionID, shortID := captureReviewSession(instancePath)
 
-	// Record ONLY on success, so a failed stage does not suppress a re-attempt.
+	// The staged record is saved only on success. A failed stage whose
+	// instance the removal rule passes records nothing, so a re-attempt isn't
+	// suppressed; one whose instance the rule keeps records its head as
+	// handled in the deferred rollback above. The save goes through
+	// saveStagedRecordFunc, the continuation's seam, so a test can fail the
+	// stage after the launch.
 	rec := watch.StagedRecord{
 		Handle:         slug,
 		Owner:          pr.Owner,
@@ -890,7 +959,7 @@ func stageReview(cmd *cobra.Command, root, cwd, token string, client *github.API
 		ReapKey:        reapKey,
 		SettingsDigest: settingsDigest,
 	}
-	if err := watch.SaveStagedRecord(root, rec); err != nil {
+	if err := saveStagedRecordFunc(root, rec); err != nil {
 		return err
 	}
 	if err := watch.AppendHandled(root, pr.Owner, pr.Repo, pr.Number, head.SHA); err != nil {

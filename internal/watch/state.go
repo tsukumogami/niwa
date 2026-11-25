@@ -128,9 +128,13 @@ func loadHandledState(workspaceRoot string) (map[string]string, TriggerSemantics
 	return m, sem, nil
 }
 
-// AppendHandled records a PR as handled at the given head SHA. It is called only
-// after a successful contained dispatch, so a transient poll/dispatch failure
-// never permanently suppresses a review. It is idempotent per identity: an entry
+// AppendHandled records a PR as handled at the given head SHA. It is called
+// after a successful contained dispatch, and by a failed stage whose instance
+// the removal rule kept, so that head isn't staged into a second instance
+// beside the kept one. A failed stage whose instance the rule passed doesn't
+// call it, so a transient poll/dispatch failure never permanently suppresses
+// a review, and a recorded head stops suppressing one once the PR's head
+// moves. It is idempotent per identity: an entry
 // already present has its recorded SHA moved forward to sha, and the file is
 // rewritten rather than accumulating a duplicate line; re-recording the same SHA
 // is a no-op. The declared trigger semantics and every other entry are preserved.

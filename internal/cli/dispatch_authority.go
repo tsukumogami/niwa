@@ -578,18 +578,19 @@ func grantAttribute(rec authority.Record) string {
 // resolved, so the same request is resolved again against the config now on
 // disk and the overlay the new instance was built from. A refusal, or a level
 // or grant different from what (2e) printed, refuses the dispatch (the
-// rollback armed at (7) removes the instance). Otherwise the record keeps
+// rollback armed at (7) removes the instance unless the removal rule keeps
+// it, and the refusal then says it was kept). Otherwise the record keeps
 // (2e)'s level, level source and grant, which the printed line described,
 // and takes this resolution's ceilings and their sources, so it never claims
 // a wider ceiling than the instance has.
 func recheckDispatchAuthority(auth *dispatchAuthority, workspaceRoot, wsConfigPath, instancePath string, gc *config.GlobalConfig) (authority.Record, error) {
 	loaded, err := config.Load(wsConfigPath)
 	if err != nil {
-		return authority.Record{}, refuse("re-reading %s after provisioning: %v; the instance was removed", wsConfigPath, err)
+		return authority.Record{}, refuse("re-reading %s after provisioning: %v; "+instanceRemovedClause, wsConfigPath, err)
 	}
 	overlay, err := provisionedAuthorityOverlay(auth, workspaceRoot, instancePath, loaded.Config, gc)
 	if err != nil {
-		return authority.Record{}, refuse("%v; the instance was removed", err)
+		return authority.Record{}, refuse("%v; "+instanceRemovedClause, err)
 	}
 	policy, _, err := config.AuthorityPolicy(loaded.Config, overlay, gc)
 	changed := changedAuthoritySettings(auth.policy, policy)
@@ -611,7 +612,7 @@ func recheckDispatchAuthority(auth *dispatchAuthority, workspaceRoot, wsConfigPa
 	}
 	// The same dispatcher as (2e), so provisioning can't widen the child.
 	if err := authority.CapByDispatcher(again, auth.cap); err != nil {
-		return authority.Record{}, refuse("%v; the instance was removed", err)
+		return authority.Record{}, refuse("%v; "+instanceRemovedClause, err)
 	}
 	final := first
 	final.LevelCeiling, final.LevelCeilingSource = again.LevelCeiling, again.LevelCeilingSource
@@ -659,7 +660,7 @@ func policyChangedRefusal(changed []string, detail string) error {
 	if len(changed) > 0 {
 		what = strings.Join(changed, ", ")
 	}
-	return refuse("the authority policy changed while the instance was provisioned (%s changed): %s; the instance was removed and nothing launched, so dispatch again to resolve against the new policy",
+	return refuse("the authority policy changed while the instance was provisioned (%s changed): %s; "+instanceRemovedClause+" and nothing launched, so dispatch again to resolve against the new policy",
 		what, detail)
 }
 

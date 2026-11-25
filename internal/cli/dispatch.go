@@ -305,7 +305,7 @@ var dispatchPromptCapture = promptcapture.Read
 // second. Stdout is left out on purpose so it stays redirectable.
 var dispatchInteractive = func() bool { return IsStdinTTY() && IsStderrTTY() }
 
-func runDispatch(cmd *cobra.Command, args []string) error {
+func runDispatch(cmd *cobra.Command, args []string) (retErr error) {
 	// Arity selects the path, so no invocation can request both a positional
 	// prompt and a capture. An explicit empty argument stays an error: it is
 	// usually an unset variable in a script, and turning it into a capture
@@ -663,7 +663,8 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// lineage entry and the authority copy all in place and prints the first
 	// keeping check with the path it names. Only a destroy that succeeded
 	// removes the entry and the copy, so neither outlives a kept instance's
-	// record of what it was granted.
+	// record of what it was granted. An error that says the instance was
+	// removed says it was kept instead when the rule keeps it.
 	success := false
 	entryCreated := false
 	defer func() {
@@ -675,6 +676,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			InstancePath: instancePath,
 			Liveness:     removal.LivenessGone,
 		}) {
+			retErr = withKeptInstance(retErr)
 			return
 		}
 		if err := destroyInstanceFunc(instancePath); err != nil {
@@ -1089,7 +1091,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		releaseInterrupt()
 	}
 	if dispatchInterrupted(prepCtx) {
-		return interruptedDispatchError(prepCtx, "before its worker was launched; the instance was removed")
+		return interruptedDispatchError(prepCtx, "before its worker was launched; "+instanceRemovedClause)
 	}
 
 	// (9c) Open the capture window: from here until the mapping is written, the

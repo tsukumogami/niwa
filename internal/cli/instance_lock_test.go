@@ -728,8 +728,8 @@ func TestPruneStagedRecords_InstanceLockHeld_KeepsRecord(t *testing.T) {
 	if handles, _ := watch.ListStagedHandles(root); len(handles) != 0 {
 		t.Errorf("records left after a free pass: %v", handles)
 	}
-	if len(*destroyed) != 2 {
-		t.Errorf("destroyed %v after a free pass, want both instances", *destroyed)
+	if len(*destroyed) != 1 || (*destroyed)[0] != recs[0].InstancePath {
+		t.Errorf("destroyed %v after a free pass, want only %s; the live stale review's instance is kept by liveness", *destroyed, recs[0].InstancePath)
 	}
 }
 

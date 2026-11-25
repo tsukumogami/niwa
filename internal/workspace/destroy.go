@@ -342,6 +342,23 @@ func withdrawClaudeTrust(instanceDir string, reporter *Reporter) {
 	resolveClaudeTrust(instanceDir).apply(reporter)
 }
 
+// WithdrawClaudeTrust withdraws the Claude Code trust grants instanceDir's
+// state records, as a destroy does right before it removes the directory,
+// and leaves the instance itself in place. It is for an instance the
+// removal rule keeps when its caller would have destroyed it, so a kept
+// instance doesn't stay trusted: the watch's discard and failed-stage
+// rollback of a review instance. The state keeps its records, so a later
+// destroy runs the same withdrawal again and finds nothing left to remove.
+// Only WithDestroyReporter among the options applies; warnings go to its
+// reporter, as a destroy's do.
+func WithdrawClaudeTrust(instanceDir string, opts ...DestroyOption) {
+	var o destroyOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	withdrawClaudeTrust(instanceDir, o.reporter)
+}
+
 // trustWithdrawal is withdrawClaudeTrust's work with every key resolved
 // while the instance is at its own path, so it can be applied after the
 // directory was renamed: a key is the path resolved, which needs the path

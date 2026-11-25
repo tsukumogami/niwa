@@ -7,8 +7,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/tsukumogami/niwa/internal/removal"
+	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
 // rollbackUnit is what a caller outside the pass tells the removal rule
@@ -109,4 +111,55 @@ func keptByRule(w io.Writer, workspaceRoot string, u rollbackUnit) bool {
 	first, _ := verdict.First()
 	reportKeptUnit(w, keptUnit{Name: name, Check: first})
 	return true
+}
+
+// withdrawKeptReviewTrust withdraws the Claude trust grants a review
+// instance's state records once the removal rule has kept the instance the
+// watch would have destroyed. The destroy would have withdrawn them; a kept
+// review instance holds the PR's content and must not stay trusted while it
+// waits for a later reap. The warnings pass removal.ScrubEvidence on their
+// way to stderr, as a destroy's do (realDestroyInstance).
+func withdrawKeptReviewTrust(instancePath string) {
+	w := newScrubLineWriter(os.Stderr, 400)
+	defer w.Flush()
+	workspace.WithdrawClaudeTrust(instancePath,
+		workspace.WithDestroyReporter(workspace.NewWarningReporter(w)))
+}
+
+// instanceRemovedClause ends the error of a dispatch that fails with its
+// rollback armed. The error is built before the rollback runs, so it says
+// what the rollback normally does; when the removal rule keeps the instance
+// instead, the rollback puts instanceKeptClause in its place
+// (keptInstanceError).
+const (
+	instanceRemovedClause = "the instance was removed"
+	instanceKeptClause    = "the instance was kept"
+)
+
+// keptInstanceError is a failed dispatch's error after its rollback kept
+// the instance: the text says the instance was kept where it said it was
+// removed. Only the last occurrence is replaced, the clause the dispatch
+// wrote; an embedded error's text before it is left as it was. It unwraps to
+// the original, so errors.Is and errors.As see through it.
+type keptInstanceError struct{ err error }
+
+func (e keptInstanceError) Error() string {
+	s := e.err.Error()
+	i := strings.LastIndex(s, instanceRemovedClause)
+	if i < 0 {
+		return s
+	}
+	return s[:i] + instanceKeptClause + s[i+len(instanceRemovedClause):]
+}
+
+func (e keptInstanceError) Unwrap() error { return e.err }
+
+// withKeptInstance is err as the rollback that kept the instance leaves it:
+// an error that says the instance was removed now says it was kept, and any
+// other error is returned as it is.
+func withKeptInstance(err error) error {
+	if err == nil || !strings.Contains(err.Error(), instanceRemovedClause) {
+		return err
+	}
+	return keptInstanceError{err}
 }
