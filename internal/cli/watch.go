@@ -658,7 +658,7 @@ func pruneStagedRecord(ctx context.Context, out io.Writer, root, h string, rec w
 	}
 
 	if !stagedInstanceLiveFunc(jobsDir, rec.InstancePath) {
-		if discardStagedReview(out, root, h, rec, "session no longer live", gate, false) {
+		if discardStagedRecord(out, root, h, rec, "session no longer live", gate, false) {
 			reapDiscardedReview(onReap, root, rec)
 		}
 		return
@@ -681,7 +681,7 @@ func pruneStagedRecord(ctx context.Context, out io.Writer, root, h string, rec w
 	// liveness: the record goes and the instance stays until its session
 	// stops.
 	if ok, reason := evalRecordFreshness(ctx, client, requested, rec); !ok {
-		discardStagedReview(out, root, h, rec, reason, gate, true)
+		discardStagedRecord(out, root, h, rec, reason, gate, true)
 	}
 	// live + fresh: keep the record and its session untouched.
 }
@@ -714,16 +714,7 @@ func reapDiscardedReview(onReap *onReapStep, root string, rec watch.StagedRecord
 	onReap.run(removedSession{SessionID: rec.SessionID, ReapKey: key, InstancePath: rec.InstancePath})
 }
 
-// discardStagedRecord is discardStagedReview for a caller that hasn't read
-// the review session's liveness: it reads it with stagedInstanceLiveFunc.
-// pruneStagedRecord has read it already and calls discardStagedReview with
-// what it read, so a discard reads liveness once.
-func discardStagedRecord(out io.Writer, root, handle string, rec watch.StagedRecord, reason string, gate *removalGate) bool {
-	live := rec.InstancePath != "" && stagedInstanceLiveFunc(defaultJobsDir(), rec.InstancePath)
-	return discardStagedReview(out, root, handle, rec, reason, gate, live)
-}
-
-// discardStagedReview tears down one staged review: it destroys the
+// discardStagedRecord tears down one staged review: it destroys the
 // instance when the removal rule passes it (so a stale session does not
 // linger), then deletes the record. The reason is printed so the operator
 // sees which condition retired the review.
@@ -733,14 +724,23 @@ func discardStagedRecord(out io.Writer, root, handle string, rec watch.StagedRec
 // were, so the next pass asks again, and it returns false.
 //
 // Then the removal rule is asked about the instance, told whether the review
-// session is live (live, from the caller). When the rule keeps it, its first
+// session is live. live is that reading when the caller has made it:
+// pruneStagedRecord has read it with stagedInstanceLiveFunc already and passes
+// it, so a discard reads liveness once. A caller that passes nothing has it
+// read here, before anything else. When the rule keeps it, its first
 // keeping check is printed, the instance stays where it is (a unit the normal
 // lifecycle reaps later), its Claude trust grants are withdrawn as a destroy
 // would have withdrawn them, the record is still deleted, and it returns
 // false, so the caller runs no on-reap command for a review whose instance is
 // still there. It returns true once the review is discarded and its instance
 // destroyed.
-func discardStagedReview(out io.Writer, root, handle string, rec watch.StagedRecord, reason string, gate *removalGate, live bool) bool {
+func discardStagedRecord(out io.Writer, root, handle string, rec watch.StagedRecord, reason string, gate *removalGate, live ...bool) bool {
+	var isLive bool
+	if len(live) > 0 {
+		isLive = live[0]
+	} else {
+		isLive = rec.InstancePath != "" && stagedInstanceLiveFunc(defaultJobsDir(), rec.InstancePath)
+	}
 	kept := false
 	if rec.InstancePath != "" {
 		var ids []string
@@ -751,7 +751,7 @@ func discardStagedReview(out io.Writer, root, handle string, rec watch.StagedRec
 			return false
 		}
 		u := rollbackUnit{InstancePath: rec.InstancePath, Liveness: removal.LivenessGone}
-		if live {
+		if isLive {
 			u.Liveness = removal.LivenessLive
 		}
 		if len(ids) == 1 {
