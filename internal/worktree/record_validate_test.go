@@ -199,7 +199,7 @@ func TestDestroySession_RefusesCraftedRecord(t *testing.T) {
 		outside := t.TempDir()
 		root, sid := seed(t, outside, "session/abcd1234")
 		inv := &recordingInvoker{}
-		state, err := DestroySession(context.Background(), root, sid, true /* force */, inv)
+		state, err := DestroySession(context.Background(), root, sid, true /* force */, inv, DiscardingGitWorktreeRemover{Git: inv})
 		if err == nil {
 			t.Fatal("crafted worktree_path was accepted")
 		}
@@ -226,7 +226,7 @@ func TestDestroySession_RefusesCraftedRecord(t *testing.T) {
 			t.Fatalf("WriteSessionLifecycleState: %v", err)
 		}
 		inv := &recordingInvoker{}
-		if _, err := DestroySession(context.Background(), root, "abcd1234", true /* force */, inv); err == nil {
+		if _, err := DestroySession(context.Background(), root, "abcd1234", true /* force */, inv, DiscardingGitWorktreeRemover{Git: inv}); err == nil {
 			t.Fatal("crafted branch_name was accepted")
 		}
 		if len(inv.calls) != 0 {
@@ -248,7 +248,7 @@ func TestDestroySession_RefusesCraftedRecord(t *testing.T) {
 			t.Fatalf("WriteSessionLifecycleState: %v", err)
 		}
 		inv := &recordingInvoker{}
-		gotState, err := DestroySession(context.Background(), root, "abcd1234", false /* force */, inv)
+		gotState, err := DestroySession(context.Background(), root, "abcd1234", false /* force */, inv, DiscardingGitWorktreeRemover{Git: inv})
 		if err == nil {
 			t.Fatal("a missing worktree directory was reported clean and destroyed")
 		}
@@ -271,7 +271,7 @@ func TestDestroySession_BranchArgvUsesEndOfOptions(t *testing.T) {
 	sid := seedActiveSession(t, root, "myrepo", worktreePath)
 
 	inv := &recordingInvoker{}
-	if _, err := DestroySession(context.Background(), root, sid, true /* force */, inv); err != nil {
+	if _, err := DestroySession(context.Background(), root, sid, true /* force */, inv, DiscardingGitWorktreeRemover{Git: inv}); err != nil {
 		t.Fatalf("DestroySession: %v", err)
 	}
 

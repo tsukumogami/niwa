@@ -660,7 +660,8 @@ func runSessionDestroy(cmd *cobra.Command, args []string) error {
 // because only there does a caller need to know which worktrees of which
 // instance were removed.
 func destroyOneWorktree(cmd *cobra.Command, instanceRoot, sessionID string) error {
-	state, err := worktree.DestroySession(context.Background(), instanceRoot, sessionID, sessionDestroyForce, worktree.StdGitInvoker{})
+	state, err := worktree.DestroySession(context.Background(), instanceRoot, sessionID, sessionDestroyForce, worktree.StdGitInvoker{},
+		worktree.DiscardingGitWorktreeRemover{Ctx: context.Background(), Git: worktree.StdGitInvoker{}})
 	if err != nil {
 		// A live attach holds the worktree and --force was not passed: surface
 		// the guard message verbatim (it carries the holder PID and recovery

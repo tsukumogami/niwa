@@ -401,7 +401,8 @@ func destroySessionWorktrees(cmd *cobra.Command, instanceDir string, m workspace
 		if info, statErr := os.Lstat(instanceDir); statErr != nil || !info.IsDir() {
 			return fmt.Errorf("niwa: error: instance %s disappeared during teardown", instanceDir)
 		}
-		state, destroyErr := worktree.DestroySession(cmd.Context(), instanceDir, st.SessionID, false, git)
+		state, destroyErr := worktree.DestroySession(cmd.Context(), instanceDir, st.SessionID, false, git,
+			worktree.DiscardingGitWorktreeRemover{Ctx: cmd.Context(), Git: git})
 		if destroyErr != nil {
 			refused++
 			fmt.Fprintf(cmd.ErrOrStderr(), "niwa: error: %s\n", stripControlChars(destroyErr.Error()))
