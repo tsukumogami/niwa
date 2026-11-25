@@ -556,6 +556,12 @@ func DestroySession(ctx context.Context, instanceRoot, sessionID string, force b
 		return state, fmt.Errorf("writing session state: %w", err)
 	}
 
+	// A remover that judged the branch positively absent asks for no branch
+	// delete: there is nothing to delete.
+	if skip, ok := remover.(interface{ skipsBranchDelete() bool }); ok && skip.skipsBranchDelete() {
+		haveRepo = false
+	}
+
 	if haveRepo {
 		// Delete the session branch. With force=false, use git branch -d which
 		// only succeeds when the branch is already merged; unmerged branches are
@@ -673,20 +679,36 @@ func (r DiscardingGitWorktreeRemover) RemoveWorktree(instance, workTree, adminDi
 
 // GoneWorktreeRemover is the WorktreeRemover for a forced destroy of a
 // session whose worktree directory is already gone, once the caller has
-// judged the session branch held. It keeps git's exit code: a work tree
+// judged the session branch held, or the branch or the repository
+// positively absent. It keeps git's exit code: a work tree
 // that is there again stops the removal, an admin directory that is already
 // gone too leaves nothing for git worktree remove to clear and is skipped,
 // and otherwise `git -C <repo> worktree remove --force <workTree>` runs
 // through Git, with Ctx, and a failure stops the removal with git's last
 // line.
+//
+// BranchAbsent is set when git positively answered that the session branch
+// doesn't exist: DestroySession then runs no branch delete. RepoAbsent is set
+// when the session's repository was positively absent from the instance:
+// DestroySession then finds none and never calls the remover, so a call
+// means a repository is there now, and the removal stops before anything is
+// removed or deleted.
 type GoneWorktreeRemover struct {
-	Ctx context.Context
-	Git GitInvoker
+	Ctx          context.Context
+	Git          GitInvoker
+	BranchAbsent bool
+	RepoAbsent   bool
 }
+
+// skipsBranchDelete tells DestroySession to run no branch delete.
+func (r GoneWorktreeRemover) skipsBranchDelete() bool { return r.BranchAbsent || r.RepoAbsent }
 
 // RemoveWorktree clears the gone worktree's admin directory through git, or
 // does nothing when that directory is gone too.
 func (r GoneWorktreeRemover) RemoveWorktree(instance, workTree, adminDir string) error {
+	if r.RepoAbsent {
+		return fmt.Errorf("the session's repository was absent from %s when it was checked, and one is there now", instance)
+	}
 	if r.Git == nil {
 		return errors.New("git invoker not configured")
 	}

@@ -662,17 +662,22 @@ func runSessionDestroy(cmd *cobra.Command, args []string) error {
 // It passes the discarding remover, as before, except on a forced destroy of
 // an Active session whose worktree directory is already gone. There
 // judgeGoneWorktree first judges the session branch against the proof
-// remotes and keeps it, with the record Active, unless it is fully held;
-// a held branch goes on with GoneWorktreeRemover, which keeps git's exit
-// code, and a failing branch -D on that path is reported and returned.
+// remotes and keeps it, with the record Active, unless it is fully held,
+// git positively answers that it doesn't exist, or the session's repository
+// is positively absent from the instance. Those go on with
+// GoneWorktreeRemover, which keeps git's exit code and, for the two
+// absences, has DestroySession run no branch delete; a failing branch -D on
+// that path is reported and returned.
 func destroyOneWorktree(cmd *cobra.Command, instanceRoot, sessionID string) error {
-	gone, err := judgeGoneWorktree(cmd, instanceRoot, sessionID)
+	judged, err := judgeGoneWorktree(cmd, instanceRoot, sessionID)
 	if err != nil {
 		return err
 	}
+	gone := judged.gone
 	var remover worktree.WorktreeRemover = worktree.DiscardingGitWorktreeRemover{Ctx: context.Background(), Git: worktree.StdGitInvoker{}}
 	if gone {
-		remover = worktree.GoneWorktreeRemover{Ctx: context.Background(), Git: worktree.StdGitInvoker{}}
+		remover = worktree.GoneWorktreeRemover{Ctx: context.Background(), Git: worktree.StdGitInvoker{},
+			BranchAbsent: judged.branchAbsent, RepoAbsent: judged.repoAbsent}
 	}
 	state, err := worktree.DestroySession(context.Background(), instanceRoot, sessionID, sessionDestroyForce, worktree.StdGitInvoker{}, remover)
 	if err != nil {

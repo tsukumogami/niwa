@@ -111,12 +111,21 @@ func sweepHookWorktreesIn(workspaceRoot string, instances []string, jobsDir stri
 			}
 			unchanged, why, err := worktree.WorktreeUnchanged(ctx, st, swept)
 			if err != nil || !unchanged {
-				// Say why the worktree stays, so a keep is never silent. The
-				// reason is WorktreeUnchanged's own; it can quote the worktree
-				// path, so it passes the scrub like the other keep lines.
-				if err == nil && why != "" {
+				// Say why the worktree stays, so a keep is never silent: a
+				// check that failed, the reason WorktreeUnchanged gave, or that
+				// it gave none. The error and the reason can quote the worktree
+				// path, so they pass the scrub like the other keep lines. This
+				// only reports; the worktree is kept in every case.
+				switch {
+				case err != nil:
+					fmt.Fprintf(stderr, "niwa: kept worktree %s: check failed: %s\n",
+						removal.ScrubEvidence(st.WorktreePath, 400), removal.ScrubEvidence(err.Error(), 400))
+				case why != "":
 					fmt.Fprintf(stderr, "niwa: kept worktree %s: %s\n",
 						removal.ScrubEvidence(st.WorktreePath, 400), removal.ScrubEvidence(why, 400))
+				default:
+					fmt.Fprintf(stderr, "niwa: kept worktree %s: no reason given\n",
+						removal.ScrubEvidence(st.WorktreePath, 400))
 				}
 				continue
 			}

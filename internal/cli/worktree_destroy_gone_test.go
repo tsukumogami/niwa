@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -280,5 +281,240 @@ func TestWorktreeDestroyGone_APresentWorktreeKeepsTheForcedPathAsBefore(t *testi
 	}
 	if strings.Contains(errb.String(), "already gone") {
 		t.Errorf("stderr calls a present worktree gone:\n%s", errb.String())
+	}
+}
+
+// goneGitAtLeast reports whether the git on PATH is major.minor or later.
+func goneGitAtLeast(t *testing.T, major, minor int) bool {
+	t.Helper()
+	out, err := exec.Command(realGit(t), "version").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var maj, min int
+	fields := strings.Fields(string(out))
+	if len(fields) < 3 {
+		t.Fatalf("git version printed %q", out)
+	}
+	if _, err := fmt.Sscanf(fields[2], "%d.%d", &maj, &min); err != nil {
+		t.Fatalf("git version printed %q: %v", out, err)
+	}
+	return maj > major || (maj == major && min >= minor)
+}
+
+// goneUnreadable sets dir's mode and restores it in Cleanup. A test that
+// runs as root reads through any mode, so it skips there.
+func goneUnreadable(t *testing.T, dir string, mode os.FileMode) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a directory whatever its mode")
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, mode); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, info.Mode().Perm()) })
+}
+
+// A branch git positively answers is absent goes on with no branch delete:
+// the record ends, the command exits 0 and says the branch was already
+// absent. Only git 2.43's show-ref --exists tells a missing branch from one
+// it can't read; with an older git the destroy keeps, record Active, since
+// the absence can't be shown.
+func TestWorktreeDestroyGone_APositivelyAbsentBranchGoesOnWithNoBranchDelete(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		removeAdmin bool
+	}{
+		{"admin dir still present", false},
+		{"admin dir gone too", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, st := newGoneHeldFixture(t, "gone-absent")
+			branch := st.EffectiveBranchName()
+			gitIn(t, f.repoPath, "update-ref", "-d", "refs/heads/"+branch)
+
+			log := goneLoggingGit(t)
+			stdout, stderr, err := goneForcedDestroy(t, f, st, tc.removeAdmin)
+
+			lines := goneLogLines(t, log)
+			if goneLogHas(lines, " branch -D ") || goneLogHas(lines, " branch -d ") {
+				t.Errorf("a branch delete ran for an absent branch:\n%s", strings.Join(lines, "\n"))
+			}
+			if listed := gitIn(t, f.repoPath, "branch", "--list", branch); listed != "" {
+				t.Errorf("branch %s is there after the destroy: %q", branch, listed)
+			}
+			if !goneGitAtLeast(t, 2, 43) {
+				if code := goneExitCode(err); code != 1 {
+					t.Errorf("destroyOneWorktree --force = %v; want exit 1 where git can't show the branch is absent", err)
+				}
+				if status := goneRecordStatus(t, f, st); status != worktree.SessionStatusActive {
+					t.Errorf("record is %q, want active where git can't show the branch is absent", status)
+				}
+				if !strings.Contains(stderr, "keeping branch "+branch) {
+					t.Errorf("stderr doesn't name the kept branch:\n%s", stderr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("destroyOneWorktree --force = %v; want exit 0 for an absent branch\nstderr:\n%s", err, stderr)
+			}
+			if status := goneRecordStatus(t, f, st); status != worktree.SessionStatusEnded {
+				t.Errorf("record after the destroy is %q, want ended", status)
+			}
+			if !strings.Contains(stderr, "branch already absent: "+branch) {
+				t.Errorf("stderr doesn't say branch %s was already absent:\n%s", branch, stderr)
+			}
+			if !goneSaysAlreadyGone(stderr, f.root, st) {
+				t.Errorf("stderr doesn't say the worktree was already gone:\n%s", stderr)
+			}
+			if !strings.Contains(stdout, "session: destroyed "+st.SessionID) {
+				t.Errorf("stdout = %q; want the destroyed line", stdout)
+			}
+		})
+	}
+}
+
+// A branch the listing can't see because its refs directory can't be read
+// is no absence: the destroy keeps, the record stays Active, and the branch
+// is still there once the directory is readable again. The branch is pushed,
+// so only the failed read keeps it.
+func TestWorktreeDestroyGone_AnUnreadableBranchDirectoryKeeps(t *testing.T) {
+	f, st := newGoneHeldFixture(t, "gone-unreadable")
+	branch := st.EffectiveBranchName()
+	gitIn(t, st.WorktreePath, "commit", "-q", "--allow-empty", "-m", "pushed work")
+	commit := gitIn(t, st.WorktreePath, "rev-parse", "HEAD")
+	gitIn(t, st.WorktreePath, "push", "-q", "origin", branch)
+	refDir := filepath.Dir(filepath.Join(f.repoPath, ".git", "refs", "heads", filepath.FromSlash(branch)))
+	if _, err := os.Stat(filepath.Join(f.repoPath, ".git", "refs", "heads", filepath.FromSlash(branch))); err != nil {
+		t.Fatalf("branch %s isn't a loose ref: %v", branch, err)
+	}
+
+	log := goneLoggingGit(t)
+	goneUnreadable(t, refDir, 0)
+	_, stderr, err := goneForcedDestroy(t, f, st, true)
+	if cerr := os.Chmod(refDir, 0o755); cerr != nil {
+		t.Fatal(cerr)
+	}
+
+	if code := goneExitCode(err); code != 1 {
+		t.Errorf("destroyOneWorktree --force = %v; want exit 1 when the branch can't be read", err)
+	}
+	if status := goneRecordStatus(t, f, st); status != worktree.SessionStatusActive {
+		t.Errorf("record after the keep is %q, want active", status)
+	}
+	if tip := gitIn(t, f.repoPath, "rev-parse", "refs/heads/"+branch); tip != commit {
+		t.Errorf("branch %s points at %s after the keep, want %s", branch, tip, commit)
+	}
+	if !strings.Contains(stderr, "keeping branch "+branch) {
+		t.Errorf("stderr doesn't name the kept branch:\n%s", stderr)
+	}
+	lines := goneLogLines(t, log)
+	if goneLogHas(lines, " branch -D ") || goneLogHas(lines, " branch -d ") {
+		t.Errorf("a branch delete ran after an unreadable read:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// A session whose repository is positively absent from the instance goes
+// on: nothing is deleted, the record ends and no branch call runs. The
+// repository was moved out; its branch is still there.
+func TestWorktreeDestroyGone_ARepositoryPositivelyAbsentGoesOn(t *testing.T) {
+	f := newCreateFlowFixture(t)
+	goneIsolatedHome(t)
+	resetSessionCreateFlags(t)
+	t.Cleanup(func() { resetSessionCreateFlags(t) })
+	st := createViaHook(t, f, "gone-norepo")
+	branch := st.EffectiveBranchName()
+	gitIn(t, st.WorktreePath, "commit", "-q", "--allow-empty", "-m", "unpushed work")
+	commit := gitIn(t, st.WorktreePath, "rev-parse", "HEAD")
+
+	if err := os.RemoveAll(st.WorktreePath); err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(canonicalTempDir(t), "moved")
+	if err := os.Rename(f.repoPath, moved); err != nil {
+		t.Fatal(err)
+	}
+	log := goneLoggingGit(t)
+	sessionDestroyForce = true
+	cmd, out, errb := newCallerCmd()
+	err := destroyOneWorktree(cmd, f.root, st.SessionID)
+	sessionDestroyForce = false
+
+	if err != nil {
+		t.Fatalf("destroyOneWorktree --force = %v; want exit 0 with the repository absent\nstderr:\n%s", err, errb.String())
+	}
+	if status := goneRecordStatus(t, f, st); status != worktree.SessionStatusEnded {
+		t.Errorf("record is %q, want ended", status)
+	}
+	if !strings.Contains(errb.String(), "its repository isn't in the instance") {
+		t.Errorf("stderr doesn't say the repository is absent:\n%s", errb.String())
+	}
+	if !strings.Contains(out.String(), "session: destroyed "+st.SessionID) {
+		t.Errorf("stdout = %q; want the destroyed line", out.String())
+	}
+	if tip := gitIn(t, moved, "rev-parse", "refs/heads/"+branch); tip != commit {
+		t.Errorf("the moved repository's branch %s points at %s, want %s", branch, tip, commit)
+	}
+	if lines := goneLogLines(t, log); goneLogHas(lines, " branch ") || goneLogHas(lines, "worktree remove") {
+		t.Errorf("git ran on an absent repository:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// A repository the destroy can't positively show is absent keeps: an
+// instance root it can't list, or a group directory it can't search. The
+// record stays Active and the branch is still there.
+func TestWorktreeDestroyGone_AnUnreadableInstanceKeepsTheRepository(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		dir  func(f *createFlowFixture) string
+		mode os.FileMode
+	}{
+		{"instance root can't be listed", func(f *createFlowFixture) string { return f.root }, 0o300},
+		{"group directory can't be searched", func(f *createFlowFixture) string { return filepath.Dir(f.repoPath) }, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCreateFlowFixture(t)
+			goneIsolatedHome(t)
+			resetSessionCreateFlags(t)
+			t.Cleanup(func() { resetSessionCreateFlags(t) })
+			st := createViaHook(t, f, "gone-hidden")
+			branch := st.EffectiveBranchName()
+			gitIn(t, st.WorktreePath, "commit", "-q", "--allow-empty", "-m", "unpushed work")
+			commit := gitIn(t, st.WorktreePath, "rev-parse", "HEAD")
+			if err := os.RemoveAll(st.WorktreePath); err != nil {
+				t.Fatal(err)
+			}
+
+			log := goneLoggingGit(t)
+			dir := tc.dir(f)
+			goneUnreadable(t, dir, tc.mode)
+			sessionDestroyForce = true
+			cmd, _, errb := newCallerCmd()
+			err := destroyOneWorktree(cmd, f.root, st.SessionID)
+			sessionDestroyForce = false
+			if cerr := os.Chmod(dir, 0o755); cerr != nil {
+				t.Fatal(cerr)
+			}
+
+			if code := goneExitCode(err); code != 1 {
+				t.Errorf("destroyOneWorktree --force = %v; want exit 1 when the repository can't be shown absent", err)
+			}
+			if status := goneRecordStatus(t, f, st); status != worktree.SessionStatusActive {
+				t.Errorf("record is %q, want active", status)
+			}
+			if !strings.Contains(errb.String(), "keeping branch "+branch) {
+				t.Errorf("stderr doesn't name the kept branch:\n%s", errb.String())
+			}
+			if tip := gitIn(t, f.repoPath, "rev-parse", "refs/heads/"+branch); tip != commit {
+				t.Errorf("branch %s points at %s, want %s", branch, tip, commit)
+			}
+			if lines := goneLogLines(t, log); goneLogHas(lines, " branch -D ") || goneLogHas(lines, "worktree remove") {
+				t.Errorf("git removed something after the keep:\n%s", strings.Join(lines, "\n"))
+			}
+		})
 	}
 }
