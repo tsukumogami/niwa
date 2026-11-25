@@ -261,7 +261,7 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingP
 				return fmt.Errorf("instance has unpushed work and stdin is not a terminal; aborting (resolve unpushed work, or use --force to destroy without confirmation)")
 			}
 
-			matched, err := ReadConfirmation("> ", scan.InstanceName, os.Stdin, cmd.ErrOrStderr())
+			matched, err := ReadConfirmation("> ", scan.InstanceName, cmd.InOrStdin(), cmd.ErrOrStderr())
 			if err != nil {
 				return fmt.Errorf("confirmation aborted: %w", err)
 			}
