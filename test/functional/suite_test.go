@@ -369,6 +369,13 @@ func initializeScenario(ctx *godog.ScenarioContext, binPath string) {
 		if scenarioErr != nil && os.Getenv("NIWA_TEST_KEEP_SANDBOX") != "" {
 			fmt.Fprintf(os.Stderr, "scenario %q failed; its sandbox is at %s\n", sc.Name, s.sandbox)
 		}
+		// A failed assertion names what it expected, not why niwa did what
+		// it did, and niwa's own output lives only in the scenario's state.
+		// Print the last command's result so a CI log carries it.
+		if scenarioErr != nil {
+			fmt.Fprintf(os.Stderr, "scenario %q failed; its last command exited %d\n--- stdout ---\n%s\n--- stderr ---\n%s\n--- end ---\n",
+				sc.Name, s.exitCode, s.stdout, s.stderr)
+		}
 		if s.githubFake != nil {
 			s.githubFake.Close()
 			s.githubFake = nil
