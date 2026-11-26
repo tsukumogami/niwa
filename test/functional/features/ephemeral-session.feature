@@ -76,6 +76,7 @@ Feature: Ephemeral per-session instances: provision, keep-while-resumable, and d
     Then the exit code is 0
     And the instance "myws-bbbbbbbb-bbb" exists
     When the session "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" is deleted from the Agent View
+    And a fake claude for dispatch with session "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
     And I run niwa reap from the workspace root
     Then the exit code is 0
     And the instance "myws-bbbbbbbb-bbb" does not exist
