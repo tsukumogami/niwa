@@ -60,6 +60,39 @@ func TryFileLock(path, holder string) (func(), error) {
 	return holdLock(f, path, holder)
 }
 
+// TryFileLockShared takes a shared advisory lock on path without waiting.
+// Any number of shared holders can hold it at once; an exclusive holder
+// (TryFileLock) can't take it while one does, and none of them can take it
+// while an exclusive holder has it. A refused take returns at once with an
+// error wrapping ErrLockHeld that names the exclusive holder.
+//
+// The directory and the file get the same checks as TryFileLock, through the
+// same openLockFile: a real 0700 directory of the user's, and a regular
+// file of the user's opened without following a link, created 0600. A
+// shared holder writes no holder line and its release doesn't empty the
+// file, so one shared holder never rewrites what another, or the exclusive
+// holder before them, left there.
+func TryFileLockShared(path string) (func(), error) {
+	f, err := openLock(path)
+	if err != nil {
+		return nil, err
+	}
+	if lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); lockErr != nil {
+		defer f.Close()
+		if errors.Is(lockErr, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("%w by %s", ErrLockHeld, readLockHolder(f))
+		}
+		return nil, fmt.Errorf("locking %s: %w", path, lockErr)
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			_ = f.Close()
+		})
+	}, nil
+}
+
 // WaitFileLock takes the same lock as TryFileLock, with the same checks on the
 // directory and the file, but waits for it: it polls until the lock is free,
 // ctx is done or timeout passes. On timeout it returns an error wrapping

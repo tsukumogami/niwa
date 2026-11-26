@@ -415,6 +415,11 @@ func DiscoverInstance(startPath string) (string, error) {
 // .niwa/instance.json markers and returns the directories that contain them.
 // Entries with names containing ASCII controls or Unicode Cf/Zl/Zp codepoints
 // are filtered out; see ValidName for the full rationale.
+//
+// .niwa and every name starting with ".niwa-" are niwa's own and never an
+// instance. A tombstone (.niwa-tombstone-<instance>-<hex>) still holds
+// .niwa/instance.json, and without the skip it would be listed, and judged
+// or acted on, as an instance.
 func EnumerateInstances(workspaceRoot string) ([]string, error) {
 	entries, err := os.ReadDir(workspaceRoot)
 	if err != nil {
@@ -424,6 +429,9 @@ func EnumerateInstances(workspaceRoot string) ([]string, error) {
 	var instances []string
 	for _, entry := range entries {
 		if !entry.IsDir() {
+			continue
+		}
+		if name := entry.Name(); name == StateDir || strings.HasPrefix(name, StateDir+"-") {
 			continue
 		}
 		if !ValidName(entry.Name()) {
@@ -783,7 +791,20 @@ func HashFile(path string) (string, error) {
 		return "", fmt.Errorf("hashing file: %w", err)
 	}
 
-	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
+	return contentHash(h.Sum(nil)), nil
+}
+
+// HashBytes is HashFile's hash of b, for a caller that holds the exact bytes
+// it wrote: the SHA-256 of b with the same "sha256:" prefix, so it compares
+// equal to HashFile of a file holding those bytes.
+func HashBytes(b []byte) string {
+	sum := sha256.Sum256(b)
+	return contentHash(sum[:])
+}
+
+// contentHash formats a SHA-256 digest as a managed file's recorded hash.
+func contentHash(sum []byte) string {
+	return "sha256:" + hex.EncodeToString(sum)
 }
 
 // CheckDrift compares the current hash of a managed file against its recorded

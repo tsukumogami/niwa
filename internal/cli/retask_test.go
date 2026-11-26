@@ -92,6 +92,20 @@ func newRetaskFixture(t *testing.T, mod func(*retaskFixture, *retaskSetup)) *ret
 		k, v, _ := strings.Cut(kv, "=")
 		t.Setenv(k, v)
 	}
+	// The resume fixture sets CLAUDE_CONFIG_DIR, so the job entries belong
+	// at $CLAUDE_CONFIG_DIR/jobs, where Claude Code puts them and the
+	// job-directory vet looks. The stub writes under $HOME/.claude/jobs, so
+	// that path is a link to them.
+	cfgJobs := filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "jobs")
+	if err := os.MkdirAll(cfgJobs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(f.home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(cfgJobs, filepath.Join(f.home, ".claude", "jobs")); err != nil {
+		t.Fatal(err)
+	}
 	shortenRetaskBounds(t, 5*time.Second, 5*time.Second)
 
 	rec := f.record()

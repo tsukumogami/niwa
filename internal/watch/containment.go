@@ -14,6 +14,9 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
+
+	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
 // Matcher strings for the PreToolUse hooks. A review hook's identity is its
@@ -434,11 +437,22 @@ func postGuardHook() map[string]any {
 //
 // The re-verification is the per-instance check that runs before launch; a dropped or
 // relaxed stanza or hook means the PR must not be launched.
+//
+// Right after the write, the file is recorded in the instance's state as a managed
+// file with the hash of the bytes written, when what it merged from was niwa's own
+// (see recordReviewSettings), so the removal rule doesn't keep the instance on a
+// file only niwa has written.
 func ApplyReviewSettings(instancePath string, sandbox, ask bool) error {
 	claudeDir := filepath.Join(instancePath, ".claude")
 	settingsPath := filepath.Join(claudeDir, "settings.json")
 	settings := map[string]any{}
+	// prior is what the file held before this write (priorExists false when
+	// there was none), so the write can be recorded as niwa's own only when
+	// what it merged from was niwa's own too (recordReviewSettings).
+	var prior []byte
+	priorExists := false
 	if data, err := os.ReadFile(settingsPath); err == nil {
+		prior, priorExists = data, true
 		if err := json.Unmarshal(data, &settings); err != nil {
 			return fmt.Errorf("apply review settings: parsing %s: %w", settingsPath, err)
 		}
@@ -507,6 +521,9 @@ func ApplyReviewSettings(instancePath string, sandbox, ask bool) error {
 	if err := os.WriteFile(settingsPath, out, 0o644); err != nil {
 		return fmt.Errorf("apply review settings: writing settings: %w", err)
 	}
+	if err := recordReviewSettings(instancePath, settingsPath, prior, priorExists, out); err != nil {
+		return fmt.Errorf("apply review settings: recording %s as niwa's own: %w", settingsPath, err)
+	}
 
 	// Re-read from disk and re-verify the settings survived the write/merge.
 	data, err := os.ReadFile(settingsPath)
@@ -518,6 +535,69 @@ func ApplyReviewSettings(instancePath string, sandbox, ask bool) error {
 		return fmt.Errorf("apply review settings: re-parsing settings: %w", err)
 	}
 	return VerifyReviewSettings(merged, instancePath, sandbox, ask)
+}
+
+// recordReviewSettings records the review settings file ApplyReviewSettings
+// has just written at settingsPath as one of the instance's managed files,
+// with the hash of written, the exact bytes niwa wrote, in the same record and
+// hash format provisioning uses. The removal rule then counts the file as
+// niwa's own for as long as it holds those bytes; a byte changed after the
+// write makes its hash differ, and the rule keeps the instance on it.
+//
+// It records only when the file held niwa's own bytes before the write: it
+// didn't exist, or every managed entry for this exact path holds the hash of
+// prior. A file something else wrote or changed (no entry, or an entry its
+// bytes don't match) keeps its entries, or its lack of one, as they were, so a
+// re-apply that merges over such a change never makes the file niwa's. An
+// instance with no state records nothing, and a record that already holds
+// the hash is left alone.
+func recordReviewSettings(instancePath, settingsPath string, prior []byte, priorExists bool, written []byte) error {
+	path, err := filepath.Abs(settingsPath)
+	if err != nil {
+		return err
+	}
+	state, err := workspace.LoadState(instancePath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var at []int
+	for i, mf := range state.ManagedFiles {
+		if filepath.Clean(mf.Path) == path {
+			at = append(at, i)
+		}
+	}
+	if priorExists {
+		if len(at) == 0 {
+			return nil
+		}
+		priorHash := workspace.HashBytes(prior)
+		for _, i := range at {
+			if state.ManagedFiles[i].ContentHash != priorHash {
+				return nil
+			}
+		}
+	}
+	hash := workspace.HashBytes(written)
+	now := time.Now()
+	changed := false
+	for _, i := range at {
+		if state.ManagedFiles[i].ContentHash != hash {
+			state.ManagedFiles[i].ContentHash = hash
+			state.ManagedFiles[i].Generated = now
+			changed = true
+		}
+	}
+	if len(at) == 0 {
+		state.ManagedFiles = append(state.ManagedFiles, workspace.ManagedFile{Path: path, ContentHash: hash, Generated: now})
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return workspace.SaveState(instancePath, state)
 }
 
 // reviewHook is one PreToolUse hook a review session needs: its name (for error

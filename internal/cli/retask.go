@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/tsukumogami/niwa/internal/agentplan"
+	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/watch"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -436,6 +437,12 @@ type retaskRun struct {
 //
 // A non-nil error is always the refusal or outcome the result names.
 func retaskCore(ctx context.Context, v workerView, c retaskCaller) (retaskResult, error) {
+	// Every claude agents and claude rm the run makes runs from an empty
+	// directory under ~/.niwa/w-<key>/scratch/, and removeCopy's claude rm
+	// waits on the vet of the copy's job directory.
+	cc := newClaudeCalls(v.Root)
+	defer cc.close()
+	ctx = withClaudeCalls(ctx, cc)
 	r := &retaskRun{ctx: ctx, v: v, c: c, target: c.Target}
 	if r.target == "" {
 		r.target = v.SessionID
@@ -965,8 +972,10 @@ func (r *retaskRun) removeCopy(cp claudeSessionRow, before map[string]bool) (boo
 		}
 	}
 	if listed {
-		if _, err := removeClaudeSessionFunc(r.ctx, cp.ID); err != nil {
-			return false, "claude rm failed on it"
+		if out, err := removeClaudeSessionFunc(withRemovalSession(r.ctx, cp.SessionID), cp.ID); err != nil {
+			// The vet's failure, which made no call, names the path; a call
+			// that failed gives Claude Code's message.
+			return false, "claude rm failed on it: " + removal.ScrubEvidence(firstLine(out, err), 400)
 		}
 	}
 	rows, err = listClaudeSessionsFunc(r.ctx)

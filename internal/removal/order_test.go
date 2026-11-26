@@ -1,0 +1,355 @@
+package removal
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestEvaluateListsEveryKeepingCheckInRuleOrder(t *testing.T) {
+	f := newFixture(t)
+	writeFile(t, filepath.Join(f.instance, DispatchRetainMarker), "kept for review\n")
+	writeFile(t, filepath.Join(f.clone, "notes.txt"), "n\n")
+	writeFile(t, filepath.Join(f.instance, "loose.txt"), "l\n")
+	p := f.policy(t)
+	p.Processes = &Listing{Procs: []Process{{PID: 4242, Cwd: filepath.Join(f.instance, "tools")}}}
+
+	v := Evaluate(context.Background(), f.unit(), p)
+	var names []CheckName
+	for _, c := range v.Checks {
+		names = append(names, c.Name)
+		if c.Evidence == "" || len(c.Paths) == 0 {
+			t.Errorf("check %+v lacks paths or evidence", c)
+		}
+	}
+	want := []CheckName{CheckLiveness, CheckHold, CheckRepository, CheckOutside}
+	if strings.Join(checkNames(names), ",") != strings.Join(checkNames(want), ",") {
+		t.Fatalf("checks %v, want %v", names, want)
+	}
+	first, _ := v.First()
+	if first.Name != CheckLiveness || !strings.Contains(first.Evidence, "pid 4242") {
+		t.Fatalf("first check %+v; want liveness naming the process", first)
+	}
+	if !strings.Contains(v.Checks[1].Evidence, "kept for review") {
+		t.Errorf("hold evidence %q; want the recorded reason", v.Checks[1].Evidence)
+	}
+}
+
+func checkNames(n []CheckName) []string {
+	out := make([]string, len(n))
+	for i, x := range n {
+		out[i] = string(x)
+	}
+	return out
+}
+
+func TestLivenessKeepsWhenTheProcessListingFailed(t *testing.T) {
+	f := newFixture(t)
+	p := f.policy(t)
+	p.Processes = &Listing{Err: errors.New("lsof timed out")}
+	v := Evaluate(context.Background(), f.unit(), p)
+	first, _ := v.First()
+	if v.Kind != Keep || first.Name != CheckLiveness || !strings.Contains(first.Evidence, "lsof timed out") {
+		t.Fatalf("verdict %s %+v; want liveness to keep on the failed listing", v.Kind, v.Checks)
+	}
+	p.Processes = nil
+	if v := Evaluate(context.Background(), f.unit(), p); v.Kind != Keep {
+		t.Fatalf("verdict %s with no listing; want keep", v.Kind)
+	}
+}
+
+func TestHoldKeepsAnUnmappedInstanceWhetherOrNotTheMarkerReads(t *testing.T) {
+	instance := t.TempDir()
+	marker := filepath.Join(instance, DispatchRetainMarker)
+	writeFile(t, marker, "worker produced work\n")
+	u := Unit{InstancePath: instance, Liveness: LivenessGone}
+	p := Policy{Processes: &Listing{}}
+	v := Evaluate(context.Background(), u, p)
+	first, _ := v.First()
+	if first.Name != CheckHold || !strings.Contains(first.Evidence, "worker produced work") {
+		t.Fatalf("checks %+v; want the hold with its reason", v.Checks)
+	}
+	if err := os.Chmod(marker, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(marker, 0o644) })
+	v = Evaluate(context.Background(), u, p)
+	if first, _ := v.First(); first.Name != CheckHold {
+		t.Fatalf("checks %+v; want an unreadable marker to hold too", v.Checks)
+	}
+}
+
+// orderRepo builds a clone that fails every per-repository check: a broken
+// ref, an unpushed branch, a stash, a modified tracked file, an
+// assume-unchanged entry and an untracked file.
+func orderRepo(t *testing.T) fixture {
+	f := checkedOut(t)
+	writeFile(t, filepath.Join(f.clone, "b.txt"), "b\n")
+	gitRun(t, f.clone, "add", "b.txt")
+	gitRun(t, f.clone, "commit", "-q", "-m", "b")
+	gitRun(t, f.clone, "push", "-q", "origin", "HEAD")
+	gitRun(t, f.clone, "checkout", "-q", "-b", "work")
+	writeFile(t, filepath.Join(f.clone, "c.txt"), "c\n")
+	gitRun(t, f.clone, "add", "c.txt")
+	gitRun(t, f.clone, "commit", "-q", "-m", "c")
+	writeFile(t, filepath.Join(f.clone, "README"), "stashed\n")
+	gitRun(t, f.clone, "stash", "-q")
+	writeFile(t, filepath.Join(f.clone, "README"), "modified\n")
+	gitRun(t, f.clone, "update-index", "--assume-unchanged", "b.txt")
+	writeFile(t, filepath.Join(f.clone, "notes.txt"), "n\n")
+	writeFile(t, filepath.Join(f.clone, ".git", "refs", "heads", "zz-broken"), "not-an-object-id\n")
+	return f
+}
+
+func TestCheckRepoKeepsInTheRuleOrder(t *testing.T) {
+	f := orderRepo(t)
+	v := Evaluate(context.Background(), f.unit(), f.policy(t))
+	want := []string{
+		"the ref listing reported a problem",
+		"commits the clone URL does not show: branch work",
+		"stashes: stash@{0}",
+		"modified tracked files: README",
+		"index flag hides changes: assume-unchanged b.txt",
+		"untracked files: notes.txt",
+	}
+	var got []string
+	for _, c := range v.Checks {
+		if c.Name == CheckRepository {
+			got = append(got, c.Evidence)
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("repository keeps %q, want %d in order %q", got, len(want), want)
+	}
+	for i := range want {
+		if !strings.Contains(got[i], want[i]) {
+			t.Errorf("keep %d is %q, want it to name %q", i, got[i], want[i])
+		}
+	}
+	for _, e := range got {
+		if strings.Contains(e, "refs/stash") {
+			t.Errorf("the stash is named as a ref too: %q", e)
+		}
+	}
+}
+
+func TestEvaluateKeepsACommitOnlyADetachedHeadReaches(t *testing.T) {
+	f := checkedOut(t)
+	gitRun(t, f.clone, "checkout", "-q", "--detach")
+	gitRun(t, f.clone, "commit", "-q", "--allow-empty", "-m", "detached work")
+	v := Evaluate(context.Background(), f.unit(), f.policy(t))
+	first, _ := v.First()
+	if v.Kind != Keep || first.Name != CheckRepository || !strings.Contains(first.Evidence, "commits the clone URL does not show: HEAD") {
+		t.Fatalf("verdict %s %+v; want the repository check naming HEAD", v.Kind, v.Checks)
+	}
+	wantClass(t, v, "tools/app/.git/", ClassUnique, "")
+}
+
+func TestEvaluateReapsAPushedDetachedHead(t *testing.T) {
+	f := checkedOut(t)
+	gitRun(t, f.clone, "checkout", "-q", "--detach")
+	if v := Evaluate(context.Background(), f.unit(), f.policy(t)); v.Kind != Reap {
+		t.Fatalf("verdict %s %+v; want a detached HEAD at a pushed commit reaped", v.Kind, v.Checks)
+	}
+}
+
+func TestParseWorktreeList(t *testing.T) {
+	oid := strings.Repeat("a", 40)
+	other := strings.Repeat("b", 40)
+	out := "worktree /i/app\x00HEAD " + oid + "\x00branch refs/heads/main\x00\x00" +
+		"worktree /tmp/w\x00HEAD " + other + "\x00detached\x00locked\x00\x00" +
+		"worktree /i/new\x00HEAD " + strings.Repeat("0", 40) + "\x00branch refs/heads/unborn\x00\x00"
+	heads, err := parseWorktreeList([]byte(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(heads) != 2 || !heads[0].Main || heads[0].OID != oid || heads[1].Main || heads[1].OID != other {
+		t.Fatalf("heads %+v", heads)
+	}
+	if got := heads[1].label("/i/app"); got != "HEAD of worktree /tmp/w" {
+		t.Fatalf("label %q", got)
+	}
+	for _, bad := range []string{
+		"",
+		"worktree /i/app\x00HEAD " + oid + "\x00",
+		"HEAD " + oid + "\x00\x00",
+		"worktree /i/app\x00HEAD nothex\x00\x00",
+		"worktree /i/app\x00HEAD " + oid + "\x00surprise field\x00\x00",
+		"worktree /i/app\x00branch refs/heads/main\x00\x00",
+		"worktree /i/app\x00HEAD " + oid + "\x00\x00worktree /tmp/w\x00detached\x00\x00",
+	} {
+		if _, err := parseWorktreeList([]byte(bad)); err == nil {
+			t.Errorf("parseWorktreeList(%q) parsed", bad)
+		}
+	}
+	if _, err := parseWorktreeList([]byte("worktree /i/app\x00branch refs/heads/main\x00\x00")); err == nil || !strings.Contains(err.Error(), "no HEAD") || !strings.Contains(err.Error(), "/i/app") {
+		t.Errorf("a record with no HEAD: error %v; want the record named", err)
+	}
+	bare, err := parseWorktreeList([]byte("worktree /i/bare.git\x00bare\x00\x00" +
+		"worktree /tmp/w\x00HEAD " + oid + "\x00branch refs/heads/main\x00\x00"))
+	if err != nil {
+		t.Fatalf("a bare record without HEAD: %v", err)
+	}
+	if len(bare) != 1 || bare[0].OID != oid || bare[0].Main {
+		t.Fatalf("heads with a bare main record %+v", bare)
+	}
+}
+
+func TestAcceptLsofTakesExitOneOnlyWhenTheOutputParsesInFull(t *testing.T) {
+	good := []byte("p10\x00R1\x00\nfcwd\x00n/w\x00\n")
+	if procs, err := acceptLsof(1, good); err != nil || len(procs) != 1 || procs[0].Cwd != "/w" {
+		t.Fatalf("exit 1 with a full listing: %+v, %v", procs, err)
+	}
+	for _, out := range [][]byte{
+		[]byte("p10\x00R1\x00\nfcwd\x00n/w"),
+		[]byte("p10\x00R1\x00\nfcwd\x00\n"),
+		{},
+	} {
+		if _, err := acceptLsof(1, out); err == nil {
+			t.Errorf("exit 1 with %q was accepted", out)
+		}
+	}
+	if _, err := acceptLsof(2, good); err == nil {
+		t.Error("exit 2 was accepted")
+	}
+	if _, err := acceptLsof(0, good); err != nil {
+		t.Errorf("exit 0: %v", err)
+	}
+}
+
+func TestOutsideKeepsAnEntryThatTurnedUnreadableAfterTheFirstWalk(t *testing.T) {
+	f := newFixture(t)
+	notes := filepath.Join(f.instance, "notes")
+	writeFile(t, filepath.Join(notes, "a.txt"), "a")
+	p := f.policy(t)
+	w := walkUnit(context.Background(), f.unit(), p)
+	if len(w.errs) != 0 {
+		t.Fatalf("first walk errors %+v", w.errs)
+	}
+	if err := os.Chmod(notes, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(notes, 0o755) })
+	s := &evalState{walk: &w}
+	keeps := checkOutside(context.Background(), f.unit(), p, s)
+	found := false
+	for _, k := range keeps {
+		if strings.Contains(k.Evidence, "unreadable: notes: permission denied") && len(k.Paths) == 1 && k.Paths[0] == "notes" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("outside keeps %+v; want the unreadable directory named with its error", keeps)
+	}
+}
+
+func TestEvaluateKeepsABrokenRefInACleanClone(t *testing.T) {
+	f := newFixture(t)
+	writeFile(t, filepath.Join(f.clone, ".git", "refs", "heads", "broken"), "0000\n")
+	v := Evaluate(context.Background(), f.unit(), f.policy(t))
+	first, _ := v.First()
+	if v.Kind != Keep || first.Name != CheckRepository || !strings.Contains(first.Evidence, "broken") {
+		t.Fatalf("verdict %s %+v; want the repository check naming the broken ref", v.Kind, v.Checks)
+	}
+}
+
+func TestIndexFlagsKeepASkipWorktreeEntryAndASparseCheckout(t *testing.T) {
+	f := checkedOut(t)
+	gitRun(t, f.clone, "update-index", "--skip-worktree", "README")
+	v := Evaluate(context.Background(), f.unit(), f.policy(t))
+	if first, _ := v.First(); !strings.Contains(first.Evidence, "index flag hides changes: skip-worktree README") {
+		t.Fatalf("checks %+v; want the skip-worktree flag named", v.Checks)
+	}
+	g := checkedOut(t)
+	gitRun(t, g.clone, "config", "core.sparseCheckout", "true")
+	v = Evaluate(context.Background(), g.unit(), g.policy(t))
+	if first, _ := v.First(); !strings.Contains(first.Evidence, "sparse checkout") {
+		t.Fatalf("checks %+v; want the sparse checkout named", v.Checks)
+	}
+}
+
+func TestCheckRepoKeepsACloneSwappedForASymlinkAfterTheWalk(t *testing.T) {
+	f := newFixture(t)
+	p := f.policy(t)
+	w := walkUnit(context.Background(), f.unit(), p)
+	if len(w.repos) != 1 {
+		t.Fatalf("walk found %+v", w)
+	}
+	// A clean clone elsewhere takes the walked clone's place.
+	other := filepath.Join(t.TempDir(), "app")
+	gitRun(t, t.TempDir(), "clone", "-q", f.remoteURL, other)
+	if err := os.Rename(f.clone, f.clone+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, f.clone); err != nil {
+		t.Fatal(err)
+	}
+	c := w.repos[0]
+	res := p.Env.checkRepo(context.Background(), repoTarget{
+		Rel: c.Rel, Base: f.instance, Dirs: repoDirs{GitDir: c.GitDir, WorkTree: c.WorkTree},
+		URL: c.URL, wtInfo: c.wtInfo, gitInfo: c.gitInfo,
+	}, repoPolicy{})
+	if len(res.keeps) != 1 || !strings.Contains(res.keeps[0].Evidence, "changed since the walk") {
+		t.Fatalf("keeps %+v; want the swapped clone kept", res.keeps)
+	}
+}
+
+func TestCheckRepoKeepsADirectoryMadeUnreadableWithItsError(t *testing.T) {
+	f := newFixture(t)
+	locked := filepath.Join(f.clone, "locked")
+	writeFile(t, filepath.Join(locked, "x"), "x")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	v := Evaluate(context.Background(), f.unit(), f.policy(t))
+	first, _ := v.First()
+	if v.Kind != Keep || !strings.Contains(first.Evidence, "tools/app/locked") || !strings.Contains(first.Evidence, "permission denied") {
+		t.Fatalf("verdict %s %+v; want the path and the read error", v.Kind, v.Checks)
+	}
+}
+
+// TestLsRemoteReadsNoRepositoryWhereItRuns plants a repository whose
+// configuration rewrites the clone URL to a local remote and names a
+// URL-scoped credential helper, in the directory ls-remote runs from. Read,
+// the rewrite would make the call succeed; it must fail as unreachable, and
+// the helper must never run.
+func TestLsRemoteReadsNoRepositoryWhereItRuns(t *testing.T) {
+	f := newFixture(t)
+	p := f.policy(t)
+	dir := t.TempDir()
+	gitRun(t, dir, "init", "-q")
+	marker := filepath.Join(t.TempDir(), "helper-ran")
+	helper := filepath.Join(t.TempDir(), "helper.sh")
+	writeFile(t, helper, "#!/bin/sh\ntouch "+marker+"\n")
+	if err := os.Chmod(helper, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	url := "https://example.invalid/app"
+	gitRun(t, dir, "config", "url."+f.remoteURL+".insteadOf", url)
+	gitRun(t, dir, "config", "credential."+url+".helper", helper)
+
+	if _, err := p.Env.lsRemoteFrom(context.Background(), dir, url); err == nil {
+		t.Fatal("ls-remote succeeded; the planted repository's configuration was read")
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the planted credential helper ran")
+	}
+}
+
+func TestScratchUseRefusesADirectoryThatIsNotEmpty(t *testing.T) {
+	f := newFixture(t)
+	p := f.policy(t)
+	if err := os.Mkdir(filepath.Join(p.Env.Scratch.Dir, scratchNet, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Env.scratchDir(scratchNet); err == nil || !strings.Contains(err.Error(), "not empty") {
+		t.Fatalf("scratch use error %v; want a refusal", err)
+	}
+	if _, err := p.Env.liveTips(context.Background(), f.remoteURL); err == nil {
+		t.Fatal("ls-remote ran from a scratch directory holding a .git")
+	}
+}

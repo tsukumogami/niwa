@@ -411,6 +411,7 @@ func TestBackstop_RetainedInstance_Spared(t *testing.T) {
 	}
 
 	destroyed := stubDestroyAll(t)
+	out := captureReapStderr(t)
 
 	n, err := reapBackstop(root, t.TempDir(), now)
 	if err != nil {
@@ -422,16 +423,11 @@ func TestBackstop_RetainedInstance_Spared(t *testing.T) {
 
 	// And the developer is told, because nothing will ever reclaim it on its
 	// own and an instance that accumulates silently is the other half of this
-	// failure.
-	_, spared, err := selectBackstopTargets(root, t.TempDir(), now)
-	if err != nil {
-		t.Fatalf("selectBackstopTargets error: %v", err)
-	}
-	if len(spared) != 1 {
-		t.Fatalf("spared %d instance(s), want 1", len(spared))
-	}
-	if spared[0].Reason != reason {
-		t.Errorf("spared reason = %q, want the marker's own words %q", spared[0].Reason, reason)
+	// failure. The removal rule's hold check keeps it, and the pass prints
+	// the kept line with the marker's own words.
+	want := "niwa: kept " + dispInstOld + ": hold check: held by .niwa/dispatch-retain: " + reason
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("no kept line %q:\n%s", want, out.String())
 	}
 }
 
@@ -771,12 +767,18 @@ func onReapWarnings(out string) []string {
 }
 
 // stubDestroyRemoving installs a destroyInstanceFunc that really removes the
-// directory, so the next reap finds the instance gone.
+// directory, so the next reap finds the instance gone. The reap removes an
+// instance through its tombstone, so the stub removes the tombstone there.
 func stubDestroyRemoving(t *testing.T) {
 	t.Helper()
 	prev := destroyInstanceFunc
 	destroyInstanceFunc = func(path string) error { return os.RemoveAll(path) }
-	t.Cleanup(func() { destroyInstanceFunc = prev })
+	prevTomb := removeTombstoneFunc
+	removeTombstoneFunc = func(_ *workspace.DestroyPlan, tomb string) error { return os.RemoveAll(tomb) }
+	t.Cleanup(func() {
+		destroyInstanceFunc = prev
+		removeTombstoneFunc = prevTomb
+	})
 }
 
 // TestOnReap_FixedEnvironment: the command sees PATH, HOME, the three values
@@ -1451,7 +1453,7 @@ func TestOnReap_CallSites(t *testing.T) {
 		}
 	}
 
-	want := map[string]bool{"on_reap.go": true, "reap.go": true, "destroy_session.go": true, "watch.go": true}
+	want := map[string]bool{"on_reap.go": true, "pass.go": true, "destroy_session.go": true, "watch.go": true}
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatal(err)

@@ -368,6 +368,8 @@ func TestRunDestroy_WorkspaceRemovesEveryOwningSession(t *testing.T) {
 	chdirTo(t, root)
 	quietDestroyCmd()
 	setDestroyFlags(t, false, true, "testws")
+	sessionJobDir(t, "11111111")
+	sessionJobDir(t, "22222222")
 
 	if err := runDestroy(destroyCmd, nil); err != nil {
 		t.Fatalf("destroy --workspace: %v", err)
@@ -399,6 +401,9 @@ func TestRunDestroy_FailedRemovalStillDestroys(t *testing.T) {
 			chdirTo(t, root)
 			stderr := quietDestroyCmd()
 			setDestroyFlags(t, true, false, "")
+			if name == "rm fails" {
+				sessionJobDir(t, "11111111")
+			}
 
 			if err := runDestroy(destroyCmd, []string{"alpha"}); err != nil {
 				t.Fatalf("destroy should succeed despite the session failure: %v", err)
@@ -490,6 +495,9 @@ func TestRunDestroy_RemovesOwningSession(t *testing.T) {
 			prevKeep := destroyKeepSession
 			destroyKeepSession = keep
 			t.Cleanup(func() { destroyKeepSession = prevKeep })
+			if !keep {
+				sessionJobDir(t, "11111111")
+			}
 
 			if err := runDestroy(destroyCmd, []string{"alpha"}); err != nil {
 				t.Fatalf("destroy: %v", err)

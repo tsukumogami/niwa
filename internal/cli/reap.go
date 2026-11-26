@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
+	"github.com/tsukumogami/niwa/internal/cli/sessionattach"
+	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -110,9 +113,42 @@ reap says so on stderr rather than silently, because they pile up until you
 remove them yourself with niwa destroy. Sparing an instance nobody is using
 costs a directory; the other mistake costs the work inside it.
 
+A session being gone isn't enough on its own. Before reap removes a mapped
+instance, it checks every repository in it and in its session's job
+directory (each clone, nested, bare or build-tree repository, submodule
+store and worktree) against the clone URL the workspace configuration gives
+that clone: a branch or other ref whose commit the URL doesn't show (git
+ls-remote), a commit in a repository the configuration gives no URL, any
+uncommitted or untracked file, a git error, an unreachable URL, a
+repository configuration that names a program, a worktree or work tree
+outside the instance, a .git file naming a git directory outside it, or a
+directory on another filesystem keeps the instance, and reap prints one
+"niwa: kept <instance>: <check> check: ..." line naming what it found.
+git runs there with a fixed environment and every repository-named program
+turned off, and the instance is left exactly as it was. One reap takes at
+most 30 seconds over these checks; an instance it doesn't reach in time is
+left for the next one.
+
+A mapped Claude session that Claude Code still lists (claude agents, read
+once per reap) goes with its instance, through claude rm. Before anything is
+removed, each such session's job directory under the jobs root
+($CLAUDE_CONFIG_DIR/jobs, or ~/.claude/jobs) is checked the way niwa destroy
+checks it, and again right before its claude rm; a failure, a session still
+running, or a listing that fails keeps the instance with the reason named.
+Every claude call runs from an empty directory under ~/.niwa.
+
+An instance that passes is checked again right before it goes: reap reads
+its session, its processes and every repository again, renames the
+instance to <root>/.niwa-tombstone-<instance>-<hex>, and repeats the
+process, repository, ref and record checks there. Anything that changed in
+between renames it back and keeps it with "changed during the pass" and
+what changed. A tombstone a reap that was interrupted left behind is renamed
+back by the next reap that finds no other reap holding it.
+
 The same care applies to a dispatch instance with no mapping at all, which reap
-otherwise reclaims on age: if an agent's records say a worker is still writing
-there, reap leaves the directory alone.
+otherwise reclaims on age: it goes through the same checks, so one holding
+work, one marked to be kept (.niwa/dispatch-retain) or one an agent's
+records say a worker is still writing in is left alone.
 
 reap also removes worktrees niwa's WorktreeCreate hook made that are
 unchanged since they were created and whose Claude Code session has ended:
@@ -121,8 +157,10 @@ transcript is gone or idle for that long. A worktree with any change, or one
 made with niwa worktree create, is never removed this way.
 
 When the workspace declares [session.on_reap], its command runs once for each
-session reap removes, from the workspace root, with PATH, HOME, NIWA_REAP_KEY,
-NIWA_SESSION_ID, NIWA_INSTANCE_PATH and the names its own env list declares.
+session reap removes, after the instance is removed, from the
+workspace root, with PATH, HOME, NIWA_REAP_KEY,
+NIWA_SESSION_ID, NIWA_INSTANCE_PATH (the instance's former path, no longer on
+disk) and the names its own env list declares.
 Each run is bounded by its timeout (10s by default) and all of one reap's runs
 by 30 seconds together. A run that fails, times out or is skipped prints one
 "niwa: warning: on-reap for session <id>: ..." line and keeps the session's
@@ -143,14 +181,82 @@ again. The command's own output is never printed; only its last line is
 quoted, as the reason.
 
 reap runs on demand and is also invoked opportunistically at the start of
-niwa create, niwa dispatch, and niwa watch so session fan-out self-bounds.`,
-	Args:          cobra.NoArgs,
+niwa create, niwa dispatch, and niwa watch so session fan-out self-bounds.
+
+With --verdict-only, reap removes nothing. It judges every instance of the
+workspace, or only the <instance> named, under the same lock and with the
+same checks a reap would use at that moment, and prints each one's verdict
+(keep or reap), every check that keeps it with the paths and evidence it
+names, and the class of every path. An instance reap would never remove is
+listed too, kept by its liveness. It runs no pre-removal or on-reap command,
+settles no session record and sweeps no worktree; one it doesn't reach
+within the 30 seconds is printed as not reached. --json prints the same as a
+niwa.verdicts/v1 document. When the workspace's removal settings are
+invalid it says so on stderr, prints no verdict in either form and exits
+non-zero. An <instance> argument and --json are accepted only with
+--verdict-only.`,
+	Args:          reapArgs,
 	SilenceErrors: true,
 	SilenceUsage:  true,
-	RunE:          runReap,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return scrubReapError(runReap(cmd, args))
+	},
 }
 
-func runReap(cmd *cobra.Command, _ []string) error {
+// scrubbedError is an error reap returns, whose text passes
+// removal.ScrubEvidence: an error from enumerating instances or reading a
+// unit's records can quote a path or a record's contents, and the command's
+// caller prints the text. Unwrap keeps the wrapped error, an exit status
+// included, visible to errors.As.
+type scrubbedError struct{ err error }
+
+func (e *scrubbedError) Error() string { return removal.ScrubEvidence(e.err.Error(), 400) }
+
+func (e *scrubbedError) Unwrap() error { return e.err }
+
+// scrubReapError wraps a non-nil err in scrubbedError.
+func scrubReapError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &scrubbedError{err: err}
+}
+
+// reapVerdictOnly and reapJSON are reap's --verdict-only and --json.
+var (
+	reapVerdictOnly bool
+	reapJSON        bool
+)
+
+func init() {
+	reapCmd.Flags().BoolVar(&reapVerdictOnly, "verdict-only", false,
+		"judge each instance and print its verdict, removing nothing")
+	reapCmd.Flags().BoolVar(&reapJSON, "json", false,
+		"with --verdict-only, print the verdicts as a niwa.verdicts/v1 document")
+}
+
+// reapArgs checks reap's arguments before anything runs: at most one
+// instance, which, like --json, is accepted only with --verdict-only and
+// must be a bare instance name.
+func reapArgs(_ *cobra.Command, args []string) error {
+	if len(args) > 1 {
+		return fmt.Errorf("reap takes at most one instance argument, got %d", len(args))
+	}
+	if !reapVerdictOnly {
+		if len(args) == 1 {
+			return fmt.Errorf("an instance argument (%q) is accepted only with --verdict-only", args[0])
+		}
+		if reapJSON {
+			return fmt.Errorf("--json is accepted only with --verdict-only")
+		}
+	}
+	if len(args) == 1 && strings.ContainsAny(args[0], `/\`) {
+		return fmt.Errorf("instance %q holds a path separator; name an instance of this workspace", args[0])
+	}
+	return nil
+}
+
+func runReap(cmd *cobra.Command, args []string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting working directory: %w", err)
@@ -163,8 +269,15 @@ func runReap(cmd *cobra.Command, _ []string) error {
 	if class.WorkspaceRoot == "" {
 		return fmt.Errorf("not inside a niwa workspace")
 	}
+	if reapVerdictOnly {
+		var instance string
+		if len(args) == 1 {
+			instance = args[0]
+		}
+		return runReapVerdicts(cmd, class.WorkspaceRoot, instance)
+	}
 
-	n, err := reapWorkspace(class.WorkspaceRoot, defaultJobsDir(), time.Now())
+	n, err := reapWorkspaceResolved(class.WorkspaceRoot, time.Now())
 	if err != nil {
 		return err
 	}
@@ -174,6 +287,47 @@ func runReap(cmd *cobra.Command, _ []string) error {
 	if m := sweepHookWorktrees(class.WorkspaceRoot, defaultJobsDir(), time.Now(), cmd.ErrOrStderr()); m > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Removed %d unchanged worktree(s) whose session has ended\n", m)
 	}
+	return nil
+}
+
+// runReapVerdicts is `niwa reap --verdict-only`: one verdict-only pass over
+// the workspace's instances, or the one named, printed to the command's
+// output as text or, with --json, as a niwa.verdicts/v1 document. It runs
+// no worktree sweep: that sweep removes worktrees, and this mode removes
+// nothing.
+func runReapVerdicts(cmd *cobra.Command, workspaceRoot, instance string) error {
+	if instance != "" {
+		instances, err := workspace.EnumerateInstances(workspaceRoot)
+		if err != nil {
+			return fmt.Errorf("enumerating instances: %w", err)
+		}
+		found := false
+		for _, dir := range instances {
+			if filepath.Base(dir) == instance {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("no instance named %q in this workspace", instance)
+		}
+	}
+	jobsDir, jobsErr := passJobsRoot()
+	res, err := runPass(context.Background(), workspaceRoot, passVerdictOnly,
+		passScope{JobsDir: jobsDir, JobsErr: jobsErr, Now: time.Now(), Instance: instance})
+	if err != nil {
+		return err
+	}
+	if res.SettingsInvalid {
+		// The pass printed why on stderr and judged nothing. Nothing goes
+		// to stdout in either form: an empty document would read as a
+		// workspace with no instances. The exit status says it failed.
+		return &sessionattach.ExitCodeError{Code: 1}
+	}
+	if reapJSON {
+		return printVerdictsJSON(cmd.OutOrStdout(), res.Verdicts)
+	}
+	printVerdictsText(cmd.OutOrStdout(), res.Verdicts)
 	return nil
 }
 
@@ -245,13 +399,18 @@ func reportSparedInstances(w io.Writer, spared []sparedInstance) {
 	if len(spared) == 0 {
 		return
 	}
+	// Names and reasons come from the instances and the records in them, so
+	// each passes removal.ScrubEvidence: a reason before it is grouped, so
+	// two that differ only in what scrubbing removes share a line, and
+	// again, unchanged, where it is printed; a name where it is printed.
 	byReason := map[string][]string{}
 	var order []string
 	for _, s := range spared {
-		if _, seen := byReason[s.Reason]; !seen {
-			order = append(order, s.Reason)
+		reason := removal.ScrubEvidence(s.Reason, 200)
+		if _, seen := byReason[reason]; !seen {
+			order = append(order, reason)
 		}
-		byReason[s.Reason] = append(byReason[s.Reason], s.Name)
+		byReason[reason] = append(byReason[reason], s.Name)
 	}
 	for _, reason := range order {
 		names := byReason[reason]
@@ -262,10 +421,20 @@ func reportSparedInstances(w io.Writer, spared []sparedInstance) {
 			suffix = fmt.Sprintf(" and %d more", len(names)-maxSparedNamesListed)
 		}
 		fmt.Fprintf(w, "niwa: kept %d instance(s) this sweep would not reclaim (%s%s): %s\n",
-			len(names), strings.Join(listed, ", "), suffix, reason)
+			len(names), scrubJoined(listed, 80), suffix, removal.ScrubEvidence(reason, 200))
 	}
 	// The name rather than the path, because that is what the command takes.
 	fmt.Fprintf(w, "niwa: reclaim one with `niwa destroy <name>` when you are done with its session\n")
+}
+
+// scrubJoined joins names with ", ", each through removal.ScrubEvidence cut
+// to max characters.
+func scrubJoined(names []string, max int) string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = removal.ScrubEvidence(n, max)
+	}
+	return strings.Join(out, ", ")
 }
 
 // sparedInstance is an instance the sweep left alone -- because it could not
@@ -578,7 +747,7 @@ func settleStoredMapping(workspaceRoot, jobsDir string, m workspace.SessionMappi
 			name = filepath.Base(m.InstancePath)
 		}
 		fmt.Fprintf(reapStderr, "niwa: kept %s: its session record changed while the reap ran; the next reap asks again\n",
-			sanitizeRemovalGateText(name, 80))
+			removal.ScrubEvidence(name, 80))
 		return
 	}
 	onReap.settle(current)
@@ -594,126 +763,41 @@ func sameSessionMapping(a, b workspace.SessionMapping) bool {
 }
 
 // reapWorkspace selects and reclaims orphaned ephemeral instances under
-// workspaceRoot, returning the count actually destroyed. For each target it
-// force-destroys the instance (via destroyInstanceFunc, the non-interactive
-// destroy path, which also withdraws the Claude trust grant the instance's
-// state records), then runs the workspace's on-reap command for the removed
-// session and deletes the mapping entry once that succeeds. A destroy
-// failure on one target is surfaced on stderr and does not abort the rest, so a
-// single stuck instance never blocks reclaiming the others.
-//
-// It also walks the stored mappings whose instance is already gone
-// (selectStoredMappingTargets) and runs the command for each whose session is
-// gone. Those are selected before any instance is destroyed here, so a
-// mapping this sweep keeps after a failed run is retried by the next reap,
-// not by this one.
+// workspaceRoot, returning the count actually destroyed. It is a thin call
+// into runPass, which takes each mapped unit whose session is gone through
+// the removal rule before the workspace's pre-removal command and the
+// destroy, and then settles stored mappings, sweeps launch records and runs
+// the backstop as before.
 func reapWorkspace(workspaceRoot, jobsDir string, now time.Time) (int, error) {
-	targets, unreadable, err := selectReapTargets(workspaceRoot, jobsDir, now)
+	res, err := runPass(context.Background(), workspaceRoot, passActAll, passScope{JobsDir: jobsDir, Now: now})
+	return res.Reaped, err
+}
+
+// passHomeDir is the home directory a pass resolves the jobs root from. A
+// variable so a test can make it fail.
+var passHomeDir = os.UserHomeDir
+
+// passJobsRoot resolves a pass's jobs root once, as Claude Code resolves
+// it: under CLAUDE_CONFIG_DIR when the variable is set, ~/.claude/jobs
+// otherwise. The pass reads liveness and finds each unit's job directory
+// under this one root. A home directory that can't be resolved is an
+// error whatever the variable says, so the pass keeps every unit with the
+// reason named rather than guess where Claude Code keeps its sessions.
+func passJobsRoot() (string, error) {
+	home, err := passHomeDir()
 	if err != nil {
-		return 0, err
+		return "", fmt.Errorf("the home directory can't be resolved: %v", err)
 	}
-	stored, err := selectStoredMappingTargets(workspaceRoot, jobsDir, now)
-	if err != nil {
-		return 0, err
-	}
-	reportSparedInstances(os.Stderr, unreadable)
+	return removal.ResolveJobsRoot(os.LookupEnv, home)
+}
 
-	onReap := newOnReapStep(workspaceRoot, reapStderr)
-	// The workspace's pre-removal command gets the last word on each target,
-	// after niwa's own checks. Its spare lines go where the on-reap command's
-	// warnings go.
-	gate := newRemovalGate(workspaceRoot, removeStepReap, reapStderr)
-	var sessionIDs map[string][]string
-	if gate.active() {
-		sessionIDs = sessionIDsByInstance(workspaceRoot)
-	}
-	reaped := 0
-	for _, t := range targets {
-		// Selection happened before the spared report was printed and before
-		// every earlier destroy in this loop, so the verdict that chose the
-		// target is stale by the time it is acted on: the session can have
-		// come back, a resume can have relaunched into the instance, or
-		// another worker can be rooted there now.
-		//
-		// So the instance's lock is taken first, and only then is everything
-		// that justified the destroy read again: the liveness verdict, for
-		// every agent and not only one whose liveness is read from activity,
-		// and the two guards that spare an instance a worker is rooted in. The
-		// lock is held through the removal gate, the destroy and the mapping's
-		// settlement, so no other niwa command can act on the instance between
-		// this re-read and the instance being gone.
-		//
-		// A held lock spares the instance for this sweep, with one "niwa:
-		// kept" line naming the holder, and the next sweep asks again. A kept
-		// target is left exactly as it was, mapping and on-reap failure count
-		// included.
-		reclaimed := func() bool {
-			release, err := takeInstanceLock(t.InstancePath, "reap")
-			if err != nil {
-				reportInstanceLockKept(reapStderr, t.InstancePath, err)
-				return false
-			}
-			defer release()
-
-			rereadAt := time.Now()
-			if verdict, _ := sessionState(t.Agent, t.SessionID, jobsDir, t.InstancePath, rereadAt); verdict != sessionIsGone {
-				return false
-			}
-			if _, recorded := instanceHasRecordedSession(t.InstancePath, rereadAt); recorded || instanceHasLiveJob(jobsDir, t.InstancePath) {
-				return false
-			}
-			if !gate.ask(t.InstancePath, sessionIDs[t.InstancePath]) {
-				return false
-			}
-			if err := destroyInstanceFunc(t.InstancePath); err != nil {
-				fmt.Fprintf(os.Stderr, "niwa: warning: reaping instance %s: %v\n", t.InstancePath, err)
-				// Leave the mapping in place so a later reap retries this
-				// target rather than orphaning the mapping for a
-				// still-present instance.
-				return false
-			}
-			// The session is gone and so is its instance. The mapping goes
-			// once the on-reap command has run for it; a failed run keeps it
-			// for the next reap. Both happen before the lock is released, so
-			// the next command to take it finds neither.
-			onReap.settle(t.Mapping)
-			// Printed after the destroy rather than before it, so the line is
-			// a report of something that happened rather than of something
-			// intended: a destroy that fails above says nothing here.
-			if t.Notice.Reason != "" {
-				fmt.Fprintf(os.Stderr, "niwa: reclaimed %s: %s\n", t.Notice.Name, t.Notice.Reason)
-			}
-			return true
-		}()
-		if reclaimed {
-			reaped++
-		}
-	}
-
-	for _, m := range stored {
-		settleStoredMapping(workspaceRoot, jobsDir, m, onReap)
-	}
-
-	// The launch records go only once their transcripts have, which is
-	// independent of whether any instance went above: a record outlives its
-	// instance on purpose.
-	sweepLaunchRecords(workspaceRoot, userHomeDir(), reapStderr, now)
-
-	// Second pass: the name+TTL backstop. This is a SEPARATE scan, not a
-	// branch in selectReapTargets, because EnumerateInstanceRecords derives
-	// Ephemeral solely from the mapping store -- an unmapped orphan is already
-	// Ephemeral:false and is dropped before any per-record branch there. The
-	// backstop is the only path that may act on an UNMAPPED instance, and only
-	// under its own gates (dispatch instance name, no mapping, age past the TTL).
-	// It runs after the primary reclamation so the existing sweep keeps ownership
-	// of every mapped instance (DESIGN Decision 4).
-	n, err := reapBackstop(workspaceRoot, jobsDir, now)
-	if err != nil {
-		return reaped, err
-	}
-	reaped += n
-
-	return reaped, nil
+// reapWorkspaceResolved is reapWorkspace with the jobs root resolved for
+// the pass. A root that can't be resolved keeps every unit and removes
+// nothing.
+func reapWorkspaceResolved(workspaceRoot string, now time.Time) (int, error) {
+	jobsDir, jobsErr := passJobsRoot()
+	res, err := runPass(context.Background(), workspaceRoot, passActAll, passScope{JobsDir: jobsDir, JobsErr: jobsErr, Now: now})
+	return res.Reaped, err
 }
 
 // backstopTarget is an instance the marker+TTL backstop has selected. Unlike a
@@ -804,21 +888,9 @@ func selectBackstopTargets(workspaceRoot, jobsDir string, now time.Time) ([]back
 			continue
 		}
 
-		// An instance explicitly marked to be kept is spared regardless of age.
-		// This is the case where a worker's turn finished and produced work but
-		// niwa could not identify the session, so no mapping was ever written:
-		// name-and-age alone reads that as an abandoned dispatch, which is the
-		// one reading that deletes exactly the directory somebody was told was
-		// being kept for them. The marker is the dispatch saying so, and it is
-		// reported rather than silently honored, because an instance nothing
-		// will ever reclaim on its own is one the developer has to know about.
-		if reason, marked := dispatchRetainReason(rec.Path); marked {
-			if reason == "" {
-				reason = "it is marked to be kept, though the note saying why could not be read"
-			}
-			spared = append(spared, sparedInstance{Name: filepath.Base(rec.Path), Reason: reason})
-			continue
-		}
+		// An instance marked to be kept (.niwa/dispatch-retain) is a
+		// candidate like any other: the removal rule's hold check keeps it,
+		// and the pass prints it as a kept line with the recorded reason.
 
 		created, ok := dispatchInstanceAge(rec.Path)
 		if !ok {
@@ -874,107 +946,45 @@ func selectBackstopTargets(workspaceRoot, jobsDir string, now time.Time) ([]back
 
 // dispatchInstanceAge returns the creation time the backstop ages a dispatch
 // instance against. It prefers the pending-marker's embedded RFC3339 timestamp
-// (precise; written by dispatch at create time) and FALLS BACK to the instance
-// directory's mtime when the marker is absent or its timestamp is malformed --
-// the SIGKILL-before-marker case the name-keyed backstop exists to cover. It
-// returns (time, true) when either source yields a time, and (zero, false) only
-// when neither is readable (a missing/unstattable directory), in which case the
-// caller fails safe and spares the instance.
+// (precise; written by dispatch at create time), read through the removal
+// rule's shared reader: opened without following a link, owned by the user,
+// a regular file under its cap. It FALLS BACK to the instance directory's
+// own mtime, read with Lstat, when the marker is absent, refused by that
+// reader or malformed -- the SIGKILL-before-marker case the name-keyed
+// backstop exists to cover. An instance whose directory is itself a link,
+// or can't be read, has no age (zero, false), and the caller fails safe and
+// leaves it alone.
 func dispatchInstanceAge(instancePath string) (time.Time, bool) {
-	if ts, ok := readDispatchMarkerTime(instancePath); ok {
-		return ts, true
-	}
-	info, err := os.Stat(instancePath)
-	if err != nil {
+	info, err := os.Lstat(instancePath)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return time.Time{}, false
+	}
+	if ts, ok := removal.ReadDispatchPending(instancePath); ok {
+		return ts, true
 	}
 	return info.ModTime(), true
 }
 
-// readDispatchMarkerTime reads the dispatch pending-marker inside instancePath
-// and parses its embedded RFC3339 timestamp. It returns (time, true) only when
-// the marker exists, is readable, and its first line parses as RFC3339;
-// otherwise it returns (zero, false), and the caller falls back to the directory
-// mtime. The embedded timestamp is preferred when present because it is the
-// exact creation instant, independent of any later mtime touch (DESIGN
-// Decision 4).
-func readDispatchMarkerTime(instancePath string) (time.Time, bool) {
-	data, err := os.ReadFile(filepath.Join(instancePath, dispatchPendingMarker))
-	if err != nil {
-		return time.Time{}, false
-	}
-	line := strings.TrimSpace(string(data))
-	ts, err := time.Parse(time.RFC3339, line)
-	if err != nil {
-		return time.Time{}, false
-	}
-	return ts, true
-}
-
-// reapBackstop selects and reclaims dispatch-named, unmapped, past-TTL orphan
-// instances under workspaceRoot, returning the count actually destroyed. Each target
-// the workspace's pre-removal command allows (step reap-backstop) is
-// force-destroyed via destroyInstanceFunc, the same path the primary sweep
-// uses; one it keeps is left for the next pass. A destroy failure on one target is surfaced on
-// stderr and does not abort the rest. There is no mapping to delete (a backstop
-// target is unmapped by definition). jobsDir feeds the liveness gate in
-// selectBackstopTargets so a live-but-unmapped instance is never reclaimed.
+// reapBackstop selects dispatch-named, unmapped, past-TTL orphan instances
+// under workspaceRoot and takes each through the removal rule, the gate
+// (step reap-backstop), the re-read, the tombstone and the removal, as the
+// pass does after its mapped units, returning the count removed. It is that
+// stage of a pass run on its own, under the pass's deadline. There is no
+// mapping to delete (a backstop target is unmapped by definition). jobsDir
+// feeds the two rooted-worker guards, read under each instance's lock, so a
+// live-but-unmapped instance is never reclaimed.
 func reapBackstop(workspaceRoot, jobsDir string, now time.Time) (int, error) {
-	targets, spared, err := selectBackstopTargets(workspaceRoot, jobsDir, now)
-	if err != nil {
-		return 0, err
+	ctx, cancel := context.WithTimeout(context.Background(), passDeadline)
+	defer cancel()
+	cfg, cfgErr := loadWorkspaceConfig(workspaceRoot)
+	if removalSettingsInvalid(cfgErr) {
+		return 0, nil
 	}
-	reportSparedInstances(os.Stderr, spared)
-
-	// An unmapped instance has no session ids to hand the command; its path
-	// is the whole question.
-	gate := newRemovalGate(workspaceRoot, removeStepReapBackstop, reapStderr)
-	reaped := 0
-	for _, t := range targets {
-		// The same re-ask the mapped sweep makes, for the same reason and with
-		// a wider window to close: selection ran before the spared report and
-		// before every earlier destroy in this loop, and this is the half of
-		// the reaper with no mapping to consult, so these two guards are the
-		// whole of what stands between a live worker and its directory. They
-		// are read once the instance's lock is taken, and it is held through
-		// the removal gate and the destroy, so no niwa command can launch into
-		// the instance between the re-read and the removal. A held lock spares
-		// the instance for this pass.
-		//
-		// The re-read costs one scan of the job tree and one of each agent's
-		// records, which is what selection already paid for this instance
-		// moments ago.
-		reclaimed := func() bool {
-			release, err := takeInstanceLock(t.InstancePath, "reap")
-			if err != nil {
-				reportInstanceLockKept(reapStderr, t.InstancePath, err)
-				return false
-			}
-			defer release()
-
-			if instanceHasLiveJob(jobsDir, t.InstancePath) {
-				return false
-			}
-			if _, recorded := instanceHasRecordedSession(t.InstancePath, time.Now()); recorded {
-				return false
-			}
-			// The workspace's pre-removal command gets the last word, after the
-			// re-asks; a kept instance is asked again by the next backstop pass.
-			if !gate.ask(t.InstancePath, nil) {
-				return false
-			}
-			if err := destroyInstanceFunc(t.InstancePath); err != nil {
-				fmt.Fprintf(os.Stderr, "niwa: warning: reaping orphaned dispatch instance %s: %v\n", t.InstancePath, err)
-				return false
-			}
-			return true
-		}()
-		if reclaimed {
-			reaped++
-		}
-	}
-
-	return reaped, nil
+	a := &passActor{ctx: ctx, root: workspaceRoot, jobsDir: jobsDir, cfg: cfg, cfgErr: cfgErr, lockHolder: "reap"}
+	defer a.close()
+	var res passResult
+	err := a.backstop(now, &res)
+	return res.Reaped, err
 }
 
 // reapOpportunistically runs the reaper as a best-effort side effect at the
@@ -986,7 +996,7 @@ func reapOpportunistically(workspaceRoot string) {
 	if workspaceRoot == "" {
 		return
 	}
-	n, err := reapWorkspace(workspaceRoot, defaultJobsDir(), time.Now())
+	n, err := reapWorkspaceResolved(workspaceRoot, time.Now())
 	if err == nil && n > 0 {
 		fmt.Fprintf(os.Stderr, "niwa: reaped %d orphaned ephemeral instance(s)\n", n)
 	}

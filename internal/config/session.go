@@ -1,12 +1,16 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/remoteurl"
 )
 
 // The agent-neutral session declaration.
@@ -36,11 +40,12 @@ type SessionConfig struct {
 	Env     SessionEnvConfig     `toml:"env,omitempty"`
 	Posture SessionPostureConfig `toml:"posture,omitempty"`
 
-	// DispatchEnv, OnReap and BeforeRemove are read when niwa launches or
-	// removes a session, never at apply. See their types.
+	// DispatchEnv, OnReap, BeforeRemove and Removal are read when niwa
+	// launches or removes a session, never at apply. See their types.
 	DispatchEnv  SessionDispatchEnvConfig  `toml:"dispatch_env,omitempty"`
 	OnReap       SessionOnReapConfig       `toml:"on_reap,omitempty"`
 	BeforeRemove SessionBeforeRemoveConfig `toml:"before_remove,omitempty"`
+	Removal      SessionRemovalConfig      `toml:"removal,omitempty"`
 
 	// DispatchProfiles is [session.dispatch_profiles.<name>], keyed by the
 	// profile name. Like DispatchEnv it is read only when `niwa dispatch`
@@ -53,6 +58,59 @@ type SessionConfig struct {
 	// to `niwa dispatch` only: `niwa watch`'s launches, `niwa resume` and
 	// `niwa retask` never read it. Empty means no default.
 	DefaultDispatchProfile string `toml:"default_dispatch_profile,omitempty"`
+}
+
+// The two values [session.removal] accepts for ignored_files and job_scratch.
+// An empty value means RemovalDisposable.
+const (
+	RemovalDisposable = "disposable"
+	RemovalUnique     = "unique"
+)
+
+// SessionRemovalConfig is [session.removal]: how niwa classifies what it finds
+// in a unit it is about to remove. It is read only when niwa removes a unit,
+// never at apply.
+//
+// IgnoredFiles decides whether a git-ignored path outside a build tree is
+// disposable (the default) or unique. JobScratch decides the same for job
+// scratch in a unit that has no handoff brief. Each takes RemovalDisposable,
+// RemovalUnique, or empty for the default.
+//
+// Disposable adds workspace patterns whose matches count as disposable. Each
+// entry needs a non-empty review naming the review that added the pattern.
+// That field is an audit trail, not a control: niwa checks only that it is
+// there.
+//
+// ProofRemotes are URL prefixes, each an https:// or ssh:// URL ending in "/"
+// with a host and at least one path segment, under which a repository's
+// remote counts as proof that a commit exists elsewhere, beside the clone URL
+// the configuration gives it (for people who push to forks). Empty by
+// default; a prefix that doesn't parse is a configuration error.
+type SessionRemovalConfig struct {
+	IgnoredFiles string              `toml:"ignored_files,omitempty"`
+	JobScratch   string              `toml:"job_scratch,omitempty"`
+	Disposable   []DisposablePattern `toml:"disposable,omitempty"`
+	ProofRemotes []string            `toml:"proof_remotes,omitempty"`
+}
+
+// DisposablePattern is one [[session.removal.disposable]] entry: a relative,
+// slash-separated glob whose segments are each "**" or a path.Match pattern,
+// and the review that added it. One trailing "/" is allowed.
+type DisposablePattern struct {
+	Pattern string `toml:"pattern"`
+	Review  string `toml:"review"`
+}
+
+// IgnoredUnique reports whether a git-ignored path outside a build tree is
+// unique. The default, an empty value, is disposable.
+func (s SessionRemovalConfig) IgnoredUnique() bool {
+	return s.IgnoredFiles == RemovalUnique
+}
+
+// JobScratchUnique reports whether job scratch in a unit with no handoff brief
+// is unique. The default, an empty value, is disposable.
+func (s SessionRemovalConfig) JobScratchUnique() bool {
+	return s.JobScratch == RemovalUnique
 }
 
 // SessionDispatchProfile is one [session.dispatch_profiles.<name>] table:
@@ -530,7 +588,98 @@ func validateSessionDeclaration(s SessionConfig) error {
 	if err := checkList("session.before_remove.env", s.BeforeRemove.Env); err != nil {
 		return err
 	}
-	return checkTimeout("session.before_remove.timeout", s.BeforeRemove.Timeout)
+	if err := checkTimeout("session.before_remove.timeout", s.BeforeRemove.Timeout); err != nil {
+		return err
+	}
+	if err := validateSessionRemoval(s.Removal); err != nil {
+		return &RemovalSettingsError{Err: err}
+	}
+	return nil
+}
+
+// RemovalSettingsError is a refusal of the settings the removal rule reads,
+// [session.removal] or a repository's build_trees. A pass that meets one
+// removes nothing, since it can't tell what a unit holds without them.
+type RemovalSettingsError struct {
+	Err error
+}
+
+func (e *RemovalSettingsError) Error() string { return e.Err.Error() }
+
+func (e *RemovalSettingsError) Unwrap() error { return e.Err }
+
+// validateSessionRemoval applies the load-time refusals for [session.removal].
+func validateSessionRemoval(r SessionRemovalConfig) error {
+	if err := checkRemovalValue("session.removal.ignored_files", r.IgnoredFiles); err != nil {
+		return err
+	}
+	if err := checkRemovalValue("session.removal.job_scratch", r.JobScratch); err != nil {
+		return err
+	}
+	for i, d := range r.Disposable {
+		field := fmt.Sprintf("session.removal.disposable[%d]", i)
+		if strings.TrimSpace(d.Pattern) == "" {
+			return fmt.Errorf("%s: pattern is required", field)
+		}
+		if strings.TrimSpace(d.Review) == "" {
+			return fmt.Errorf("%s: review is required", field)
+		}
+		if err := checkDisposablePattern(d.Pattern); err != nil {
+			return fmt.Errorf("%s: pattern %q: %w", field, d.Pattern, err)
+		}
+	}
+	for i, p := range r.ProofRemotes {
+		// The reason never repeats the prefix: one carrying userinfo could
+		// hold a credential.
+		if _, err := remoteurl.ParsePrefix(p); err != nil {
+			return fmt.Errorf("session.removal.proof_remotes[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// checkRemovalValue refuses a classification other than empty,
+// RemovalDisposable or RemovalUnique.
+func checkRemovalValue(field, value string) error {
+	switch value {
+	case "", RemovalDisposable, RemovalUnique:
+		return nil
+	}
+	return fmt.Errorf("%s: %q must be %q or %q", field, value, RemovalDisposable, RemovalUnique)
+}
+
+// checkDisposablePattern reports why pattern is not a usable disposable glob,
+// or nil when it is. One trailing "/" is allowed and marks a directory. A
+// pattern none of whose segments holds a character other than "*" and "?"
+// counts as matching every path and is refused: it would make everything in
+// a unit disposable.
+func checkDisposablePattern(pattern string) error {
+	if strings.Contains(pattern, `\`) {
+		return fmt.Errorf("must not contain a backslash; separate segments with \"/\"")
+	}
+	if strings.HasPrefix(pattern, "/") {
+		return fmt.Errorf("must be relative, not start with \"/\"")
+	}
+	segs := strings.Split(strings.TrimSuffix(pattern, "/"), "/")
+	for _, seg := range segs {
+		switch seg {
+		case "":
+			return fmt.Errorf("has an empty segment")
+		case ".", "..":
+			return fmt.Errorf("has a %q segment", seg)
+		case "**":
+			continue
+		}
+		if _, err := path.Match(seg, ""); errors.Is(err, path.ErrBadPattern) {
+			return fmt.Errorf("segment %q is not a valid glob", seg)
+		}
+	}
+	for _, seg := range segs {
+		if strings.Trim(seg, "*?") != "" {
+			return nil
+		}
+	}
+	return errors.New("matches every path")
 }
 
 // validateDispatchProfiles applies the load-time refusals for

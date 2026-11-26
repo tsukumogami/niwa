@@ -13,6 +13,11 @@ func TryFileLock(string, string) (func(), error) {
 	return nil, ErrLockUnsupported
 }
 
+// TryFileLockShared has no shared lock to take here either; see TryFileLock.
+func TryFileLockShared(string) (func(), error) {
+	return nil, ErrLockUnsupported
+}
+
 // WaitFileLock has no lock to wait for here either; see TryFileLock.
 func WaitFileLock(context.Context, string, string, time.Duration) (func(), error) {
 	return nil, ErrLockUnsupported

@@ -113,7 +113,7 @@ func TestDestroyInstance_WithdrawsCreatedGrant(t *testing.T) {
 	})
 
 	var buf bytes.Buffer
-	if err := DestroyInstance(inst, WithDestroyReporter(NewReporterWithTTY(&buf, false))); err != nil {
+	if err := DestroyInstance(filepath.Dir(inst), inst, WithDestroyReporter(NewReporterWithTTY(&buf, false))); err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
 	assertGone(t, inst)
@@ -156,7 +156,7 @@ func TestDestroyInstance_WithdrawsFlagOnlyGrant(t *testing.T) {
 		ConfigFile: cfgPath, Key: key, Mode: claudetrust.ModeFlagOnly, Source: claudetrust.SourceWorkspace,
 	})
 
-	if err := DestroyInstance(inst); err != nil {
+	if err := DestroyInstance(filepath.Dir(inst), inst); err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
 	assertGone(t, inst)
@@ -253,7 +253,7 @@ func TestDestroy_RefusesTamperedRecord(t *testing.T) {
 		destroy func(root, inst string, r *Reporter) error
 	}{
 		{"DestroyInstance", func(_, inst string, r *Reporter) error {
-			return DestroyInstance(inst, WithDestroyReporter(r))
+			return DestroyInstance(filepath.Dir(inst), inst, WithDestroyReporter(r))
 		}},
 		{"DestroyWorkspace", func(root, _ string, r *Reporter) error {
 			return DestroyWorkspace(root, DestroyWorkspaceOpts{Reporter: r})
@@ -322,7 +322,7 @@ func TestDestroyInstance_UnparseableConfigWarns(t *testing.T) {
 	})
 
 	var buf bytes.Buffer
-	if err := DestroyInstance(inst, WithDestroyReporter(NewReporterWithTTY(&buf, false))); err != nil {
+	if err := DestroyInstance(filepath.Dir(inst), inst, WithDestroyReporter(NewReporterWithTTY(&buf, false))); err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
 	assertGone(t, inst)
@@ -360,7 +360,7 @@ func TestDestroyInstance_NoRecordLeavesEntry(t *testing.T) {
 	before := mustRead(t, cfgPath)
 
 	var buf bytes.Buffer
-	if err := DestroyInstance(inst, WithDestroyReporter(NewReporterWithTTY(&buf, false))); err != nil {
+	if err := DestroyInstance(filepath.Dir(inst), inst, WithDestroyReporter(NewReporterWithTTY(&buf, false))); err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
 	assertGone(t, inst)
@@ -385,7 +385,7 @@ func TestDestroyInstance_MissingConfigIsSilent(t *testing.T) {
 	})
 
 	var buf bytes.Buffer
-	if err := DestroyInstance(inst, WithDestroyReporter(NewReporterWithTTY(&buf, false))); err != nil {
+	if err := DestroyInstance(filepath.Dir(inst), inst, WithDestroyReporter(NewReporterWithTTY(&buf, false))); err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
 	assertGone(t, inst)
@@ -409,7 +409,7 @@ func TestDestroyInstance_NilReporterDropsWarning(t *testing.T) {
 		ConfigFile: cfgPath, Key: "/not/this/instance", Mode: claudetrust.ModeCreated, Source: claudetrust.SourceWorkspace,
 	})
 
-	if err := DestroyInstance(inst); err != nil {
+	if err := DestroyInstance(filepath.Dir(inst), inst); err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
 	assertGone(t, inst)
@@ -426,7 +426,7 @@ func TestDestroyInstance_UnreadableStateWarns(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := DestroyInstance(inst, WithDestroyReporter(NewReporterWithTTY(&buf, false))); err != nil {
+	if err := DestroyInstance(filepath.Dir(inst), inst, WithDestroyReporter(NewReporterWithTTY(&buf, false))); err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
 	assertGone(t, inst)
@@ -461,7 +461,7 @@ func TestDestroyInstance_UnresolvableRootWarns(t *testing.T) {
 	t.Cleanup(func() { claudeTrustKey = prev })
 
 	var buf bytes.Buffer
-	if err := DestroyInstance(inst, WithDestroyReporter(NewReporterWithTTY(&buf, false))); err != nil {
+	if err := DestroyInstance(filepath.Dir(inst), inst, WithDestroyReporter(NewReporterWithTTY(&buf, false))); err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
 	assertGone(t, inst)

@@ -20,6 +20,7 @@ import (
 	"github.com/tsukumogami/niwa/internal/firstread"
 	"github.com/tsukumogami/niwa/internal/keyreport"
 	"github.com/tsukumogami/niwa/internal/promptcapture"
+	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/testfault"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -118,8 +119,9 @@ const (
 	// The contents are the reason, in the words a developer needs to decide
 	// what to do with the directory. The sweep spares any instance carrying
 	// this file and says so, which is the same treatment an instance whose
-	// liveness cannot be read already gets.
-	dispatchRetainMarker = ".niwa/dispatch-retain"
+	// liveness cannot be read already gets. The removal rule reads the same
+	// path as its hold, so the one literal lives in internal/removal.
+	dispatchRetainMarker = removal.DispatchRetainMarker
 
 	// dispatchCaptureTimeout bounds the jobs-dir cwd-correlation poll that
 	// recovers the worker's session UUID. Exhaustion is a capture failure that
@@ -305,7 +307,7 @@ var dispatchPromptCapture = promptcapture.Read
 // second. Stdout is left out on purpose so it stays redirectable.
 var dispatchInteractive = func() bool { return IsStdinTTY() && IsStderrTTY() }
 
-func runDispatch(cmd *cobra.Command, args []string) error {
+func runDispatch(cmd *cobra.Command, args []string) (retErr error) {
 	// Arity selects the path, so no invocation can request both a positional
 	// prompt and a capture. An explicit empty argument stays an error: it is
 	// usually an unset variable in a script, and turning it into a capture
@@ -661,7 +663,8 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 	// (7) Arm the deferred self-rollback IMMEDIATELY after create, before any
 	// other work. ANY early return after create -- and before success is set --
-	// destroys the just-created instance promptly (DESIGN Decision 4). A Go
+	// destroys the just-created instance promptly (DESIGN Decision 4), unless
+	// the removal rule keeps it (below). A Go
 	// defer does not run on SIGKILL; the name+TTL reaper backstop closes that
 	// remaining gap (the dispatch instance NAME, created atomically by provision,
 	// is the backstop's eligibility signal, so no marker is required).
@@ -674,16 +677,37 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// entry exists exactly when the dispatch keeps its instance. A foreground
 	// dispatch sets success before capture, so its entry is never removed
 	// here; a change that moves that line must keep this true.
+	//
+	// Before anything is removed the rollback asks the removal rule about the
+	// instance. The dispatch failed, so no session of its own is live there,
+	// and the rule is told so; its process listing still keeps an instance a
+	// live process works in. A keeping verdict leaves the instance, its
+	// lineage entry and the authority copy all in place and prints the first
+	// keeping check with the path it names. Only a destroy that succeeded
+	// removes the entry and the copy, so neither outlives a kept instance's
+	// record of what it was granted. An error that says the instance was
+	// removed says it was kept instead when the rule keeps it.
 	success := false
 	entryCreated := false
 	defer func() {
-		if !success {
-			if entryCreated {
-				_ = workspace.RemoveLineageEntry(workspaceRoot, dispatchID)
-			}
-			_ = workspace.RemoveAuthorityCopy(workspaceRoot, dispatchID)
-			_ = destroyInstanceFunc(instancePath)
+		if success {
+			return
 		}
+		if keptByRule(cmd.ErrOrStderr(), workspaceRoot, rollbackUnit{
+			Name:         res.Name,
+			InstancePath: instancePath,
+			Liveness:     removal.LivenessGone,
+		}) {
+			retErr = withKeptInstance(retErr)
+			return
+		}
+		if err := destroyInstanceFunc(instancePath); err != nil {
+			return
+		}
+		if entryCreated {
+			_ = workspace.RemoveLineageEntry(workspaceRoot, dispatchID)
+		}
+		_ = workspace.RemoveAuthorityCopy(workspaceRoot, dispatchID)
 	}()
 
 	// (8) Drop the pending-marker carrying its own creation timestamp. This is
@@ -1103,7 +1127,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		releaseInterrupt()
 	}
 	if dispatchInterrupted(prepCtx) {
-		return interruptedDispatchError(prepCtx, "before its worker was launched; the instance was removed")
+		return interruptedDispatchError(prepCtx, "before its worker was launched; "+instanceRemovedClause)
 	}
 
 	// (9c) Open the capture window: from here until the mapping is written, the

@@ -129,6 +129,7 @@ func deepCopyRepos(in map[string]config.RepoOverride) map[string]config.RepoOver
 			ShareGitHistory:  cloneBoolPtr(ov.ShareGitHistory),
 			EnvExamplePolicy: deepCopyEnvExamplePolicy(ov.EnvExamplePolicy),
 			EnvOutput:        deepCopyEnvOutput(ov.EnvOutput),
+			BuildTrees:       slices.Clone(ov.BuildTrees),
 		}
 	}
 	return out
@@ -165,6 +166,14 @@ func deepCopySession(in config.SessionConfig) config.SessionConfig {
 			Command: in.BeforeRemove.Command,
 			Timeout: in.BeforeRemove.Timeout,
 			Env:     slices.Clone(in.BeforeRemove.Env),
+		},
+		// DisposablePattern holds only strings, so cloning the slice is a
+		// full copy.
+		Removal: config.SessionRemovalConfig{
+			IgnoredFiles: in.Removal.IgnoredFiles,
+			JobScratch:   in.Removal.JobScratch,
+			Disposable:   slices.Clone(in.Removal.Disposable),
+			ProofRemotes: slices.Clone(in.Removal.ProofRemotes),
 		},
 		DispatchProfiles:       deepCopyDispatchProfiles(in.DispatchProfiles),
 		DefaultDispatchProfile: in.DefaultDispatchProfile,

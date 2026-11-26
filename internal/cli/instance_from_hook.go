@@ -868,7 +868,12 @@ func mirrorRepos(workspaceRoot string, instances, ids []string) []mirror.Repo {
 // validates the directory is a destroyable instance (not a workspace root)
 // first. It is wired into destroyInstanceFunc; tests override that variable.
 func realDestroyInstance(instancePath string) error {
-	return destroyInstanceWarningTo(instancePath, os.Stderr)
+	// The warnings name trust entries and paths read from the instance's own
+	// state, which its agent can write, so each line passes
+	// removal.ScrubEvidence on its way to stderr.
+	w := newScrubLineWriter(os.Stderr, 400)
+	defer w.Flush()
+	return destroyInstanceWarningTo(instancePath, w)
 }
 
 // destroyInstanceWarningTo is realDestroyInstance writing to w. Plugin-record
@@ -880,8 +885,24 @@ func destroyInstanceWarningTo(instancePath string, w io.Writer) error {
 	if err := workspace.ValidateInstanceDir(instancePath); err != nil {
 		return err
 	}
-	return workspace.DestroyInstance(instancePath,
+	root, err := destroyWorkspaceRoot(instancePath)
+	if err != nil {
+		return err
+	}
+	return workspace.DestroyInstance(root, instancePath,
 		workspace.WithDestroyReporter(workspace.NewWarningReporter(w)))
+}
+
+// destroyWorkspaceRoot resolves the workspace root a teardown destroys an
+// instance under: the directory holding .niwa/workspace.toml found walking
+// up from the instance's parent. DestroyInstance then refuses the destroy
+// unless the instance sits directly under that root.
+func destroyWorkspaceRoot(instancePath string) (string, error) {
+	_, configDir, err := config.Discover(filepath.Dir(filepath.Clean(instancePath)))
+	if err != nil {
+		return "", fmt.Errorf("refusing to destroy %s: no workspace root found above it: %w", instancePath, err)
+	}
+	return filepath.Dir(configDir), nil
 }
 
 // writeReapKeyEnvFile appends `export NIWA_REAP_KEY='<key>'` to the hook's

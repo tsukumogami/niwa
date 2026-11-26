@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/agentplan"
+	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -77,6 +79,11 @@ func writeJobEntry(t *testing.T, jobsDir, sessionID string) {
 // stubDestroyAll installs a fake destroyInstanceFunc that records every path it
 // was asked to destroy, without touching the filesystem. It restores the
 // original on cleanup and returns a pointer to the recorded slice.
+//
+// The reap removes an instance through its tombstone rather than through
+// destroyInstanceFunc, so the stub stands in for that removal too: it
+// records the instance's own path and renames the tombstone back, leaving
+// the filesystem as a destroy that did nothing would.
 func stubDestroyAll(t *testing.T) *[]string {
 	t.Helper()
 	var destroyed []string
@@ -85,8 +92,45 @@ func stubDestroyAll(t *testing.T) *[]string {
 		destroyed = append(destroyed, path)
 		return nil
 	}
-	t.Cleanup(func() { destroyInstanceFunc = prev })
+	prevTomb := removeTombstoneFunc
+	removeTombstoneFunc = func(p *workspace.DestroyPlan, tomb string) error {
+		destroyed = append(destroyed, p.Dir())
+		_, err := workspace.UntombstoneInstance(p.Root(), tomb)
+		return err
+	}
+	t.Cleanup(func() {
+		destroyInstanceFunc = prev
+		removeTombstoneFunc = prevTomb
+	})
+	stubProcessListing(t)
 	return &destroyed
+}
+
+// stubProcessListing hands every pass in the test an empty listing that
+// succeeded, in place of the system-wide lsof the pass takes once and then
+// again for each unit it checks on its tombstone. No test that uses it starts
+// a process in an instance, so the real listing would find nothing there
+// either. A test about what the listing finds sets listProcessesFunc itself
+// after its fixtures, and a test that needs the real one calls
+// realProcessListing.
+func stubProcessListing(t *testing.T) {
+	t.Helper()
+	prev := listProcessesFunc
+	listProcessesFunc = func(context.Context, *removal.Env) *removal.Listing {
+		return &removal.Listing{}
+	}
+	t.Cleanup(func() { listProcessesFunc = prev })
+}
+
+// realProcessListing puts the pass's real process listing back for the rest
+// of the test, after a fixture stubbed it.
+func realProcessListing(t *testing.T) {
+	t.Helper()
+	prev := listProcessesFunc
+	listProcessesFunc = func(ctx context.Context, env *removal.Env) *removal.Listing {
+		return env.ListProcesses(ctx)
+	}
+	t.Cleanup(func() { listProcessesFunc = prev })
 }
 
 // TestReap_DeadEphemeralOrphan_Reclaimed: an ephemeral instance whose session

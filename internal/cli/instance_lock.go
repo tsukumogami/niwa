@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -75,9 +76,13 @@ func takeInstanceLock(instancePath, command string) (func(), error) {
 }
 
 // reportInstanceLockKept prints the line a pass that spares an instance on its
-// lock prints, in the shape the removal gate's spare lines have.
+// lock prints, in the shape the removal gate's spare lines have. The instance's
+// name and the reason, which carries the holder line read from the lock file,
+// both pass removal.ScrubEvidence first.
 func reportInstanceLockKept(w io.Writer, instancePath string, err error) {
-	fmt.Fprintf(w, "niwa: kept %s: %s\n", sanitizeRemovalGateText(filepath.Base(instancePath), 80), instanceLockReason(err))
+	fmt.Fprintf(w, "niwa: kept %s: %s\n",
+		removal.ScrubEvidence(filepath.Base(instancePath), 80),
+		removal.ScrubEvidence(instanceLockReason(err), 200))
 }
 
 // instanceLockReason says why the lock wasn't taken, in words that fit after

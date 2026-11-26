@@ -12,6 +12,7 @@ import (
 
 	"github.com/tsukumogami/niwa/internal/agent"
 	"github.com/tsukumogami/niwa/internal/cli/sessionattach"
+	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -32,11 +33,14 @@ const launchRecordGrace = time.Hour
 // can't be read, a home that can't be found, an agent whose transcripts niwa
 // doesn't know how to find, and a record younger than launchRecordGrace all
 // keep the record. A file that isn't a record niwa can read is kept with one
-// warning line naming it, and the sweep goes on with the others.
+// warning line naming it, and the sweep goes on with the others. A path or
+// error a warning names passes removal.ScrubEvidence first: a record's
+// file name and its decode error come from whatever wrote the file.
 func sweepLaunchRecords(workspaceRoot, home string, w io.Writer, now time.Time) int {
 	entries, err := workspace.ListLaunchRecords(workspaceRoot)
 	if err != nil {
-		fmt.Fprintf(w, "niwa: warning: could not read the launch store %s: %v\n", workspace.LaunchDir(workspaceRoot), err)
+		fmt.Fprintf(w, "niwa: warning: could not read the launch store %s: %s\n",
+			removal.ScrubEvidence(workspace.LaunchDir(workspaceRoot), 400), removal.ScrubEvidence(err.Error(), 400))
 		return 0
 	}
 	if len(entries) == 0 {
@@ -52,12 +56,14 @@ func sweepLaunchRecords(workspaceRoot, home string, w io.Writer, now time.Time) 
 	for _, e := range entries {
 		path := filepath.Join(workspace.LaunchDir(workspaceRoot), e.Name)
 		if e.Err != nil {
-			fmt.Fprintf(w, "niwa: warning: kept launch record %s: %v\n", path, e.Err)
+			fmt.Fprintf(w, "niwa: warning: kept launch record %s: %s\n",
+				removal.ScrubEvidence(path, 400), removal.ScrubEvidence(e.Err.Error(), 400))
 			continue
 		}
 		rec := e.Record
 		if !workspace.ValidSessionID(rec.SessionID) || !validInstanceName(rec.InstanceName) {
-			fmt.Fprintf(w, "niwa: warning: kept launch record %s: it does not name a valid session and instance\n", path)
+			fmt.Fprintf(w, "niwa: warning: kept launch record %s: it does not name a valid session and instance\n",
+				removal.ScrubEvidence(path, 400))
 			continue
 		}
 		if !projectsReadable {
@@ -74,7 +80,8 @@ func sweepLaunchRecords(workspaceRoot, home string, w io.Writer, now time.Time) 
 			continue
 		}
 		if err := workspace.RemoveLaunchRecord(workspaceRoot, rec.DispatchID); err != nil {
-			fmt.Fprintf(w, "niwa: warning: could not remove launch record %s: %v\n", path, err)
+			fmt.Fprintf(w, "niwa: warning: could not remove launch record %s: %s\n",
+				removal.ScrubEvidence(path, 400), removal.ScrubEvidence(err.Error(), 400))
 			continue
 		}
 		removed++

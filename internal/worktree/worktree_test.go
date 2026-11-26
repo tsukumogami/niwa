@@ -226,7 +226,7 @@ func TestDestroySession_Integration(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	state, err := DestroySession(context.Background(), root, sessionID, true /* force */, StdGitInvoker{})
+	state, err := DestroySession(context.Background(), root, sessionID, true /* force */, StdGitInvoker{}, DiscardingGitWorktreeRemover{Git: StdGitInvoker{}})
 	if err != nil {
 		t.Fatalf("DestroySession: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestDestroySession_Integration(t *testing.T) {
 	}
 
 	// Idempotent second destroy returns the terminal state, no error.
-	state2, err := DestroySession(context.Background(), root, sessionID, true, StdGitInvoker{})
+	state2, err := DestroySession(context.Background(), root, sessionID, true, StdGitInvoker{}, DiscardingGitWorktreeRemover{Git: StdGitInvoker{}})
 	if err != nil {
 		t.Fatalf("second DestroySession: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestDestroySession_AttachLockGuard(t *testing.T) {
 		writeLiveAttachSentinel(t, worktreePath)
 
 		inv := &recordingInvoker{}
-		state, err := DestroySession(context.Background(), root, sid, false /* force */, inv)
+		state, err := DestroySession(context.Background(), root, sid, false /* force */, inv, DiscardingGitWorktreeRemover{Git: inv})
 		if !errors.Is(err, ErrSessionAttached) {
 			t.Fatalf("want ErrSessionAttached, got %v", err)
 		}
@@ -355,7 +355,7 @@ func TestDestroySession_AttachLockGuard(t *testing.T) {
 		writeLiveAttachSentinel(t, worktreePath)
 
 		inv := &recordingInvoker{}
-		state, err := DestroySession(context.Background(), root, sid, true /* force */, inv)
+		state, err := DestroySession(context.Background(), root, sid, true /* force */, inv, DiscardingGitWorktreeRemover{Git: inv})
 		if err != nil {
 			t.Fatalf("DestroySession with force: %v", err)
 		}
@@ -372,7 +372,7 @@ func TestDestroySession_AttachLockGuard(t *testing.T) {
 		// No attach sentinel written -> AttachAvailable.
 
 		inv := &recordingInvoker{}
-		state, err := DestroySession(context.Background(), root, sid, false /* force */, inv)
+		state, err := DestroySession(context.Background(), root, sid, false /* force */, inv, DiscardingGitWorktreeRemover{Git: inv})
 		if err != nil {
 			t.Fatalf("DestroySession without attach: %v", err)
 		}
@@ -488,7 +488,7 @@ func TestDestroySession_DirtyGuard(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		state, err := DestroySession(context.Background(), root, sid, false /* force */, StdGitInvoker{})
+		state, err := DestroySession(context.Background(), root, sid, false /* force */, StdGitInvoker{}, DiscardingGitWorktreeRemover{Git: StdGitInvoker{}})
 		if !errors.Is(err, ErrWorktreeDirty) {
 			t.Fatalf("want ErrWorktreeDirty, got %v", err)
 		}
@@ -516,7 +516,7 @@ func TestDestroySession_DirtyGuard(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		state, err := DestroySession(context.Background(), root, sid, true /* force */, StdGitInvoker{})
+		state, err := DestroySession(context.Background(), root, sid, true /* force */, StdGitInvoker{}, DiscardingGitWorktreeRemover{Git: StdGitInvoker{}})
 		if err != nil {
 			t.Fatalf("DestroySession with force on dirty worktree: %v", err)
 		}
@@ -529,7 +529,7 @@ func TestDestroySession_DirtyGuard(t *testing.T) {
 	t.Run("succeeds_when_clean", func(t *testing.T) {
 		root, sid, _ := setup(t)
 
-		state, err := DestroySession(context.Background(), root, sid, false /* force */, StdGitInvoker{})
+		state, err := DestroySession(context.Background(), root, sid, false /* force */, StdGitInvoker{}, DiscardingGitWorktreeRemover{Git: StdGitInvoker{}})
 		if err != nil {
 			t.Fatalf("DestroySession on clean worktree: %v", err)
 		}

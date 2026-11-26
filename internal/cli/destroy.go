@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/tui"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
@@ -66,6 +68,15 @@ Behavior depends on where you run it from and which arguments are provided:
 
 By default, destroy refuses to proceed if any cloned repository has
 uncommitted changes. Use --force <name> to skip this check for one instance.
+
+Linked worktrees inside the instance are removed before its session, one
+directory at a time without following a link and without git. Without
+--force, each one's git status is listed with the scan, a locked worktree or
+one holding a repository is listed as left to go with the instance
+directory, and a repository configuration that names a program, or a change
+the listing didn't show, found when every worktree is read again before the
+first one goes, stops destroy with the path named.
+
 --force never wipes the workspace: without an instance name at the workspace
 root it refuses and points at --workspace.
 
@@ -74,6 +85,16 @@ owns it (the one niwa recorded when it provisioned or dispatched into the
 instance), with ` + "`claude rm`" + `. Claude Code keeps the session's transcript, so
 ` + "`claude --resume <session-id>`" + ` still opens it. Use --keep-session to keep the
 session.
+
+Before it removes anything, destroy checks the job directory of every session
+it will pass to claude rm, under the jobs root Claude Code uses
+($CLAUDE_CONFIG_DIR/jobs, or ~/.claude/jobs): the jobs root and the job
+directory must be real directories you own, with no group or other write
+permission, on one device and reached through no link below your home
+directory, and nothing in the job directory may be a link, pipe, socket or
+device. Any failure, an invalid CLAUDE_CONFIG_DIR included, stops destroy
+with the path named and removes nothing; --force doesn't skip it. Every
+claude call destroy makes runs from an empty directory under ~/.niwa.
 
 Before any prompt, destroy refuses an instance something still needs: a
 session niwa mapped to it that Claude Code lists as running, or the
@@ -200,9 +221,16 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingP
 	}
 	defer release()
 
+	// Every claude call destroy makes runs from an empty directory under
+	// ~/.niwa/w-<key>/scratch/, and every claude rm waits on the vet of the
+	// session's job directory under the jobs root ResolveJobsRoot gives.
+	cc := newClaudeCalls(workspaceRoot)
+	defer cc.close()
+	ctx := withClaudeCalls(context.Background(), cc)
+
 	// Before any prompt: a running session or the pre-removal command keeps
 	// the instance unless --force overrides them, and then each is named.
-	listSessions := listClaudeSessionsOnce()
+	listSessions := listClaudeSessionsOnce(cc)
 	if kept := destroyPreflight(workspaceRoot, []string{instanceDir}, removeStepDestroy, listSessions); len(kept) > 0 {
 		reportDestroyKept(cmd.ErrOrStderr(), kept, force)
 		if !force {
@@ -210,11 +238,42 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingP
 		}
 	}
 
+	// The linked worktrees inside the instance, found by niwa's walk. They
+	// are removed through the no-follow walk before the sessions, never by
+	// git; unforced, each one's configuration and status are read with the
+	// scan.
+	worktrees := newDestroyWorktrees(ctx, workspaceRoot, instanceDir, force)
+	defer worktrees.close()
+
 	if !force {
-		scan, err := workspace.ScanInstance(instanceDir, workspace.WithForge(newDestroyForge()))
+		// The scan starts git only through the removal pass's command
+		// builder, from its own removal environment: the filtered PATH, the
+		// fixed environment and overrides, and the configuration check again
+		// right before each status. Each remote is read the way the pass
+		// reads a proof remote, in no repository against the repository's
+		// own remote.<name>.url, and a commit the repository lacks is
+		// fetched into a scratch store, never into the repository; a remote
+		// that can't be read keeps. Before its first git call the scan runs
+		// the removal walk over the instance and the configuration check on
+		// every repository the walk finds; a flagged repository, or one the
+		// walk keeps, gets no further git call and is listed as loss naming
+		// the key or the walk's reason, and every submodule and nested
+		// repository is read with its own status.
+		scanEnv := newRemovalEnv(workspaceRoot, userHomeDir(), os.Getenv("PATH"))
+		defer scanEnv.Close()
+		scan, err := workspace.ScanInstance(instanceDir,
+			workspace.WithForge(newDestroyForge()),
+			workspace.WithRepositoryWalk(destroyScanWalk(scanEnv)),
+			workspace.WithGitCommand(scanEnv.ScanCommand),
+			workspace.WithRemoteFetch(scanEnv.ScanFetch))
 		if err != nil {
 			return fmt.Errorf("scanning instance for unpushed work: %w", err)
 		}
+		findings, err := worktrees.scan(ctx)
+		if err != nil {
+			return err
+		}
+		scan.Repos = append(scan.Repos, findings...)
 		if scan.HasLoss() {
 			workspace.FormatScans([]workspace.InstanceScan{scan}, cmd.ErrOrStderr(), scan.InstanceName)
 
@@ -222,7 +281,7 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingP
 				return fmt.Errorf("instance has unpushed work and stdin is not a terminal; aborting (resolve unpushed work, or use --force to destroy without confirmation)")
 			}
 
-			matched, err := ReadConfirmation("> ", scan.InstanceName, os.Stdin, cmd.ErrOrStderr())
+			matched, err := ReadConfirmation("> ", scan.InstanceName, cmd.InOrStdin(), cmd.ErrOrStderr())
 			if err != nil {
 				return fmt.Errorf("confirmation aborted: %w", err)
 			}
@@ -232,12 +291,30 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingP
 		}
 	}
 
-	reporter := workspace.NewReporter(cmd.ErrOrStderr())
+	// Before the first removal step, the job directory of every session
+	// destroy will pass to claude rm is vetted; a failure stops destroy with
+	// the instance and every session in place. --force doesn't skip it: what
+	// it guards lies outside the instance. --keep-session passes no session.
 	if !destroyKeepSession {
-		removeOwningSessionsListed(reporter, workspaceRoot, []string{instanceDir}, listSessions)
+		if err := vetDestroySessions(ctx, cc, workspaceRoot, []string{instanceDir}, listSessions); err != nil {
+			return fmt.Errorf("nothing was destroyed: %s", removal.ScrubEvidence(err.Error(), 400))
+		}
 	}
 
-	if err := workspace.DestroyInstance(instanceDir,
+	// The worktrees, before the sessions: unforced, every one's configuration
+	// and a fresh status are read again before the first removal, then each
+	// goes through the no-follow walk with no git call in between. A worktree
+	// the walk won't remove goes with the instance directory.
+	if err := worktrees.remove(ctx, cmd.ErrOrStderr()); err != nil {
+		return err
+	}
+
+	reporter := workspace.NewReporter(cmd.ErrOrStderr())
+	if !destroyKeepSession {
+		removeOwningSessionsListed(ctx, reporter, workspaceRoot, []string{instanceDir}, listSessions)
+	}
+
+	if err := workspace.DestroyInstance(workspaceRoot, instanceDir,
 		workspace.WithDestroyReporter(reporter)); err != nil {
 		return err
 	}
@@ -416,7 +493,11 @@ func runDestroyEmptyWorkspace(cmd *cobra.Command, workspaceRoot string) error {
 // instance for non-pushed work and list any it finds, then require the
 // workspace name, typed at a prompt or passed as confirm, whether or not the
 // scan found anything. Only then destroy every instance and the workspace
-// root, landing the shell at the workspace parent.
+// root, landing the shell at the workspace parent. The scan and the order
+// are an unforced single-instance destroy's, on every instance: the walk and
+// the configuration check before the scan's first git call, and after the
+// confirmation and the vet, every worktree's re-check and fresh status
+// before the first worktree removal, then the worktrees, then the sessions.
 //
 // The confirmation is unconditional because this is the one command that
 // removes every other session's instance too; a clean scan says nothing about
@@ -464,18 +545,58 @@ func runDestroyWorkspace(cmd *cobra.Command, workspaceRoot, confirm string) erro
 	// Before the scan and any prompt: the workspace goes whole or not at all,
 	// so one instance something still needs refuses all of it. --workspace
 	// takes no --force, so there is nothing to override this with.
-	listSessions := listClaudeSessionsOnce()
+	cc := newClaudeCalls(workspaceRoot)
+	defer cc.close()
+	ctx := withClaudeCalls(context.Background(), cc)
+	listSessions := listClaudeSessionsOnce(cc)
 	if kept := destroyPreflight(workspaceRoot, instances, removeStepDestroyWorkspace, listSessions); len(kept) > 0 {
 		reportDestroyKept(cmd.ErrOrStderr(), kept, false)
 		return fmt.Errorf("nothing was destroyed; %d instance(s) are still needed (destroy the others by name, or run niwa destroy --workspace again once nothing needs them)", len(kept))
 	}
 
 	// Scan for non-pushed work, so whoever confirms sees what would be lost.
-	scans, scanErr := workspace.ScanInstancesParallel(workspaceRoot, instances, 0, workspace.WithForge(newDestroyForge()))
+	// The scan is an unforced single-instance destroy's, on every instance:
+	// before its first git call in an instance it runs the removal walk and
+	// the configuration check on every repository the walk finds, a flagged
+	// one getting no further git call and being listed as loss naming the
+	// key, and it starts git only through the removal pass's command builder
+	// from its own removal environment, which the parallel scan's workers
+	// share (its lazily filled parts are under its lock).
+	scanEnv := newRemovalEnv(workspaceRoot, userHomeDir(), os.Getenv("PATH"))
+	defer scanEnv.Close()
+	scans, scanErr := workspace.ScanInstancesParallel(workspaceRoot, instances, 0,
+		workspace.WithForge(newDestroyForge()),
+		workspace.WithRepositoryWalk(destroyScanWalk(scanEnv)),
+		workspace.WithGitCommand(scanEnv.ScanCommand),
+		workspace.WithRemoteFetch(scanEnv.ScanFetch))
 	if scanErr != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: scan reported errors: %v\n", scanErr)
 		// Continue — individual repo errors are surfaced in scans[*].Skipped
 		// and the confirmation below still fires.
+	}
+
+	// Each instance's linked worktrees, found by niwa's walk, are read the
+	// way an unforced single-instance destroy reads them, one instance after
+	// another once the parallel scan is done, and listed with that
+	// instance's findings. Something that changed under the walk refuses the
+	// whole destroy.
+	if len(scans) != len(instances) {
+		return fmt.Errorf("nothing was destroyed: the scan returned %d result(s) for %d instance(s)", len(scans), len(instances))
+	}
+	worktrees := make([]*destroyWorktrees, 0, len(instances))
+	defer func() {
+		for _, w := range worktrees {
+			w.close()
+		}
+	}()
+	for i, inst := range instances {
+		w := newDestroyWorktrees(ctx, workspaceRoot, inst, false)
+		worktrees = append(worktrees, w)
+		findings, err := w.scan(ctx)
+		if err != nil {
+			return err
+		}
+		scans[i].Repos = append(scans[i].Repos, findings...)
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "This destroys %d instance(s) and the workspace at %s.\n", len(instances), workspaceRoot)
 	promptName := workspaceName
@@ -520,9 +641,36 @@ func runDestroyWorkspace(cmd *cobra.Command, workspaceRoot, confirm string) erro
 		return fmt.Errorf("nothing was destroyed: %v; run niwa destroy --workspace again once it is done", err)
 	}
 
+	// Every instance's sessions are vetted before the first removal step; a
+	// failure on any stops the whole destroy with nothing removed.
+	if !destroyKeepSession {
+		if err := vetDestroySessions(ctx, cc, workspaceRoot, instances, listSessions); err != nil {
+			return fmt.Errorf("nothing was destroyed: %s", removal.ScrubEvidence(err.Error(), 400))
+		}
+	}
+
+	// The worktrees, before the sessions, as an unforced single-instance
+	// destroy removes them: every worktree in every instance has its
+	// configuration read again and a fresh status taken before the first
+	// removal anywhere, so a reason, a read that fails or a change the
+	// listing didn't show, in any instance, stops the destroy with every
+	// worktree, session and instance kept. Then each instance's worktrees go
+	// through the no-follow walk with no git call in between; a worktree the
+	// walk won't remove goes with the instance directory.
+	for _, w := range worktrees {
+		if err := w.recheck(ctx); err != nil {
+			return err
+		}
+	}
+	for _, w := range worktrees {
+		if err := w.removeChecked(cmd.ErrOrStderr()); err != nil {
+			return err
+		}
+	}
+
 	reporter := workspace.NewReporter(cmd.ErrOrStderr())
 	if !destroyKeepSession {
-		removeOwningSessionsListed(reporter, workspaceRoot, instances, listSessions)
+		removeOwningSessionsListed(ctx, reporter, workspaceRoot, instances, listSessions)
 	}
 
 	// Only the locked, checked list is removed, and the root stays while

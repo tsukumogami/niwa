@@ -253,6 +253,7 @@ func reconcileFailedHookCreate(stderr io.Writer, instanceRoot, sessionID string,
 
 	state, err := worktree.DestroySession(
 		context.Background(), instanceRoot, sessionID, false /* force */, worktree.StdGitInvoker{},
+		worktree.DiscardingGitWorktreeRemover{Ctx: context.Background(), Git: worktree.StdGitInvoker{}},
 	)
 	if err != nil {
 		if errors.Is(err, worktree.ErrWorktreeDirty) {
@@ -373,7 +374,8 @@ func teardownHookSession(stderr io.Writer, instanceRoot, sessionID, event string
 		}
 	}
 
-	_, err := worktree.DestroySession(context.Background(), instanceRoot, sessionID, false /* force */, worktree.StdGitInvoker{})
+	_, err := worktree.DestroySession(context.Background(), instanceRoot, sessionID, false /* force */, worktree.StdGitInvoker{},
+		worktree.DiscardingGitWorktreeRemover{Ctx: context.Background(), Git: worktree.StdGitInvoker{}})
 	if err == nil {
 		return
 	}

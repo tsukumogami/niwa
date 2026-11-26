@@ -462,7 +462,7 @@ func TestManagedMarketplace_CreateApplyDestroy(t *testing.T) {
 	p.assertRegisteredFromManagedCopy(t)
 
 	// Destroying the instance that registered last leaves the entry valid.
-	if err := DestroyInstance(second, WithPluginRecordBaseDir(p.home)); err != nil {
+	if err := DestroyInstance(filepath.Dir(second), second, WithPluginRecordBaseDir(p.home)); err != nil {
 		t.Fatalf("destroy: %v", err)
 	}
 	p.assertRegisteredFromManagedCopy(t)

@@ -648,7 +648,7 @@ func TestClaudeTrust_OffThenDestroyLeavesFlaglessEntry(t *testing.T) {
 	}
 	before := snapFile(t, f.claudeJSON)
 
-	if err := DestroyInstance(f.instanceRoot, WithDestroyReporter(f.applier.Reporter), WithPluginRecordBaseDir(f.home)); err != nil {
+	if err := DestroyInstance(filepath.Dir(f.instanceRoot), f.instanceRoot, WithDestroyReporter(f.applier.Reporter), WithPluginRecordBaseDir(f.home)); err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
 	assertFileUntouched(t, f.claudeJSON, before)
@@ -1159,7 +1159,7 @@ func TestClaudeTrust_StaysInsideItsBoundary(t *testing.T) {
 		t.Errorf("projects = %v, want only %s and %s added", projects, key, repoKey)
 	}
 
-	if err := DestroyInstance(f.instanceRoot, WithDestroyReporter(f.applier.Reporter), WithPluginRecordBaseDir(f.home)); err != nil {
+	if err := DestroyInstance(filepath.Dir(f.instanceRoot), f.instanceRoot, WithDestroyReporter(f.applier.Reporter), WithPluginRecordBaseDir(f.home)); err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
 	}
 	doc := readClaudeConfig(t, f.claudeJSON)

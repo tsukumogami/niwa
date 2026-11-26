@@ -5,7 +5,12 @@ single Claude Code background session and reclaimed when you delete that session
 from the Agent View. The model is one-to-one: **1 Claude Code background session ==
 1 ephemeral niwa instance**. A session that finishes its task, goes idle, or is
 suspended keeps its instance — it is still listed and resumable, so you can re-open
-it into the same clone — and only an explicit delete tears the instance down. When
+it into the same clone — and for a Claude Code session only an explicit delete
+tears the instance down, with the exceptions [`niwa reap`](#niwa-reap) lists: a
+reap through another mapping of the instance that reads gone, or a session job
+entry niwa can't decode, takes the instance and the session; a Codex session's
+instance goes after the idle grace; and the backstop takes an unmapped dispatch
+instance past its TTL. When
 you dispatch workers with `claude agents` from the workspace
 root, each worker gets its own isolated instance — its own clone, its own
 secrets, its own CLAUDE context — instead of all the workers sharing the one
@@ -22,10 +27,14 @@ workspace-root level, one per dispatched session.
 directory's working directory. Sessions fanned out from the workspace root all
 share that one tree, so parallel agents step on each other. The fix is to give
 each dispatched session its own instance, created on `SessionStart` and reclaimed
-by the reaper once you delete the session. Teardown is delete-only: the reaper
-keys on the session's Claude Code job entry disappearing (the proxy for deletion),
-so completed, idle, and suspended sessions keep their instances and stay
-resumable.
+by the reaper once you delete the session. For a Claude Code session, teardown
+is delete-only: the reaper keys on the session's Claude Code job entry
+disappearing (the proxy for deletion), so completed, idle, and suspended
+sessions keep their instances and stay resumable, unless another mapping of the
+instance reads gone or niwa can't decode the session's own job entry, either of
+which lets a reap take the instance and the session. A Codex session's instance
+is reclaimed after the idle grace instead, and the backstop takes an unmapped
+dispatch instance past its TTL.
 
 niwa already owns the analogous surface one level down — per-repo worktree
 hooks, a `.niwa/sessions/` store, non-interactive `niwa destroy --force`. This
@@ -52,15 +61,22 @@ agent cd's into the instance and works there in isolation
       | you delete the session (Ctrl+X twice in `claude agents`)
       | -> its ~/.claude/jobs/<id>/ entry disappears
       v
-niwa reap  (on demand, or at the next niwa create)
-           sees the job entry gone, niwa destroy --force, run the on-reap
-           command (if declared), delete mapping once it succeeds
+niwa reap  (on demand, or when niwa dispatch, create or watch runs)
+           sees the job entry gone, checks the instance for work found
+           nowhere else, removes the instance and its session, runs the
+           on-reap command (if declared), deletes the mapping once the
+           command succeeds
 ```
 
 The reaper is the single automatic teardown path; `niwa destroy` is the manual one
-(see [Destroying an instance by hand](#destroying-an-instance-by-hand)). It runs on demand and opportunistically at
-the next `niwa create`. Until you delete the session, its instance survives — a
-completed-but-resumable session can be re-opened into the same clone.
+(see [Destroying an instance by hand](#destroying-an-instance-by-hand)). It runs
+on demand and opportunistically when `niwa dispatch`, `niwa create` or
+`niwa watch` runs. Until you delete the session, its instance survives — a
+completed-but-resumable session can be re-opened into the same clone. The
+exceptions are in [`niwa reap`](#niwa-reap): a reap through another mapping of
+the instance that reads gone, or a session job entry niwa can't decode, takes
+the instance and the session; a Codex session's instance is reclaimed after the
+idle grace; and the backstop takes an unmapped dispatch instance past its TTL.
 
 ## The session hooks
 
@@ -164,12 +180,22 @@ and any friendly slug is cosmetic metadata in `label`.
 
 ## Teardown
 
-Teardown is **delete-only** and driven entirely by the reaper. An ephemeral
-instance is reclaimed only when you delete its backing session from the Agent View
-(Ctrl+X twice in `claude agents`), which removes the session's
-`~/.claude/jobs/<id>/` entry — the signal the reaper keys on. A session that
-finishes its task, goes idle, or is suspended keeps its instance and stays
-resumable.
+For a Claude Code session, teardown is **delete-only** and driven entirely by
+the reaper. Its ephemeral instance is reclaimed only when you delete its backing
+session from the Agent View (Ctrl+X twice in `claude agents`), which removes the
+session's `~/.claude/jobs/<id>/` entry — the signal the reaper keys on. A
+session that finishes its task, goes idle, or is suspended keeps its instance
+and stays resumable, unless a reap of its instance through another mapping
+that reads gone removes it, or niwa can't decode the session's own job entry,
+which reads as gone (see [`niwa reap`](#niwa-reap)); either way the reap
+removes the session too. Two removals don't wait for a
+delete: a Codex session's instance goes once nobody has worked in it for the
+idle grace and no writer holds its lock, and the backstop takes an unmapped
+dispatch instance past its 30-minute TTL. All of this holds only while the
+agent can't write the files the reaper reads: one that can delete or rewrite
+the job entry, or rewrite the mapping, can make the reaper reclaim the
+instance sooner (see
+[What to deny the agent writes to](#what-to-deny-the-agent-writes-to)).
 
 `SessionEnd` is **not** a teardown trigger. It fires on idle-suspend, `/clear`,
 logout, and similar, none of which mean the session was deleted, so the
@@ -259,21 +285,36 @@ niwa reap
 
 `reap` reclaims ephemeral instances whose backing session you have deleted. It
 enumerates the workspace's instances (`niwa list --json`), joins each against its
-session mapping, and force-destroys an instance only when BOTH hold:
+session mapping, and removes a mapped instance only when all three hold:
 
-- the instance is marked **ephemeral**, and
-- its session is **deleted** by the liveness rule.
+- a session mapping marks the instance **ephemeral**,
+- its session is **deleted** by the liveness rule, and
+- the removal rule finds nothing in the unit that exists nowhere else.
+
+The name+TTL backstop is the one other path: it takes an unmapped instance
+whose name has the dispatch form once it's older than 30 minutes, under the
+same removal rule (see
+[Never reap a live instance, mapped or not](#never-reap-a-live-instance-mapped-or-not)).
 
 It also walks the stored session mappings for those whose instance is already
 gone, and when the workspace declares an on-reap command, it runs it for each
 removed session and keeps the mapping until it succeeds (see
 [The reap key and the on-reap command](#the-reap-key-and-the-on-reap-command)).
 
+What a reap decides depends on files outside the instance it's judging, and on
+programs those files name. A workspace whose agents could write them should
+deny that; [What to deny the agent writes to](#what-to-deny-the-agent-writes-to)
+lists each place and why it matters, and says where a repository inside the
+instance can still make a reap run a program (tracked in niwa#577).
+
 ### The liveness rule
 
-A session is **live** as long as its Claude Code job entry at
-`~/.claude/jobs/<session-id>/state.json` exists (and the `sessionId` recorded
-inside, when present, matches). It is **dead** only when that entry is gone.
+A Claude Code session is **live** as long as its job entry at
+`~/.claude/jobs/<session-id>/state.json` (under `CLAUDE_CONFIG_DIR` when that's
+set; [What to deny the agent writes to](#what-to-deny-the-agent-writes-to) says
+where) exists, decodes, and records that session's `sessionId` when it records
+one. It is **dead** when that entry is gone, and an entry that won't decode or
+names another session reads the same way.
 
 This is the whole rule: **entry present = live, entry gone = deleted.** Job-entry
 presence is a faithful proxy for "the session still exists in the Agent View,"
@@ -282,16 +323,24 @@ suspended, but still listed). A completed or idle session keeps its entry — an
 keeps its instance. Only deleting the session removes the entry, and that delete is
 what the reaper reclaims on.
 
-Liveness deliberately does **not** look at the job `state` label, at
-`firstTerminalAt`, at an idle TTL, or at transcript mtime. Each of those is true of
-a live-but-resumable session, so keying on any of them would reap an instance whose
-session you might still re-open. (That is exactly what the earlier rule did, and the
-bug it caused.)
+A Claude Code session's liveness deliberately does **not** look at the job
+`state` label, at `firstTerminalAt`, at an idle TTL, or at transcript mtime.
+Each of those is true of a live-but-resumable session, so keying on any of them
+would reap an instance whose session you might still re-open. (That is exactly
+what the earlier rule did, and the bug it caused.) A Codex session's mapping is
+read by activity and the idle grace instead, and the worktree sweep reads
+transcripts; the deny list below covers both.
 
-`reap` never destroys a non-ephemeral (developer) instance, and never reaps on a
-marker alone — the session must be gone. An ephemeral instance with no resolvable
-mapping is skipped by the primary (mapping-keyed) sweep — without a session id the
-entry-present liveness rule can't run.
+The primary (mapping-keyed) sweep takes only an instance a session mapping
+marks ephemeral, and never on the marker alone — the session must be gone. The
+mapping is what marks it: a mapping whose `instance_path` names an instance and
+whose `ephemeral` is true makes that instance a target, a developer instance
+included, which is why the mapping store is on the deny list. An ephemeral
+instance with no resolvable mapping is skipped by the primary sweep — without a
+session id the entry-present liveness rule can't run. The backstop never takes
+a developer instance under its usual name, since that name lacks the dispatch
+form, but an instance renamed into that form is a backstop candidate once it's
+past the TTL.
 
 ### Never reap a live instance, mapped or not
 
@@ -310,16 +359,60 @@ reap is itself a live session rooted in its own instance, this guard is also wha
 stops `niwa dispatch` (which reaps opportunistically before provisioning) from
 deleting the instance it is running inside.
 
-Unlike `niwa destroy`, `reap` never removes a Claude session, because it never
-needs to. It reclaims an instance only after the session's job entry is gone, which
-is what deleting the session does, and it spares any instance a job is still rooted
-in. A finished session you haven't looked at yet keeps both its Agent View entry and
-its instance until you delete it.
+`reap` reclaims a mapped Claude Code instance only after the judged session
+reads gone (its job entry is gone, won't decode, or names another session; a
+Codex mapping goes by activity instead), and it spares any instance a job is
+still rooted in.
+
+**The `claude rm` step.** Once a unit has passed liveness (the judged mapping
+reads gone and no rooted-worker guard spares the instance), the removal rule,
+the pre-removal command and the re-read, the reap removes Claude sessions with
+`claude rm`. It takes every stopped session Claude Code still lists that any
+Claude mapping names for the instance and that still has a job directory, not
+only the judged one. A listing that fails, a listed session that is still
+running, an id niwa won't pass to a command, a job directory that fails niwa's
+checks or a `claude rm` that fails keeps the unit. That differs from
+`niwa destroy`, which warns on a failed `claude rm` and still removes the
+instance. The reap decides first and removes after. Every check that can
+still keep the unit runs before anything is removed: the reads of each
+worktree inside the instance, `PrepareDestroy`, the tombstone lock, the rename
+to the tombstone, the tombstone re-check, a last read of each worktree's
+repository configuration, and one last listing of Claude Code's sessions with
+every job directory vetted again. A unit any of those keeps is renamed back
+with nothing removed: no worktree, no session, and no on-reap run. Only then
+are the worktrees removed inside the tombstone, followed by the `claude rm`
+calls, each of which lists and vets its session once more right before it
+runs. A `claude rm` that fails keeps the unit and renames back what is left.
+Then the tombstone is removed, and the on-reap command runs last, once the
+instance is gone.
+
+**The worktrees inside the instance.** Before the rename, the reap reads each
+linked worktree niwa's walk found inside the instance: its repository's
+configuration is read again, its HEAD and refs must match what the re-read
+saw, and its `git status` must report nothing. On the tombstone it reads each
+one again by its new paths, and any difference keeps the unit. The removal
+comes after every check, inside the tombstone. It opens one directory at a
+time relative to the one before it, never follows a link and runs no git, so
+a directory swapped for a link mid-removal stops it with "changed during the
+pass" and the path named, and nothing the link points to is touched. A locked
+worktree, or one holding another repository, keeps the reap's unit.
+`niwa destroy` reads every worktree's configuration and status after its scan
+and vet, before it removes the first one, then removes them the same way
+before its `claude rm`. It lists a locked worktree, or one holding another
+repository, with its scan's findings, and once the instance name is confirmed
+that worktree goes with the instance directory.
+
+So a finished session you haven't looked at yet keeps its Agent View entry and
+its instance until you delete it, unless the reap takes its instance through
+another mapping that reads gone, or can't decode the session's own job entry.
+Then the reap removes that session too.
 
 `reap` runs on demand and is also invoked opportunistically at the start of
-`niwa create`, so session fan-out self-bounds. The opportunistic call never
-fails create: a reap error there is swallowed, and only successful reclamations
-are noted on stderr.
+`niwa create`, and by `niwa dispatch` and `niwa watch`, so session fan-out
+self-bounds. The opportunistic call never fails the command that runs it: a
+reap error there is swallowed. The reap's own lines still print on stderr: the
+instances it reclaimed, kept or spared, and the worktree sweep's removals and
+warnings.
 
 > **One known edge.** The Agent View stops a finished background session's
 > supervisor process after roughly an hour. It is not yet confirmed whether that
@@ -330,12 +423,288 @@ are noted on stderr.
 > longer-lived safety-net TTL for genuinely abandoned instances is a possible future
 > addition.
 
+### What to deny the agent writes to
+
+A reap checks each unit for work that exists nowhere else before it removes
+anything, and keeps the unit when it can't tell. Most of what it reads sits
+inside the instance, where the removal pass treats everything as the agent's:
+it keeps a unit whose repository configuration names a program, and its own git
+calls also override several of those settings and set the hooks directory
+aside. The reap's worktree sweep, `niwa destroy`'s scan and `niwa reset`'s check
+for uncommitted changes do neither, so for them a repository's own
+configuration and hooks inside the instance aren't harmless, and no entry on
+this list makes them so; the bullet on the sweep and the destroy scan below
+says what that means today. Some of what the reap reads isn't inside the
+instance at all: the reap trusts files outside the instance to say what counts
+as pushed, which instances it may act on and which sessions are live, and it
+runs programs that the person's own git, ssh and Claude Code configuration,
+and the workspace's own commands, name. niwa runs as the person, and so does
+the agent, so niwa can't stop the agent from writing those files. Whether it
+can is up to the sandbox the agent runs under.
+
+**The mechanism.** Deny the agent writes to every place below with sandbox
+write restrictions that also cover Bash: Claude Code's sandbox, or an
+operating-system equivalent. A path deny rule in Claude Code's permission
+settings isn't enough on its own. It covers Claude Code's file tools, not a
+shell command that writes the same path, so `echo ... >> ~/.gitconfig` from
+Bash gets past it.
+
+**The list.**
+
+- **`~/.niwa/`, all of it.** This is niwa's own state. It holds the
+  instance and tombstone locks (`~/.niwa/locks/`) and the scratch directory,
+  `~/.niwa/w-<key>/scratch/`. Each pass makes a fresh directory there, mode
+  0700, holding the scratch object stores the network reads land in and the
+  empty directories that git's network calls, git's version read, every
+  `claude` call and the credential-helper read run from. niwa checks the
+  owner and mode before each use and keeps the unit when a check fails, but
+  an agent that can write there can plant a store or a file between checks.
+  The record ledger and the kept set that later releases add live under
+  `~/.niwa/` too.
+- **The workspace root's `.niwa/`.** Its `workspace.toml` holds the clone
+  URLs and the `[session.removal]` `proof_remotes` prefixes, which decide
+  which hosts count as proof that a commit is pushed and which hosts get the
+  person's credential helper. An agent that can write it chooses both. The
+  rest of `[session.removal]` (`disposable`, `ignored_files`, `job_scratch`)
+  and each repository's `build_trees` decide which files the removal rule
+  treats as disposable rather than as work. The same file holds the
+  `[session.on_reap]` command, which a reap runs as the person after it
+  removes a session's instance, and the `[session.before_remove]` command,
+  whose exit status decides whether a removal goes ahead. Both run under
+  `/bin/sh -c` from the workspace root. The session mapping store,
+  `.niwa/sessions/<session id>.json`, lives here too. A reap acts on the
+  instances an ephemeral mapping names, and through the backstop on unmapped
+  dispatch-named instances older than its 30-minute TTL. Each mapping
+  records the session id and the agent, and the agent decides where that
+  session's liveness is read from: Claude Code's jobs root, or the Codex
+  session store. An agent that can write a mapping chooses which instance a
+  mapped reap acts on, a developer instance included, since a mapping's
+  `instance_path` with `ephemeral` true is what marks an instance ephemeral;
+  it also chooses which session the reap asks about and where it looks. And
+  it chooses which sessions the reap removes: once a reap takes an
+  instance, it runs `claude rm` on every stopped Claude session Claude Code
+  still lists that any mapping names for that instance, so a written mapping
+  can get another stopped session removed. Deleting a mapping makes its
+  instance a backstop candidate, whose liveness then rests only on the
+  rooted-worker guards and the TTL. Each mapping also
+  carries the count of failed on-reap runs that decides whether a later reap
+  runs the command again or drops the mapping.
+- **The workspace root directory itself, and every instance in it other
+  than the agent's own.** A reap lists instances by the root's directory
+  entries, and the backstop takes only an unmapped one whose name has the
+  dispatch form, `<config>+<slug>-<8 hex>` (the slug may be empty). It ages
+  that instance by the timestamp in its `.niwa/dispatch-pending`, or by the
+  instance directory's mtime when the marker is missing or can't be read. An
+  agent that can create or rename entries in the root, or write a sibling
+  instance's marker or its directory's mtime, decides which instances the
+  backstop may take and when their TTL runs out. A sibling's `.niwa/` also
+  holds its worktree records, which the worktree sweep reads to decide a
+  session has ended, and its `.niwa/dispatch-retain` hold marker. The
+  removal rule still keeps an instance that holds work found nowhere else.
+- **The root's `.niwa-tombstone-*` entries.** A pass renames an instance to
+  `<root>/.niwa-tombstone-<instance>-<8 hex>`, checks it again there and only
+  then deletes it. A later pass recovers a tombstone an interrupted pass left.
+  An agent that can create or swap one controls what that recovery finds.
+- **`~/.gitconfig` and `~/.config/git/config`.** niwa reads the person's
+  `credential.helper` from these two files once per pass, and that helper is
+  the program its proof-remote network calls run. The read is
+  `git config --global --no-includes`, and niwa's environment for it carries
+  no `XDG_CONFIG_HOME`, so it reads `~/.config/git/config` even when your
+  shell's `XDG_CONFIG_HOME` points elsewhere. Every other git call the removal
+  pass makes goes through the pass's one git builder, which ignores both
+  files and the system configuration (`GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_CONFIG_NOSYSTEM=1`). Other git calls in niwa don't: the reap's
+  worktree sweep, `niwa destroy`'s scan, clone and sync all read the full
+  global and system configuration. The bullet on the worktree sweep and the
+  destroy scan below says what that adds to this list.
+- **git's global and system attributes files**, `~/.config/git/attributes`
+  (the pass's git gets no `XDG_CONFIG_HOME`) and the `gitattributes` file in
+  git's own `etc/` directory, which for a Homebrew git sits inside a prefix
+  that is often user-owned. The removal pass's git doesn't set these aside,
+  so they apply to every status it runs. How far they can change what a
+  status reports isn't established; deny writes to them anyway.
+- **The whole `~/.ssh/` directory, and every file outside it that an
+  `Include` in `~/.ssh/config` names.** Network calls to an ssh remote run
+  ssh as `ssh -o BatchMode=yes -o ForwardAgent=no`, which reads the person's
+  ssh configuration and known hosts. That configuration decides which host
+  answers and can name programs ssh runs.
+- **Any script or library those configuration files point at that the agent
+  could write.** A credential helper's script, a `ProxyCommand` or
+  `Match exec` target, a `PKCS11Provider` library: each runs as the person
+  during a reap.
+- **Every directory niwa's filtered `PATH` searches, the programs found
+  there and the files they link to, and git's libexec directory.** niwa
+  starts `git`, `claude` and, on macOS, `lsof` by the first match on that
+  `PATH`, and git in turn finds `ssh` and any `git-credential-*` helper
+  through it. git also runs programs from its libexec directory, the exec
+  path compiled into it, which usually isn't on `PATH`: `git-remote-https`
+  and the other transport helpers the proof-remote calls use, and the
+  credential helpers git ships. niwa starts a program by its path in the
+  `PATH` directory, so when that path is a link, the file it resolves to is
+  what runs, such as a `claude` link into `~/.local/share/claude/versions/`
+  or a `git` link into a Homebrew Cellar. Deny writes to those targets too.
+  The filter drops only empty and relative entries, entries that don't
+  resolve, and entries that resolve inside the workspace root. A directory
+  outside the root that the agent can write, such as `~/.local/bin`, a
+  native `claude` install or a user-owned Homebrew prefix, lets it replace
+  the program that decides what is pushed and which sessions are live.
+- **Every directory on niwa's whole `PATH`, when the workspace sets an
+  on-reap or pre-removal command.** The `[session.on_reap]` and
+  `[session.before_remove]` commands run under `/bin/sh -c` from the
+  workspace root with niwa's own `PATH`, not the filtered one. A relative
+  entry resolves against the workspace root, and an entry inside the root is
+  searched like any other, so either can supply a program a command names.
+  Deny writes to every directory on that `PATH`, or have the commands name
+  each program by absolute path and deny writes to those programs. A
+  replaced pre-removal program can approve a removal the workspace's own
+  check would refuse.
+- **Claude Code's jobs root**, `jobs/` in Claude Code's config directory.
+  A Claude Code session is live exactly while its job entry there is present
+  and records that session, so an agent that deletes another session's job
+  entry, or rewrites it so it no longer decodes or names a different
+  `sessionId`, makes that session read as gone, and its instance becomes
+  reapable while the session is still resumable. A reap of that instance
+  then also removes, with `claude rm`, every other stopped session Claude
+  Code still lists that a mapping names for the instance, so a write here
+  can get another session removed, not only an instance. The entries' `cwd`
+  fields are also the rooted-worker guard: a reap spares any instance a present
+  job's `cwd` is at or under. For an unmapped instance the backstop could
+  take, that guard and the Codex records below are the only liveness it
+  has, so rewriting another job's `cwd` removes that instance's spare.
+- **The Codex session store**, in `$CODEX_HOME` when it's set and in
+  `~/.codex/` otherwise: its `sessions/` rollouts and its
+  `thread-writer-locks/` directory. A mapping whose agent is Codex reads
+  liveness from these: the session is live while its rollout was written to
+  within the idle grace, or while a writer holds its lock. The rooted-worker
+  guard reads the rollouts' recorded `cwd` for every instance, mapped or
+  not, whatever agent the workspace dispatches. Backdating a rollout while no
+  writer holds its lock, removing a held lock file or rewriting a rollout's
+  `cwd` makes a live Codex session read as gone or drops an instance's spare.
+- **Claude Code's transcripts**, `projects/` in the resolved config
+  directory. The reap's worktree sweep reads the session behind a worktree
+  record made without a job entry as ended once the transcript the record
+  names is gone or hasn't changed for the idle grace, and can then remove
+  the worktree if it's unchanged.
+- **Claude Code's user settings and user-scope plugins.** Every `claude` call
+  on the removal path (`claude agents`, `claude rm`) runs with the person's
+  environment, so it reads the user settings and plugins, and both can
+  define hooks or programs `claude` runs. They live in the same config
+  directory as the jobs root; "Where the Claude Code files are" says where
+  that is.
+- **Claude Code's user-scope MCP file**, which can name programs `claude`
+  runs, and the legacy `.config.json` in the resolved config directory,
+  which Claude Code reads in place of `.claude.json` when it exists.
+- **What the reap's worktree sweep and `niwa destroy`'s scan read today.**
+  These calls don't yet use the removal pass's git and its program lookup;
+  that hardening is tracked in
+  [niwa#577](https://github.com/tsukumogami/niwa/issues/577), which moves
+  them onto the removal pass's git. Until it lands, they run bare `git`, and
+  destroy's pull-request lookups bare `gh` when neither `GITHUB_TOKEN` nor
+  `GH_TOKEN` is set, by the first match on niwa's
+  unfiltered `PATH`, with niwa's whole environment and git's full global and
+  system configuration: `~/.gitconfig` and every file its includes name, all
+  of `~/.config/git/` (or `$XDG_CONFIG_HOME/git/` when niwa's environment
+  sets it), and the system gitconfig. Those files can set keys, such as
+  `core.fsmonitor`, that make git run a program. Deny writes to every
+  directory on that `PATH`, entries inside the workspace root included, to
+  those configuration files and every file they include, and to `gh`'s own
+  configuration (`~/.config/gh/`, or `$GH_CONFIG_DIR` when set).
+  These git calls also use each repository's own configuration (its
+  `.git/config`, a worktree's `config.worktree`, and every file those
+  include) and the hooks in its hooks directory, as git does, with none of
+  the removal pass's overrides and without its check for keys that name a
+  program. So do the bare `git status` calls `niwa reset` makes in each of
+  the instance's repositories when it runs without `--force`. A repository
+  setting or hook that names a program can make these git calls run it as
+  the person. The agent can write its own instance's repositories, so no
+  entry on this list stops it from planting one, and today a sandbox doesn't
+  either; niwa#577 tracks moving the sweep and the destroy scan onto the
+  removal pass's git. Reading an instance's repository configuration and
+  hooks before you run a reap, `niwa destroy` or `niwa reset` narrows this
+  but doesn't close it: an agent that is still running can change them after
+  you look.
+  Separately, the sweep reads job entries from `~/.claude/jobs/` whatever
+  `CLAUDE_CONFIG_DIR` says, so deny `~/.claude/jobs/` even when that variable
+  is set, creating it included: a listing there with no entry for a
+  worktree's session reads that session as ended.
+- **The shell startup files, and niwa itself.** A reap the person runs takes
+  `PATH`, `HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and
+  `NIWA_REAP_IDLE_GRACE` from the shell that starts niwa, and that shell
+  builds them from its startup files. Deny writes to the login and
+  interactive startup files of every shell the person uses, and to any file
+  they source: for example `~/.zshenv`, `~/.zprofile`, `~/.zshrc` and
+  `~/.zlogin` for zsh (in `$ZDOTDIR` instead of `~` when that's set),
+  `~/.bash_profile`, `~/.bash_login` and `~/.bashrc` for bash, and
+  `~/.profile`, which a login `sh` reads and a login bash reads when neither
+  of the first two exists. The on-reap and pre-removal commands' `/bin/sh -c`
+  is neither a login nor an interactive shell, so a POSIX `sh` reads no
+  startup file for it: it reads the file `ENV` names only when interactive,
+  and those commands' environment carries `ENV` only if the workspace lists
+  it. `/bin/sh` is a different shell on different systems, so check what
+  yours reads. Deny writes to niwa's own binary as well, the directory it's
+  installed in, and the file it resolves to when it's a link, along with
+  the absolute path the root's SessionStart hook runs. An agent that
+  replaces niwa, or edits a startup file, controls those variables, or the
+  whole program, for every reap the person runs later.
+
+**Where the Claude Code files are.** niwa resolves the config directory once
+per pass, as Claude Code does:
+
+- With `CLAUDE_CONFIG_DIR` unset, the jobs root is `~/.claude/jobs/`, the
+  settings and plugins are in `~/.claude/`, and the MCP file is
+  `~/.claude.json` in the home directory. It sits beside the default config
+  directory, not inside it. The legacy file is `~/.claude/.config.json`.
+- With `CLAUDE_CONFIG_DIR` set to an absolute, clean directory, deny that
+  directory's `jobs/`, settings and plugins, and `.claude.json` inside that
+  directory rather than `~/.claude.json`. The legacy file is `.config.json`
+  in that directory. Deny `~/.claude/jobs/` as well: the reap's worktree
+  sweep reads it whatever `CLAUDE_CONFIG_DIR` says.
+- A relative value, one starting with `~`, or one that isn't already in its
+  clean form (a `..`, a `.`, or a repeated or trailing separator) makes niwa
+  keep every unit, since it can't tell which sessions are live.
+
+**What isn't read.** ssh follows `Include`, so an included file is as much a
+part of the configuration as `~/.ssh/config` itself. niwa's credential-helper
+read doesn't follow git's includes, and reads only the plain
+`credential.helper` key. A helper set only in an included file, or under a
+`credential.<url>.helper` key, isn't read: the remote it was needed for reads
+as unreachable, and the unit is kept. In the removal pass, a helper set in a
+repository's own configuration keeps the unit too, since `credential.helper`
+there is a key that names a program. The worktree sweep, `niwa destroy`'s
+scan and `niwa reset`'s check make no such check: they read a repository's own
+configuration as git does, as the bullet on the sweep and the destroy scan
+above says.
+
+**Without a sandbox there's no boundary.** These places are all outside the
+agent's working directory, but that's only where they are; it doesn't stop a
+write. A worker that runs without sandbox write restrictions like the ones
+above can write every one of them, and nothing in this list protects it. Keep
+any niwa the agent starts inside the agent's sandbox, never as a command the
+sandbox lets out: niwa takes the home directory from `HOME`, so a process that
+starts niwa outside the sandbox with a `HOME` of its choosing points the
+scratch directory and the credential-helper read at files it wrote.
+
+**A niwa the agent starts isn't bound by this list.** `niwa dispatch`,
+`niwa create` and `niwa watch` each reap as they run, and an agent can run
+`niwa reap` itself. That niwa takes `PATH`, `HOME`, `CLAUDE_CONFIG_DIR`,
+`CODEX_HOME` and `NIWA_REAP_IDLE_GRACE` from the agent, so the agent picks
+where its reap finds the jobs root, `~/.niwa/`, the credential-helper read,
+the Codex store and the programs it runs, and none of the denies above bind
+that reap. `NIWA_REAP_IDLE_GRACE` sets the idle grace the Codex rule and the
+worktree sweep use, 24 hours by default; niwa accepts any positive duration
+there, so a smaller value shortens the window before a session reads as gone.
+The reap this list protects is one niwa runs with the person's environment,
+and that environment is outside the agent's reach only while the shell
+startup files and niwa's binary are denied too.
+
 ## The reap key and the on-reap command
 
 A workspace can ask niwa to run a command each time it removes a session, so
 that state some other tool keeps per session can be closed when the session
 goes. Two pieces make that work: a key every session niwa starts carries, and
-the command itself.
+the command itself. In a reap the command runs last, after the session and the
+instance are both gone, and never for a unit a check keeps; the instance path
+it's given names the instance's former location.
 
 ### `NIWA_REAP_KEY`
 
@@ -381,7 +750,10 @@ instance may already be gone), in its own process group, with stdin at
 - `PATH` and `HOME` from niwa's environment;
 - `NIWA_REAP_KEY`, the recomputed key;
 - `NIWA_SESSION_ID`, the removed session's id;
-- `NIWA_INSTANCE_PATH`, the instance it ran in;
+- `NIWA_INSTANCE_PATH`, the instance the session ran in, by its original
+  path: a record of where the instance was, not a directory to work in. A
+  reap runs the command after the instance is removed, so the path names its
+  former location;
 - each name in `env` that is set in niwa's environment.
 
 The `env` list reaches only the command, never a command line, so a name may
@@ -445,8 +817,10 @@ mappings are kept until the file is fixed (or ten reaps go by).
 
 ## The pre-removal command
 
-`[session.on_reap]` runs after a session is removed. `[session.before_remove]`
-runs before, and decides whether the removal happens. It is how something
+`[session.on_reap]` runs after a session is removed, and in a reap after its
+instance is gone too, so the instance path it gets names the instance's former
+location. `[session.before_remove]` runs before, and decides whether the
+removal happens. It is how something
 outside niwa that knows a path is still needed, a workflow engine with a run
 bound under the instance, keeps that instance on disk, without niwa knowing
 anything about the engine.
@@ -508,10 +882,16 @@ is spent is kept with a line saying the time ran out.
 **With nothing declared,** every removal behaves as it did before and niwa
 starts no process for it.
 
-**Where it runs.** The mapped reap: `niwa reap`, the idle-grace reclaim, and the
-reaps `niwa dispatch`, `niwa create` and `niwa watch` run first. It runs after
-niwa's own checks (the ephemeral marker, the liveness rule and the re-ask before
-a destroy), immediately before the instance is removed. `niwa destroy` asks it
+**Where it runs.** Every reap step: the mapped reap (`niwa reap`, the
+idle-grace reclaim, and the reaps `niwa dispatch`, `niwa create` and
+`niwa watch` run), the backstop (`reap-backstop`) and the worktree sweep
+(`worktree-sweep`). In a reap pass it runs after niwa's own checks (the
+ephemeral marker, the liveness rule and the removal rule) and before the
+re-read, the worktree reads, the rename and the tombstone check, and before
+anything is removed: the worktrees, the `claude rm` step, the tombstone and
+the on-reap command. In
+the worktree sweep it runs after the unchanged check, right before the
+worktree is removed. `niwa destroy` asks it
 once per instance before any prompt, and lists its reason with every other one
 it found instead of printing the `niwa: kept` line; `--force` overrides it.
 
@@ -888,13 +1268,24 @@ root, and the root config installs again.
   mapping-independent guard (`instanceHasLiveJob`) keys on any present job's
   `cwd` resolving inside the instance, sparing an instance a live session is
   rooted in even when it has no usable mapping (the backstop's case). `state.json`
-  is an undocumented Claude Code file, so absent fields decode to zero and every
-  reader fails safe on a miss.
-- `niwa reap` destroys with `--force`, which skips the uncommitted-work guard. It
-  is constrained to instances carrying the `ephemeral: true` marker whose session
-  is gone (job entry deleted) — a developer's normal instance has no such marker
-  and is never a target. The `SessionEnd` hook branch destroys nothing (it is a
-  no-op); the reaper is the single teardown path.
+  is an undocumented Claude Code file, so absent fields decode to zero. Not
+  every reader fails toward keeping on a miss. `sessionLive` reads a missing
+  entry, one that won't decode and one that names another session alike as
+  gone, and `instanceHasLiveJob` skips an entry that won't decode, so it
+  spares nothing on that entry's account; the removal rule's own checks still
+  run after both. `jobEntryGone`, the worktree sweep's read, does fail toward
+  keeping: an unset or unreadable jobs directory, or an entry that won't
+  decode, is never gone.
+- `niwa reap` doesn't remove through `niwa destroy --force`: each unit goes
+  through the removal rule (`removal.Evaluate`), the pre-removal command when
+  one is declared, a re-read and a tombstone before it is deleted. The
+  mapped sweep takes only instances a mapping marks `ephemeral: true` whose
+  session is gone, and the backstop only unmapped instances with a dispatch
+  name past the TTL. A developer's normal instance has no such mapping and
+  no such name, so it is a target only if a mapping is written for it or it
+  is renamed into the dispatch form, which is why the mapping store and the
+  workspace root are on the deny list. The `SessionEnd` hook branch destroys
+  nothing (it is a no-op); the reaper is the single teardown path.
 - The root materializer (`internal/workspace/root_materializer.go`) reuses the
   shared `buildSettingsDoc`, so the root settings ride the same path the
   instance settings do for permissions, hooks, env, plugins, and marketplaces.

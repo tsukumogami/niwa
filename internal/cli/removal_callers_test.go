@@ -27,8 +27,8 @@ type removalCaller struct {
 var removalCallers = map[string]removalCaller{
 	// Gated: niwa removes these on its own judgment that nothing needs them,
 	// so the workspace's command gets the last word.
-	"reap.go:reapWorkspace": {true, "the mapped reap asks with step reap and the instance's mapped session ids"},
-	"reap.go:reapBackstop":  {true, "the backstop for unmapped dispatch instances asks with step reap-backstop and no session ids"},
+	"pass_act.go:actReap": {true,
+		"the reap removes a unit through its tombstone after asking the gate: with step reap and the instance's mapped session ids for a mapped unit, with step reap-backstop and no session ids for an unmapped dispatch instance the backstop found"},
 	"watch.go:discardStagedRecord": {true,
 		"niwa watch's discard of a staged review asks with step watch-discard; a kept review keeps its instance and its record"},
 	"destroy.go:runDestroyInstance": {true,
@@ -170,12 +170,13 @@ func isGateCall(fun ast.Expr) bool {
 }
 
 // isRemovalCall reports whether fun is destroyInstanceFunc,
+// removeTombstoneFunc (the reap's removal of a unit through its tombstone),
 // worktree.DestroySession, or one of the workspace removals they and niwa
 // destroy reach: workspace.DestroyInstance and workspace.DestroyWorkspace.
 func isRemovalCall(fun ast.Expr) bool {
 	switch f := fun.(type) {
 	case *ast.Ident:
-		return f.Name == "destroyInstanceFunc"
+		return f.Name == "destroyInstanceFunc" || f.Name == "removeTombstoneFunc"
 	case *ast.SelectorExpr:
 		pkg, ok := f.X.(*ast.Ident)
 		if !ok {

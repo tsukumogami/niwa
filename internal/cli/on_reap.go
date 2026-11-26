@@ -13,10 +13,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/tsukumogami/niwa/internal/config"
+	"github.com/tsukumogami/niwa/internal/removal"
 	"github.com/tsukumogami/niwa/internal/workspace"
 )
 
@@ -109,6 +108,9 @@ type onReapStep struct {
 	cfgErr error
 
 	started time.Time
+	// deadline, when set, is the end of the pass the step runs within; no
+	// run gets time past it, whatever is left of the step's own budget.
+	deadline time.Time
 }
 
 func newOnReapStep(workspaceRoot string, out io.Writer) *onReapStep {
@@ -134,10 +136,12 @@ func (s *onReapStep) load() {
 	}
 }
 
-// warn prints the one warning line a run that didn't succeed gets.
+// warn prints the one warning line a run that didn't succeed gets. The
+// session id comes from a mapping and the reason can carry the command's
+// stderr or a configuration error, so both pass scrubOnReapText.
 func (s *onReapStep) warn(sessionID, reason string) {
 	fmt.Fprintf(s.out, "niwa: warning: on-reap for session %s: %s\n",
-		sanitizeOnReapText(sessionID, 80), sanitizeOnReapText(reason, maxOnReapReasonBytes))
+		scrubOnReapText(sessionID, 80), scrubOnReapText(reason, maxOnReapReasonBytes))
 }
 
 // run runs the command for one removed session and reports whether it
@@ -174,6 +178,16 @@ func (s *onReapStep) run(r removedSession) bool {
 		s.warn(r.SessionID, fmt.Sprintf("skipped: this step's %s on-reap budget is spent; a later reap runs it", onReapStepBudget))
 		return false
 	}
+	if !s.deadline.IsZero() {
+		left := time.Until(s.deadline)
+		if left <= 0 {
+			s.warn(r.SessionID, "skipped: the pass's time ran out; a later reap runs it")
+			return false
+		}
+		if left < remaining {
+			remaining = left
+		}
+	}
 	timeout := s.cfg.TimeoutDuration()
 	if timeout > remaining {
 		timeout = remaining
@@ -190,19 +204,23 @@ func (s *onReapStep) run(r removedSession) bool {
 //
 // The command runs under sh -c from the workspace root, in its own process
 // group, with stdin at /dev/null. On timeout the whole group is killed. Its
-// standard output goes to s.out; its standard error is kept, bounded, so the
-// warning can quote its last line. cmd.WaitDelay stops Wait from waiting on a
-// pipe a grandchild still holds, including one that left the group with
-// setsid and so outlived the kill.
+// standard output goes to s.out a line at a time, each line through
+// removal.ScrubEvidence, since what the command prints about a session can
+// carry what the session's unit holds; its standard error is kept, bounded,
+// so the warning can quote its last line. cmd.WaitDelay stops Wait from
+// waiting on a pipe a grandchild still holds, including one that left the
+// group with setsid and so outlived the kill.
 func (s *onReapStep) exec(command string, timeout time.Duration, r removedSession) string {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	stdout := newScrubLineWriter(s.out, 400)
+	defer stdout.Flush()
 	stderr := &tailBuffer{max: maxOnReapStderrBytes}
 	cmd := exec.CommandContext(ctx, onReapShell, "-c", command)
 	cmd.Dir = s.workspaceRoot
 	cmd.Env = onReapEnv(s.cfg.Env, r)
-	cmd.Stdout = s.out
+	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
@@ -267,7 +285,17 @@ func onReapEnv(declared []string, r removedSession) []string {
 // when it doesn't, and dropped with a final warning once the count reaches
 // onReapFailureLimit.
 func (s *onReapStep) settle(m workspace.SessionMapping) {
-	if s.run(removedSession{SessionID: m.SessionID, ReapKey: reapKeyFor(m), InstancePath: m.InstancePath}) {
+	s.settleMapping(m, s.run(removedSession{SessionID: m.SessionID, ReapKey: reapKeyFor(m), InstancePath: m.InstancePath}))
+}
+
+// settleMapping settles a removed session's mapping once its on-reap run
+// is known: deleted when ran is true, kept with its failure count raised
+// when it isn't, and dropped with a final warning once the count reaches
+// onReapFailureLimit. The pass runs the command before it removes the
+// instance and settles the mapping only after the removal, so a unit kept
+// on the way leaves its mapping exactly as it was.
+func (s *onReapStep) settleMapping(m workspace.SessionMapping, ran bool) {
+	if ran {
 		s.deleteMapping(m.SessionID)
 		return
 	}
@@ -278,13 +306,15 @@ func (s *onReapStep) settle(m workspace.SessionMapping) {
 		return
 	}
 	if err := workspace.WriteSessionMapping(s.workspaceRoot, m); err != nil {
-		fmt.Fprintf(s.out, "niwa: warning: recording the failed on-reap run for session %s: %v\n", sanitizeOnReapText(m.SessionID, 80), err)
+		fmt.Fprintf(s.out, "niwa: warning: recording the failed on-reap run for session %s: %s\n",
+			scrubOnReapText(m.SessionID, 80), scrubOnReapText(err.Error(), 400))
 	}
 }
 
 func (s *onReapStep) deleteMapping(sessionID string) {
 	if err := workspace.DeleteSessionMapping(s.workspaceRoot, sessionID); err != nil {
-		fmt.Fprintf(s.out, "niwa: warning: deleting session mapping %s: %v\n", sanitizeOnReapText(sessionID, 80), err)
+		fmt.Fprintf(s.out, "niwa: warning: deleting session mapping %s: %s\n",
+			scrubOnReapText(sessionID, 80), scrubOnReapText(err.Error(), 400))
 	}
 }
 
@@ -292,28 +322,13 @@ func (s *onReapStep) deleteMapping(sessionID string) {
 // control characters become spaces, runs of spaces collapse, and the result
 // is cut to at most max bytes, with "..." marking a cut.
 func sanitizeOnReapText(text string, max int) string {
-	var b strings.Builder
-	space := false
-	for _, r := range strings.ToValidUTF8(text, " ") {
-		if unicode.IsControl(r) || unicode.IsSpace(r) {
-			if !space {
-				b.WriteByte(' ')
-			}
-			space = true
-			continue
-		}
-		space = false
-		b.WriteRune(r)
-	}
-	out := strings.TrimSpace(b.String())
-	if len(out) <= max {
-		return out
-	}
-	cut := max - len("...")
-	for cut > 0 && !utf8.RuneStart(out[cut]) {
-		cut--
-	}
-	return out[:cut] + "..."
+	return removal.CutText(removal.StripControls(text), max)
+}
+
+// scrubOnReapText is what an on-reap warning prints of a unit-sourced
+// string: removal.ScrubEvidence first, then sanitizeOnReapText's byte bound.
+func scrubOnReapText(text string, max int) string {
+	return sanitizeOnReapText(removal.ScrubEvidence(text, max), max)
 }
 
 // lastLine returns the last non-blank line of s.

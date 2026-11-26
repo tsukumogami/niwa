@@ -287,6 +287,7 @@ func TestDestroyPreflight_NothingNeedsItBehavesAsBefore(t *testing.T) {
 	chdirTo(t, root)
 	stderr := quietDestroyCmd()
 	setDestroyFlags(t, false, false, "")
+	sessionJobDir(t, "11111111")
 
 	if err := runDestroy(destroyCmd, []string{"alpha"}); err != nil {
 		t.Fatalf("destroy: %v\n%s", err, stderr.String())

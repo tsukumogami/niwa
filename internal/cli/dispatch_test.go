@@ -136,6 +136,9 @@ func installDispatchFakes(t *testing.T, workspaceRoot string) *dispatchFakes {
 		dispatchAttach = prevAttach
 		destroyInstanceFunc = prevDestroy
 	})
+	// The reap a dispatch runs first takes a process listing; none of these
+	// tests starts a process in an instance, so an empty one stands in.
+	stubProcessListing(t)
 
 	return f
 }
@@ -552,10 +555,17 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 	// absent is gone by the reaper's rule and is reclaimed, mapping and all. A
 	// real dispatched worker has a job entry; the fake capture below writes one
 	// for each session it hands out, under a HOME of the test's own so the
-	// sweep reads this test's jobs directory.
+	// sweep reads this test's jobs directory. The entries go in the jobs root
+	// the sweep resolves, not a path spelled here: setupDispatchWorkspace sets
+	// CLAUDE_CONFIG_DIR, which that root honors ahead of HOME. Written under
+	// HOME instead, every entry is missing to the sweep, and each later
+	// goroutine reclaims whatever mappings earlier ones had written.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	jobsDir := filepath.Join(home, ".claude", "jobs")
+	jobsDir, err := passJobsRoot()
+	if err != nil {
+		t.Fatalf("resolving the jobs root the sweep reads: %v", err)
+	}
 
 	// Override the launch seam with a goroutine-safe no-op. The default fake from
 	// installDispatchFakes mutates shared dispatchFakes counters without
@@ -1070,7 +1080,9 @@ func TestDispatch_EnvDeclaredButAbsent(t *testing.T) {
 // TestDispatch_OnReapInItsReap: the reap a dispatch runs first runs the
 // on-reap command for a session it removes; a command that exits 1 or sleeps
 // past its timeout leaves the dispatch's outcome unchanged and prints one
-// warning line, within the timeout plus one second.
+// warning line, within the timeout plus three seconds. The extra seconds are
+// the reap's own cost, its re-read and tombstone check, which the race
+// detector slows; the timeout still caps the wait well short of a 10s sleep.
 func TestDispatch_OnReapInItsReap(t *testing.T) {
 	for _, command := range []string{"exit 1", "sleep 10"} {
 		t.Run(command, func(t *testing.T) {
@@ -1088,7 +1100,7 @@ func TestDispatch_OnReapInItsReap(t *testing.T) {
 			if _, _, err := runDispatchCmd(t, "do a thing"); err != nil {
 				t.Fatalf("a failing on-reap command failed the dispatch: %v", err)
 			}
-			if elapsed := time.Since(start); elapsed > 2*time.Second {
+			if elapsed := time.Since(start); elapsed > 4*time.Second {
 				t.Errorf("dispatch took %s", elapsed)
 			}
 			if w := onReapWarnings(stderr.String()); len(w) != 1 || !strings.Contains(w[0], reapDeadSessionID) {
