@@ -66,6 +66,35 @@ func assertScanKept(t *testing.T, root string, err error, stderr string, want ..
 	assertInstancesExist(t, root, "alpha")
 }
 
+// The plain case, with no redirect anywhere in the repository's
+// configuration: the remote is reachable at its own URL and its main was
+// rewound behind the clone's, so the clone's last commit is on no remote
+// branch while its own refs/remotes/origin/main still names it. The scan
+// reads the remote, finds the commit missing and keeps the instance.
+func TestDestroyScanNetwork_ARewoundReachableRemoteKeeps(t *testing.T) {
+	root, clone, remote, _ := rewoundRemoteInstance(t)
+	scanFileRemotes(t)
+	// git config --get-regexp exits 1 when nothing matches, which is the
+	// answer wanted here.
+	redirects := exec.Command("git", "config", "--get-regexp", `^url\.|^http\.`)
+	redirects.Dir = clone
+	redirects.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	if got, err := redirects.Output(); err == nil || len(got) > 0 {
+		t.Fatalf("the clone carries a redirect, so this is not the plain case: %q (%v)", got, err)
+	}
+	head := strings.TrimSpace(passGitOut(t, clone, "rev-parse", "HEAD"))
+	if tracking := strings.TrimSpace(passGitOut(t, clone, "rev-parse", "refs/remotes/origin/main")); tracking != head {
+		t.Fatalf("the clone's origin/main is %s, want its own HEAD %s", tracking, head)
+	}
+	if onRemote := strings.TrimSpace(passGitOut(t, remote, "rev-parse", "refs/heads/main")); onRemote == head {
+		t.Fatalf("the remote's main still holds %s; it was not rewound", head)
+	}
+	stderr := quietDestroyCmd()
+
+	err := runDestroy(destroyCmd, []string{"alpha"})
+	assertScanKept(t, root, err, stderr.String(), "origin")
+}
+
 func TestDestroyScanNetwork_TheRepositorysRedirectsDontDecideTheRead(t *testing.T) {
 	t.Run("insteadOf", func(t *testing.T) {
 		root, clone, remote, second := rewoundRemoteInstance(t)

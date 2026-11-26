@@ -555,10 +555,17 @@ func TestDispatch_Concurrent_DistinctMappings(t *testing.T) {
 	// absent is gone by the reaper's rule and is reclaimed, mapping and all. A
 	// real dispatched worker has a job entry; the fake capture below writes one
 	// for each session it hands out, under a HOME of the test's own so the
-	// sweep reads this test's jobs directory.
+	// sweep reads this test's jobs directory. The entries go in the jobs root
+	// the sweep resolves, not a path spelled here: setupDispatchWorkspace sets
+	// CLAUDE_CONFIG_DIR, which that root honors ahead of HOME. Written under
+	// HOME instead, every entry is missing to the sweep, and each later
+	// goroutine reclaims whatever mappings earlier ones had written.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	jobsDir := filepath.Join(home, ".claude", "jobs")
+	jobsDir, err := passJobsRoot()
+	if err != nil {
+		t.Fatalf("resolving the jobs root the sweep reads: %v", err)
+	}
 
 	// Override the launch seam with a goroutine-safe no-op. The default fake from
 	// installDispatchFakes mutates shared dispatchFakes counters without

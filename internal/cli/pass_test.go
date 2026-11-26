@@ -264,17 +264,34 @@ func TestPass_LeavesNoProcessRunning(t *testing.T) {
 	// The real listing runs lsof, a process this test must see gone too.
 	realProcessListing(t)
 	f.commitUnpushed(t, "never-pushed")
+	// The test binary is shared by the whole package, so its children can
+	// include processes earlier tests started and never waited on, such as
+	// a detached fake worker the launcher released. Only a child that
+	// wasn't there before the pass is one the pass left behind.
+	before := childPIDs(t)
 	if _, err := runPass(context.Background(), f.root, passActAll, passScope{JobsDir: f.jobsDir, Now: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	out, _ := exec.Command("pgrep", "-P", strconv.Itoa(os.Getpid())).Output()
-	// pgrep itself is the caller's child while it runs; anything else is
-	// a process the pass left behind.
-	for _, pid := range strings.Fields(string(out)) {
+	for pid := range childPIDs(t) {
+		if before[pid] {
+			continue
+		}
 		if comm, err := exec.Command("ps", "-o", "comm=", "-p", pid).Output(); err == nil && !strings.Contains(string(comm), "pgrep") {
 			t.Errorf("process %s (%s) is still running after the pass", pid, strings.TrimSpace(string(comm)))
 		}
 	}
+}
+
+// childPIDs lists the test process's children by pid. pgrep itself is one
+// while it runs, so the caller filters it out by name.
+func childPIDs(t *testing.T) map[string]bool {
+	t.Helper()
+	out, _ := exec.Command("pgrep", "-P", strconv.Itoa(os.Getpid())).Output()
+	pids := make(map[string]bool)
+	for _, pid := range strings.Fields(string(out)) {
+		pids[pid] = true
+	}
+	return pids
 }
 
 func TestCloneURLsFromConfig(t *testing.T) {
