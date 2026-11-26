@@ -73,6 +73,21 @@ key it sets, and the launch record, the audit line and `niwa list` name it.
 only: `niwa watch`'s launches never take it, and `niwa resume` and
 `niwa retask` take the profile from the launch record, not from the default.
 
+`--no-profile` skips the default. The dispatch launches with no profile, the
+same launch a workspace with no default makes: no compaction window and no
+`NIWA_DISPATCH_PROFILE` in its settings document, no inherited window in its
+environment, and no profile on its launch record, so a resume or retask
+relaunches it with none. It prints one line to stderr saying what it skipped:
+
+```
+niwa dispatch: --no-profile: skipped the default dispatch profile "worker"; the worker launches with no profile
+```
+
+With no default set, `--no-profile` changes nothing and prints nothing. A
+coordinator, or any other long-lived dispatch that has to keep its own
+launch in a workspace with a default, passes it. Set a default only once
+every such dispatch does, or they pick up the default's window.
+
 That example is the coordinator profile. Each item it drops was never called
 across 17 coordinator tenures, except AskUserQuestion and Skill, which only a
 session the owner starts needs: a dispatched coordinator reports by message,
@@ -176,7 +191,10 @@ leaves no instance behind:
   spelling yet, and `--profile` says so rather than launching a worker at full
   context with nobody told;
 - a profile that drops a tool the agent's dispatch path needs, whether it was
-  named with `--profile` or is the default.
+  named with `--profile` or is the default;
+- `--no-profile` beside a non-empty `--profile`. The message names both flags.
+  An empty `--profile` beside `--no-profile` isn't refused: `--no-profile`
+  wins and the dispatch launches with no profile.
 
 A Codex dispatch that names no profile in a workspace with a default doesn't
 refuse. It skips the default, records no profile, and prints one line to
@@ -185,6 +203,9 @@ stderr beside the other dispatch notices, naming the profile and the agent:
 ```
 niwa dispatch: skipped the default dispatch profile "worker": the "codex" agent has no dispatch profile support, so the worker launches with no profile
 ```
+
+A Codex dispatch that passes `--no-profile` prints the `--no-profile` line
+from [The default profile](#the-default-profile) instead, not this one.
 
 ### What a profile can't drop
 
@@ -230,7 +251,9 @@ before profiles existed, less an inherited compaction window (see
 [The compaction window](#the-compaction-window)), and nothing else has to
 change for one that does. A workspace with a `default_dispatch_profile`
 dispatches a coordinator under that default unless the dispatch passes
-`--profile`.
+`--profile` or `--no-profile`. `--no-profile` keeps the coordinator's own
+launch, the one it had before profiles existed, so every dispatch that starts
+a coordinator, a successor's included, passes it before a default is set.
 
 Under the coordinator profile, a coordinator can't call the Skill tool, so
 its entry skill has to reach it another way. When a dispatch uses the

@@ -23,15 +23,29 @@ import (
 // dispatchProfile is the --profile flag's value, "" when it wasn't given.
 var dispatchProfile string
 
-const dispatchProfileFlagUsage = "a [session.dispatch_profiles] name to launch the worker with, in place of [session] default_dispatch_profile: the tools it names are denied, bundled skills and the account's connectors are left out when it says so, and its auto_compact_window sets the worker's Claude Code compaction window. It applies to this launch only and refuses, before anything is provisioned, for an unknown name, an agent with no profile support, or a profile that drops a tool the dispatch path needs"
+// dispatchNoProfile is the --no-profile flag's value: launch with no profile,
+// the workspace's default_dispatch_profile included.
+var dispatchNoProfile bool
+
+const dispatchProfileFlagUsage = "a [session.dispatch_profiles] name to launch the worker with, in place of [session] default_dispatch_profile: the tools it names are denied, bundled skills and the account's connectors are left out when it says so, and its auto_compact_window sets the worker's Claude Code compaction window. It applies to this launch only and refuses, before anything is provisioned, for an unknown name, an agent with no profile support, or a profile that drops a tool the dispatch path needs. To launch with no profile under a default, pass --no-profile instead"
+
+const dispatchNoProfileFlagUsage = "launch the worker with no dispatch profile, skipping [session] default_dispatch_profile: the launch is the one a workspace with no default makes. It can't be combined with a non-empty --profile"
 
 // resolveDispatchLaunchProfile resolves the profile a `niwa dispatch` of ag
 // launches with: the --profile name when one was given, otherwise the
-// workspace's default_dispatch_profile. An explicit name that ag can't take
-// refuses, as resolveDispatchProfile does. A default that ag can't take is
-// skipped instead: the dispatch launches with no profile and skipped holds the
-// default's name, for the caller's one notice.
-func resolveDispatchLaunchProfile(flag string, cfg *config.WorkspaceConfig, ag agent.Agent) (profile dispatchLaunchProfile, skipped string, err error) {
+// workspace's default_dispatch_profile. noProfile (--no-profile) resolves to
+// no profile at all, default included, and refuses beside a non-empty
+// --profile; the caller says when it skipped a default. An explicit name that
+// ag can't take refuses, as resolveDispatchProfile does. A default that ag
+// can't take is skipped instead: the dispatch launches with no profile and
+// skipped holds the default's name, for the caller's one notice.
+func resolveDispatchLaunchProfile(flag string, noProfile bool, cfg *config.WorkspaceConfig, ag agent.Agent) (profile dispatchLaunchProfile, skipped string, err error) {
+	if noProfile {
+		if flag != "" {
+			return dispatchLaunchProfile{}, "", fmt.Errorf("--no-profile and --profile %q can't be used together: --no-profile launches with no profile and --profile names one", flag)
+		}
+		return dispatchLaunchProfile{}, "", nil
+	}
 	name := flag
 	if name == "" && cfg != nil && cfg.Session.DefaultDispatchProfile != "" {
 		decl, err := agentplan.Lookup(agentplan.DispatchProfile, ag)
@@ -51,6 +65,13 @@ func resolveDispatchLaunchProfile(flag string, cfg *config.WorkspaceConfig, ag a
 // the workspace's default profile for an agent with no profile support.
 func skippedDefaultProfileLine(name string, ag agent.Agent) string {
 	return fmt.Sprintf("niwa dispatch: skipped the default dispatch profile %q: the %q agent has no dispatch profile support, so the worker launches with no profile", name, ag)
+}
+
+// noProfileSkippedDefaultLine is the one line a dispatch prints when
+// --no-profile skipped the workspace's default profile, so the audit shows why
+// a dispatch in a defaulted workspace launched with none.
+func noProfileSkippedDefaultLine(name string) string {
+	return fmt.Sprintf("niwa dispatch: --no-profile: skipped the default dispatch profile %q; the worker launches with no profile", name)
 }
 
 // dispatchLaunchProfile is a profile resolved for one launch: its name, the
