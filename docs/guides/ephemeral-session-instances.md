@@ -468,7 +468,7 @@ Bash gets past it.
   rest of `[session.removal]` (`disposable`, `ignored_files`, `job_scratch`)
   and each repository's `build_trees` decide which files the removal rule
   treats as disposable rather than as work. The same file holds the
-  `[session.on_reap]` command, which a reap runs as the person before it
+  `[session.on_reap]` command, which a reap runs as the person after it
   removes a session's instance, and the `[session.before_remove]` command,
   whose exit status decides whether a removal goes ahead. Both run under
   `/bin/sh -c` from the workspace root. The session mapping store,

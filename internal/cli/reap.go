@@ -157,9 +157,10 @@ transcript is gone or idle for that long. A worktree with any change, or one
 made with niwa worktree create, is never removed this way.
 
 When the workspace declares [session.on_reap], its command runs once for each
-session reap removes, right before the instance is removed, from the
+session reap removes, after the instance is removed, from the
 workspace root, with PATH, HOME, NIWA_REAP_KEY,
-NIWA_SESSION_ID, NIWA_INSTANCE_PATH and the names its own env list declares.
+NIWA_SESSION_ID, NIWA_INSTANCE_PATH (the instance's former path, no longer on
+disk) and the names its own env list declares.
 Each run is bounded by its timeout (10s by default) and all of one reap's runs
 by 30 seconds together. A run that fails, times out or is skipped prints one
 "niwa: warning: on-reap for session <id>: ..." line and keeps the session's
