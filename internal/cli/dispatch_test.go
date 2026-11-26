@@ -188,6 +188,9 @@ func resetDispatchFlags(t *testing.T) {
 	dispatchBrief = ""
 	dispatchSkill = ""
 	dispatchProfile = ""
+	prevNoProfile := dispatchNoProfile
+	dispatchNoProfile = false
+	t.Cleanup(func() { dispatchNoProfile = prevNoProfile })
 	prevFirstRead := dispatchFirstRead
 	dispatchFirstRead = 0
 	t.Cleanup(func() { dispatchFirstRead = prevFirstRead })

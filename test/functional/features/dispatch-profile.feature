@@ -120,3 +120,41 @@ Feature: niwa dispatch: a dispatch profile shapes one launch
     Then the exit code is 0
     And the output contains "dispatch profile: worker"
     And the output contains "dispatch profile: coordinator"
+
+  @dispatch-profile
+  Scenario: --no-profile launches with no profile under a default, and refuses beside a named profile
+    Given a clean niwa environment
+    And a local git server is set up
+    And a config repo "myws" exists with body:
+      """
+      [workspace]
+      name = "myws"
+
+      [session]
+      default_dispatch_profile = "worker"
+
+      [session.dispatch_profiles.worker]
+      auto_compact_window = 400000
+      """
+    When I run niwa init from config repo "myws"
+    Then the exit code is 0
+    Given a fake claude for dispatch that mints a new session per launch
+    When I run "niwa dispatch hello-task --detach --name bare --no-profile" from the workspace root with env "CLAUDE_CODE_AUTO_COMPACT_WINDOW" set to "900000"
+    Then the exit code is 0
+    And the error output contains "--no-profile: skipped the default dispatch profile"
+    And the error output does not contain "launched with dispatch profile"
+    And the launched claude settings document has exactly the keys "env"
+    And the launched claude settings document env has no "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+    And the launched claude settings document env has no "NIWA_DISPATCH_PROFILE"
+    And the launched claude process environment has no compaction window
+    When I run "niwa list" from the workspace root
+    Then the exit code is 0
+    And the output does not contain "dispatch profile:"
+    When I run "niwa dispatch hello-task --detach --name blank --no-profile --profile=" from the workspace root
+    Then the exit code is 0
+    And the launched claude settings document env has no "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+    And the launched claude settings document env has no "NIWA_DISPATCH_PROFILE"
+    When I run "niwa dispatch hello-task --detach --name both --no-profile --profile worker" from the workspace root
+    Then the exit code is not 0
+    And the error output contains "--no-profile and --profile"
+    And the error output contains "can't be used together"

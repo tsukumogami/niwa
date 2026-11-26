@@ -557,3 +557,81 @@ func TestRetaskKeepsRecordedWindow(t *testing.T) {
 		})
 	}
 }
+
+// TestDispatchNoProfile: --no-profile in a workspace whose default profile
+// sets a window launches what a dispatch with no profile launches, byte for
+// byte: no window and no marker in the settings document, no exported window
+// in the process environment, no profile on the record or the mapping. It
+// says once that it skipped the default, and says nothing when there's no
+// default to skip. For Codex it prints that line, not the Codex skip line.
+func TestDispatchNoProfile(t *testing.T) {
+	t.Run("skips the default", func(t *testing.T) {
+		got := runProfileFixtureDispatch(t, profileFixtureCase{name: "default", decl: defaultWorkerDecl}, both(exportWindow, withNoProfile))
+		checkProfileFixture(t, "no_profile_plain", got.argv)
+		env := settingsEnv(t, got.argv)
+		for _, name := range []string{windowEnv, config.DispatchProfileEnv} {
+			if v, ok := env[name]; ok {
+				t.Errorf("settings env carries %s=%v", name, v)
+			}
+			if v, ok := envLookup(got.req.Env, name); ok {
+				t.Errorf("the process environment carries %s=%s", name, v)
+			}
+		}
+		want := noProfileSkippedDefaultLine("worker")
+		if strings.Count(got.stderr, want) != 1 || strings.Count(got.stderr, "default dispatch profile") != 1 {
+			t.Errorf("stderr doesn't hold the opt-out line exactly once:\n%s", got.stderr)
+		}
+		for _, w := range []string{"--no-profile", `"worker"`} {
+			if !strings.Contains(want, w) {
+				t.Errorf("the opt-out line doesn't name %s: %s", w, want)
+			}
+		}
+		if strings.Contains(got.stderr, "launched with dispatch profile") {
+			t.Errorf("an opted-out dispatch printed the audit line:\n%s", got.stderr)
+		}
+		rec, err := workspace.ReadLaunchRecord(got.root, profileFixtureDispatchID)
+		if err != nil {
+			t.Fatalf("reading the launch record: %v", err)
+		}
+		if rec.DispatchProfile != "" {
+			t.Errorf("record DispatchProfile = %q, want none", rec.DispatchProfile)
+		}
+		m, err := workspace.ReadSessionMapping(got.root, dispatchTestSessionID)
+		if err != nil {
+			t.Fatalf("reading the session mapping: %v", err)
+		}
+		if m.DispatchProfile != "" {
+			t.Errorf("mapping DispatchProfile = %q, want none", m.DispatchProfile)
+		}
+	})
+	t.Run("empty --profile beside it", func(t *testing.T) {
+		got := runProfileFixtureDispatch(t, profileFixtureCase{name: "default", decl: defaultWorkerDecl}, both(exportWindow, withProfile(""), withNoProfile))
+		checkProfileFixture(t, "no_profile_plain", got.argv)
+		if strings.Count(got.stderr, noProfileSkippedDefaultLine("worker")) != 1 {
+			t.Errorf("stderr doesn't hold the opt-out line exactly once:\n%s", got.stderr)
+		}
+	})
+	t.Run("no default to skip", func(t *testing.T) {
+		got := runProfileFixtureDispatch(t, profileFixtureCase{name: "plain", decl: windowedProfileDecl}, both(exportWindow, withNoProfile))
+		checkProfileFixture(t, "no_profile_plain", got.argv)
+		if v, ok := envLookup(got.req.Env, windowEnv); ok {
+			t.Errorf("the worker inherited %s=%s", windowEnv, v)
+		}
+		if strings.Contains(got.stderr, "dispatch profile") {
+			t.Errorf("an opt-out with no default printed a profile line:\n%s", got.stderr)
+		}
+	})
+	t.Run("codex", func(t *testing.T) {
+		got := runProfileFixtureDispatch(t, profileFixtureCase{name: "codex", decl: defaultWorkerDecl, codex: true}, both(exportWindow, withNoProfile))
+		checkProfileFixture(t, "no_profile_codex", got.argv)
+		if strings.Count(got.stderr, noProfileSkippedDefaultLine("worker")) != 1 {
+			t.Errorf("stderr doesn't hold the opt-out line exactly once:\n%s", got.stderr)
+		}
+		if strings.Contains(got.stderr, skippedDefaultProfileLine("worker", agent.AgentCodex)) {
+			t.Errorf("an opted-out Codex dispatch printed the Codex skip line:\n%s", got.stderr)
+		}
+		if v, ok := envLookup(got.req.Env, windowEnv); ok {
+			t.Errorf("the worker inherited %s=%s", windowEnv, v)
+		}
+	})
+}

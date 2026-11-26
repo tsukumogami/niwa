@@ -403,3 +403,87 @@ func TestProfileDenyList(t *testing.T) {
 	}()
 	renderLaunchSettings(map[string]any{"permissions": profileDenyList{names: []string{"allow"}}})
 }
+
+// withNoProfile is a prep that passes --no-profile.
+func withNoProfile(t *testing.T) { dispatchNoProfile = true }
+
+// TestDispatchNoProfileFlag: --no-profile is a boolean flag, off by default,
+// and the --profile usage text points at it.
+func TestDispatchNoProfileFlag(t *testing.T) {
+	f := dispatchCmd.Flags().Lookup("no-profile")
+	if f == nil {
+		t.Fatal("niwa dispatch has no --no-profile flag")
+	}
+	if f.Value.Type() != "bool" || f.DefValue != "false" {
+		t.Errorf("--no-profile is a %s defaulting to %q, want a bool defaulting to false", f.Value.Type(), f.DefValue)
+	}
+	if p := dispatchCmd.Flags().Lookup("profile"); p == nil || !strings.Contains(p.Usage, "--no-profile") {
+		t.Errorf("the --profile usage text doesn't point at --no-profile")
+	}
+}
+
+// TestResolveDispatchLaunchProfile_NoProfile: the opt-out resolves to the zero
+// profile with no skip notice, whether or not a default is set and for an
+// agent with no profile support too. A non-empty --profile beside it refuses,
+// naming both flags.
+func TestResolveDispatchLaunchProfile_NoProfile(t *testing.T) {
+	defaulted := &config.WorkspaceConfig{}
+	defaulted.Session.DefaultDispatchProfile = "worker"
+	cases := []struct {
+		name string
+		cfg  *config.WorkspaceConfig
+		ag   agent.Agent
+	}{
+		{"default set", defaulted, agent.AgentClaude},
+		{"no default", &config.WorkspaceConfig{}, agent.AgentClaude},
+		{"no config", nil, agent.AgentClaude},
+		{"codex with a default", defaulted, agent.AgentCodex},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			profile, skipped, err := resolveDispatchLaunchProfile("", true, tc.cfg, tc.ag)
+			if err != nil {
+				t.Fatalf("err = %v, want none", err)
+			}
+			if skipped != "" {
+				t.Errorf("skipped = %q, want none: the skip notice is the Codex default's alone", skipped)
+			}
+			if !reflect.DeepEqual(profile, dispatchLaunchProfile{}) {
+				t.Errorf("profile = %#v, want the zero profile", profile)
+			}
+		})
+	}
+	t.Run("with a non-empty --profile", func(t *testing.T) {
+		_, _, err := resolveDispatchLaunchProfile("worker", true, defaulted, agent.AgentClaude)
+		if err == nil {
+			t.Fatal("--profile worker with --no-profile resolved")
+		}
+		for _, want := range []string{"--no-profile", `--profile "worker"`} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q doesn't name %s", err, want)
+			}
+		}
+	})
+}
+
+// TestDispatchNoProfile_RefusesWithProfile: --no-profile with a non-empty
+// --profile exits non-zero naming both flags, and provisions and launches
+// nothing, for a declared profile and an undeclared one alike.
+func TestDispatchNoProfile_RefusesWithProfile(t *testing.T) {
+	for _, name := range []string{"coordinator", "nope"} {
+		t.Run(name, func(t *testing.T) {
+			got, reqs, err := tryProfileFixtureDispatch(t, profileFixtureCase{decl: defaultWorkerDecl}, both(withProfile(name), withNoProfile))
+			if err == nil {
+				t.Fatalf("dispatch went ahead; stderr:\n%s", got.stderr)
+			}
+			for _, want := range []string{"--no-profile", "--profile " + `"` + name + `"`} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q doesn't name %s", err, want)
+				}
+			}
+			if got.fakes.provisionCalled != 0 || len(reqs) != 0 {
+				t.Errorf("provisioned %d, launched %d; want neither", got.fakes.provisionCalled, len(reqs))
+			}
+		})
+	}
+}
