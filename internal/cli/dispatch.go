@@ -29,6 +29,7 @@ func init() {
 	dispatchCmd.Flags().StringVar(&dispatchBrief, "brief", "", "the file holding the worker's brief, inside the workspace. Its content digest, never its path, is recorded as the dispatch's brief identity on the worker's telemetry; without it, the prompt's digest is")
 	dispatchCmd.Flags().IntVar(&dispatchFirstRead, "first-read", 0, "with --brief: the worker reads lines 1-N of the brief, on their own, before it reads any more of it. A guard in the worker's session refuses any other read of the brief until that read has run, and names the command that satisfies it")
 	dispatchCmd.Flags().StringVar(&dispatchProfile, "profile", "", dispatchProfileFlagUsage)
+	dispatchCmd.Flags().BoolVar(&dispatchNoProfile, "no-profile", false, dispatchNoProfileFlagUsage)
 	dispatchCmd.Flags().StringVar(&dispatchSkill, "skill", "", "the skill the brief asks the worker to run, as <plugin>:<name>, recorded as the dispatch's requested skill on the worker's telemetry; without it none is recorded")
 	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session, sanitized into a slug. The session name is the slug plus the instance's random suffix (<slug>-<id>), and the instance is <config>+<slug>-<id>; with no name the instance is <config>+-<id> and no session name is forwarded -- '+' always marks the end of the config name. An agent with no display-name flag gets no session name, though the slug still names the instance")
 	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", dispatchModelFlagHelp())
@@ -436,13 +437,18 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	// refuses with nothing left behind. Without the flag the workspace's
 	// default_dispatch_profile applies, skipped with one line for an agent
 	// that has no profile support; with neither this is the zero profile,
-	// which contributes nothing below.
-	profile, skippedDefault, err := resolveDispatchLaunchProfile(dispatchProfile, wsConfig, dispatchedAgent)
+	// which contributes nothing below. --no-profile is the zero profile too,
+	// default included, and refuses beside a non-empty --profile; when it
+	// skipped a default it says so in one line of its own, for any agent.
+	profile, skippedDefault, err := resolveDispatchLaunchProfile(dispatchProfile, dispatchNoProfile, wsConfig, dispatchedAgent)
 	if err != nil {
 		return fmt.Errorf("niwa: error: %w", err)
 	}
 	if skippedDefault != "" {
 		fmt.Fprintln(cmd.ErrOrStderr(), skippedDefaultProfileLine(skippedDefault, dispatchedAgent))
+	}
+	if dispatchNoProfile && wsConfig != nil && wsConfig.Session.DefaultDispatchProfile != "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), noProfileSkippedDefaultLine(wsConfig.Session.DefaultDispatchProfile))
 	}
 
 	// (2e) Resolve the dispatch's authority level and named grant, and read
