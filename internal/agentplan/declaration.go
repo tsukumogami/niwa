@@ -67,9 +67,10 @@ type Declaration struct {
 // The Codex column states what niwa delivers today and nothing more. Directory
 // trust is the first row it delivers: the entry that makes every later
 // trust-gated row possible arrives with the writer that produces it, in the
-// same change. Fifteen Codex rows are implemented and eleven are unavailable:
-// ten inherent to the agent, and one, row 26, carrying the not-built kind --
-// the one row where niwa owes this column something a route exists for.
+// same change. Fifteen Codex rows are implemented and thirteen are unavailable:
+// ten inherent to the agent, and three, rows 26, 27 and 28, carrying the
+// not-built kind -- the rows where niwa owes this column something a route
+// exists for.
 // Every implemented row flipped in the change that delivered it, never before:
 // writing a future state down early would make the table a plan rather than a
 // record, which is the failure this contract exists to prevent.
@@ -407,6 +408,19 @@ var declarations = []Declaration{
 		State:  StateUnavailable,
 		Kind:   ReasonNotBuilt,
 		Reason: "A Codex launch has no settings document to carry the guard's hook.",
+	},
+
+	// Row 28: a dispatched worker launched with a named profile applied. The
+	// delivery is the deny list, the bundled-skills switch and the connectors
+	// env value in the launch settings document niwa dispatch already builds,
+	// so it exists only where niwa launches the worker, which is the edge to
+	// row 22.
+	{Capability: DispatchProfile, Agent: agent.AgentClaude, State: StateImplemented, Requires: []Capability{DispatchLaunch}},
+	{
+		Capability: DispatchProfile, Agent: agent.AgentCodex,
+		State:  StateUnavailable,
+		Kind:   ReasonNotBuilt,
+		Reason: "A profile is spelled in Claude Code's tool names and connectors switch; a Codex profile needs its own spelling and its own measurements, and until then niwa dispatch refuses --profile for Codex.",
 	},
 }
 

@@ -1,15 +1,17 @@
 package functional
 
 // Steps for features/mirror-repair.feature: a host mirror under the sandbox
-// home, borrowers made from niwa's own clones, and the faults a scenario
-// inflicts on the mirror.
+// home, the borrowers niwa create makes from it in the test build, and the
+// faults a scenario inflicts on the mirror.
 //
 // The mirror's paths are worked out here from the layout the design fixes
 // (~/.niwa/w-<32 hex of sha256 of the workspace root's real path>/mirrors/<id>),
 // not by importing niwa's mirror package, so a change to the layout shows up
 // as a failing scenario rather than as a test that silently follows it. Only
-// niwa ever writes the mirror; these steps read it, delete it, and write the
-// borrowers' alternates the way a reference clone would.
+// niwa ever writes the mirror; these steps read it and delete or damage it.
+// A scenario gets its borrowers from "the clones of ... were made borrowing
+// by niwa create" (reference_clones_steps_test.go), which checks the
+// alternates line the create wrote. No step here writes an alternates file.
 
 import (
 	"bufio"
@@ -68,11 +70,11 @@ type borrowerSnapshot struct {
 
 func registerMirrorSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^a source repo "([^"]*)" exists with (\d+) commits$`, aSourceRepoExistsWithCommits)
-	ctx.Step(`^the clones of "([^"]*)" in instances "([^"]*)" and "([^"]*)" borrow from the mirror of "([^"]*)"$`, theClonesBorrowFromTheMirror)
 	ctx.Step(`^the mirror of "([^"]*)" is a link into its store$`, theMirrorIsALinkIntoItsStore)
 	ctx.Step(`^the mirror of "([^"]*)" has the remote URL of source repo "([^"]*)"$`, theMirrorHasTheRemoteURL)
 	ctx.Step(`^I repack the borrowers of "([^"]*)" against the mirror$`, iRepackTheBorrowers)
 	ctx.Step(`^each borrower of "([^"]*)" holds none of the mirror's objects$`, eachBorrowerHoldsNoObjects)
+	ctx.Step(`^each borrower of "([^"]*)" holds no pack a mirror store holds$`, eachBorrowerHoldsNoMirrorPack)
 	ctx.Step(`^the borrower of "([^"]*)" in instance "([^"]*)" has an unpushed commit and an uncommitted edit$`, theBorrowerHasUnpushedWork)
 	ctx.Step(`^I snapshot the borrowers of "([^"]*)"$`, iSnapshotTheBorrowers)
 	ctx.Step(`^I delete the mirror of "([^"]*)" and its store$`, iDeleteTheMirrorAndItsStore)
@@ -97,6 +99,7 @@ func registerMirrorSteps(ctx *godog.ScenarioContext) {
 	registerMirrorHostileSteps(ctx)
 	registerMirrorIdentitySteps(ctx)
 	registerMirrorEnvSteps(ctx)
+	registerMirrorRetentionSteps(ctx)
 }
 
 // mirrorState returns the scenario's mirror state, allocating it on first use.
@@ -225,33 +228,6 @@ func aSourceRepoExistsWithCommits(ctx context.Context, name string, n int) (cont
 	return ctx, nil
 }
 
-// theClonesBorrowFromTheMirror writes each clone's alternates to name the
-// mirror's stable path, which is what a reference clone made by the borrowing
-// create will hold. The mirror itself need not exist yet: niwa's next command
-// finds borrowers naming a missing mirror and builds it.
-func theClonesBorrowFromTheMirror(ctx context.Context, groupRepo, inst1, inst2, repoID string) (context.Context, error) {
-	s, m, err := mirrorState(ctx)
-	if err != nil {
-		return ctx, err
-	}
-	stable, err := mirrorStablePath(s, repoID)
-	if err != nil {
-		return ctx, err
-	}
-	for _, inst := range []string{inst1, inst2} {
-		clone := filepath.Join(s.workspaceRoot, inst, groupRepo)
-		info := filepath.Join(clone, ".git", "objects", "info")
-		if err := os.MkdirAll(info, 0o755); err != nil {
-			return ctx, err
-		}
-		if err := os.WriteFile(filepath.Join(info, "alternates"), []byte(stable+"/objects\n"), 0o644); err != nil {
-			return ctx, err
-		}
-		m.borrowers[repoID] = append(m.borrowers[repoID], clone)
-	}
-	return ctx, nil
-}
-
 func theMirrorIsALinkIntoItsStore(ctx context.Context, repoID string) error {
 	s, _, err := mirrorState(ctx)
 	if err != nil {
@@ -349,6 +325,42 @@ func eachBorrowerHoldsNoObjects(ctx context.Context, repoID string) error {
 		if fields["count"] != "0" || fields["in-pack"] != "0" {
 			return fmt.Errorf("borrower %s holds objects of its own (count %s, in-pack %s); it does not depend on the mirror",
 				clone, fields["count"], fields["in-pack"])
+		}
+	}
+	return nil
+}
+
+// eachBorrowerHoldsNoMirrorPack checks that no borrower of repoID holds a
+// pack file named as one in any store of the workspace's mirrors. A scenario
+// runs it before it deletes or damages the mirror, so what a borrower reads
+// after the restore comes from the rebuilt mirror and not from a copy of the
+// mirror's pack it already held. A mirror with no pack in any store fails the
+// check, since there would be nothing to compare against.
+func eachBorrowerHoldsNoMirrorPack(ctx context.Context, repoID string) error {
+	s, m, err := mirrorState(ctx)
+	if err != nil {
+		return err
+	}
+	held, err := mirrorStorePacks(s)
+	if err != nil {
+		return err
+	}
+	if len(held) == 0 {
+		return fmt.Errorf("no store of the workspace's mirrors holds a pack")
+	}
+	clones, err := borrowersOf(m, repoID)
+	if err != nil {
+		return err
+	}
+	for _, clone := range clones {
+		packs, err := fileNames(filepath.Join(clone, ".git", "objects", "pack"))
+		if err != nil {
+			return err
+		}
+		for _, p := range packs {
+			if held[p] {
+				return fmt.Errorf("borrower %s holds %s, a pack a mirror store holds", clone, p)
+			}
 		}
 	}
 	return nil

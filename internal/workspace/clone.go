@@ -13,6 +13,12 @@ import (
 type CloneOptions struct {
 	Ref   string // tag, branch, or commit SHA to checkout
 	Depth int    // clone depth (0 = full, >0 = shallow)
+	// Reference is a host mirror's stable path to borrow objects from, passed
+	// as git clone --reference-if-able; "" is a full clone. git records the
+	// path it resolves the reference to in the clone's alternates file, so a
+	// caller that sets it rewrites that file to the stable path afterwards
+	// (see borrowingClone).
+	Reference string
 }
 
 // Cloner handles git clone operations.
@@ -56,6 +62,9 @@ func (c *Cloner) CloneWith(ctx context.Context, url, targetDir string, opts Clon
 	}
 	if opts.Ref != "" && !sha {
 		args = append(args, "--branch", opts.Ref)
+	}
+	if opts.Reference != "" {
+		args = append(args, "--reference-if-able", opts.Reference)
 	}
 	args = append(args, url, targetDir)
 

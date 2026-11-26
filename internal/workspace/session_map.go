@@ -123,6 +123,11 @@ type SessionMapping struct {
 	// and dispatches with no caller session, byte-identical.
 	DispatchID      string `json:"dispatch_id,omitempty"`
 	ParentSessionID string `json:"parent_session_id,omitempty"`
+	// DispatchProfile is the dispatch profile the session was launched with,
+	// "" for none. It is display-only and powers `niwa list`; the launch
+	// record's copy is the one resume trusts. omitempty keeps mappings of
+	// unprofiled dispatches byte-identical.
+	DispatchProfile string `json:"dispatch_profile,omitempty"`
 	// OnReapFailures counts the on-reap runs that failed, timed out or were
 	// skipped for this session after it was removed. The mapping is kept while
 	// the count is below the limit, so a later reap runs the command again;

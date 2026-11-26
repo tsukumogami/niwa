@@ -283,7 +283,7 @@ func TestLog_RotatesAtOneMiB(t *testing.T) {
 		}
 		requireMode0600(t, path)
 		requireMode0600(t, path+".1")
-		if got := metaNames(t, f); !slices.Equal(got, []string{"app.json", "mirror.log", "mirror.log.1"}) {
+		if got := metaNames(t, f); !slices.Equal(got, []string{"app.json", "app.stores", "mirror.log", "mirror.log.1"}) {
 			t.Fatalf("generation %d: .meta holds %v", gen, got)
 		}
 	}
@@ -301,8 +301,8 @@ func TestLog_StaysTwoFilesUnderSustainedWrites(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := metaNames(t, f); !slices.Equal(got, []string{"app.json", "mirror.log", "mirror.log.1"}) {
-		t.Fatalf(".meta holds %v, want app.json, mirror.log and mirror.log.1", got)
+	if got := metaNames(t, f); !slices.Equal(got, []string{"app.json", "app.stores", "mirror.log", "mirror.log.1"}) {
+		t.Fatalf(".meta holds %v, want app.json, app.stores, mirror.log and mirror.log.1", got)
 	}
 	for _, name := range []string{"mirror.log", "mirror.log.1"} {
 		info, err := os.Stat(filepath.Join(metaDir(f.mdir()), name))
@@ -348,7 +348,7 @@ func TestLog_ConcurrentAppendsStayWhole(t *testing.T) {
 			decodeLine(t, raw)
 		}
 	}
-	if got := metaNames(t, f); !slices.Equal(got, []string{"app.json", "mirror.log", "mirror.log.1"}) {
+	if got := metaNames(t, f); !slices.Equal(got, []string{"app.json", "app.stores", "mirror.log", "mirror.log.1"}) {
 		t.Fatalf(".meta holds %v", got)
 	}
 }

@@ -165,6 +165,7 @@ func resetDispatchFlags(t *testing.T) {
 	prevAcceptSessionMessages := dispatchAcceptSessionMessages
 	prevBrief := dispatchBrief
 	prevSkill := dispatchSkill
+	prevProfile := dispatchProfile
 	prevLevel := dispatchLevel
 	prevLevelSet := dispatchLevelSet
 	prevGrants := dispatchGrants
@@ -189,6 +190,10 @@ func resetDispatchFlags(t *testing.T) {
 	dispatchAcceptSessionMessages = nil
 	dispatchBrief = ""
 	dispatchSkill = ""
+	dispatchProfile = ""
+	prevNoProfile := dispatchNoProfile
+	dispatchNoProfile = false
+	t.Cleanup(func() { dispatchNoProfile = prevNoProfile })
 	prevFirstRead := dispatchFirstRead
 	dispatchFirstRead = 0
 	t.Cleanup(func() { dispatchFirstRead = prevFirstRead })
@@ -213,6 +218,7 @@ func resetDispatchFlags(t *testing.T) {
 		dispatchAcceptSessionMessages = prevAcceptSessionMessages
 		dispatchBrief = prevBrief
 		dispatchSkill = prevSkill
+		dispatchProfile = prevProfile
 		dispatchLevel = prevLevel
 		dispatchLevelSet = prevLevelSet
 		dispatchGrants = prevGrants

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+
+	"github.com/tsukumogami/niwa/internal/config"
 )
 
 // renderLaunchSettings renders the inline settings document a dispatch passes
@@ -27,10 +29,10 @@ import (
 // settings files, so anything a caller could influence here would let that
 // caller rewrite the worker's configuration.
 //
-// Three values are exceptions, and they are named here so they stay the only
+// Four values are exceptions, and they are named here so they stay the only
 // ones. The first is the launch environment contributor's "env" key, a
 // launchEnv (dispatch_env.go) that can marshal to nothing but a JSON object of
-// string values. Its keys come from three places and no others:
+// string values. Its keys come from these places and no others:
 //
 //   - OTEL_RESOURCE_ATTRIBUTES, the lineage value composed in
 //     dispatch_lineage.go from niwa's own entries, each checked against an
@@ -43,7 +45,16 @@ import (
 //     credential. Their values are copied verbatim from niwa's own
 //     environment, the developer's shell, and are never read from a file a
 //     repository controls;
-//   - NIWA_REAP_KEY, whose value must match reapKeyPattern.
+//   - NIWA_REAP_KEY, whose value must match reapKeyPattern;
+//   - NIWA_DISPATCH_ID and NIWA_WORKSPACE, whose values must match
+//     dispatchIdentityPattern;
+//   - for a profiled dispatch, NIWA_DISPATCH_PROFILE, whose value is a
+//     profile name config.ValidProfileName accepts, and the profile's own env
+//     values, the constants agentplan.ProfileSettings spells for the agent
+//     (ENABLE_CLAUDEAI_MCP_SERVERS=false for Claude), and the profile's
+//     CLAUDE_CODE_AUTO_COMPACT_WINDOW, the decimal form of an integer config
+//     load bounded to 100000 through 1000000. The window goes in this object
+//     only, never in the process environment.
 //
 // Every key and value is a JSON string inside the one "env" object, so nothing
 // in them can add a settings key outside it.
@@ -64,6 +75,16 @@ import (
 // guardedNiwaHookCommand. The brief's path and line count never enter the
 // document; the dispatch records them in the instance, where the guard reads
 // them.
+//
+// The fourth is a dispatch profile's permissions key, a profileDenyList that
+// can marshal to nothing but {"deny":[...]}. Its names come from the
+// workspace config's [session.dispatch_profiles], which config load accepted
+// only as names passing config.ValidateProfileToolName, and the list checks
+// each name against that grammar again when it marshals. The check at load is
+// the one that counts: this function runs after provisioning and panics on a
+// marshal error, so the render-time check only guards against a contributor
+// that skipped the load. The profile's other key, disableBundledSkills, is a
+// constant true and needs no exception.
 //
 // An empty or nil map returns ("", false), and the caller then appends no
 // settings flag at all. A value encoding/json can't encode panics, since only
@@ -119,6 +140,29 @@ func (l mcpApprovalList) MarshalJSON() ([]byte, error) {
 		names = []string{}
 	}
 	return json.Marshal(names)
+}
+
+// profileDenyList is the launch settings document's permissions value for a
+// profiled launch. Its one field is unexported, and it marshals to exactly
+// {"deny":[...]} over names that pass config.ValidateProfileToolName, so no
+// name can add a key, an allow rule, or change the document's shape.
+type profileDenyList struct{ names []string }
+
+// MarshalJSON renders {"deny":[...]}, [] when empty, and refuses a name
+// outside the tool-name grammar.
+func (l profileDenyList) MarshalJSON() ([]byte, error) {
+	names := l.names
+	if names == nil {
+		names = []string{}
+	}
+	for _, n := range names {
+		if err := config.ValidateProfileToolName(n); err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(struct {
+		Deny []string `json:"deny"`
+	}{Deny: names})
 }
 
 // maxWarnedNameBytes bounds how much of a dropped name a warning prints.

@@ -1,10 +1,11 @@
 @mirror-repair
 Feature: niwa restores a deleted or damaged host mirror by itself
-  A workspace's clones can borrow git objects from one bare mirror per repo
-  under ~/.niwa, through their alternates file. No create borrows yet, so these
-  scenarios turn two of niwa's own clones into borrowers the way a reference
-  clone would be made, then take the mirror away or damage it and run an
-  ordinary command. Only niwa writes the mirror.
+  A workspace's clones borrow git objects from one bare mirror per repo under
+  ~/.niwa, through their alternates file. niwa create makes each new clone
+  borrow by default, so the borrowers here come from niwa create: each
+  scenario checks that both hold the one stable-path alternates line and no
+  pack the mirror holds, then takes the mirror away or damages it and runs an
+  ordinary command. Only niwa writes the mirror and the alternates files.
 
   Background:
     Given a clean niwa environment
@@ -34,7 +35,8 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -65,6 +67,7 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     And the error output carries no mirror warning
     And the mirror log gained a healthy check line and a refresh line for "app" from "apply"
     And the mirror link of "app" is unchanged
+    And nothing mirror-related exists outside the sandbox home
 
     Examples:
       | command                                    | logged    |
@@ -76,6 +79,20 @@ Feature: niwa restores a deleted or damaged host mirror by itself
       | niwa worktree create in myws               | worktree  |
 
   Scenario: A workspace with no borrowers gets no mirror
+    # The test build's creates borrow unless the setting says not to, which
+    # is what leaves this workspace with no borrowers.
+    Given the config repo "myws" is force-pushed to:
+      """
+      [workspace]
+      name = "myws"
+      share_git_history = false
+
+      [groups.tools]
+
+      [repos.app]
+      url = "{repo:app}"
+      group = "tools"
+      """
     When I run "niwa create myws"
     Then the exit code is 0
     And the error output carries no mirror warning
@@ -92,13 +109,15 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     And the hook printed nothing
     And the error output carries no mirror warning
     And no workspace key directory exists under the sandbox home
+    And nothing mirror-related exists outside the sandbox home
 
   Scenario Outline: A damaged mirror is restored by an ordinary command
     When I run "niwa create myws"
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -118,7 +137,7 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     And the mirror of "app" is a link into its store
     And the state file of "app" records the linked store and its packs
     And the mirror of "app" has the remote URL of source repo "app"
-    And only the linked store of "app" remains
+    And the store "app" replaced is kept and recorded as retired
     And every ref of each borrower of "app" reads to the root and fsck is clean
     And the borrowers of "app" match their snapshot
     And the unpushed commit and uncommitted edit are intact
@@ -131,6 +150,7 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     And the mirror log gained a healthy check line and a refresh line for "app" from "apply"
     And the mirror link of "app" is unchanged
     And the state file of "app" is unchanged apart from last_refresh
+    And nothing mirror-related exists outside the sandbox home
 
     Examples:
       | damage                      | fault           |
@@ -151,7 +171,8 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -172,6 +193,7 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     And every ref of each borrower of "app" reads to the root and fsck is clean
     And the borrowers of "app" match their snapshot
     And the unpushed commit and uncommitted edit are intact
+    And nothing mirror-related exists outside the sandbox home
 
   # The source repo is moved away so the clone the restore needs fails. The
   # hook that provisions nothing runs the restore; nothing it touched may
@@ -183,7 +205,8 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -214,10 +237,11 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     And the error output carries exactly the mirror warning "mirror app: fault pack-changed, result restored"
     And the mirror link of "app" moved to a new store
     And the mirror of "app" is a link into its store
-    And only the linked store of "app" remains
+    And the store "app" replaced is kept and recorded as retired
     And every ref of each borrower of "app" reads to the root and fsck is clean
     And the borrowers of "app" match their snapshot
     And the unpushed commit and uncommitted edit are intact
+    And nothing mirror-related exists outside the sandbox home
 
   # Only the link is deleted and the source repo is moved away: the restore
   # can't clone, and needs not to, since the recorded store is intact.
@@ -226,7 +250,8 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -244,6 +269,7 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     And only the linked store of "app" remains
     And no restore leftovers remain under the mirrors
     And every ref of each borrower of "app" reads to the root and fsck is clean
+    And nothing mirror-related exists outside the sandbox home
 
   # The source repo gains a branch and a commit, then deletes the branch,
   # resets main past the commit and prunes both, as a branch deletion and a
@@ -256,7 +282,8 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -296,6 +323,7 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     And every ref of each borrower of "app" reads to the root and fsck is clean
     And the branch "keep" in the borrower of "app" in instance "myws" still names the added topic commit
     And the unpushed commit and uncommitted edit are intact
+    And nothing mirror-related exists outside the sandbox home
 
   # A branch "keep" in myws holds one unpushed commit on a pushed commit that
   # the source repo then deletes, keeping it only under a pull-request ref it
@@ -307,7 +335,8 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -340,6 +369,7 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     Then the exit code is 0
     And the hook printed nothing
     And the mirror log gained only a healthy check line for "app" from "from-hook"
+    And nothing mirror-related exists outside the sandbox home
 
   # The same, except that the source repo destroys the commit outright: no
   # ref keeps it, and the prune drops it. The restore can't get it back, so
@@ -351,7 +381,8 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -384,6 +415,7 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     Then the exit code is 0
     And the hook printed nothing
     And the mirror log gained only a healthy check line for "app" from "from-hook"
+    And nothing mirror-related exists outside the sandbox home
 
   # The two commands that check a healthy mirror without refreshing it run
   # with the source repo moved away, so a command that reached for the remote
@@ -396,7 +428,8 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -430,7 +463,8 @@ Feature: niwa restores a deleted or damaged host mirror by itself
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store

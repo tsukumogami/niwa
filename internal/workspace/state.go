@@ -499,6 +499,10 @@ type InstanceRecord struct {
 	// instances that weren't dispatched, or predate these fields, unchanged.
 	DispatchID      string `json:"dispatch_id,omitempty"`
 	ParentSessionID string `json:"parent_session_id,omitempty"`
+	// DispatchProfile is the dispatch profile recorded on the same newest
+	// mapping, filled in by the list command only when it has a profile
+	// name's shape. omitempty keeps unprofiled instances unchanged.
+	DispatchProfile string `json:"dispatch_profile,omitempty"`
 	// SessionName is the display name the instance's dispatch forwarded to
 	// the agent and recorded on its session mapping. Like KeepAlive,
 	// EnumerateInstanceRecords leaves it empty and the list command fills it

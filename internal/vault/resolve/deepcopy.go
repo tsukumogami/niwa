@@ -126,6 +126,7 @@ func deepCopyRepos(in map[string]config.RepoOverride) map[string]config.RepoOver
 			SetupDir:         ov.SetupDir,
 			ReadEnvExample:   ov.ReadEnvExample,
 			WorktreeSetup:    ov.WorktreeSetup,
+			ShareGitHistory:  cloneBoolPtr(ov.ShareGitHistory),
 			EnvExamplePolicy: deepCopyEnvExamplePolicy(ov.EnvExamplePolicy),
 			EnvOutput:        deepCopyEnvOutput(ov.EnvOutput),
 			BuildTrees:       slices.Clone(ov.BuildTrees),
@@ -174,7 +175,30 @@ func deepCopySession(in config.SessionConfig) config.SessionConfig {
 			Disposable:   slices.Clone(in.Removal.Disposable),
 			ProofRemotes: slices.Clone(in.Removal.ProofRemotes),
 		},
+		DispatchProfiles:       deepCopyDispatchProfiles(in.DispatchProfiles),
+		DefaultDispatchProfile: in.DefaultDispatchProfile,
 	}
+}
+
+// deepCopyDispatchProfiles clones [session.dispatch_profiles] down to each
+// profile's drop_tools slice, so a change to the copy never reaches the
+// caller's config.
+func deepCopyDispatchProfiles(in map[string]config.SessionDispatchProfile) map[string]config.SessionDispatchProfile {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]config.SessionDispatchProfile, len(in))
+	for name, p := range in {
+		out[name] = config.SessionDispatchProfile{
+			DropTools:             slices.Clone(p.DropTools),
+			DropBundledSkills:     p.DropBundledSkills,
+			DropAccountConnectors: p.DropAccountConnectors,
+			// A value type holding one scalar after load, so the copy is
+			// independent of the original.
+			AutoCompactWindow: p.AutoCompactWindow,
+		}
+	}
+	return out
 }
 
 func deepCopyGlobalConfigOverride(in *config.GlobalConfigOverride) *config.GlobalConfigOverride {
@@ -295,4 +319,15 @@ func cloneHooks(in config.HooksConfig) config.HooksConfig {
 		out[event] = cp
 	}
 	return out
+}
+
+// cloneBoolPtr returns a new pointer holding *in, or nil. share_git_history
+// is copied through it rather than by pointer so a change to the copy's value
+// can't reach the caller's config, which the resolver never mutates.
+func cloneBoolPtr(in *bool) *bool {
+	if in == nil {
+		return nil
+	}
+	v := *in
+	return &v
 }

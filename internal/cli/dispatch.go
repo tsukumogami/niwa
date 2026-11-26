@@ -29,6 +29,8 @@ func init() {
 	dispatchCmd.Flags().StringVar(&dispatchLabel, "label", "", "optional human-friendly alias recorded on the session mapping")
 	dispatchCmd.Flags().StringVar(&dispatchBrief, "brief", "", "the file holding the worker's brief, inside the workspace. Its content digest, never its path, is recorded as the dispatch's brief identity on the worker's telemetry; without it, the prompt's digest is")
 	dispatchCmd.Flags().IntVar(&dispatchFirstRead, "first-read", 0, "with --brief: the worker reads lines 1-N of the brief, on their own, before it reads any more of it. A guard in the worker's session refuses any other read of the brief until that read has run, and names the command that satisfies it")
+	dispatchCmd.Flags().StringVar(&dispatchProfile, "profile", "", dispatchProfileFlagUsage)
+	dispatchCmd.Flags().BoolVar(&dispatchNoProfile, "no-profile", false, dispatchNoProfileFlagUsage)
 	dispatchCmd.Flags().StringVar(&dispatchSkill, "skill", "", "the skill the brief asks the worker to run, as <plugin>:<name>, recorded as the dispatch's requested skill on the worker's telemetry; without it none is recorded")
 	dispatchCmd.Flags().StringVarP(&dispatchName, "name", "n", "", "optional display name for the session, sanitized into a slug. The session name is the slug plus the instance's random suffix (<slug>-<id>), and the instance is <config>+<slug>-<id>; with no name the instance is <config>+-<id> and no session name is forwarded -- '+' always marks the end of the config name. An agent with no display-name flag gets no session name, though the slug still names the instance")
 	dispatchCmd.Flags().StringVar(&dispatchModel, "model", "", dispatchModelFlagHelp())
@@ -429,6 +431,26 @@ func runDispatch(cmd *cobra.Command, args []string) (retErr error) {
 	if launchDecl.State != agentplan.StateImplemented || !hasSpec {
 		return fmt.Errorf("niwa: error: niwa dispatch cannot launch a background worker for the %q agent. %s %s, or open a session yourself and run the task there",
 			dispatchedAgent, launchDecl.Reason, launchableAgentsHint())
+	}
+
+	// (2d') Resolve --profile once the agent is known and before anything is
+	// provisioned, so an unknown name, an agent whose dispatch-profile row
+	// isn't implemented, or a profile dropping a tool the dispatch path needs
+	// refuses with nothing left behind. Without the flag the workspace's
+	// default_dispatch_profile applies, skipped with one line for an agent
+	// that has no profile support; with neither this is the zero profile,
+	// which contributes nothing below. --no-profile is the zero profile too,
+	// default included, and refuses beside a non-empty --profile; when it
+	// skipped a default it says so in one line of its own, for any agent.
+	profile, skippedDefault, err := resolveDispatchLaunchProfile(dispatchProfile, dispatchNoProfile, wsConfig, dispatchedAgent)
+	if err != nil {
+		return fmt.Errorf("niwa: error: %w", err)
+	}
+	if skippedDefault != "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), skippedDefaultProfileLine(skippedDefault, dispatchedAgent))
+	}
+	if dispatchNoProfile && wsConfig != nil && wsConfig.Session.DefaultDispatchProfile != "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), noProfileSkippedDefaultLine(wsConfig.Session.DefaultDispatchProfile))
 	}
 
 	// (2e) Resolve the dispatch's authority level and named grant, and read
@@ -957,6 +979,12 @@ func runDispatch(cmd *cobra.Command, args []string) (retErr error) {
 		ReapKey:     dispatchID,
 		DispatchID:  dispatchID,
 		Workspace:   identityWorkspace,
+		// A profile's env values and its marker ride the env shape, so they
+		// reach the settings env block and the process environment alike,
+		// except the compaction window, which goes in the settings env block
+		// only. The shape must hold them before applyLaunchEnv consumes it.
+		Profile:    profile.Name,
+		ProfileEnv: profile.Env,
 	}
 	workerEnv := applyLaunchEnv(spec, launchSettings, baseEnv, envShape)
 	// The MCP approval is the fourth contributor, and the second non-constant
@@ -997,6 +1025,14 @@ func runDispatch(cmd *cobra.Command, args []string) (retErr error) {
 			return fmt.Errorf("niwa: error: locating niwa for the first-read guard: %w", err)
 		}
 		launchSettings[launchHooksKey] = firstReadGuardHooks(niwaPath)
+	}
+	// A dispatch profile's settings keys are the sixth contributor, and its
+	// deny list the fourth non-constant value (see renderLaunchSettings). The
+	// profile was resolved for this agent at (2d'), which refuses an agent
+	// whose row isn't implemented, so an agent with no settings flag never
+	// gets here with keys. Without --profile there are none.
+	if err := profile.addTo(launchSettings); err != nil {
+		return fmt.Errorf("niwa: error: %w", err)
 	}
 	// Two discrete argv elements, and none at all when no contributor added a
 	// key. An agent with no settings flag has nowhere for the document to go,
@@ -1233,6 +1269,7 @@ func runDispatch(cmd *cobra.Command, args []string) (retErr error) {
 		// developer can read while the session exists.
 		DispatchID:      dispatchID,
 		ParentSessionID: parentSessionID,
+		DispatchProfile: profile.Name,
 		// The same boolean that gates the audit line at (12a), so the record
 		// and the line can never disagree about this session.
 		AcceptsSessionMessages: inboundApplied,
@@ -1265,15 +1302,16 @@ func runDispatch(cmd *cobra.Command, args []string) (retErr error) {
 	// failed write costs only that later resume: it warns and the dispatch
 	// goes on.
 	launchRecord := workspace.LaunchRecord{
-		DispatchID:     dispatchID,
-		SessionID:      sessionID,
-		Agent:          string(dispatchedAgent),
-		InstanceName:   res.Name,
-		PermissionMode: permissionMode,
-		SessionName:    forwardedName,
-		Model:          resolvedModel,
-		Settings:       launchDoc,
-		Env:            launchEnvValues(baseEnv, envShape),
+		DispatchID:      dispatchID,
+		SessionID:       sessionID,
+		Agent:           string(dispatchedAgent),
+		InstanceName:    res.Name,
+		PermissionMode:  permissionMode,
+		SessionName:     forwardedName,
+		Model:           resolvedModel,
+		Settings:        launchDoc,
+		Env:             launchEnvValues(baseEnv, envShape),
+		DispatchProfile: profile.Name,
 	}
 	if err := writeLaunchRecordFunc(workspaceRoot, launchRecord); err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(),
@@ -1312,6 +1350,9 @@ func runDispatch(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	case inbound.overrodeMachineOn && inboundDeliverable:
 		fmt.Fprintln(cmd.ErrOrStderr(), inboundOverrideLine)
+	}
+	if profile.Name != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "niwa dispatch: launched with dispatch profile %q\n", profile.Name)
 	}
 
 	// (13) Print the session id and the launched agent's own management hints.

@@ -11,6 +11,12 @@
 // renames a new link over the old one replaces the mirror atomically without
 // touching any borrower.
 //
+// Every store a restore makes is listed in .meta/<repo-id>.stores, the store
+// record. A restore removes no store that was ever linked: it marks the one
+// it replaced retired, and a later sweep removes a retired store only once
+// the callers' strict scan of every clone on disk shows no alternates line
+// resolving into it (Options.Scan).
+//
 // The package imports internal/filelock and never internal/workspace; the
 // callers pass in the repos, their URLs and the instance clone paths.
 package mirror
@@ -68,11 +74,48 @@ func StablePath(home, workspaceRoot, repoID string) string {
 	return filepath.Join(mirrorsDir(home, workspaceRoot), repoID)
 }
 
+// LinkedStore reads the link at repoID's stable path and returns its target,
+// relative to mirrors/ (".store/<name>"), when it's a link niwa would have
+// written (validLinkTarget) to a real store directory the user owns, inside a
+// workspace key directory, mirrors/ and .store/ that are each real
+// directories the user owns. Anything else is an error, so a borrower is
+// never pointed through a link a person or another program put there. It
+// only reads. A caller that must see the same store through a whole
+// operation holds the mirror's lock (LockPath) around both reads.
+func LinkedStore(home, workspaceRoot, repoID string) (string, error) {
+	if !ValidRepoID(repoID) {
+		return "", fmt.Errorf("repo id %q can't name a mirror", repoID)
+	}
+	mdir := mirrorsDir(home, workspaceRoot)
+	for _, dir := range []string{filepath.Dir(mdir), mdir, filepath.Join(mdir, ".store")} {
+		if !realOwnedDir(dir) {
+			return "", fmt.Errorf("%s is not a directory the user owns", dir)
+		}
+	}
+	target, err := os.Readlink(filepath.Join(mdir, repoID))
+	if err != nil {
+		return "", fmt.Errorf("reading the mirror's link: %w", err)
+	}
+	if !validLinkTarget(repoID, target) {
+		return "", fmt.Errorf("the mirror's link names %q, which is not a store niwa made", CleanText(target))
+	}
+	if !realOwnedDir(filepath.Join(mdir, target)) {
+		return "", fmt.Errorf("the mirror's store %s is not a directory the user owns", target)
+	}
+	return target, nil
+}
+
 // LockPath is the per-mirror lock in niwa's lock directory. The name hashes
 // the workspace key and the repo id rather than the stable path, because
 // CanonicalPath resolves symlinks and would give each store its own lock.
 func LockPath(home, workspaceRoot, repoID string) string {
-	sum := sha256.Sum256([]byte(WorkspaceKey(workspaceRoot) + "/" + repoID))
+	return lockPathFor(home, WorkspaceKey(workspaceRoot), repoID)
+}
+
+// lockPathFor is LockPath from the workspace key itself, for the teardown,
+// which runs once the root its key came from is gone.
+func lockPathFor(home, key, repoID string) string {
+	sum := sha256.Sum256([]byte(key + "/" + repoID))
 	return filepath.Join(home, ".niwa", "locks", "m-"+hex.EncodeToString(sum[:])[:32]+".lock")
 }
 
@@ -283,8 +326,8 @@ func layoutIsReal(mdir string) bool {
 
 // tightenModes puts the modes of niwa's own entries for one mirror back:
 // mirrors/, .meta/, .store/, .tmp/, ~/.niwa/locks/ and ~/.niwa/empty-hooks/
-// to 0700, and the state file, the mirror log, mirror.log.1 and the mirror's
-// lock file to 0600 (see tighten). The workspace key directory above
+// to 0700, and the state file, the store record, the mirror log,
+// mirror.log.1 and the mirror's lock file to 0600 (see tighten). The workspace key directory above
 // mirrors/ is shared with the plugin store, so its mode is left as it is
 // (see createPrivateDir). It creates nothing. Each entry is tightened only
 // when every directory above it, up to ~/.niwa, is real, since tighten
@@ -303,7 +346,7 @@ func tightenModes(home, workspaceRoot, repoID string) {
 			}
 			if realOwnedDir(metaDir(mdir)) {
 				log := logPath(mdir)
-				for _, file := range []string{statePath(mdir, repoID), log, log + ".1"} {
+				for _, file := range []string{statePath(mdir, repoID), storesPath(mdir, repoID), log, log + ".1"} {
 					tighten(file, 0o600, false)
 				}
 			}

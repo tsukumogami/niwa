@@ -457,6 +457,14 @@ type WorkspaceMeta struct {
 	// lives on [workspace], which the overlay merge never assigns, so only the
 	// workspace's own config sets it.
 	SharePluginReleases *bool `toml:"share_plugin_releases,omitempty"`
+	// ShareGitHistory controls whether the workspace's new clones borrow
+	// objects from the host's per-repo mirror instead of copying the whole
+	// history. nil means on. A repo's own RepoOverride.ShareGitHistory wins
+	// over this value in both directions; ShareGitHistoryEnabled is the
+	// cascade. The cascade knows nothing of the layout: in one with no
+	// workspace root it still answers on, and internal/workspace's
+	// planBorrowing makes the clones full there.
+	ShareGitHistory *bool `toml:"share_git_history,omitempty"`
 }
 
 // SharePluginReleasesEnabled reports whether new instances link their github
@@ -464,6 +472,23 @@ type WorkspaceMeta struct {
 // set to false.
 func (w WorkspaceMeta) SharePluginReleasesEnabled() bool {
 	return w.SharePluginReleases == nil || *w.SharePluginReleases
+}
+
+// ShareGitHistoryEnabled reports whether the named repo's new clones should
+// borrow objects from the host mirror: the repo's share_git_history when it
+// is set, else the workspace's, else true. A nil config has neither set and
+// answers true. Callers in internal/workspace go through borrowEnabled.
+func (c *WorkspaceConfig) ShareGitHistoryEnabled(repo string) bool {
+	if c == nil {
+		return true
+	}
+	if override, ok := c.Repos[repo]; ok && override.ShareGitHistory != nil {
+		return *override.ShareGitHistory
+	}
+	if c.Workspace.ShareGitHistory != nil {
+		return *c.Workspace.ShareGitHistory
+	}
+	return true
 }
 
 // ResolveStrictSecrets decides whether a run fails on a shortfall, from the
@@ -621,6 +646,11 @@ type RepoOverride struct {
 	// to gate itself, which is what lets one scripts/setup/ directory hold both
 	// a per-tree dependency install and a shared-state git-hooks installer.
 	WorktreeSetup *bool `toml:"worktree_setup,omitempty"`
+	// ShareGitHistory overrides the workspace-level share_git_history
+	// setting for this repo, in both directions. nil means inherit from
+	// WorkspaceMeta.ShareGitHistory. A repo set to false gets a full clone
+	// and no mirror is seeded for it.
+	ShareGitHistory *bool `toml:"share_git_history,omitempty"`
 	// EnvExamplePolicy is the per-repo .env.example failure policy. nil means
 	// inherit from the workspace policy. This is a project-scope position: its
 	// Vars sub-table is honored.
@@ -926,6 +956,9 @@ func validate(cfg *WorkspaceConfig) error {
 	}
 
 	if err := validateSessionDeclaration(cfg.Session); err != nil {
+		return err
+	}
+	if err := validateAutoCompactWindowNames(cfg); err != nil {
 		return err
 	}
 

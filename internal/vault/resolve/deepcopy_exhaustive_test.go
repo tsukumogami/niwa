@@ -151,3 +151,72 @@ func TestDeepCopyRepos_CodexOverrideIsIndependent(t *testing.T) {
 		t.Error("mutating the copy changed the original: the Codex override is shared, not copied")
 	}
 }
+
+// TestDeepCopySession_DispatchProfilesAreIndependent: the resolver's copy of
+// [session] carries every dispatch profile, and a change to the copy's
+// drop_tools or to its map never reaches the original.
+func TestDeepCopySession_DispatchProfilesAreIndependent(t *testing.T) {
+	in := config.SessionConfig{DispatchProfiles: map[string]config.SessionDispatchProfile{
+		"coordinator": {
+			DropTools:             []string{"Artifact", "Skill"},
+			DropBundledSkills:     true,
+			DropAccountConnectors: true,
+		},
+	}}
+
+	out := deepCopySession(in)
+
+	got, ok := out.DispatchProfiles["coordinator"]
+	if !ok {
+		t.Fatal("the coordinator profile was dropped by deepCopySession")
+	}
+	if !reflect.DeepEqual(got, in.DispatchProfiles["coordinator"]) {
+		t.Fatalf("copied profile = %+v, want %+v", got, in.DispatchProfiles["coordinator"])
+	}
+
+	got.DropTools[0] = "Workflow"
+	out.DispatchProfiles["other"] = config.SessionDispatchProfile{DropBundledSkills: true}
+	if in.DispatchProfiles["coordinator"].DropTools[0] != "Artifact" {
+		t.Error("mutating the copy's drop_tools changed the original: the slice is shared, not copied")
+	}
+	if _, leaked := in.DispatchProfiles["other"]; leaked {
+		t.Error("adding a profile to the copy changed the original: the map is shared, not copied")
+	}
+
+	if deepCopySession(config.SessionConfig{}).DispatchProfiles != nil {
+		t.Error("a config with no profiles came back with a non-nil map")
+	}
+}
+
+// TestDeepCopySession_WindowAndDefaultAreCopied: the resolver's copy of
+// [session] keeps a profile's auto_compact_window and the
+// default_dispatch_profile, and changing either on the copy leaves the
+// original alone.
+func TestDeepCopySession_WindowAndDefaultAreCopied(t *testing.T) {
+	in := config.SessionConfig{
+		DefaultDispatchProfile: "worker",
+		DispatchProfiles: map[string]config.SessionDispatchProfile{
+			"worker": {AutoCompactWindow: config.NewAutoCompactWindow(400000)},
+		},
+	}
+
+	out := deepCopySession(in)
+
+	if out.DefaultDispatchProfile != "worker" {
+		t.Errorf("DefaultDispatchProfile = %q, want worker", out.DefaultDispatchProfile)
+	}
+	if got, ok := out.DispatchProfiles["worker"].AutoCompactWindow.Value(); !ok || got != 400000 {
+		t.Fatalf("copied window = %d, %v; want 400000", got, ok)
+	}
+
+	p := out.DispatchProfiles["worker"]
+	p.AutoCompactWindow = config.NewAutoCompactWindow(200000)
+	out.DispatchProfiles["worker"] = p
+	out.DefaultDispatchProfile = "other"
+	if got, _ := in.DispatchProfiles["worker"].AutoCompactWindow.Value(); got != 400000 {
+		t.Errorf("changing the copy's window changed the original to %d", got)
+	}
+	if in.DefaultDispatchProfile != "worker" {
+		t.Errorf("changing the copy's default changed the original to %q", in.DefaultDispatchProfile)
+	}
+}

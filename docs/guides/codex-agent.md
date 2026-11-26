@@ -413,6 +413,10 @@ debt, and it's the one group that can shrink without the agent changing.
   telemetry reads them from the launch environment is unverified.
 - **A guard holding a dispatched worker to its brief's declared first read.**
   A Codex launch has no settings document to carry the guard's hook.
+- **Dispatch profiles that trim a dispatched worker's tools, skills and
+  connectors.** A profile is spelled in Claude Code's tool names and
+  connectors switch; a Codex profile needs its own spelling and its own
+  measurements, and until then niwa dispatch refuses --profile for Codex.
 
 ### What doesn't apply to Codex
 

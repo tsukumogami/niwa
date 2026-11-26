@@ -793,8 +793,13 @@ func TestHostile_LinksPlantedInTheStoreAreRebuiltNotFollowed(t *testing.T) {
 					t.Fatalf("config =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 				}
 				requireManifestMatches(t, f)
-				if _, err := os.Lstat(oldStore); !os.IsNotExist(err) {
-					t.Fatalf("the old store is still there (%v)", err)
+				// The old store is kept, retired, with its planted link
+				// still in place: nothing removed it through the link.
+				if info, err := os.Lstat(planted); err != nil || info.Mode()&os.ModeSymlink == 0 {
+					t.Fatalf("the planted link %s = %v (%v), want it left as it was", rel, info, err)
+				}
+				if e := entryOf(t, f, old); !e.Linked || e.RetiredAt == "" {
+					t.Fatalf("the old store's entry = %+v, want linked and retired", e)
 				}
 				if !maps.Equal(treeFiles(t, outside), outsideFiles) {
 					t.Fatalf("the outside copy of %s changed", rel)

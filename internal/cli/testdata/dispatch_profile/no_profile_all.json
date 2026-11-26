@@ -1,0 +1,7 @@
+[
+  "--bg",
+  "--settings",
+  "{\"crossSessionInbound\":\"accept\",\"enabledMcpjsonServers\":[\"example\",\"zeta\"],\"env\":{\"OTEL_RESOURCE_ATTRIBUTES\":\"niwa.dispatch.id=abababab-abab-4bab-abab-abababababab,niwa.brief.id=sha256:703092a7bcdc339d1eca73db990906d0d7eb6ad825cd65abb590ce86e5d5be6e,niwa.workspace=test-ws,niwa.authority.level=autonomous,niwa.authority.grant=none\",\"NIWA_REAP_KEY\":\"abababab-abab-4bab-abab-abababababab\",\"NIWA_DISPATCH_ID\":\"abababab-abab-4bab-abab-abababababab\",\"NIWA_WORKSPACE\":\"test-ws\"},\"remoteControlAtStartup\":true}",
+  "--",
+  "do a thing"
+]

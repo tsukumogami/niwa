@@ -49,11 +49,14 @@ test-functional-claude-integration: build-test
 	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_TAGS=@claude-integration go test -v -timeout $(FUNCTIONAL_TIMEOUT) ./test/functional/... $(LOCK_HELD)
 
 # Run the mirror-repair features: a deleted host mirror restored by an
-# ordinary command, with borrowers the scenarios build from niwa's own clones,
-# and a mirror whose repo URL changes spelling or remote. The full suite runs
-# them too; this is the reviewer's one-line check.
+# ordinary command, with borrowers niwa create makes in the test build,
+# a mirror whose repo URL changes spelling or remote, the old stores a
+# restore keeps until no clone on disk names them, and the mirror's network
+# calls keeping the user's remote-access variables (a remote reached only
+# through GIT_SSH_COMMAND among them). The full suite runs them too; this is
+# the reviewer's one-line check.
 test-functional-mirror-repair: build-test
-	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_PATHS=features/mirror-repair.feature:features/mirror-remote-identity.feature \
+	$(FLOCK) env NIWA_TEST_BINARY=$(CURDIR)/niwa-test NIWA_TEST_PATHS=features/mirror-repair.feature:features/mirror-remote-identity.feature:features/mirror-retention.feature:features/mirror-network-env.feature \
 	go test -v -count=1 -timeout $(FUNCTIONAL_TIMEOUT) -run TestFeatures ./test/functional/... $(LOCK_HELD)
 
 # Run the plugin-release-hold feature: each github marketplace release held

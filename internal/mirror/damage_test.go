@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -339,6 +340,14 @@ func TestRestore_SalvagesOnlyIntactObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 	old, keep, drop := oldStoreFixture(t, f)
+	// Salvage reads only a store the record lists as cloned from this
+	// remote, so the old store gets the entry a restore would have written.
+	writeRecord(t, f, storesFile{Stores: []storeEntry{{
+		Name:     filepath.Base(old),
+		URL:      recordURL(f.repo().URL),
+		Identity: remoteIdentity(f.repo().URL),
+		Linked:   true,
+	}}})
 
 	res := EnsureHealthy(context.Background(), f.applyOpts(), []Repo{f.repo()})
 	if len(res) != 1 || res[0].Outcome != OutcomeRestored {
@@ -373,9 +382,7 @@ func TestRestore_SalvagesOnlyIntactObjects(t *testing.T) {
 	if refs, err := os.ReadFile(filepath.Join(store, "packed-refs")); err == nil && strings.Contains(string(refs), "planted") {
 		t.Error("the planted packed-refs reached the new store")
 	}
-	if _, err := os.Lstat(old); !os.IsNotExist(err) {
-		t.Errorf("the old store is still there (%v)", err)
-	}
+	requireKeptRetired(t, f, old)
 	st, err := readState(f.mdir(), "app")
 	if err != nil {
 		t.Fatal(err)
@@ -385,8 +392,12 @@ func TestRestore_SalvagesOnlyIntactObjects(t *testing.T) {
 	}
 }
 
-func TestRestore_RemovesOnlyThisRepoStores(t *testing.T) {
+// A restore removes no store: not the one it replaced, which the record now
+// lists as retired, not a store directory the record doesn't name, and
+// nothing of a repo whose id only starts with this one.
+func TestRestore_KeepsEveryStoreAndTouchesNoOtherRepo(t *testing.T) {
 	f := built(t)
+	old := f.linkTarget(t)
 	unused := filepath.Join(f.mdir(), ".store", "app-20200101T000000Z-00000000")
 	if err := os.MkdirAll(unused, 0o700); err != nil {
 		t.Fatal(err)
@@ -412,8 +423,14 @@ func TestRestore_RemovesOnlyThisRepoStores(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stores) != 1 || filepath.Join(".store", stores[0]) != f.linkTarget(t) || st.Store != f.linkTarget(t) {
-		t.Fatalf(".store holds %v of app, link %q, state %q; want only the linked one", stores, f.linkTarget(t), st.Store)
+	want := []string{filepath.Base(unused), filepath.Base(old), filepath.Base(f.linkTarget(t))}
+	slices.Sort(want)
+	if !slices.Equal(stores, want) || st.Store != f.linkTarget(t) {
+		t.Fatalf(".store holds %v of app, state %q; want %v with the state naming the link %q", stores, st.Store, want, f.linkTarget(t))
+	}
+	requireKeptRetired(t, f, old)
+	if rec := recordOf(t, f); rec.index(filepath.Base(unused)) >= 0 || rec.index(filepath.Base(other)) >= 0 {
+		t.Fatalf("the record lists a store no restore made: %+v", rec.Stores)
 	}
 	if data, err := os.ReadFile(otherFile); err != nil || string(data) != "other repo" {
 		t.Fatalf("the app-extra store changed: %q (%v)", data, err)

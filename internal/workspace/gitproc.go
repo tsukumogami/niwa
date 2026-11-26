@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"syscall"
 	"time"
+
+	"github.com/tsukumogami/niwa/internal/mirror"
 )
 
 // disposableGitKey is the context key WithDisposableGit sets.
@@ -29,8 +31,12 @@ type disposableGitKey struct{}
 // process group alone would leave git on the terminal's session but off its
 // foreground group, where reading /dev/tty stops the process instead.
 // GIT_TERMINAL_PROMPT=0 makes git say why the prompt failed.
+//
+// The mark also reaches the host mirror's git processes, through
+// mirror.WithDisposableGit, so a mirror seeded or restored under ctx stops
+// the same way.
 func WithDisposableGit(ctx context.Context) context.Context {
-	return context.WithValue(ctx, disposableGitKey{}, true)
+	return mirror.WithDisposableGit(context.WithValue(ctx, disposableGitKey{}, true))
 }
 
 // gitKillDelay is how long a cancelled disposable git command's process group

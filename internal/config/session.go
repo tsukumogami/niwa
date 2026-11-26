@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,6 +46,18 @@ type SessionConfig struct {
 	OnReap       SessionOnReapConfig       `toml:"on_reap,omitempty"`
 	BeforeRemove SessionBeforeRemoveConfig `toml:"before_remove,omitempty"`
 	Removal      SessionRemovalConfig      `toml:"removal,omitempty"`
+
+	// DispatchProfiles is [session.dispatch_profiles.<name>], keyed by the
+	// profile name. Like DispatchEnv it is read only when `niwa dispatch`
+	// launches a worker with a profile, never at apply. See
+	// SessionDispatchProfile.
+	DispatchProfiles map[string]SessionDispatchProfile `toml:"dispatch_profiles,omitempty"`
+
+	// DefaultDispatchProfile names the profile a `niwa dispatch` takes when it
+	// names none with --profile. It must name a declared profile. It applies
+	// to `niwa dispatch` only: `niwa watch`'s launches, `niwa resume` and
+	// `niwa retask` never read it. Empty means no default.
+	DefaultDispatchProfile string `toml:"default_dispatch_profile,omitempty"`
 }
 
 // The two values [session.removal] accepts for ignored_files and job_scratch.
@@ -98,6 +112,172 @@ func (s SessionRemovalConfig) IgnoredUnique() bool {
 func (s SessionRemovalConfig) JobScratchUnique() bool {
 	return s.JobScratch == RemovalUnique
 }
+
+// SessionDispatchProfile is one [session.dispatch_profiles.<name>] table:
+// what a dispatch that selects the profile removes from the launched session,
+// and the one setting it may give it.
+//
+// The keys name what is removed or set, not how an agent spells it. The
+// per-agent spelling lives in internal/agentplan, so the workspace file states
+// intent and an agent without a spelling refuses the profile instead of
+// ignoring it. Nothing here can grant a tool.
+//
+// DropTools names whole tools, each matching ValidateProfileToolName.
+// DropBundledSkills removes the agent's bundled skills. DropAccountConnectors
+// stops the account-level connectors from loading. AutoCompactWindow is the
+// Claude Code compaction window, written as CLAUDE_CODE_AUTO_COMPACT_WINDOW in
+// the launch settings document's env object and nowhere else. A profile must
+// declare at least one drop or the window.
+type SessionDispatchProfile struct {
+	DropTools             []string          `toml:"drop_tools,omitempty"`
+	DropBundledSkills     bool              `toml:"drop_bundled_skills,omitempty"`
+	DropAccountConnectors bool              `toml:"drop_account_connectors,omitempty"`
+	AutoCompactWindow     AutoCompactWindow `toml:"auto_compact_window,omitempty"`
+}
+
+// IsEmpty reports whether the profile declares no drop and no setting.
+func (p SessionDispatchProfile) IsEmpty() bool {
+	return len(p.DropTools) == 0 && !p.DropBundledSkills && !p.DropAccountConnectors && !p.AutoCompactWindow.IsSet()
+}
+
+// AutoCompactWindowEnv is the Claude Code setting a profile's
+// auto_compact_window is written as.
+const AutoCompactWindowEnv = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+
+// MinAutoCompactWindow and MaxAutoCompactWindow bound auto_compact_window,
+// both included.
+const (
+	MinAutoCompactWindow = 100_000
+	MaxAutoCompactWindow = 1_000_000
+)
+
+// AutoCompactWindow is a profile's auto_compact_window. It holds the value
+// exactly as the TOML decoder produced it, so a float or a string reaches
+// validateDispatchProfiles and is refused there with the profile and the key
+// named, rather than by the decoder with neither.
+type AutoCompactWindow struct {
+	raw any
+}
+
+// NewAutoCompactWindow returns a window set to n.
+func NewAutoCompactWindow(n int64) AutoCompactWindow {
+	return AutoCompactWindow{raw: n}
+}
+
+// UnmarshalTOML keeps the decoded value as it is; validation happens at load.
+func (w *AutoCompactWindow) UnmarshalTOML(v any) error {
+	w.raw = v
+	return nil
+}
+
+// MarshalTOML writes a valid window as a TOML integer.
+func (w AutoCompactWindow) MarshalTOML() ([]byte, error) {
+	n, ok := w.Value()
+	if !ok {
+		return nil, fmt.Errorf("auto_compact_window holds no integer from %d to %d", MinAutoCompactWindow, MaxAutoCompactWindow)
+	}
+	return []byte(strconv.FormatInt(n, 10)), nil
+}
+
+// IsSet reports whether the profile sets the key at all, valid or not.
+func (w AutoCompactWindow) IsSet() bool {
+	return w.raw != nil
+}
+
+// Value returns the window and true when it is an integer inside the bounds,
+// or 0 and false otherwise.
+func (w AutoCompactWindow) Value() (int64, bool) {
+	n, ok := w.raw.(int64)
+	if !ok || n < MinAutoCompactWindow || n > MaxAutoCompactWindow {
+		return 0, false
+	}
+	return n, true
+}
+
+// check reports why the set value isn't a window. An integer out of bounds is
+// quoted; any other value is described by its kind and never printed.
+func (w AutoCompactWindow) check() error {
+	bounds := fmt.Sprintf("use an integer from %d to %d", MinAutoCompactWindow, MaxAutoCompactWindow)
+	switch v := w.raw.(type) {
+	case int64:
+		if _, ok := w.Value(); !ok {
+			return fmt.Errorf("%q is out of range; %s", strconv.FormatInt(v, 10), bounds)
+		}
+		return nil
+	case float64:
+		return fmt.Errorf("a float is not a window; %s", bounds)
+	case string:
+		return fmt.Errorf("a string is not a window; %s", bounds)
+	default:
+		return fmt.Errorf("not an integer; %s", bounds)
+	}
+}
+
+// autoCompactWindowPattern is the only text a recorded window may be: a
+// decimal integer with no sign and no leading zero.
+var autoCompactWindowPattern = regexp.MustCompile(`^[1-9][0-9]{0,15}$`)
+
+// ValidateAutoCompactWindow reports why value, the text a launch record holds
+// for CLAUDE_CODE_AUTO_COMPACT_WINDOW, isn't a window, or nil when it is. The
+// error never repeats the value, so a caller that prints it quotes it itself.
+func ValidateAutoCompactWindow(value string) error {
+	if !autoCompactWindowPattern.MatchString(value) {
+		return fmt.Errorf("not a decimal integer")
+	}
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || n < MinAutoCompactWindow || n > MaxAutoCompactWindow {
+		return fmt.Errorf("outside %d to %d", MinAutoCompactWindow, MaxAutoCompactWindow)
+	}
+	return nil
+}
+
+// profileNamePattern is what a dispatch profile's name must look like.
+var profileNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
+// ValidProfileName reports whether name has the shape a dispatch profile's
+// name has. Config load refuses any other name, so a reader of a profile name
+// recorded in a file any same-user process can edit, such as a session
+// mapping, uses this to tell a value niwa could have written from one it
+// couldn't.
+func ValidProfileName(name string) bool {
+	return profileNamePattern.MatchString(name)
+}
+
+// profileToolNamePatterns are the two shapes a dropped tool's name may take: a
+// built-in tool, which starts upper-case, and an MCP tool.
+var profileToolNamePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`),
+	regexp.MustCompile(`^mcp__[A-Za-z0-9_-]+$`),
+}
+
+// ValidateProfileToolName reports why name may not appear in a dispatch
+// profile's drop_tools, or nil when it may. It is the one copy of the grammar:
+// config load, the dispatch-time deny-list renderer and resume all call it.
+//
+// The grammar refuses a lowercase name, which the agent treats as an unusable
+// entry, and a scoped rule such as `Bash(git *)`: a scoped rule is a
+// permission rule, not a removal, and doesn't belong in a profile.
+func ValidateProfileToolName(name string) error {
+	for _, p := range profileToolNamePatterns {
+		if p.MatchString(name) {
+			return nil
+		}
+	}
+	return fmt.Errorf("not a whole-tool name: use a tool name such as \"Artifact\" or \"mcp__server_tool\", with no lowercase start and no scoped rule")
+}
+
+// ProfileEnvNames are the environment names a dispatch profile may set in a
+// launched worker's environment. A workspace may not declare any of them in
+// [session.dispatch_env], as a passthrough or an unset name: the profile owns
+// the slot, and a passthrough would both fight the profile for it and let a
+// resume accept the value on a record that names no profile.
+//
+// AutoCompactWindowEnv is among them, though [session.dispatch_env] refuses it
+// first as a reserved CLAUDE_ name.
+//
+// internal/agentplan can't import this package, so a test in internal/cli
+// holds this list equal to agentplan.AllProfileEnvNames().
+var ProfileEnvNames = []string{AutoCompactWindowEnv, "ENABLE_CLAUDEAI_MCP_SERVERS"}
 
 // SessionPostureConfig is [session.posture]: how much a prepared session asks
 // before it acts, and how much of the machine it may touch when it does.
@@ -276,12 +456,19 @@ const (
 	WorkspaceEnv  = "NIWA_WORKSPACE"
 )
 
+// DispatchProfileEnv marks a launch made with a dispatch profile: `niwa
+// dispatch --profile <name>` sets it to the profile's name. A launch that
+// inherits it removes it, along with every environment name a profile can
+// set, so a worker dispatched without a profile from inside a profiled one
+// doesn't inherit the profile.
+const DispatchProfileEnv = "NIWA_DISPATCH_PROFILE"
+
 // LaunchSettingsEnvNames are the names niwa itself writes into a launched
 // worker's settings env object. A declared name equal to one of them would
 // fight niwa for the slot. The NIWA_ prefix already covers the reap key and
 // the identity names; they are listed so this stays the one place that says
 // what niwa sets.
-var LaunchSettingsEnvNames = []string{"OTEL_RESOURCE_ATTRIBUTES", ReapKeyEnv, DispatchIDEnv, WorkspaceEnv}
+var LaunchSettingsEnvNames = []string{"OTEL_RESOURCE_ATTRIBUTES", ReapKeyEnv, DispatchIDEnv, WorkspaceEnv, DispatchProfileEnv}
 
 // credentialSuffixes and credentialPrefixes are the shapes of a variable name
 // that usually holds a credential, matched against the upper-cased name.
@@ -365,6 +552,30 @@ func validateSessionDeclaration(s SessionConfig) error {
 	for _, name := range s.DispatchEnv.Unset {
 		if passed[name] {
 			return fmt.Errorf("session.dispatch_env: %q is listed in both passthrough and unset", name)
+		}
+	}
+	for _, list := range []struct {
+		field string
+		names []string
+	}{
+		{"session.dispatch_env.passthrough", s.DispatchEnv.Passthrough},
+		{"session.dispatch_env.unset", s.DispatchEnv.Unset},
+	} {
+		for _, name := range list.names {
+			upper := strings.ToUpper(name)
+			for _, owned := range ProfileEnvNames {
+				if upper == owned {
+					return fmt.Errorf("%s: %q: a dispatch profile owns %s; remove the entry and declare the drop in [session.dispatch_profiles.<name>] instead", list.field, name, owned)
+				}
+			}
+		}
+	}
+	if err := validateDispatchProfiles(s.DispatchProfiles); err != nil {
+		return err
+	}
+	if d := s.DefaultDispatchProfile; d != "" {
+		if _, ok := s.DispatchProfiles[d]; !ok {
+			return fmt.Errorf("session.default_dispatch_profile: %q names no profile in [session.dispatch_profiles]", d)
 		}
 	}
 
@@ -471,6 +682,44 @@ func checkDisposablePattern(pattern string) error {
 	return errors.New("matches every path")
 }
 
+// validateDispatchProfiles applies the load-time refusals for
+// [session.dispatch_profiles]. This is the gate that counts: the dispatch-time
+// renderer runs after an instance is provisioned, so a bad name has to stop
+// here. Profiles are checked in name order so the first refusal is stable.
+func validateDispatchProfiles(profiles map[string]SessionDispatchProfile) error {
+	names := make([]string, 0, len(profiles))
+	for name := range profiles {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		if !ValidProfileName(name) {
+			return fmt.Errorf("session.dispatch_profiles: %q is not a profile name: use lowercase letters, digits and '-', starting with a letter or digit", name)
+		}
+		p := profiles[name]
+		field := "session.dispatch_profiles." + name
+		if p.IsEmpty() {
+			return fmt.Errorf("%s: the profile drops and sets nothing; declare at least one of drop_tools, drop_bundled_skills, drop_account_connectors or auto_compact_window", field)
+		}
+		if p.AutoCompactWindow.IsSet() {
+			if err := p.AutoCompactWindow.check(); err != nil {
+				return fmt.Errorf("%s.auto_compact_window: %w", field, err)
+			}
+		}
+		seen := make(map[string]bool, len(p.DropTools))
+		for _, tool := range p.DropTools {
+			if err := ValidateProfileToolName(tool); err != nil {
+				return fmt.Errorf("%s.drop_tools: %q: %w", field, tool, err)
+			}
+			if seen[tool] {
+				return fmt.Errorf("%s.drop_tools: %q is listed more than once", field, tool)
+			}
+			seen[tool] = true
+		}
+	}
+	return nil
+}
+
 // checkTimeout refuses a timeout that is set but doesn't parse as a duration,
 // or isn't positive. An empty value means the table's default.
 func checkTimeout(field, value string) error {
@@ -486,6 +735,103 @@ func checkTimeout(field, value string) error {
 		return fmt.Errorf("%s: %q must be positive", field, value)
 	}
 	return nil
+}
+
+// validateAutoCompactWindowNames refuses CLAUDE_CODE_AUTO_COMPACT_WINDOW, in
+// any letter case, in every table of this config that renders into Claude
+// Code's settings env, once some dispatch profile sets auto_compact_window. A
+// profile is then where the window is set, and a value written into the
+// instance's settings would reach every session started there, profiled or
+// not. A workspace whose profiles set no window keeps whatever it declares.
+func validateAutoCompactWindowNames(cfg *WorkspaceConfig) error {
+	windowed := false
+	for _, p := range cfg.Session.DispatchProfiles {
+		if p.AutoCompactWindow.IsSet() {
+			windowed = true
+			break
+		}
+	}
+	if !windowed {
+		return nil
+	}
+	refuse := func(table string, names []string) error {
+		for _, n := range names {
+			if strings.EqualFold(n, AutoCompactWindowEnv) {
+				return fmt.Errorf("%s: %q: a dispatch profile sets auto_compact_window, so %s is set there and nowhere else; remove the entry", table, n, AutoCompactWindowEnv)
+			}
+		}
+		return nil
+	}
+	check := func(prefix string, tables []claudeEnvTable) error {
+		for _, t := range tables {
+			if err := refuse(prefix+t.path, t.names); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := check("claude.env", claudeEnvTables(cfg.Claude.Env)); err != nil {
+		return err
+	}
+	if cfg.Instance.Claude != nil {
+		if err := check("instance.claude.env", claudeEnvTables(cfg.Instance.Claude.Env)); err != nil {
+			return err
+		}
+	}
+	repos := make([]string, 0, len(cfg.Repos))
+	for name := range cfg.Repos {
+		repos = append(repos, name)
+	}
+	slices.Sort(repos)
+	for _, name := range repos {
+		if ov := cfg.Repos[name]; ov.Claude != nil {
+			if err := check("repos."+name+".claude.env", claudeEnvTables(ov.Claude.Env)); err != nil {
+				return err
+			}
+		}
+	}
+	return check("session.env", []claudeEnvTable{
+		{".promote", cfg.Session.Env.Promote},
+		{".vars", mapKeys(cfg.Session.Env.Vars.Values)},
+		{".vars.required", mapKeys(cfg.Session.Env.Vars.Required)},
+		{".vars.recommended", mapKeys(cfg.Session.Env.Vars.Recommended)},
+		{".vars.optional", mapKeys(cfg.Session.Env.Vars.Optional)},
+	})
+}
+
+// claudeEnvTable is one table of a Claude env declaration and the names it
+// declares; path is relative to the declaration, starting with a dot.
+type claudeEnvTable struct {
+	path  string
+	names []string
+}
+
+// claudeEnvTables lists every table of e that declares a name: promote, and
+// vars and secrets with their requirement sub-tables.
+func claudeEnvTables(e ClaudeEnvConfig) []claudeEnvTable {
+	tables := []claudeEnvTable{{".promote", e.Promote}}
+	for _, v := range []struct {
+		path string
+		t    EnvVarsTable
+	}{{".vars", e.Vars}, {".secrets", e.Secrets}} {
+		tables = append(tables,
+			claudeEnvTable{v.path, mapKeys(v.t.Values)},
+			claudeEnvTable{v.path + ".required", mapKeys(v.t.Required)},
+			claudeEnvTable{v.path + ".recommended", mapKeys(v.t.Recommended)},
+			claudeEnvTable{v.path + ".optional", mapKeys(v.t.Optional)},
+		)
+	}
+	return tables
+}
+
+// mapKeys returns m's keys, sorted.
+func mapKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 // sessionEnvDeclaredNames is every name [session.env] declares, through

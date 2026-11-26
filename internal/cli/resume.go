@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -240,7 +242,11 @@ func resolveWorkerAt(root string, wsConfig *config.WorkspaceConfig, verb, arg st
 		}
 	}
 	passthrough, unset := dispatchEnvLists(wsConfig)
-	if err := validateLaunchRecord(rec, spec, passthrough); err != nil {
+	profile, err := resolveRecordProfile(rec, wsConfig, ag)
+	if err != nil {
+		return workerTarget{}, workerRefuse(verb, arg, retaskInvalidRecord, "launch record %s: %v", rec.DispatchID, err)
+	}
+	if err := validateLaunchRecord(rec, spec, passthrough, profile); err != nil {
 		return workerTarget{}, workerRefuse(verb, arg, retaskInvalidRecord, "launch record %s: %v", rec.DispatchID, err)
 	}
 	return workerTarget{
@@ -425,7 +431,10 @@ func runResume(cmd *cobra.Command, args []string) error {
 		Origin:       workspace.MappingOriginDispatch,
 		SessionName:  rec.SessionName,
 		DispatchID:   rec.DispatchID,
-		Created:      time.Now().UTC(),
+		// The record's profile, checked against the current config above, so
+		// a mapping rewritten after a reap still shows what the worker runs.
+		DispatchProfile: rec.DispatchProfile,
+		Created:         time.Now().UTC(),
 	}
 	prev, prevErr := workspace.ReadSessionMapping(root, rec.SessionID)
 	if prevErr == nil {
@@ -574,9 +583,41 @@ func resolveLaunchRecord(root, verb, arg string) (workspace.LaunchRecord, error)
 	return rec, nil
 }
 
+// resolveRecordProfile resolves the dispatch profile rec names against the
+// workspace's current config, the zero profile when it names none. A profile
+// the config no longer declares, or one that no longer applies to the agent,
+// refuses naming the profile: the recorded settings and env were made for it,
+// and nothing current says what they should be.
+func resolveRecordProfile(rec workspace.LaunchRecord, wsConfig *config.WorkspaceConfig, ag agent.Agent) (dispatchLaunchProfile, error) {
+	if rec.DispatchProfile == "" {
+		return dispatchLaunchProfile{}, nil
+	}
+	if !config.ValidProfileName(rec.DispatchProfile) {
+		return dispatchLaunchProfile{}, fmt.Errorf("dispatch profile %q is not a profile name", rec.DispatchProfile)
+	}
+	profile, err := resolveDispatchProfile(rec.DispatchProfile, wsConfig, ag)
+	if err != nil {
+		return dispatchLaunchProfile{}, fmt.Errorf("the recorded dispatch profile %q doesn't resolve in the current config: %w", rec.DispatchProfile, err)
+	}
+	// The compaction window is the one profile key a relaunch takes from the
+	// record rather than the current config: a worker keeps the window it
+	// launched with when the profile's auto_compact_window is added, changed
+	// or removed since. It leaves the comparison here, and checkResumeEnv
+	// checks the recorded value on its own.
+	for _, n := range agentplan.SettingsOnlyProfileEnvNames() {
+		delete(profile.Env, n)
+	}
+	return profile, nil
+}
+
 // validateLaunchRecord checks every field of rec a resume acts on, against
-// the agent's declaration and the workspace's current passthrough list.
-func validateLaunchRecord(rec workspace.LaunchRecord, spec agentplan.LaunchSpec, passthrough []string) error {
+// the agent's declaration, the workspace's current passthrough list, and the
+// record's dispatch profile as it resolves now (the zero profile when the
+// record names none).
+func validateLaunchRecord(rec workspace.LaunchRecord, spec agentplan.LaunchSpec, passthrough []string, profile dispatchLaunchProfile) error {
+	if profile.Name != rec.DispatchProfile {
+		return fmt.Errorf("internal: the resolved dispatch profile %q is not the recorded %q", profile.Name, rec.DispatchProfile)
+	}
 	if !workspace.ValidSessionID(rec.SessionID) {
 		return fmt.Errorf("session id %q is not a session id", rec.SessionID)
 	}
@@ -604,13 +645,15 @@ func validateLaunchRecord(rec workspace.LaunchRecord, spec agentplan.LaunchSpec,
 	allowed := func(name string) bool {
 		return slices.Contains(config.LaunchSettingsEnvNames, name) || slices.Contains(passthrough, name)
 	}
-	if err := checkResumeEnv(rec.Env, allowed); err != nil {
+	if err := checkResumeEnv(rec.Env, allowed, profile, false); err != nil {
 		return err
 	}
 	if rec.Settings != "" {
-		if err := checkResumeSettings(rec.Settings, allowed); err != nil {
+		if err := checkResumeSettings(rec.Settings, allowed, profile); err != nil {
 			return fmt.Errorf("settings: %w", err)
 		}
+	} else if profile.Name != "" {
+		return fmt.Errorf("the record names dispatch profile %q but holds no settings document", profile.Name)
 	}
 	return nil
 }
@@ -620,22 +663,74 @@ func validateLaunchRecord(rec workspace.LaunchRecord, spec agentplan.LaunchSpec,
 // names niwa sets itself and the ones the workspace's current
 // [session.dispatch_env] still passes, so a name the workspace stopped
 // passing, or one planted in the record, never reaches the worker.
-func checkResumeEnv(env map[string]string, allowed func(string) bool) error {
+//
+// The profile marker and the names a profile sets are admitted only as
+// profile resolves now: the marker equal to its name, each profile name equal
+// to its value, and every one of them present. With the zero profile none of
+// them is admitted, so a record that names no profile can't carry a profile's
+// switch to a resumed worker.
+//
+// The compaction window is checked apart from the profile, since a relaunch
+// keeps the recorded one whatever the profile sets now (resolveRecordProfile
+// leaves it out of profile). It is admitted only in the settings document's
+// env object (inSettings), only on a record that names a profile, and only as
+// a decimal integer config.ValidateAutoCompactWindow accepts.
+func checkResumeEnv(env map[string]string, allowed func(string) bool, profile dispatchLaunchProfile, inSettings bool) error {
 	names := make([]string, 0, len(env))
 	for n := range env {
 		names = append(names, n)
 	}
 	sort.Strings(names)
 	for _, n := range names {
-		if !allowed(n) {
+		v := env[n]
+		switch {
+		case n == config.AutoCompactWindowEnv:
+			if !inSettings {
+				return fmt.Errorf("environment variable %s is in the record's environment; niwa sets it only in the settings document's env object", n)
+			}
+			if profile.Name == "" {
+				return fmt.Errorf("environment variable %s is one only a dispatch profile sets, and the record names none", n)
+			}
+			if err := config.ValidateAutoCompactWindow(v); err != nil {
+				return fmt.Errorf("environment variable %s is %q, which is %v", n, v, err)
+			}
+		case n == config.DispatchProfileEnv:
+			if profile.Name == "" {
+				return fmt.Errorf("environment variable %s is set, but the record names no dispatch profile", n)
+			}
+			if v != profile.Name {
+				return fmt.Errorf("environment variable %s is %q, but the record names dispatch profile %q", n, v, profile.Name)
+			}
+		case slices.Contains(config.ProfileEnvNames, n):
+			if profile.Name == "" {
+				return fmt.Errorf("environment variable %s is one only a dispatch profile sets, and the record names none", n)
+			}
+			want, ok := profile.Env[n]
+			if !ok {
+				return fmt.Errorf("environment variable %s is set, but dispatch profile %q doesn't set it now", n, profile.Name)
+			}
+			if v != want {
+				return fmt.Errorf("environment variable %s is %q, but dispatch profile %q sets it to %q now", n, v, profile.Name, want)
+			}
+		case !allowed(n):
 			return fmt.Errorf("environment variable %s is neither one niwa sets nor one the workspace's [session.dispatch_env] passes now", n)
 		}
-		v := env[n]
 		if len(v) > maxResumeEnvValueLen {
 			return fmt.Errorf("environment variable %s is longer than %d bytes", n, maxResumeEnvValueLen)
 		}
 		if strings.IndexFunc(v, unicode.IsControl) >= 0 {
 			return fmt.Errorf("environment variable %s holds a control character", n)
+		}
+	}
+	if profile.Name == "" {
+		return nil
+	}
+	if _, ok := env[config.DispatchProfileEnv]; !ok {
+		return fmt.Errorf("the record names dispatch profile %q, but environment variable %s isn't set", profile.Name, config.DispatchProfileEnv)
+	}
+	for _, n := range slices.Sorted(maps.Keys(profile.Env)) {
+		if _, ok := env[n]; !ok {
+			return fmt.Errorf("dispatch profile %q sets environment variable %s now, and the record doesn't hold it", profile.Name, n)
 		}
 	}
 	return nil
@@ -646,7 +741,13 @@ func checkResumeEnv(env map[string]string, allowed func(string) bool) error {
 // key ("accept"), the MCP approval list (names matching
 // mcpServerNamePattern) and the env object (checked like the record's own
 // environment). Any other key, a hook or a permission rule, refuses it.
-func checkResumeSettings(doc string, allowed func(string) bool) error {
+//
+// A dispatch profile's keys are admitted only as profile resolves now, and
+// every one of them must be there: the permissions key as a lone deny list of
+// names in the tool-name grammar equal to the profile's drop_tools, and each
+// other key equal to the profile's value. With the zero profile none of them
+// is admitted.
+func checkResumeSettings(doc string, allowed func(string) bool, profile dispatchLaunchProfile) error {
 	dec := json.NewDecoder(strings.NewReader(doc))
 	var keys map[string]json.RawMessage
 	if err := dec.Decode(&keys); err != nil {
@@ -693,14 +794,87 @@ func checkResumeSettings(doc string, allowed func(string) bool) error {
 			if err := json.Unmarshal(raw, &env); err != nil {
 				return errors.New("env must be an object of string values")
 			}
-			if err := checkResumeEnv(env, allowed); err != nil {
+			if err := checkResumeEnv(env, allowed, profile, true); err != nil {
+				return err
+			}
+		case profilePermissionsKey:
+			if err := checkResumeDenyList(raw, profile); err != nil {
 				return err
 			}
 		default:
-			return fmt.Errorf("key %q is not one dispatch emits", k)
+			want, ok := profile.Keys[k]
+			if !ok {
+				if profile.Name != "" {
+					return fmt.Errorf("key %q is not one dispatch emits, and dispatch profile %q doesn't set it now", k, profile.Name)
+				}
+				return fmt.Errorf("key %q is not one dispatch emits", k)
+			}
+			if !sameJSON(raw, want) {
+				return fmt.Errorf("key %q differs from what dispatch profile %q sets now", k, profile.Name)
+			}
+		}
+	}
+	if profile.Name == "" {
+		return nil
+	}
+	if _, ok := keys["env"]; !ok {
+		return fmt.Errorf("the record names dispatch profile %q, but the document has no env object to carry %s", profile.Name, config.DispatchProfileEnv)
+	}
+	for _, k := range slices.Sorted(maps.Keys(profile.Keys)) {
+		if _, ok := keys[k]; !ok {
+			return fmt.Errorf("dispatch profile %q sets key %q now, and the recorded document doesn't hold it", profile.Name, k)
 		}
 	}
 	return nil
+}
+
+// checkResumeDenyList checks a recorded settings document's permissions value.
+// Its shape is checked first, whatever the profile says: only a lone deny list
+// of names in the tool-name grammar is ever admitted, so an allow list or a
+// planted rule never reaches a resumed worker. The list must then equal the
+// deny list profile resolves to now, in order.
+func checkResumeDenyList(raw json.RawMessage, profile dispatchLaunchProfile) error {
+	var perms map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &perms); err != nil {
+		return fmt.Errorf("%s must be an object holding only a deny list", profilePermissionsKey)
+	}
+	denyRaw, ok := perms["deny"]
+	if !ok || len(perms) != 1 {
+		return fmt.Errorf("%s must hold only a deny list", profilePermissionsKey)
+	}
+	var deny []string
+	if err := json.Unmarshal(denyRaw, &deny); err != nil || deny == nil {
+		return fmt.Errorf("%s deny must be a list of tool names", profilePermissionsKey)
+	}
+	for _, n := range deny {
+		if err := config.ValidateProfileToolName(n); err != nil {
+			return fmt.Errorf("%s deny name %q: %w", profilePermissionsKey, n, err)
+		}
+	}
+	if profile.Name == "" {
+		return fmt.Errorf("key %q is one only a dispatch profile emits, and the record names no dispatch profile", profilePermissionsKey)
+	}
+	want, ok := profile.Keys[profilePermissionsKey].(profileDenyList)
+	if !ok {
+		return fmt.Errorf("%s holds a deny list, but dispatch profile %q drops no tools now", profilePermissionsKey, profile.Name)
+	}
+	if !slices.Equal(deny, want.names) {
+		return fmt.Errorf("%s deny %q differs from dispatch profile %q's drop_tools now (%q)", profilePermissionsKey, deny, profile.Name, want.names)
+	}
+	return nil
+}
+
+// sameJSON reports whether raw decodes to the same value want encodes to.
+func sameJSON(raw json.RawMessage, want any) bool {
+	encoded, err := json.Marshal(want)
+	if err != nil {
+		return false
+	}
+	var got, exp any
+	if json.Unmarshal(raw, &got) != nil || json.Unmarshal(encoded, &exp) != nil {
+		return false
+	}
+	return reflect.DeepEqual(got, exp)
 }
 
 // instancePresent reports whether the instance is at path (true), or nothing
@@ -769,8 +943,9 @@ func displayMode(m string) string {
 }
 
 // resumeEnv is the resumed worker's environment: the parent's, less the
-// workspace's unset names and the reap key, with the recorded names set to
-// their recorded values.
+// workspace's unset names, the reap key and an inherited compaction window,
+// with the recorded names set to their recorded values. A recorded window
+// rides the recorded settings document, never this environment.
 func resumeEnv(base, unset []string, recorded map[string]string) []string {
 	proc, _ := shapeLaunchEnv(base, launchEnvShape{Unset: unset})
 	out := make([]string, 0, len(proc)+len(recorded))

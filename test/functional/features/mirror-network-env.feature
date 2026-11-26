@@ -5,10 +5,12 @@ Feature: The mirror's network calls keep the user's remote-access settings
   helper, the proxy command, TLS trust, the proxy auth method, and the
   GIT_CONFIG_COUNT entries whose key carries remote access. Every local
   mirror call still strips each inherited GIT_* variable, and every mirror
-  call runs with GIT_TERMINAL_PROMPT=0. No create borrows yet, so these
-  scenarios turn two of niwa's own clones into borrowers by hand. The test
-  build's environment probe records each mirror git process's GIT_* entries
-  in a file in the sandbox home.
+  call runs with GIT_TERMINAL_PROMPT=0. In the test build niwa create makes
+  each new clone borrow and seeds the mirror first, so the borrowers here
+  come from niwa create, and a scenario that checks the seed sets the probe
+  and the environment before its first create: the create's own seed is the
+  mirror's first network call. The test build's environment probe records
+  each mirror git process's GIT_* entries in a file in the sandbox home.
 
   Background:
     Given a clean niwa environment
@@ -29,19 +31,21 @@ Feature: The mirror's network calls keep the user's remote-access settings
       """
     When I run niwa init from config repo "myws"
     Then the exit code is 0
-    When I run "niwa create myws"
-    Then the exit code is 0
-    When I run "niwa create myws"
-    Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
-    And the mirror's git environment probe is on
+    Given the mirror's git environment probe is on
     And every remote-access variable is set in niwa's environment
     And I set env "GIT_NIWA_UNLISTED" to "niwa-unlisted-value"
     When I count the probe lines
-    And I run "niwa apply" from workspace root
+    And I run "niwa create myws"
     Then the exit code is 0
     And the mirror of "app" is a link into its store
     And the probe gained a network "clone" line
+    When I run "niwa create myws"
+    Then the exit code is 0
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
+    When I run "niwa apply" from workspace root
+    Then the exit code is 0
+    And the mirror of "app" is a link into its store
     When I add a branch "topic" with one commit to source repo "app"
     And I count the probe lines
     And I run "niwa apply" from workspace root
@@ -82,18 +86,19 @@ Feature: The mirror's network calls keep the user's remote-access settings
       """
     When I run niwa init from config repo "myws"
     Then the exit code is 0
-    When I run "niwa create myws"
-    Then the exit code is 0
-    When I run "niwa create myws"
-    Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
-    And the mirror's git environment probe is on
+    Given the mirror's git environment probe is on
     And I set env "GIT_CONFIG_COUNT" to "2"
     And I set env "GIT_CONFIG_KEY_0" to "remote.origin.prune"
     And I set env "GIT_CONFIG_VALUE_0" to "true"
     And I set env "GIT_CONFIG_KEY_1" to "http.extraHeader"
     And I set env "GIT_CONFIG_VALUE_1" to "X-Niwa-Probe: kept"
     And I set env "GIT_TERMINAL_PROMPT" to "1"
+    When I run "niwa create myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is 0
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -107,6 +112,7 @@ Feature: The mirror's network calls keep the user's remote-access settings
     And no line the probe holds names "remote.origin.prune"
     And every network line the probe holds carries "GIT_TERMINAL_PROMPT" = "0"
     And no line the probe holds carries a GIT variable niwa didn't set itself or keep for the network
+    And nothing mirror-related exists outside the sandbox home
 
   # The repo's URL names a host under .invalid, which only the wrapper can
   # reach; niwa's own clones of it reach it the same way. The SessionStart
@@ -129,12 +135,15 @@ Feature: The mirror's network calls keep the user's remote-access settings
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
+    And the mirror log gained a check line and a restore line for "app" with fault "missing" and result "restored" from command "create"
+    And the mirror of "app" is a link into its store
+    And the mirror of "app" has the remote URL of source repo "app-ssh"
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
-    And the mirror log gained a check line and a restore line for "app" with fault "missing" and result "restored" from command "apply"
     And the mirror of "app" is a link into its store
     And the mirror of "app" has the remote URL of source repo "app-ssh"
     When I delete the mirror of "app" and its store
@@ -167,7 +176,8 @@ Feature: The mirror's network calls keep the user's remote-access settings
     Then the exit code is 0
     When I run "niwa create myws"
     Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -187,6 +197,7 @@ Feature: The mirror's network calls keep the user's remote-access settings
     And no local line the probe gained carries "GIT_DIR"
     And no local line the probe gained carries "GIT_ALTERNATE_OBJECT_DIRECTORIES"
     And every ref of each borrower of "app" reads to the root and fsck is clean
+    And nothing mirror-related exists outside the sandbox home
 
   Scenario: No environment value reaches the mirror log, which notes what was honoured
     Given a config repo "myws" exists with body:
@@ -202,18 +213,19 @@ Feature: The mirror's network calls keep the user's remote-access settings
       """
     When I run niwa init from config repo "myws"
     Then the exit code is 0
-    When I run "niwa create myws"
-    Then the exit code is 0
-    When I run "niwa create myws"
-    Then the exit code is 0
-    Given the clones of "tools/app" in instances "myws" and "myws-2" borrow from the mirror of "app"
-    And I set env "GIT_SSH_COMMAND" to "/niwa-sentinel-ssh-command"
+    Given I set env "GIT_SSH_COMMAND" to "/niwa-sentinel-ssh-command"
     And I set env "GIT_ASKPASS" to "/niwa-sentinel-askpass"
     And I set env "GIT_PROXY_COMMAND" to "/niwa-sentinel-proxy-command"
     And I set env "GIT_SSL_NO_VERIFY" to "niwa-sentinel-no-verify"
     And I set env "GIT_CONFIG_COUNT" to "1"
     And I set env "GIT_CONFIG_KEY_0" to "http.extraHeader"
     And I set env "GIT_CONFIG_VALUE_0" to "X-Niwa: niwa-sentinel-config-value"
+    When I run "niwa create myws"
+    Then the exit code is 0
+    When I run "niwa create myws"
+    Then the exit code is 0
+    Given the clones of "tools/app" in instances "myws" and "myws-2" were made borrowing by niwa create from the mirror of "app"
+    And each borrower of "app" holds no pack a mirror store holds
     When I run "niwa apply" from workspace root
     Then the exit code is 0
     And the mirror of "app" is a link into its store
@@ -225,3 +237,4 @@ Feature: The mirror's network calls keep the user's remote-access settings
     And the mirror log gained a check line and a restore line for "app" with fault "missing" and result "restored" from command "apply"
     And every restore and refresh line the mirror log gained carries the network notes "ssl-no-verify,proxy-command"
     And the mirror log holds none of "niwa-sentinel-ssh-command,niwa-sentinel-askpass,niwa-sentinel-proxy-command,niwa-sentinel-no-verify,niwa-sentinel-config-value"
+    And nothing mirror-related exists outside the sandbox home

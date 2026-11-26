@@ -9,8 +9,8 @@ import (
 
 func TestAllIsTheClosedSet(t *testing.T) {
 	all := All()
-	if len(all) != 27 {
-		t.Fatalf("All() returned %d capabilities, want the matrix's 27", len(all))
+	if len(all) != 28 {
+		t.Fatalf("All() returned %d capabilities, want the matrix's 28", len(all))
 	}
 	seen := map[Capability]bool{}
 	for _, c := range all {
@@ -112,9 +112,10 @@ func TestLookupAnswersEachDeclaredPair(t *testing.T) {
 // Every one of them is inherent to the agent -- five its own mechanics put out
 // of reach, five naming surface that exists only in the other harness. The
 // not-built kind, the one category a developer could act on, stays out of this
-// map: a row of that kind is pending, not final. Row 26, dispatch resource
-// attributes, is such a row today, which is why the kind survives in the checks
-// below and in the guide's renderer.
+// map: a row of that kind is pending, not final. Rows 26, 27 and 28, dispatch
+// resource attributes, the dispatch first-read guard and dispatch profile, are
+// such rows today, which is why the kind survives in the checks below and in
+// the guide's renderer.
 //
 // Writing the rows out here is what makes an accidental flip fail with a name
 // in the message. A row missing from this map is one whose delivery is still
@@ -148,8 +149,9 @@ var codexFinalGaps = map[Capability]ReasonKind{
 }
 
 // codexDelivered is what niwa delivers to Codex today: fifteen rows against the
-// ten final gaps in codexFinalGaps, with one row pending between them (row 26,
-// dispatch resource attributes, declared as niwa's own debt). Directory trust is the first, and deliberately so --
+// ten final gaps in codexFinalGaps, with three rows pending between them (rows
+// 26, 27 and 28, dispatch resource attributes, the dispatch first-read guard
+// and dispatch profile, declared as niwa's own debt). Directory trust is the first, and deliberately so --
 // every trust-gated row downstream names it in Requires, and the closure test
 // refuses such an edge while it is unavailable. The list grew one entry per
 // delivery, in the change that landed the delivery, never before it.
@@ -190,7 +192,7 @@ var codexDelivered = []Capability{
 // per-row check by moving a name from one list to the other -- still has to
 // face a number somebody wrote down on purpose.
 func TestCodexColumnTotals(t *testing.T) {
-	const wantImplemented, wantUnavailable = 15, 12
+	const wantImplemented, wantUnavailable = 15, 13
 
 	implemented, unavailable := 0, 0
 	for _, c := range All() {
@@ -219,8 +221,8 @@ func TestCodexColumnTotals(t *testing.T) {
 //
 // The pending branch below is what a new row with a route and no delivery goes
 // through: it must declare niwa's own debt rather than borrow an inherent
-// reason. Rows 26 and 27, dispatch resource attributes and the dispatch
-// first-read guard, are the rows in it today.
+// reason. Rows 26, 27 and 28, dispatch resource attributes, the dispatch
+// first-read guard and dispatch profile, are the rows in it today.
 func TestCodexColumnStatesWhatIsDelivered(t *testing.T) {
 	for _, c := range All() {
 		d, err := Lookup(c, agent.AgentCodex)
