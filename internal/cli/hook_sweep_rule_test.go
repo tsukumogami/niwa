@@ -125,6 +125,56 @@ func TestSweepRule_FsmonitorInTheRepositoryNeverRuns(t *testing.T) {
 	}
 }
 
+// The sweep's git calls run with hooks off, so hooks planted in the
+// repository don't run when the sweep removes the worktree and deletes its
+// branch with branch -d. A plain checkout afterwards shows the hooks were
+// live all along.
+func TestSweepRule_HooksInTheRepositoryNeverRunOnTheBranchDelete(t *testing.T) {
+	fx := newSweepRuleFixture(t, nil)
+	markers := map[string]string{}
+	for _, hook := range []string{"reference-transaction", "post-checkout"} {
+		marker := filepath.Join(t.TempDir(), hook+"-ran")
+		markers[hook] = marker
+		body := fmt.Sprintf("#!/bin/sh\n: > '%s'\n", marker)
+		if err := os.WriteFile(filepath.Join(fx.f.repoPath, ".git", "hooks", hook), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	n, out := sweep(t, fx.f, fx.jobs)
+	if n != 1 {
+		t.Fatalf("removed %d, want the unchanged worktree removed\nstderr:\n%s", n, out)
+	}
+	assertRemoved(t, fx.f, fx.st)
+	for _, marker := range markers {
+		assertNoMarker(t, marker)
+	}
+
+	passGit(t, fx.f.repoPath, "checkout", "-q", "-b", "probe")
+	for hook, marker := range markers {
+		if _, err := os.Stat(marker); err != nil {
+			t.Errorf("the planted %s hook did not run on a plain checkout: %v", hook, err)
+		}
+	}
+}
+
+func TestSweepRule_SSHCommandInTheRepositoryKeepsAndNeverRuns(t *testing.T) {
+	fx := newSweepRuleFixture(t, nil)
+	marker := filepath.Join(t.TempDir(), "ssh-ran")
+	passGit(t, fx.f.repoPath, "config", "core.sshCommand", markerScript(t, marker))
+
+	n, out := sweep(t, fx.f, fx.jobs)
+	assertNoMarker(t, marker)
+	if n != 0 {
+		t.Fatalf("removed %d, want the worktree kept\nstderr:\n%s", n, out)
+	}
+	assertKept(t, fx.f, fx.st)
+	// git lists configuration keys in lower case.
+	if !strings.Contains(out, "core.sshcommand") {
+		t.Errorf("sweep output does not name core.sshCommand:\n%s", out)
+	}
+}
+
 func TestSweepRule_ACleanFilterDriverKeepsTheWorktree(t *testing.T) {
 	fx := newSweepRuleFixture(t, func(repo string) {
 		writeTestFile(t, filepath.Join(repo, ".gitattributes"), "*.txt filter=x\n")
