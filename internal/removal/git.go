@@ -69,8 +69,8 @@ const allowedProtocols = "https:ssh"
 const sshCommand = "ssh -o BatchMode=yes -o ForwardAgent=no"
 
 // Env is what one pass resolves once and every external program the rule
-// runs is started from: the filtered PATH, the absolute paths of git, lsof
-// and claude found on it, the home directory and the pass's scratch
+// runs is started from: the filtered PATH, the absolute paths of git, lsof,
+// claude and gh found on it, the home directory and the pass's scratch
 // directory.
 type Env struct {
 	// Root is the workspace root, with symlinks resolved.
@@ -79,9 +79,9 @@ type Env struct {
 	Home string
 	// PATH is the filtered PATH, already joined.
 	PATH string
-	// Git, Lsof and Claude are absolute paths, empty when the filtered PATH
-	// has no such program.
-	Git, Lsof, Claude string
+	// Git, Lsof, Claude and Gh are absolute paths, empty when the filtered
+	// PATH has no such program.
+	Git, Lsof, Claude, Gh string
 	// Scratch is the pass's scratch directory; nil when it couldn't be made,
 	// and then nothing that needs it runs.
 	Scratch *Scratch
@@ -138,7 +138,7 @@ type EnvOption func(*Env)
 func WithFileRemotes() EnvOption { return func(e *Env) { e.allowFile = true } }
 
 // NewEnv resolves the pass's environment: the PATH filtered against root,
-// git, lsof and claude on it, a fresh scratch directory under home, git's
+// git, lsof, claude and gh on it, a fresh scratch directory under home, git's
 // version and the person's credential helpers. A scratch directory that
 // can't be made is recorded rather than returned as an error, so a unit that
 // never needs it can still be judged; with none, the version and
@@ -154,6 +154,7 @@ func NewEnv(root, home, pathEnv string, opts ...EnvOption) *Env {
 		Git:       lookIn(dirs, "git", canonRoot),
 		Lsof:      lookIn(dirs, "lsof", canonRoot),
 		Claude:    lookIn(dirs, "claude", canonRoot),
+		Gh:        lookIn(dirs, "gh", canonRoot),
 		allowFile: testhook.RemovalFileRemotes(),
 		caFile:    testhook.RemovalCAFile(),
 		lsRemote:  map[string]lsRemoteResult{},

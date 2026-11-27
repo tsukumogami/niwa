@@ -123,7 +123,7 @@ func scanWithDestroyForge(t *testing.T, instanceDir, apiURL string) workspace.In
 	t.Setenv("NIWA_GITHUB_API_URL", apiURL)
 	t.Setenv("GITHUB_TOKEN", "test-token")
 	s, err := workspace.ScanInstance(instanceDir,
-		workspace.WithForge(newDestroyForge()), workspace.WithNetworkTimeout(10*time.Second),
+		workspace.WithForge(newDestroyForge(resolveGitHubToken)), workspace.WithNetworkTimeout(10*time.Second),
 		workspace.WithGitCommand(plainScanGit), workspace.WithRemoteFetch(plainScanFetch(t)))
 	if err != nil {
 		t.Fatalf("ScanInstance: %v", err)

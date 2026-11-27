@@ -14,17 +14,20 @@ import (
 // never need the forge doesn't run `gh auth token`.
 type githubForge struct {
 	once   sync.Once
+	token  func() string
 	client *github.APIClient
 }
 
-// newDestroyForge returns the forge the destroy scan uses.
-func newDestroyForge() workspace.Forge {
-	return &githubForge{}
+// newDestroyForge returns the forge the destroy scan uses, which takes its
+// token from token on the first lookup. Destroy passes the scan's removal
+// environment's GitHubToken, so gh starts only from the filtered PATH.
+func newDestroyForge(token func() string) workspace.Forge {
+	return &githubForge{token: token}
 }
 
 func (f *githubForge) HeadPR(ctx context.Context, owner, repo, branch string) (workspace.HeadPR, error) {
 	f.once.Do(func() {
-		f.client = github.NewAPIClient(resolveGitHubToken())
+		f.client = github.NewAPIClient(f.token())
 	})
 	// A branch in a fork is proposed to the parent repository, so its pull
 	// requests live there, and asking the fork finds none. "No PR" would then
