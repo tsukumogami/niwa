@@ -247,10 +247,12 @@ func validateRecordBranchName(branchName string) error {
 }
 
 // worktreeHasUncommittedChanges reports whether worktreePath has uncommitted
-// git changes, mirroring reset's uncommitted-changes check:
-// it runs `git status --porcelain` in the worktree and treats any non-empty
-// output as dirty. All git access flows through gitInvoker so the destroy
-// path stays test-injectable and the worktree package stays a leaf (no
+// git changes. Unlike reset's uncommitted-changes check, which runs through
+// the removal pass's git, this guard still runs bare `git status --porcelain`
+// in the worktree, with the repository's own configuration and hooks, and
+// treats any non-empty output as dirty. All git access flows through
+// gitInvoker so the destroy path stays test-injectable and the worktree
+// package stays a leaf (no
 // internal/workspace import). It fails closed: a worktree path that cannot be
 // stat'd — missing, unreadable, a symlink loop — is an error, not a "clean"
 // verdict. Reporting an unverifiable worktree as clean would let a record that
@@ -515,7 +517,8 @@ func DestroySession(ctx context.Context, instanceRoot, sessionID string, force b
 	}
 
 	// Reject when the worktree holds uncommitted changes and force is not set.
-	// This mirrors reset's uncommitted-changes check: the
+	// Like reset's uncommitted-changes check, it refuses a dirty tree, though
+	// it still runs bare git status (see worktreeHasUncommittedChanges): the
 	// removal deletes the worktree directory, so destroying a dirty worktree
 	// would discard unsaved work. The check runs BEFORE any teardown (before
 	// remover is called and before the terminal-state write) so a refused

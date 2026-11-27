@@ -308,6 +308,10 @@ lists each place and why it matters. A repository's own configuration and
 hooks inside the instance can't make a reap run a program: every git call the
 reap, `niwa destroy` and `niwa reset` make goes through the removal pass's git,
 which keeps (or refuses) on a key that names a program and sets hooks aside.
+That isn't true of every git call niwa makes in an instance. The worktree
+hook's teardowns, `niwa worktree destroy` and `niwa apply`'s check that a clone
+registers a worktree still run bare `git`, with the repository's own
+configuration and hooks.
 
 ### The liveness rule
 
@@ -435,8 +439,9 @@ calls also override several of those settings and set the hooks directory
 aside. The reap's worktree sweep, `niwa destroy`'s scan and `niwa reset`'s
 check for uncommitted changes do the same: they run through that git, refuse
 or keep on a key that names a program, and run with hooks set aside. The
-worktree hook's teardowns and `niwa worktree destroy` don't yet; the bullet on
-what the sweep, `niwa destroy` and `niwa reset` read below says more.
+worktree hook's teardowns, `niwa worktree destroy` and `niwa apply`'s worktree
+check don't yet; the bullet on what the sweep, `niwa destroy` and `niwa reset`
+read below says more.
 Some of what the reap reads isn't inside the
 instance at all: the reap trusts files outside the instance to say what counts
 as pushed, which instances it may act on and which sessions are live, and it
@@ -602,9 +607,10 @@ Bash gets past it.
   every git call through the removal pass's git: the filtered `PATH`, no
   global or system configuration, the overrides for keys that name a
   program, hooks set aside, and the configuration check before git runs.
-  Before the sweep makes a git call or reads anything at a worktree, it
-  checks that the path the session record names is inside the instance, as
-  text and following no link below the instance root.
+  Before the sweep makes a git call at a worktree, it checks that the path
+  the session record names is inside the instance. The check is textual,
+  apart from resolving links at the record path itself, and follows no link
+  below the instance root; no git runs at a path that fails it.
   Destroy's pull-request lookups take their token from `GITHUB_TOKEN`, then
   `GH_TOKEN`, and run `gh auth token` only when neither is set. That `gh` is
   the first match on the filtered `PATH`, run by its absolute path with
@@ -642,7 +648,9 @@ Bash gets past it.
   the submodule under its own path (`app/sub`), where reset used to name only
   the containing repository (`app`); a submodule checked out at another
   commit, a staged submodule commit or a removed submodule work tree still
-  lists the containing repository.
+  lists the containing repository. Reset's checks don't read a submodule's
+  `submodule.<name>.ignore` setting, so where that setting used to hide a
+  submodule's change from reset, reset now blocks.
   A file that only your global excludes ignore now makes reset see its
   repository as dirty. A `.DS_Store` matched by `~/.config/git/ignore` or by
   a global `core.excludesFile` is the usual case: reset's git doesn't read
@@ -652,7 +660,8 @@ Bash gets past it.
   checked nothing else is uncommitted. `--force` still skips the whole check.
   `niwa worktree from-hook` (its `WorktreeRemove` and `SubagentStop`
   teardowns, the cleanup after a failed create and the baseline it reads at
-  create) and `niwa worktree destroy` still run bare `git`, with the
+  create), `niwa worktree destroy` and `niwa apply`'s check that a clone
+  registers a worktree still run bare `git`, with the
   repository's own configuration and hooks. An agent can write its own instance's
   repositories, so a setting or hook there can make those calls run a
   program as the person, and no entry on this list stops it.
