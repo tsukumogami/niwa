@@ -128,9 +128,10 @@ func (s InstanceScan) HasLoss() bool {
 // The scan contacts each repo's remotes (ls-remote, and a fetch of the
 // default branch) and, through WithForge, the forge. See durable.go for the
 // test a branch has to pass. Every git call it makes, the git version read
-// included, is built by the builder WithGitCommand hands it, or by plain git
-// from PATH when it is given none. Given WithRepositoryWalk, the walk runs
-// before the first git call, in place of the search for .git directories.
+// included, is built by the builder WithGitCommand hands it; given none, it
+// starts no git and lists every repository as at risk. Given
+// WithRepositoryWalk, the walk runs before the first git call, in place of
+// the search for .git directories.
 func ScanInstance(instanceDir string, opts ...ScanOption) (InstanceScan, error) {
 	cfg := newScanConfig(opts)
 	state, err := LoadState(instanceDir)
@@ -505,6 +506,11 @@ func listWorktrees(cfg scanConfig, primary string) ([]worktreeEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseWorktreeList(out), nil
+}
+
+// parseWorktreeList reads the output of `git worktree list --porcelain`.
+func parseWorktreeList(out string) []worktreeEntry {
 	var entries []worktreeEntry
 	for _, line := range strings.Split(out, "\n") {
 		switch {
@@ -514,7 +520,7 @@ func listWorktrees(cfg scanConfig, primary string) ([]worktreeEntry, error) {
 			entries[len(entries)-1].branch = strings.TrimPrefix(strings.TrimPrefix(line, "branch "), "refs/heads/")
 		}
 	}
-	return entries, nil
+	return entries
 }
 
 // gitOutput runs git in treeDir with args, built by the scan's builder, and

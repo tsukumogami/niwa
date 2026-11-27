@@ -282,14 +282,14 @@ func TestRunDestroy_FromInsideWritesLandingPath(t *testing.T) {
 
 // TestRunDestroy_PerInstanceScansForUnpushedWorkAndRefusesNonTTY confirms
 // that runDestroyInstance now runs the comprehensive non-pushed-work scan
-// (ScanInstance, not the narrower CheckUncommittedChanges) when --force
+// (ScanInstance, not reset's narrower uncommitted-changes check) when --force
 // is absent. With stdin not a TTY (always true in unit tests), the
 // typed-confirmation path can't fire, so the command must refuse with the
 // non-TTY error rather than proceeding silently.
 //
 // Setup uses a real git repo with an unpushed commit so the scan finds
-// LossUnpushedCommits — a state the OLD CheckUncommittedChanges helper
-// would have missed.
+// LossUnpushedCommits — a state reset's uncommitted-changes check
+// misses.
 func TestRunDestroy_PerInstanceScansForUnpushedWorkAndRefusesNonTTY(t *testing.T) {
 	root := destroyTestSetup(t, []string{"alpha"})
 	chdirTo(t, root)
@@ -321,7 +321,7 @@ func TestRunDestroy_PerInstanceScansForUnpushedWorkAndRefusesNonTTY(t *testing.T
 		t.Errorf("error should mention non-TTY; got: %v", err)
 	}
 	// Stderr should contain the FormatScans rendering — proves the
-	// broader scan ran rather than the narrow CheckUncommittedChanges.
+	// broader scan ran rather than reset's narrower check.
 	if !strings.Contains(stderr.String(), "unpushed") && !strings.Contains(stderr.String(), "ahead") {
 		t.Errorf("stderr should contain scan output (unpushed/ahead); got: %q", stderr.String())
 	}

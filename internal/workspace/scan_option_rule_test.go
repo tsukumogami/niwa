@@ -220,6 +220,67 @@ func TestScanOptionRule_EveryGitCallTheScanMakesGoesThroughTheBuilder(t *testing
 	}
 }
 
+// A scan handed no builder starts no git at all, from PATH or anywhere
+// else: every call it would make is refused before it starts, so every
+// repository in the instance is listed as a scan error, and nothing is
+// passed as clean.
+func TestScanOptionRule_AScanGivenNoBuilderStartsNoGit(t *testing.T) {
+	scans := []struct {
+		name string
+		run  func(instanceDir string, opts ...ScanOption) ([]InstanceScan, error)
+	}{
+		{"ScanInstance", func(instanceDir string, opts ...ScanOption) ([]InstanceScan, error) {
+			s, err := ScanInstance(instanceDir, opts...)
+			return []InstanceScan{s}, err
+		}},
+		{"ScanInstancesParallel", func(instanceDir string, opts ...ScanOption) ([]InstanceScan, error) {
+			return ScanInstancesParallel(filepath.Dir(instanceDir), []string{instanceDir}, 0, opts...)
+		}},
+	}
+	for _, s := range scans {
+		t.Run(s.name, func(t *testing.T) {
+			instanceDir := builderScanInstance(t)
+			scanInitGitRepo(t, filepath.Join(instanceDir, "beta", "lib"))
+			_, log := scanGitWrappers(t)
+
+			results, err := s.run(instanceDir, WithNetworkTimeout(10*time.Second))
+			if err != nil {
+				t.Fatalf("%s: %v", s.name, err)
+			}
+
+			raw, err := os.ReadFile(log)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+				if line != "" {
+					t.Errorf("a scan given no builder started git: %s", line)
+				}
+			}
+
+			for _, r := range results {
+				want := map[string]bool{"app": false, filepath.Join("beta", "lib"): false}
+				for _, repo := range r.Repos {
+					if _, ok := want[repo.Name]; !ok {
+						t.Errorf("the scan listed an unexpected repository %q: %+v", repo.Name, repo)
+						continue
+					}
+					for _, l := range repo.Losses {
+						if l.Kind == LossScanError {
+							want[repo.Name] = true
+						}
+					}
+				}
+				for name, listed := range want {
+					if !listed {
+						t.Errorf("%s isn't listed as a scan error; a scan with no builder must list every repository: %+v", name, r.Repos)
+					}
+				}
+			}
+		})
+	}
+}
+
 func containsField(line, word string) bool {
 	for _, f := range strings.Fields(line) {
 		if f == word {

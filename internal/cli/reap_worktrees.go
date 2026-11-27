@@ -32,6 +32,11 @@ import (
 // worktree-sweep and the recorded Claude session id; a refusal keeps the
 // worktree for this pass and prints the gate's line.
 //
+// A record whose worktree path fails worktree.ValidateRecordFields, or
+// isn't, as text and with no link followed below the instance root, the
+// path the walk finds the worktree at, keeps the worktree with a line naming
+// it, and no git call or read is made at that path.
+//
 // Before any other git call in a worktree whose session has ended, the
 // sweep walks the instance and runs the program-naming configuration check
 // on every repository it finds under the worktree, its own and each
@@ -95,14 +100,25 @@ func sweepHookWorktreesIn(workspaceRoot string, instances []string, jobsDir stri
 			if !hookSessionEnded(st, jobsDir, now, grace) {
 				continue
 			}
+			// The record's fields are checked first, the check DestroySession
+			// makes, so a worktree path outside the instance's worktrees
+			// directory or a branch name git would misread keeps the worktree
+			// before anything is read at that path. The worktree path is read
+			// from the instance's session record and the reasons can quote it,
+			// so both pass removal.ScrubEvidence.
+			if err := worktree.ValidateRecordFields(instance, st.WorktreePath, st.EffectiveBranchName()); err != nil {
+				fmt.Fprintf(stderr, "niwa: kept worktree %s: %s\n",
+					removal.ScrubEvidence(st.WorktreePath, 400), removal.ScrubEvidence(err.Error(), 400))
+				continue
+			}
 			if env == nil {
 				env = newRemovalEnv(workspaceRoot, userHomeDir(), os.Getenv("PATH"))
 				defer env.Close()
 			}
 			// The walk and the configuration check on every repository
-			// under the worktree come before any other git call there. The
-			// worktree path is read from the instance's session record and
-			// the reasons can quote it, so both pass removal.ScrubEvidence.
+			// under the worktree come before any other git call there, and
+			// the evaluation takes the record's path only as the walk's own
+			// spelling of the worktree, inside the instance as text.
 			swept, keep := env.EvaluateSweptWorktree(ctx, instance, st.WorktreePath)
 			if keep != "" {
 				fmt.Fprintf(stderr, "niwa: kept worktree %s: %s\n",

@@ -88,7 +88,7 @@ func (f *durableFixture) asGitHub() {
 
 func (f *durableFixture) scan(opts ...ScanOption) InstanceScan {
 	f.t.Helper()
-	opts = append([]ScanOption{WithNetworkTimeout(10 * time.Second)}, opts...)
+	opts = append([]ScanOption{withPlainGit(), WithNetworkTimeout(10 * time.Second)}, opts...)
 	s, err := ScanInstance(f.instanceDir, opts...)
 	if err != nil {
 		f.t.Fatalf("ScanInstance: %v", err)

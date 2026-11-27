@@ -262,7 +262,7 @@ func runDestroyInstance(cmd *cobra.Command, instanceDir, workspaceRoot, landingP
 		scanEnv := newRemovalEnv(workspaceRoot, userHomeDir(), os.Getenv("PATH"))
 		defer scanEnv.Close()
 		scan, err := workspace.ScanInstance(instanceDir,
-			workspace.WithForge(newDestroyForge()),
+			workspace.WithForge(newDestroyForge(func() string { return scanEnv.GitHubToken(ctx) })),
 			workspace.WithRepositoryWalk(destroyScanWalk(scanEnv)),
 			workspace.WithGitCommand(scanEnv.ScanCommand),
 			workspace.WithRemoteFetch(scanEnv.ScanFetch))
@@ -565,7 +565,7 @@ func runDestroyWorkspace(cmd *cobra.Command, workspaceRoot, confirm string) erro
 	scanEnv := newRemovalEnv(workspaceRoot, userHomeDir(), os.Getenv("PATH"))
 	defer scanEnv.Close()
 	scans, scanErr := workspace.ScanInstancesParallel(workspaceRoot, instances, 0,
-		workspace.WithForge(newDestroyForge()),
+		workspace.WithForge(newDestroyForge(func() string { return scanEnv.GitHubToken(ctx) })),
 		workspace.WithRepositoryWalk(destroyScanWalk(scanEnv)),
 		workspace.WithGitCommand(scanEnv.ScanCommand),
 		workspace.WithRemoteFetch(scanEnv.ScanFetch))

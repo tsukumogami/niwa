@@ -3052,11 +3052,14 @@ func pathUnder(dir, candidate string) bool {
 // worktree of the clone at cloneDir, via a `git worktree list --porcelain`
 // cross-check. A failed git invocation (clone not a git repo, git absent) makes
 // the worktree undetectable; the caller defaults such cases to skip-with-warning.
+// It is apply's own git call, not the destroy scan's, so it doesn't go through
+// a scan's command builder.
 func gitRegistersWorktree(cloneDir, worktreePath string) bool {
-	entries, err := listWorktrees(newScanConfig(nil), cloneDir)
+	out, err := gitCommand(context.Background(), "-C", cloneDir, "worktree", "list", "--porcelain").Output()
 	if err != nil {
 		return false
 	}
+	entries := parseWorktreeList(string(out))
 	target, err := filepath.Abs(worktreePath)
 	if err != nil {
 		target = worktreePath

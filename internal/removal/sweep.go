@@ -33,7 +33,8 @@ var perWorktreeRefPrefixes = []string{"refs/worktree/", "refs/bisect/", "refs/re
 type SweptWorktree struct {
 	env      *Env
 	instance string
-	// workTree is the work tree as the sweep was given it, adminDir its admin
+	// workTree is the work tree as the sweep was given it, which the
+	// evaluation matched as text with the walk's, adminDir its admin
 	// directory as the walk found it, and repoDir the repository's own work
 	// tree, whose common git directory is common.
 	workTree, adminDir string
@@ -50,23 +51,39 @@ type SweptWorktree struct {
 }
 
 // EvaluateSweptWorktree walks the instance and judges the linked worktree
-// at workTree. Before any other git call it runs the configuration check on
+// at workTree. workTree must be absolute, carry no ".." component, and lie
+// under the instance as text, named under the instance as given or with the
+// links at and above it resolved; named that way, it must be the very path
+// the walk found the worktree at, so no link below the instance root is
+// followed to reach it. A path that isn't is kept before any git call or
+// read in it. Before any other git call it runs the configuration check on
 // every repository the walk finds under the worktree; then it records the
 // worktree's HEAD and per-worktree refs. keep is empty and s set when nothing
 // keeps the worktree. Otherwise keep says why, with the key or the walk's
-// rule named: a key that names a program, a configuration that can't be
-// read or doesn't match the walk, a walk rule's keep or an unreadable path
-// under the worktree, a worktree the walk didn't find inside the instance,
-// or a ref read that fails.
+// rule named: a path that isn't the walk's worktree, a key that names a
+// program, a configuration that can't be read or doesn't match the walk, a
+// walk rule's keep or an unreadable path under the worktree, a worktree the
+// walk didn't find inside the instance, or a ref read that fails. The
+// SweptWorktree's git calls name the worktree as workTree does, which then
+// differs from the walk's only in the links at and above the instance.
 func (e *Env) EvaluateSweptWorktree(ctx context.Context, instance, workTree string) (s *SweptWorktree, keep string) {
 	if e == nil {
 		return nil, "git can't be run for this pass"
 	}
+	if why := recordedPathRefusal(workTree); why != "" {
+		return nil, why
+	}
+	// The walk runs no git; it gives the instance's spellings the path is
+	// matched against.
 	f := walkUnit(ctx, Unit{InstancePath: instance}, Policy{})
+	want, ok := f.walkSpelling(workTree)
+	if !ok {
+		return nil, "the worktree path is outside the instance: " + workTree
+	}
 	var own *foundRepo
 	for i := range f.repos {
 		r := &f.repos[i]
-		if r.Linked && !r.Prunable && r.WorkTree != "" && sameDir(r.WorkTree, workTree) {
+		if r.Linked && !r.Prunable && r.WorkTree != "" && filepath.Clean(r.WorkTree) == want {
 			own = r
 			break
 		}
@@ -152,6 +169,46 @@ func (e *Env) EvaluateSweptWorktree(ctx context.Context, instance, workTree stri
 	}
 	s.refs = refs
 	return s, ""
+}
+
+// recordedPathRefusal says why a worktree path read from a session record
+// can't name a worktree in the instance, before anything is read at it: it
+// is empty, not absolute, or has a ".." component. It is empty for a path
+// that can.
+func recordedPathRefusal(p string) string {
+	switch {
+	case p == "":
+		return "the worktree path is empty"
+	case !filepath.IsAbs(p):
+		return "the worktree path is not absolute: " + p
+	}
+	for _, part := range strings.Split(filepath.ToSlash(p), "/") {
+		if part == ".." {
+			return `the worktree path has a ".." component: ` + p
+		}
+	}
+	return ""
+}
+
+// walkSpelling names p, cleaned without following a link, as the walk names
+// the same place: by its place below whichever spelling of the instance it
+// sits under, as given or with the links at and above it resolved, joined
+// to the instance as the walk was given it. It is false for a path under
+// neither spelling.
+func (f *found) walkSpelling(p string) (string, bool) {
+	if len(f.roots) == 0 {
+		return "", false
+	}
+	r := f.roots[0]
+	for _, base := range []string{r.given, r.real} {
+		if base == "" {
+			continue
+		}
+		if rel, err := relBelow(base, p); err == nil {
+			return filepath.Join(r.given, rel), true
+		}
+	}
+	return "", false
 }
 
 // sameDir reports whether a and b name the same directory, as text or with

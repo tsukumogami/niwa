@@ -141,6 +141,100 @@ func TestDestroyScanNetwork_AFullyPushedReachableRemoteStillDestroys(t *testing.
 	assertInstanceGone(t, filepath.Join(root, "alpha"))
 }
 
+// plantRefHooks writes reference-transaction, post-merge and pre-push hooks
+// into the repository at repo, each appending its own name to marker.
+func plantRefHooks(t *testing.T, repo, marker string) {
+	t.Helper()
+	hooks := filepath.Join(repo, ".git", "hooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "#!/bin/sh\nbasename \"$0\" >> '" + marker + "'\n"
+	for _, h := range []string{"reference-transaction", "post-merge", "pre-push"} {
+		if err := os.WriteFile(filepath.Join(hooks, h), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The remote's main moved past the clone's, so the commit the remote names
+// is missing from the clone and the scan fetches it into a scratch store to
+// judge the clone's main against it. No hook planted in the clone runs: the
+// fetch writes no ref in the repository, and nothing the scan does merges or
+// pushes. The same hooks, planted in a second clone, do run on a plain fetch
+// there, so the planted hooks are live.
+func TestDestroyScanNetwork_AFetchForTheScanRunsNoHookInTheRepository(t *testing.T) {
+	root, clone := destroyScanInstance(t, nil)
+	scanFileRemotes(t)
+	remote := strings.TrimSpace(passGitOut(t, clone, "config", "--get", "remote.origin.url"))
+	control := filepath.Join(canonicalTempDir(t), "control")
+	passGit(t, root, "clone", "-q", remote, control)
+
+	other := filepath.Join(canonicalTempDir(t), "other")
+	passGit(t, root, "clone", "-q", remote, other)
+	writeTestFile(t, filepath.Join(other, "later.txt"), "pushed from elsewhere\n")
+	passGit(t, other, "add", "later.txt")
+	passGit(t, other, "commit", "-q", "-m", "later")
+	passGit(t, other, "push", "-q", "origin", "main")
+	later := strings.TrimSpace(passGitOut(t, other, "rev-parse", "HEAD"))
+	missing := exec.Command("git", "cat-file", "-e", later+"^{commit}")
+	missing.Dir = clone
+	if err := missing.Run(); err == nil {
+		t.Fatalf("the clone already holds %s; the scan would have nothing to fetch", later)
+	}
+
+	controlMarker := filepath.Join(t.TempDir(), "control-hooks-ran")
+	plantRefHooks(t, control, controlMarker)
+	passGit(t, control, "fetch", "-q", "origin")
+	if _, err := os.Stat(controlMarker); err != nil {
+		t.Fatalf("the planted hooks didn't run on a plain fetch in the control clone: %v", err)
+	}
+
+	marker := filepath.Join(t.TempDir(), "hooks-ran")
+	plantRefHooks(t, clone, marker)
+	log := destroyGitWrapper(t, "")
+	stderr := quietDestroyCmd()
+
+	err := runDestroy(destroyCmd, []string{"alpha"})
+	if got, readErr := os.ReadFile(marker); readErr == nil {
+		t.Errorf("a hook planted in the scanned repository ran: %q", got)
+	} else if !os.IsNotExist(readErr) {
+		t.Fatal(readErr)
+	}
+	if err != nil {
+		t.Fatalf("destroy of an instance whose main is behind its remote's: %v\nstderr:\n%s", err, stderr.String())
+	}
+	assertInstanceGone(t, filepath.Join(root, "alpha"))
+
+	raw, readErr := os.ReadFile(log)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	fetched := false
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if !containsArg(line, "fetch") {
+			continue
+		}
+		if strings.Contains(line, clone) {
+			t.Errorf("a fetch ran in the scanned repository: git %s", line)
+		}
+		fetched = fetched || strings.Contains(line, "--stdin")
+	}
+	if !fetched {
+		t.Errorf("no fetch into a scratch store ran, so the missing commit wasn't fetched; git calls:\n%s", raw)
+	}
+}
+
+// containsArg reports whether one of line's space-separated fields is arg.
+func containsArg(line, arg string) bool {
+	for _, f := range strings.Fields(line) {
+		if f == arg {
+			return true
+		}
+	}
+	return false
+}
+
 // passGitOut is passGit returning git's standard output.
 func passGitOut(t *testing.T, dir string, args ...string) string {
 	t.Helper()
