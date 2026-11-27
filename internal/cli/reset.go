@@ -1,10 +1,10 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 
 	"github.com/spf13/cobra"
 	"github.com/tsukumogami/niwa/internal/config"
@@ -30,8 +30,10 @@ enclosing instance. The workspace configuration must come from a remote source
 (cloned config repo). Local-only workspaces cannot be reset because the
 configuration would be lost; use destroy + init instead.
 
-By default, reset refuses to proceed if any cloned repository has uncommitted
-changes. Use --force to skip this check.`,
+By default, reset refuses to proceed if any repository in the instance has
+uncommitted changes, or if any can't be checked: a recorded repository name
+that leads outside the instance, a configuration key that names a program,
+or a repository git can't safely read. Use --force to skip this check.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runReset,
 }
@@ -56,18 +58,20 @@ func runReset(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Determine the workspace root (parent of instance directories).
+	workspaceRoot := filepath.Dir(instanceDir)
+
 	if !resetForce {
-		dirty, err := workspace.CheckUncommittedChanges(instanceDir)
+		ctx := cmd.Context()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		dirty, unchecked, err := checkResetUncommitted(ctx, workspaceRoot, instanceDir)
 		if err != nil {
 			return fmt.Errorf("checking for uncommitted changes: %w", err)
 		}
-		if len(dirty) > 0 {
-			sort.Strings(dirty)
-			fmt.Fprintf(cmd.ErrOrStderr(), "Repos with uncommitted changes:\n")
-			for _, name := range dirty {
-				fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", name)
-			}
-			return fmt.Errorf("instance has uncommitted changes in %d repo(s); use --force to override", len(dirty))
+		if err := reportResetCheck(cmd.ErrOrStderr(), dirty, unchecked); err != nil {
+			return err
 		}
 	}
 
@@ -76,9 +80,6 @@ func runReset(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("loading instance state: %w", err)
 	}
-
-	// Determine the workspace root (parent of instance directories).
-	workspaceRoot := filepath.Dir(instanceDir)
 
 	// Check that the config comes from a remote source (cloned config repo).
 	configDir := filepath.Join(workspaceRoot, config.ConfigDir)

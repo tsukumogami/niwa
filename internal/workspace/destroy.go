@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -89,42 +88,6 @@ func ValidateInstanceDir(dir string) error {
 	}
 
 	return nil
-}
-
-// CheckUncommittedChanges inspects each cloned repo within the instance for
-// uncommitted git changes. It loads the instance state, iterates repos where
-// Cloned is true, and runs git status --porcelain on each. Repos whose
-// directories no longer exist on disk are silently skipped.
-//
-// Returns the names (map keys) of repos that have uncommitted changes.
-func CheckUncommittedChanges(instanceDir string) ([]string, error) {
-	state, err := LoadState(instanceDir)
-	if err != nil {
-		return nil, fmt.Errorf("loading instance state: %w", err)
-	}
-
-	var dirty []string
-	for name, repo := range state.Repos {
-		if !repo.Cloned {
-			continue
-		}
-
-		repoDir := filepath.Join(instanceDir, name)
-		if _, err := os.Stat(repoDir); os.IsNotExist(err) {
-			continue
-		}
-
-		out, err := exec.Command("git", "-C", repoDir, "status", "--porcelain").Output()
-		if err != nil {
-			return nil, fmt.Errorf("checking git status for %s: %w", name, err)
-		}
-
-		if len(strings.TrimSpace(string(out))) > 0 {
-			dirty = append(dirty, name)
-		}
-	}
-
-	return dirty, nil
 }
 
 // destroyOptions holds the resolved configuration for a destroy operation.

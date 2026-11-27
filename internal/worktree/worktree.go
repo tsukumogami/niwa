@@ -93,7 +93,7 @@ var ErrSessionAttached = errors.New("session attached")
 
 // ErrWorktreeDirty is returned by DestroySession when the session's worktree
 // holds uncommitted changes and force is false. It is the worktree analog of
-// the instance-level CheckUncommittedChanges guard: removing a worktree with
+// reset's uncommitted-changes check: removing a worktree with
 // uncommitted work would discard that work irrecoverably (the worktree dir is
 // deleted by `git worktree remove --force`). Callers map this to an
 // actionable message instructing the operator to commit/stash or pass --force.
@@ -247,7 +247,7 @@ func validateRecordBranchName(branchName string) error {
 }
 
 // worktreeHasUncommittedChanges reports whether worktreePath has uncommitted
-// git changes, mirroring the instance-level CheckUncommittedChanges pattern:
+// git changes, mirroring reset's uncommitted-changes check:
 // it runs `git status --porcelain` in the worktree and treats any non-empty
 // output as dirty. All git access flows through gitInvoker so the destroy
 // path stays test-injectable and the worktree package stays a leaf (no
@@ -465,7 +465,7 @@ func CreateSession(ctx context.Context, params CreateSessionParams) (sessionID, 
 //
 // When the worktree holds uncommitted changes and force is false,
 // DestroySession performs no teardown and returns ErrWorktreeDirty (the
-// worktree analog of the instance CheckUncommittedChanges guard) so unsaved
+// worktree analog of reset's uncommitted-changes check) so unsaved
 // work is not discarded. force=true bypasses this guard. The guard order for
 // a live (non-terminal) session is: idempotent-terminal early-return, then the
 // attach-lock guard, then the dirty guard, then teardown. Both guards refuse
@@ -515,7 +515,7 @@ func DestroySession(ctx context.Context, instanceRoot, sessionID string, force b
 	}
 
 	// Reject when the worktree holds uncommitted changes and force is not set.
-	// This mirrors the instance-level CheckUncommittedChanges guard: the
+	// This mirrors reset's uncommitted-changes check: the
 	// removal deletes the worktree directory, so destroying a dirty worktree
 	// would discard unsaved work. The check runs BEFORE any teardown (before
 	// remover is called and before the terminal-state write) so a refused
