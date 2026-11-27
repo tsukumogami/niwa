@@ -294,3 +294,20 @@ func TestRefreshWorktreeEnvs_RemovedRepoSilentlySkipped(t *testing.T) {
 		t.Errorf("removed-repo worktree should be skipped silently; got warning:\n%s", buf.String())
 	}
 }
+
+// The real check behind gitRegistered: git still registers a linked worktree
+// of the clone, and doesn't register a directory that was never added.
+func TestGitRegistersWorktree_ReadsTheClonesWorktreeList(t *testing.T) {
+	clone := filepath.Join(canonicalTempDir(t), "app")
+	scanInitGitRepo(t, clone)
+	linked := filepath.Join(canonicalTempDir(t), "app-wt")
+	gitRun(t, clone, "worktree", "add", "-q", "-b", "ship", linked)
+	stray := canonicalTempDir(t)
+
+	if !gitRegistersWorktree(clone, linked) {
+		t.Errorf("gitRegistersWorktree(%s, %s) = false; git lists it as a worktree of the clone", clone, linked)
+	}
+	if gitRegistersWorktree(clone, stray) {
+		t.Errorf("gitRegistersWorktree(%s, %s) = true for a directory git never added", clone, stray)
+	}
+}
