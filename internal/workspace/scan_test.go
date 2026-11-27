@@ -91,7 +91,7 @@ func setupInstanceWithRepo(t *testing.T, instanceName, repoName string) (instanc
 func TestScanInstance_CleanRepo(t *testing.T) {
 	instanceDir, _ := setupInstanceWithRepo(t, "alpha", "myrepo")
 
-	scan, err := ScanInstance(instanceDir)
+	scan, err := ScanInstance(instanceDir, withPlainGit())
 	if err != nil {
 		t.Fatalf("ScanInstance: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestScanInstance_ModifiedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scan, err := ScanInstance(instanceDir)
+	scan, err := ScanInstance(instanceDir, withPlainGit())
 	if err != nil {
 		t.Fatalf("ScanInstance: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestScanInstance_UntrackedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scan, err := ScanInstance(instanceDir)
+	scan, err := ScanInstance(instanceDir, withPlainGit())
 	if err != nil {
 		t.Fatalf("ScanInstance: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestScanInstance_UnpushedCommits(t *testing.T) {
 	gitRun(t, repoDir, "add", "second.txt")
 	gitRun(t, repoDir, "commit", "-m", "second")
 
-	scan, err := ScanInstance(instanceDir)
+	scan, err := ScanInstance(instanceDir, withPlainGit())
 	if err != nil {
 		t.Fatalf("ScanInstance: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestScanInstance_LocalOnlyBranch(t *testing.T) {
 	gitRun(t, repoDir, "add", "local.txt")
 	gitRun(t, repoDir, "commit", "-m", "local")
 
-	scan, err := ScanInstance(instanceDir)
+	scan, err := ScanInstance(instanceDir, withPlainGit())
 	if err != nil {
 		t.Fatalf("ScanInstance: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestScanInstance_Stash(t *testing.T) {
 	}
 	gitRun(t, repoDir, "stash")
 
-	scan, err := ScanInstance(instanceDir)
+	scan, err := ScanInstance(instanceDir, withPlainGit())
 	if err != nil {
 		t.Fatalf("ScanInstance: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestScanInstance_DetachedHead(t *testing.T) {
 	gitRun(t, repoDir, "add", "orphan.txt")
 	gitRun(t, repoDir, "commit", "-m", "orphan")
 
-	scan, err := ScanInstance(instanceDir)
+	scan, err := ScanInstance(instanceDir, withPlainGit())
 	if err != nil {
 		t.Fatalf("ScanInstance: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestScanInstance_Worktree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scan, err := ScanInstance(instanceDir)
+	scan, err := ScanInstance(instanceDir, withPlainGit())
 	if err != nil {
 		t.Fatalf("ScanInstance: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestScanInstance_WorktreeUnderSymlinkedInstancePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scan, err := ScanInstance(filepath.Join(link, "alpha"))
+	scan, err := ScanInstance(filepath.Join(link, "alpha"), withPlainGit())
 	if err != nil {
 		t.Fatalf("ScanInstance: %v", err)
 	}
@@ -366,7 +366,7 @@ func TestScanInstance_OrphanInstanceDir(t *testing.T) {
 	}
 	// No instance.json — should be flagged as Skipped.
 
-	scan, err := ScanInstance(dir)
+	scan, err := ScanInstance(dir, withPlainGit())
 	if err != nil {
 		t.Fatalf("ScanInstance: %v", err)
 	}
@@ -386,7 +386,7 @@ func TestScanInstancesParallel_PreservesOrder(t *testing.T) {
 	scanInitGitRepo(t, filepath.Join(b, "r2"))
 	scanInitGitRepo(t, filepath.Join(c, "r3"))
 
-	scans, err := ScanInstancesParallel(root, []string{a, b, c}, 2)
+	scans, err := ScanInstancesParallel(root, []string{a, b, c}, 2, withPlainGit())
 	if err != nil {
 		t.Fatalf("ScanInstancesParallel: %v", err)
 	}

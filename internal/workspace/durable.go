@@ -128,12 +128,11 @@ func WithRemoteFetch(fn RemoteFetchFunc) ScanOption {
 // run, which lists the repository as at risk.
 type GitCommandFunc func(ctx context.Context, dir string, env []string, args ...string) (*exec.Cmd, error)
 
-// WithGitCommand makes the scan start every git call through fn instead of
-// plain git from PATH with the inherited environment. fn adds
-// --ignore-submodules=all and --untracked-files=all to every status and
+// WithGitCommand makes the scan start every git call through fn. Without
+// it the scan starts no git at all and lists every repository as at risk. fn
+// adds --ignore-submodules=all and --untracked-files=all to every status and
 // --no-show-signature to every log-family call itself, so the scan doesn't
-// pass them. A nil fn refuses every call, so the scan lists every repository
-// as at risk rather than falling back to plain git.
+// pass them. A nil fn refuses every call, as no WithGitCommand does.
 func WithGitCommand(fn GitCommandFunc) ScanOption {
 	return func(c *scanConfig) {
 		if fn == nil {
@@ -172,23 +171,11 @@ func WithRepositoryWalk(fn RepositoryWalkFunc) ScanOption {
 	return func(c *scanConfig) { c.walk = fn }
 }
 
-// refuseGitCommand is the builder WithGitCommand(nil) leaves the scan with.
+// refuseGitCommand is the builder a scan has when its caller hands it none,
+// or hands WithGitCommand a nil one: it refuses every call, so git never
+// runs and every repository is listed as at risk.
 func refuseGitCommand(context.Context, string, []string, ...string) (*exec.Cmd, error) {
 	return nil, errors.New("the scan was given no git command builder")
-}
-
-// plainGitCommand is the builder a scan uses when its caller hands it none:
-// git from PATH with the inherited environment, run with -C dir. Its status
-// asks for untracked files explicitly, so a repository's
-// status.showUntrackedFiles=no can't hide them.
-func plainGitCommand(ctx context.Context, dir string, env []string, args ...string) (*exec.Cmd, error) {
-	argv := append([]string{"-C", dir}, args...)
-	if len(args) > 0 && args[0] == "status" {
-		argv = append(argv, "--untracked-files=normal")
-	}
-	cmd := exec.CommandContext(ctx, "git", argv...)
-	cmd.Env = append(os.Environ(), env...)
-	return cmd, nil
 }
 
 // DefaultScanNetworkTimeout bounds each network operation the scan makes: one
@@ -209,7 +196,7 @@ func WithNetworkTimeout(d time.Duration) ScanOption {
 }
 
 func newScanConfig(opts []ScanOption) scanConfig {
-	c := scanConfig{networkTimeout: DefaultScanNetworkTimeout, git: plainGitCommand, mergeTree: &mergeTreeProbe{}}
+	c := scanConfig{networkTimeout: DefaultScanNetworkTimeout, git: refuseGitCommand, mergeTree: &mergeTreeProbe{}}
 	for _, o := range opts {
 		o(&c)
 	}

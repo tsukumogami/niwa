@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -75,12 +78,53 @@ func forkFixture(t *testing.T) (instanceDir, repo, other string) {
 	return instanceDir, repo, other
 }
 
+// plainScanGit builds the scan's git calls as git from PATH with the
+// inherited environment, adding the flags WithGitCommand's builder adds
+// itself. Unlike the destroy's own builder it follows the repository's
+// insteadOf, which is how these fixtures reach a github.com remote.
+func plainScanGit(ctx context.Context, dir string, env []string, args ...string) (*exec.Cmd, error) {
+	argv := append([]string{"-C", dir}, args...)
+	switch {
+	case len(args) == 0:
+	case args[0] == "status":
+		argv = append(argv, "--ignore-submodules=all", "--untracked-files=all")
+	case args[0] == "log", args[0] == "stash" && len(args) > 1 && args[1] == "list":
+		argv = append(argv, "--no-show-signature")
+	}
+	cmd := exec.CommandContext(ctx, "git", argv...)
+	cmd.Env = append(os.Environ(), env...)
+	return cmd, nil
+}
+
+// plainScanFetch fetches every branch of the repository's remote, at the
+// URL git resolves for it in that repository, into a fresh bare store under
+// t.TempDir(), and returns the store's objects directory.
+func plainScanFetch(t *testing.T) workspace.RemoteFetchFunc {
+	return func(ctx context.Context, dir, remote string, _ []string) (string, error) {
+		url, err := exec.CommandContext(ctx, "git", "-C", dir, "remote", "get-url", remote).Output()
+		if err != nil {
+			return "", err
+		}
+		store := filepath.Join(t.TempDir(), "store.git")
+		if out, err := exec.CommandContext(ctx, "git", "init", "-q", "--bare", store).CombinedOutput(); err != nil {
+			return "", fmt.Errorf("git init: %v: %s", err, out)
+		}
+		fetch := exec.CommandContext(ctx, "git", "-C", store, "fetch", "-q", "--no-tags",
+			strings.TrimSpace(string(url)), "+refs/heads/*:refs/heads/*")
+		if out, err := fetch.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("git fetch: %v: %s", err, out)
+		}
+		return filepath.Join(store, "objects"), nil
+	}
+}
+
 func scanWithDestroyForge(t *testing.T, instanceDir, apiURL string) workspace.InstanceScan {
 	t.Helper()
 	t.Setenv("NIWA_GITHUB_API_URL", apiURL)
 	t.Setenv("GITHUB_TOKEN", "test-token")
 	s, err := workspace.ScanInstance(instanceDir,
-		workspace.WithForge(newDestroyForge()), workspace.WithNetworkTimeout(10*time.Second))
+		workspace.WithForge(newDestroyForge()), workspace.WithNetworkTimeout(10*time.Second),
+		workspace.WithGitCommand(plainScanGit), workspace.WithRemoteFetch(plainScanFetch(t)))
 	if err != nil {
 		t.Fatalf("ScanInstance: %v", err)
 	}
